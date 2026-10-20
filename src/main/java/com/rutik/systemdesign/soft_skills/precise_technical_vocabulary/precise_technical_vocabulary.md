@@ -64,7 +64,7 @@ consistent" — same idea, now falsifiable.
 
 ## 4. Types / Levels / Modes
 
-Eight registers, each covering a family of terms engineers reach for constantly and get
+Nine registers, each covering a family of terms engineers reach for constantly and get
 subtly wrong:
 
 | Register | What it covers | Terms |
@@ -76,6 +76,7 @@ subtly wrong:
 | Concurrency | what happens when things happen at once | race condition vs data race, concurrency vs parallelism, deadlock/livelock/starvation, blocking modes |
 | Failure | the vocabulary of what went wrong | bug/defect/fault/error/failure, regression, flake, heisenbug, incident/outage/degradation |
 | Project | the vocabulary of planning and risk | risk vs issue vs assumption vs dependency, estimate vs commitment vs target, blocker vs impediment |
+| AI and LLM | what a model, a pipeline and a test result actually are | hallucination, agent vs workflow, eval vs benchmark, context window, RAG vs fine-tuning, non-deterministic vs stochastic |
 | Technical debt | the single most abused term in the field | Cunningham's original definition, Fowler's quadrant |
 
 Each register is a `### ` heading in Section 6 below, and every substantial term inside
@@ -714,6 +715,108 @@ it exists. Flaky staging is an impediment — costs 20 minutes a day, but I ship
 
 ---
 
+### AI and LLM register
+
+#### `Hallucination`
+
+**Definition.** Generated text that is fluent but unfaithful to its source or unsupported
+by any source. Ji et al., "Survey of Hallucination in Natural Language Generation" (*ACM
+Computing Surveys*, 2023), split it into **intrinsic** (contradicts the provided source)
+and **extrinsic** (cannot be verified from the source at all). The term describes the
+model's output relative to its input, not every wrong answer.
+
+**Misuse.** "The bot hallucinated the old refund policy" when retrieval handed it the
+2024 policy document and it quoted that document correctly. The model was faithful to its
+source; the failure is a stale index, and "hallucination" sends the fix to the prompt
+instead of the retrieval pipeline.
+
+**Correct use.** "Two failure classes in last week's sample: 14 answers quoted a stale doc
+(retrieval freshness, fix the index), and 3 invented a refund window that appears in no
+doc (extrinsic hallucination, add a citation check)."
+
+#### `Agent` vs `workflow`
+
+**Definition.** Anthropic's "Building effective agents" (Erik Schluntz and Barry Zhang,
+December 19, 2024): **workflows** are "systems where LLMs and tools are orchestrated
+through predefined code paths"; **agents** are "systems where LLMs dynamically direct
+their own processes and tool usage." The test is who chooses the next step: your code, or
+the model.
+
+**Misuse.** "Our triage agent" for a fixed chain of classify, then summarise, then post to
+Jira. That is a workflow; calling it an agent makes reviewers ask about loop limits,
+tool permissions and runaway cost that do not apply, and hides the real question, which
+is whether each step's prompt is right.
+
+**Correct use.** "Triage is a three-step workflow, every path fixed in code. The
+remediation bot is an agent: it chooses which runbook tools to call, so it runs with a
+20-step cap and read-only credentials."
+
+#### `Eval` vs `benchmark`
+
+**Definition.** A **benchmark** is a public, fixed dataset and metric used to compare
+models across labs: MMLU (Hendrycks et al., ICLR 2021), SWE-bench (Jimenez et al., ICLR
+2024). An **eval** is your own test suite, built from your task's inputs and graded
+against your definition of correct, run on every prompt, model or retrieval change. A
+benchmark ranks models in general; an eval tells you whether your feature works.
+
+**Misuse.** "The new model scores 6 points higher on MMLU, so ship it for ticket
+routing." MMLU is multiple-choice academic knowledge; it says nothing about your 40
+routing labels, and public benchmarks also leak into training data.
+
+**Correct use.** "On our 600-ticket routing eval the new model goes from 91.2% to 93.0%
+accuracy and the p95 latency rises 300 ms. Benchmarks got it onto the shortlist; the eval
+decides."
+
+#### `Context window`
+
+**Definition.** The maximum number of tokens one request can hold, input and output
+combined. A token is a sub-word unit; OpenAI's rule of thumb for English is about 4
+characters or 0.75 words per token. It is a per-request limit, not memory: nothing
+persists between calls unless the application sends it again. Liu et al., "Lost in the
+Middle" (*TACL*, 2024), showed models use information at the start and end of a long
+context more reliably than information in the middle.
+
+**Misuse.** "It has a million-token window, so it remembers everything the customer said
+last month." It remembers nothing; the app must re-send that history, and paying for a
+million tokens per call does not mean the model uses the middle of them well.
+
+**Correct use.** "We send the last 20 turns plus the 5 retrieved docs, about 12K tokens,
+and put the policy text last because recall drops for material in the middle."
+
+#### `RAG` vs `fine-tuning`
+
+**Definition.** **Retrieval-augmented generation** (Lewis et al., NeurIPS 2020) fetches
+relevant documents at query time and puts them in the prompt; knowledge changes when the
+index changes. **Fine-tuning** updates the model's weights on examples; it is good at
+teaching a format, tone or task behaviour and poor at storing facts that change, because
+a new fact needs a new training run.
+
+**Misuse.** "Let's fine-tune on our docs so the bot knows this quarter's pricing." The
+prices change next quarter, the old ones stay in the weights, and nobody can cite which
+document an answer came from.
+
+**Correct use.** "Pricing and policy come from RAG with citations, refreshed nightly. We
+fine-tuned only to make answers follow the support-macro format, which has not changed in
+two years."
+
+#### `Non-deterministic` vs `stochastic`
+
+**Definition.** **Stochastic** means the output is sampled from a probability
+distribution on purpose, controlled by temperature and top-p. **Non-deterministic** means
+the same input can produce different output for any reason. LLM serving is
+non-deterministic even at temperature 0: results depend on batch size and floating-point
+reduction order on the GPU (Horace He, Thinking Machines Lab, "Defeating Nondeterminism in
+LLM Inference", September 2025).
+
+**Misuse.** "We set temperature to 0, so the output is deterministic and we can snapshot
+test it." Under a different batch composition the same prompt can return a different
+string.
+
+**Correct use.** "Temperature 0 removes the sampling, not the non-determinism. The tests
+assert on the parsed fields and the eval's pass rate, not on exact strings."
+
+---
+
 ### Technical debt — its own subsection, because it is the most abused term in the field
 
 #### `Technical debt`
@@ -886,6 +989,11 @@ sequence.
 | Ward Cunningham, 1992 OOPSLA experience report + later video interview on wiki.c2.com | the original technical-debt metaphor and his own correction |
 | Martin Fowler, *"TechnicalDebtQuadrant"* (martinfowler.com, 2009) | the deliberate/inadvertent x reckless/prudent quadrant |
 | AWS, Amazon S3 FAQ and S3 Service Level Agreement pages | the durability vs availability numbers, verbatim |
+| Ziwei Ji et al., "Survey of Hallucination in Natural Language Generation", *ACM Computing Surveys* 55(12), 2023 | intrinsic vs extrinsic hallucination |
+| Erik Schluntz and Barry Zhang, "Building effective agents" (Anthropic, December 19, 2024) | the agent vs workflow definitions |
+| Patrick Lewis et al., "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks", NeurIPS 2020 | the original RAG paper |
+| Nelson F. Liu et al., "Lost in the Middle: How Language Models Use Long Contexts", *TACL*, 2024 | why a large context window is not uniform recall |
+| Horace He, "Defeating Nondeterminism in LLM Inference" (Thinking Machines Lab, September 2025) | why temperature 0 is still non-deterministic |
 
 ---
 
@@ -919,6 +1027,26 @@ eventual consistency (replicas converge given time, no promise in between). A Po
 primary is ACID-consistent and, across replicas, deliberately not linearizable — which is
 why the word alone answers nothing. Naming which of the three you mean usually ends the
 argument in one exchange.
+
+**Q: The LLM call runs at temperature 0. Why can the same prompt still return different text, and what does that do to your tests?**
+**Short:** Temperature 0 removes sampling, not non-determinism: GPU batch size and floating-point reduction order still change outputs, so tests should assert parsed fields or eval pass rates, not exact strings.
+
+"Stochastic" is randomness added on purpose by sampling; "non-deterministic" is any
+variation for the same input. Serving stacks batch requests together, and the batch size
+changes the order of floating-point reductions on the GPU, which can flip a token and
+everything after it (Horace He, Thinking Machines Lab, 2025). A snapshot test that
+compares exact strings will flake. Assert on structure (the JSON parses, the label is one
+of 40 allowed values) and track quality as a pass rate over an eval set, with a threshold.
+
+**Q: A colleague calls a classify-summarise-post pipeline "our agent". Why does the word matter in a design review?**
+**Short:** It is a workflow, because code fixes every step; calling it an agent sends reviewers to loop limits and tool permissions that do not apply, and away from the prompts that do.
+
+Anthropic's definitions (Schluntz and Zhang, 2024): a workflow orchestrates LLMs and
+tools through predefined code paths, while an agent lets the model choose its own next
+step and tools. The review questions differ. For an agent: step cap, tool permissions,
+cost ceiling, what stops a loop. For a workflow: is each prompt right, what happens when
+one step's output is malformed. Naming it correctly puts the review's attention on the
+risks the system actually has.
 
 **Q: What's the difference between a race condition and a data race? Can you have one without the other?**
 **Short:** Yes, both directions — every data race is a bug, but a race condition can exist with zero data races.

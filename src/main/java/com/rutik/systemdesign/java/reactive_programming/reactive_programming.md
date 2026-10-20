@@ -519,8 +519,8 @@ Always bound the buffer and pick an overflow strategy.
 | Reactive Streams TCK | 1.0.4 | Conformance test kit for custom `Publisher`s |
 | `java.util.concurrent.Flow` | Java 9+ | JDK-standard Reactive Streams interfaces |
 | R2DBC | 1.0+ | Reactive relational database connectivity |
-| Reactor Kafka / RabbitMQ | 1.3+ | Reactive messaging with backpressure |
-| Micrometer + `Flux.metrics()` | 1.12+ | Per-operator throughput and latency metrics |
+| Spring Kafka, or the Kafka client on virtual threads | Spring Kafka 4.x | Kafka messaging; Reactor Kafka was discontinued in May 2025, its OSS support ended 2026-06-30, and its repo was archived 2026-09-30 |
+| `reactor-core-micrometer` + `tap(Micrometer.metrics(registry))` | 3.8.x, Micrometer 1.12+ | Per-sequence throughput and latency metrics |
 
 ---
 

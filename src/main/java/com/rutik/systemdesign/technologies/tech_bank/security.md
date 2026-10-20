@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 230 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 232 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1820,6 +1820,18 @@ That is what makes it fit GitOps: the whole desired state including secrets live
 **Kind:** spec
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, security/privacy-and-compliance @3
+
+### SPIFFE
+**Short:** CNCF workload identity standard: a SPIFFE ID URI, short-lived X.509-SVID or JWT-SVID documents, and a Workload API to fetch them.
+**Kind:** spec
+**Lang:** *
+**Roles:** security/authentication-and-identity @1
+
+### SPIRE
+**Short:** CNCF reference implementation of SPIFFE that attests workloads by node and workload selectors and issues short-lived SVIDs.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/authentication-and-identity @1, security/secrets-and-cryptography @2
 
 ### Spring Authorization Server
 **Short:** Spring's own OAuth2/OIDC authorization server for issuing and introspecting tokens inside your stack.

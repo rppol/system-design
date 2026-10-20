@@ -104,13 +104,13 @@ copy of everything that did not.
 
 ### 4.2 Client generators worth knowing
 
-Versions verified 2026-08-26.
+Versions verified 2026-10-19.
 
 | Target | Tool | Version | Notes |
 |---|---|---|---|
-| Python | `openapi-python-client` | 0.29.0 (2026-05-30) | `requires_python >=3.11`; generates `httpx`-based, typed clients |
+| Python | `openapi-python-client` | 0.29.1 (2026-08-30) | `requires_python >=3.11`; generates `httpx`-based, typed clients |
 | TypeScript | `@hey-api/openapi-ts` | 0.99.0 | the current recommended generator |
-| 50+ languages | `openapi-generator-cli` | 7.25.0 (2026-08-25) | supports OpenAPI 3.1 input; the broadest coverage |
+| 50+ languages | `openapi-generator-cli` | 7.26.0 (2026-10-06) | supports OpenAPI 3.1 input; the broadest coverage |
 
 **`openapi-typescript-codegen` is deprecated**, with all versions marked deprecated on npm since
 2024-05-01 and users directed to `@hey-api/openapi-ts`. If a consumer's repository still uses it, that
@@ -121,7 +121,7 @@ is a migration to schedule rather than a preference to respect.
 | Concern | Tool | What it catches |
 |---|---|---|
 | Breaking changes between spec revisions | `oasdiff` (plus `oasdiff-action` for pull requests) | a removed field, a narrowed type, a newly required parameter |
-| Implementation conforming to the schema | Schemathesis 4.25.2 | responses that violate the declared schema, 500s on valid input |
+| Implementation conforming to the schema | Schemathesis 4.32.1 | responses that violate the declared schema, 500s on valid input |
 | Consumers still calling a deprecated route | your own access logs, keyed by version | who is blocking the deletion |
 
 `oasdiff` supports OpenAPI 3.0, 3.1 and 3.2, which matters because your spec version and your
@@ -132,7 +132,8 @@ consumer's may differ.
 **OpenAPI 3.2.0 shipped on 2025-09-23**, a backward-compatible minor release on the 3.x line. It added
 structured tags, native support for streaming media types including Server-Sent Events, a `query` HTTP
 method with `additionalOperations`, OAuth2 device-flow support, an `in: querystring` parameter
-location, and reusable `components/mediaTypes`.
+location, and reusable `components/mediaTypes`. OpenAPI 3.2.1, a patch release, followed on
+2026-09-10.
 
 **FastAPI still emits OpenAPI 3.1.0**, and its OpenAPI models are built against 3.1.0. That is not a
 problem to solve; it is a fact to know, because the SSE support in 3.2 is directly relevant to
@@ -253,14 +254,14 @@ The consequence is the opposite of what the setting suggests: a 3.0-only consume
 rejected the document outright now accepts it and mis-models the fields. **A loud failure has been
 converted into a silent one.**
 
-If a consumer genuinely cannot handle 3.1, the honest options are to upgrade their generator — most
-current ones handle 3.1, including `openapi-generator-cli` 7.25.0 — or to run a real down-conversion
+If a consumer genuinely cannot handle 3.1, the honest options are to upgrade their generator (most
+current ones handle 3.1, including `openapi-generator-cli` 7.26.0) or to run a real down-conversion
 step in the pipeline and validate the output against the 3.0 schema before publishing it. Setting the
 string is neither.
 
 ### 6.2 Cadwyn: one implementation, versions as migrations
 
-Cadwyn (7.2.0, 2026-07-29) describes itself as "production-ready Stripe-like API versioning in
+Cadwyn (7.4.0, 2026-09-20) describes itself as "production-ready Stripe-like API versioning in
 FastAPI", and the model it implements is exactly Stripe's: you implement only the latest version, and
 each older version is defined by what changed since the next one. It generates the older versions'
 schemas and routes from that description.
@@ -386,7 +387,7 @@ def test_api_conforms_to_its_own_schema(case):
     case.validate_response(response)
 ```
 
-Schemathesis (4.25.2, 2026-08-24) reads the schema, generates requests from it using property-based
+Schemathesis (4.32.1, 2026-10-19) reads the schema, generates requests from it using property-based
 testing, and asserts that responses conform to what the schema declares. Driving it through the ASGI
 app rather than over the network means no server to start and no port to manage.
 
@@ -545,7 +546,7 @@ app.openapi_schema = get_openapi(..., openapi_version="3.0.3", routes=app.routes
 
 ```python
 # FIX: upgrade the consumer's generator, or run a REAL conversion and validate it
-#   1. Most current generators handle 3.1 -- openapi-generator-cli 7.25.0 does.
+#   1. Most current generators handle 3.1 -- openapi-generator-cli 7.26.0 does.
 #   2. If a real down-conversion is unavoidable, run it as a pipeline step and
 #      validate the output against the 3.0 meta-schema before publishing.
 #   3. Never publish a document whose declared version its own content violates.
@@ -640,17 +641,17 @@ becomes unmanageable — the cheapness is what makes the discipline necessary ra
 
 ## 11. Technologies & Tools
 
-Versions verified 2026-08-26.
+Versions verified 2026-10-19.
 
 | Tool | Role | Notes |
 |---|---|---|
 | FastAPI | emits the spec | 0.141.1; OpenAPI 3.1.0, and `deprecated=True` marks an operation |
-| Cadwyn | Stripe-style versioning for FastAPI | 7.2.0; `VersionBundle`, `VersionChange` |
-| `openapi-python-client` | typed Python client generation | 0.29.0; `requires_python >=3.11`; httpx-based |
+| Cadwyn | Stripe-style versioning for FastAPI | 7.4.0; `VersionBundle`, `VersionChange` |
+| `openapi-python-client` | typed Python client generation | 0.29.1; `requires_python >=3.11`; httpx-based |
 | `@hey-api/openapi-ts` | TypeScript client generation | 0.99.0; replaces the deprecated `openapi-typescript-codegen` |
-| `openapi-generator-cli` | 50+ language targets | 7.25.0; supports OpenAPI 3.1 input |
+| `openapi-generator-cli` | 50+ language targets | 7.26.0; supports OpenAPI 3.1 input |
 | `oasdiff` | spec diffing and breaking-change detection | supports 3.0, 3.1 and 3.2; `oasdiff-action` for pull requests |
-| Schemathesis | property-based contract testing | 4.25.2; drives the ASGI app directly, no server needed |
+| Schemathesis | property-based contract testing | 4.32.1; drives the ASGI app directly, no server needed |
 | RFC 9745 | the `Deprecation` header | a published RFC; structured date |
 | RFC 8594 | the `Sunset` header | informational; must not precede `Deprecation` |
 
@@ -726,7 +727,7 @@ That is the design-time half of the deprecation story: consumers who regenerate 
 **Q: How would you support a consumer who genuinely cannot parse OpenAPI 3.1?**
 **Short:** Upgrade their generator first, and only if that is impossible run a real down-conversion step whose output you validate against the 3.0 meta-schema.
 
-Most current generators handle 3.1 — `openapi-generator-cli` 7.25.0 does — so the first question is which tool they are on and whether it is one of the deprecated ones. If a conversion is genuinely unavoidable, it must be an actual transformation of the schemas, not a version string, and the result must be validated against the 3.0 meta-schema before publishing, because publishing a document whose content violates its own declared version is the failure mode in the first question. Treat it as a compatibility shim with a named owner and an end date.
+Most current generators handle 3.1 (`openapi-generator-cli` 7.26.0 does), so the first question is which tool they are on and whether it is one of the deprecated ones. If a conversion is genuinely unavoidable, it must be an actual transformation of the schemas, not a version string, and the result must be validated against the 3.0 meta-schema before publishing, because publishing a document whose content violates its own declared version is the failure mode in the first question. Treat it as a compatibility shim with a named owner and an end date.
 
 **Q: You inherit a FastAPI service with five versions implemented as five copies of the routers. What do you do?**
 **Short:** Measure who uses each version first, delete what you can, and only migrate to a transformation model for what remains.

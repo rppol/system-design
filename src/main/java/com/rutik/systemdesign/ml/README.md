@@ -18,7 +18,7 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Forty-seven modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#34) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Forty-seven modules organized across eight learning phases take you from linear algebra through production MLOps. Twelve topics contain deep-dive sub-files (42 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-seven end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#34) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
@@ -98,7 +98,7 @@ Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [xgboost_lightgbm.md](ensemble_methods/xgboost_lightgbm.md) | XGBoost and LightGBM | Second-order gradients, GOSS, EFB, histogram-based splits, GPU training, hyperparameters |
 | [stacking_and_blending.md](ensemble_methods/stacking_and_blending.md) | Stacking and Blending | Meta-learners, cross-val stacking, blending, model diversity, leakage prevention |
 
-### computer_vision/ (4 sub-files)
+### computer_vision/ (5 sub-files)
 
 | File | Topic | Key Concepts |
 |------|-------|-------------|
@@ -106,8 +106,9 @@ Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [image_segmentation.md](computer_vision/image_segmentation.md) | Image Segmentation | Semantic vs instance vs panoptic, U-Net, Mask R-CNN, DeepLab, SAM |
 | [vision_transformers.md](computer_vision/vision_transformers.md) | Vision Transformers | ViT, DeiT, Swin Transformer, patch embeddings, positional encodings, attention maps |
 | [self_supervised_vision.md](computer_vision/self_supervised_vision.md) | Self-Supervised Vision | MAE, DINO, SimCLR for vision, contrastive pretraining, linear probing, fine-tuning |
+| [open_vocabulary_and_vision_foundation.md](computer_vision/open_vocabulary_and_vision_foundation.md) | Open-Vocabulary Detection and Vision Foundation Models | Grounding DINO, OWL-ViT/OWLv2, CLIP text queries, DINOv2/DINOv3 backbones, naming classes at inference time |
 
-### recommender_systems/ (5 sub-files)
+### recommender_systems/ (6 sub-files)
 
 | File | Topic | Key Concepts |
 |------|-------|-------------|
@@ -116,6 +117,7 @@ Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [retrieval_and_ranking.md](recommender_systems/retrieval_and_ranking.md) | Retrieval and Ranking | ANN retrieval, FAISS, ScaNN, pointwise/pairwise/listwise ranking, LambdaRank, LambdaMART |
 | [content_and_hybrid.md](recommender_systems/content_and_hybrid.md) | Content-Based and Hybrid | TF-IDF features, item embeddings, hybrid architectures, cold-start, exploration-exploitation |
 | [online_learning_and_bandits.md](recommender_systems/online_learning_and_bandits.md) | Online Learning and Bandits | Multi-armed bandits, epsilon-greedy, UCB, Thompson sampling, contextual bandits, LinUCB |
+| [generative_recommenders.md](recommender_systems/generative_recommenders.md) | Generative Recommenders | Semantic IDs from RQ-VAE, TIGER, HSTU, OneRec, generating the next item instead of scoring a catalogue |
 
 ### natural_language_processing/ (11 sub-files)
 
@@ -133,15 +135,16 @@ Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [language_modeling.md](natural_language_processing/language_modeling.md) | Language Modeling | n-gram LMs, Kneser-Ney smoothing, backoff/interpolation, perplexity, neural LMs, transformer bridge |
 | [syntactic_parsing.md](natural_language_processing/syntactic_parsing.md) | Syntactic Parsing | CFG/PCFG, CKY, dependency parsing (transition- and graph-based), Eisner, UAS/LAS |
 
-### ml_system_design/ (5 sub-files)
+### ml_system_design/ (6 sub-files)
 
 | File | Topic | Key Concepts |
 |------|-------|-------------|
 | [design_framework.md](ml_system_design/design_framework.md) | ML Design Framework | Problem framing, metric selection, data strategy, training/serving split, iterative rollout |
-| [feature_store_design.md](ml_system_design/feature_store_design.md) | Feature Store Design | Online vs offline stores, point-in-time correctness, Feast, Tecton, Hopsworks, freshness SLOs |
+| [feature_store_design.md](ml_system_design/feature_store_design.md) | Feature Store Design | Online vs offline stores, point-in-time correctness, Feast, Tecton, freshness SLOs |
 | [training_pipeline_design.md](ml_system_design/training_pipeline_design.md) | Training Pipeline Design | DAG orchestration, Airflow, Kubeflow, data versioning, reproducibility, resource scheduling |
-| [ab_testing_for_ml.md](ml_system_design/ab_testing_for_ml.md) | A/B Testing for ML | Treatment/control design, minimum detectable effect, p-values, Bonferroni, interleaving, switchback |
-| [latency_and_throughput_optimization.md](ml_system_design/latency_and_throughput_optimization.md) | Latency and Throughput Optimization | Batching strategies, caching predictions, model cascades, early exit, p99 vs p50, SLO budgeting |
+| [ab_testing_for_ml.md](ml_system_design/ab_testing_for_ml.md) | A/B Testing for ML | Treatment/control design, minimum detectable effect, p-values, Bonferroni, interleaving |
+| [latency_and_throughput_optimization.md](ml_system_design/latency_and_throughput_optimization.md) | Latency and Throughput Optimization | Batching strategies, caching predictions, model cascades, p99 vs p50, SLO budgeting |
+| [classical_ml_vs_llm.md](ml_system_design/classical_ml_vs_llm.md) | Classical ML vs LLM | The build decision: when a classifier or GBDT beats an LLM, and when the LLM wins |
 
 ### unsupervised_learning/ (1 sub-file)
 
@@ -161,6 +164,24 @@ Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single
 |------|-------|-------------|
 | [semi_supervised_learning.md](active_learning_and_weak_supervision/semi_supervised_learning.md) | Semi-Supervised Learning | SSL assumptions, pseudo-labeling, consistency regularization, FixMatch/MixMatch, label propagation, co-training, UDA |
 
+### recurrent_neural_networks/ (1 sub-file)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [state_space_models.md](recurrent_neural_networks/state_space_models.md) | State Space Models | S4, Mamba selective scan, xLSTM, hybrid models such as Jamba |
+
+### time_series_forecasting/ (1 sub-file)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [time_series_foundation_models.md](time_series_forecasting/time_series_foundation_models.md) | Time-Series Foundation Models | Chronos, TimesFM, Moirai, TimeGPT, zero-shot forecasting |
+
+### reinforcement_learning/ (1 sub-file)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [offline_rl.md](reinforcement_learning/offline_rl.md) | Offline Reinforcement Learning | Learning from logged data, BCQ, CQL, IQL, Decision Transformer, off-policy evaluation |
+
 ### case_studies/cross_cutting/ (5 shared-primitive files)
 
 Infrastructure patterns referenced by multiple case studies. Read just-in-time when a case study references the topic.
@@ -177,9 +198,9 @@ See [`case_studies/cross_cutting/cross_cutting.md`](case_studies/cross_cutting/c
 
 ---
 
-## Case Studies (24)
+## Case Studies (27)
 
-All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–24 use the 11-section principal template (same format as LLM case studies). See [`case_studies/case_studies.md`](case_studies/case_studies.md) for the full learning-path index with dependency map and interview prep shortcuts.
+All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–27 use the 11-section principal template (same format as LLM case studies). See [`case_studies/case_studies.md`](case_studies/case_studies.md) for the full learning-path index with dependency map and interview prep shortcuts.
 
 | # | Case Study | Core ML Concepts | Template | Link |
 |---|-----------|-----------------|----------|------|
@@ -207,6 +228,9 @@ All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-secti
 | 22 | Design a Question Answering System | DPR dual-encoder, BERT-large extractive reader, SQuAD 2.0 null-score, multi-hop retrieval, hybrid RRF | Principal | [design_question_answering_system](case_studies/design_question_answering_system.md) |
 | 23 | Design a Video Recommendation System | Two-tower candidate generation, watch-time-weighted logistic ranking, MMoE multitask, position/selection-bias tower, freshness | Principal | [design_video_recommendation](case_studies/design_video_recommendation.md) |
 | 24 | Design a Harmful Content Detection System | Policy taxonomy, classifier cascade, per-policy cost-and-capacity thresholds, human-in-the-loop review queue, adversarial evasion | Principal | [design_harmful_content_detection](case_studies/design_harmful_content_detection.md) |
+| 25 | Design a Document AI Extraction Service | Layout-aware extraction for accounts-payable invoices, per-vendor memory, LLM vs fine-tuned extractor | Principal | [design_document_ai_extraction](case_studies/design_document_ai_extraction.md) |
+| 26 | Design a Company-Wide Experimentation Platform | Concurrent tests on shared traffic, assignment, guardrail metrics, cross-test interference | Principal | [design_experimentation_platform](case_studies/design_experimentation_platform.md) |
+| 27 | Design an LLM + Classical Hybrid Support-Ticket Triage System | Distilled classifier for head categories, LLM for the long tail, routing between them | Principal | [design_llm_hybrid_support_triage](case_studies/design_llm_hybrid_support_triage.md) |
 
 ---
 

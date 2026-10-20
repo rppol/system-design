@@ -368,7 +368,9 @@ CREATE INDEX idx_wrong ON orders (created_at, country);
 -- WHERE a = 1 AND b = 2          -- uses a, b
 -- WHERE a = 1 AND b > 2          -- uses a, b (range stop)
 -- WHERE a = 1 AND b = 2 AND c=3  -- uses a, b, c
--- WHERE b = 2                    -- CANNOT use index (a is not in WHERE)
+-- WHERE b = 2                    -- no prefix match; only a skip scan (MySQL 8.0.13+,
+--                                   PostgreSQL 18+) uses it: one probe per distinct a,
+--                                   cheap only when a has few distinct values
 ```
 
 ### Invisible Indexes (MySQL 8+, Oracle)
@@ -816,9 +818,9 @@ ORDER BY pg_relation_size(indexrelid) DESC;
 `idx_scan = 0` since last stats reset means the index was never used. Verify: reset stats with `SELECT pg_stat_reset()`, wait 1-2 weeks to accumulate representative traffic. Indexes still at idx_scan=0 are candidates for removal. Test removal safely: use MySQL's INVISIBLE INDEX feature or PostgreSQL's `pg_hint_plan` to disable index use and measure query performance. Drop with `DROP INDEX CONCURRENTLY idx_name` to avoid locking.
 
 **Q: Explain the prefix matching rule for composite indexes in MySQL.**
-**Short:** MySQL can only use a composite index for a left-to-right prefix of its columns, and stops using it for navigation once a range condition is hit.
+**Short:** MySQL navigates a composite index by a left-to-right column prefix and stops at the first range; omitting the leading column needs a skip scan, cheap only if it has few distinct values.
 
-A composite index (a, b, c) can be used for queries that reference a prefix of the columns in order: just (a), (a, b), or (a, b, c). If a query omits a leading column (queries only on b or c), MySQL cannot use the index at all. The exception: if the leading column has an equality condition, subsequent columns can have range conditions — but once a range is hit, further columns are not usable for index navigation (though they may be used for in-index filtering). Example: `WHERE a = 1 AND b > 5 AND c = 3` — the index is used for a (equality) and b (range) but c is not used for index navigation (though it can be evaluated in the leaf nodes).
+A composite index (a, b, c) can be used for queries that reference a prefix of the columns in order: just (a), (a, b), or (a, b, c). If a query omits the leading column (`WHERE b = 2`), there is no prefix to seek on. MySQL 8.0.13+ can still use the index through Skip Scan range access (`Using index for skip scan` in EXPLAIN): it seeks once per distinct value of `a`, then range-scans `b` inside each group. It applies only to a single-table query that reads nothing outside the index and has no `GROUP BY` or `DISTINCT`, and it pays off only when `a` has few distinct values; with a million distinct values of `a` it is a million seeks and the optimizer picks a full scan. PostgreSQL 18 added the same B-tree skip scan. The second rule: if the leading column has an equality condition, subsequent columns can have range conditions, but once a range is hit, further columns are not usable for index navigation (though they may be used for in-index filtering). Example: `WHERE a = 1 AND b > 5 AND c = 3`: the index is used for a (equality) and b (range) but c is not used for index navigation (though it can be evaluated in the leaf nodes).
 
 **Q: What is an expression index and when does the planner use it?**
 **Short:** An expression index only helps a query that uses the exact same expression text, such as lower(email), not an equivalent-looking one.

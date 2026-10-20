@@ -79,7 +79,7 @@ column reflects learning sequence, not addition order.
 | 41 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | NeMo Guardrails, Llama Guard, input/output filters — with 1 deep-dive sub-file (guardrail evaluation & operations) | Intermediate |
 | 42 | 6 — Advanced | [Safety & Alignment](safety_and_alignment/safety_and_alignment.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming — with 1 deep-dive sub-file (automated jailbreak algorithms) | Intermediate |
 | 43 | 6 — Advanced | [Mechanistic Interpretability](mechanistic_interpretability/mechanistic_interpretability.md) | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | Advanced |
-| 44 | 6 — Advanced | [LLM Security](llm_security/llm_security.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 1 deep-dive sub-file (privacy & data governance) | Advanced |
+| 44 | 6 — Advanced | [LLM Security](llm_security/llm_security.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 2 deep-dive sub-files (privacy & data governance, agent identity & authorization) | Advanced |
 | 45 | 6 — Advanced | [AI Regulations & Compliance](ai_regulations_and_compliance/ai_regulations_and_compliance.md) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA, right to explanation | Intermediate |
 | 46 | 6 — Advanced | [Multimodal Models](multimodal_models/multimodal_models.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
 | 47 | 6 — Advanced | [Vision-Language Models](vision_language_models/vision_language_models.md) | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | Advanced |
@@ -123,6 +123,7 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | File | Topic |
 |------|-------|
 | [grpo_and_rlvr.md](alignment_and_rlhf/grpo_and_rlvr.md) | GRPO vs PPO, verifiable rewards (RLVR), DeepSeek-R1 pipeline, DAPO/Dr. GRPO/GSPO, verifier hardening |
+| [rl_environments_and_agentic_rl.md](alignment_and_rlhf/rl_environments_and_agentic_rl.md) | RL environments as programs: dataset row, action, sandboxed execution, trajectory scoring, agentic RL post-training |
 
 ### RAG Fundamentals (`rag_fundamentals/`)
 | File | Topic |
@@ -160,6 +161,8 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [agent_ux_patterns.md](agents_and_tool_use/agent_ux_patterns.md) | Streaming, interrupt/resume, approval gates, artifacts, confidence signaling |
 | [durable_long_running_agents.md](agents_and_tool_use/durable_long_running_agents.md) | Temporal, Inngest, Restate, LangGraph checkpointing, idempotency |
 | [agent_cost_and_token_budget.md](agents_and_tool_use/agent_cost_and_token_budget.md) | Budgets, model cascade, compaction, caching, Batch API |
+| [agent_skills_and_progressive_disclosure.md](agents_and_tool_use/agent_skills_and_progressive_disclosure.md) | Agent Skills as packaged procedures, progressive disclosure of instructions, Skills vs tools |
+| [reasoning_models_vs_scaffolds.md](agents_and_tool_use/reasoning_models_vs_scaffolds.md) | Native extended thinking vs a hand-rolled agent scaffold: what each spends and when each wins |
 
 ### Agentic Frameworks (`agentic_frameworks/`)
 | File | Topic |
@@ -182,6 +185,7 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [mastra_typescript.md](agentic_frameworks/mastra_typescript.md) | Mastra (TS) — workflows, agents, MCP client, evals, Vercel/CF deployment |
 | [litellm_routing.md](agentic_frameworks/litellm_routing.md) | LiteLLM — unified routing, fallback, cost tracking, semantic caching, virtual keys |
 | [google_adk.md](agentic_frameworks/google_adk.md) | Google Agent Development Kit — LlmAgent, Workflow agents (Sequential/Parallel/Loop), tools, sessions/state, A2A integration, Vertex AI Agent Engine |
+| [microsoft_agent_framework.md](agentic_frameworks/microsoft_agent_framework.md) | Microsoft Agent Framework: the AutoGen and Semantic Kernel merger, Python and .NET agents and workflows |
 
 ### Multi-Agent Systems (`multi_agent_systems/`)
 | File | Topic |
@@ -231,6 +235,7 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | File | Topic |
 |------|-------|
 | [privacy_and_data_governance.md](llm_security/privacy_and_data_governance.md) | Memorization & extraction, membership inference, PII pipelines, DP-SGD, machine unlearning, deletion requests |
+| [agent_identity_and_authorization.md](llm_security/agent_identity_and_authorization.md) | Agent workload identity (SPIFFE), OAuth token exchange (RFC 8693), delegated and least-privilege tool access, the confused-deputy problem |
 
 ---
 
@@ -825,12 +830,12 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | ANN index libraries | FAISS (faiss-cpu / faiss-gpu / faiss-gpu-cuvs), Hnswlib, ScaNN, Annoy, DiskANN, cuVS |
 | Vector Databases | Pinecone, Weaviate, Qdrant, Milvus, pgvector, Chroma, Vespa |
 | Orchestration | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, Haystack |
-| Fine-tuning | Axolotl, Unsloth, HuggingFace PEFT, LLaMA-Factory, torchtune |
+| Fine-tuning | Axolotl, Unsloth, HuggingFace PEFT, LLaMA-Factory, TRL |
 | Evaluation | RAGAS, LangSmith, Weights & Biases, TruLens, DeepEval |
-| Guardrails | NeMo Guardrails, Llama Guard, Guardrails AI, Rebuff |
+| Guardrails | NeMo Guardrails, Llama Guard, Guardrails AI |
 | Training infra | DeepSpeed, FSDP, Megatron-LM, Ray Train, SkyPilot |
 | Monitoring | LangSmith, Arize Phoenix, Helicone, Langfuse, OpenTelemetry, Weights & Biases |
-| Security | Rebuff, Lakera Guard, Prompt Armor, NVIDIA NeMo Guardrails, canary tokens |
+| Security | Lakera Guard, Llama Prompt Guard, Prompt Armor, NVIDIA NeMo Guardrails, canary tokens |
 | Interpretability | TransformerLens, SAELens, Neuronpedia, NNsight, pyvene, Goodfire/Ember |
 | Distillation & Merging | mergekit, distilabel, Hugging Face PEFT, SparseML, Neural Magic |
 | LLMOps Platforms | MLflow, Weights & Biases, LangSmith, Langfuse, Braintrust, DeepEval, Ragas |

@@ -95,8 +95,8 @@ It is evidence that you did not do the specific things you told it to check for.
 | Tool | Written in | Formats | Type-aware | Ecosystem |
 |------|-----------|---------|------------|-----------|
 | **ESLint 10** | JavaScript | no | via typescript-eslint | thousands of plugins |
-| **typescript-eslint 8.69.0** | JavaScript | no | yes, the reference implementation | the TypeScript rule set |
-| **Prettier 3.9.6** | JavaScript | yes, exclusively | n/a | n/a |
+| **typescript-eslint 8.71.2** | JavaScript | no | yes, the reference implementation | the TypeScript rule set |
+| **Prettier 3.9.10** | JavaScript | yes, exclusively | n/a | n/a |
 | **Biome 2.5** | Rust | yes, one binary | yes | small, first-party only |
 | **oxlint** | Rust | no, `oxfmt` is separate | yes, GA 2026-07-22 | small, first-party plus a JS plugin API |
 
@@ -116,7 +116,7 @@ flowchart LR
     SRC(["source<br/>ts, tsx, css"])
     OX(["oxlint or Biome<br/>syntactic sweep<br/>1 to 3 seconds"])
     ES(["ESLint 10<br/>plus typescript-eslint<br/>type-aware rules"])
-    PR(["Prettier 3.9.6<br/>or Biome format<br/>writes the file"])
+    PR(["Prettier 3.9.10<br/>or Biome format<br/>writes the file"])
     CI(["CI gate<br/>max-warnings 0"])
     SRC --> OX --> CI
     SRC --> ES --> CI
@@ -344,7 +344,7 @@ awaited something that was never a promise, so the code reads asynchronous and i
 **`no-unsafe-*`** family, which tracks an `any` from an untyped `JSON.parse` or a third-party
 `.d.ts` as it flows through three files and lands in a call argument.
 
-**typescript-eslint 8.69.0 does not yet support TypeScript 7 or tsgo**, because TypeScript 7.0
+**typescript-eslint 8.71.2 does not yet support TypeScript 7 or tsgo**, because TypeScript 7.0
 shipped without a stable Compiler API — that is expected in 7.1. Type-aware linting therefore
 still runs against the TypeScript 6.x checker even in a repository whose `tsc --noEmit` job has
 moved to the native binary. Compiler details belong to
@@ -632,8 +632,8 @@ so a comment whose rule no longer fires becomes an error rather than archaeology
 | Tool | Role | Relevance |
 |------|------|-----------|
 | ESLint | Linter | Version 10, flat config only, eslintrc removed |
-| typescript-eslint | Linter plugin | 8.69.0, the reference type-aware rule set |
-| Prettier | Formatter | 3.9.6, deterministic reprint from the AST |
+| typescript-eslint | Linter plugin | 8.71.2, the reference type-aware rule set |
+| Prettier | Formatter | 3.9.10, deterministic reprint from the AST |
 | eslint-config-prettier | Config | Disables the roughly 40 conflicting style rules |
 | Biome | Linter | 2.5, Rust, linter and formatter in one binary |
 | oxlint | Linter | Rust, type-aware GA 2026-07-22 via tsgolint |
@@ -770,7 +770,7 @@ in more than a handful of places, the rule is misconfigured — fix the config, 
 sites.
 
 **Q: Can typescript-eslint use TypeScript 7 and its native compiler?**
-**Short:** Not yet — TypeScript 7.0 shipped without a stable Compiler API, so version 8.69.0 still builds its program with the 6.x checker even where the type-check job has moved.
+**Short:** Not yet: TypeScript 7.0 shipped without a stable Compiler API, so version 8.71.2 still builds its program with the 6.x checker even where the type-check job has moved.
 
 The stable API is expected in 7.1. The practical consequence is a split: `tsc --noEmit` can run
 on the fast native binary while type-aware linting keeps loading the JavaScript checker, so the

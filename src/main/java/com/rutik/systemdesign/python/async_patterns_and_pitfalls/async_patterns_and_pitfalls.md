@@ -29,7 +29,7 @@ This module covers:
 - Common memory leaks: untracked tasks, un-closed async generators
 
 Python version baseline for this module: **3.11** for the async APIs themselves; runtime
-behaviour and defaults are stated for **3.14**, the current stable release.
+behaviour and defaults are stated for **3.14**.
 
 ---
 

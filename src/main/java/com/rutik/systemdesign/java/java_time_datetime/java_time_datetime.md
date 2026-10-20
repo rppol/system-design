@@ -481,12 +481,20 @@ String s = ZonedDateTime.now(ny).format(human);   // "Fri, 3 Jul 2026 09:00"
 
 Unlike `SimpleDateFormat`, a `DateTimeFormatter` is strict by default and immutable — build it once, use it everywhere. See [Strings & Text](../strings_and_text/strings_and_text.md) for parsing/formatting mechanics.
 
+On JDK 27 (JDK-8210336), every predefined ISO formatter that accepts an offset also parses the short form `+01`, so `OffsetDateTime.parse("2026-07-03T09:00+01")` succeeds; JDK 26 and earlier throw `DateTimeParseException` on the same string. Write offsets as `+01:00` whenever another service, or an older JDK, has to read them back.
+
+The zone rules come from the IANA tzdata bundled in each JDK build: JDK 27 GA carries 2026b, after the 2025c, 2026a, and 2026b updates listed in its release notes. Read the version the running JVM uses rather than assuming it from the JDK number, because update releases and `tzupdater` change it:
+
+```java
+String tzVersion = ZoneRulesProvider.getVersions("Europe/London").lastKey();   // e.g. "2026b"
+```
+
 ---
 
 ## 7. Real-World Examples
 
 - **JDBC 4.2 / databases**: modern drivers map `LocalDate` to SQL `DATE`, `LocalDateTime` to `TIMESTAMP`, and `OffsetDateTime`/`Instant` to `TIMESTAMP WITH TIME ZONE` (`timestamptz`). Postgres stores `timestamptz` as UTC and converts on read — the DB-level mirror of the `Instant` pattern.
-- **Jackson `JavaTimeModule`**: serializes `Instant` as ISO-8601 (`2026-07-03T08:00:00Z`) so REST APIs exchange unambiguous UTC timestamps by default.
+- **Jackson 3 (`jackson-databind`)**: `java.time` binding is built in, with no module to register, and `Instant` serializes as ISO-8601 (`2026-07-03T08:00:00Z`) because `DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS` is off by default, so REST APIs exchange unambiguous UTC timestamps. See [JSON Processing with Jackson](../json_processing_jackson/json_processing_jackson.md).
 - **Joda-Time**: the direct predecessor; JSR-310 is essentially its redesign, so migrating legacy Joda code is mostly a one-to-one type mapping.
 - **Android**: `java.time` is available natively on API 26+ and via *core library desugaring* below that, so the same code runs on older phones.
 - **Financial / trading systems**: use `Instant`/`ZonedDateTime` with explicit exchange zones (`America/New_York` for NYSE) because market open/close is a wall-clock rule that must survive DST changes.
@@ -549,6 +557,9 @@ An analytics team stored ingestion times as `LocalDateTime` in the JVM default z
 ### War Story 6: Trusting the server's default zone
 A batch job used `LocalDate.now()` (which uses `ZoneId.systemDefault()`) to pick "today." After a container migration to a UTC host, the job's day boundary shifted, double-processing some records near midnight. **Fix**: always pass an explicit zone: `LocalDate.now(ZoneId.of("America/New_York"))`.
 
+### Pitfall: Parsing and zone IDs that differ across a JDK 25/27 fleet
+Two JDK 27 changes make the same input behave differently on old and new nodes. The ISO formatters accept a short offset such as `2026-07-03T09:00+01` on JDK 27 (JDK-8210336) and reject it with `DateTimeParseException` on JDK 26 and earlier, so a payload written by a lenient producer is accepted by upgraded consumers and rejected by the rest. On Windows, `TimeZone.getDefault()` returns current IANA IDs on JDK 27 (JDK-8377013), for example `Asia/Kolkata` where earlier JDKs returned `Asia/Calcutta`, which breaks any code that compares or keys on the zone ID string. **Fix**: emit offsets as `+HH:MM`, validate inbound timestamps against the oldest JDK still deployed, and compare zones by their rules (`ZoneId.of(a).getRules().equals(ZoneId.of(b).getRules())`), never by raw ID string.
+
 ---
 
 ## 11. Technologies & Tools
@@ -561,7 +572,7 @@ A batch job used `LocalDate.now()` (which uses `ZoneId.systemDefault()`) to pick
 | IANA tzdata / `ZoneRules` | Time-zone offset + DST transition database shipped with the JDK |
 | `tzupdater` | Oracle tool to patch a JDK's tzdata when governments change DST rules |
 | ThreeTen-Extra (`org.threeten.extra`) | Colebourne's add-on types (`Interval`, `Quarter`, `DayOfMonth`) |
-| Jackson `JavaTimeModule` | JSON (de)serialization of java.time types |
+| Jackson 3 `jackson-databind` (built-in `java.time` binding, `DateTimeFeature`) | JSON (de)serialization of java.time types |
 | JDBC 4.2 `getObject`/`setObject` | Direct mapping of java.time types to SQL DATE/TIMESTAMP/TIMESTAMPTZ |
 
 ---

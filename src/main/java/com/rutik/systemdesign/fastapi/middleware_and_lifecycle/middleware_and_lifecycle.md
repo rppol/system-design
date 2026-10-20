@@ -78,8 +78,13 @@ Outermost middleware executes first on request and last on response. The mnemoni
 of pancakes — the last one placed is on top and is eaten first.
 
 **3. Middleware runs before routing.** The router, path matching, and dependency injection are all
-inside the innermost app. Middleware cannot access `request.path_params`, the matched route, or
-resolved dependencies because none of that has happened yet.
+inside the innermost app. On the way in, middleware cannot access `request.path_params`, the matched
+route, or resolved dependencies because none of that has happened yet. On the way out it can read
+the matched route: the router writes it to the shared `scope` dict as `scope["route"]` (FastAPI's
+`APIRoute` always has; Starlette 1.7.0+ does it for every route and for 405 partial matches),
+so after `call_next` returns, `scope["route"].path_format` gives the template `/items/{item_id}`.
+That template is relative to the innermost router: it omits a `Mount` prefix and, on FastAPI
+0.137+, an `include_router(prefix=...)` prefix (Q3).
 
 **4. `Request.state` is the message bus between layers.** Middleware that needs to pass data to a
 route handler (e.g., a decoded user ID from a JWT) attaches it to `request.state.user_id`. The
@@ -102,8 +107,8 @@ middleware do not reach `@app.exception_handler`.
 ### 4.1 `@app.middleware("http")` decorator
 
 The simplest form. FastAPI converts the decorated async function into a `BaseHTTPMiddleware` under
-the hood. Suitable for logging, timing, and header injection. Not suitable for streaming responses
-(see §10 for the double-buffering pitfall).
+the hood. Suitable for logging, timing, and header injection. It streams responses chunk by chunk,
+but `ContextVar` changes made downstream do not reach it (see §10, Pitfall 2).
 
 ```python
 @app.middleware("http")
@@ -118,8 +123,7 @@ async def timing_middleware(request: Request, call_next: Callable) -> Response:
 ### 4.2 `BaseHTTPMiddleware` class
 
 Subclasses `starlette.middleware.base.BaseHTTPMiddleware` and overrides `dispatch`. Provides full
-access to `Request` and `Response` objects. Same double-buffering limitation as the decorator form
-for streaming responses.
+access to `Request` and `Response` objects. Same `ContextVar` limitation as the decorator form.
 
 ```python
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -137,8 +141,8 @@ class CorrelationIDMiddleware(BaseHTTPMiddleware):
 
 Operates directly on `scope`, `receive`, `send`. No `Request`/`Response` abstraction overhead.
 Approximately 20-30 µs faster per request than `BaseHTTPMiddleware` on a fast path because it
-avoids the double-wrapping of the receive and send callables. Required for streaming responses where
-you must not buffer the body.
+avoids the double-wrapping of the receive and send callables. Required when the middleware must read
+a `ContextVar` that the endpoint or a dependency sets.
 
 ```python
 class RawTimingMiddleware:
@@ -173,6 +177,10 @@ class RawTimingMiddleware:
 | `TrustedHostMiddleware` | `starlette.middleware.trustedhost` | Reject requests with bad Host headers |
 | `HTTPSRedirectMiddleware` | `starlette.middleware.httpsredirect` | 301 redirect HTTP to HTTPS |
 | `SessionMiddleware` | `starlette.middleware.sessions` | Cookie-backed signed sessions |
+| `OpenTelemetryMiddleware` | `starlette.middleware.opentelemetry` | Experimental (Starlette 1.7.0+): one HTTP server span per request, named from the route template; needs `opentelemetry-api` |
+
+Starlette 1.7.0+ requires AnyIO `>=4.0,<5`; pin AnyIO 4 before upgrading if another dependency
+still holds AnyIO 3.
 
 ### 4.5 `lifespan` context manager [FastAPI 0.93+]
 
@@ -361,7 +369,7 @@ middlewares that case study registers:
   difference : 1.88 cores, recovered by changing base class -- no logic changed
 ```
 
-Sanity-check the scale against the figure in Q8: one `BaseHTTPMiddleware` at 10,000 req/s is
+Sanity-check the scale against the figure in Q9: one `BaseHTTPMiddleware` at 10,000 req/s is
 `20-30 us x 10,000 = 200-300 ms` of CPU per second, which is the same arithmetic with `N = 1` and
 half the traffic.
 
@@ -441,7 +449,7 @@ async def get_user(user_id: int, request: Request) -> dict:
     return dict(row)
 ```
 
-### 6.5 Pure ASGI middleware (zero double-buffering)
+### 6.5 Pure ASGI middleware
 
 ```python
 from starlette.types import ASGIApp, Scope, Receive, Send, Message
@@ -449,7 +457,7 @@ from starlette.datastructures import MutableHeaders
 
 
 class SecurityHeadersMiddleware:
-    """Pure ASGI — no BaseHTTPMiddleware overhead, safe for streaming responses."""
+    """Pure ASGI: no BaseHTTPMiddleware task or memory-stream overhead."""
 
     HEADERS = {
         "X-Content-Type-Options": "nosniff",
@@ -604,11 +612,11 @@ workspace. The lifespan block initializes a per-process connection pool pointing
 for GET requests and the primary for mutations — that decision is made once at startup, not per
 request.
 
-**OpenAI API gateway.** `GZipMiddleware` with `minimum_size=1000` compresses streaming JSON
-responses (token-by-token SSE). On a 10 KB JSON payload, gzip achieves 70-80% compression,
-reducing bandwidth from ~10 KB to ~2 KB. For token streams, chunked transfer encoding interacts
-with GZip buffering — the Starlette GZipMiddleware correctly buffers only when the full response
-is available, passing through streaming responses untouched.
+**OpenAI API gateway.** `GZipMiddleware` with `minimum_size=1000` compresses JSON responses. On a
+10 KB JSON payload, gzip achieves 70-80% compression, reducing bandwidth from ~10 KB to ~2 KB.
+Since Starlette 1.5.0 the middleware compresses and flushes each chunk of a streaming response,
+and its default `exclude_content_types` list includes `text/event-stream`, so token-by-token SSE
+passes through uncompressed with no per-route opt-out.
 
 **What it means.** "Compression ratio times payload size times requests per second is bandwidth
 saved per second — the only form in which a percentage becomes a number you can put on an invoice."
@@ -654,29 +662,32 @@ non-zero code, triggering a Kubernetes `CrashLoopBackOff` and alerting on-call.
 
 ### Middleware approach comparison
 
-| Approach | Overhead | Streaming safe | Complexity | Access to Request obj |
+| Approach | Overhead | Sees downstream `ContextVar` changes | Complexity | Access to Request obj |
 |---|---|---|---|---|
-| `@app.middleware("http")` | ~20-30 µs | No (buffers body) | Low | Yes |
-| `BaseHTTPMiddleware` subclass | ~20-30 µs | No (buffers body) | Medium | Yes |
+| `@app.middleware("http")` | ~20-30 µs | No (app runs in a separate task) | Low | Yes |
+| `BaseHTTPMiddleware` subclass | ~20-30 µs | No (app runs in a separate task) | Medium | Yes |
 | Pure ASGI middleware | ~1-2 µs | Yes | High | No (raw scope only) |
+
+All three stream response chunks as they are produced.
 
 ```mermaid
 quadrantChart
     title Choosing a middleware implementation
     x-axis Low Overhead --> High Overhead
-    y-axis Not Streaming-Safe --> Streaming-Safe
+    y-axis Drops ContextVar changes --> Keeps ContextVar changes
     quadrant-1 Rarely needed
     quadrant-2 Best for hot paths
     quadrant-3 Uncommon combination
-    quadrant-4 Convenient but blocks streaming
+    quadrant-4 Convenient but drops ContextVar changes
     "Pure ASGI middleware": [0.12, 0.88]
     "BaseHTTPMiddleware": [0.68, 0.15]
     "app.middleware decorator": [0.62, 0.10]
 ```
 
-Pure ASGI middleware is the only option in the low-overhead, streaming-safe quadrant; both
-`BaseHTTPMiddleware` and the `@app.middleware` decorator land in the same high-overhead,
-streaming-unsafe corner because they share the same double-buffering mechanism under the hood.
+Pure ASGI middleware is the only option in the low-overhead quadrant that keeps `ContextVar`
+changes; both `BaseHTTPMiddleware` and the `@app.middleware` decorator land in the same corner
+because both run the downstream app in a separate anyio task with a copied context and relay its
+messages through a memory stream.
 
 ### Lifecycle approach comparison
 
@@ -714,8 +725,9 @@ streaming-unsafe corner because they share the same double-buffering mechanism u
 - You need access to **parsed request body** or **Pydantic-validated models** — the body is a
   stream; middleware that reads it prevents the route handler from reading it again unless you
   re-wrap the receive callable (complex and error-prone)
-- You need **route-level context** such as `path_params`, the matched `APIRoute`, or a
-  dependency-resolved object — none of these exist yet when middleware runs
+- You need **route-level context** such as `path_params` or a dependency-resolved object before
+  the handler runs: none of these exist yet. Only the matched route (`scope["route"]`) is readable,
+  and only after `call_next` returns
 - You are writing **per-user auth logic** — put it in a `Security()` dependency so it is visible
   in OpenAPI and testable in isolation
 
@@ -785,57 +797,49 @@ app = FastAPI(lifespan=lifespan)
 
 ---
 
-### Pitfall 2: `BaseHTTPMiddleware` double-buffering breaks streaming responses
+### Pitfall 2: `BaseHTTPMiddleware` never sees `ContextVar` changes made downstream
 
 ```python
-# BROKEN: BaseHTTPMiddleware (and @app.middleware) buffer the entire response body.
-# For a StreamingResponse that yields token-by-token, call_next() does not return
-# until the generator is exhausted, defeating the purpose of streaming.
+# BROKEN: a dependency sets a ContextVar; BaseHTTPMiddleware reads the old value.
+# call_next() runs the app in a separate anyio task with a copied context, so a
+# .set() in the endpoint or a dependency never propagates back to dispatch().
 
+import contextvars
 from starlette.middleware.base import BaseHTTPMiddleware
 
-class BrokenStreamingMiddleware(BaseHTTPMiddleware):
+user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("user_id", default=None)
+
+
+class BrokenAuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
-        # call_next() here waits for ALL chunks from StreamingResponse to be produced
-        # before this line is reached — the client sees no tokens until the model finishes.
-        response.headers["X-Done"] = "true"
+        logger.info("request done", extra={"user_id": user_id.get()})  # always None
         return response
 
-# Symptom: LLM token stream that should appear word-by-word arrives all at once
-# after a 30-second wait. Memory usage spikes because the full response is buffered.
+# Symptom: every audit line logs user_id=None although the auth dependency set it.
+# A BaseHTTPMiddleware placed outside a pure ASGI middleware breaks it the same way.
 ```
 
 ```python
-# FIX: use pure ASGI middleware — intercept send() directly, never buffer the body
+# FIX: pure ASGI middleware awaits the app in the same task, so async code's
+# ContextVar changes are visible after it returns.
 
-from starlette.types import ASGIApp, Scope, Receive, Send, Message
-from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Scope, Receive, Send
 
 
-class StreamingSafeHeaderMiddleware:
-    """Appends a header to every response without buffering the body."""
-
-    def __init__(self, app: ASGIApp, header_name: str, header_value: str) -> None:
+class AuditMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self.header_name = header_name
-        self.header_value = header_value
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        await self.app(scope, receive, send)
+        logger.info("request done", extra={"user_id": user_id.get()})
 
-        async def patched_send(message: Message) -> None:
-            if message["type"] == "http.response.start":
-                headers = MutableHeaders(scope=message)
-                headers.append(self.header_name, self.header_value)
-            await send(message)
-
-        await self.app(scope, receive, patched_send)
-
-# The send() hook fires once per chunk — the client receives each chunk
-# immediately without waiting for the full response body to be produced.
+# A sync def dependency runs in a worker thread with a copied context, so its
+# .set() is lost either way; write such values to request.state instead.
 ```
 
 ---
@@ -867,35 +871,64 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"])  # add LAST -> outermost
 
 ---
 
-### Pitfall 4: Reading request body in middleware leaks the stream
+### Pitfall 4: Reading the request body in pure ASGI middleware drains `receive`
 
 ```python
-# BROKEN: reading request.body() in BaseHTTPMiddleware consumes the async stream.
-# The route handler then reads an empty body.
+# BROKEN: pure ASGI middleware reads the body from receive() and then passes the
+# original receive on. The ASGI receive channel is one-shot: the handler gets no
+# body messages, and on uvicorn its receive() waits until the client disconnects.
 
-class BrokenBodyLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        body = await request.body()       # consumes the receive stream
-        print(f"Request body: {body}")
-        response = await call_next(request)  # route handler gets empty body
-        return response
+class BrokenBodyLoggingMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        chunks, more = [], True
+        while more:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        logger.info("body bytes=%d", len(b"".join(chunks)))
+        await self.app(scope, receive, send)       # handler's body is gone
 ```
 
 ```python
-# FIX: cache the body bytes and re-wrap the receive callable
+# FIX: replay the cached body once, then hand later calls to the real receive
 
-class BodyLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        body = await request.body()  # consumes stream once
-        # Re-inject body bytes so the route handler can read them
-        async def receive_override():
-            return {"type": "http.request", "body": body, "more_body": False}
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-        request._receive = receive_override  # type: ignore[assignment]
-        print(f"Request body ({len(body)} bytes): {body[:200]}")
-        return await call_next(request)
-# Note: body logging in production middleware is a security risk (credentials in bodies).
-# Prefer logging only metadata (URL, method, content-type, content-length).
+
+class BodyLoggingMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        chunks, more = [], True
+        while more:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        body = b"".join(chunks)
+        replayed = False
+
+        async def replay() -> Message:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        logger.info("body bytes=%d", len(body))
+        await self.app(scope, replay, send)
+# BaseHTTPMiddleware has done this replay itself since Starlette 0.28.0, so
+# await request.body() in dispatch() leaves the handler's body intact.
+# Logging bodies in production leaks credentials; log metadata instead.
 ```
 
 ---
@@ -904,12 +937,13 @@ class BodyLoggingMiddleware(BaseHTTPMiddleware):
 
 | Tool / Library | Role | Key Feature | Limitation |
 |---|---|---|---|
-| Starlette `BaseHTTPMiddleware` | Structured middleware base class | `Request`/`Response` objects; simple `dispatch` override | Buffers response body — not safe for streaming |
-| Starlette pure ASGI | Low-level middleware | No buffering; direct `scope/receive/send` access | Verbose; no `Request` abstraction |
+| Starlette `BaseHTTPMiddleware` | Structured middleware base class | `Request`/`Response` objects; simple `dispatch` override; replays the request body to the handler | Downstream `ContextVar` changes do not reach it; ~20-30 µs per request |
+| Starlette pure ASGI | Low-level middleware | Same task as the app; direct `scope/receive/send` access | Verbose; no `Request` abstraction; must replay `receive` itself after reading the body |
 | `CORSMiddleware` (Starlette) | CORS header injection | Handles preflight automatically; `allow_origin_regex` | Must be outermost to work correctly |
-| `GZipMiddleware` (Starlette) | Response compression | 70-80% size reduction on JSON >1 KB; `minimum_size` threshold | Adds latency for small payloads (<1 KB); skip for SSE/WebSocket |
+| `GZipMiddleware` (Starlette) | Response compression | 70-80% size reduction on JSON >1 KB; `minimum_size` threshold; per-chunk flush on streams (1.5.0+) | Adds latency for small payloads (<1 KB); `exclude_content_types` skips `text/event-stream` by default |
 | `slowapi` | Rate limiting middleware | Redis-backed; `@limiter.limit("100/minute")` per route | Not built-in; adds Redis dependency |
 | `starlette-csrf` | CSRF protection | Cookie + header double-submit pattern | Must coordinate with SPA frameworks |
+| Starlette `OpenTelemetryMiddleware` | HTTP server spans | Span name and `http.route` from the matched route template; `excluded_urls` regexes; one span even if added twice | Experimental: API and emitted telemetry can change in a minor release; FastAPI 0.142+ records request spans natively, see [observability](../observability_and_monitoring/observability_and_monitoring.md) |
 | `asgi-correlation-id` | Correlation ID propagation | Structlog integration; UUID v4 auto-generation | Third-party library; audit before production use |
 
 ---
@@ -925,17 +959,45 @@ On a request: C runs first, then B, then A, then the router. On a response: A pr
 then B, then C. The mnemonic is a stack — last in, first out on the request side. Always trace
 the `add_middleware` call order carefully when debugging middleware interactions.
 
-**Q2: Why does `BaseHTTPMiddleware` break streaming responses, and what is the fix?**
-**Short:** BaseHTTPMiddleware buffers the entire response body before returning, breaking streaming responses.
+**Q2: Does `BaseHTTPMiddleware` buffer streaming responses, and what is its real limitation?**
+**Short:** No. call_next relays chunks through a memory stream as they arrive; the documented limit is that ContextVar changes made downstream never reach dispatch().
 
-`BaseHTTPMiddleware.dispatch()` calls `call_next(request)` which returns only after all response
-chunks have been collected — the framework buffers the entire body before returning a `Response`
-object. For `StreamingResponse` or SSE, this means the client waits until the generator is
-exhausted, defeating the purpose of streaming. The fix is to write a pure ASGI middleware that
-intercepts the `send` callable directly — it fires once per chunk and passes each chunk downstream
-immediately without buffering.
+`call_next(request)` runs the downstream app in a separate anyio task and returns a response
+whose body iterator reads from a memory stream, so `StreamingResponse` and SSE chunks reach the
+client as they are produced. The body is only buffered if your own `dispatch()` drains
+`response.body_iterator`, for example to hash it. Starlette's docs list one known limitation:
+because the app runs in a separate task with a copied context, a `ContextVar` set in the
+endpoint or a dependency is not visible in `dispatch()`, and a `BaseHTTPMiddleware` placed
+outside a pure ASGI middleware breaks propagation for that one too. The fix is pure ASGI
+middleware, which awaits the app in the same task.
 
-**Q3: How do you pass data from middleware to a route handler?**
+**Q3: Your metrics middleware labels requests by `request.url.path` and Prometheus memory keeps growing. How do you get a route label if middleware runs before routing?**
+**Short:** Read scope["route"].path_format after call_next returns, then add the prefixes it omits: the Mount root_path and, on FastAPI 0.137+, the include_router prefix.
+
+Every distinct path value (`/items/1`, `/items/2`, ...) creates a new time series, so a label taken
+from the raw URL grows without bound. The route template is bounded by the number of routes. The
+router writes the matched route into the same `scope` dict the middleware holds, so it is readable
+once the inner app has returned:
+
+```python
+async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+    await self.app(scope, receive, send)
+    route = scope.get("route")
+    label = getattr(route, "path_format", None) or "unmatched"   # 404s have no route
+    REQUESTS.labels(method=scope["method"], route=label).inc()
+```
+
+FastAPI's `APIRoute` has always set `scope["route"]`; Starlette 1.7.0 sets it for every route type
+and for 405 partial matches. The innermost router writes last, so the template is relative to it.
+Under a `Mount`, prepend `scope["root_path"]`. On FastAPI 0.137+, `scope["route"]` is the
+`APIRoute` as declared, so `GET /v1/items/42` on a router included with `prefix="/v1"` gives
+`/items/{item_id}` (measured on FastAPI 0.143.0) and `/v1` and `/v2` traffic merge into one
+series. Build a map at startup from `fastapi.routing.iter_route_contexts(app.routes)`, keyed by
+`id(ctx.original_route)`, whose `ctx.path_format` carries every prefix (see
+[routing](../routing_and_request_handling/routing_and_request_handling.md), 6.10). Map 404s to one
+fixed label, otherwise scanners probing random paths are the next cardinality leak.
+
+**Q4: How do you pass data from middleware to a route handler?**
 **Short:** Attach data to request.state in middleware, then read it in the handler via request.state.
 
 Attach data to `request.state` in middleware (e.g., `request.state.user_id = decoded_jwt["sub"]`).
@@ -943,7 +1005,7 @@ The route handler reads it via `request: Request` parameter as `request.state.us
 `State` is a simple attribute bag scoped to the request lifetime. Avoid thread-locals or module-level
 globals — they break under async concurrency and multiple worker processes.
 
-**Q4: What is the difference between `@app.exception_handler` and a try/except in middleware?**
+**Q5: What is the difference between `@app.exception_handler` and a try/except in middleware?**
 **Short:** Middleware's try/except can catch exceptions that escape every @app.exception_handler registration.
 
 `@app.exception_handler` hooks into Starlette's exception handling chain, which runs inside the
@@ -953,7 +1015,7 @@ catch exceptions that escape all `@app.exception_handler` registrations — incl
 other middleware layers below it. For a global last-resort 500 handler, use middleware; for HTTP
 semantics tied to specific routes, use `@app.exception_handler`.
 
-**Q5: Why was `@app.on_event("startup")` deprecated in favor of `lifespan`?**
+**Q6: Why was `@app.on_event("startup")` deprecated in favor of `lifespan`?**
 **Short:** lifespan uses asynccontextmanager's try/finally to guarantee cleanup always runs, unlike on_event.
 
 Three reasons: (1) `on_event` splits startup and shutdown into separate functions, making it easy
@@ -963,7 +1025,7 @@ were silently swallowed in some Uvicorn/pytest combinations; (3) `lifespan` uses
 lifespan spec also defines a standard protocol that servers implement, making `lifespan` more
 portable than framework-specific event hooks.
 
-**Q6: How do you initialize a database connection pool at startup and make it available to all route handlers?**
+**Q7: How do you initialize a database connection pool at startup and make it available to all route handlers?**
 **Short:** Create the pool before yield in lifespan and store it on app.state for handlers to reuse.
 
 Use the `lifespan` context manager: create the pool before `yield` and assign it to `app.state.db`.
@@ -972,7 +1034,7 @@ Route handlers access it via `request.app.state.db`. Alternatively, define a dep
 injectable through the standard `Depends()` mechanism, which is easier to mock in tests via
 `dependency_overrides`.
 
-**Q7: What does `allow_credentials=True` in CORSMiddleware do, and why can it not be combined with `allow_origins=["*"]`?**
+**Q8: What does `allow_credentials=True` in CORSMiddleware do, and why can it not be combined with `allow_origins=["*"]`?**
 **Short:** Browsers forbid a wildcard Allow-Origin whenever Access-Control-Allow-Credentials is true.
 
 `allow_credentials=True` causes CORSMiddleware to add `Access-Control-Allow-Credentials: true`
@@ -983,17 +1045,17 @@ origin to be reflected. Combining both is a browser-enforced security restrictio
 credential theft by malicious origins. Always specify an explicit origin list when using
 `allow_credentials=True`.
 
-**Q8: What is the overhead of `BaseHTTPMiddleware` compared to pure ASGI middleware?**
+**Q9: What is the overhead of `BaseHTTPMiddleware` compared to pure ASGI middleware?**
 **Short:** BaseHTTPMiddleware adds roughly 20-30 microseconds per request versus 1-2 for pure ASGI middleware.
 
-`BaseHTTPMiddleware` wraps the `receive` and `send` callables twice — once internally to collect
-the response body and once to present a `Response` object to `dispatch()`. This adds approximately
+`BaseHTTPMiddleware` runs the downstream app in a separate anyio task and relays every response
+message through a memory stream to present a `Response` object to `dispatch()`. This adds approximately
 20-30 µs of overhead per request on fast paths. For a service handling 10,000 req/s, that is
 200-300 ms of cumulative CPU overhead per second. Pure ASGI middleware adds roughly 1-2 µs.
 The difference is rarely the bottleneck (database queries dominate at 1-50 ms), but matters for
 high-frequency internal services where P99 latency targets are tight.
 
-**Q9: How do you write middleware that correctly handles both HTTP and WebSocket connections?**
+**Q10: How do you write middleware that correctly handles both HTTP and WebSocket connections?**
 **Short:** Check scope["type"] at the top of middleware to branch HTTP, WebSocket, and lifespan handling.
 
 Check `scope["type"]` at the start of `__call__`. For `"http"` connections, apply HTTP-specific
@@ -1002,7 +1064,7 @@ or apply WebSocket-specific logic. Always handle the `"lifespan"` type as a pass
 failing to do so prevents the lifespan startup/shutdown protocol from running.
 `BaseHTTPMiddleware` handles this automatically; pure ASGI middleware requires explicit type checking.
 
-**Q10: How do you test a FastAPI application that uses `lifespan` for startup?**
+**Q11: How do you test a FastAPI application that uses `lifespan` for startup?**
 **Short:** Use TestClient as a context manager, or wrap the app in LifespanManager for async tests — ASGITransport alone never runs lifespan.
 
 Use Starlette's `TestClient` as a context manager — `with TestClient(app) as client:` — which
@@ -1028,17 +1090,18 @@ level so a single initialized app is shared across tests, since paying startup a
 per test is the usual reason an async suite crawls. Note that `AsyncClient` has no `app=`
 parameter at all; passing one raises `TypeError`.
 
-**Q11: What is `Request.state` and what is its scope?**
-**Short:** Request.state is a per-request attribute bag created fresh each request and never shared.
+**Q12: What is `Request.state` and what is its scope?**
+**Short:** A per-request attribute bag: keys set on it die with the request, but it starts as a shallow copy of the lifespan state, so objects yielded by lifespan are shared.
 
-`Request.state` is a `starlette.datastructures.State` instance — a simple object that accepts
-arbitrary attribute assignments (`request.state.foo = "bar"`). It is created fresh for each
-request and destroyed when the request completes. It is not shared between requests, not thread-safe
-(because each async request has its own coroutine stack), and not accessible outside the request
-lifecycle. Use it to pass middleware-set values (correlation IDs, authenticated user objects) to
+`Request.state` is a `starlette.datastructures.State` instance, a simple object that accepts
+arbitrary attribute assignments (`request.state.foo = "bar"`). Each request gets its own, built
+from a shallow copy of the ASGI lifespan state, and it is discarded when the request completes.
+A key set or rebound on it is never seen by another request, but a mutable object the lifespan
+yielded (a pool, a client, a list) is the same object in every request. It is not
+accessible outside the request lifecycle. Use it to pass middleware-set values (correlation IDs, authenticated user objects) to
 route handlers without function-signature coupling.
 
-**Q12: When should you use `BackgroundTasks` in a route handler vs a dedicated task queue?**
+**Q13: When should you use `BackgroundTasks` in a route handler vs a dedicated task queue?**
 **Short:** BackgroundTasks runs in-process after the response; use a real task queue for slow or critical work.
 
 `BackgroundTasks` runs the task in the same Uvicorn worker process after the response is sent,
@@ -1047,29 +1110,35 @@ tasks: sending a confirmation email (50-200 ms), writing an audit log entry, or 
 cache key. Use a dedicated task queue (Celery, ARQ, Dramatiq) when: the task takes longer than
 1-2 seconds, failure must be retried with exponential backoff, tasks must survive process restarts,
 or task volume exceeds what a single worker can handle. `BackgroundTasks` in middleware is an
-anti-pattern — middleware's `call_next` must complete before the response is sent, so tasks
-registered there block the response.
+anti-pattern: middleware's `call_next` must complete before the response is sent, so tasks
+registered there block the response. A route's own `BackgroundTasks` behind a `BaseHTTPMiddleware`
+start only after the last body chunk reaches the client on Starlette 1.7.0+; older versions started
+them while the middleware was still streaming the tail of the response.
 
-**Q13: Why does reading `request.body()` inside `BaseHTTPMiddleware.dispatch()` cause the route handler to receive an empty body?**
-**Short:** Reading request.body() in middleware drains the one-shot receive stream, leaving nothing for the handler.
+**Q14: Does reading `request.body()` inside `BaseHTTPMiddleware.dispatch()` leave the route handler an empty body?**
+**Short:** No. Since Starlette 0.28.0 BaseHTTPMiddleware caches the body and replays it to the handler; pure ASGI middleware that reads receive() must replay it itself.
 
-`request.body()` consumes the ASGI `receive` stream, which is a one-shot async generator that
-cannot be rewound. Once middleware awaits it to inspect or log the bytes, the underlying
-`receive` callable has nothing left to yield, so the route handler's own `await request.body()`
-call returns empty. The fix is to cache the bytes and monkey-patch `request._receive` with a
-callable that replays the cached body, letting downstream code read the same content again.
+The ASGI `receive` channel is one-shot: once a message is read it cannot be read again.
+`BaseHTTPMiddleware` wraps the request in a caching `Request` subclass, and since Starlette
+0.28.0 (2023-06-07) `call_next` feeds the cached bytes to the handler, so `await request.body()`
+in `dispatch()` is safe. Pure ASGI middleware has no such wrapper. If it drains `receive()` and
+passes the original callable on, the handler gets no body messages, and on uvicorn its next
+`receive()` waits until the client disconnects. The fix is to pass a replacement `receive` that
+returns the cached body once and then delegates to the real one (§10, Pitfall 4).
 
-**Q14: What does `GZipMiddleware`'s `minimum_size` threshold control, and why should it be skipped for SSE and WebSocket routes?**
-**Short:** minimum_size skips compressing small bodies, and GZip should be disabled for SSE and WebSocket routes.
+**Q15: What does `GZipMiddleware`'s `minimum_size` threshold control, and how does the middleware treat SSE and WebSocket traffic?**
+**Short:** minimum_size skips compressing small bodies; text/event-stream is excluded by default, so SSE passes uncompressed, and WebSocket scopes bypass it.
 
 `minimum_size` sets the smallest response body, in bytes, that `GZipMiddleware` will compress.
 Bodies below the threshold (default 500 bytes) pass through uncompressed because the compression
 overhead outweighs the savings on small payloads, while a JSON response over 1 KB typically saves
-70-80% of its wire size. Skip GZip entirely for SSE and WebSocket connections because those
-protocols stream events incrementally and gzip's block-based compression would buffer and delay
-delivery, defeating the purpose of a live stream.
+70-80% of its wire size. The middleware acts only on `http` scopes, so WebSocket traffic passes
+through untouched. Since Starlette 1.5.0 it compresses and flushes each chunk of a streaming
+response, skips `206` responses, and excludes the types in `exclude_content_types`, whose default
+`DEFAULT_EXCLUDED_CONTENT_TYPES` includes `text/event-stream` (1.8.0 added gRPC types). SSE
+therefore needs no per-route opt-out; extend that list to exclude further types.
 
-**Q15: What does `TrustedHostMiddleware` protect against, and what happens on a `Host` header mismatch?**
+**Q16: What does `TrustedHostMiddleware` protect against, and what happens on a `Host` header mismatch?**
 **Short:** TrustedHostMiddleware rejects requests with an unrecognized Host header, blocking header injection.
 
 `TrustedHostMiddleware` validates the incoming `Host` header against an explicit allowlist and
@@ -1079,7 +1148,7 @@ unvalidated `Host` value, and a spoofed header receives a `400 Bad Request` befo
 route handler or middleware below it in the stack. Always configure an explicit `allowed_hosts`
 list in production rather than the permissive `["*"]` default.
 
-**Q16: What should happen if the code before `yield` in a `lifespan` context manager raises an exception?**
+**Q17: What should happen if the code before `yield` in a `lifespan` context manager raises an exception?**
 **Short:** An exception before yield in lifespan aborts startup entirely, so the server never accepts traffic.
 
 The exception propagates out of the `lifespan` context manager and Uvicorn aborts startup
@@ -1097,9 +1166,10 @@ being deferred to first use inside a route handler.
 work at 10,000 req/s is 10 ms of wasted CPU per second. Avoid database calls, cache lookups,
 or JSON parsing in middleware — those belong in dependencies.
 
-**Use pure ASGI middleware for streaming routes.** Any route that returns `StreamingResponse`
-or uses SSE must not be wrapped by `BaseHTTPMiddleware`. Audit your middleware stack when adding
-streaming endpoints. Consider using pure ASGI middleware uniformly for performance-sensitive services.
+**Use pure ASGI middleware when it reads a `ContextVar` set downstream.** `BaseHTTPMiddleware`
+streams responses correctly but runs the app in a separate task, so those changes never reach
+`dispatch()`. Never drain `response.body_iterator` in `dispatch()` on a streaming route. Consider
+pure ASGI middleware uniformly for performance-sensitive services.
 
 **Register CORSMiddleware last (outermost).** CORS headers must be present on every response,
 including 400s and 500s. If CORSMiddleware is not the outermost layer, an error response from
@@ -1344,26 +1414,37 @@ async def list_users(tenant_id: str, request: Request) -> dict:
 #### BROKEN→FIX in the case study
 
 ```python
-# BROKEN: SecurityHeadersMiddleware registered via add_middleware but defined as BaseHTTPMiddleware
-# — will buffer streaming responses from any tenant route that returns StreamingResponse.
+# BROKEN: an ETag middleware drains body_iterator to hash every response.
+# call_next itself streams, but this dispatch() reads every chunk before returning.
 
-class BrokenSecurityHeadersMiddleware(BaseHTTPMiddleware):
+import hashlib
+
+
+class BrokenETagMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)   # buffers entire body even for StreamingResponse
-        response.headers["X-Frame-Options"] = "DENY"
-        return response
+        response = await call_next(request)
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        headers = dict(response.headers)
+        headers["ETag"] = hashlib.sha256(body).hexdigest()
+        return Response(body, status_code=response.status_code, headers=headers)
 
-# This causes tenant CSV export endpoints (StreamingResponse, multi-MB files) to block
-# until the full CSV is generated before the first byte reaches the browser.
-# Memory usage spikes to O(file size) per concurrent export.
+# Tenant CSV export endpoints (StreamingResponse, multi-MB files) now send no byte
+# until the full CSV is generated, and memory grows to O(file size) per concurrent export.
 ```
 
 ```python
-# FIX: rewrite as pure ASGI middleware — patches the send callable, never buffers
-# (exact implementation shown in the SecurityHeadersMiddleware class above)
-# Pure ASGI add_middleware still works:
-app.add_middleware(SecurityHeadersMiddleware)
-# The __call__ method fires per chunk; streaming responses are not buffered.
+# FIX: hash only bounded bodies; pass streams (no Content-Length) through untouched
+
+class ETagMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        length = response.headers.get("content-length")
+        if length is None or int(length) > 1_000_000:
+            return response
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        headers = dict(response.headers)
+        headers["ETag"] = hashlib.sha256(body).hexdigest()
+        return Response(body, status_code=response.status_code, headers=headers)
 ```
 
 #### Discussion Questions
@@ -1376,9 +1457,10 @@ app.add_middleware(SecurityHeadersMiddleware)
    because the database is not yet ready when the pod starts. The Kubernetes pod goes into
    `CrashLoopBackOff`. Is this the desired behavior? What is the alternative?
 
-3. A developer adds a `BodyLoggingMiddleware` using `BaseHTTPMiddleware` that calls
-   `await request.body()`. The `POST /tenants/{id}/users` endpoint suddenly returns empty
-   `name` and `email` fields for all new users. What is the cause and fix?
+3. A developer adds a `BodyLoggingMiddleware` as pure ASGI middleware that drains `receive()`
+   to log the body and passes the original `receive` on. `POST /tenants/{id}/users` now hangs
+   until the client times out. What is the cause, and why did the same logic written with
+   `BaseHTTPMiddleware` and `await request.body()` work?
 
 4. The on-call engineer needs to reduce cold-start latency from 8 seconds (dominated by
    loading a 2 GB tenant-specific ML model in lifespan) to under 500 ms. What architectural

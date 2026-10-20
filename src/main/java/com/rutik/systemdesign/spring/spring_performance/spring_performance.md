@@ -246,8 +246,8 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    SC["Source Code"] --> AOT["spring-aot-maven-plugin (AOT processing)\nreflection config, proxy hints,\nresource config, bean defs at build time"]
-    AOT --> NI["native-image compiler (GraalVM)\npoints-to analysis (30-90 min build)\neliminates dead code, AOT compiles to native binary"]
+    SC["Source Code"] --> AOT["spring-boot-maven-plugin process-aot\nreachability metadata, proxy hints,\nbean defs generated at build time"]
+    AOT --> NI["native-image compiler (GraalVM)\npoints-to analysis (2-10 min build)\neliminates dead code, AOT compiles to native binary"]
     NI --> BIN["Single native executable (~50-100MB)\nno JVM required, startup: less than 200ms\nmemory: 50-70% less than JVM baseline"]
 
     class SC io
@@ -267,7 +267,7 @@ xychart-beta
     bar [0.3, 1.5, 0.3]
 ```
 
-First bar = baseline (~8s total boot); second bar = with lazy init + spring-context-indexer + CDS applied (~2.1s total, "Ready" reached far sooner).
+First bar = baseline (~8s total boot); second bar = with lazy init + JVM AOT processing + CDS applied (~2.1s total, "Ready" reached far sooner).
 
 ```mermaid
 xychart-beta
@@ -371,19 +371,25 @@ public class DatabaseHealthCheck {
 
 Risk: with `lazy-initialization=true`, misconfigurations (missing beans, bad property bindings) are not detected at startup. They surface on the first request that triggers the bean creation — potentially causing errors in production under load, rather than failing the deployment. Mitigate with ApplicationContext validation tests in CI.
 
-### Spring Context Indexer — Compile-Time Component Scanning
+### Spring AOT Processing on the JVM
 
 ```xml
-<!-- pom.xml: eliminates classpath scanning at runtime -->
-<dependency>
-    <groupId>org.springframework</groupId>
-    <artifactId>spring-context-indexer</artifactId>
-    <optional>true</optional>
-</dependency>
-<!-- Generates META-INF/spring.components at build time -->
-<!-- Spring loads the index file instead of scanning JAR files at startup -->
-<!-- Startup time reduction: 0.5-2s depending on classpath size -->
+<!-- pom.xml: generate bean definitions as Java code at build time -->
+<plugin>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-maven-plugin</artifactId>
+    <executions>
+        <execution>
+            <id>process-aot</id>
+            <goals><goal>process-aot</goal></goals>
+        </execution>
+    </executions>
+</plugin>
+<!-- Run: java -Dspring.aot.enabled=true -jar app.jar -->
+<!-- Startup skips classpath scanning and condition evaluation -->
 ```
+
+The trade-off: the bean set is fixed at build time. `@Profile` and `@ConditionalOnProperty` are evaluated during the build, so a profile switched on at runtime does not add or remove beans.
 
 ### Excluding Unused Auto-Configuration
 
@@ -394,8 +400,7 @@ Risk: with `lazy-initialization=true`, misconfigurations (missing beans, bad pro
 @SpringBootApplication(exclude = {
     DataSourceAutoConfiguration.class,       // if you don't use a DB
     KafkaAutoConfiguration.class,            // if Kafka is on classpath but not used
-    SecurityAutoConfiguration.class,         // if managing security manually
-    ActuatorAutoConfiguration.class          // if actuator not needed in this profile
+    SecurityAutoConfiguration.class          // if managing security manually
 })
 public class Application {
     public static void main(String[] args) {
@@ -409,8 +414,8 @@ public class Application {
 spring:
   autoconfigure:
     exclude:
-      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
-      - org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration
+      - org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration
+      - org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration
 ```
 
 ### @Cacheable with Redis — TTL Strategy
@@ -668,10 +673,12 @@ Section 1 lists JVM configuration as a lever; here is what actually moves the ne
 
 | Collector | Flag | Pause profile | Heap sweet spot | Choose it when |
 |-----------|------|---------------|-----------------|----------------|
-| G1 (default since JDK 9) | `-XX:+UseG1GC` | Target-driven, `-XX:MaxGCPauseMillis=200` by default | 4 GB - 32 GB | Default. Balanced throughput and pause for a typical request/response service |
+| G1 (default; on every machine from JDK 27) | `-XX:+UseG1GC` | Target-driven, `-XX:MaxGCPauseMillis=200` by default | 4 GB - 32 GB | Default. Balanced throughput and pause for a typical request/response service |
 | ZGC (generational since JDK 21) | `-XX:+UseZGC` | Sub-millisecond, independent of heap size | 8 GB and up | P99 tail latency is the SLO and you can spend 5-15% more CPU on barriers |
 | Parallel | `-XX:+UseParallelGC` | Long stop-the-world, highest throughput | any | Batch jobs and Spring Batch steps where wall-clock total beats per-request latency |
-| Serial | `-XX:+UseSerialGC` | Single-threaded | under 2 GB | Small containers, one or two vCPUs, where G1's own threads are pure overhead |
+| Serial | `-XX:+UseSerialGC` | Single-threaded | under 2 GB | Small containers, one or two vCPUs, where G1's own threads are pure overhead. Up to JDK 26 ergonomics picked it for one CPU or under 1792 MB; from JDK 27 (JEP 523) only the flag selects it |
+
+Two JDK 27 (GA 2026-09-15) defaults change what an unflagged container gets. JEP 523 makes G1 the ergonomic choice everywhere, so a 1-vCPU or 1 GB pod that silently ran Serial on JDK 25 runs G1 on 27; pin `-XX:+UseSerialGC` if you measured Serial as better there. JEP 534 turns on compact object headers (opt-in via `-XX:+UseCompactObjectHeaders` on JDK 25), shrinking every object header from 96 to 64 bits; the JEP measured about 22% less heap and 8% less CPU on SPECjbb2015. JDK 27 is a non-LTS release, so a Boot 4.1 service on the LTS line stays on JDK 25 and can enable compact headers there with the flag.
 
 Three settings matter more than collector choice. First, **size the heap against the container, not the host**: the JVM is container-aware and defaults `MaxRAMPercentage` to 25%, which wastes most of a 4 GB pod — set `-XX:MaxRAMPercentage=75` and let the flag scale when the pod is resized, rather than hard-coding `-Xmx`. Second, **set `-Xms` equal to `-Xmx`** so the heap never has to grow under load; growth events are stop-the-world resizes at exactly the wrong moment. Third, **leave `MaxGCPauseMillis` alone unless you have measured a violation** — lowering it makes G1 shrink the young generation, which raises GC frequency and can cost more total pause time than it saves.
 
@@ -734,7 +741,7 @@ List<Order> findByStatus(String status);
 
 **Connection pool exhaustion incident**: An e-commerce service was receiving 500 errors sporadically during flash sales. Investigation showed `hikaricp.connections.pending` spiking to 80 during peak load. The pool was sized at 5 (developer default, never tuned). The fix was to increase pool size to 20 and set connection-timeout to 3s (from the default 30s). The 30s default caused requests to pile up in the queue and time out together — the 3s timeout created faster failure feedback and prevented queue buildup from compounding.
 
-**Startup time reduction for Kubernetes autoscaling**: A microservice took 22 seconds to start, making Kubernetes readiness probe pass after 22 seconds from pod creation. During a traffic spike, newly created pods were not ready fast enough to absorb load. The team applied lazy-initialization=true, excluded 8 unused auto-configurations, added spring-context-indexer, and enabled AppCDS. Startup dropped to 4 seconds, allowing Kubernetes to scale out faster during spikes.
+**Startup time reduction for Kubernetes autoscaling**: A microservice took 22 seconds to start, making Kubernetes readiness probe pass after 22 seconds from pod creation. During a traffic spike, newly created pods were not ready fast enough to absorb load. The team applied lazy-initialization=true, excluded 8 unused auto-configurations, enabled Spring AOT processing on the JVM, and enabled AppCDS. Startup dropped to 4 seconds, allowing Kubernetes to scale out faster during spikes.
 
 **N+1 query causing 4s response times**: A customer dashboard was calling getOrderHistory() which loaded 50 orders, each triggering a separate query for order items and another for customer details — 1 + 50 + 50 = 101 queries per page load. With spring.jpa.show-sql=true and slow query logging, the issue was immediately visible. A JOIN FETCH with EntityGraph reduced it to 2 queries: one for orders + items, one for customer details. Response time dropped from 4s to 80ms.
 
@@ -772,9 +779,9 @@ List<Order> findByStatus(String status);
 | Dimension | JVM | Native Image |
 |-----------|-----|-------------|
 | Startup | 5-30s | <200ms |
-| Throughput | Higher (JIT profile-guided optimization) | ~20-30% lower |
+| Throughput | Higher (JIT profile-guided optimization) | ~10-20% lower |
 | Memory | 256MB-1GB typical | 50-150MB typical |
-| Build time | <30s | 5-15 minutes |
+| Build time | <30s | 2-10 minutes |
 | Reflection | Full | Requires hints |
 | Observability | Full (JFR, JMX, async-profiler) | Limited |
 | Best for | Long-running services | Serverless, CLI, short-lived functions |
@@ -1093,7 +1100,7 @@ spring:
 | JDK AOT cache (`-XX:AOTCache`) | Startup: memoised class load/link | Java 25+; needs a training run and the extracted app form |
 | AppCDS (`-XX:ArchiveClassesAtExit`) | Startup: shared class archive | Java 17+; superseded by the AOT cache where the JDK allows |
 | CRaC | Startup: checkpoint/restore of a warmed process | Fastest restore; open-file and in-memory-secret hazards |
-| spring-context-indexer | Compile-time component index | Eliminates classpath scanning at startup |
+| Spring AOT on the JVM (`process-aot`) | Build-time bean definitions | `spring.aot.enabled=true`; skips scanning and condition evaluation; bean set fixed at build |
 | Gatling / k6 | Load testing | Measure throughput, latency, saturation |
 | Hibernate Statistics | Query count, cache hits | Detect N+1, measure 2nd-level cache effectiveness |
 | Testcontainers | Real DB in tests | PostgreSQLContainer, RedisContainer, KafkaContainer |
@@ -1109,7 +1116,7 @@ The HikariCP-recommended formula for OLTP workloads is: poolSize = (numCores * 2
 
 **Q: What does spring.main.lazy-initialization=true do, and what is the risk of enabling it?**
 **Short:** It defers bean creation to first access instead of startup, cutting startup time at the cost of late-fail errors.
-It configures all Spring beans to be created on first access rather than at ApplicationContext startup. This reduces startup time because the majority of beans are never needed during JVM initialization — they are created on the first request that exercises their code path. Typical startup time reduction is 40–70% for large applications. The risk is late-fail behavior: misconfigurations (missing required properties, unsatisfied dependencies, failed @PostConstruct methods) that would normally surface as startup errors are deferred until the first request triggers the problematic bean's creation. This means a misconfigured deployment may appear healthy (readiness probe passes) but fail on the first real request. Mitigate by running integration tests in CI that exercise all beans before production deployment, or by selectively annotating critical beans with @Lazy(false) to force eager initialization.
+It configures all Spring beans to be created on first access rather than at ApplicationContext startup. This reduces startup time because the majority of beans are never needed during JVM initialization; they are created on the first request that exercises their code path. Typical startup time reduction is 40-70% for large applications. The risk is late-fail behavior: misconfigurations (missing required properties, unsatisfied dependencies, failed @PostConstruct methods) that would normally surface as startup errors are deferred until the first request triggers the problematic bean's creation. This means a misconfigured deployment may appear healthy (readiness probe passes) but fail on the first real request. A second cost is a slow first request: expensive beans (HikariCP pool setup, cache warm-up) now initialise inside a user request. Mitigate by running integration tests in CI that exercise all beans before production deployment, or by selectively annotating critical beans with @Lazy(false) to force eager initialization.
 
 **Q: Explain how @Cacheable works internally and what the limitations are for self-invocation.**
 **Short:** @Cacheable works via an AOP proxy; self-invocation bypasses that proxy so the cache is never consulted.
@@ -1126,14 +1133,6 @@ Both solve the same problem — too many platform threads blocking on I/O — bu
 **Q: What is the HikariCP maxLifetime property, and what can go wrong if it is set incorrectly?**
 **Short:** maxLifetime retires a pooled connection after a set duration to avoid handing out stale or firewall-dropped connections.
 maxLifetime is the maximum amount of time a connection is allowed to exist in the pool, whether idle or in use. When a connection reaches maxLifetime, HikariCP retires it from the pool and creates a new one to replace it. This is necessary because long-lived database connections can become stale: firewalls may silently drop idle TCP connections, database servers may kill old connections, or connection state (e.g., transaction isolation level, character set) may drift. The critical rule is that maxLifetime must be several minutes less than the database or network proxy's connection idle timeout. AWS RDS Proxy has a default idle timeout of 1800 seconds (30 minutes). HikariCP's default maxLifetime is also 1800 seconds. If a connection approaches its maxLifetime exactly when the RDS Proxy times it out, HikariCP may hand out the connection to a thread after the proxy has already closed it, resulting in a broken pipe exception on the first query. Set maxLifetime to 1500s (25 minutes) with a 5-minute buffer.
-
-**Q: How does spring-context-indexer improve startup time and what are its constraints?**
-**Short:** spring-context-indexer generates a compile-time component list so Spring skips full classpath scanning at startup.
-spring-context-indexer is an annotation processor that runs at compile time and generates a META-INF/spring.components file listing all @Component-annotated classes and their stereotype annotations. At runtime, Spring reads this index file instead of scanning the entire classpath JAR by JAR. This eliminates the classpath scanning phase, which for large applications with hundreds of JARs can take 1–2 seconds. The constraint is that all components must be compiled with the annotation processor on the classpath — dynamically added components (loaded via URLClassLoader at runtime, OSGi bundles, etc.) are not indexed and will not be found. Also, the index covers only the current module's compilation; components in dependencies are still found normally.
-
-**Q: What is GraalVM AOT compilation and what Spring Boot features require special configuration (hints) to work natively?**
-**Short:** GraalVM's closed-world AOT analysis needs explicit hints for reflection, dynamic loading, and JDK proxies to work.
-GraalVM's native-image compiler performs ahead-of-time compilation by running a closed-world analysis starting from the main method, tracing all reachable code paths, and compiling them to native machine code. It eliminates all unreachable code and bakes in the call graph statically. Anything that adds to the call graph dynamically at runtime — reflection, dynamic class loading, JDK proxies, serialization — must be declared explicitly via hints (JSON configuration files or RuntimeHintsRegistrar). Spring Boot's spring-aot-maven-plugin generates most hints automatically for Spring beans, @Autowired, @Value, and common patterns. Areas requiring manual hints: custom Jackson modules, third-party libraries using reflection internally, JNI calls, and runtime-generated proxy classes not recognized by Spring's AOT analysis. Test native images with mvn -Pnative test using GraalVM's native test runner.
 
 **Q: How does HikariCP pool saturation manifest in production metrics, and what is the remediation sequence?**
 **Short:** Pool saturation shows up as rising pending connections and acquire latency, remediated by sizing, then query, then DB fixes.
@@ -1156,12 +1155,8 @@ server.tomcat.threads.max controls the maximum number of platform threads in Tom
 Enable JFR (Java Flight Recorder) with -XX:+FlightRecorder and -XX:StartFlightRecording=filename=app.jfr. JFR records GC events with pause durations at microsecond resolution and zero production overhead. In JFR output, look for GC pause events that correlate with latency spikes. Also useful: -XX:+PrintGCDetails -Xlog:gc*:file=gc.log for traditional GC logging. For G1GC (default since Java 9), a target pause time of 200ms is the default — tune with -XX:MaxGCPauseMillis=50 for lower latency at the cost of some throughput. ZGC (Java 15+ production ready) provides sub-millisecond pauses at the cost of slightly higher CPU overhead — add -XX:+UseZGC. In Spring Boot applications, common GC pressure sources are: large response objects materialized in memory, Jackson serialization of deep object graphs, and Hibernate first-level cache accumulating entities in long-running transactions. Use async-profiler in allocation mode (-e alloc) to find the top allocation sites.
 
 **Q: How does Spring Boot's GraalVM native image compilation affect startup time, memory usage, and what you give up?**
-**Short:** GraalVM native image cuts startup to ~50ms and memory to tens of MB, trading away reflection and peak JIT throughput.
-GraalVM native image AOT compilation (Spring Boot 3.x + GraalVM) produces a platform-native binary with: startup time ~50ms (vs ~2–4s for JVM), memory footprint ~50–200MB RSS (vs ~300–800MB for JVM), and zero JIT warmup overhead — first-request latency is as good as steady-state. What you give up: (1) **Dynamic class loading/reflection** — all reflection must be declared via hints at build time; frameworks that rely on runtime class scanning (Hibernate envers, some JPA providers) require additional configuration. (2) **JIT optimisations** — peak throughput is typically 10–20% lower than a warmed-up JVM. (3) **Build time** — native compilation takes 2–10 minutes vs ~30 seconds for JAR. (4) **Platform-specific binary** — you must build on the same OS/arch as the deployment target (cross-compilation requires QEMU or Docker). Use native image for serverless/FaaS (AWS Lambda), CLI tools, and edge deployments where startup and memory dominate. Stay on JVM for long-running services where peak throughput and operational flexibility matter more.
-
-**Q: What is Spring Boot lazy initialisation (`spring.main.lazy-initialization=true`) and what are its risks?**
-**Short:** Lazy initialisation defers bean creation to first use, risking deferred startup failures and a slow first request.
-Lazy initialisation defers bean creation until the bean is first requested (first HTTP request, first use) instead of initialising all beans at startup. Benefits: faster startup (relevant for tests and development), lower initial memory. Risks: (1) **Deferred failure** — a misconfigured bean that would fail at startup now fails on the first user request, potentially in production. (2) **Slow first request** — initialising expensive beans (HikariCP pool establishment, cache warm-up) on the first request adds latency visible to the user. (3) **Kubernetes readiness probes** — the pod reports ready before it is actually ready to serve traffic efficiently. Mitigation: only enable lazy initialisation for development and test; use it in production only for clearly isolated optional feature modules. For production startup-time optimisation, prefer GraalVM native image or class data sharing (`-XX:+UseSharedSpaces`) over lazy initialisation.
+**Short:** Native image starts in about 50 ms with far less RSS, but needs build-time hints for reflection, loses 10-20% peak throughput, and builds in minutes.
+GraalVM's native-image compiler runs a closed-world analysis from the main method and compiles only reachable code into a platform-native binary. The result: startup of about 50 ms (vs about 2-4 s on the JVM), RSS of about 50-200 MB (vs about 300-800 MB), and no JIT warmup, so the first request is as fast as steady state. What you give up: (1) **Dynamic behaviour**: reflection, dynamic class loading, JDK proxies, serialization, and resources must be declared at build time. The `process-aot` goal of `spring-boot-maven-plugin` (run by the `native` profile) generates these hints for Spring beans, `@Autowired`, `@Value`, and common patterns. You register the rest with a `RuntimeHintsRegistrar` or `@RegisterReflectionForBinding`: custom Jackson modules, third-party libraries that reflect internally, JNI calls, and runtime proxies that Spring's AOT analysis does not see. (2) **JIT optimisations**: peak throughput is typically 10-20% lower than a warmed-up JVM. (3) **Build time**: native compilation takes 2-10 minutes vs about 30 seconds for a JAR. (4) **Platform-specific binary**: build on the same OS and architecture as the target (cross-builds need QEMU or a Docker builder). Run `mvn -Pnative test` to execute the test suite as a native image. Use native image for serverless/FaaS (AWS Lambda), CLI tools, and edge deployments where startup and memory dominate; stay on the JVM for long-running services where peak throughput and operational flexibility matter more.
 
 **Q: What is the JDK AOT cache, and how is it different from CDS and from a native image?**
 **Short:** The AOT cache memoises class loading and linking from a training run; unlike native image it keeps the JIT, reflection and full peak throughput.
@@ -1189,7 +1184,7 @@ The first is form: the cache works against the **extracted** application (`java 
 
 **Prefer Redis TTL + @CacheEvict over very long TTLs**: Long TTLs increase cache hit rate but risk stale data. Combine a moderate TTL (minutes to hours) with explicit @CacheEvict on write paths for data correctness without sacrificing hit rate.
 
-**Use spring-context-indexer in production builds**: It is a pure compile-time change with zero runtime downside. It removes classpath scanning overhead and is especially impactful for large multi-module applications.
+**Use Spring AOT processing on the JVM when the bean set is fixed**: The `process-aot` goal generates bean definitions at build time and `spring.aot.enabled=true` uses them, which removes classpath scanning and condition evaluation from startup. Skip it when profiles or properties must change which beans exist at runtime.
 
 **Enable virtual threads via one property for Spring Boot 3.2+ on Java 21 or later**: spring.threads.virtual.enabled=true is a one-line change that eliminates thread pool as a bottleneck for I/O-bound workloads. Before switching, run the service under load with a default JFR recording and check the `jdk.VirtualThreadPinned` event to confirm no dependency blocks inside a native frame.
 
@@ -1445,7 +1440,7 @@ public FleetData readFromVendorDevice(String id) throws Exception {
 ```
 
 ```bash
-# Build native image (takes 3-5 minutes, AOT compilation)
+# Build native image (about 4 minutes on this service, AOT compilation)
 ./mvnw -Pnative native:compile
 
 # Before: JVM startup
@@ -1497,7 +1492,7 @@ spring:
 
 **How do you size the HikariCP pool when using virtual threads?** With platform threads, pool size = thread count (threads block, holding connections). With virtual threads, threads are cheap but DB connections are still expensive OS resources. Size based on actual connection hold time: `pool = TPS × avg_hold_ms / 1000` + headroom. Avoid a pool larger than the DB server's `max_connections / service_count` — PostgreSQL default is 100; with 5 services each getting 20 connections, you exactly hit the limit.
 
-**What are the trade-offs of GraalVM Native Image for a Spring Boot service?** Native images compile ahead-of-time: startup drops from seconds to milliseconds, memory footprint shrinks 60-70%. The cost: JIT compilation is unavailable (peak throughput ~10-15% lower than warmed JVM), reflection requires explicit hints (`@RegisterReflectionForBinding`, `reflect-config.json`), build time is 3-5 minutes vs. 15 seconds, and runtime profiling (JFR, async-profiler) has limited support. Best fit: serverless functions, batch jobs that start/stop frequently, or microservices where memory cost dominates.
+**What are the trade-offs of GraalVM Native Image for a Spring Boot service?** Native images compile ahead-of-time: startup drops from seconds to milliseconds, memory footprint shrinks 60-70%. The cost: JIT compilation is unavailable (peak throughput ~10-20% lower than warmed JVM), reflection requires explicit hints (`@RegisterReflectionForBinding`, `reachability-metadata.json`), build time is 2-10 minutes vs. about 30 seconds, and runtime profiling (JFR, async-profiler) has limited support. Best fit: serverless functions, batch jobs that start/stop frequently, or microservices where memory cost dominates.
 
 **How does lazy initialization interact with health checks on startup?** With `spring.main.lazy-initialization=true`, beans initialize on first use. A readiness probe that calls `/actuator/health` before the first real request will get a "healthy" response — but the first real request hits cold beans and can be slow. For production, warm up critical paths in an `ApplicationReadyEvent` listener or use a dedicated readiness probe that exercises the critical bean path.
 

@@ -34,6 +34,11 @@ A ship's hull is divided into watertight compartments (bulkheads) — if one com
 - Feature-flag-based routing: same path, behavior toggled by feature flag
 - Traffic weighting: 10% → 50% → 100% of traffic to new service while monitoring error rates
 
+**Feature flag integration**:
+- Vendor SDK in application code: every call site imports the vendor's client and context types; changing vendors touches every call site
+- OpenFeature API plus a provider: call sites use the CNCF OpenFeature API (Incubating since November 21, 2023); the vendor sits behind one provider object set at startup
+- Remote evaluation over OFREP: a client with no vendor SDK calls the OpenFeature Remote Evaluation Protocol over HTTP, per flag or in bulk
+
 ---
 
 ## 5. Architecture Diagrams
@@ -125,7 +130,7 @@ flowchart TD
 public class BulkheadConfig {
 
     @Bean
-    public BulkheadRegistry bulkheadRegistry() {
+    public ThreadPoolBulkheadRegistry bulkheadRegistry() {
         // Thread pool bulkhead for Payment service calls
         ThreadPoolBulkheadConfig paymentConfig = ThreadPoolBulkheadConfig.custom()
             .maxThreadPoolSize(10)
@@ -141,7 +146,7 @@ public class BulkheadConfig {
             .queueCapacity(10)
             .build();
 
-        return BulkheadRegistry.of(Map.of(
+        return ThreadPoolBulkheadRegistry.of(Map.of(
             "paymentService", paymentConfig,
             "inventoryService", inventoryConfig
         ));
@@ -156,7 +161,8 @@ public class OrderService {
     private final ThreadPoolBulkheadRegistry bulkheadRegistry;
 
     public CompletableFuture<PaymentResult> processPayment(PaymentRequest request) {
-        ThreadPoolBulkhead paymentBulkhead = bulkheadRegistry.bulkhead("paymentService");
+        // (name, configName): bulkhead(name) alone would use the default config
+        ThreadPoolBulkhead paymentBulkhead = bulkheadRegistry.bulkhead("paymentService", "paymentService");
 
         return ThreadPoolBulkhead.decorateSupplier(paymentBulkhead,
             () -> paymentClient.charge(request))
@@ -371,26 +377,23 @@ public RestTemplate restTemplate() {
     return template;
 }
 
-// Propagate to Kafka messages
-@Bean
-public ProducerFactory<String, String> producerFactory() {
-    return new DefaultKafkaProducerFactory<>(producerProps()) {
-        @Override
-        public Producer<String, String> createProducer() {
-            return new Producer<>() {
-                public Future<RecordMetadata> send(ProducerRecord<String, String> record) {
-                    String correlationId = MDC.get(CorrelationIdFilter.REQUEST_ID_KEY);
-                    if (correlationId != null) {
-                        record.headers().add(
-                            CorrelationIdFilter.CORRELATION_ID_HEADER,
-                            correlationId.getBytes()
-                        );
-                    }
-                    return super.send(record);
-                }
-            };
+// Propagate to Kafka messages. onSend runs on the thread that calls send(), so MDC is visible.
+// Register: spring.kafka.producer.properties[interceptor.classes]=com.example.CorrelationIdProducerInterceptor
+public class CorrelationIdProducerInterceptor implements ProducerInterceptor<String, String> {
+
+    @Override
+    public ProducerRecord<String, String> onSend(ProducerRecord<String, String> record) {
+        String correlationId = MDC.get(CorrelationIdFilter.REQUEST_ID_KEY);
+        if (correlationId != null) {
+            record.headers().add(CorrelationIdFilter.CORRELATION_ID_HEADER,
+                correlationId.getBytes(StandardCharsets.UTF_8));
         }
-    };
+        return record;
+    }
+
+    @Override public void onAcknowledgement(RecordMetadata metadata, Exception exception) {}
+    @Override public void close() {}
+    @Override public void configure(Map<String, ?> configs) {}
 }
 ```
 
@@ -452,31 +455,85 @@ public class FeatureConfig {
 }
 ```
 
-### Feature Flags with Unleash
+### Feature Flags with OpenFeature and an Unleash Provider
+
+Call sites depend on the OpenFeature API (`dev.openfeature:sdk`, 1.23.0); the flag vendor is one provider object registered at startup. Moving from Unleash to LaunchDarkly, flagd, or an OFREP endpoint changes the provider bean, not the call sites.
+
+```
+  CheckoutService, SearchService, ...      (call sites: getBooleanValue / getBooleanDetails)
+                    |
+                    v
+  OpenFeature API   client, EvaluationContext, hooks, events      <- stable, vendor-neutral
+                    |
+                    v
+  provider          UnleashProvider | LaunchDarkly | flagd | OFREP  <- swapped in one bean
+                    |
+                    v
+  flag backend      rules, targeting, rollout UI, audit log       <- still the vendor's
+```
+
+*The API layer is the only thing call sites see; rules and rollout tooling stay with whichever backend the provider talks to.*
 
 ```java
+@Configuration
+class FeatureFlagConfig {
+
+    @Bean
+    Client featureFlags(@Value("${unleash.api-url}") String apiUrl,
+                        @Value("${unleash.api-token}") String apiToken) throws Exception {
+        var unleash = UnleashConfig.builder()
+            .appName("checkout-service")
+            .unleashAPI(apiUrl)
+            .apiKey(apiToken)
+            .synchronousFetchOnInitialisation(true);
+        var provider = new UnleashProvider(
+            UnleashProviderConfig.builder().unleashConfigBuilder(unleash).build());
+
+        OpenFeatureAPI api = OpenFeatureAPI.getInstance();
+        api.setProviderAndWait(provider);   // blocks until PROVIDER_READY or throws
+        return api.getClient();
+    }
+}
+
 @Service
-@RequiredArgsConstructor
 public class CheckoutService {
 
-    private final Unleash unleash;
+    private static final Logger log = LoggerFactory.getLogger(CheckoutService.class);
+    private final Client flags;
     private final ClassicCheckoutHandler classicHandler;
     private final NewCheckoutHandler newHandler;
 
-    public CheckoutResult checkout(CheckoutRequest request) {
-        // Context allows user-based, percentage-based, or environment-based toggles
-        UnleashContext context = UnleashContext.builder()
-            .userId(request.getUserId())
-            .addProperty("region", request.getRegion())
-            .build();
+    public CheckoutService(Client flags, ClassicCheckoutHandler classicHandler, NewCheckoutHandler newHandler) {
+        this.flags = flags;
+        this.classicHandler = classicHandler;
+        this.newHandler = newHandler;
+    }
 
-        if (unleash.isEnabled("new-checkout-flow", context)) {
-            return newHandler.process(request);    // gradual rollout
+    public CheckoutResult checkout(CheckoutRequest request) {
+        // The Unleash provider ignores targetingKey: rollout stickiness and user rules read the
+        // "userId" attribute, so it must be set explicitly
+        var context = new ImmutableContext(request.getUserId(), Map.of(
+            "userId", new Value(request.getUserId()),
+            "region", new Value(request.getRegion())));
+
+        FlagEvaluationDetails<Boolean> flag =
+            flags.getBooleanDetails("new-checkout-flow", false, context);
+        if (flag.getErrorCode() != null) {
+            log.warn("flag new-checkout-flow fell back to default: {} {}",
+                flag.getErrorCode(), flag.getErrorMessage());
         }
-        return classicHandler.process(request);   // fallback
+        return flag.getValue() ? newHandler.process(request) : classicHandler.process(request);
     }
 }
 ```
+
+Three parts of the OpenFeature model matter in production:
+
+- **Evaluation never throws.** A provider that is not ready, a missing flag, or a type mismatch returns the default passed at the call site, with `reason` `ERROR` and an `errorCode` such as `PROVIDER_NOT_READY`, `FLAG_NOT_FOUND`, or `TYPE_MISMATCH`. `getBooleanValue` hides that; `getBooleanDetails` shows it. The default at the call site is therefore the outage behavior and must be the safe value.
+- **Hooks** run before and after every evaluation, registered globally, per client, or per call, which is where flag-evaluation metrics, OpenTelemetry span events, and audit logging go once for every flag.
+- **Domains** bind a named client to its own provider (`api.setProvider("payments", provider)`, `api.getClient("payments")`), so two vendors can run side by side during a migration.
+
+The community Unleash provider (`dev.openfeature.contrib.providers:unleash`) is at 0.1.3-alpha; check a provider's maturity before putting it under a kill switch. For clients that cannot embed a vendor SDK, **OFREP** (OpenFeature Remote Evaluation Protocol) defines `POST /ofrep/v1/evaluate/flags/{key}` for one flag with a `context` body, and `POST /ofrep/v1/evaluate/flags` for bulk evaluation against a static context, which returns an `ETag` and answers `304 Not Modified` to a matching `If-None-Match`.
 
 ### Graceful Shutdown
 
@@ -513,8 +570,8 @@ spec:
       containers:
         - lifecycle:
             preStop:
-              exec:
-                command: ["/bin/sleep", "5"]  # sleep 5s before SIGTERM
+              sleep:
+                seconds: 5  # kubelet-run sleep before SIGTERM; works on distroless images
                 # Kubernetes stops sending traffic immediately when pod is terminating
                 # but iptables rules may take a few seconds to propagate
                 # The preStop sleep ensures no in-flight requests are dropped
@@ -603,6 +660,7 @@ stateDiagram-v2
 | ACL | Clean domain model | Translation overhead, mapping maintenance |
 | Strangler fig | Zero downtime migration | Dual maintenance period, routing complexity |
 | Feature flags | Decouple deploy from release | Flag debt, testing matrix explosion |
+| OpenFeature API over a vendor SDK | Vendor change touches one provider bean, not every call site; shared hooks for metrics | Lowest-common-denominator API; provider maturity varies; context attribute names are still provider-specific |
 | Distributed config | Centralized, dynamic | Config server becomes critical dependency |
 
 ---
@@ -623,6 +681,8 @@ Do NOT use too many feature flags simultaneously — each flag doubles the code 
 
 **Feature flag explosion**: A team accumulated 200 active feature flags over 2 years. Testing each release required checking all combinations. Some flags controlled other flags. A wrong flag combination caused a production incident. Fix: treat each feature flag as technical debt; set expiry dates on flags at creation time; automate removal of flags that have been 100% enabled for > 30 days.
 
+**Kill switch read before the flag provider is ready**: A service registered its flag provider with the non-blocking `setProvider` and passed its readiness probe as soon as the HTTP server started. For the first 4-8 seconds of every pod start, each evaluation returned the call-site default with `PROVIDER_NOT_READY`, and the code used `true` as the default for a kill switch that on-call had turned off during an incident. A rolling deploy brought the broken feature back on every new pod until its provider synced. Fix: register with `setProviderAndWait` (or tie the readiness probe to the `PROVIDER_READY` event), use the safe value as every call-site default, and alert on evaluations whose `errorCode` is set.
+
 **Config server as SPOF**: The config server went down during a deployment. All services that tried to start could not fetch their configuration. A bad actor cascaded into all services failing to start. Fix: (1) enable `spring.cloud.config.fail-fast=false` for non-critical config, (2) enable config caching on the client (if server unreachable, use last-known-good config), (3) run config server in HA mode with multiple replicas.
 
 ---
@@ -635,6 +695,9 @@ Do NOT use too many feature flags simultaneously — each flag doubles the code 
 | Spring Cloud Config | Git-backed centralized configuration server |
 | HashiCorp Vault | Secret management with dynamic secrets |
 | Kubernetes ConfigMap/Secret | Container-native configuration injection |
+| OpenFeature | CNCF Incubating vendor-neutral flag-evaluation API and provider model; Java SDK `dev.openfeature:sdk` |
+| OFREP | OpenFeature Remote Evaluation Protocol: HTTP flag evaluation (`/ofrep/v1/evaluate/flags`) with ETag-based bulk caching |
+| flagd | OpenFeature's open-source flag evaluation daemon, usable as a provider backend |
 | Unleash | Open-source feature flag server |
 | LaunchDarkly | Commercial feature flag platform |
 | Spring Cloud Gateway | API gateway for strangler fig routing |
@@ -678,6 +741,21 @@ Graceful shutdown ensures that when a pod is terminated, it completes in-flight 
 **Short:** Evaluate flags client-side against downloaded rules from a dedicated flag service, and give every flag an owner and a removal date.
 
 Use a dedicated feature flag service (Unleash, LaunchDarkly) that evaluates flags server-side based on context (user ID, percentage, environment). The application makes an SDK call that evaluates the flag locally against downloaded rules — no network call per request. Implement per-user or percentage-based targeting for gradual rollouts. Each flag must have: an owner, a description, an expected removal date, and a default value for when the flag service is unavailable. Use flags for dark launches (deployed but off), canary releases (10% of users), and kill switches (disable a misbehaving feature without a deployment). Clean up flags after full rollout — stale flags are technical debt.
+
+**Q: Why can an OpenFeature flag evaluation silently return its default value, and how do you catch it?**
+**Short:** Evaluation never throws: provider not ready, a missing flag, or a type mismatch return the call-site default, so read getBooleanDetails' errorCode and alert on it.
+
+The OpenFeature API is specified so that flag evaluation never throws into application code. If the provider is not ready yet, the flag key does not exist, the stored variant has the wrong type, or the context lacks a required attribute, the SDK returns the default value passed at the call site with `reason` set to `ERROR` and an `errorCode` such as `PROVIDER_NOT_READY`, `FLAG_NOT_FOUND`, `TYPE_MISMATCH`, or `TARGETING_KEY_MISSING`. `getBooleanValue` returns only the value, so a typo in a flag key or a slow provider start looks identical to a deliberate "off". Catch it three ways: call `getBooleanDetails` (or register a hook) and count evaluations with a non-null `errorCode` per flag key; register the provider with `setProviderAndWait` or gate readiness on `PROVIDER_READY` so a pod takes no traffic while every flag is at its default; and choose every call-site default as the value that is safe during a flag-service outage, which for a kill switch means "feature off".
+
+**Q: What does OpenFeature standardize, and what still comes from the flag vendor?**
+**Short:** OpenFeature fixes the evaluation API, evaluation context, hooks, events, and provider interface in application code; rules, targeting, rollout UI, and rule sync stay with the vendor behind the provider.
+
+OpenFeature (CNCF Incubating since November 21, 2023) is a specification plus SDKs for the code side of feature flags. Call sites use one client API (`getBooleanValue`, `getStringDetails`, and so on), pass an `EvaluationContext` with a `targetingKey` and attributes, and get back a value with a variant, reason, and error code. Hooks attach cross-cutting logic to every evaluation, events report provider state (`PROVIDER_READY`, `PROVIDER_ERROR`, `PROVIDER_CONFIGURATION_CHANGED`), and domains bind named clients to different providers. The vendor still owns everything behind the provider: where rules are stored, the targeting and percentage-rollout logic, how rules reach the process (polling, streaming), the rollout UI, and the audit log. Two things do not become portable: the attribute names a vendor's rules read (the Unleash provider reads `userId`, for example), and vendor-only features with no OpenFeature equivalent. The practical value is that a vendor migration replaces one provider bean and its context mapping, not every call site, and that metrics and tracing hooks are written once.
+
+**Q: What is OFREP, and when would you use it instead of an in-process OpenFeature provider?**
+**Short:** OFREP is OpenFeature's HTTP protocol for remote flag evaluation, per flag or in bulk with ETag caching, for clients that cannot or should not embed a vendor SDK.
+
+The OpenFeature Remote Evaluation Protocol defines two HTTP endpoints. `POST /ofrep/v1/evaluate/flags/{key}` evaluates one flag against a `context` object in the body, which suits a server that sends the context on every call. `POST /ofrep/v1/evaluate/flags` evaluates every flag for one static context, which suits a browser or mobile client that fetches its flags once and evaluates locally; the response carries an `ETag`, and a later request with a matching `If-None-Match` gets `304 Not Modified` with no body. Any backend that speaks OFREP can sit behind a generic OFREP provider, so a language with no vendor SDK, or a front end that must not ship a server-side SDK key, still gets flags through the OpenFeature API. The cost is a network round trip per evaluation in the per-flag form, versus microseconds for an in-process provider evaluating rules it has already downloaded, so hot paths in a backend service should keep an in-process provider.
 
 **Q: Why can correlation IDs leak between messages inside a Kafka consumer's poll loop?**
 **Short:** MDC is a reused ThreadLocal, so clearing it only around the whole batch lets an exception mid-batch leak one record's ID into the rest.

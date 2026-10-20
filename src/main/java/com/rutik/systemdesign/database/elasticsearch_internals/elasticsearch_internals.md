@@ -2,12 +2,12 @@
 
 ## 1. Concept Overview
 
-> **Version anchor (2026-08-05).** **Elasticsearch 9.5.0** (4 Aug 2026) is current and ships
-> **Apache Lucene 10.5**. The maintained lines are **9.5**, **9.4** (latest 9.4.4, series GA
-> May 2026), **9.3** (latest 9.3.8, series GA February 2026) and **8.19** (GA July 2025,
+> **Version anchor (2026-10-19).** **Elasticsearch 9.5** (9.5.0 on 4 Aug 2026, latest patch
+> 9.5.5) is current and ships **Apache Lucene 10.5**. The maintained lines are **9.5**, **9.4**
+> (latest 9.4.8, series GA May 2026), **9.3** (series GA February 2026) and **8.19** (GA July 2025,
 > supported to July 2027). 9.2 went end-of-support in May 2026, 9.1 in February 2026, 9.0 in
 > October 2025 — Elastic maintains a major for the longer of 30 months after its own GA or 18
-> months after the next major's GA. **OpenSearch 3.7.0** (9 June 2026) is the fork's current
+> months after the next major's GA. **OpenSearch 3.9.0** (29 September 2026) is the fork's current
 > release; it forked from Elasticsearch **7.10.2** in January 2021 and now runs its own Lucene
 > 10 line. Behaviour that arrived in a specific release is tagged inline as `[9.5]`, `[9.1]`,
 > `[8.17]`, `[7.0]`, `[Lucene 10.3]`, `[OpenSearch 2.7]` — nothing here is called "current"
@@ -70,7 +70,7 @@ timeline
     Aug 2024  : Elastic adds AGPLv3 as a third licence option : Elasticsearch is OSI-open again
     Sep 2024  : OpenSearch moves to the Linux Foundation as the OpenSearch Software Foundation
     May 2025  : OpenSearch 3.0 on Lucene 10 : Elasticsearch 9.0 on Lucene 10
-    2026      : Elasticsearch 9.5 on Lucene 10.5 : OpenSearch 3.7
+    2026      : Elasticsearch 9.5 on Lucene 10.5 : OpenSearch 3.9
 ```
 
 **The honest reading.** AGPLv3 is OSI-approved, so Elasticsearch 9 *is* open source by the standard
@@ -83,7 +83,7 @@ And the fork did not fold when the licence changed back. Four years of independe
 not a rounding error. **The two engines share the Lucene core, the shard/replica model and most of
 the query DSL; they have genuinely diverged everywhere above that.**
 
-| Area | Elasticsearch 9.5 | OpenSearch 3.7 |
+| Area | Elasticsearch 9.5 | OpenSearch 3.9 |
 |---|---|---|
 | Licence | AGPLv3 / SSPL / Elastic License 2.0 (pick one) | Apache 2.0, Linux Foundation |
 | Fork point | — | Elasticsearch 7.10.2, Jan 2021 |

@@ -449,6 +449,51 @@ It is deliberately the crudest metric in this module — one ratio, no labels, n
 
 That second row is the trap worth carrying into an interview: a model can be perfectly calibrated and perfectly equal-opportunity and still fail the four-fifths rule outright, because the rule measures a completely different denominator (Section 4.1). "We checked for bias" is not an answer — *which* metric, and against which base rates, is the answer.
 
+#### NYC Local Law 144: bias audits for automated employment decision tools
+
+New York City Local Law 144 of 2021 (enforced from July 5, 2023, under DCWP rules at 6 RCNY 5-300) is the first US law that requires a published bias audit of a hiring model. It applies when an employer or employment agency uses an **automated employment decision tool (AEDT)**, a machine-learning, statistical, or AI tool whose simplified output (a score, rank, or classification) substantially assists or replaces the decision to screen candidates or employees for jobs in New York City.
+
+What the law requires:
+
+| Requirement | Detail |
+|-------------|--------|
+| Independent bias audit | Done by an auditor with no financial interest in the employer or vendor, no more than one year before each use of the AEDT |
+| Categories | Sex, race/ethnicity (EEO-1 categories), and every intersection of the two |
+| Metric | Selection rate and impact ratio per category; for a tool that scores rather than selects, scoring rate and impact ratio |
+| Data | Historical data from the employer's own use; test data only if historical data is insufficient, with an explanation |
+| Publication | Summary on the employment section of the website: audit date, data source, number of applicants with unknown category, rates, and impact ratios |
+| Candidate notice | At least 10 business days before use, with the job qualifications assessed and how to request an alternative process or accommodation |
+| Penalties | Up to $500 for a first violation, $500 to $1,500 for each later one; each day of use without an audit is a separate violation |
+
+**The impact ratio.** For a selecting tool, `impact ratio = selection rate of a category / selection rate of the most selected category`, the same arithmetic as the four-fifths rule in 6.3. For a scoring tool, the rule defines a **scoring rate**: the share of a category that scores above the median score of the whole sample. The auditor may leave a category under 2% of the data out of the impact ratios, but must report its count.
+
+```python
+import pandas as pd
+
+
+def ll144_impact_ratios(df: pd.DataFrame, score: str, cats: list[str]) -> pd.DataFrame:
+    """Scoring rate = share above the full-sample median; ratio vs the top category."""
+    above = df[score] > df[score].median()
+    out = df.assign(above=above).groupby(cats)["above"].agg(n="size", scoring_rate="mean")
+    out["impact_ratio"] = out["scoring_rate"] / out["scoring_rate"].max()
+    out["share"] = out["n"] / out["n"].sum()
+    return out  # run for ["sex"], ["race_ethnicity"], and ["sex", "race_ethnicity"]
+```
+
+**Walk one example.** 1,000 applicants scored by a resume ranker; 500 are above the median.
+
+```
+  category   applicants   above median   scoring rate   impact ratio
+  male           520           290          0.558          1.000
+  female         480           210          0.438          0.784
+
+  0.438 / 0.558 = 0.784, under the 0.80 four-fifths line
+```
+
+LL144 sets **no pass threshold**. It requires that 0.784 be measured by an independent auditor and published, not that it reach 0.80. The legal exposure comes through other routes: the published number is evidence in a Title VII or New York State Human Rights Law claim, and the four-fifths screen in 6.3 still applies. Federal disparate-impact enforcement is weaker after Executive Order 14281 (April 23, 2025); see [Responsible AI, Fairness and Explainability](../case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md) for that discussion. A city-law audit requirement does not depend on federal enforcement, so the LL144 obligation is unchanged.
+
+Two engineering consequences: the audit runs on production decisions, so serving must log the score, the decision, and the applicant's self-reported category (collected separately from the model's inputs); and the intersectional categories get small fast, so plan sample sizes or expect many categories under the 2% line.
+
 ### 6.4 Per-group metrics with fairlearn
 
 ```python
@@ -461,6 +506,25 @@ mf = MetricFrame(
 print(mf.by_group)
 print(mf.difference(method="between_groups"))   # largest pairwise gap per metric
 ```
+
+A per-group gap on a small group can be sampling noise. fairlearn 0.15 (October 2026) reads it against bootstrap intervals and adds a per-group ROC plot:
+
+```python
+from fairlearn.experimental.enable_metric_frame_plotting import plot_metric_frame
+from fairlearn.metrics import plot_roc_curve_by_group
+
+mf_ci = MetricFrame(
+    metrics={"TPR": true_positive_rate, "FPR": false_positive_rate},
+    y_true=y_test, y_pred=approved, sensitive_features=group_test,
+    n_boot=1000, ci_quantiles=[0.025, 0.975], random_state=0,
+)
+print(mf_ci.by_group_ci)          # list, one frame per quantile: 95% interval bounds per group
+plot_metric_frame(mf_ci, kind="point")   # intervals picked up from by_group_ci when conf_intervals is omitted
+
+plot_roc_curve_by_group(y_test, scores, sensitive_features=group_test)  # one curve per group, plus overall and chance
+```
+
+If two groups' TPR intervals overlap widely, the TPR gap is weak evidence of an equal-opportunity violation at this sample size; collect more data for the small group before mitigating. The per-group ROC curves show whether a gap comes from the threshold (curves overlap, operating points differ) or from the model ranking one group worse (curves separate), which a single-threshold `MetricFrame` cannot tell apart.
 
 ### 6.5 Pre-processing: reweighing (Kamiran & Calders, 2012)
 
@@ -756,7 +820,7 @@ A team facing a failing four-fifths ratio reached for the fastest fix — an exp
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| fairlearn | 0.10+ | Microsoft; `MetricFrame`, `reductions` (ExponentiatedGradient, GridSearch), `postprocessing` (ThresholdOptimizer) |
+| fairlearn | 0.15+ | `MetricFrame`, `reductions` (ExponentiatedGradient, GridSearch), `postprocessing` (ThresholdOptimizer); 0.15 needs Python 3.11+ and scikit-learn 1.6+, adds `plot_roc_curve_by_group` and auto-plots bootstrap CIs, and `MetricFrame` rejects missing sensitive-feature values |
 | aif360 (AI Fairness 360) | 0.6+ | IBM; widest catalog of pre/in/post-processing algorithms, includes reweighing and adversarial debiasing reference implementations |
 | Aequitas | latest | University of Chicago; audit-report-style bias and fairness report generator, popular in public-sector/criminal-justice audits |
 | What-If Tool | latest | Google; interactive counterfactual and fairness-slice exploration in TensorBoard |
@@ -765,6 +829,7 @@ A team facing a failing four-fifths ratio reached for the fastest fix — an exp
 | Themis-ML | latest | Early scikit-learn-compatible fairness-aware estimators (reweighing, prejudice remover) |
 | holisticai | latest | Newer multi-framework fairness/bias-mitigation toolkit spanning tabular, NLP, and CV |
 | scipy.stats / statsmodels | current | Statistical-significance testing to complement the four-fifths rule of thumb |
+| Holistic AI, BABL AI, and other independent auditors | n/a | Third-party LL144 bias audits; the employer cannot self-certify |
 
 ---
 
@@ -801,6 +866,16 @@ Sometimes not: several US employment and lending contexts treat an explicit per-
 **Q: What is the EEOC four-fifths (80%) rule and how do you compute the disparate impact ratio?**
 **Short:** The EEOC's four-fifths rule flags adverse impact when a group's selection rate falls below 80% of the highest group's rate, computed as lowest divided by highest rate.
 The four-fifths rule flags adverse impact when a group's selection rate falls below 80% of the highest-selected group's rate, per the EEOC's 1978 Uniform Guidelines on Employee Selection Procedures. The disparate impact ratio is simply the lowest group's selection rate divided by the highest group's rate — for example 45% versus 60% gives a ratio of 0.75, which fails the 80% threshold. It is a screening heuristic, not a legal safe harbor, and is noisy at small sample sizes, so pair it with a statistical-significance test before drawing conclusions.
+
+**Q: Your resume ranker has an LL144 impact ratio of 0.78 for women. Is it illegal to keep using it in New York City?**
+**Short:** Not under LL144 itself, which sets no threshold and only requires an independent audit, publication, and notice; the number is still evidence for Title VII and state discrimination claims.
+
+Local Law 144 requires an independent bias audit within the past year, a published summary of selection or scoring rates and impact ratios by sex, race/ethnicity, and their intersections, and candidate notice 10 business days before use. It does not set a minimum impact ratio. So 0.78 is a disclosure, not an automatic violation. It is below the 0.80 four-fifths screen, though, and a published adverse-impact figure is evidence in a Title VII or New York State Human Rights Law claim. Investigate the gap (proxy features, label bias, threshold) and document the job-relatedness of the criteria before the next audit.
+
+**Q: How does an LL144 bias audit compute an impact ratio for a tool that outputs scores rather than yes/no decisions?**
+**Short:** It uses the scoring rate, the share of each category scoring above the full sample's median, and divides each category's rate by the highest category's rate.
+
+For a selecting tool the impact ratio is a category's selection rate over the most selected category's rate, as in the four-fifths rule. A ranking or scoring tool has no selection, so the DCWP rules binarize at the median: each category's scoring rate is the fraction of its members scoring above the median of all scored applicants, and the impact ratio divides that by the highest category's scoring rate. Rates are computed for sex, race/ethnicity, and each intersection. The auditor may exclude categories under 2% of the data from the ratios but must report their counts.
 
 **Q: What is the difference between demographic parity, equalized odds, equal opportunity, and predictive parity?**
 **Short:** Demographic parity equalizes prediction rate, equalized odds equalizes both error rates, equal opportunity equalizes only true-positive rate, and predictive parity equalizes precision.

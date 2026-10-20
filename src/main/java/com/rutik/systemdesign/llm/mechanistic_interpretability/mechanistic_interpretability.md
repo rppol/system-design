@@ -141,6 +141,7 @@ These methods address superposition directly by learning a new, larger, sparser 
   - **JumpReLU SAEs** (Rajamanoharan et al., DeepMind, 2024 — used for Gemma Scope): replace ReLU with a discontinuous "jump" activation with a learned per-feature threshold, allowing features to have arbitrarily small *non-zero* magnitudes once active while remaining exactly zero below threshold — best of both worlds between L1 and TopK.
 - **Transcoders**: like an SAE, but trained to reconstruct the **output** of an MLP layer from its **input** (rather than reconstructing a single activation from itself) — directly modeling the *function* an MLP computes in a sparse, interpretable basis. This makes transcoders naturally decomposable into input-feature → output-feature edges.
 - **Cross-Layer Transcoders (CLTs)**: Anthropic's evolution (used in "On the Biology of a Large Language Model," 2025) — a single transcoder whose features can read from one layer's residual stream and write to *multiple* downstream layers' MLP outputs simultaneously, dramatically reducing the number of separate dictionaries needed and enabling **attribution graphs**: end-to-end feature → feature → feature graphs spanning the whole forward pass, replacing the raw neuron-level computational graph with an interpretable feature-level one.
+- **Crosscoders** (Anthropic, October 2024): one dictionary whose features read from and write to activations of *several* layers or *several models* at once. Trained jointly on a base model and its fine-tuned version, each feature gets one decoder vector per model; the ratio of the two decoder norms sorts features into base-only, fine-tune-only, and shared. That is **model diffing**: a feature-level list of what fine-tuning added or removed, instead of a benchmark delta.
 
 ### 4.4 Circuit Discovery
 
@@ -157,6 +158,7 @@ These methods use interpretability findings to *change* model behavior at infere
 - **Representation Engineering (RepE)** (Zou et al., 2023): a broader framework that uses techniques like PCA over contrastive activations to find "concept directions" (e.g., honesty, power-seeking) and both *reads* them (as a lie-detector / monitor) and *writes* them (steering) — positioned as a top-down alternative to bottom-up circuit analysis for alignment-relevant concepts.
 - **Rank-One Model Editing (ROME)** (Meng et al., 2022): treats a feed-forward layer's weight matrix as a key-value associative memory and computes a rank-one update to that matrix that changes a single factual association (e.g., "The Eiffel Tower is in `Paris`" → "...in `Rome`") while minimizing collateral changes to other facts.
 - **MEMIT** (Meng et al., 2023): generalizes ROME to edit thousands of facts simultaneously by distributing rank-one updates across multiple layers, addressing ROME's degradation when editing more than a handful of facts.
+- **Persona vectors** (Chen et al., Anthropic Fellows, arXiv 2507.21509, July 2025): an automated pipeline that turns a natural-language trait description ("evil", "sycophantic", "hallucinates") into a residual-stream direction, as the difference in mean activation between responses that show the trait and responses that do not. The same direction is used to *monitor* (project activations onto it at deployment), to *steer* (subtract it at inference, or add it during fine-tuning so the optimizer has no reason to move along it), and to *screen data* before training.
 
 ---
 
@@ -837,7 +839,72 @@ Used **GPT-4** to automatically generate natural-language explanations ("this ne
 
 An open-source suite of **JumpReLU SAEs** trained on **every layer and sublayer** (attention output, MLP output, residual stream) of **Gemma 2 (2B and 9B)**, at multiple dictionary sizes (16K to 1M features), released publicly alongside the **Neuronpedia** interface for browsing features. This was the first time a frontier-adjacent lab released a *complete*, *open* SAE suite for a production model family — enabling academic researchers without frontier-lab compute to do circuit-level work on a near-frontier model.
 
-### 7.7 Foundational Circuit & Editing Papers
+### 7.7 Anthropic Fellows: Persona Vectors (July 2025)
+
+Chen, Arditi, Sleight, Evans and Lindsey (arXiv 2507.21509) extracted trait directions for evil,
+sycophancy and hallucination, plus optimism and humor, from Qwen2.5-7B-Instruct and
+Llama-3.1-8B-Instruct. The pipeline needs only a trait name and description: an LLM writes
+contrastive system prompts and evaluation questions, a judge scores each response for the trait,
+and the persona vector is the mean-activation difference between trait and non-trait responses at
+the best layer. Three applied results matter for production. Fine-tuning-induced persona shifts
+(including emergent misalignment from narrow training data) correlate strongly with movement along
+the vector, so a deployed model can be monitored by projection. *Preventative steering*, adding the
+vector during fine-tuning, limits the shift with less capability loss than subtracting it at
+inference. And a dataset's **projection difference** (how far its responses sit along the vector
+compared with the base model's own responses to the same prompts) predicts the post-training
+trait shift before any training runs, at both dataset and single-sample level.
+
+```mermaid
+flowchart LR
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    trait(["Trait name +<br/>description"]) --> gen("Contrastive system<br/>prompts + questions")
+    gen --> judge("Generate, judge<br/>trait score")
+    judge --> diff("Mean activation<br/>difference per layer")
+    diff --> vec(["Persona vector"])
+    vec --> mon("Monitor:<br/>projection at deploy")
+    vec --> steer("Steer: subtract at<br/>inference or add<br/>during fine-tune")
+    vec --> screen("Screen data:<br/>projection difference")
+
+    class trait,vec io
+    class gen,judge train
+    class diff mathOp
+    class mon,steer,screen req
+```
+
+The persona-vector pipeline: one trait description in, one direction out, three uses. The data
+screen is the cheapest of the three because it runs before any GPU time is spent on fine-tuning.
+
+### 7.8 Model Diffing with Crosscoders (2024-2025)
+
+Anthropic's crosscoder update (October 2024) trained one dictionary across a base and a fine-tuned
+model and found features clustered into base-only, fine-tune-only and shared groups by relative
+decoder norm. Minder, Dumas et al. (arXiv 2504.02922, April 2025) applied it to Gemma 2 2B base
+versus chat and found a trap: the L1 sparsity loss makes features that exist in both models look
+chat-only. Their Latent Scaling check measures each feature's presence in each model directly,
+and a BatchTopK crosscoder removes most of the artifact, leaving chat-specific features that are
+interpretable and causally effective, such as *false information*, *personal question*, and several
+refusal-trigger features. Model diffing is the feature-level answer to "what did this fine-tune
+change", and it complements persona vectors: the vector checks a trait you named, the diff finds
+changes you did not think to name.
+
+### 7.9 Open Tooling: circuit-tracer (May 2025) and Gemma Scope 2 (December 2025)
+
+On 2025-05-29 Anthropic open-sourced **circuit-tracer** (`safety-research/circuit-tracer`), the
+attribution-graph method of §7.4 for open-weight models, with Decode Research's Neuronpedia as the
+front end for viewing, annotating, sharing, and intervening on graphs. The launch demos ran on
+Gemma-2-2B and Llama-3.2-1B, using Gemma Scope transcoders for the Gemma graphs. On 2025-12-19
+Google DeepMind released **Gemma Scope 2** for every Gemma 3 size from 270M to 27B: SAEs and
+transcoders on every layer, skip-transcoders and cross-layer transcoders for multi-step
+computations, Matryoshka-trained SAEs, and dedicated tools for the chat-tuned models aimed at
+jailbreaks, refusal, and chain-of-thought faithfulness. DeepMind reports about 110 PB of stored
+data and over 1T trained parameters. Together they move attribution graphs from a frontier-lab
+result to something a team can run on an open model in an afternoon.
+
+### 7.10 Foundational Circuit & Editing Papers
 
 - **Wang et al., "Interpretability in the Wild" (IOI circuit, 2022)**: the canonical fully-manual circuit analysis (§5.4), establishing the path-patching methodology still used today.
 - **Meng et al., ROME (2022)** and **MEMIT (2023)**: demonstrated that individual factual associations are localized to a small number of MLP layers at the subject token's last position, and that they can be surgically edited via rank-one (ROME) or distributed rank-one (MEMIT, thousands of edits) weight updates — the basis for "knowledge editing" as a cheaper alternative to fine-tuning for fact updates.
@@ -1021,6 +1088,8 @@ Training a 16x TopK SAE on a single layer of a 7-8B model is a few GPU-days — 
 | **pyvene** | Library specifically for activation interventions (patching, steering) with a declarative config format | Stanford NLP; emphasizes reproducible intervention specifications |
 | **EleutherAI `sae` library** | Open-source SAE training (including TopK) on Pythia and other open models | Used for several open replications of Anthropic/OpenAI SAE results |
 | **Goodfire / Ember API** | Commercial API exposing SAE features and steering for select open-weight models as a hosted service | Represents the emerging "interpretability-as-a-service" category |
+| **circuit-tracer** | Builds attribution graphs from cross-layer or per-layer transcoders, prunes them, and runs feature interventions | Anthropic, open-sourced May 2025; Neuronpedia front end; works with Gemma Scope and Gemma Scope 2 transcoders |
+| **Gemma Scope 2** | Open SAEs, transcoders, skip-transcoders and CLTs for every Gemma 3 size (270M-27B), base and chat | Google DeepMind, December 2025; the default dictionary set for open-model circuit work |
 | **Captum** | General PyTorch model interpretability (integrated gradients, saliency maps, SHAP-style attributions) | *Not* mechanistic (correlational/gradient-based) — useful for contrast: explains "which input tokens mattered" rather than "which internal circuit computed the output" |
 
 ---
@@ -1116,6 +1185,16 @@ It's the fraction of the model's actual behavior (e.g., the logit difference for
 **Short:** Mech interp today is limited by a scale gap between SAE sizes and true concept counts, non-identifiable features, and the lack of formal causal guarantees.
 
 Three stand out: (1) **scale gap** — even the largest published SAEs (tens of millions of features) are likely still far smaller than the true number of concepts in a frontier model, and circuit-level analyses validated on GPT-2-scale models don't automatically transfer to frontier models; (2) **non-identifiability and interpretability illusions** — feature/circuit decompositions depend on training choices and can look like genuine concepts while actually tracking confounds (§10.1-10.3), so findings require causal validation that is itself expensive; (3) **no formal guarantees** — even a well-validated finding ("this feature correlates with deceptive outputs in our eval set") is empirical and probabilistic, not a certified safety property, so mech interp complements but cannot yet replace behavioral evals and red-teaming for safety-critical claims. The field's own framing (e.g., Anthropic's "Biology of an LLM" paper explicitly reports unexplained-variance numbers) increasingly treats these as open problems rather than solved ones.
+
+**Q19: A fine-tune on narrow, harmless-looking data made the model more sycophantic. How would persona vectors have caught this, and how do they prevent it?**
+**Short:** A persona vector's projection difference flags trait-shifting training data before training, and adding the vector during fine-tuning (preventative steering) blocks the shift.
+
+Persona vectors (Chen et al., arXiv 2507.21509, July 2025) give you a direction for a named trait, the difference in mean activation between responses that show it and responses that do not, built automatically from a trait description. Three uses follow. Before training, compute each dataset's **projection difference**: how far its responses sit along the sycophancy vector compared with the base model's own responses to the same prompts. In the paper this predicted the post-fine-tuning trait shift across datasets and also flagged individual samples, including some that escape LLM-based data filtering. During training, **preventative steering** adds the vector to activations, so the optimizer gains nothing by moving the weights along it; the paper reports this limits the shift with less damage to general capability (MMLU) than subtracting the vector at inference afterwards. After deployment, project live activations onto the vector to **monitor** drift, since fine-tuning shifts correlated strongly with movement along it. The limit is that you only catch traits you named; pair it with model diffing to find the ones you did not.
+
+**Q20: You diff a base model and its chat fine-tune with a crosscoder and find many "chat-only" features. What is the trap, and how do you avoid it?**
+**Short:** An L1-trained crosscoder can mark features as chat-only when they exist in both models; check with Latent Scaling and train with a BatchTopK loss instead.
+
+A crosscoder learns one dictionary over both models' activations, gives each feature one decoder vector per model, and labels a feature model-specific when its decoder norm is near zero in the other model (Anthropic, October 2024). Minder, Dumas et al. (arXiv 2504.02922, April 2025) showed on Gemma 2 2B base versus chat that the L1 sparsity penalty produces two artifacts. *Complete shrinkage*: it can zero the base-model decoder of a concept the base model does represent, because absorbing it into the chat side is cheaper under L1. *Latent decoupling*: it can split one shared concept so part of it looks chat-only. The fix has two parts. Latent Scaling measures how well each feature explains each model's activations directly, flagging features that are not really exclusive. A BatchTopK crosscoder replaces the L1 penalty with an exact sparsity budget per batch and removes most of the artifact; what survives includes interpretable, causally effective chat features such as *false information*, *personal question*, and refusal-trigger features. Then steer or ablate each candidate in the chat model before reporting it as introduced by fine-tuning.
 
 ---
 

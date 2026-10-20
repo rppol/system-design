@@ -51,7 +51,8 @@ actually sit in a real decision, which is usually above every technical axis abo
   and no change to how you write the code.
 - CPython's ceiling is the GIL: one thread executes bytecode at a time, with a 5 ms switch
   interval. `asyncio` sidesteps it for I/O by never needing a second thread; free-threading
-  `python3.14t` removes it outright, at the cost of every extension having to be re-audited.
+  `python3.15t` removes it outright, at the cost of every C extension being made thread-safe
+  and rebuilt, either per version (`cp315t`) or once for the `abi3t` stable ABI (PEP 803).
 
 **Key insight:** Go and Loom are the *same idea* arrived at from opposite directions — both let you
 write `resp, err := http.Get(url)` or `var r = client.send(req)` and block, because blocking is
@@ -178,7 +179,7 @@ preference, and it is very expensive to reverse.
 | Primary knob | `GOGC` (default 100), `GOMEMLIMIT` `[1.19]` | `MaxGCPauseMillis` (default 200) | Heap size | `gc.set_threshold` |
 | Optimizes for | Predictable latency, simplicity | Balanced throughput and latency | Latency on huge heaps | Determinism and immediate reclamation |
 | Pays with | Throughput, fragmentation | Pause length | Read throughput | The GIL itself |
-| Recent | Green Tea GC on by default `[1.26]`, 10–40% less GC overhead | G1 becomes the default in every environment in JDK 27 (JEP 523) | Generational-only since Java 24 | Free-threading changes refcounting to biased |
+| Recent | Green Tea GC on by default `[1.26]`, 10 to 40% less GC overhead | G1 is the default in every environment since JDK 27 (JEP 523) | Generational-only since Java 24 | Free-threading changes refcounting to biased |
 
 ### 4.3 The three type systems
 
@@ -368,7 +369,7 @@ func fetchAll(ctx context.Context, urls []string) ([][]byte, error) {
 
 ```java
 // JVM: StructuredTaskScope. Also no colouring — an ordinary method.
-// StructuredTaskScope is a preview API; JEP 525 is its current shape in Java 26.
+// Preview API; JEP 533 (JDK 27, seventh preview) is its current shape.
 List<byte[]> fetchAll(List<URI> uris) throws Exception {
     try (var scope = StructuredTaskScope.open(
              StructuredTaskScope.Joiner.<byte[]>allSuccessfulOrThrow())) {
@@ -377,7 +378,7 @@ List<byte[]> fetchAll(List<URI> uris) throws Exception {
                     HttpRequest.newBuilder(u).build(),
                     HttpResponse.BodyHandlers.ofByteArray()).body()))
             .toList();
-        scope.join();                       // first failure cancels the siblings
+        scope.join();       // first failure cancels the siblings, throws ExecutionException
         return tasks.stream().map(StructuredTaskScope.Subtask::get).toList();
     }
 }
@@ -479,17 +480,25 @@ with ProcessPoolExecutor() as pool:
     results = list(pool.map(expensive, chunks))
 
 #   2. a C/Rust extension that releases the GIL (NumPy, Polars, PyO3)
-#   3. the free-threaded build, python3.14t, officially supported since 3.14
-#      (PEP 779), at a single-threaded penalty of roughly 1% on macOS aarch64
-#      to 8% on x86-64 Linux, and only if every extension you import is safe
+#   3. the free-threaded build, python3.15t, officially supported since 3.14
+#      (PEP 779), at a single-threaded penalty CPython 3.14 measured at roughly
+#      1% on macOS aarch64 to 8% on x86-64 Linux, and only if every extension
+#      you import is safe
 ```
 
 The Python row is where free-threading genuinely changes the conversation, and where it is easy to
-overstate the change. `python3.14t` does remove the GIL and does give real thread parallelism. What
+overstate the change. `python3.15t` does remove the GIL and does give real thread parallelism. What
 it does not do is make CPython's *per-core* throughput competitive: a tight numeric loop in pure
 Python is 30–100x slower than the equivalent Go or Java, and eight cores of that is still slower
 than one core of Go. Free-threading matters most for workloads already dominated by C extensions
 that were fighting over the GIL, not for pure-Python compute.
+
+Python 3.15 (2026-10-09) lowers the packaging cost with PEP 803: an extension built for the
+`abi3t` stable ABI loads on free-threaded CPython, so one wheel replaces a `cp3XXt` wheel per
+release. Porting to it is not a recompile. The extension has to move to the PEP 697 type-data
+API (no `PyObject` embedded in the instance struct) and replace its `PyInit_` function with the
+PEP 793 `PyModExport_*` hook, and anything outside the stable ABI still ships a separate
+`cp315t` build. Thread safety of the extension's own state is still the author's job.
 
 ### 6.4 Errors: what each makes visible
 
@@ -910,13 +919,14 @@ throughput loss.
 
 ### 10.7 Believing free-threading makes pure Python fast
 
-A data team moved a scoring pipeline to `python3.14t` expecting an 8x speedup on an 8-core box.
+A data team moved a scoring pipeline to `python3.15t` expecting an 8x speedup on an 8-core box.
 They measured 5.4x on the parallel section and a 7% regression on the single-threaded sections
-(consistent with the documented penalty of roughly 1% on macOS aarch64 to 8% on x86-64 Linux), for
+(consistent with the penalty CPython 3.14 documented, roughly 1% on macOS aarch64 to 8% on x86-64 Linux), for
 a net end-to-end win of 2.1x. The pipeline was still 40x slower than the Go prototype, because
 free-threading removes a *serialization* constraint and does nothing about CPython's per-operation
-interpreter overhead. Two of their dependencies also had no free-threaded wheels and had to be
-pinned to the GIL build, which forced a split deployment.
+interpreter overhead. Two of their dependencies also had no free-threaded wheels (neither a
+`cp315t` build nor an `abi3t` one) and had to be pinned to the GIL build, which forced a split
+deployment.
 
 ### 10.8 Treating "Go is simple" as "Go is easy"
 
@@ -946,7 +956,7 @@ for any runtime.
 | `py-spy` | Python | Sampling profiler that attaches to a running process |
 | `uv` | Python | Fast dependency resolution and virtualenv management |
 | `mypy` / `pyright` | Python | Static checking of type hints the runtime ignores |
-| `python3.14t` | Python | The officially supported free-threaded build (PEP 779) |
+| `python3.15t` | Python | The officially supported free-threaded build (PEP 779); loads `abi3t` stable-ABI extensions (PEP 803) |
 | PyO3 / Cython | Python | Native extensions that release the GIL for real parallelism |
 | `hey` / `wrk` / `k6` | All | Load generation; mandatory for any cross-runtime claim |
 | `hyperfine` | All | Startup-time measurement with statistical rigour |
@@ -973,7 +983,7 @@ Go's collector is concurrent, non-generational and non-compacting, so its stop-t
 **Q: Does Python's free-threading build make the GIL argument obsolete?**
 **Short:** It removes the serialization constraint but not CPython's per-operation interpreter overhead, so pure-Python compute stays roughly 30–100x slower than Go per core.
 
-`python3.14t` has been officially supported since 3.14 under PEP 779, replaces plain reference counting with biased refcounting plus per-object locking, and does give genuine thread parallelism. Its costs are a single-threaded penalty of roughly 1% on macOS aarch64 to 8% on x86-64 Linux, and a C-extension ecosystem where any module not built free-threaded-safe forces you back to the GIL build. What it does not change is that eight cores of interpreted Python are still slower than one core of Go on a tight numeric loop. Free-threading matters most where C extensions were already fighting over the GIL; it is not a reason to reach for pure Python on CPU-bound work.
+The free-threaded build (`python3.15t`) has been officially supported since 3.14 under PEP 779, replaces plain reference counting with biased refcounting plus per-object locking, and does give genuine thread parallelism. Its costs are a single-threaded penalty CPython 3.14 measured at roughly 1% on macOS aarch64 to 8% on x86-64 Linux, and a C-extension ecosystem where any module without a free-threaded build forces you back to the GIL build. Python 3.15's `abi3t` stable ABI (PEP 803) lets one extension wheel cover free-threaded releases, but porting to it needs source changes (PEP 697 type data, the PEP 793 export hook), so the ecosystem gap closes slowly. What it does not change is that eight cores of interpreted Python are still slower than one core of Go on a tight numeric loop. Free-threading matters most where C extensions were already fighting over the GIL; it is not a reason to reach for pure Python on CPU-bound work.
 
 **Q: What does `if err != nil` actually buy over exceptions?**
 **Short:** It puts every failure edge in the source where the reader sees it, so a function's complete control-flow graph is visible without opening another file.

@@ -609,7 +609,8 @@ BACKWARD compatibility means the upgraded v2 consumer can read both the old v1 p
 
 | Broker | Throughput | Ordering | Replay | Routing | Best For |
 |--------|-----------|---------|--------|---------|---------|
-| Kafka | 1M+ msg/s | Per-partition | Yes (offset) | By partition key | Event streaming, audit log, high throughput |
+| Kafka consumer group | 1M+ msg/s | Per-partition | Yes (offset) | By partition key | Event streaming, audit log, high throughput |
+| Kafka share group (KIP-932, production-ready since 4.2) | Consumers not capped by partition count | None across redeliveries | Topic is still a log; the group tracks per-record state | By topic only | Work queues on an existing Kafka estate |
 | RabbitMQ | ~30K msg/s per quorum queue at 1 KB, RF=3 | Per queue | Streams only | Complex (exchanges) | Task queues, RPC, complex routing |
 | SQS | Elastic | FIFO queues | No (visibility timeout) | Topics via SNS | Serverless, AWS-native, decoupled tasks |
 
@@ -621,7 +622,7 @@ Use the outbox pattern whenever a service must publish an event as a side effect
 
 Use the transactional inbox whenever downstream message processing must be exactly-once (payment processing, inventory decrement, financial ledger updates). For idempotent operations like updating a cache or sending a notification, simpler deduplication (check-then-act) may be sufficient.
 
-Use Kafka when: you need replay capability, throughput beyond what a single broker queue sustains, ordered processing per entity, or log-based event streaming. Use RabbitMQ when: you need complex routing (header-based, topic patterns), low latency message delivery, or per-message TTL. Use SQS when: you are fully on AWS, need serverless-friendly messaging, or want managed FIFO ordering without Kafka operational overhead.
+Use Kafka when: you need replay capability, throughput beyond what a single broker queue sustains, ordered processing per entity, or log-based event streaming. A plain work queue no longer forces RabbitMQ: a Kafka share group (KIP-932, production-ready since 4.2) gives per-record acknowledgement (`ACCEPT`, `RELEASE`, `REJECT`), a lock timeout that redelivers stalled records, a delivery-attempt cap, and more consumers than partitions. It gives up ordering and does not route. Use RabbitMQ when: you need complex routing (header-based, topic patterns), priority queues, low latency push delivery, or per-message TTL. Use SQS when: you are fully on AWS, need serverless-friendly messaging, or want managed FIFO ordering without Kafka operational overhead.
 
 ---
 
@@ -652,6 +653,8 @@ public Order createOrder(CreateOrderRequest request) {
 
 **Outbox table growing unbounded**: The outbox relay ran but forgot to delete or mark processed events. After 6 months, the `outbox_events` table had 50 million rows. The `SELECT ... WHERE published_at IS NULL` query did a sequential scan despite the partial index (index was not maintained when rows were only updated, not deleted). Fix: either DELETE processed rows after 7 days, or verify the partial index on `WHERE published_at IS NULL` is used by EXPLAIN.
 
+**Moving an ordered consumer to a share group**: A team switched an `account-events` consumer from a consumer group to a share group to scale past 12 partitions. Share groups hand records of one partition to many consumers and redeliver released or timed-out records out of order, so a `debit` was applied before the `account-opened` it depended on. Fix: keep a consumer group for any per-entity sequence; use share groups only for independent tasks, and make the handler idempotent because a record whose lock expires (`share.record.lock.duration.ms`, 30 s by default) is handed to a second consumer while the first may still be running.
+
 **Using wrong Avro compatibility mode**: A team set compatibility to NONE. A producer added a new required field without a default. All existing consumers that did not have the new schema version crashed on deserialization. Fix: always use BACKWARD compatibility (consumers can read newer schema with defaults for missing fields), deploy consumers before producers.
 
 ---
@@ -668,10 +671,10 @@ public Order createOrder(CreateOrderRequest request) {
 | RabbitMQ | AMQP broker with exchange-based routing |
 | AWS SQS / SNS | Managed message queue and pub/sub |
 | KEDA | Kubernetes autoscaler based on Kafka consumer lag |
+| `KafkaShareConsumer` | Kafka client for share groups (KIP-932): per-record acknowledgement, delivery-attempt counting |
 | Standard Webhooks | Reference spec for the webhook payload envelope and HMAC-SHA256 signature headers |
 | Svix / Hookdeck | Managed webhook delivery — signing, per-endpoint retry ladders, circuit breaking, redrive, delivery logs |
 | EventBridge API destinations | AWS-managed HTTP delivery from an event bus, with built-in retry and rate limiting per destination |
-| RabbitMQ delayed-message exchange | Broker-side scheduled redelivery, so a retry ladder does not need an application-side scheduler |
 | CloudEvents | CNCF vendor-neutral event envelope (`id`, `source`, `specversion`, `type`) with HTTP/Kafka/AMQP/MQTT bindings — use it once events cross an organisational or vendor boundary |
 
 ---
@@ -706,7 +709,12 @@ BACKWARD compatibility means a newer schema version can read data written with a
 **Q: What is the difference between Kafka and RabbitMQ for event-driven architectures?**
 **Short:** Kafka is log-based with replay and high throughput; RabbitMQ is queue-based with complex routing and lower latency.
 
-Kafka is log-based: messages are retained for a configured duration (default 7 days) and consumers maintain their own offset. Any consumer can replay from any offset. Kafka preserves order within a partition. Throughput is very high (1M+ msg/s per cluster). Kafka is ideal for event streaming, audit logs, and scenarios requiring replay. RabbitMQ's classic and quorum queues are queue-based: messages are removed once acknowledged, though its third queue type, streams, is an append-only log that does support replay. Complex routing is available (topic exchanges, header exchanges). Per-queue throughput is lower — RabbitMQ's own docs cite ~30K msg/s for one quorum queue at 1 KB with 3-node replication — but latency is lower (push-based vs poll-based). RabbitMQ is better for task queues, RPC patterns, and complex routing requirements. Use Kafka when you need replay and high throughput; use RabbitMQ when you need complex routing and low latency task distribution.
+Kafka is log-based: messages are retained for a configured duration (default 7 days) and consumers maintain their own offset. Any consumer can replay from any offset. Kafka preserves order within a partition. Throughput is very high (1M+ msg/s per cluster). Kafka is ideal for event streaming, audit logs, and scenarios requiring replay; since 4.2 its share groups (KIP-932) also give queue-style consumption with per-record acks and more consumers than partitions, but no ordering and no routing. RabbitMQ's classic and quorum queues are queue-based: messages are removed once acknowledged, though its third queue type, streams, is an append-only log that does support replay. Complex routing is available (topic exchanges, header exchanges). Per-queue throughput is lower (RabbitMQ's own docs cite ~30K msg/s for one quorum queue at 1 KB with 3-node replication), but latency is lower (push-based vs poll-based). RabbitMQ remains the better fit for RPC patterns, priority queues, per-message TTL, and complex routing. Use Kafka when you need replay and high throughput, or a simple work queue on a cluster you already run; use RabbitMQ when you need routing and low latency push delivery.
+
+**Q: Why does a Kafka share group make the transactional inbox mandatory rather than optional?**
+**Short:** Share groups are at-least-once with lock-timeout redelivery and no transactional offset commit, so the same record can reach two consumers and only dedup makes that safe.
+
+KIP-932 states share-group delivery is at-least-once. A consumer acquires a record under a lock (`share.record.lock.duration.ms`, 30 s by default); if it does not acknowledge in time, the broker hands the record to another consumer while the first may still be running, so two workers can process one record concurrently. A consumer group can reach exactly-once for Kafka-to-Kafka flows with `sendOffsetsToTransaction`; a share group has no offsets to commit in a transaction, and its acknowledgements sit outside your database transaction. The fix is the inbox: insert the record's key (or `topic-partition-offset`) into a dedup table in the same transaction as the side effect, then `ACCEPT`. Also set the lock above p99 processing time (the group-level `share.record.lock.duration.ms` is capped by the broker's `group.share.max.record.lock.duration.ms`, 60 s by default), and treat `share.delivery.count.limit` (broker default `group.share.delivery.count.limit` = 5, after which the record is archived and not redelivered) as the poison-pill cap you must still alert on.
 
 **Q: How do you handle message ordering with Kafka when multiple consumers process in parallel?**
 **Short:** Kafka only guarantees ordering within a partition, so use the entity ID as the partition key to preserve per-entity order.

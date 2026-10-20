@@ -82,7 +82,9 @@ a serialized bean.
 
 ---
 
-## 4. MBean Flavors
+## 4. Types / Architectures / Strategies
+
+### MBean flavors
 
 | Flavor | How it is defined | When to use |
 |--------|-------------------|-------------|
@@ -348,33 +350,13 @@ java -Dcom.sun.management.jmxremote \
 # JConsole connects to: service:jmx:rmi:///jndi/rmi://host:9010/jmxrmi
 ```
 
-Setting `rmi.port` equal to `port` is the fix for the firewall pitfall in §8: by
+Setting `rmi.port` equal to `port` is the fix for the firewall pitfall in §6.5: by
 default the connector exports the actual data channel on a *random* ephemeral
 port, which a firewall or Kubernetes NetworkPolicy blocks.
 
----
+### 6.5 Remote JMX and Security
 
-## 7. Technologies and Tools — JConsole, VisualVM, jcmd, jstack, jmap
-
-| Tool | Mechanism | Best for |
-|------|-----------|----------|
-| **JConsole** | JMX connector (local or remote) | Quick live view: memory, threads, GC, MBean browser |
-| **VisualVM** | JMX + attach API + sampling profiler | Richer UI, CPU/memory sampling, heap dumps, plugins |
-| **jcmd** | Attach API (local) | Scriptable one-shot commands: `GC.heap_info`, `Thread.print`, `VM.flags`, `JFR.start` |
-| **jstack** | Attach API (local) | Thread dumps for deadlock/hang analysis (`jstack <pid>`) |
-| **jmap** | Attach API (local) | Heap histogram and heap dumps (`jmap -dump:live,format=b,file=h.hprof <pid>`) |
-
-`jcmd` is the modern umbrella that subsumes much of `jstack`/`jmap`:
-`jcmd <pid> Thread.print` ≈ `jstack`, `jcmd <pid> GC.heap_dump` ≈ `jmap -dump`.
-All three use the **attach API** over a local socket, so they need no
-`jmxremote` port and are the safe way to inspect a JVM you can `ssh` into. JFR
-(Java Flight Recorder) is also driven through `jcmd` (`JFR.start`, `JFR.dump`).
-
----
-
-## 8. Remote JMX and Security
-
-### BROKEN → FIX: unauthenticated remote JMX is remote code execution
+#### BROKEN → FIX: unauthenticated remote JMX is remote code execution
 
 ```bash
 # BROKEN: JMX/RMI open to the whole network with no auth and no TLS.
@@ -410,7 +392,7 @@ The defense-in-depth stance: **never bind JMX to a routable interface.** Bind
 localhost and reach it through an SSH tunnel or a sidecar; if you must open a
 port, require both authentication and TLS with client-cert auth.
 
-### The firewall / port pitfall
+#### The firewall / port pitfall
 
 The RMI connector uses **two** ports: the registry port you specify (9010) and a
 *separate* export port for the actual JMX data channel, which defaults to a
@@ -422,7 +404,42 @@ port, and set `-Djava.rmi.server.hostname` to the address clients dial.
 
 ---
 
-## 9. JMX vs Micrometer / Prometheus, and JFR
+## 7. Real-World Examples
+
+- **Apache Kafka** brokers and clients publish every metric as an MBean, for example
+  `kafka.server:type=BrokerTopicMetrics,name=MessagesInPerSec` and
+  `kafka.network:type=RequestMetrics,name=TotalTimeMs,request=Produce`. Strimzi, the
+  Kubernetes operator for Kafka, gets them into Prometheus by attaching `jmx_exporter` as
+  a Java agent and serving `/metrics` over HTTP, so no RMI port leaves the pod.
+- **Apache Cassandra's `nodetool`** is a JMX client. It connects to port 7199 and invokes
+  operations such as `forceKeyspaceFlush` on `org.apache.cassandra.db:type=StorageService`.
+  `cassandra-env.sh` binds JMX to localhost by default (`LOCAL_JMX=yes`), which is why a
+  remote `nodetool` needs JMX authentication switched on first.
+- **HikariCP** with `registerMbeans=true` registers `com.zaxxer.hikari:type=Pool (poolName)`,
+  exposing `ActiveConnections`, `IdleConnections`, `ThreadsAwaitingConnection`, and
+  `TotalConnections`, plus a `softEvictConnections()` operation that retires every
+  connection after its current use, for example after a database failover.
+- **Apache Tomcat** registers `Catalina:type=ThreadPool,name="http-nio-8080"` with
+  `currentThreadsBusy` and `maxThreads`. A busy count pinned at `maxThreads` is the first
+  JMX-visible sign of request-thread exhaustion.
+- **Spring Boot** has shipped with `spring.jmx.enabled=false` since 2.2. Actuator metrics
+  go through Micrometer to Prometheus, and JMX is an explicit opt-in.
+
+---
+
+## 8. Tradeoffs
+
+| Dimension | JMX (RMI connector) | Prometheus `/metrics` (via jmx_exporter / Micrometer) | JFR |
+|-----------|---------------------|-------------------------------------------------------|-----|
+| Model | Pull, interactive query | Pull, scrape at interval | Continuous event recording |
+| Transport | RMI (stateful, ephemeral port) | HTTP (stateless, one port) | In-process buffer, dumped on demand |
+| Dimensional labels | No | Yes | Event fields |
+| Write/operations (invoke methods) | Yes (`clear()`, set attrs) | No (read-only) | No |
+| DoS / RCE surface | High if misconfigured | Low (read-only HTTP) | None (local) |
+| Overhead | Low (on query) | Low (on scrape) | ~1% continuous |
+| Best for | Live console + operations | Fleet dashboards + alerting | Post-incident forensics |
+
+### JMX vs Micrometer / Prometheus, and JFR
 
 **JMX is pull-over-RMI; Prometheus is pull-over-HTTP; StatsD is push.** JMX was
 designed for interactive, point-in-time queries by a management console, not for
@@ -455,21 +472,27 @@ through the same MBeanServer.
 
 ---
 
-## 10. Tradeoffs
+## 9. When to Use / When NOT to Use
 
-| Dimension | JMX (RMI connector) | Prometheus `/metrics` (via jmx_exporter / Micrometer) | JFR |
-|-----------|---------------------|-------------------------------------------------------|-----|
-| Model | Pull, interactive query | Pull, scrape at interval | Continuous event recording |
-| Transport | RMI (stateful, ephemeral port) | HTTP (stateless, one port) | In-process buffer, dumped on demand |
-| Dimensional labels | No | Yes | Event fields |
-| Write/operations (invoke methods) | Yes (`clear()`, set attrs) | No (read-only) | No |
-| DoS / RCE surface | High if misconfigured | Low (read-only HTTP) | None (local) |
-| Overhead | Low (on query) | Low (on scrape) | ~1% continuous |
-| Best for | Live console + operations | Fleet dashboards + alerting | Post-incident forensics |
+**Use JMX when:**
+- You need to invoke an operation on one live JVM: clear a cache, change a log level,
+  call HikariCP's `softEvictConnections()`, or run `findDeadlockedThreads()`.
+- You inspect a JVM interactively with JConsole or VisualVM during an incident.
+- A product exposes its metrics only as MBeans (Kafka, Cassandra, Tomcat). Bridge them
+  with `jmx_exporter` rather than polling RMI.
+
+**Do NOT use JMX when:**
+- You need fleet-wide time series and alerts. Scrape Prometheus `/metrics` from
+  Micrometer or `jmx_exporter`.
+- You need a time-ordered record of what happened before an incident. Use JFR.
+- The only way to reach the JVM is to open the RMI port across a network. Use `jcmd`
+  through `ssh` or `kubectl exec`, or tunnel to a localhost-bound connector.
+- The threads you care about are virtual threads. `ThreadMXBean` covers platform threads
+  only; use `jcmd <pid> Thread.dump_to_file` and the `jdk.VirtualThreadPinned` JFR event.
 
 ---
 
-## 11. Common Pitfalls and Best Practices
+## 10. Common Pitfalls
 
 ### Pitfall 1: Unauthenticated remote JMX
 `authenticate=false ssl=false` on a routable interface is a direct RCE vector via
@@ -504,17 +527,23 @@ Thread CPU-time measurement can be unsupported or turned off
 (`isThreadCpuTimeSupported()`/`isThreadCpuTimeEnabled()`), returning `-1`. Check
 support before relying on it; enabling it has a small per-context-switch cost.
 
-### Best Practices
-1. **Never bind JMX to a routable interface** — localhost + SSH tunnel, or auth + TLS.
-2. **Pin `rmi.port` = `port`** and set `java.rmi.server.hostname`.
-3. **Write MXBeans, not Standard MBeans** — Open Types cross the wire safely.
-4. **Register once, unregister on shutdown** — MBeans are long-lived, not per-request.
-5. **Keep attribute getters cheap and read-only** — tools poll them.
-6. **Prefer local `jcmd`/`jstack`/`jmap`** for one-off inspection — no open port needed.
-7. **Bridge to Prometheus** (`jmx_exporter` / Micrometer) for fleet monitoring; keep JMX for interactive ops.
-8. **Run `findDeadlockedThreads()` on a health check** to surface silent hangs.
-9. **Enable JFR** (`-XX:StartFlightRecording`) for continuous low-overhead forensics.
-10. **Use unique, descriptive ObjectNames** with a stable domain and type/name keys.
+---
+
+## 11. Technologies & Tools
+
+| Tool | Mechanism | Best for |
+|------|-----------|----------|
+| **JConsole** | JMX connector (local or remote) | Quick live view: memory, threads, GC, MBean browser |
+| **VisualVM** | JMX + attach API + sampling profiler | Richer UI, CPU/memory sampling, heap dumps, plugins |
+| **jcmd** | Attach API (local) | Scriptable one-shot commands: `GC.heap_info`, `Thread.print`, `VM.flags`, `JFR.start` |
+| **jstack** | Attach API (local) | Thread dumps for deadlock/hang analysis (`jstack <pid>`) |
+| **jmap** | Attach API (local) | Heap histogram and heap dumps (`jmap -dump:live,format=b,file=h.hprof <pid>`) |
+
+`jcmd` is the modern umbrella that subsumes much of `jstack`/`jmap`:
+`jcmd <pid> Thread.print` ≈ `jstack`, `jcmd <pid> GC.heap_dump` ≈ `jmap -dump`.
+All three use the **attach API** over a local socket, so they need no
+`jmxremote` port and are the safe way to inspect a JVM you can `ssh` into. JFR
+(Java Flight Recorder) is also driven through `jcmd` (`JFR.start`, `JFR.dump`).
 
 ---
 
@@ -604,6 +633,61 @@ The RMI connector is JMX's default remote transport, addressed as `service:jmx:r
 **Short:** Attribute getters run real code, so polling expensive ones often adds measurable load and contention.
 
 Attribute getters run real code, so polling expensive ones every second — a `getHitRatio()` that takes a lock, or `getThreadCpuTime` across every thread — adds measurable load and can even contend with application work. Because tools poll attributes repeatedly, getters must be cheap, side-effect-free, and free of locks on hot paths. Keep polling intervals coarse and push heavy aggregation out of the getter itself.
+
+---
+
+## 13. Best Practices
+
+1. **Never bind JMX to a routable interface** — localhost + SSH tunnel, or auth + TLS.
+2. **Pin `rmi.port` = `port`** and set `java.rmi.server.hostname`.
+3. **Write MXBeans, not Standard MBeans** — Open Types cross the wire safely.
+4. **Register once, unregister on shutdown** — MBeans are long-lived, not per-request.
+5. **Keep attribute getters cheap and read-only** — tools poll them.
+6. **Prefer local `jcmd`/`jstack`/`jmap`** for one-off inspection — no open port needed.
+7. **Bridge to Prometheus** (`jmx_exporter` / Micrometer) for fleet monitoring; keep JMX for interactive ops.
+8. **Run `findDeadlockedThreads()` on a health check** to surface silent hangs.
+9. **Enable JFR** (`-XX:StartFlightRecording`) for continuous low-overhead forensics.
+10. **Use unique, descriptive ObjectNames** with a stable domain and type/name keys.
+
+---
+
+## 14. Case Study
+
+### Silent deadlock in a Tomcat payments service, found through ThreadMXBean
+
+**Scenario.** A payments API runs as 12 Kubernetes pods on Java 21 with Spring Boot and
+Tomcat's platform-thread pool (`maxThreads=200`) and a HikariCP pool of 20 connections.
+Every few days one pod stops completing requests. Its HTTP liveness probe keeps passing,
+because the probe handler takes neither of the locks involved, so Kubernetes never
+restarts it. Clients time out at 30 s, and the load balancer keeps one twelfth of the
+traffic on the dead pod until a human restarts it, 25 to 40 minutes after the first alert.
+
+**Diagnosis.** The pods expose no remote JMX port, by policy (§6.5). On-call runs
+`kubectl exec <pod> -- jcmd 1 Thread.print` during the next hang. The dump ends with
+`Found one Java-level deadlock`: a refund path takes `ledgerLock` then `accountLock`,
+and a settlement path takes them in the opposite order. A second dump five minutes later
+showed all 200 `http-nio-8080-exec` threads blocked on those two locks and none waiting in
+`HikariPool.getConnection`. The connection pool was never the bottleneck; every request
+thread queued behind the locks.
+
+**Changes.**
+
+| Change | Mechanism | Effect |
+|---|---|---|
+| Fix lock order | Both paths take `accountLock` before `ledgerLock` | Removes this cycle |
+| Deadlock check in the liveness probe | `ThreadMXBean.findDeadlockedThreads()` every 10 s with `failureThreshold: 1`, as in §6.2 | A future cycle fails the probe and the pod restarts within one probe period |
+| Log the cycle before failing | `getThreadInfo(ids, true, true)` with the full `getStackTrace()` | `ThreadInfo.toString()` prints only 8 frames, too few to see both lock sites |
+| `registerMbeans=true` on HikariCP | `jmx_exporter` agent serves `/metrics` on port 9404 | `ThreadsAwaitingConnection` and Tomcat `currentThreadsBusy` become Prometheus alerts |
+| Remote JMX stays off | Operators use `jcmd` through `kubectl exec` | No RMI port, no MLet exposure |
+
+**Result.** The ordering fix removed the deadlock. In the following quarter, a different
+lock-ordering bug introduced by a later change was caught by the probe: the pod restarted
+about 20 s after the cycle formed (one 10 s probe period plus container restart) instead of after a 30-minute human loop, and the logged
+`ThreadInfo` named both lock sites, so the fix took one review.
+
+**Limit to know.** `findDeadlockedThreads()` sees platform threads only. When the team
+moved request handling to virtual threads, the probe could no longer see request-thread
+cycles, and they replaced it with a request-latency check plus `jcmd Thread.dump_to_file`.
 
 ---
 

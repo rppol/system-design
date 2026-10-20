@@ -104,6 +104,7 @@ assertions structurally cannot.
 | `expectTypeOf` | `expect-type`, bundled in Vitest | invariant with `toEqualTypeOf` | in-repo type tests beside unit tests |
 | `assertType` | Vitest | assignability only | a quick check inside an existing test |
 | `tsd` | standalone CLI | invariant, runs against the built `.d.ts` | a published library's shipped surface |
+| TSTyche | standalone CLI | `.type.toBe` identity, plus `toBeCallableWith` | one suite rerun on several TypeScript versions |
 
 `expectTypeOf` tests the types in your source. `tsd` tests the types in your `dist`. A
 library wants both, because `isolatedDeclarations` and `exports` maps can make the two
@@ -449,6 +450,58 @@ can dominate a build. Two habits keep it bounded:
   Measure with `tsc --extendedDiagnostics` before assuming the app is at fault; see
   [`../the_typescript_compiler_and_type_performance/`](../the_typescript_compiler_and_type_performance/the_typescript_compiler_and_type_performance.md).
 
+### 6.9 Testing one type surface against several compiler versions
+
+A published `.d.ts` is checked by the **consumer's** compiler, not yours. In October 2026
+consumers are split across TypeScript 5.x, 6.0 and 7.0, and DefinitelyTyped tests
+`@types` packages against every version less than 2 years old. A suite that runs on one
+compiler misses two kinds of regression: declarations an older compiler cannot read (a
+`const` type parameter `[5.0]`, or a `NoInfer<T>` `[5.4]` that a 5.3 consumer cannot resolve
+and, under `skipLibCheck`, silently treats as `any`), and inference that differs between
+versions.
+
+**`tsd` checks one version, and not yours.** `tsd` 0.33.0, released 2025-08-05 and still its
+latest, depends on `@tsd/typescript` `^5.9.2`: it embeds its own 5.9 compiler and ignores the
+`typescript` your project installs. A green `tsd` run says the surface works on 5.9.
+
+**TSTyche runs the suite once per version.** The `target` option in `tstyche.json` takes a
+minor (`"5.6"`), a patch (`"5.8.2"`), a dist-tag (`"latest"`), a range (`">=5.6"`) or several
+joined with `||`. TSTyche downloads each compiler from the npm registry and reruns every test
+file on it. `npx tstyche --list` prints the versions a range expands to.
+
+```json
+// tstyche.json
+{ "target": ">=5.6", "testFileMatch": ["typetests/*.tst.ts"] }
+```
+
+```ts
+// typetests/client.tst.ts
+import { expect, test } from "tstyche";
+import { createClient } from "@acme/sdk";
+
+test("createClient", () => {
+  const c = createClient({ baseUrl: "https://example.test" });
+  expect(c.get("/users")).type.toBe<Promise<Response>>();
+  expect(createClient).type.not.toBeCallableWith({});
+});
+```
+
+**The TypeScript 7 leg needs a separate step.** TSTyche drives the compiler through its
+JavaScript API, and TypeScript 7.0 has no stable programmatic API until 7.1. TSTyche 7.x
+(7.2.5, 2026-09-10) therefore tops out at 6.0: its 7.2.2 release made it load TypeScript 6
+when 7 is installed. TS 7 support landed in TSTyche 8.0.0-beta.0 on 2026-10-11 as a breaking
+change. Until 8.0 is stable, cover 7.0 by running `tsc` 7 over a fixture consumer file that
+holds `expectTypeOf` and `@ts-expect-error` assertions, which are plain types any compiler checks.
+
+| Version leg | Tool | Checks |
+|-------------|------|--------|
+| 5.6 to 6.0 | TSTyche 7.2.5, `"target": ">=5.6"` | the full `.tst.ts` suite per minor |
+| 7.0 | `tsc -p tsconfig.typetest.json` with `typescript@7` | `expectTypeOf` and `@ts-expect-error` fixtures |
+| 5.9 only | `tsd` 0.33.0 | its `expectType` / `expectError` assertions |
+
+Which versions belong in `target` is a support-policy decision, covered in
+[`../declaration_files_and_library_authoring/`](../declaration_files_and_library_authoring/declaration_files_and_library_authoring.md).
+
 ---
 
 ## 7. Real-World Examples
@@ -588,15 +641,17 @@ built artifact, plus `attw`, sees it. See
 | Vitest | Test runner with built-in type-testing mode | `vitest --typecheck` |
 | expect-type | `expectTypeOf` assertions, bundled with Vitest | `import { expectTypeOf } from "vitest"` |
 | tsd | Type assertions against a built `.d.ts` | `npx tsd` |
+| TSTyche | Type test runner with a TypeScript version matrix | `npx tstyche --target '>=5.6'` |
 | arethetypeswrong | Detects ESM/CJS type-resolution failures | `npx @arethetypeswrong/cli --pack .` |
 | publint | Detects packaging and `exports` mistakes | `npx publint` |
 | TypeScript | The checker that actually runs type tests | `tsc --noEmit -p tsconfig.test.json` |
 | typescript-eslint | Enforces `@ts-expect-error` over `@ts-ignore` | `ban-ts-comment` rule |
 | Zod | Schemas whose inferred types are worth pinning | `z.infer<typeof S>` |
 
-Versions verified 2026-09-04: Vitest 5.0.0, TypeScript 7.0, typescript-eslint 8.69.0
+Versions verified 2026-10-19: Vitest 5.0.5, TypeScript 7.0, typescript-eslint 8.71.2
 (which still runs on `tsc6` because TypeScript 7.0 has no stable Compiler API until 7.1),
-Zod 4.5.4. Related reading:
+Zod 4.6.7, tsd 0.33.0 (embeds TypeScript 5.9), TSTyche 7.2.5 (runs TypeScript 5.4 to 6.0).
+Related reading:
 [`../declaration_files_and_library_authoring/`](../declaration_files_and_library_authoring/declaration_files_and_library_authoring.md)
 and
 [`../../react/testing_and_frontend_ci/`](../../react/testing_and_frontend_ci/testing_and_frontend_ci.md).
@@ -658,6 +713,15 @@ emitted `any` for an unexported type, or a `types` condition pointing at a stale
 never touches an in-repo test. `tsd` resolves the way a consumer does, and
 `@arethetypeswrong/cli` catches the ESM/CJS resolution half.
 
+**Q: `tsd` passes on every commit, yet a consumer on TypeScript 6.0 hits errors inside your shipped `.d.ts`. How?**
+**Short:** tsd 0.33.0 checks with its own embedded TypeScript 5.9 compiler, so a green run says nothing about how the declarations behave on 6.0 or 7.0.
+
+`tsd` depends on `@tsd/typescript` `^5.9.2` and ignores the `typescript` your project
+installs, and 0.33.0 (2025-08-05) is still its latest release. The consumer's compiler is
+the one that reads your `.d.ts`, so a regression in how 6.0 infers or resolves a type never
+appears in the 5.9 run. Run the type suite once per supported version with TSTyche's `target`
+option, and add a `tsc` 7 fixture check for the 7.0 leg.
+
 **Q: How do you keep a type suite from slowing the build?**
 **Short:** Give the type tests their own tsconfig with a narrow include, so an incremental application build never re-checks them.
 
@@ -665,6 +729,17 @@ Type assertions are work for `tsc`, and a file full of recursive conditional typ
 twenty ways can dominate a check. Isolating them means the app's watch loop stays fast
 while CI still runs them. Measure before blaming the app: `tsc --extendedDiagnostics`
 reports instantiation counts and check time per file.
+
+**Q: How do you run one type suite against several TypeScript versions, and where does TypeScript 7 fit?**
+**Short:** TSTyche's target option, such as ">=5.6", downloads each compiler and reruns the suite per version; TSTyche 7.x stops at 6.0, so check 7.0 with tsc 7 directly.
+
+`target` accepts minors, patches, dist-tags and ranges joined with `||`, and
+`npx tstyche --list` shows what a range expands to. TSTyche drives the compiler through its
+JavaScript API, which TypeScript 7.0 does not offer as a stable API until 7.1, so TSTyche
+7.2.5 loads TypeScript 6 when 7 is installed. TS 7 support is in TSTyche 8.0.0-beta.0
+(2026-10-11). Until that is stable, run `tsc` 7 over a fixture file of `expectTypeOf` and
+`@ts-expect-error` assertions, which need no API. Take the version list from the package's
+published support window, not from what CI happens to install.
 
 **Q: What does `expectTypeOf(x).not.toBeAny()` guard against?**
 **Short:** An assertion silently satisfied by any, since a value typed any matches every expected type you could compare it against.
@@ -763,6 +838,8 @@ member.
    `ts-expect-error: allow-with-description`.
 10. **Add a negative assertion whenever you add a union.** The union exists to forbid
     something; nothing else proves it still does.
+11. **Run the published surface's type tests on every supported compiler version,** not only
+    the one in your lockfile.
 
 ---
 

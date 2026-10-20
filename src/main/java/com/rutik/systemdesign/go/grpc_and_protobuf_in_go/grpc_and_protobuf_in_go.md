@@ -35,8 +35,8 @@ The Go-specific ground this page covers:
   reflection plus `grpcurl`.
 
 Versions this page is written against: Go **1.27** (released 2026-08-19),
-`google.golang.org/grpc` **v1.83.2**, `google.golang.org/protobuf` **v1.36.12**,
-`connectrpc.com/connect` **v1.20.0**.
+`google.golang.org/grpc` **v1.84.0**, `google.golang.org/protobuf` **v1.36.12**,
+`connectrpc.com/connect/v2` **v2.0.1**.
 
 ---
 
@@ -847,16 +847,23 @@ surface to anyone who can reach the port.
 
 ### `connect-go` and grpc-gateway
 
-`connectrpc.com/connect` generates a plain `http.Handler` that speaks **three** protocols on
-one endpoint: gRPC, gRPC-Web, and Connect's own protocol, which is ordinary HTTP/1.1 with a
-JSON or protobuf body.
+`connectrpc.com/connect/v2` serves **three** protocols on one endpoint: gRPC, gRPC-Web, and
+Connect's own protocol, which is ordinary HTTP/1.1 with a JSON or protobuf body. Handlers take
+and return plain messages, services register on a `*connect.Server`, and `connecthttp.Mount`
+puts that server on an ordinary `http.ServeMux`.
 
 ```go
+srv := connect.NewServer(auth)                    // interceptors are NewServer arguments
+userv1connect.RegisterUserServiceHandler(srv, &server{})
 mux := http.NewServeMux()
-path, handler := userv1connect.NewUserServiceHandler(&server{}, connect.WithInterceptors(auth))
-mux.Handle(path, handler)
-// h2c so the same server also serves HTTP/2 without TLS, behind a terminating proxy.
-http.ListenAndServe(":8080", h2c.NewHandler(mux, &http2.Server{}))
+connecthttp.Mount(mux, srv)
+
+p := new(http.Protocols)
+p.SetHTTP1(true)
+p.SetUnencryptedHTTP2(true)                       // [1.24] h2c for gRPC clients, no x/net
+hs := &http.Server{Addr: ":8080", Handler: mux, Protocols: p,
+    ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
+log.Fatal(hs.ListenAndServe())
 ```
 
 ```bash
@@ -865,8 +872,8 @@ curl -X POST -H "Content-Type: application/json" \
 ```
 
 That `curl` line is the whole pitch: a browser can call it, a load balancer that only speaks
-HTTP/1.1 can route it, and `net/http` middleware composes with it, because it *is* a
-`net/http` handler. grpc-gateway solves the same problem differently — it generates a
+HTTP/1.1 can route it, and `net/http` middleware composes with it, because it is mounted on a
+plain `net/http` mux. grpc-gateway solves the same problem differently: it generates a
 **reverse proxy** that translates REST+JSON into gRPC using `google.api.http` annotations,
 which means a second process (or an in-process mux) and a second port, but it gives you a
 genuinely RESTful URL shape (`GET /v1/users/{id}`) that Connect does not.
@@ -1068,8 +1075,8 @@ scales with tenant data should be a server-stream or a paged unary call.
 | **`buf`** | The modern CLI: `buf generate`, `buf lint`, `buf breaking`, `buf format`, plus the Buf Schema Registry for dependency resolution. `v2` config. |
 | **`protoc-gen-go`** | Generates message types from `.proto`. `google.golang.org/protobuf` v1.36.12. |
 | **`protoc-gen-go-grpc`** | Generates gRPC client and server stubs, including the generic stream types from v1.5. |
-| **`google.golang.org/grpc`** | The runtime: server, `ClientConn`, resolvers, balancers, interceptors, `status`, `codes`, `metadata`, `keepalive`, `credentials`. v1.83.2. |
-| **`connectrpc.com/connect`** | gRPC + gRPC-Web + Connect protocol from one `net/http` handler. v1.20.0. |
+| **`google.golang.org/grpc`** | The runtime: server, `ClientConn`, resolvers, balancers, interceptors, `status`, `codes`, `metadata`, `keepalive`, `credentials`. v1.84.0. |
+| **`connectrpc.com/connect/v2`** | gRPC + gRPC-Web + Connect protocol from one `*connect.Server`, mounted on a `net/http` mux by `connecthttp.Mount`. v2.0.1. |
 | **`grpc-gateway`** | Generates a REST/JSON reverse proxy from `google.api.http` annotations, plus an OpenAPI spec. |
 | **`grpcurl`** | `curl` for gRPC. Works with no `.proto` when server reflection is on, or with `-import-path`/`-proto` when it is off. |
 | **`grpcui`** | A browser UI over the same reflection data — the Postman of gRPC. |
@@ -1280,11 +1287,13 @@ directly and skipping everything gRPC does. Wire teardown through `t.Cleanup(srv
 failing test does not leak goroutines into the rest of the package.
 
 **Q: What does connect-go give you that grpc-go does not?**
-**Short:** One net/http handler that speaks gRPC, gRPC-Web and a curl-able HTTP/1.1 protocol, composing with ordinary Go HTTP middleware.
+**Short:** One server mounted on a net/http mux that speaks gRPC, gRPC-Web and a curl-able HTTP/1.1 protocol, composing with ordinary Go HTTP middleware.
 
-A Connect handler is a plain `http.Handler` returned by a generated
-`NewXServiceHandler`, so it drops into `http.ServeMux`, works with any `net/http` middleware
-you already have, and is served by `net/http` rather than a separate gRPC server. It answers
+In connect-go v2 a generated `RegisterXServiceHandler` adds your implementation to a
+`*connect.Server`, and `connecthttp.Mount` puts that server on an `http.ServeMux`, so it works
+with any `net/http` middleware you already have and is served by `net/http` rather than a
+separate gRPC server. Handlers take and return plain messages, not request and response
+wrappers. It answers
 three protocols on the same endpoint, and its own protocol is a POST with a JSON or protobuf
 body — meaning a browser can call it without a gRPC-Web proxy and you can debug it with
 `curl`. The tradeoffs are a smaller ecosystem and fewer battle-tested interceptors than
@@ -1356,9 +1365,8 @@ available to operators and not to the internet.
     forces periodic rebalancing and gives you a way to drain during a deploy.
 11. **One sender goroutine and one receiver goroutine per stream.** Funnel producers through
     a buffered channel.
-12. **`grpc.StatsHandler(otelgrpc.NewServerHandler())` for tracing and metrics**, not an
-    interceptor — the stats handler sees payload sizes and per-message events an interceptor
-    cannot. Wiring the rest is
+12. **`grpc.StatsHandler(otelgrpc.NewServerHandler())` for tracing and metrics.** Stats
+    handlers are the only `otelgrpc` API; its interceptors were removed in 2025. Wiring the rest is
     [Observability and OpenTelemetry](../observability_and_opentelemetry/observability_and_opentelemetry.md).
 13. **Keep `UnimplementedXServer` embedded** (`require_unimplemented_servers=true`). It means
     adding an RPC to the `.proto` does not break every server's compile, which is what lets

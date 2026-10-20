@@ -1,17 +1,22 @@
 # Trino
 
-> **Version anchor (2026-08-26).** **Trino 483** (released 2026-07-17, `trino.io/docs/current/release.html`)
-> is the current stable release at time of writing; Trino ships a new numbered release roughly
-> every 4-8 weeks (483 followed 482 on 2026-06-25, which followed 481 on 2026-05-11), so a
-> higher number may exist by the time you read this — always check the release page rather than
-> trusting this number. **Amazon Athena engine version 3**, generally available since October
-> 2022, is built on Trino and AWS states it targets staying within 60-90 days of upstream Trino
+> **Version anchor (2026-10-19).** **Trino 484** (released 2026-10-15, `trino.io/docs/current/release.html`)
+> is the stable release this page is pinned to. Releases are numbered, with irregular gaps
+> (481 on 2026-05-11, 482 on 2026-06-25, 483 on 2026-07-17, then 484 three months later), so
+> check the release page before trusting this number. Release 484 carries breaking changes an
+> upgrade from 483 must plan for: the Hive and Lakehouse connectors default
+> `hive.storage-format` to `PARQUET` (set `ORC` to keep the old behaviour); the Alluxio file
+> system cache settings (`fs.cache.directories`, `fs.cache.max-sizes` and related) move to a
+> node-wide cache config shared by all catalogs, which now set only `fs.cache.enabled`; and the
+> Docker image is built on the Red Hat Hardened core runtime image, has no `run-trino` script,
+> and needs `node.id=${ENV:HOSTNAME}` in any custom `node.properties`.
+> **Amazon Athena engine version 3**, generally available since October 2022, is built on Trino and AWS states it targets staying within 60-90 days of upstream Trino
 > releases. **Starburst Enterprise (SEP)** and **Starburst Galaxy** are Starburst's commercial
 > distributions of Trino, founded in 2017 by Justin Borgman together with Trino's original
 > creators. The **Iceberg connector** referenced throughout §6.8 tracks whatever Iceberg table
 > spec version the connector build supports; see the version anchor in
 > [`apache_iceberg.md`](../apache_iceberg/apache_iceberg.md) for the Iceberg-side version line.
-> Version-gated behaviour is tagged inline as `[483]`, `[Athena v3]`, `[SEP]` and so on; anything
+> Version-gated behaviour is tagged inline as `[484]`, `[483]`, `[Athena v3]`, `[SEP]` and so on; anything
 > untagged is stable across the current release line.
 
 Trino is a distributed MPP SQL query engine: a stateless compute layer that plans and executes
@@ -627,6 +632,79 @@ than one Trino cluster, `opa` (Open Policy Agent) and `ranger` (Apache Ranger) i
 delegate the actual authorization decision to an external policy service rather than encoding
 rules locally on each coordinator.
 
+### 6.13 File system cache `[484]`
+
+The Delta Lake, Hive and Iceberg connectors can cache object-storage reads on each
+node's local disk, so a hot Parquet footer or row group is read from S3 once and then from SSD.
+From 484 the cache is one per node, shared by every catalog, and configured in two places:
+
+```properties
+# etc/config.properties (identical on every node)
+cache-manager.config-files=etc/cache-manager-alluxio.properties
+
+# etc/cache-manager-alluxio.properties
+cache-manager.name=alluxio
+fs.cache.directories=/mnt/nvme/trino-cache
+fs.cache.max-sizes=500GB          # or fs.cache.max-disk-usage-percentages
+# fs.cache.ttl=7d, fs.cache.page-size=1MB are the defaults
+
+# etc/catalog/lake.properties (each catalog that should cache)
+fs.cache.enabled=true
+```
+
+A catalog with `fs.cache.enabled=true` on a node with no `alluxio` cache manager fails to
+start. A separate `memory` cache manager caches coordinator metadata on the heap
+(`fs.memory-cache.max-size`, `fs.memory-cache.ttl` default `1h`).
+
+**Why locality decides the hit rate.** Each node caches only what it reads, so the scheduler
+prefers a fixed set of nodes for the splits of a given file: `node-scheduler.cache-preferred-hosts-count`
+(default 2) on the coordinator. Lower values mean fewer duplicate copies and more effective
+cache; higher values spread hot files over more nodes and survive a node loss with a warm
+copy. When the preferred nodes are busy the split runs elsewhere and that node caches the file
+too. Put the cache on dedicated local NVMe, never on the root disk and never on shared storage,
+and expect the hit rate to drop after autoscaling adds nodes, since a new node starts cold.
+
+### 6.14 Table functions and query pass-through
+
+A table function returns a table and is called in `FROM` inside `TABLE(...)`. When its output
+columns depend on its arguments it is a **polymorphic table function** (PTF), the SQL:2016
+feature Trino implements in its SPI. Arguments are scalars (constant expressions), descriptors
+(`DESCRIPTOR(id BIGINT, name VARCHAR)`) or tables (`TABLE(orders)` or `TABLE(SELECT ...)`), passed
+either all by name (`=>`) or all by position, never mixed.
+
+| Function | Where it lives | What it returns |
+|---|---|---|
+| `exclude_columns(input => TABLE(t), columns => DESCRIPTOR(a, b))` | `system.builtin` | `t` minus the listed columns, so `SELECT *` without a wide `SELECT` list |
+| `sequence(start => 0, stop => n, step => 1)` | `system.builtin` | one `bigint` column `sequential_number`; `stop` is inclusive, output is unordered |
+| `<catalog>.system.query(query => '...')` | JDBC connectors (PostgreSQL, MySQL, Oracle, SQL Server and others) | the result set of a native query, executed entirely by the source |
+| `<catalog>.system.table_changes(schema_name, table_name, start_snapshot_id, end_snapshot_id)` | Iceberg connector | row-level changes between two snapshots, with `_change_type`, `_change_version_id`, `_change_timestamp` and `_change_ordinal` |
+
+A table argument declared with set semantics also accepts `PARTITION BY`, `ORDER BY` and
+`KEEP WHEN EMPTY` or `PRUNE WHEN EMPTY`, which lets Trino run one function instance per partition
+in parallel across workers, the same way it parallelises a window function.
+
+```sql
+-- Pass-through: PostgreSQL runs the window frame exclusion Trino's SQL does not have
+SELECT * FROM TABLE(
+  legacy_pg.system.query(query => 'SELECT id, array_agg(week) OVER (ORDER BY week
+     ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE GROUP) AS w FROM test.time_data'));
+
+-- Iceberg incremental read: only rows changed between two snapshots
+SELECT * FROM TABLE(lake.system.table_changes(
+  schema_name => 'sales', table_name => 'orders',
+  start_snapshot_id => 6541165659943306573,   -- exclusive
+  end_snapshot_id   => 6745790645714043599));  -- inclusive
+```
+
+**Pass-through is a hole in the security model.** The native query string goes to the source
+unparsed: Trino does not validate it, does not apply its own table, column, row-filter or mask
+rules to it, and the source checks it with the catalog's connection credentials. Trino also does
+not preserve an `ORDER BY` inside the string. With file-based access control, `system.query` is
+gated by a function rule on schema `system`, function `query`, privilege `EXECUTE`; with no
+function rules only `system.builtin` functions run. With the default allow-all access control
+(§6.12) every user can call it. Grant it to the few users who need a native feature, and connect
+that catalog with a read-only database role so a pass-through `DELETE` fails at the source.
+
 ---
 
 ## 7. Real-World Examples
@@ -828,6 +906,17 @@ guidance is explicit that `TASK`-policy batch workloads belong on a **dedicated 
 case study hit this exact regression before splitting into the two-cluster architecture it
 documents.
 
+**The 484 upgrade that failed at catalog load.** A cluster upgraded from 483 with
+`fs.cache.directories` and `fs.cache.max-sizes` still in each catalog file, as every pre-484
+example shows. From 484 those keys live only in the node-wide cache-manager file named by
+`cache-manager.config-files`, and catalogs set only `fs.cache.enabled`, so the catalogs failed
+to load. The same upgrade changed three behaviours that do not fail loudly: new Hive and
+Lakehouse tables default to `PARQUET` instead of `ORC` (set `hive.storage-format=ORC` to keep
+ORC), JSON casts and constructors now keep numeric types, decimal scale, member order and
+duplicate keys and reject nesting deeper than 1,024, and interval multiplication and division
+truncate to the interval's field range. Diff the release notes' breaking-change list against the
+queries your dashboards run before upgrading, not after.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1002,6 +1091,14 @@ Every join, aggregation boundary, and exchange point in a query's plan can add a
 **Short:** Pushdown depth is connector-specific — Trino only pushes down what that connector's implementation explicitly supports, not everything Postgres itself could execute.
 Trino's JDBC-family connectors push down what their specific implementation has been built to translate into the source system's native query language — simple predicates and often aggregations for a mature connector — but any expression, function, or join shape the connector doesn't translate gets pulled into Trino's own compute layer and evaluated there instead, silently, with no error indicating the pushdown didn't happen. The practical consequence is that a query which would be trivially fast run directly against Postgres can be dramatically slower through Trino if it relies on pushdown the connector doesn't implement — checking `EXPLAIN` output for what actually got pushed down (versus assumed) is the only reliable way to know, not reading the connector's marketing description.
 
+**Q: A team gets around a missing pushdown by wrapping the PostgreSQL query in `system.query` pass-through. What did they give up?**
+**Short:** Trino's own access control on that query: the native SQL runs unparsed with the catalog's credentials, so table, column, row-filter and mask rules do not apply.
+`TABLE(pg.system.query(query => '...'))` is a polymorphic table function whose output columns come from the result set of a string Trino never parses. PostgreSQL executes it in full, which does fix the pushdown gap, but Trino cannot see which tables or columns it touches, so none of its own column masks or row filters run, and the source authorizes it as the catalog's connection user. Trino also does not keep an `ORDER BY` written inside the string. With the default allow-all access control every user can call it; with file-based control it needs a function rule for schema `system`, function `query`, privilege `EXECUTE`. Grant it to named users, and give the catalog a read-only database role so a pass-through write fails at the source.
+
+**Q: Trino 484's file system cache is on and the hit rate was 80%, then autoscaling doubled the workers and query latency got worse for an hour. Why?**
+**Short:** Each node caches only what it reads; split scheduling prefers a few hosts per file, and the new nodes start with empty caches, so many splits go back to object storage.
+The `alluxio` cache manager stores pages on each worker's local disk, and `node-scheduler.cache-preferred-hosts-count` (default 2) makes the coordinator send a file's splits to the same small set of nodes so the cache stays warm. Adding nodes changes that host set for many files, so their preferred hosts are now cold workers that read from S3 again and fill their own `fs.cache.directories`. The hit rate climbs back as the working set is re-read. Scale out ahead of the peak rather than during it, keep the cache on local NVMe, and watch the cache hit metrics after every scaling event, not only the CPU graph.
+
 **Q: Why does Trino's own documentation describe spill-to-disk as legacy rather than removing it outright?**
 **Short:** Spill still solves a narrower problem fault-tolerant execution doesn't — a single query's memory spike on one otherwise-healthy node.
 Fault-tolerant execution is designed around surviving a worker's outright failure or preemption, spooling data so a *different* worker can pick up a failed task; it does nothing for a query that's simply using more memory than one node comfortably has while that node stays up and healthy. Spill addresses exactly that narrower case — an operator offloading intermediate state to local disk to avoid an out-of-memory kill on a node that never actually failed — which is a real, distinct scenario even in a fault-tolerant-execution-enabled cluster. Trino's guidance to prefer fault-tolerant execution is about which mechanism to reach for *first*, not a claim that spill has no remaining use.
@@ -1066,6 +1163,8 @@ With no access control file configured, Trino's built-in default access control 
 - **Check `EXPLAIN` output for what actually got pushed down**, especially on cross-catalog joins
   against connectors with uncertain statistics support — never assume a pushdown happened because
   it seemed like it should have (§6.9, §12).
+- **Grant `system.query` pass-through to named users only**, and connect JDBC catalogs with a
+  read-only database role, since the native string bypasses Trino's own access control (§6.14).
 - **Monitor the coordinator as its own dashboard**, not an assumed-fine appendage to worker
   metrics — JMX via Prometheus/Grafana on coordinator CPU, GC, and query-queue depth catches the
   bottleneck §10 describes before it becomes an incident.

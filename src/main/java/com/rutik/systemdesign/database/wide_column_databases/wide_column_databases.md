@@ -1,8 +1,8 @@
 # Wide-Column Databases
 
 > **Version anchor (2026-08-25).** **Apache Cassandra 5.0** (GA September 2024) is the current
-> stable generation and this page's baseline. **Cassandra 6.0** exists only as **6.0-alpha1**
-> as of 2026 — not GA, not production-ready — and its headline feature, **Accord**, is called
+> stable generation and this page's baseline. **Cassandra 6.0** exists only as alphas (**6.0-alpha2**,
+> July 2026), not GA and not production-ready, and its headline feature, **Accord**, is called
 > out as alpha everywhere it appears below. **ScyllaDB** is a separate C++, shard-per-core
 > reimplementation of the Cassandra wire protocol, covered in its own subsection — a different
 > codebase, not a Cassandra version. **Apache HBase** and its managed descendant **Google Cloud
@@ -392,8 +392,8 @@ IF balance = 500;
 ### Accord: Transactions Beyond LWT [6.0-alpha]
 
 LWT above costs 4 round trips because it runs Paxos per operation, and it is scoped to a
-single partition. Apache Cassandra 6.0 — **alpha only as of 2026, published as
-6.0-alpha1, not GA, not production-ready** — introduces **Accord**, a leaderless
+single partition. Apache Cassandra 6.0 (**alpha only as of 2026, published as
+6.0-alpha1 and 6.0-alpha2, not GA, not production-ready**) introduces **Accord**, a leaderless
 consensus protocol that aims to provide general-purpose ACID transactions natively,
 alongside Transactional Cluster Metadata and transactional repair.
 
@@ -531,9 +531,19 @@ framework instead of running on the JVM. Two changes drive most of the differenc
 Practical consequence: far higher achievable throughput per node and fewer nodes for
 the same workload, at the cost of a different operational model (Seastar's
 async/reactor-per-core model instead of the JVM tooling most Cassandra operators
-already know) and a feature set that lags newer Cassandra releases — SAI, vector
-search, and UCS above are Cassandra-5.0-specific; verify ScyllaDB's own roadmap before
-assuming feature parity.
+already know) and a feature set that diverges from Cassandra's. SAI and UCS above are
+Cassandra 5.0 features. ScyllaDB took its own path: tablets (Raft-managed, per-table
+data distribution) reached feature parity with vnodes in 2026.1, when counters, the last
+missing feature, were added, and 2026.3 (3 September 2026) made vnode-to-tablet migration GA. 2026.3 also added full-text
+search: a `fulltext_index` custom index, queried with `WHERE BM25(col, 'terms') > 0 ORDER BY
+BM25(col, 'terms') LIMIT n`. Strongly consistent keyspaces (`CREATE KEYSPACE ... WITH
+consistency = 'global'`, experimental since 2026.2) give each tablet its own Raft group: a
+write goes to that tablet's Raft leader, is appended to its log, and commits once a majority
+has it. They do not yet support LWT, CDC, materialized views or secondary indexes. 2026.3 also
+previews keyspaces whose SSTables live on S3-compatible object storage
+(`STORAGE = {'type': 'S3', ...}` at `CREATE KEYSPACE`), and ScyllaDB Cloud offers Vector
+Search. Check a specific CQL feature against ScyllaDB's docs rather than assuming parity with
+a Cassandra release.
 
 **Real-world example.** Discord migrated its message-history storage from Cassandra to
 ScyllaDB after Cassandra's JVM garbage collection produced tail-latency spikes at their
@@ -739,6 +749,16 @@ bucket width that puts your busiest key under both limits, then remember the cos
 | Query flexibility | Limited (partition key required) | Very High (SQL) | High (aggregation) |
 | Secondary indexes | Limited (local, per-node fan-out; SAI [5.0] narrows but does not close the gap) | Rich (B+tree, GIN, etc.) | Rich |
 | Transactions | Single partition or LWT | Full ACID | Multi-document ACID (also across shards) |
+
+Two efforts aim past Paxos-based LWT in the Cassandra-compatible family:
+
+| | ScyllaDB strongly consistent keyspace | Cassandra Accord |
+|---|---|---|
+| Protocol | Raft, one leader-based group per tablet | Accord, leaderless consensus |
+| Scope | Orders every operation within one tablet; no cross-tablet transactions announced | General multi-partition ACID transactions |
+| Round trips | Leader appends and waits for a majority | Design target of one wide-area round trip |
+| Status (October 2026) | Experimental since ScyllaDB 2026.2; no LWT, CDC, MVs or secondary indexes | Cassandra 6.0-alpha2, not GA |
+| Choose it when | A table needs linearizable reads and writes without per-operation Paxos | Writes must commit atomically across partitions |
 
 ---
 
@@ -947,9 +967,9 @@ Cassandra's Lightweight Transactions run Paxos per operation: prepare, promise, 
 HBase and Cassandra both descend from Google's Bigtable paper, but HBase inherited Bigtable's architecture directly while Cassandra grafted Bigtable's data model onto Amazon Dynamo's ring. That shows up as opposite tradeoffs: HBase partitions by row-key range, assigns each range (region) to exactly one RegionServer via a master (HMaster), and gets strong, read-your-writes consistency for free because only one server ever owns a given region at a time — no quorum math required. Cassandra partitions by hashing the key across a masterless ring and only gets that same strength by paying for `QUORUM` reads and writes on every operation, defaulting instead to tunable eventual consistency. The cost on HBase's side is architectural: it runs on HDFS rather than owning its storage, needs ZooKeeper plus an HMaster for coordination, and a monotonically increasing row key (timestamps, auto-increment IDs) hotspots the newest region until it splits, a problem Cassandra's murmur3 hashing avoids by construction. Choose HBase, or its managed descendant Google Cloud Bigtable, when the workload wants strong consistency by default and already lives in a Hadoop/HDFS ecosystem; choose Cassandra for masterless multi-region writes and when you can design row keys around hashing instead of natural ranges.
 
 **Q: What does ScyllaDB's shard-per-core architecture buy you over Cassandra, and what's the cost?**
-**Short:** Shard-per-core plus no JVM GC gives ScyllaDB higher throughput per node, at the cost of a different ops model and lagging features.
+**Short:** Shard-per-core plus no JVM GC gives ScyllaDB higher throughput per node, at the cost of a different ops model and a feature set that diverges from Cassandra's.
 
-ScyllaDB reimplements the Cassandra wire protocol and CQL in C++ on the Seastar framework instead of the JVM. Two architectural changes drive the difference: shard-per-core pins one shard to each physical core with its own memory and its own slice of the node's data, eliminating the cross-core locking a JVM thread pool pays for, so a single node's throughput scales with core count more directly; and the absence of a JVM means no stop-the-world garbage-collection pause, which is precisely the failure mode that produces p99 tail-latency spikes on a large heap under load. The practical payoff is far higher achievable throughput per node and fewer nodes for the same workload — Discord migrated its message-history storage from Cassandra to ScyllaDB for exactly this reason, moving off Cassandra because JVM garbage collection was producing tail-latency spikes at their node count and message volume. The cost is a different operational model — Seastar's async/reactor-per-core design instead of the JVM tooling most Cassandra operators already know — and a feature set that lags newer Cassandra releases; SAI, vector search, and UCS are Cassandra-5.0-specific, so feature parity with ScyllaDB should be verified rather than assumed.
+ScyllaDB reimplements the Cassandra wire protocol and CQL in C++ on the Seastar framework instead of the JVM. Two architectural changes drive the difference: shard-per-core pins one shard to each physical core with its own memory and its own slice of the node's data, eliminating the cross-core locking a JVM thread pool pays for, so a single node's throughput scales with core count more directly; and the absence of a JVM means no stop-the-world garbage-collection pause, which is precisely the failure mode that produces p99 tail-latency spikes on a large heap under load. The practical payoff is far higher achievable throughput per node and fewer nodes for the same workload. Discord migrated its message-history storage from Cassandra to ScyllaDB for exactly this reason, moving off Cassandra because JVM garbage collection was producing tail-latency spikes at their node count and message volume. The cost is a different operational model (Seastar's async/reactor-per-core design instead of the JVM tooling most Cassandra operators already know) and a feature set that diverges from Cassandra's: SAI and UCS are Cassandra 5.0 features, while ScyllaDB has its own tablets, Vector Search, BM25 full-text search (2026.3), and experimental Raft-backed strongly consistent keyspaces (2026.2), so verify each feature rather than assuming parity.
 
 **Q: How does Cassandra 5.0's VECTOR type and ANN search fit into SAI, and when should you use it?**
 **Short:** VECTOR search is an HNSW-based SAI index type good for single-store top-K similarity, not a dedicated vector database replacement.

@@ -180,7 +180,7 @@ The Client only ever talks to `VendingMachine`; `IdleState` is the object that d
 - **Stateless objects** — if behavior doesn't depend on accumulated state, the pattern adds unnecessary structure.
 - **Few operations per state** — if there's only one or two methods, an if-else is more readable than creating a full class hierarchy.
 - **Transitions are rare** — if the object almost never changes state, the overhead of the pattern isn't justified.
-- **State transitions require complex coordination** — if transitioning involves multiple objects atomically, consider a dedicated state machine library (e.g., Spring State Machine) rather than a hand-rolled implementation.
+- **State transitions require complex coordination** — if transitioning involves multiple objects atomically, consider a workflow engine that persists the current state and retries transitions (Temporal, AWS Step Functions, Camunda or Flowable) rather than a hand-rolled implementation.
 
 ---
 
@@ -381,9 +381,10 @@ public class Order {
   `isEnabled()` — Swing button behavior depends on which combination of states is active.
 - **JPA/Hibernate entity lifecycle**: `Transient -> Managed -> Detached -> Removed`; each state
   has different behavior for `persist()`, `merge()`, `remove()`, `detach()` calls on `EntityManager`.
-- **Spring State Machine** (`org.springframework.statemachine`): explicit `StateMachineConfig<S,E>`
+- **Spring Statemachine** (`org.springframework.statemachine`): explicit `StateMachineConfig<S,E>`
   with guard conditions, actions on entry/exit, and transition event types; used for order workflows,
-  approval chains, and IoT device lifecycle management.
+  approval chains, and IoT device lifecycles. The project is no longer maintained, and its GitHub
+  repository was archived on 2026-07-05.
 - **Java NIO `SelectionKey`**: `OP_ACCEPT`, `OP_CONNECT`, `OP_READ`, `OP_WRITE` — channel
   readiness state drives which operations the selector dispatches.
 - **Camunda / Activiti BPMN engines**: process token state machines map directly to State pattern;
@@ -529,11 +530,11 @@ public enum OrderStates implements OrderState {
 - Adding a new state requires modifying 3 or more existing methods/classes.
 - Illegal transitions are silently ignored or produce inconsistent data.
 
-**Move AWAY FROM State pattern (to Spring State Machine or Camunda) when:**
+**Move AWAY FROM State pattern (to a workflow engine such as Temporal or Camunda) when:**
 - Transitions require persistence (persisted state machine with audit trail) and retry on restart.
 - Business users need to configure transitions at runtime (BPMN editor) without code changes.
-- The state machine spans multiple microservices (sagas) — Spring State Machine with Redis
-  persister or Camunda with a process engine is more appropriate than in-process State objects.
+- The state machine spans multiple microservices (sagas) — Temporal, AWS Step Functions,
+  or Camunda with a persisted process engine is more appropriate than in-process State objects.
 
 ```mermaid
 flowchart LR
@@ -550,7 +551,7 @@ flowchart LR
     Q1 -->|"Yes"| REFACTOR(["Refactor to<br/>State pattern"])
     REFACTOR --> Q2{"Needs persisted audit trail,<br/>runtime-configurable transitions,<br/>or a multi-service saga?"}
     Q2 -->|"No"| INPROC(["In-process State<br/>(enum or class hierarchy)"])
-    Q2 -->|"Yes"| FRAMEWORK(["Spring State Machine<br/>or Camunda"])
+    Q2 -->|"Yes"| FRAMEWORK(["Temporal, Step Functions<br/>or Camunda"])
 
     class START io
     class Q1,Q2 mathOp
@@ -586,7 +587,7 @@ A: This is the most common interview question. Strategy: the algorithm is select
 
 **Q: Where does transition logic live?**
 **Short:** Transition logic lives either centralized in the Context's switch/table or distributed across each ConcreteState.
-A: Two approaches: (1) Context-driven — Context has a big switch/table that maps (currentState, event) to nextState. Centralized but Context becomes complex. (2) State-driven — each ConcreteState calls `context.setState(new NextState())`. Distributed but co-located. Mention that Spring State Machine centralizes transitions in a configuration DSL, which is the cleanest approach for complex machines.
+A: Two approaches: (1) Context-driven — Context has a big switch/table that maps (currentState, event) to nextState. Centralized but Context becomes complex. (2) State-driven — each ConcreteState calls `context.setState(new NextState())`. Distributed but co-located. Mention that a transition table (`EnumMap<State, EnumMap<Event, State>>`) or a workflow engine's model (Camunda BPMN, Step Functions ASL) centralizes transitions as data, which is the cleanest approach for complex machines.
 
 **Q: How would you make a State machine thread-safe?**
 **Short:** An AtomicReference<State> with compare-and-swap transitions makes a State machine thread-safe.
@@ -594,7 +595,7 @@ A: Use `AtomicReference<State>` for the state field and compare-and-swap to tran
 
 **Q: What is "state explosion" and how do you manage it for a complex FSM?**
 **Short:** State explosion is when state-by-event combinations grow unmanageable, fixed with a transition table or a framework.
-A: State explosion happens when the number of (state x event) combinations grows large enough that a single Context class — or even one ConcreteState class per state — becomes unmanageable, with logic scattered and transitions hard to verify for completeness. The standard fixes are: a state transition table (a `Map<State, Map<Event, State>>` or similar data structure that's validated for missing/illegal transitions at startup), a framework like Spring State Machine that lets you declare states, events, and transitions in a configuration DSL, or a hierarchical state machine (HSM) where substates inherit transitions from a parent state so common edges aren't duplicated. Choose a table or framework once you have more than roughly 5-6 states or any states share significant transition logic.
+A: State explosion happens when the number of (state x event) combinations grows large enough that a single Context class — or even one ConcreteState class per state — becomes unmanageable, with logic scattered and transitions hard to verify for completeness. The standard fixes are: a state transition table (a `Map<State, Map<Event, State>>` or similar data structure that's validated for missing/illegal transitions at startup), a workflow engine such as Temporal, Step Functions, or Camunda that declares states and transitions as a model and persists the current state, or a hierarchical state machine (HSM) where substates inherit transitions from a parent state so common edges aren't duplicated. Choose a table or framework once you have more than roughly 5-6 states or any states share significant transition logic.
 
 **Q: Enum-based State vs. class-based State — which would you pick and when?**
 **Short:** Enum-based State suits small, fixed, stateless FSMs, while class-based State suits states carrying data or needing extensibility.
@@ -661,7 +662,7 @@ A: Once the machine is long-running and durable rather than in-memory and short-
 
 5. **Validate transitions** — explicitly reject illegal transitions (e.g., `dispense()` in `IdleState`) rather than silently ignoring them. Throw `IllegalStateException` with a descriptive message.
 
-6. **Consider Spring State Machine for complex workflows** — hand-rolled State pattern is fine for simple machines, but real workflow engines with persistence, history, and parallel states deserve a framework.
+6. **Consider a workflow engine (Temporal, Camunda, Flowable) for complex workflows** — hand-rolled State pattern is fine for simple machines, but real workflow engines with persistence, history, and parallel states deserve a framework.
 
 7. **Document the state diagram** — draw a finite state machine diagram and keep it in sync with the code. It's the most important documentation for a state-based system.
 
@@ -676,7 +677,7 @@ A: Once the machine is long-running and durable rather than in-memory and short-
 | Java `enum` with per-constant method bodies | A closed set of states, exhaustive by construction, with zero dependencies and no allocation per transition | The default for any FSM that fits in one JVM and one class |
 | `EnumMap` / `EnumSet` transition tables | The transition function as data rather than code — `EnumMap<State, EnumMap<Event, State>>` | The transition table is large enough that reading it matters more than inlining it |
 | Sealed interfaces + pattern matching for `switch` (Java 21+) | States that carry different data, with the compiler enforcing exhaustiveness | States are not uniform — each one holds its own payload |
-| Spring Statemachine | Declarative states, transitions, guards, actions, hierarchical and parallel regions, plus persistence of the current state | The machine has guards and nested regions, and you want the topology visible in configuration |
+| Spring Statemachine (no longer maintained, repository archived 2026-07-05) | Declarative states, transitions, guards, actions, hierarchical and parallel regions, plus persistence of the current state | Existing code only; a new FSM uses an `enum` or sealed interfaces in-process, or Temporal, Step Functions, or Camunda/Flowable when the state must be durable |
 | Apache Pekko (or Akka) FSM | Per-actor state with mailbox-serialized transitions, so no locking is needed | Highly concurrent FSMs, one instance per entity |
 | Temporal | Durable execution: the workflow's state survives process restarts and is replayed deterministically from history | State must outlive the process — multi-day approvals, sagas |
 | AWS Step Functions | A managed state machine defined in JSON/ASL, with per-transition visibility and retries | Orchestration across services, where the operator view matters as much as the code |

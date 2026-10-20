@@ -506,8 +506,8 @@ innodb_io_capacity = 2000           # SSD: 2000-10000
 innodb_io_capacity_max = 4000       # Peak I/O capacity
 
 # Redo log: too small → frequent log flushes, I/O spikes; too large → slow crash recovery
-# MySQL 8.0: automatically sized; MySQL 5.7 default: 48MB (usually too small)
-innodb_log_file_size = 1G           # MySQL 5.7 only; MySQL 8.0 auto-configures
+# MySQL 8.0.30+: default 100MB, settable online; auto-sized only when innodb_dedicated_server=ON
+innodb_redo_log_capacity = 2G
 innodb_log_buffer_size = 64M        # Buffer before writing to redo log
 
 # Flush method: most important durability/performance knob

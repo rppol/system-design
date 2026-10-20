@@ -24,7 +24,7 @@ This module is pure Java — no Spring. It pairs with [JVM Internals](../jvm_int
 
 ## 3. Core Principles
 
-- **Magic + version gate every class**: The first 4 bytes are `0xCAFEBABE`; the next 4 are `minor_version` (u2) + `major_version` (u2). Major 52 = Java 8, 61 = Java 17, 65 = Java 21, 69 = Java 25, 70 = Java 26. A newer major on an older JVM throws `UnsupportedClassVersionError`.
+- **Magic + version gate every class**: The first 4 bytes are `0xCAFEBABE`; the next 4 are `minor_version` (u2) + `major_version` (u2). Major 52 = Java 8, 61 = Java 17, 65 = Java 21, 69 = Java 25, 70 = Java 26, 71 = Java 27. A newer major on an older JVM throws `UnsupportedClassVersionError`.
 - **The constant pool is 1-indexed**: Valid indices run `1..constant_pool_count-1`; index 0 is reserved. `CONSTANT_Long`/`CONSTANT_Double` occupy **two** consecutive slots, so the next entry's index jumps by 2 — a classic parsing trap.
 - **Stack-based execution**: No registers. Operands live on a per-frame operand stack; arguments and locals live in the local variable array. Each `Code` attribute declares `max_stack` and `max_locals`.
 - **Symbolic references, resolved lazily**: A `Methodref` names a class/method/descriptor by pool indices. The JVM resolves the symbolic reference to a direct one on first use (link phase — see [JVM Internals](../jvm_internals/jvm_internals.md)).
@@ -87,7 +87,27 @@ This module is pure Java — no Spring. It pairs with [JVM Internals](../jvm_int
 | Mode | Entry method | Timing | Constraint |
 |------|--------------|--------|------------|
 | **Static (launch)** | `premain(String, Instrumentation)` | before `main()`, via `-javaagent:agent.jar` | sees classes as they first load |
-| **Dynamic (attach)** | `agentmain(String, Instrumentation)` | any time, via Attach API / `jcmd`, on a running JVM | must `retransformClasses` already-loaded classes |
+| **Dynamic (attach)** | `agentmain(String, Instrumentation)` | any time, via Attach API / `jcmd`, on a running JVM | must `retransformClasses` already-loaded classes; warns on Java 21+ unless `-XX:+EnableDynamicAgentLoading` |
+| **Executable JAR** | `agentmain(String, Instrumentation)` | before `main()`, via `Launcher-Agent-Class` in the `java -jar` manifest | counts as startup loading, so no warning |
+
+**Integrity by default [JEP 451, Java 21].** Loading an agent into a running JVM now
+prints a warning to stderr, and a future JDK will refuse it unless the JVM was started
+with `-XX:+EnableDynamicAgentLoading`. Startup agents (`-javaagent`, `-agentlib`,
+`Launcher-Agent-Class`) and attach uses that load no agent (`jcmd Thread.print`,
+JMX via `jconsole`) are unaffected. The rule behind it: a library must not load an
+agent into its own process; only the person launching the JVM decides which agents run.
+
+```text
+WARNING: A Java agent has been loaded dynamically (/opt/agents/timing-agent.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+```
+
+`-XX:-EnableDynamicAgentLoading` (accepted since JDK 9) turns the future default on
+today. Self-attach from inside the process has been blocked since JDK 9 unless
+`-Djdk.attach.allowAttachSelf=true` is set, which is why some libraries spawn a helper
+JVM to attach back; JEP 451 covers that path too.
 
 ---
 
@@ -129,7 +149,7 @@ Offset  Raw bytes        Field (JVMS ClassFile)     Meaning / example
 ------  ---------------  -------------------------  --------------------------------
 0x00    CA FE BA BE      u4 magic                   0xCAFEBABE  "is this a class?"
 0x04    00 00            u2 minor_version           0
-0x06    00 45            u2 major_version           69 = Java 25   (52=8, 61=17, 65=21)
+0x06    00 45            u2 major_version           69 = Java 25   (52=8, 61=17, 65=21, 71=27)
 0x08    00 1F            u2 constant_pool_count      31 -> real entries are #1..#30
 0x0A    <variable>       cp_info[count-1]           the constant pool (1-INDEXED)
   |     01 00 05 ...     CONSTANT_Utf8       tag 01  u2 length + modified UTF-8 bytes
@@ -174,6 +194,7 @@ That framing matters because it explains the format's one real constraint: nothi
 
   major_version decoded:   feature = major - 44
       45 -> Java 1.1     52 -> Java 8      61 -> Java 17     65 -> Java 21     69 -> Java 25
+      70 -> Java 26     71 -> Java 27
 
   the eight pool entries of Adder, each sized from its own tag
       #1  Methodref     1 tag + 2 + 2                        =  5    5
@@ -496,10 +517,13 @@ A large suite created thousands of distinct Mockito mocks; each generated subcla
 ### War Story 3: `retransformClasses` failed with `UnsupportedOperationException`
 An engineer tried to hot-add a field to a loaded class via a dynamic agent to store timing state. `retransformClasses` rejected it — **you cannot add/remove methods or fields, change signatures, or alter the class hierarchy** during retransformation; only method bodies may change. **Fix**: store per-invocation state on the operand stack / thread-local inside advice, never by changing the class schema.
 
-### War Story 4: `final` method silently not advised
+### War Story 4: JDK 21 upgrade fills test logs with dynamic-agent warnings
+A team moved its test suite to JDK 21 and every Maven Surefire fork printed `WARNING: A Java agent has been loaded dynamically`. The source was Mockito's inline mock maker (the default since Mockito 5), which attaches Byte Buddy's agent to the test JVM at runtime to retransform `final` classes. Nothing failed, so the warning was ignored until the team asked what would happen when a later JDK disallows dynamic loading by default: every test that mocks a `final` class would stop working. **Fix**: load the agent at startup by adding `-javaagent:${org.mockito:mockito-core:jar}` to Surefire's `argLine` (after `maven-dependency-plugin:properties` resolves the path), which removes the warning without `-XX:+EnableDynamicAgentLoading`. Keep that flag for real serviceability tools attached by an operator.
+
+### War Story 5: `final` method silently not advised
 A `@Transactional` annotation on a `final` service method did nothing — no transaction, no error. Spring's CGLIB subclass proxy cannot override a `final` method, so the advice was skipped entirely. **Fix**: remove `final` from methods intended to be proxied, or use interface-based JDK proxies; treat "advice mysteriously missing" as a proxying/override problem first.
 
-### War Story 5: Off-by-one constant-pool parser
+### War Story 6: Off-by-one constant-pool parser
 A homegrown `.class` reader iterated the constant pool as a simple loop `for (i=1; i<count; i++)`, corrupting on the first `long`/`double`. Those entries **occupy two slots**, so the loop must skip an index after each. **Fix**: increment the index by 2 for `CONSTANT_Long`/`CONSTANT_Double`; this is the most infamous class-parsing bug.
 
 **What it means.** "`constant_pool_count` counts index numbers, not entries — so once a `long` appears, the number of things you must read stops equalling the number of times you may increment the cursor."
@@ -572,7 +596,7 @@ You changed the control flow (added a branch) without updating the `StackMapTabl
 **Q2: What is the magic number and what does the major version tell you?**
 **Short:** 0xCAFEBABE marks a class file, and its major_version byte reveals which Java release compiled it.
 
-The first four bytes of every `.class` file are `0xCAFEBABE`, identifying it as a class file; bytes 6-7 are the `major_version`. Major 52 = Java 8, 61 = Java 17, 65 = Java 21, 69 = Java 25 (major = Java feature version + 44). If a class's major version exceeds what the running JVM supports, you get `UnsupportedClassVersionError` at load. This is the concrete cause of "class compiled by a newer version" errors — check the target `--release`.
+The first four bytes of every `.class` file are `0xCAFEBABE`, identifying it as a class file; bytes 6-7 are the `major_version`. Major 52 = Java 8, 61 = Java 17, 65 = Java 21, 69 = Java 25, 71 = Java 27 (major = Java feature version + 44). If a class's major version exceeds what the running JVM supports, you get `UnsupportedClassVersionError` at load. This is the concrete cause of "class compiled by a newer version" errors; check the target `--release`.
 
 **Q3: Is the constant pool 0-indexed or 1-indexed, and why does that trip people up?**
 **Short:** The constant pool is 1-indexed, and long/double constants each occupy two consecutive slots.
@@ -609,52 +633,57 @@ The local variable array holds a method's parameters and locals, addressed by sl
 
 `premain` is the static-attach entry point, invoked before `main()` via `-javaagent:agent.jar`. `agentmain` is the dynamic-attach entry point, invoked when an agent attaches to an already-running JVM via the Attach API. `premain(String, Instrumentation)` sees classes as they first load (cleanest instrumentation); `agentmain(String, Instrumentation)` must call `Instrumentation.retransformClasses` to re-instrument classes that already loaded. Manifest keys `Premain-Class`/`Agent-Class` and `Can-Retransform-Classes: true` declare these.
 
-**Q10: What can `retransformClasses` NOT change about a loaded class?**
+**Q10: What changed for dynamically loaded Java agents in Java 21?**
+**Short:** JEP 451 makes the JVM warn when an agent is loaded into a running JVM; -XX:+EnableDynamicAgentLoading allows it, and a later JDK will disallow it by default.
+
+Since JEP 451 (Java 21) loading an agent into a running JVM, through the Attach API, `jcmd JVMTI.agent_load`, or a library attaching to its own process, prints a multi-line warning to stderr, and the JEP states that a future release will disallow it by default. `-XX:+EnableDynamicAgentLoading` allows it and hides the warning; `-XX:-EnableDynamicAgentLoading` disallows it today. Startup agents (`-javaagent`, `-agentlib`, and the `Launcher-Agent-Class` attribute of an executable JAR) are unaffected, as are attach uses that load no agent, such as `jcmd` thread dumps. The intent is integrity by default: only whoever launches the JVM chooses which agents may rewrite its classes. Libraries that relied on self-attach, such as Mockito's inline mock maker, should be loaded with `-javaagent` instead.
+
+**Q11: What can `retransformClasses` NOT change about a loaded class?**
 **Short:** retransformClasses can only change method bodies, never add or remove methods, fields, or hierarchy.
 
 It cannot add or remove methods or fields, change method signatures or modifiers, or alter the class hierarchy/interfaces — only method bodies (and constant pool as needed) may change. This "schema-preserving" constraint exists because live instances, JIT-compiled frames, and vtables assume the old shape. If you need extra per-invocation state, keep it on the operand stack or in a thread-local inside your advice, never by adding a field via retransform (which throws `UnsupportedOperationException`).
 
-**Q11: When would you pick ASM over Byte Buddy, or vice versa?**
+**Q12: When would you pick ASM over Byte Buddy, or vice versa?**
 **Short:** Byte Buddy's type-safe DSL and automatic frame computation make it the default over hand-written ASM.
 
 Use Byte Buddy for almost everything — agents, mocks, proxies — because its fluent DSL is type-safe and frames are computed for you. Drop to ASM only when you need opcode-level control or minimal overhead in a library hot path. ASM is the thin substrate (Byte Buddy, CGLIB, and Jacoco all use it internally) but forces you to manage frames and understand the JVMS. Javassist's source-string API is convenient for quick edits but is slower and weaker with generics. Rule of thumb: Byte Buddy by default, ASM when you must.
 
-**Q12: What is bytecode verification and what role does the `StackMapTable` play?**
+**Q13: What is bytecode verification and what role does the `StackMapTable` play?**
 **Short:** Verification proves bytecode is type-safe before execution, driven by the StackMapTable attribute since Java 7.
 
 Verification is the JVM proving, before execution, that bytecode is type-safe and the operand stack is consistent at every instruction (JVMS §4.10). Since Java 7 it uses type-checking rather than the old data-flow inference, driven by the `StackMapTable` attribute that `javac` emits recording the stack/local types at each branch target. This turns verification into a fast linear pass — but it means any tool that changes control flow must regenerate the frames or the class fails to load with `VerifyError`.
 
-**Q13: How does generics erasure show up in the class file?**
+**Q14: How does generics erasure show up in the class file?**
 **Short:** Erasure strips generic types from descriptors, so the compiler adds a synthetic bridge method to preserve polymorphism.
 
 Erasure removes generic type parameters from executable descriptors, so `Comparable<Box>.compareTo` erases to `compareTo(Object)`. The compiler adds a synthetic **bridge method** (`ACC_BRIDGE | ACC_SYNTHETIC`) that matches the erased signature and forwards, after a `checkcast`, to your typed `compareTo(Box)`. The generic information survives only in the `Signature` attribute for reflection, not in the bytecode the JVM executes. Seeing two `compareTo` methods in `javap` where you wrote one is erasure's bridge fixup in action.
 
-**Q14: Compile-time codegen versus bytecode-time manipulation — what's the tradeoff?**
+**Q15: Compile-time codegen versus bytecode-time manipulation — what's the tradeoff?**
 **Short:** Compile-time codegen is early and visible; bytecode manipulation is late, universal, and invisible in stack traces.
 
 Compile-time codegen (annotation processing) generates real source/classes during `javac`, so output is IDE-visible, debuggable, and fails at compile time. Bytecode manipulation instead rewrites classes at load or attach time, so it can touch code you can't recompile (JDK, third-party libs) but fails late with `VerifyError` and is invisible in stack traces. Choose compile-time when you own the source (MapStruct, Dagger, Lombok); choose bytecode-time for cross-cutting instrumentation of code you don't own (APM, coverage). The axis is early-and-visible versus late-and-universal.
 
-**Q15: How does Mockito create a mock, and why can't it (by default) mock a `final` class?**
-**Short:** Mockito subclasses the target via Byte Buddy, so it cannot mock final classes without the inline mock maker.
+**Q16: How does Mockito create a mock, and how can it mock a `final` class?**
+**Short:** Mockito 5's default inline mock maker retransforms the real class through a Java agent; the subclass maker cannot mock finals.
 
-Mockito's default mock-maker uses Byte Buddy to generate a runtime **subclass** of the target type whose methods are overridden to call Mockito's stubbing interceptor. Because it relies on subclassing/overriding, a `final` class or `final` method can't be intercepted this way — there's nothing to override. The workaround is the **inline mock maker** (`mockito-inline`), which uses a Java agent + `retransformClasses` to rewrite the *original* class's method bodies in place, enabling mocking of finals and statics at the cost of agent overhead.
+Since Mockito 5 the default mock maker is the **inline** one: Byte Buddy loads a Java agent and calls `retransformClasses` to rewrite the *original* class's method bodies so each call goes to Mockito's stubbing interceptor. Because nothing is subclassed, `final` classes, `final` methods and (with `mockStatic`) static methods can be mocked, and no extra artifact is needed; the old `mockito-inline` artifact only existed to switch this on before Mockito 5. The alternative `mockito-subclass` maker generates a runtime **subclass** whose overrides call the interceptor, so it cannot touch a `final` class or method, since there is nothing to override; it is the maker to use where retransformation is not available, such as GraalVM native image. The inline maker's cost is agent overhead and, on Java 21+, the JEP 451 dynamic-agent warning unless the agent is passed with `-javaagent`.
 
-**Q16: What is `invokespecial` used for besides constructors?**
+**Q17: What is `invokespecial` used for besides constructors?**
 **Short:** invokespecial performs non-virtual dispatch for constructors, explicit super calls, and private instance methods.
 
 `invokespecial` performs non-virtual dispatch to an exactly-named method: constructors (`<init>`), explicit `super.method()` calls, and `private` instance methods. The point is to bypass override lookup — `super.toString()` must call the parent's version, not re-dispatch to the current object's override. (Historically private-method calls used `invokespecial`; on interfaces with private methods and in some Java 11+ cases nestmate access refined this, but the non-virtual semantics remain.)
 
-**Q17: What is a `MethodHandle` and how does it differ from reflection?**
+**Q18: What is a `MethodHandle` and how does it differ from reflection?**
 **Short:** A MethodHandle resolves access once and executes at near-native speed, unlike per-call-checked reflection.
 
 A `MethodHandle` is a typed, directly-executable reference to a method/field/constructor from `java.lang.invoke`, resolved once and then invoked at near-native speed via `invokeExact`. Unlike `java.lang.reflect.Method`, access checks happen at lookup time (not every call), it's JIT-friendly (the JIT can inline through it), and it composes (bind arguments, adapt types, combine handles) — the JDK's own answer to [Effective Java Item 65: "Prefer interfaces to reflection"], whose complaint about `java.lang.reflect` is exactly the per-call cost and lost static type-checking that `MethodHandle` was designed to avoid. It's the runtime plumbing behind `invokedynamic` — `LambdaMetafactory` hands back a `CallSite` wrapping a `MethodHandle` to the lambda body.
 
-**Q18: How can you read a class file's bytecode without any third-party library?**
+**Q19: How can you read a class file's bytecode without any third-party library?**
 **Short:** javap -c -v -p disassembles a class file's bytecode, constant pool, and attributes without any external library.
 
 Run `javap -c -v -p ClassName` from the JDK — `-c` disassembles the bytecode, `-v` dumps the constant pool, versions, and attributes (`StackMapTable`, `BootstrapMethods`), and `-p` includes private members. For programmatic access without external deps, use the standard `java.lang.classfile` API — `ClassFile.of().parse(bytes)` returns a `ClassModel` you can walk for methods, attributes, and instructions. It is a final, non-preview part of `java.base` as of Java 24 (JEP 484), so it needs no `--enable-preview` and no ASM dependency on the Java 25 baseline. `javap` is the fastest way to answer "what did the compiler actually emit?" for lambdas, records, and switch expressions.
 
-**Q19: Why does `String` concatenation in a loop still cause allocation even with the JEP 280 `invokedynamic` form?**
+**Q20: Why does `String` concatenation in a loop still cause allocation even with the JEP 280 `invokedynamic` form?**
 **Short:** Each invokedynamic concatenation call still allocates a new String per execution, so loops need an explicit StringBuilder.
 
 Each `+` expression compiles to an independent `invokedynamic makeConcatWithConstants` call that allocates a brand-new `String` every time it runs. Running that inside a loop therefore allocates one new `String` (and intermediate buffers) every iteration. JEP 280 optimizes a *single* concatenation expression, not repeated ones across loop iterations. The fix is unchanged from the pre-Java-9 advice: hoist an explicit `StringBuilder` outside the loop and `append` inside it, turning N allocations into amortized growth.
@@ -671,7 +700,7 @@ Each `+` expression compiles to an independent `invokedynamic makeConcatWithCons
 6. **Cap `-XX:MaxMetaspaceSize`** in codegen-heavy apps and reuse generated classes (mocks, proxies) so leaks fail fast, not after hours.
 7. **Prefer Byte Buddy over hand-written ASM** for agents/mocks/proxies — same power, automatic frames, far fewer footguns.
 8. **Read the bytecode when behavior surprises you** — `javap -c -v` settles "is this a lambda or an anon class?", "why two `compareTo`?", and "is `final` blocking my proxy?" instantly.
-9. **Keep `Can-Retransform-Classes: true` and both entry points** (`Premain-Class` + `Agent-Class`) in the manifest so one agent JAR works for both static and dynamic attach.
+9. **Keep `Can-Retransform-Classes: true` and both entry points** (`Premain-Class` + `Agent-Class`) in the manifest so one agent JAR works for both static and dynamic attach. Document `-javaagent` as the supported way to load it; dynamic attach warns on Java 21+ (JEP 451) and needs `-XX:+EnableDynamicAgentLoading` once a later JDK disallows it by default.
 10. **Guard against `final`** — don't mark methods `final` if a framework must proxy/advise them; treat "advice missing" as an override/proxy problem first. This is the proxying corollary of [Effective Java Item 19: "Design and document for inheritance or else prohibit it"]: `final` is exactly how you prohibit it, and a subclass-based proxy like CGLIB needs the opposite choice.
 
 ---
@@ -773,7 +802,7 @@ java -javaagent:timing-agent.jar -jar app.jar
 # [Timed] com.example.OrderService.checkout            1830 us
 ```
 
-Or attach dynamically to a live PID (via the Attach API / `jattach`), which triggers `agentmain` and, for classes already loaded, `Instrumentation.retransformClasses` to re-run the transform.
+Or attach dynamically to a live PID (via the Attach API / `jattach`), which triggers `agentmain` and, for classes already loaded, `Instrumentation.retransformClasses` to re-run the transform. On Java 21+ that attach prints the JEP 451 warning; start the target JVM with `-XX:+EnableDynamicAgentLoading` if operators are expected to attach the agent at runtime.
 
 #### Broken first attempt, then fix
 

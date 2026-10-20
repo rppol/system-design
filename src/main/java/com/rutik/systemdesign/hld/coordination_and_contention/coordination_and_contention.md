@@ -868,7 +868,7 @@ no single storage layer in common.** A single row's atomic conditional write alr
 single-resource contention without the operational cost of etcd/ZooKeeper.
 
 **Prefer Valkey over Redis for new managed-cache deployments** unless the team has
-explicitly cleared Redis's AGPLv3 terms — it's the default AWS ElastiCache/MemoryDB and
+explicitly cleared Redis's RSALv2, SSPLv1, or AGPLv3 terms. It is the default AWS ElastiCache/MemoryDB and
 Google Cloud Memorystore now provision, and functionally equivalent for every locking
 primitive in this module.
 

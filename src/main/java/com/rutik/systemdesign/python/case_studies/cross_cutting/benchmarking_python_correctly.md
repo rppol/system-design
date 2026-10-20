@@ -361,11 +361,12 @@ the measured gap was the compiler, not the interpreter. Against a corrected base
 "Python 3.14 built with Clang 19, without this new interpreter". Two variables moved; the number was
 plausible; it circulated for months.
 
-**The 3.15 JIT figures** show the discipline done correctly. The Python Insider RC1 announcement
-reports "8-9% geometric mean performance improvement on x86-64 Linux over the standard interpreter,
-and 12-13% speedup on AArch64 macOS" — note that each figure names its platform, and that the macOS
-baseline has been stated differently in different posts across the release cycle. Tag such numbers
-`[3.15]` and describe them as shipping in 3.15; 3.15 is at rc1.
+**The 3.15 JIT figures** show the discipline done correctly. The 3.15 whatsnew document reports
+"a 7-8% geometric mean performance improvement for the JIT over the standard CPython interpreter
+built with all optimizations enabled on x86-64 Linux" and "an 11-12% speedup over the tail calling
+interpreter" on AArch64 macOS. Each figure names its platform and its baseline, and the two
+baselines differ. The RC1 announcement quoted 8-9% and 12-13%, so a number copied from a
+pre-release post can disagree with the final document. Tag such numbers `[3.15]`.
 
 **pytest-benchmark and codspeed** are the ecosystem's CI-integrated options, both built around
 comparing against a stored baseline rather than an absolute threshold.
@@ -572,7 +573,7 @@ happened with `dis.dis(fn, adaptive=True)`, which shows the specialized opcodes 
 
 The one official cumulative geomean CPython publishes is 3.11 at roughly 25% faster than 3.10. Every
 later measurement carries its own, different baseline: the 3.14 tail-call interpreter's 3-5% geomean
-is against the same source built with the same Clang 19 *without* the flag, and the 3.15 JIT's 8-9%
+is against the same source built with the same Clang 19 *without* the flag, and the 3.15 JIT's 7-8%
 on x86-64 Linux is against the standard 3.15 interpreter on that platform. These do not compose —
 multiplying percentages measured against different baselines produces a number that corresponds to no
 experiment anyone ran. Any "Python 3.N is X% faster" index beyond 3.11 is a third-party aggregation.

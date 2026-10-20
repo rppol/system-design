@@ -107,7 +107,7 @@ capabilities a kernel author must know about:
 | Ada Lovelace | L4, L40S, RTX 40xx | 8.9 | 4th-gen Tensor Cores + FP8; large L2 |
 | Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory across a cluster; 50 MB L2; 228 KB shared memory/SM |
 | Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; NVLink 5 at 1.8 TB/s bidirectional per GPU, 72-GPU NVL72 domains |
-| Rubin | VR200, Vera Rubin NVL72 | not yet published | TSMC 3nm multi-chip module, 336B transistors; 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
+| Rubin | VR200, Vera Rubin NVL72 | 10.7 (`sm_107`, CUDA 13.4 developer preview) | TSMC 3nm multi-chip module, 336B transistors; 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
 
 Constants worth memorizing (used throughout this section): **warp = 32 threads**; the
 register file is **64K 32-bit registers per SM (256 KB)** on every architecture from

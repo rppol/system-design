@@ -181,6 +181,39 @@ Train an autoencoder to reconstruct only-normal data through a bottleneck. At in
 
 ---
 
+### 4.10 Visual industrial anomaly detection (PatchCore, MVTec AD)
+
+Factory inspection is the most common image anomaly task: thousands of photos of good parts, a few dozen defects of unknown kinds, and a need for a pixel-level heatmap the line operator can check. The standard benchmark is **MVTec AD** (Bergmann et al., CVPR 2019): 15 categories (5 textures, 10 objects), 5,354 images, with a training split that contains only defect-free images and pixel masks for the test defects. Methods are scored by image-level AUROC (is this part defective?) and pixel-level AUROC or PRO (per-region overlap, which weights small and large defects equally).
+
+**PatchCore** (Roth et al., CVPR 2022) is the reference method and has no training loop:
+
+1. Pass every good training image through an ImageNet-pretrained WideResNet-50 and keep mid-level feature maps (layers 2 and 3). Each spatial location becomes one patch embedding, averaged over its 3x3 neighborhood for local context.
+2. Put all patch embeddings in a memory bank, then shrink it with greedy coreset subsampling to 1% to 10% of its size. The coreset keeps the patches that best cover the feature space, so nearest-neighbor search stays fast with little accuracy loss.
+3. At test time, score each patch of the new image by its distance to the nearest memory-bank patch. The patch distances form the anomaly heatmap; the maximum is the image score.
+
+PatchCore reaches up to 99.6% image-level AUROC on MVTec AD with a few hundred good images per category, which means MVTec AD is close to saturated. MVTec AD 2 (2025) was released with harder scenarios (transparent and reflective parts, lighting changes) to separate methods again. Variants trade accuracy for speed or labels: PaDiM fits a Gaussian per patch location, EfficientAD (WACV 2024) uses a small student-teacher network for millisecond-level latency on a GPU, and WinCLIP (CVPR 2023) and AnomalyCLIP (ICLR 2024) score patches against text prompts such as "a photo of a damaged object" for zero-shot detection with no good images at all. Intel's **anomalib** library implements these behind one API and exports to OpenVINO for edge inspection hardware.
+
+```mermaid
+flowchart LR
+    G[Good images only] --> E[Frozen WideResNet-50<br/>layer2 + layer3]
+    E --> P[Patch embeddings<br/>3x3 neighborhood avg]
+    P --> C[Greedy coreset<br/>keep 1-10%]
+    C --> M[(Memory bank)]
+    T[Test image] --> E2[Same frozen encoder]
+    E2 --> N[Nearest-neighbor distance<br/>per patch]
+    M --> N
+    N --> H[Pixel heatmap]
+    N --> S[Image score = max patch distance]
+```
+
+The same score-then-threshold rule from 6.2 applies: the threshold is set on a validation set of good images (for example their 99.5th percentile score) plus whatever defects exist, never fixed at a constant.
+
+### 4.11 Zero-shot residual detection with a time-series foundation model
+
+Section 6.5 builds a residual from STL or a per-series forecaster, which needs one fitted model per series. A time-series foundation model (Chronos-2, TimesFM, Toto) forecasts any series zero-shot from its recent context, so the residual pipeline works on a new or sparse series with no training. The model also returns quantiles, so the anomaly test is direct: flag `y_t` when it falls outside the forecast's `[q0.01, q0.99]` band (Chronos-2 is trained on quantiles 0.01 to 0.99, so it cannot give a wider band), or score it by `(y_t - q0.5) / (q0.95 - q0.05)`. Datadog's Toto is trained on observability metrics for this use. Model choice, licenses, and context limits are in [Time Series Foundation Models](../time_series_forecasting/time_series_foundation_models.md); 6.8 below has the mechanics.
+
+---
+
 ## 5. Architecture Diagrams
 
 ### Detection pipeline (score, then threshold)
@@ -514,6 +547,35 @@ def cusum(y: np.ndarray, target: float, k: float, h: float) -> np.ndarray:
 
 You **decompose or forecast first, then threshold the residual** — thresholding the raw seasonal value flags every legitimate daily peak. See [`../time_series_forecasting/time_series_forecasting.md`](../time_series_forecasting/time_series_forecasting.md) for STL, Prophet, and DeepAR whose forecast residuals feed this exact pipeline.
 
+### 6.8 Zero-shot residual detection with Chronos-2
+
+```python
+import numpy as np
+import pandas as pd
+from chronos import Chronos2Pipeline
+
+pipe = Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map="cuda")
+
+
+def tsfm_band_anomalies(context_df: pd.DataFrame, actual_df: pd.DataFrame, h: int = 12) -> pd.DataFrame:
+    """Forecast h steps per series zero-shot, flag actuals outside the 98% band."""
+    pred = pipe.predict_df(
+        context_df, prediction_length=h, quantile_levels=[0.01, 0.5, 0.99],
+        id_column="id", timestamp_column="timestamp", target="target",
+    )
+    out = pred.merge(actual_df[["id", "timestamp", "target"]], on=["id", "timestamp"])
+    width = (out["0.99"] - out["0.01"]).clip(lower=1e-9)
+    out["score"] = (out["target"] - out["0.5"]).abs() / width
+    out["anomaly"] = (out["target"] < out["0.01"]) | (out["target"] > out["0.99"])
+    return out
+```
+
+Three details decide whether this works in production:
+
+- **Forecast in blocks, not per point.** Forecasting `h = 12` steps and re-running every 12 steps cuts model calls 12x versus one-step-ahead. At 100,000 series on 1-minute data that is about 8,300 batched forecasts per minute instead of 100,000.
+- **Keep anomalies out of the context.** If a flagged spike stays in the context window, the next forecast widens its band and the following anomaly is missed. Replace flagged points in the context with the forecast median before the next call.
+- **Calibrate the band.** The model's 98% band is not 98% coverage on your data. Measure the empirical exceedance rate on a clean week and adjust the quantile levels, or apply conformal calibration from [Uncertainty Quantification](../uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md), until the false-alarm rate fits the alert budget.
+
 ### 6.6 Mahalanobis and GMM (probabilistic scores)
 
 ```python
@@ -660,9 +722,9 @@ EVT is the principled way to threshold **unbounded** signals (latency, loss, tra
 - **Netflix — RAD (Robust Anomaly Detection) & Surus.** Netflix open-sourced RAD, built on **Robust PCA**, to detect anomalies in high-cardinality business metrics (signups, streams per title, payment success). RPCA decomposes the metric matrix into a low-rank "normal" part plus a sparse "anomaly" part, robust to seasonality and to the anomalies themselves. Used to catch signup drops and payment-gateway regressions before they hit revenue dashboards.
 - **PayPal / Stripe — payment fraud.** Both run a **rules + supervised model + unsupervised anomaly** stack. A sub-millisecond rule engine blocks known-bad; a gradient-boosted model scores the ~0.1%-fraud stream; an unsupervised layer (Isolation Forest / autoencoder over device, velocity, and graph features) catches *novel* fraud rings the supervised model has never seen. Reason codes are mandatory (regulatory decline explanations). See [`../case_studies/design_fraud_detection.md`](../case_studies/design_fraud_detection.md).
 - **Datadog / Grafana — infrastructure monitoring.** Datadog's anomaly monitors ship `basic`, `agile`, and `robust` algorithms (variants of seasonal decomposition + robust bounds) plus **outlier detection using DBSCAN** to find the one host in a fleet behaving unlike its peers. Alert fatigue is the enemy: thresholds are seasonal and adaptive to keep false positives under a tight budget. See [`../case_studies/design_anomaly_detection.md`](../case_studies/design_anomaly_detection.md).
-- **Amazon — Random Cut Forest (RCF).** A streaming Isolation-Forest variant powering CloudWatch Anomaly Detection and Kinesis Data Analytics. RCF maintains the forest online over sliding windows, so it adapts to drift without a batch retrain.
+- **Amazon: Random Cut Forest (RCF).** A streaming Isolation-Forest variant powering CloudWatch Anomaly Detection and Amazon Managed Service for Apache Flink. RCF maintains the forest online over sliding windows, so it adapts to drift without a batch retrain.
 - **Twitter — AnomalyDetection (S-H-ESD).** The Seasonal-Hybrid ESD library detects both global and local anomalies in seasonal time series (tweet volume, ad spend) by combining STL with the Generalized ESD test.
-- **Microsoft Azure Anomaly Detector — SR-CNN.** Spectral-Residual saliency + CNN for univariate time-series anomalies, serving anomaly detection as an API.
+- **Microsoft: SR-CNN.** Spectral-Residual saliency + CNN for univariate time-series anomalies (Ren et al., KDD 2019), built for Microsoft's internal metric monitoring. The Azure Anomaly Detector API that served it was retired on 2026-10-01; Microsoft points users to Fabric anomaly detection or the open-source `microsoft/anomaly-detector` package.
 - **Semiconductor fabs — One-Class SVM.** Equipment health from sensor streams, trained on normal operation only (`nu=0.01` sets ~1% expected false-positive rate), as covered in [`../supervised_learning/support_vector_machines.md`](../supervised_learning/support_vector_machines.md) §7.
 - **OVHcloud — SPOT/DSPOT (EVT).** Streaming Peaks-Over-Threshold sets automatic, drift-aware thresholds on latency and traffic tails without a Gaussian assumption.
 
@@ -767,6 +829,14 @@ A single corrupted feature in a 784-dim input barely moves the mean MSE — the 
 
 A per-point z-score never fires on a slow memory leak (each reading is individually normal; the *trend* is the anomaly) or a flat-line sensor (a normal value, abnormally *sustained*). Match the method to the anomaly type (§4.1): CUSUM/EWMA for drift, subsequence/sequence-autoencoder for collective anomalies.
 
+### Pitfall 8 - DeepSVDD baselines from PyOD before 3.6.3
+
+In PyOD releases before 3.6.3 (August 1, 2026), `loss.backward()` in the DeepSVDD training loop was commented out (issues #606 and #641), so no gradient reached the weights and every score came from the randomly initialized network. Any DeepSVDD PR-AUC, threshold, or model-selection decision made on those versions compared an untrained network against the other detectors. Upgrade to 3.6.3 or later and re-run the DeepSVDD baseline and its thresholds. On PyOD's 17-dataset ODDS check the fixed model averages 0.748 ROC AUC against 0.746 for the untrained one, so expect different scores, not a better detector, and note that `l2_regularizer` now defaults to 5e-7.
+
+### Pitfall 9 - Loading a detector file from an untrusted source
+
+A saved PyOD detector is a pickle or joblib file, and unpickling runs arbitrary code. CVE-2026-15529 covers this path; since PyOD 3.6.2, `pyod.utils.persistence.load()` and `compat_load()` raise `ValueError` unless called with `trusted=True`. Pass `trusted=True` only for files your own pipeline wrote and stored with access control, and verify a checksum recorded at save time before loading.
+
 ---
 
 ## 11. Technologies & Tools
@@ -774,15 +844,17 @@ A per-point z-score never fires on a slow memory leak (each reading is individua
 | Tool | Version | Notes |
 |------|---------|-------|
 | scikit-learn | 1.4+ | `IsolationForest`, `LocalOutlierFactor`, `OneClassSVM`, `SGDOneClassSVM`, `EllipticEnvelope`, `covariance.MinCovDet` |
-| PyOD | 1.1+ | 40+ detectors under one API (ECOD, COPOD, HBOS, AutoEncoder, DeepSVDD); `pip install pyod` |
+| PyOD | 3.6.3+ | 60+ detectors under one API (ECOD, COPOD, HBOS, AutoEncoder, DeepSVDD); `pip install pyod`. DeepSVDD did not train before 3.6.3; since 3.6.2 `persistence.load()` needs `trusted=True` |
 | statsmodels | 0.14+ | STL, seasonal decomposition, Generalized ESD |
 | scipy | 1.11+ | `genpareto` (EVT/GPD fit), `chi2` (Mahalanobis threshold), robust stats |
 | PyTorch | 2.x | Autoencoders, VAEs, sequence models (GPU) |
 | Prophet / statsforecast | latest | Forecast-residual anomaly detection on seasonal series |
 | River | 0.21+ | Online/streaming anomaly detection (Half-Space Trees, streaming stats) |
 | ADTK | 0.6+ | Rule- and model-based time-series anomaly toolkit |
-| Amazon RCF | AWS | Random Cut Forest in CloudWatch / Kinesis Data Analytics |
+| Amazon RCF | AWS | Random Cut Forest in CloudWatch / Managed Service for Apache Flink |
 | SHAP | 0.44+ | Per-feature attribution of Isolation Forest / autoencoder scores (reason codes) |
+| anomalib (Intel) | 2.x | Visual anomaly detection: PatchCore, PaDiM, EfficientAD, WinCLIP; OpenVINO export for edge inspection |
+| chronos-forecasting | 2.x | Chronos-2 zero-shot quantile forecasts for residual-band detection on any series |
 
 `pyod` is the fastest path to a strong baseline — `ECOD` and `COPOD` are parameter-free, deterministic, and often competitive with tuned Isolation Forest:
 
@@ -803,6 +875,11 @@ Because anomalies are rare — at a 0.1% base rate, a model that labels everythi
 **Q: Should you use ROC-AUC or PR-AUC for imbalanced anomaly detection?**
 **Short:** PR-AUC, because ROC-AUC's tiny false-positive rate hides huge false-positive counts under extreme class imbalance.
 Use PR-AUC — ROC-AUC is misleadingly optimistic under extreme imbalance because the enormous true-negative count keeps the false-positive *rate* tiny even when false-positive *counts* dwarf true positives. A model can show ROC-AUC 0.99 while precision at its operating point is 5%. PR-AUC (precision vs recall) has no true-negative term, so it reflects the imbalance honestly; report it alongside precision@k at the real alert budget.
+
+**Q: Your zero-shot forecaster misses the second of two spikes an hour apart. Why?**
+**Short:** The first spike stayed in the context window, so the model widened its band; replace flagged points in the context with the forecast median before the next forecast.
+
+A foundation-model forecaster conditions on whatever is in its context. After the first spike, the context contains an extreme value, so the next forecast has a higher median and a wider quantile band, and the second spike falls inside it. The same issue affects any forecast-residual detector that refits on recent data. Fix it by masking: when a point is flagged, write the forecast median (or a robust interpolation) into the context copy used for later forecasts, while keeping the raw value in storage for the incident record.
 
 **Q: Why should you never threshold a raw anomaly score directly?**
 **Short:** Raw scores like Isolation Forest's decision_function are uncalibrated and drift with every retrain, so threshold a percentile of a clean reference distribution instead.
@@ -863,6 +940,16 @@ Use supervised when you have trustworthy labels for both classes and the anomali
 **Q: What is a GMM used for in anomaly detection?**
 **Short:** A Gaussian Mixture Model scores points by negative log-likelihood under a fitted mixture, suited to normal data with several distinct multimodal regimes.
 It fits a mixture of K Gaussians to normal data and scores each point by its negative log-likelihood under the mixture; low-likelihood points are anomalies. It is the right choice when normal behavior is multimodal — several distinct normal regimes — because a single-Gaussian or z-score model would flag the minor modes as anomalies. Choose K by BIC and use a robust or regularized covariance so a near-singular component does not assign spuriously high density.
+
+**Q: How does PatchCore detect defects with no defect images in training?**
+**Short:** It stores pretrained-CNN patch features of good parts in a coreset memory bank and scores each test patch by its nearest-neighbor distance; the maximum is the image score.
+
+PatchCore passes good training images through a frozen ImageNet WideResNet-50, keeps mid-level patch features averaged over a 3x3 neighborhood, and stores them in a memory bank reduced to 1% to 10% by greedy coreset subsampling. A defect produces patches that are far from every stored good patch, so the nearest-neighbor distance per patch gives a pixel heatmap and its maximum gives the image score. There is no gradient training, which is why it works with a few hundred good images. It reaches up to 99.6% image-level AUROC on MVTec AD.
+
+**Q: When do you pick a time-series foundation model over STL residuals for anomaly detection?**
+**Short:** Pick a TSFM for many new, short, or irregular series where per-series fitting is impractical; keep STL for long, stable seasonal series where it is cheaper and already calibrated.
+
+STL plus a robust z-score needs several full seasonal cycles per series and one decomposition per series, which fails on cold-start or sparse series. A TSFM such as Chronos-2 or Toto forecasts any series zero-shot from its context and returns quantiles, so the anomaly band comes for free. The costs are GPU inference, a band that needs calibration on your data, and the need to keep flagged points out of the context. For a fleet of long-lived, strongly seasonal metrics, STL is cheaper and easier to explain; for many new or short series, the TSFM removes the per-series fitting step.
 
 **Q: How do you handle categorical or mixed-type data in anomaly detection?**
 **Short:** Tree-based detectors like Isolation Forest handle mixed types after simple encoding, while distance methods need Gower distance plus a rareness score for categoricals.

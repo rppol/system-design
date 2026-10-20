@@ -155,6 +155,7 @@ flowchart LR
 - **Ring**: every GPU has exactly one send-neighbor and one recv-neighbor; bandwidth-optimal (`2·(N-1)/N · size` per GPU) but latency scales with `N` (N-1 steps each way) — wins for large messages.
 - **Tree** (NCCL's double-binary-tree): communication forms two binary trees so latency scales as `O(log N)` instead of `O(N)` — wins for small messages and very large GPU counts, at a small bandwidth cost versus the ring.
 - **NVLS** (NVLink SHARP): on third-generation NVSwitch fabrics — NVLink 4 with Hopper GPUs and later — the switch ASIC performs the reduction *in the network*. A GPU issues `multimem` PTX store/load-reduce instructions against a multicast address, the switch sums the contributions and fans the result back out, so no rank ever has to receive and re-send its peers' data. That breaks the ring's `2(N-1)/N` floor: the same collective moves fewer bytes across NVLink and burns far fewer SMs on communication kernels. `NVLSTree` is the multi-node variant — NVLink SHARP inside each node, a tree between them.
+- **PAT** (Parallel Aggregated Trees, NCCL 2.23+): a Bruck-style algorithm for `ncclAllGather` and `ncclReduceScatter` that takes a logarithmic number of network steps instead of the ring's `N-1`, so small messages at large scale stop paying one latency per rank. NCCL 2.23 ran it only with one GPU per node, the shape where every ring hop crosses the network; NCCL 2.31 adds a hierarchical variant (NVLS inside the node, PAT across nodes) that is off by default and enabled with `NCCL_ALGO=PAT`.
 - NCCL auto-selects per call based on message size, GPU count, and detected topology; you almost never choose manually.
 
 ```mermaid
@@ -262,7 +263,9 @@ NCCL's API does not change as a job grows from one node to many — the same `nc
 | `NCCL_IB_HCA` | Restricts which InfiniBand host-channel adapters NCCL uses for inter-node GPUDirect RDMA |
 | `NCCL_SOCKET_IFNAME` | Selects the network interface for the initial rendezvous handshake (not the bulk data path) |
 | `NCCL_P2P_LEVEL` | Forces or disables P2P at a given PCIe distance (e.g. same root complex vs. across a QPI/NUMA link) — mostly for debugging a suspected P2P misdetection |
-| `NCCL_ALGO` / `NCCL_PROTO` | Manually pins the algorithm (`Ring`, `Tree`, `NVLS`, `NVLSTree`, `CollNet`) or the protocol (`Simple`/`LL`/`LL128`) — an escape hatch for benchmarking, rarely needed in production |
+| `NCCL_ALGO` / `NCCL_PROTO` | Manually pins the algorithm (`Ring`, `Tree`, `NVLS`, `NVLSTree`, `CollNet`, `PAT`) or the protocol (`Simple`/`LL`/`LL128`); an escape hatch for benchmarking, rarely needed in production |
+| `NCCL_IB_TIMEOUT` / `NCCL_IB_RETRY_CNT` | InfiniBand transport timeout `4.096 us x 2^timeout` (default 20, about 4.3 s) times the retry count (default 7), so a dead IB peer surfaces as a transport error after roughly 30 s |
+| `NCCL_RAS_ENABLE` / `NCCL_RAS_ADDR` | The RAS health subsystem (NCCL 2.24+, on by default, listens on `localhost:28028`); query it with the `ncclras` client while a job is hung |
 
 Multi-node introduces a failure mode single-node setups do not have: **network partition or a single slow/failed node stalls every rank's collective**, since a collective cannot complete until every participant has done its part. Production clusters pair NCCL with a health-check/elastic layer (e.g. `torch.distributed.elastic`, Kubernetes liveness probes) so a dead node is evicted and training restarts from a checkpoint rather than hanging indefinitely.
 
@@ -720,7 +723,7 @@ Every raw-NCCL example above omits error handling for readability; production co
 NCCLCHECK(ncclAllReduce(sendbuf, recvbuf, N, ncclFloat, ncclSum, comm, stream));
 ```
 
-A NCCL call returning an error almost always means the *communicator* is now unusable (a mismatched collective, a dead peer, a topology it could not resolve) — the correct recovery is to tear down and re-initialize the whole communicator, not retry the single call.
+A NCCL call returning an error almost always means the *communicator* is now unusable (a mismatched collective, a dead peer, a topology it could not resolve), so the correct recovery is to tear down and re-initialize the whole communicator, not retry the single call. Section 6.10 covers doing that without restarting the surviving processes.
 
 ### 6.8 Point-to-point send/recv for pipeline hand-off
 
@@ -810,6 +813,100 @@ a given `N` — so if `busbw` is far below the fabric's rating, the problem is t
 transport NCCL chose (check `NCCL_DEBUG=INFO`), never the arithmetic.
 
 `busbw` (bus bandwidth) is the number to compare against the hardware ceiling — ~900 GB/s for a ring on B200 NVLink 5, since a ring hop uses one direction at a time. A result well below that on an NVSwitch node usually means P2P is disabled, the wrong GPUs are paired, or a driver/topology misdetection is silently falling back to a slower path — exactly the class of problem `NCCL_DEBUG=INFO` (Section 4.6) is built to expose. A busbw *above* 900 GB/s is not an error either: NVLS reduces inside the switch, so it delivers ring-equivalent throughput while moving fewer bytes, and the correction factor `nccl-tests` applies is a ring correction.
+
+### 6.10 Hangs and fault tolerance: nonblocking communicators, abort, shrink, RAS
+
+A collective cannot finish until every rank in the communicator joins it, so one dead GPU,
+one crashed process, or one rank that took a different code path stalls every other rank
+inside the same kernel. With a default (blocking) communicator, the NCCL docs warn that
+"the thread can possibly get stuck inside NCCL calls due to network errors", so the
+process cannot even run its own error handling. Recovery needs four pieces: a
+communicator that never blocks the host thread, a watchdog with a deadline, an abort that
+frees the stuck kernels, and a way to continue without the failed rank.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    issue(["Collective issued<br/>blocking = 0"]) --> poll{"Watchdog polls<br/>stream + async error"}
+    poll -->|"done"| ok(["Next step"])
+    poll -->|"error or<br/>deadline passed"| diag(["ncclras: missing ranks,<br/>op-count mismatch"])
+    diag --> shrink(["ncclCommShrink<br/>NCCL_SHRINK_ABORT"])
+    diag --> abort(["ncclCommAbort,<br/>re-init without rank"])
+    shrink --> ok
+    abort --> ok
+
+    class issue io
+    class poll mathOp
+    class diag req
+    class shrink,abort lossN
+    class ok train
+```
+
+The watchdog decides that a rank is gone; RAS tells you which one; shrink or abort
+removes it without restarting the surviving processes.
+
+```cpp
+// 1. Nonblocking communicator: NCCL calls return ncclInProgress instead of hanging.
+ncclConfig_t cfg = NCCL_CONFIG_INITIALIZER;
+cfg.blocking = 0;
+ncclCommInitRankConfig(&comm, nranks, id, rank, &cfg);
+ncclResult_t st;
+do { ncclCommGetAsyncError(comm, &st); } while (st == ncclInProgress);
+
+// 2. Watchdog: wait for the collective with a deadline, polling async errors.
+ncclAllReduce(sendbuf, recvbuf, n, ncclFloat, ncclSum, comm, stream);
+auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+bool failed = false;
+while (cudaStreamQuery(stream) == cudaErrorNotReady) {
+    ncclCommGetAsyncError(comm, &st);
+    if (st != ncclSuccess && st != ncclInProgress) { failed = true; break; }
+    if (std::chrono::steady_clock::now() > deadline) { failed = true; break; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+// 3. Recover on every surviving rank: drop the dead ranks, abort in-flight work.
+if (failed) {
+    int dead[] = {5};                         // from RAS or the launcher's health check
+    ncclComm_t smaller;
+    ncclCommShrink(comm, dead, 1, &smaller, &cfg, NCCL_SHRINK_ABORT);
+    do { ncclCommGetAsyncError(smaller, &st); } while (st == ncclInProgress);
+    comm = smaller;                           // ranks are renumbered to stay contiguous
+}
+```
+
+What each call does, from the NCCL 2.32 documentation:
+
+| API | Effect | Who calls it |
+|-----|--------|--------------|
+| `config.blocking = 0` | Every NCCL call returns at once, possibly `ncclInProgress`; poll `ncclCommGetAsyncError` | All ranks, at init |
+| `ncclCommGetAsyncError` | Reports network and other asynchronous errors, and completion of nonblocking calls | Watchdog thread |
+| `ncclCommAbort` | Aborts uncompleted operations and frees the communicator | Every surviving rank; then re-init with a new unique ID |
+| `ncclCommShrink` (NCCL 2.27+) | New communicator without the listed ranks; `NCCL_SHRINK_ABORT` first aborts the parent's in-flight operations | Every surviving rank; excluded ranks do not call it |
+| `ncclCommRevoke` | Revokes in-flight operations but keeps resources, so the communicator can then be destroyed, split, or shrunk | Surviving ranks |
+| `ncclCommGrow` | Adds new ranks to an existing communicator (existing ranks pass `rank = -1`) | Existing and joining ranks |
+| `ncclCommSplit` | Sub-communicators by color; all ranks must call it, so it cannot drop a dead rank | All ranks |
+
+**Finding the missing rank.** The RAS subsystem (NCCL 2.24+, on by default) runs one thread
+per process and listens on `localhost:28028`. Running `ncclras` (or
+`echo verbose status | nc localhost 28028`) on any node of a hung job reports
+"Missing communicator data from 1 job process" for unreachable processes, marks a process
+`DEAD` after 60 s of failed reconnects, and groups ranks by collective operation count
+("Communicator ranks have different collective operation counts"). Counts that stop
+changing between two queries mean the communicator is stuck; the ranks with the lower
+count are the ones that never issued the collective, which is the mismatched-branch bug
+from Section 10.
+
+**In PyTorch.** `ProcessGroupNCCL` runs this watchdog for you: `init_process_group(timeout=...)`
+defaults to 10 minutes for NCCL, and on expiry "collectives will be aborted asynchronously
+and the process will crash" (PyTorch 2.14 docs), unless `TORCH_NCCL_BLOCKING_WAIT` makes the
+calling thread block and raise instead. `shrink_group()` in `torch.distributed` wraps
+`ncclCommShrink` (with a `SHRINK_ABORT` option) so a job can drop failed ranks and keep
+training on the rest instead of restarting every process from a checkpoint.
 
 ---
 
@@ -945,6 +1042,7 @@ The fix is structural: never gate a collective call behind rank-specific `if` lo
 | **NVLink / NVSwitch** | High-bandwidth GPU interconnect — 900 GB/s bidirectional per GPU on H100 (NVLink 4), 1.8 TB/s on Blackwell B200 (NVLink 5) — plus the all-to-all crossbar fabric that turns a set of GPUs into one NVLink domain: 8 in an HGX chassis, 72 in a GB200 NVL72 rack, up to 576 through an external NVLink Switch |
 | **NVLS / NVLink SHARP** | In-switch reduction on NVLink 4 NVSwitch fabrics and later; NCCL selects it automatically for `ncclAllReduce`/`ncclReduceScatter`/`ncclAllGather`, and `NCCL_ALGO=NVLS` / `NVLSTree` pins it for benchmarking |
 | **`ncclCommInitRankConfig` / `ncclCommSplit`** | Initialize a communicator with an explicit `ncclConfig_t` (non-blocking init, `blocking=0`, split-share, CGA cluster size), and carve sub-communicators out of an existing one without a second rendezvous — the tensor-parallel/pipeline-parallel sub-group pattern |
+| **NCCL fault tolerance** (`ncclCommAbort`, `ncclCommShrink`, `ncclCommRevoke`, RAS / `ncclras`) | Abort a hung collective, drop failed ranks without restarting survivors, and ask a live job which ranks are missing or behind; needs nonblocking communicators (`blocking = 0`) |
 | **NCCL device API** | Communication primitives callable from inside your own CUDA kernel over a symmetric-memory window registered with `ncclCommWindowRegister()`. Three modes: **LSA** (`ncclGetLsaPointer()`) for peers reachable by plain load/store over NVLink or P2P-capable PCIe; **Multimem** (`ncclGetLsaMultimemPointer()`) for NVLink SHARP hardware multicast; **GIN** (`ncclGin::put()` / `ncclGin::get()`) for GPU-initiated networking across nodes. `ncclLsaBarrierSession` synchronizes threads and ranks. This is how you fuse communication into a compute kernel instead of alternating between them |
 | **NVSHMEM** | PGAS-style one-sided GPU-to-GPU `put`/`get` addressed straight from inside a kernel, rather than stream-ordered collectives; the substrate under fine-grained overlap in tensor-parallel inference kernels where a whole NCCL collective is too coarse |
 | **`torch.distributed`** | PyTorch's process-group abstraction; NCCL is its default GPU backend, with Gloo as a CPU/fallback backend |
@@ -964,6 +1062,10 @@ In practice the choice of layer is dictated by altitude, not preference: reach f
 **Q: What happens if two ranks call collectives in a different order or count?**
 **Short:** The job deadlocks silently, since NCCL collectives are barriers across the whole communicator and a rank waiting on one a peer never issues blocks forever with no error.
 The job deadlocks silently — NCCL collectives are barriers across the whole communicator, so a rank waiting on a collective that a peer never issues blocks forever with no error message. Always structure code so every rank calls the identical sequence of collectives; gate data content on rank, never the collective call itself.
+
+**Q: A 512-GPU training job stops in an all-reduce with no error and every GPU at 100% utilization. How do you find the cause and recover without restarting every process?**
+**Short:** Ask NCCL RAS (`ncclras`) which ranks are missing or behind on operation count, then on the surviving ranks abort the in-flight collective and drop the bad rank with `ncclCommShrink`.
+All ranks are spinning inside the collective kernel waiting for a peer that never arrives, which is why utilization reads 100% and nothing errors. Run `ncclras` (NCCL 2.24+, on by default at `localhost:28028`) on any node: it reports processes it cannot reach ("Missing communicator data"), marks them `DEAD` after 60 s, and groups ranks by collective operation count, so a rank stuck at a lower count took a different code path while an unreachable one crashed or lost its network. Recovery needs a nonblocking communicator (`config.blocking = 0`), because a blocking one can trap the host thread inside NCCL; then every surviving rank calls `ncclCommShrink(..., NCCL_SHRINK_ABORT)` (NCCL 2.27+) to abort the parent's in-flight work and build a smaller communicator, or `ncclCommAbort` followed by a fresh init. PyTorch's `ProcessGroupNCCL` watchdog provides the deadline, 10 minutes by default for NCCL.
 
 **Q: Why is a host-staged `cudaMemcpy` D2H-then-H2D wasteful when NVLink is available?**
 **Short:** It pays for two PCIe hops at ~64 GB/s each versus one NVLink 5 hop at ~900 GB/s per direction, about 28x slower than enabling peer access and using cudaMemcpyPeer.
@@ -1028,6 +1130,10 @@ No — by default a `ncclComm_t` is not thread-safe for concurrent collective ca
 **Q: Why can two ranks silently end up bound to the same physical GPU?**
 **Short:** If CUDA_VISIBLE_DEVICES is inconsistent across a job's processes, each process's local index 0 can map to a different physical GPU, silently colliding two ranks onto one.
 If `CUDA_VISIBLE_DEVICES` is inconsistent across a job's processes, each process's local index `0` can map to a different physical GPU, colliding two ranks onto one GPU with no error raised. Production launchers set it identically and derive the local device from `LOCAL_RANK`, not an assumed ordering.
+
+**Q: Why can't `ncclCommSplit` remove a failed rank from a communicator, and what does `ncclCommShrink` do instead?**
+**Short:** Every rank of the parent must call `ncclCommSplit`, which a dead rank never does; `ncclCommShrink` is called only by the survivors and can abort the parent's stuck operations first.
+`ncclCommSplit` is collective over the parent: all ranks must call it, passing `NCCL_SPLIT_NOCOLOR` to opt out, so a crashed or hung rank blocks the split exactly as it blocked the collective. `ncclCommShrink` (NCCL 2.27+) takes an explicit list of ranks to exclude and is called only by the ranks that will be in the new communicator; with `NCCL_SHRINK_ABORT` NCCL first aborts outstanding operations on the parent, and without it there must be no outstanding work or the call can deadlock. Surviving ranks are renumbered to stay contiguous, so any rank-indexed sharding (data shards, tensor-parallel slices) must be remapped afterwards. Use it with nonblocking communicators and poll `ncclCommGetAsyncError` until the new communicator leaves `ncclInProgress`.
 
 **Q: What does `NCCL_DEBUG=INFO` show you that helps diagnose a hung or slow job?**
 **Short:** NCCL_DEBUG=INFO prints the detected topology and the ring/tree algorithm and transport chosen, confirming whether NVLink/NVSwitch/GPUDirect RDMA is engaged versus a slow fallback.

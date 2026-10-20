@@ -171,6 +171,15 @@ stateDiagram-v2
     Yellow --> Green: delivery matches the renegotiated plan
     Red --> Stalled: no one renegotiates, launch date stays fixed
     Stalled --> [*]: date slips anyway, trust cost is now permanent
+
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+    class Green good
+    class Yellow warn
+    class Red bad
+    class Stalled accent
 ```
 
 The watermelon path (green, green, green, then Red) and the honest path (green, then
@@ -444,6 +453,52 @@ a live conversation to become actionable; the strong version already is.
   should be — where two people in the same meeting walked out having heard two different
   decisions.
 
+### 6.8 AI meeting summaries as the record
+
+Zoom AI Companion, Google Meet's "Take notes for me" (Gemini) and Microsoft Teams'
+Copilot recap all post a summary to everyone invited, including the people who skipped
+the meeting. For those people the summary is the meeting. That makes it the record by
+default, and it fails in ways a human note-taker usually does not:
+
+| Failure | What the transcript said | What the summary says |
+|---------|--------------------------|-----------------------|
+| hedge turned into a commitment | "we could maybe look at caching next sprint" | "The team will implement caching next sprint." |
+| decision with no owner | "someone from Platform should check the quota" | "The quota will be checked." |
+| non-decision dropped | "we are NOT cutting fraud scoring yet, revisit Friday" | no mention of fraud scoring |
+| wrong speaker | the PM raised the risk | "Priya raised the risk" (Priya is the engineer who answered) |
+| joke or sarcasm taken literally | "sure, let's just rewrite it in Rust" | "Discussed rewriting the service in Rust." |
+
+The rule: **the meeting owner edits the summary into the record before it is the
+record.** Within the hour, in the channel the agenda went to, keep three headings
+(Decided, Owners and dates, Open and explicitly not decided), delete everything else, and
+sign it. The AI draft saves the typing; the owner supplies the judgment about what was
+actually agreed.
+
+**Weak version** (the AI recap, forwarded unchanged)
+
+> The team discussed the Q3 migration timeline and various risks. Caching will be
+> implemented next sprint. Fraud scoring was discussed. Action items: follow up on quota.
+
+**Strong version** (the owner's edit of the same recap)
+
+> **Decided:** migration cutover stays at 9/24.
+>
+> **Owners:** @lee checks the Spanner quota by Wed; @priya drafts the caching spike, no
+> commitment to ship it next sprint.
+>
+> **Not decided:** whether fraud scoring stays in v1; revisit Friday with Risk.
+>
+> Reviewed by @sam (meeting owner).
+
+**What changed:** the weak recap turned a maybe into a commitment, dropped the one item
+that was explicitly not decided, and left the action item without an owner. The edit
+states what was decided, who does what by when, what is still open, and who stands behind
+the summary.
+
+Two more rules. The recorder is a recording: in all-party-consent jurisdictions such as
+California and Illinois, say it is on and get agreement. And sensitive 1:1s, performance
+conversations and legal discussions are not the place for an always-on note-taker.
+
 ---
 
 ## 7. Real-World Examples
@@ -659,6 +714,17 @@ works a certain way, and the honest answer becomes "ask around" instead of a lin
 is writing the six-field decision record (decision, made by, date, rules out, next steps,
 where the discussion lives) to a place with a permanent address before anyone builds
 against it.
+
+**Q: Your meetings get an automatic AI summary. Why is that summary not yet the record, and what makes it one?**
+**Short:** AI recaps turn maybes into commitments, drop explicit non-decisions and miss owners; the meeting owner edits it into Decided, Owners and dates, Not decided, and signs it.
+
+People who skipped the meeting treat the recap as the meeting, so its errors become the
+team's memory. The typical errors: "we could maybe add caching" becomes "the team will
+implement caching", "we are NOT cutting fraud scoring yet" disappears, an action item has
+no owner, and a remark is credited to the wrong speaker. Within the hour, the meeting
+owner rewrites it under three headings (decided; owners and dates; open or explicitly not
+decided), deletes the rest, and adds "reviewed by". The model saves the typing, and the
+owner supplies the judgment about what was agreed.
 
 **Q: What does GitLab's "handbook-first" model actually mean in practice?**
 **Short:** The handbook, not a person, is the answer to "how do we do X" — and anyone can edit it via merge request.

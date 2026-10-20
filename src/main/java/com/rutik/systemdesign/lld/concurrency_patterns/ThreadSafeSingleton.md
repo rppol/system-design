@@ -103,6 +103,8 @@ Both threads get different instances. All state managed by the "singleton" is no
 **Recommendation for most cases: Bill Pugh Holder Idiom (production Java code)**
 **Recommendation when serialization/reflection matters: Enum Singleton**
 
+`LazyConstant` (preview, JEP 531 in JDK 27, earlier `StableValue` in JDK 25) is a JDK API for the same lazy, once-only init: it works for instance fields as well as static ones, needs no holder class per field, and is constant-folded in a `static final` field, which DCL's `volatile` field never is. It needs `--enable-preview`; see [Singleton](../creational/singleton/singleton.md) for the comparison table.
+
 ```mermaid
 flowchart TD
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold

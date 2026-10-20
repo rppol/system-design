@@ -81,12 +81,13 @@ interview question or a real incident retro.
 
 **Definition.** Sylvia Ann Hewlett's formula, cited widely in this literature: "mentors
 advise; sponsors act." A *mentor* gives advice from their own experience — Herminia
-Ibarra's HBR research (2019, "A Lack of Sponsorship Is Keeping Women from Advancing into
+Ibarra's HBR piece (2019, "A Lack of Sponsorship Is Keeping Women from Advancing into
 Leadership") describes mentorship as largely a one-way, advice-giving relationship. A
 *sponsor* is a senior, powerful person who spends their own political capital to
-advocate for, name, and place a more junior person in a visible or high-stakes role —
-Ibarra's research found that having a mentor predicted promotion for men two years later
-but had no such effect for women, largely because women's mentors tended to be less
+advocate for, name, and place a more junior person in a visible or high-stakes role.
+Ibarra, Nancy Carter, and Christine Silva's study ("Why Men Still Get More Promotions Than
+Women," HBR, September 2010) found that having a mentor predicted promotion for men two
+years later but had no such effect for women, largely because women's mentors tended to be less
 senior and lacked the clout to actually advocate. *Coaching*, per the International
 Coaching Federation's definition, is "partnering with clients in a thought-provoking and
 creative process that inspires them to maximize their personal and professional
@@ -285,7 +286,8 @@ either way, so let's pick the org chart on purpose."
 
 #### `Team Topologies — Four Team Types, Three Interaction Modes`
 
-**Definition.** Matthew Skelton and Manuel Pais's *Team Topologies* (2019) names four team
+**Definition.** Matthew Skelton and Manuel Pais's *Team Topologies* (2019; second edition,
+IT Revolution, September 2025) names four team
 types: **Stream-aligned** (aligned to a single, valuable stream of work — a product, a
 service, a user journey), **Enabling** (helps stream-aligned teams overcome obstacles and
 close capability gaps), **Complicated-Subsystem** (owns a system requiring deep specialist
@@ -294,7 +296,8 @@ other teams consume to reduce their own cognitive load). And exactly three inter
 modes: **Collaboration** (two teams working closely together for a bounded period to
 discover something new), **X-as-a-Service** (one team consumes what another provides with
 minimal collaboration overhead), **Facilitating** (one team helps and mentors another
-without owning their work). The book is explicit there are only three modes.
+without owning their work). The book is explicit there are only three modes. The second edition recasts "platform
+team" as "platform grouping," since a platform can itself be made of several teams.
 **Misuse.** Calling a permanent, standing cross-team relationship "collaboration mode."
 Collaboration is meant to be temporary and bounded, used while genuine discovery is
 happening — a relationship that has been "collaborating" for two years without ever
@@ -737,11 +740,11 @@ purpose.
   published Leadership Principle used in every hiring loop and cited internally in
   planning disputes — a real, operating instance of the principle being load-bearing
   infrastructure, not a poster on a wall.
-- **Herminia Ibarra's 2019 HBR research** on sponsorship gaps for women in leadership is a
-  named, dated, citable study with a specific finding (mentorship predicted promotion for
+- **Ibarra, Carter, and Silva's September 2010 HBR study** on sponsorship gaps for women in
+  leadership is a named, dated, citable study with a specific finding (mentorship predicted promotion for
   men but not women, largely due to sponsor seniority gaps) still referenced across
   corporate DEI and leadership-development programs.
-- **Team Topologies** (Skelton and Pais, 2019) has been adopted widely enough as a named
+- **Team Topologies** (Skelton and Pais, 2019; second edition 2025) has been adopted widely enough as a named
   vocabulary that "stream-aligned team" and "platform team" now appear directly in job
   postings and org-design docs at companies that have never read the book cover to cover.
 - **Google's Project Aristotle**, an internal multi-year study of what made its own teams
@@ -819,14 +822,17 @@ a probe-and-adapt response was needed instead.
 - Andy Grove — *High Output Management* (1983), commonly traced as the origin of
   "disagree and commit"; Amazon's Leadership Principles (aboutamazon.com) for the current
   published wording of "Have Backbone; Disagree and Commit."
+- Herminia Ibarra, Nancy Carter, and Christine Silva, "Why Men Still Get More Promotions
+  Than Women," *Harvard Business Review*, September 2010. Source of the mentoring-predicts-
+  promotion-for-men-not-women finding.
 - Herminia Ibarra — "A Lack of Sponsorship Is Keeping Women from Advancing into
-  Leadership," *Harvard Business Review*, 2019.
+  Leadership," *Harvard Business Review*, 2019. A later summary of the same research line.
 - Paul Rogers and Marcia Blenko — the original RAPID framework article, *Harvard Business
   Review*, January 2006 (Bain & Company).
 - Melvin Conway — "How Do Committees Invent?", *Datamation*, 1968; Fred Brooks — *The
   Mythical Man-Month*, which named Conway's Law.
-- Matthew Skelton and Manuel Pais — *Team Topologies* (2019); teamtopologies.com for the
-  maintained reference material.
+- Matthew Skelton and Manuel Pais, *Team Topologies* (IT Revolution, 2019; second edition
+  2025-09-23); teamtopologies.com for the maintained reference material.
 - Amy Edmondson — "Psychological Safety and Learning Behavior in Work Teams,"
   *Administrative Science Quarterly*, 1999.
 - Dave Snowden — the Cynefin framework; thecynefin.co for current domain naming.
@@ -846,7 +852,7 @@ a probe-and-adapt response was needed instead.
 Sylvia Ann Hewlett's formula is "mentors advise; sponsors act" — a mentor shares
 knowledge and advice, while a sponsor is senior and powerful enough to advocate for,
 name, and place a more junior person in a visible role, spending real credibility to do
-it. Herminia Ibarra's HBR research found mentorship predicted promotion for men two years
+it. Ibarra, Carter, and Silva's 2010 HBR study found mentorship predicted promotion for men two years
 later but had no such effect for women, largely because women's mentors tended to be less
 senior and lacked the clout to actually advocate. The practical gotcha: an engineer who
 has plenty of mentors and no sponsors can be well-advised and still stuck, because advice

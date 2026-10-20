@@ -63,6 +63,7 @@ public interface Filter {
 Registered via:
 - `@Component` (Spring Boot auto-registers all `Filter` beans)
 - `FilterRegistrationBean<MyFilter>` — explicit registration with URL patterns, order, and init params
+- `@FilterRegistration` on the `@Bean` method or `@Component` class (Boot 3.5+), with the same settings as annotation attributes
 - `@WebFilter` + `@ServletComponentScan` — legacy servlet annotation style
 
 ### 4.2 HandlerInterceptor
@@ -226,7 +227,41 @@ public class FilterConfig {
         return reg;
     }
 }
+
+// Option C (Boot 3.5+): @FilterRegistration puts the registration settings in annotation
+// attributes on the bean method (or on a @Component filter class)
+@Configuration
+public class FilterConfig {
+    @Bean
+    @FilterRegistration(name = "loggingFilter",
+                        urlPatterns = "/api/*",
+                        order = Ordered.HIGHEST_PRECEDENCE + 10,
+                        dispatcherTypes = { DispatcherType.REQUEST, DispatcherType.ERROR })
+    public LoggingFilter loggingFilter() {
+        return new LoggingFilter();
+    }
+}
 ```
+
+`@FilterRegistration` (and `@ServletRegistration` for servlets) is read by Boot's servlet
+context initializer and produces the same registration a `FilterRegistrationBean` would. Its
+elements map one to one: `name`, `urlPatterns`, `servletNames`, `servletClasses`, `order`
+(default `Ordered.LOWEST_PRECEDENCE`), `dispatcherTypes`, `initParameters` (`@WebInitParam`),
+`asyncSupported` (default `true`), `matchAfter`, `enabled` and `ignoreRegistrationFailure`.
+
+| | `@Component` + `@Order` | `FilterRegistrationBean` | `@FilterRegistration` |
+|---|---|---|---|
+| URL patterns | No, every request | Yes | Yes |
+| Order on a `@Bean` method | `@Order` on the method is ignored | `setOrder(int)` | `order` attribute |
+| Values computed at runtime (patterns from config, conditional dispatcher types) | No | Yes, plain Java | No, compile-time constants only |
+| Filter is a normal bean (constructor injection, appears in context) | Yes | Only if you also declare it as a bean | Yes |
+| Disable one filter that a library registers | No | `setEnabled(false)` | `enabled = false` |
+
+The `@Order` row is the trap that the annotation removes. Boot reads a filter's order from the
+`Filter` class (`@Order` on the class or `Ordered`), not from `@Order` on the `@Bean` method
+that creates it, so a third-party filter you cannot annotate used to need a
+`FilterRegistrationBean` only to set its position. `@FilterRegistration(order = ...)` on the
+bean method does that directly.
 
 ### 6.2 HandlerInterceptor Registration
 
@@ -712,6 +747,8 @@ public class FilterConfig {
 | `org.springframework.web.util.ContentCachingResponseWrapper` | Caches response body for inspection |
 | `org.springframework.security.web.FilterChainProxy` | Spring Security's composite filter |
 | `org.springframework.web.filter.DelegatingFilterProxy` | Bridge between servlet container and Spring bean filters |
+| `org.springframework.boot.web.servlet.FilterRegistrationBean` | Programmatic filter registration: patterns, order, dispatcher types |
+| `@FilterRegistration` / `@ServletRegistration` | Declarative registration on a bean method or class (Boot 3.5+) |
 | `io.micrometer.core.instrument.Timer` | Metrics instrumentation for interceptors |
 
 ---
@@ -739,9 +776,14 @@ Spring Security must intercept requests before any handler resolution happens �
 `OncePerRequestFilter` guarantees that a filter's logic executes exactly once per logical HTTP request, even if the servlet container dispatches the request multiple times (e.g., via `RequestDispatcher.forward()` or `RequestDispatcher.include()`, or async dispatch). It achieves this by setting a boolean attribute on the request and checking it at the start of `doFilter`. Without this guard, a filter that performs authentication or request ID injection could execute two or three times on a single logical request.
 
 **Q: How do you control the order of multiple filters in a Spring Boot application?**
-**Short:** Use `@Order`/`Ordered` on filter beans, `FilterRegistrationBean.setOrder()`, or `HttpSecurity.addFilterBefore/After/At()` for security filters.
+**Short:** Use `@Order`/`Ordered` on the filter class, `FilterRegistrationBean.setOrder()`, `@FilterRegistration(order=...)`, or `HttpSecurity.addFilterBefore/After/At()` for security filters.
 
-Three mechanisms exist: (1) Implement `Ordered` or annotate with `@Order(n)` on a filter bean — lower numbers execute first; (2) Use `FilterRegistrationBean.setOrder(n)` for explicit registration without the `@Component` annotation — this also allows URL pattern restrictions; (3) For Spring Security filters, use `HttpSecurity.addFilterBefore/After/At()` to position filters relative to existing security filter positions. Avoid mixing `@Order` and `FilterRegistrationBean` for the same filter — the `FilterRegistrationBean` order takes precedence.
+Four mechanisms exist: (1) Implement `Ordered` or annotate the filter CLASS with `@Order(n)`, where lower numbers execute first; `@Order` on the `@Bean` method that returns the filter is ignored; (2) Use `FilterRegistrationBean.setOrder(n)` for explicit registration without the `@Component` annotation, which also allows URL pattern restrictions; (3) Since Boot 3.5, put `@FilterRegistration(order = n, urlPatterns = ...)` on the `@Bean` method or the `@Component` class to get the same control declaratively; (4) For Spring Security filters, use `HttpSecurity.addFilterBefore/After/At()` to position filters relative to existing security filter positions. Avoid mixing `@Order` and `FilterRegistrationBean` for the same filter, because the `FilterRegistrationBean` order takes precedence.
+
+**Q: When would you use `@FilterRegistration` instead of a `FilterRegistrationBean`?**
+**Short:** Use @FilterRegistration (Boot 3.5+) when patterns and order are constants; keep FilterRegistrationBean when registration values are computed at runtime.
+
+`@FilterRegistration` on a `@Bean` method or a `@Component` filter class carries the same settings as `FilterRegistrationBean`: `urlPatterns`, `servletNames`, `order`, `dispatcherTypes`, `initParameters`, `asyncSupported`, `matchAfter` and `enabled`. The filter stays an ordinary bean with constructor injection, and the configuration class loses the boilerplate of creating and returning a wrapper. It also fixes a common ordering bug: `@Order` on the `@Bean` method is ignored for filters, so a third-party filter you cannot annotate needed a `FilterRegistrationBean` only to set `setOrder()`, whereas `@FilterRegistration(order = ...)` on the method works. Annotation values must be compile-time constants, so when URL patterns come from configuration properties or the dispatcher types depend on an environment check, keep `FilterRegistrationBean`, which is plain Java. `@ServletRegistration` is the same feature for servlets.
 
 **Q: How do you read the request body in a filter without breaking @RequestBody deserialization?**
 **Short:** Wrap the request in a `ContentCachingRequestWrapper` and read the cached bytes only after `chain.doFilter()` returns.

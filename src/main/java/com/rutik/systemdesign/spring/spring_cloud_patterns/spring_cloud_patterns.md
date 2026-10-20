@@ -1011,6 +1011,20 @@ public class OrderService {
 }
 ```
 
+### Pitfall 7: A contract-test suite pinned to the Spring Cloud BOM
+
+A team runs consumer-driven contract tests with `spring-cloud-starter-contract-verifier` and
+stubs downstreams with `@AutoConfigureWireMock` from `spring-cloud-contract-wiremock`, all
+versioned by `spring-cloud-dependencies`. On 2026-07-06 Spring transferred Spring Cloud
+Contract to its original lead, Marcin Grzejszczak, under Stubborn.sh. Spring removed it from
+all future Spring Cloud release trains and stopped shipping updates for it in the active ones.
+The next train bump leaves these artifacts with no version from the BOM, and the current train
+gets no fixes for them, so the test suite has no upgrade path inside Spring Cloud.
+
+Fix: move contract tests to Stubborn.sh with an explicit version, and stub plain downstream
+calls with WireMock itself (`org.wiremock:wiremock-standalone`, test scope) through its
+JUnit 5 `WireMockExtension`, which does not depend on any Spring Cloud artifact.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1035,6 +1049,8 @@ public class OrderService {
 | micrometer-tracing-bridge-otel | OpenTelemetry bridge | Use for Jaeger/OTLP export |
 | Redis | Rate limiter backend for Gateway | `spring-boot-starter-data-redis-reactive` required |
 | Zipkin / Jaeger | Distributed trace UI and storage | Zipkin: simpler; Jaeger: more features, CNCF |
+| `org.wiremock:wiremock-standalone` 3.13.x | HTTP stub for downstream services in tests | JUnit 5 `WireMockExtension` with `dynamicPort()`; no Spring Cloud dependency |
+| Spring Cloud Contract (Stubborn.sh) | Consumer-driven contract tests | Left the Spring portfolio on 2026-07-06; not in any future Spring Cloud train, so pin its version yourself |
 
 ---
 
@@ -1044,11 +1060,11 @@ public class OrderService {
 **Short:** Spring Cloud Gateway is a programmatic, reactive gateway on WebFlux, unlike Nginx's static declarative config.
 Spring Cloud Gateway is a programmatic, reactive API gateway built on Spring WebFlux and Project Reactor. Unlike Nginx, which is configured with static declarative rules, Spring Cloud Gateway executes Java code in filters and predicates, enabling dynamic routing, deep Spring Security integration, service-discovery-aware load balancing via `lb://` URIs, and full access to the Spring application context. The tradeoff is performance: Nginx has lower latency (C vs JVM) for simple proxying. Gateway is preferred when routing logic requires custom Java code or deep Spring ecosystem integration.
 
-**Q: Explain the difference between GlobalFilter and GatewayFilter in Spring Cloud Gateway.**
+**Q: What is the difference between GlobalFilter and GatewayFilter in Spring Cloud Gateway?**
 **Short:** A GlobalFilter runs on every route; a GatewayFilter applies only to routes that explicitly declare it.
 A `GlobalFilter` applies to all routes defined in the gateway. It is implemented as a Spring bean and executes for every matched request. Common uses: authentication, correlation ID injection, request/response logging. A `GatewayFilter` applies only to specific routes where it is declared in the route configuration. Built-in `GatewayFilter` implementations (RewritePath, AddRequestHeader, CircuitBreaker, RequestRateLimiter) are configured per-route in `application.yml` or Java route definitions. Custom `GatewayFilter` implementations can be reused across routes by referencing them by name in the filter configuration.
 
-**Q: Describe the circuit breaker states and the role of the HALF_OPEN state.**
+**Q: What are the circuit breaker states, and what role does the HALF_OPEN state play?**
 **Short:** HALF_OPEN lets a limited number of test calls through after OPEN to probe recovery before fully closing.
 A Resilience4j circuit breaker has three states. CLOSED is the normal operating state: all calls proceed and results are measured against the sliding window. OPEN means the failure (or slow-call) rate has crossed the configured threshold: all calls fail immediately without reaching the downstream service, and the configured fallback is returned. After `waitDurationInOpenState` elapses, the circuit automatically transitions to HALF_OPEN. In HALF_OPEN, a limited number of test calls (`permittedNumberOfCallsInHalfOpenState`, e.g., 5) are allowed through. If the failure rate among test calls is below the threshold, the circuit closes; otherwise it returns to OPEN. HALF_OPEN implements the probe-and-recover pattern: it avoids thundering herd on a recovering service by limiting test traffic.
 
@@ -1066,7 +1082,7 @@ Eureka prioritizes Availability and Partition Tolerance over Consistency. Each E
 
 **Q: What is the difference between Micrometer Tracing and Spring Cloud Sleuth?**
 **Short:** Micrometer Tracing replaced Spring Cloud Sleuth from Boot 3.0 onward, adding vendor-neutral Brave/OTel support.
-Spring Cloud Sleuth (Spring Cloud 2020.x and earlier) provided distributed tracing by auto-configuring Brave (B3 propagation) and automatically injecting trace and span IDs into log MDC and HTTP headers. From Spring Boot 3.0 and Spring Cloud 2022.0 onward, Sleuth is replaced by Micrometer Tracing. Micrometer Tracing is vendor-neutral: it supports both Brave (Zipkin/B3) and OpenTelemetry bridges. The API (`Tracer`, `Span`, `Observation`) is part of Micrometer core. Auto-configuration is handled by Spring Boot actuator auto-configuration, not a separate Spring Cloud module. Migration from Sleuth to Micrometer Tracing requires changing dependencies and replacing `spring.sleuth.*` properties with `management.tracing.*`.
+Spring Cloud Sleuth (last line 3.1, shipped through the Spring Cloud 2021.0.x train for Boot 2.6 and 2.7) provided distributed tracing by auto-configuring Brave (B3 propagation) and automatically injecting trace and span IDs into log MDC and HTTP headers. From Spring Boot 3.0 and Spring Cloud 2022.0 onward, Sleuth is replaced by Micrometer Tracing. Micrometer Tracing is vendor-neutral: it supports both Brave (Zipkin/B3) and OpenTelemetry bridges. The API (`Tracer`, `Span`, `Observation`) is part of Micrometer core. Auto-configuration is handled by Spring Boot actuator auto-configuration, not a separate Spring Cloud module. Migration from Sleuth to Micrometer Tracing requires changing dependencies and replacing `spring.sleuth.*` properties with `management.tracing.*`.
 
 **Q: How does B3 propagation work and what headers are involved?**
 **Short:** B3 propagates trace context via X-B3-TraceId, SpanId, ParentSpanId, and Sampled headers across HTTP calls.
@@ -1121,15 +1137,27 @@ public KeyResolver userKeyResolver() {
 Configure the `RequestRateLimiter` filter to reference this bean via SpEL: `key-resolver: "#{@userKeyResolver}"`. Authenticated users get per-user limits (e.g., 100 req/s); anonymous requests get per-IP limits.
 
 **Q: How do you test a Spring Cloud Gateway route without starting a real downstream service?**
-**Short:** Use WebTestClient with WireMock stubbing the downstream service to test a route without a real dependency.
-Use `@WebFluxTest` with `WebTestClient` and mock the downstream service using `WireMock` (via `spring-cloud-contract-wiremock`) or a mock bean. Spring Cloud Gateway supports `MockWebServer` (OkHttp) for unit tests of individual filters. For integration testing the full filter chain:
+**Short:** Boot the gateway with `@SpringBootTest`, point the route URI at a WireMock server on a random port, and assert through `WebTestClient`.
+Start the full gateway with `@SpringBootTest(webEnvironment = RANDOM_PORT)`, run WireMock (`org.wiremock:wiremock-standalone`, test scope) on a dynamic port through its JUnit 5 `WireMockExtension`, and inject that port into the route URI with `@DynamicPropertySource`. The request then goes through the real predicates and filter chain and lands on the stub. Do not reach for `@AutoConfigureWireMock` from `spring-cloud-contract-wiremock`: Spring Cloud Contract moved to Stubborn.sh on 2026-07-06 and is out of all future Spring Cloud trains. On Boot 4, `@SpringBootTest` alone no longer provides web test client beans, so add `@AutoConfigureWebTestClient`.
 ```java
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureWireMock(port = 0)  // starts WireMock on a random port
+@AutoConfigureWebTestClient
 class GatewayRouteTest {
+    @RegisterExtension
+    static WireMockExtension orders = WireMockExtension.newInstance()
+        .options(wireMockConfig().dynamicPort()).build();
+
+    @DynamicPropertySource
+    static void routes(DynamicPropertyRegistry registry) {
+        // the route is declared as uri: ${downstream.orders-uri}
+        registry.add("downstream.orders-uri", orders::baseUrl);
+    }
+
+    @Autowired WebTestClient webTestClient;
+
     @Test
     void orderRouteForwardsCorrectly() {
-        stubFor(get(urlEqualTo("/orders/123")).willReturn(okJson("{\"id\":\"123\"}")));
+        orders.stubFor(get(urlEqualTo("/orders/123")).willReturn(okJson("{\"id\":\"123\"}")));
         webTestClient.get().uri("/api/orders/123")
             .header(HttpHeaders.AUTHORIZATION, "Bearer " + validToken)
             .exchange()
@@ -1139,7 +1167,7 @@ class GatewayRouteTest {
 }
 ```
 
-**Q: Explain the concept of slow call circuit breaking and why it matters for production.**
+**Q: What is slow call circuit breaking, and why does it matter in production?**
 **Short:** Resilience4j can count calls exceeding a duration threshold as failures even when they return 200 OK.
 In addition to failure rate thresholds, Resilience4j allows configuring a `slowCallRateThreshold` and `slowCallDurationThreshold`. A call is considered "slow" (and counted as a negative signal) if it exceeds the duration threshold (e.g., 2000ms) even if it returns a 200 OK. This matters because a dependency that consistently responds in 3 seconds is effectively a failure from the caller's perspective — it ties up resources, adds latency to the user response, and can exhaust thread pools just as a full failure would. By treating slow calls like failures, the circuit breaker opens before the downstream service fully fails, enabling the fallback to serve fast degraded responses rather than slow partial responses.
 

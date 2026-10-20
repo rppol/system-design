@@ -47,6 +47,7 @@ Key insight: **the fixed-size state is a lossy compression of history, and that 
 | S4 / S4D | Linear, time-invariant, DPLR (or purely diagonal in S4D) | None — same `A_bar, B_bar, C` for every token | FFT convolution, `O(L log L)` | HiPPO-initialized `A`, provably long memory | Long Range Arena, audio, genomics — where content-routing is not the bottleneck |
 | Mamba (selective SSM) | Linear per-step, but `B_bar, C, Δ` are input-dependent | Full selectivity | Hardware-aware parallel scan, fused CUDA kernel | Selective forget/write per token | General sequence modeling, drop-in for attention where a constant-size state matters |
 | Mamba-2 (SSD) | Same selective recurrence, restricted `A` to scalar-times-identity per head | Full selectivity, structured for matmul reuse | Chunked matmul-based scan (block decomposition of the semiseparable matrix), tensor-core friendly | Same as Mamba, larger recommended state size since matmul is cheap | Same as Mamba, preferred when training/inference throughput on GPU matters more than the last point of quality from a fully general `A` |
+| Mamba-3 | Selective recurrence with a more expressive discretization and a complex-valued state update; optional MIMO (multi-input, multi-output) form | Full selectivity | Chunked matmul-based scan, as Mamba-2 | Complex state supports state tracking (parity, modular counting) that real decaying states cannot do | Successor to Mamba-2 (Lahoti et al., ICLR 2026): matches Mamba-2 perplexity at half the state size; use the MIMO form when decode quality matters and latency is fixed |
 | xLSTM (sLSTM) | Gated, RNN-family — not an SSM | Yes (gates, as in LSTM) | Sequential (recurrent), memory-mixing across heads | Exponential gating with a stabilizer state (replaces LSTM's sigmoid gates) | A parallel *revival* of the gated-RNN line, not a member of the SSM family — included here because it targets the same "post-Transformer alternative" niche |
 | xLSTM (mLSTM) | Gated, matrix-valued memory | Yes | Fully parallelizable (no hidden-to-hidden recurrence across the matrix memory) | Covariance-update rule, exponential gating | The xLSTM block used when parallel training throughput matters more than sLSTM's stronger sequential mixing |
 | Hybrid (Jamba, Nemotron-H, Falcon-H1) | Interleaved or parallel SSM + attention layers | Both (SSM layers selective, attention layers standard) | Attention layers parallel by construction; SSM layers via parallel scan | Attention layers supply exact recall; SSM layers supply cheap long-range compression | Production LLMs and long-context systems — see Section 7 |
@@ -218,6 +219,25 @@ state accumulates `x_0=1.0`, `x_1=0.7788*1.0-0.1=0.6788`, `x_2=0.3679*0.6788+4.0
 each step is exactly `A_bar_t * (previous state) + (this step's gated input)`, the same
 "mix a re-weighted copy of the old summary with the current input" reading the parent
 module gives the vanilla RNN, minus the `tanh` squash.
+
+### Mamba-3: complex state and MIMO decoding
+
+Mamba-3 (Lahoti, Li, Chen, Wang, Bick, Kolter, Dao & Gu, ICLR 2026,
+[arXiv:2603.15569](https://arxiv.org/abs/2603.15569)) keeps the selective recurrence and changes
+three things. **A more expressive recurrence** comes from a different discretization of the
+continuous system. **A complex-valued state update** targets state tracking: Mamba-2's `A_bar` is a
+real decay in `(0, 1)`, so each state coordinate can only shrink toward zero, while a complex
+eigenvalue rotates the state each step, which is what tracking parity or a count modulo k needs.
+**The MIMO form** replaces the per-step rank-1 outer-product update with a rank-`r` update.
+Decode is memory-bandwidth-bound (the state is loaded from HBM every token for very little math),
+so the extra FLOPs of a rank-`r` update fit inside time the step already spends waiting on memory:
+quality goes up without raising decode latency.
+
+The paper's numbers at 1.5B parameters: Mamba-3 beats the next-best model, Gated DeltaNet, by
+0.6 points of average downstream accuracy, and the MIMO variant adds 1.2 more (1.8 total).
+Across state sizes, Mamba-3 matches Mamba-2's perplexity with half the state, which halves the
+per-sequence inference memory computed in the next subsection. In `mamba-ssm` it is
+`from mamba_ssm import Mamba3`, with `is_mimo=True` and `mimo_rank` selecting the MIMO form.
 
 ### Memory arithmetic: constant SSM state vs a growing KV cache
 
@@ -394,7 +414,7 @@ or `C` from the input.
 
 | Tool | Purpose |
 |---|---|
-| `mamba-ssm` (PyPI) | Official Mamba/Mamba-2 package from the `state-spaces/mamba` repo; ships the fused CUDA selective-scan kernel. Linux-only, requires a matching CUDA toolkit + PyTorch build |
+| `mamba-ssm` (PyPI) | Official Mamba/Mamba-2/Mamba-3 package from the `state-spaces/mamba` repo (`Mamba`, `Mamba2`, `Mamba3` modules; `Mamba3(is_mimo=True, mimo_rank=4)` for MIMO); ships the fused CUDA selective-scan kernel. Linux-only, requires a matching CUDA toolkit + PyTorch build |
 | `causal_conv1d` | Companion package providing the fused causal 1D convolution Mamba uses before the scan; required alongside `mamba-ssm` for the optimized path |
 | `transformers` (Hugging Face) | `MambaConfig`/`MambaForCausalLM`, `Mamba2Config`, and `JambaForCausalLM` ship in the library, giving Mamba/Mamba-2/Jamba the same `from_pretrained`/`generate` API as any Transformer checkpoint |
 | `state-spaces/mamba` (GitHub) | Upstream reference implementation and pretrained checkpoint releases (`mamba-130m` through `mamba-2.8b`, plus `-hf` variants for `transformers`) |
@@ -473,6 +493,11 @@ The recurrent state `x_t` (shape `batch x d_inner x d_state`) is per-sequence ru
 **Q: When would you choose Mamba-2 over the original Mamba, and what do you give up?**
 **Short:** Choose Mamba-2 for GPU throughput via tensor-core matmuls; the tradeoff is a more restricted, scalar-times-identity A matrix.
 Mamba-2's SSD formulation restricts `A` to a scalar-times-identity matrix per attention-style head (rather than Mamba's fully general per-channel diagonal `A`), which is what allows the recurrence to be expressed as chunked block-matrix multiplications and executed on tensor cores instead of a bespoke selective-scan kernel — the paper reports 2-8x faster than Mamba's scan. The tradeoff is a less expressive `A` per channel; in practice this is compensated by being able to afford a larger state size `d_state` for the same compute budget, since the matmul-based computation is so much cheaper per FLOP than the scan kernel.
+
+**Q: What does Mamba-3's complex-valued state let it do that Mamba-2 cannot, and what does MIMO buy at decode?**
+**Short:** A complex state rotates instead of only decaying, so it can track parity-style state; MIMO's rank-r update adds quality inside the memory-bound decode step at no latency cost.
+
+Mamba-2's per-step transition is a real decay between 0 and 1, so every state coordinate can only fade, and a fading state cannot flip back and forth the way tracking parity or a count modulo k requires. Mamba-3 (arXiv:2603.15569, ICLR 2026) makes the state update complex-valued, so a step can rotate the state, which is the missing primitive for these state-tracking tasks. MIMO addresses a different limit: single-token decode loads the whole state from memory for one rank-1 outer-product update, so the GPU is idle on arithmetic; a rank-`r` MIMO update does more math per byte loaded and raises quality without raising decode latency. The paper reports +0.6 average accuracy over Gated DeltaNet at 1.5B (+1.8 with MIMO) and Mamba-2 perplexity at half the state size.
 
 **Q: Why is a "constant memory per step" claim about SSMs true for inference but not for training?**
 **Short:** Inference walks the recurrence one step at a time with fixed state; training with the parallel scan trades memory for parallelism.

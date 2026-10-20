@@ -112,13 +112,12 @@ Projections consume the event stream asynchronously and fan out into denormalize
 
 ### Aggregate with Event Sourcing (Axon Framework 4.x)
 
-Version note (July 2026): the annotation-based aggregate model shown here is the **Axon
+Version note: the annotation-based aggregate model shown here is the **Axon
 Framework 4.x** API, which is what nearly all production Axon systems still run. Axon
-Framework **5.0** shipped in late 2025 (5.0.5 is current) and reworks the programming model
-around a Dynamic Consistency Boundary, async-native processing and "stateful handlers" that
-take state objects as parameters instead of living inside an aggregate class; AxonIQ has said
-migration tooling for 4.x arrives in 5.1.0. Check the 5.x reference before porting this code
-verbatim.
+Framework **5.0** shipped on November 18, 2025 (5.4.0 followed on October 12, 2026) and reworks the
+programming model around a Dynamic Consistency Boundary, async-native processing and
+"stateful handlers" that take state objects as parameters instead of living inside an
+aggregate class. Check the 5.x reference before porting this code verbatim.
 
 ```java
 @Aggregate
@@ -441,10 +440,11 @@ For the common case of renaming an event type or moving it to a new package, do 
 this at all — Axon 4 ships `EventTypeUpcaster`, a predefined `SingleEventUpcaster` that maps
 one type/revision pair to another.
 
-**Version caveat (July 2026):** upcasters are an Axon **4.x** feature. The Axon Framework 5.0
-reference guide states plainly that event upcasters are *not available in 5.0* and are
-scheduled to return in **5.2.0**; on 5.0 the documented approach is payload conversion at
-handling time. If you are on Axon 5 today, do not expect the classes above to resolve.
+**Version caveat:** `SingleEventUpcaster` and `EventTypeUpcaster` are the Axon **4.x** API.
+Axon Framework 5.0 and 5.1 have no upcasting; there the documented approach is payload
+conversion at handling time. **5.2.0** (July 9, 2026) adds upcasting back as "message
+transformation", with rename and drop/filter steps. It is a different API, so the 4.x classes above do not resolve on 5.x;
+port each upcaster to a 5.2 transformation using the 5.2 Event Transformation reference.
 
 ### Temporal Queries (Point-in-Time State)
 
@@ -599,6 +599,11 @@ A compensating event is a new event appended to the stream that corrects the eff
 **Short:** Aggregate boundaries should enclose only the data that must change together atomically under a true business invariant.
 
 An aggregate boundary should enclose exactly the data that must change together atomically and consistently within a single transaction, and nothing more. Model the aggregate around a true invariant — an `Order` aggregate enforces that its total always equals the sum of its items, so items and total must be inside the same aggregate — while data that can tolerate eventual consistency, like a shipping carrier's tracking updates, belongs in a separate aggregate or a projection instead. Aggregates that grow too large accumulate long event streams and create contention, since every command against the aggregate is serialized through its optimistic concurrency check; splitting an overgrown aggregate into smaller ones relieves both problems. Favor small aggregates bounded by real transactional invariants over large aggregates modeled after a whole business entity.
+
+**Q: How does a Dynamic Consistency Boundary differ from one event stream per aggregate?**
+**Short:** DCB tags each event with the entities it touches and checks a query-based append condition, so one atomic event can enforce a rule spanning two entities.
+
+With aggregate-per-stream, the consistency boundary is fixed at design time: each aggregate owns one stream, and the optimistic check is "stream revision is still N". A rule that spans two aggregates, such as "a course holds at most 30 students and a student takes at most 10 courses", then needs a saga that writes to both streams and appends a compensating event when the second step fails. A Dynamic Consistency Boundary (Sara Pellegrini, "Killing the Aggregate"; documented at dcb.events) keeps one stream per bounded context and tags each event with the entities it affects, so `StudentSubscribedToCourse` carries both the course and the student tag. The command handler reads the events matching a query over those tags, decides, and appends with that same query plus the last position it saw; the store rejects the append if any new event matching the query arrived in between. The boundary is chosen per command, not per class, and unrelated writes still run in parallel. Axon Framework 5 builds its programming model on DCB (`AppendCondition`, tag-based sourcing criteria), while Axon 4 and stream-based stores such as KurrentDB (formerly EventStoreDB) use per-stream expected versions.
 
 **Q: How do you make projection event handlers idempotent so replay or at-least-once delivery doesn't corrupt the read model?**
 **Short:** Make every projection handler an idempotent upsert keyed by the event's unique ID.

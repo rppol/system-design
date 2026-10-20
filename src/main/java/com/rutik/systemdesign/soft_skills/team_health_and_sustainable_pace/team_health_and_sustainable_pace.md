@@ -147,6 +147,13 @@ stateDiagram-v2
     Struggling --> Attrition: retro items never get an owner
     Attrition --> Healthy: rotation rebuilt, every action item owned and dated
     Struggling --> Healthy: named owner fixes on-call before trust breaks
+
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    class Healthy good
+    class Strained warn
+    class Struggling,Attrition bad
 ```
 
 A team's health does not fail in one step. Each transition in this diagram is a decision
@@ -407,6 +414,86 @@ particularly common and particularly useless, because a manager cannot act on a 
 a proposed fix the speaker is already offering to own, and a specific, bounded ask of the
 manager rather than a generic "maybe look into it."
 
+### 6.9 Measuring engineering productivity without wrecking the team
+
+Productivity metrics are a team-health topic because the fastest way to destroy
+psychological safety is to rank people on a number they can game. **Goodhart's law**:
+Charles Goodhart's 1975 observation about monetary targets, in Marilyn Strathern's 1997
+phrasing, "When a measure becomes a target, it ceases to be a good measure." A metric
+used to learn about the system stays honest. The same metric used to rank people gets
+gamed, and then it measures the gaming.
+
+```mermaid
+flowchart LR
+    classDef info fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef bad  fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef good fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    m(["PRs merged per<br/>engineer, observed"]) --> t("Made a target:<br/>ranked in reviews")
+    t --> g("PRs split in three,<br/>count up 40%")
+    g --> d("Lead time and<br/>outcomes unchanged")
+    d --> x(["Metric no longer<br/>measures output"])
+    m -.-> ok("Kept as a team trend<br/>beside quality and survey")
+
+    class m info
+    class t warn
+    class g,d,x bad
+    class ok good
+```
+
+*Goodhart's law on an engineering metric. The dashed path is the use that stays honest:
+a team-level trend read beside a quality metric and a perceptual one.*
+
+Four frameworks are in common use, and they measure different things:
+
+| Framework | Source | What it measures | Unit of analysis |
+|-----------|--------|------------------|------------------|
+| DORA software delivery metrics | Forsgren, Humble and Kim, *Accelerate* (2018); the annual DORA reports at dora.dev | the delivery pipeline: change lead time, deployment frequency, failed deployment recovery time (throughput); change fail rate, deployment rework rate (instability) | an application or service, never a person |
+| SPACE | Forsgren, Storey, Maddila, Zimmermann, Houck and Butler, *ACM Queue* 19(1), February 2021 | five dimensions: Satisfaction and well-being, Performance, Activity, Communication and collaboration, Efficiency and flow | individual, team, or system, chosen per metric |
+| DevEx | Noda, Storey, Forsgren and Greiler, *ACM Queue*, 2023 | developer friction in three dimensions: feedback loops, cognitive load, flow state; mostly from surveys, supported by workflow data | the developer's experience, aggregated to team |
+| DX Core 4 | Abi Noda and Laura Tacho (DX), December 2024 | Speed (diffs per engineer), Effectiveness (Developer Experience Index), Quality (change failure rate), Impact (percentage of time on new capabilities) | organisation and team |
+
+Points that are easy to get wrong:
+
+- **DORA has five metrics, not four.** The original four keys came from *Accelerate*. The
+  2023 report renamed MTTR to failed deployment recovery time and limited it to failures
+  caused by a change; the 2024 report added deployment rework rate, the share of
+  deployments that are unplanned and caused by a production incident.
+- **SPACE is a menu, not a scorecard.** Its authors argue for several metrics across at
+  least three dimensions, including at least one perceptual measure such as a survey,
+  so no single number stands in for productivity. Activity (commits, PRs, lines) is one
+  dimension of five, and the one most open to gaming.
+- **Core 4's speed metric carries its own warning.** DX's launch post says diffs per
+  engineer must never be used at the individual level or tied to performance
+  evaluations, and must be read against the Developer Experience Index.
+- **None of them measures an individual's contribution.** Staff work (unblocking, design
+  review, the migration plan) does not show up in diffs; a ranking on diffs pushes your
+  best multipliers to stop multiplying.
+
+Rules that keep the numbers honest: measure teams and services, not people; pair every
+throughput metric with a quality metric and a survey result; publish the definitions
+before the first dashboard; compare a team with its own trend, not with other teams; and
+keep these numbers out of individual performance reviews, where the review's own evidence
+standard applies (see [Performance Reviews & Promotions](../performance_reviews_and_promotions/performance_reviews_and_promotions.md)).
+
+**Weak version** (a director announcing the dashboard)
+
+> Starting next quarter we'll track PRs merged per engineer and share the leaderboard in
+> the monthly all-hands to celebrate our most productive people.
+
+**Strong version**
+
+> Starting next quarter each team gets a dashboard with its DORA metrics, change fail rate
+> and rework rate next to lead time, plus a quarterly DevEx survey. It is per team, compared
+> only with that team's own last quarter, and none of it feeds individual reviews. The
+> first use is finding where builds and reviews slow us down, not ranking anyone.
+
+**What changed:** the weak version makes an activity count into a target attached to
+public status, which guarantees PR splitting and punishes the people doing review and
+design. The strong version measures the system at team level, pairs speed with stability
+and perception, rules out individual use in writing, and states what the numbers are for.
+
 ---
 
 ## 7. Real-World Examples
@@ -533,6 +620,11 @@ at which point velocity did not decline gradually — it collapsed in a single s
 | John Pencavel, "The Productivity of Working Hours," *The Economic Journal* 125(589), 2015 | The empirical case that output per hour collapses well before 70 hours, and total output at 70 barely beats output at 56 |
 | Christina Maslach & Susan Jackson, the Maslach Burnout Inventory and its three-dimension model | Exhaustion, cynicism, and reduced professional efficacy as separable, measurable dimensions |
 | World Health Organization, ICD-11 (2022), "Burn-out" | The occupational-phenomenon classification and its own three-dimension description |
+| Nicole Forsgren, Jez Humble & Gene Kim, *Accelerate* (2018), and the DORA reports at dora.dev (2023 and 2024 for the metric changes) | The DORA software delivery metrics, the 2023 rename of MTTR, and the 2024 addition of deployment rework rate |
+| Nicole Forsgren et al., "The SPACE of Developer Productivity," *ACM Queue* 19(1), 2021 | The five SPACE dimensions and the case against any single productivity metric |
+| Abi Noda, Margaret-Anne Storey, Nicole Forsgren & Michaela Greiler, "DevEx: What Actually Drives Productivity," *ACM Queue*, 2023 | Feedback loops, cognitive load and flow state as the three dimensions of developer experience |
+| Abi Noda, "Introducing the DX Core 4" (Engineering Enablement newsletter, December 10, 2024) | The four Core 4 dimensions, their key metrics, and the warning against individual use of diffs per engineer |
+| Marilyn Strathern, "'Improving ratings': audit in the British University system," *European Review* 5(3), 1997 | The common phrasing of Goodhart's law |
 | Jason Fried & David Heinemeier Hansson, *It Doesn't Have to Be Crazy at Work* (2018) | A named, public rejection of crunch culture from a company that runs a standing sustainable-pace policy |
 
 Related modules in this section:
@@ -552,6 +644,39 @@ team-level property, not an individual trait or a mood. It is most often confuse
 simple niceness or a low-conflict culture — Edmondson's later work is explicit that safety
 paired with low standards produces a comfort zone, not a high-performing team; the useful
 combination is safety paired with high standards held at the same time.
+
+**Q: Your VP wants to rank engineers by PRs merged per week. What do you say?**
+**Short:** That ranking turns an activity count into a target, so people split PRs, the count rises and output does not. Measure teams on DORA and survey data, never individuals.
+
+Goodhart's law: when a measure becomes a target, it stops being a good measure. A
+leaderboard of PRs per engineer rewards splitting one change into three, penalises the
+people doing review, design and unblocking, and teaches the team that asking for help
+costs rank. Even DX, whose Core 4 includes diffs per engineer, says it must never be used
+at the individual level or tied to performance evaluations. Offer the alternative: per-team
+DORA metrics with change fail rate and rework rate beside lead time, a quarterly
+developer-experience survey, and each team compared only with its own trend.
+
+**Q: What are DORA's five software delivery metrics?**
+**Short:** Throughput: change lead time, deployment frequency, failed deployment recovery time. Instability: change fail rate and deployment rework rate, the fifth, added in 2024.
+
+The four keys came from *Accelerate* (Forsgren, Humble, Kim, 2018). The 2023 report
+renamed MTTR to failed deployment recovery time and limited it to failures caused by a
+change to production. The 2024 report added deployment rework rate: the share of
+deployments that are unplanned and made because of a production incident. All five
+describe an application's delivery system and are meant to be read together, since speed
+gained by shipping more broken changes shows up in the two instability metrics.
+
+**Q: How do SPACE, DevEx and the DX Core 4 differ from the DORA metrics?**
+**Short:** DORA measures the delivery pipeline. SPACE is a five-dimension menu for choosing balanced metrics, DevEx measures friction through surveys, and Core 4 packages them into four dimensions.
+
+DORA's five metrics cover throughput and instability of deployments. SPACE (Forsgren et
+al., 2021) names five dimensions (satisfaction and well-being, performance, activity,
+communication and collaboration, efficiency and flow) and asks for metrics across at least
+three of them, including a perceptual one. DevEx (Noda et al., 2023) narrows to what slows
+developers down: feedback loops, cognitive load and flow state, mostly measured by survey.
+DX Core 4 (December 2024) picks one key metric each for speed, effectiveness, quality and
+impact. Choose by question: "is delivery healthy" is DORA, "where is the friction" is
+DevEx, "what do we report to leadership" is usually a Core 4 style set.
 
 **Q: What did Google's Project Aristotle find, and why is that finding notable?**
 **Short:** Psychological safety was the top predictor of team effectiveness among 180 teams studied.

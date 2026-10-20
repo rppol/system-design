@@ -116,13 +116,14 @@ sponsorship, behavioural interviewing on both sides of the table, and promotion 
 | 17 | [scope_prioritization_and_saying_no](scope_prioritization_and_saying_no/scope_prioritization_and_saying_no.md) | 4 | the iron triangle; "yes, and here is what moves"; the counter-offer instead of the refusal; opportunity cost made concrete; protecting focus without becoming the department of no |
 | 18 | [mentorship_and_sponsorship](mentorship_and_sponsorship/mentorship_and_sponsorship.md) | 5 | the distinction and why sponsorship is the scarce one; the IC's 1:1; growing a junior into an owner; the sponsorship ledger; what you owe someone you sponsored |
 | 19 | [technical_leadership_and_execution](technical_leadership_and_execution/technical_leadership_and_execution.md) | 5 | leading a project you do not manage; breaking work down; sequencing to retire risk first; unblocking; delegating outcomes not tasks; handing a project off |
-| 20 | [cross_functional_collaboration](cross_functional_collaboration/cross_functional_collaboration.md) | 5 | what PM, design, data science, sales engineering, support, legal and finance are each measured on, what they need from you, and the specific translation each requires |
-| 21 | [team_health_and_sustainable_pace](team_health_and_sustainable_pace/team_health_and_sustainable_pace.md) | 5 | psychological safety in practice; on-call load, page budgets and toil; burnout as a systems failure; the retro that changes something; the quiet signals |
-| 22 | [behavioral_interview_systems](behavioral_interview_systems/behavioral_interview_systems.md) | 6 | Amazon's Leadership Principles and the Bar Raiser loop; Google's hiring attributes and committee; Meta's leadership round; Netflix, Stripe, Airbnb; how a loop actually scores you |
-| 23 | [story_portfolio_and_star_frameworks](story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md) | 6 | STAR, SBI, CARL, SOAR and which fits which question; the twelve-story portfolio against a competency grid; the numbers a story needs; full weak-to-strong story rewrites |
-| 24 | [interviewing_as_the_interviewer](interviewing_as_the_interviewer/interviewing_as_the_interviewer.md) | 6 | writing a question that discriminates; scoring rubrics; structured-interviewing evidence; bias and calibration; the debrief write-up; the hiring bar and when to say no |
-| 25 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | 6 | the weekly brag doc; the self-review; the promotion packet as scope evidence not activity; calibration and what happens in the room; being told no; the conversation to have twelve months early |
-| 26 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | 7 | review load and the reviewer bottleneck; judgment as the scarce input; AI-assisted interview cheating and the countermeasures; rewritten ladders; the soft skills that got more valuable |
+| 20 | [technical_strategy_and_vision](technical_strategy_and_vision/technical_strategy_and_vision.md) | 5 | Rumelt's kernel (diagnosis, guiding policy, coherent actions); Larson's write-five-design-docs-then-synthesise method; strategy vs vision vs design doc vs roadmap; getting a strategy adopted; refreshing and retiring one |
+| 21 | [cross_functional_collaboration](cross_functional_collaboration/cross_functional_collaboration.md) | 5 | what PM, design, data science, sales engineering, support, legal and finance are each measured on, what they need from you, and the specific translation each requires |
+| 22 | [team_health_and_sustainable_pace](team_health_and_sustainable_pace/team_health_and_sustainable_pace.md) | 5 | psychological safety in practice; on-call load, page budgets and toil; burnout as a systems failure; the retro that changes something; the quiet signals |
+| 23 | [behavioral_interview_systems](behavioral_interview_systems/behavioral_interview_systems.md) | 6 | Amazon's Leadership Principles and the Bar Raiser loop; Google's hiring attributes and committee; Meta's leadership round; Netflix, Stripe, Airbnb; how a loop actually scores you |
+| 24 | [story_portfolio_and_star_frameworks](story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md) | 6 | STAR, SBI, CARL, SOAR and which fits which question; the twelve-story portfolio against a competency grid; the numbers a story needs; full weak-to-strong story rewrites |
+| 25 | [interviewing_as_the_interviewer](interviewing_as_the_interviewer/interviewing_as_the_interviewer.md) | 6 | writing a question that discriminates; scoring rubrics; structured-interviewing evidence; bias and calibration; the debrief write-up; the hiring bar and when to say no |
+| 26 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | 6 | the weekly brag doc; the self-review; the promotion packet as scope evidence not activity; calibration and what happens in the room; being told no; the conversation to have twelve months early |
+| 27 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | 7 | review load and the reviewer bottleneck; judgment as the scarce input; AI-assisted interview cheating and the countermeasures; rewritten ladders; the soft skills that got more valuable |
 
 ---
 
@@ -238,6 +239,8 @@ performance_reviews_and_promotions
   performance_reviews_and_promotions.md  senior, principal
 ai_era_engineering_leadership
   ai_era_engineering_leadership.md  senior, principal
+technical_strategy_and_vision
+  technical_strategy_and_vision.md  senior, principal
 case_studies
   getting_a_migration_approved.md          principal
   saying_no_to_a_vp.md                     principal
@@ -268,7 +271,7 @@ topic: the ladder, the language of commitment, design docs, incident work, sayin
 sponsorship, promotions, and the 2026 delta.
 
 <!-- study-path-table senior -->
-### Senior Path (17 modules)
+### Senior Path (18 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -284,17 +287,18 @@ sponsorship, promotions, and the 2026 delta.
 | 17 | [scope_prioritization_and_saying_no](scope_prioritization_and_saying_no/scope_prioritization_and_saying_no.md) | module page only |
 | 18 | [mentorship_and_sponsorship](mentorship_and_sponsorship/mentorship_and_sponsorship.md) | module page only |
 | 19 | [technical_leadership_and_execution](technical_leadership_and_execution/technical_leadership_and_execution.md) | module page only |
-| 20 | [cross_functional_collaboration](cross_functional_collaboration/cross_functional_collaboration.md) | module page only |
-| 22 | [behavioral_interview_systems](behavioral_interview_systems/behavioral_interview_systems.md) | module page only |
-| 23 | [story_portfolio_and_star_frameworks](story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md) | module page only |
-| 25 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | module page only |
-| 26 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | module page only |
+| 20 | [technical_strategy_and_vision](technical_strategy_and_vision/technical_strategy_and_vision.md) | module page only |
+| 21 | [cross_functional_collaboration](cross_functional_collaboration/cross_functional_collaboration.md) | module page only |
+| 23 | [behavioral_interview_systems](behavioral_interview_systems/behavioral_interview_systems.md) | module page only |
+| 24 | [story_portfolio_and_star_frameworks](story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md) | module page only |
+| 26 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | module page only |
+| 27 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | module page only |
 
-**Not in this path** (9 of 26, Full Path only): `scope_impact_and_ownership`, `staff_plus_archetypes`, `business_and_finance_vocabulary`, `leadership_and_org_vocabulary`, `executive_communication`, `influence_without_authority`, `negotiation_for_engineers`, `team_health_and_sustainable_pace`, `interviewing_as_the_interviewer`
+**Not in this path** (9 of 27, Full Path only): `scope_impact_and_ownership`, `staff_plus_archetypes`, `business_and_finance_vocabulary`, `leadership_and_org_vocabulary`, `executive_communication`, `influence_without_authority`, `negotiation_for_engineers`, `team_health_and_sustainable_pace`, `interviewing_as_the_interviewer`
 <!-- /study-path-table -->
 
 <!-- study-path-table principal -->
-### Principal Path (17 modules)
+### Principal Path (18 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -311,12 +315,13 @@ sponsorship, promotions, and the 2026 delta.
 | 16 | [negotiation_for_engineers](negotiation_for_engineers/negotiation_for_engineers.md) | module page only |
 | 17 | [scope_prioritization_and_saying_no](scope_prioritization_and_saying_no/scope_prioritization_and_saying_no.md) | module page only |
 | 18 | [mentorship_and_sponsorship](mentorship_and_sponsorship/mentorship_and_sponsorship.md) | module page only |
-| 21 | [team_health_and_sustainable_pace](team_health_and_sustainable_pace/team_health_and_sustainable_pace.md) | module page only |
-| 24 | [interviewing_as_the_interviewer](interviewing_as_the_interviewer/interviewing_as_the_interviewer.md) | module page only |
-| 25 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | module page only |
-| 26 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | module page only |
+| 20 | [technical_strategy_and_vision](technical_strategy_and_vision/technical_strategy_and_vision.md) | module page only |
+| 22 | [team_health_and_sustainable_pace](team_health_and_sustainable_pace/team_health_and_sustainable_pace.md) | module page only |
+| 25 | [interviewing_as_the_interviewer](interviewing_as_the_interviewer/interviewing_as_the_interviewer.md) | module page only |
+| 26 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | module page only |
+| 27 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | module page only |
 
-**Not in this path** (9 of 26, Full Path only): `precise_technical_vocabulary`, `technical_writing_for_engineers`, `upward_and_async_communication`, `giving_and_receiving_feedback`, `difficult_conversations_and_conflict`, `technical_leadership_and_execution`, `cross_functional_collaboration`, `behavioral_interview_systems`, `story_portfolio_and_star_frameworks`
+**Not in this path** (9 of 27, Full Path only): `precise_technical_vocabulary`, `technical_writing_for_engineers`, `upward_and_async_communication`, `giving_and_receiving_feedback`, `difficult_conversations_and_conflict`, `technical_leadership_and_execution`, `cross_functional_collaboration`, `behavioral_interview_systems`, `story_portfolio_and_star_frameworks`
 <!-- /study-path-table -->
 
 ---
@@ -365,6 +370,6 @@ Full index with dependency map and interview shortcuts:
 | 3 | Writing | 8-10 |
 | 4 | Communication in flight | 11-12, plus the incident case study |
 | 5 | Influence and conflict | 13-17 |
-| 6 | People, interviews, 2026 | 18-26, plus the loop and promo-packet case studies |
+| 6 | People, interviews, 2026 | 18-27, plus the loop and promo-packet case studies |
 
 Do the modules in path order; do one case study at the end of each week from week 3 on.

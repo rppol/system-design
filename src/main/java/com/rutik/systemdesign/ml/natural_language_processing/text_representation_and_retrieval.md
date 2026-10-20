@@ -567,6 +567,8 @@ Compare that `2.24` against the average of all 12 cells, `0.2725`: most of the g
 
 The dimension drop from 768 to 128 (the `self.linear` projection) is what keeps that ratio at `5.33x` instead of `32x` — without it, 32 full-width token vectors would be 32 times a pooled vector. This is also why Best Practice 9 recommends INT8 compression of the document token embeddings: it takes the 4 bytes per dimension down to 1, restoring the storage bill to roughly bi-encoder levels for under 0.5 MRR@10 of quality.
 
+In production you rarely hand-write the class above. sentence-transformers 6.0 (August 2026) ships `MultiVectorEncoder`, which loads PyLate and Stanford ColBERT checkpoints (`MultiVectorEncoder("colbert-ir/colbertv2.0")`) and ColPali-family visual retrievers, scores with MaxSim, and offers `HierarchicalTokenPooling`, which clusters each document's token vectors (Ward linkage on cosine similarity) and keeps one mean vector per cluster to shrink the per-token storage computed above.
+
 ---
 
 ## 7. Real-World Examples
@@ -779,6 +781,20 @@ candidates = [(query, doc_id_to_text[doc_id]) for doc_id, _ in bm25_top100]
 scores = cross_encoder.predict(candidates)  # 100 pairs × 2ms each = 0.2s total
 ```
 
+### Pitfall 6: bf16 cross-encoder reranker returning near-random order
+
+```python
+# BROKEN: sentence-transformers < 6.0, reranker loaded in bfloat16.
+# The sigmoid on the logits runs in bf16, saturates, and collapses the top
+# candidates onto a few tied scores. Mean NDCG@10 of
+# cross-encoder/ettin-reranker-32m-v1 on three NanoBEIR datasets: 0.18 (v5.7.0).
+reranker = CrossEncoder(name, model_kwargs={"torch_dtype": torch.bfloat16})
+
+# FIXED: sentence-transformers >= 6.0 upcasts scoring to float32 (same model:
+# 0.68). On an older version, keep the model in float32 or apply the sigmoid
+# to float32 logits yourself.
+```
+
 ---
 
 ## 11. Technologies & Tools
@@ -787,11 +803,12 @@ scores = cross_encoder.predict(candidates)  # 100 pairs × 2ms each = 0.2s total
 |------|---------|-------|
 | `rank_bm25` (Python) | BM25 implementation | pip install rank-bm25; in-memory, pure Python |
 | Elasticsearch / OpenSearch | Production BM25 + scoring | Distributed, supports custom scoring plugins |
-| `sentence-transformers` | SBERT models + training | Built-in data loaders, losses, evaluation |
+| `sentence-transformers` | SBERT models + training | Built-in data loaders, losses, evaluation. 6.1.0 (2026-09-18); 6.x requires `transformers` 5.x |
 | FAISS (Facebook) | Dense vector ANN search | CPU/GPU; flat, IVF, HNSW, PQ variants |
 | Annoy (Spotify) | ANN search for read-heavy workloads | Memory-mapped, perfect for multiple readers |
 | ScaNN (Google) | State-of-the-art ANN for Google scale | Best recall/latency at 10B+ vectors |
 | ColBERT (Stanford) | Late interaction retrieval | `colbert-ir/colbertv2.0` on HuggingFace |
+| `MultiVectorEncoder` (sentence-transformers 6.0+) | Late interaction in the standard library | Loads PyLate, Stanford ColBERT and ColPali-family checkpoints; MaxSim scoring; `HierarchicalTokenPooling` merges similar document token vectors to cut storage |
 | BEIR benchmark | IR evaluation benchmark | 18 datasets, standardized evaluation |
 | `pyserini` | BM25 + dense retrieval research library | Wraps Anserini (Lucene) + FAISS |
 

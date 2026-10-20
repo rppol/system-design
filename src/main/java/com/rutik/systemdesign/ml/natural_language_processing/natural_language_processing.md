@@ -13,6 +13,12 @@
 | [text_representation_and_retrieval.md](text_representation_and_retrieval.md) | BM25, Sentence-BERT, ColBERT, hybrid search, RRF | 15+ |
 | [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) | BLEU, ROUGE, BERTScore, entity-level F1, calibration | 15+ |
 | [tokenization_deep_dive.md](tokenization_deep_dive.md) | BPE, WordPiece, Unigram/SentencePiece, byte-level BPE, vocabulary sizing, fertility, train/inference parity | 15+ |
+| [word_embeddings.md](word_embeddings.md) | Static embeddings: word2vec (skip-gram, CBOW), GloVe, fastText | 15+ |
+| [sequence_labeling_and_crf.md](sequence_labeling_and_crf.md) | POS tagging and NER modeling: HMM, MEMM label bias, linear-chain CRF, BiLSTM-CRF | 15+ |
+| [text_classification.md](text_classification.md) | Task framing, Naive Bayes, logistic regression, linear SVM, fastText, TextCNN, imbalance, multi-label | 15+ |
+| [topic_modeling.md](topic_modeling.md) | LSA, pLSA, LDA, NMF, BERTopic, coherence vs perplexity, choosing the topic count | 15+ |
+| [language_modeling.md](language_modeling.md) | Chain rule, n-gram models, smoothing (Laplace, Good-Turing, Kneser-Ney), perplexity, neural LM basics | 15+ |
+| [syntactic_parsing.md](syntactic_parsing.md) | Constituency (CFG, PCFG, CKY) and dependency parsing, transition- and graph-based parsers | 15+ |
 
 ---
 

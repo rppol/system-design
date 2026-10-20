@@ -2,6 +2,8 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
+> **Version anchor (2026-10-19).** Current releases: **Grafana v13.2.4** (2026-10-13), **Alertmanager v0.34.1** (2026-09-17) and **Prometheus v3.15.0** (2026-09-24). Grafana **Git Sync** is generally available from Grafana 13.0 (the `provisioning.grafana.app/v0alpha1` `Repository` resource). **Perses v0.54.0** (2026-07-29) is the latest stable release of the CNCF Sandbox dashboard project. The **Grafana Foundation SDK** (Apache-2.0) ships builders for Go, TypeScript, Python, PHP and Java.
+
 Visualization turns raw telemetry into **dashboards humans can read at a glance**; alerting turns telemetry into **pages that wake the right person at the right time — and only when action is needed**. **Grafana** is the de-facto dashboard layer over metrics/logs/traces; **Alertmanager** (and Grafana Alerting) dedupes, groups, silences, and routes alerts to **PagerDuty / Jira Service Management Operations / Slack**. The hardest problem here is not building dashboards — it's **alert quality**: too many alerts cause fatigue and missed incidents; too few mean outages go unnoticed. The modern answer is **SLO burn-rate alerting** instead of static thresholds.
 
 ---
@@ -175,7 +177,7 @@ flowchart LR
     class logs base
 ```
 
-Each click narrows scope by one level — overview to service to trace to logs — turning a vague "something's slow" into the exact failing span and its logs in three hops (see Q10).
+Each click narrows scope by one level — overview to service to trace to logs — turning a vague "something's slow" into the exact failing span and its logs in three hops (see the dashboards question in section 12).
 
 **Symptom vs cause: what earns a page versus a dashboard panel**
 
@@ -405,6 +407,65 @@ providers:
 # Add a deploy annotation source so dashboards mark releases on the timeline.
 ```
 
+File provisioning is one-way. Grafana reads the files and, with the default `allowUiUpdates: false`, refuses to save a provisioned dashboard from the UI, so every change has to go through the files.
+
+### Dashboards as code: Git Sync, the Foundation SDK and Perses
+
+Three layers solve three different problems: where the dashboard lives (Git Sync), how the JSON is produced (an SDK), and whether the dashboard format is Grafana's at all (Perses).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    code(["Go / TS code<br/>Foundation SDK"]) -->|"build JSON in CI"| pr["Pull request<br/>grafana/ path"]
+    pr --> repo["Git repo<br/>branch main"]
+    repo -->|"poll 60 s<br/>or webhook"| graf["Grafana 13<br/>Git Sync"]
+    graf -->|"UI save:<br/>commit or PR"| repo
+    cue(["CUE / Go<br/>Perses SDK"]) -->|"percli dac build"| perses["Perses server<br/>or operator CRDs"]
+
+    class code,cue io
+    class pr,repo mathOp
+    class graf train
+    class perses frozen
+```
+
+**Git Sync** (GA in Grafana 13.0) connects a Grafana instance to a Git location: repository, branch and path. It is bidirectional. Grafana polls the branch every `intervalSeconds` (default 60), or reacts within seconds when the provider webhook is configured, and writes changes into its database. A dashboard saved in the UI becomes a commit; `workflows: [write]` commits directly, `workflows: [branch]` opens a branch for a pull request, so the review rule lives in Git branch protection. GitHub, GitHub Enterprise, GitLab and Bitbucket have dedicated integrations, and any other host works as a pure Git repository.
+
+```yaml
+apiVersion: provisioning.grafana.app/v0alpha1
+kind: Repository
+metadata: {name: team-api-dashboards}
+spec:
+  title: team-api dashboards
+  type: github
+  github: {url: "https://github.com/acme/observability", branch: main, path: grafana/team-api/}
+  sync: {enabled: true, intervalSeconds: 60, target: folder}
+  workflows: [branch]          # UI saves open a PR; no direct commits to main
+```
+
+Its limits are explicit: 10 repository connections by default on self-managed Grafana (`[provisioning] max_repositories`), 1 on Grafana Cloud Free and 10 on paid Cloud tiers, and Grafana recommends no more than 1,000 resources per connection because sync load on the Grafana database grows past that. Shard by capacity, not by team: group teams into a few shard folders of up to about 1,000 resources each and connect each folder separately, because one connection per team uses up the 10-connection limit.
+
+**The Grafana Foundation SDK** generates the dashboard JSON from typed builders, so a fleet of 40 service dashboards is one function called 40 times instead of 40 copied JSON files that drift:
+
+```go
+func serviceDashboard(svc string) dashboard.Dashboard {
+    d, _ := dashboard.NewDashboardBuilder(svc + " RED").
+        Uid("red-" + svc).
+        WithPanel(timeseries.NewPanelBuilder().Title("Error ratio").
+            WithTarget(prometheus.NewDataqueryBuilder().
+                Expr(`job:http_errors:ratio5m{job="` + svc + `"}`))).
+        Build()   // a wrong field type fails at compile time, not on a 3am dashboard
+    return d
+}
+```
+
+CI marshals the result to JSON and commits it under the Git Sync path, or applies it with Terraform. Reviewers then read a 10-line Go diff instead of a 2,000-line JSON diff.
+
+**Perses** (Apache-2.0, CNCF Sandbox) is a separate dashboard server with an open dashboard specification, Go and CUE SDKs, static validation with `percli lint`, a `percli migrate` path from Grafana JSON, and a Kubernetes operator that reads dashboards as CRDs from application namespaces. It covers Prometheus, Tempo, Loki and Pyroscope data. Choose it when dashboards must be vendor-neutral or deployed per namespace with the app; stay on Grafana when you need its plugin and data-source breadth.
+
 ---
 
 ## 7. Real-World Examples
@@ -426,6 +487,8 @@ providers:
 | Sensitivity | More alerts (catch everything) | Fewer alerts (low fatigue) | Detection coverage vs fatigue/burnout |
 | Engine | Alertmanager (Prometheus-native) | Grafana Alerting (unified) | Mature routing vs single pane over many sources |
 | Routing | Single catch-all | Per-team severity tree | Simplicity vs ownership/escalation |
+| Dashboards in Git | File provisioning (one-way, UI read-only) | Git Sync (bidirectional, UI saves become commits or PRs) | Strict code-only change path vs letting UI authors keep editing |
+| Dashboard source | Exported JSON | SDK code (Foundation SDK, Perses CUE/Go) | Few hand-built dashboards vs a fleet generated from one template |
 | Notification | Page everything urgent | Page critical, ticket the rest | Coverage vs sleep/sanity |
 
 ---
@@ -468,6 +531,8 @@ providers:
 
 **Pitfall 4 — Forgetting to silence during maintenance.** A planned deploy or DB migration triggers a flood of expected alerts, paging on-call for work they already know about and desensitizing them. FIX: create a scoped Alertmanager silence for the maintenance window/labels (and ideally automate it from the deploy pipeline), then ensure it expires.
 
+**Pitfall 5: committing UI-exported JSON as "dashboards as code".** The export carries the source instance's data-source UIDs, a `version` counter and every default the UI filled in, so the file is thousands of lines no one reviews, and on another instance the panels report the data source as not found. FIX: generate dashboards from an SDK with data sources passed as variables, or let Git Sync own the files so the instance that edits them also writes them.
+
 ---
 
 ## 11. Technologies & Tools
@@ -484,87 +549,103 @@ providers:
 | Kibana / OpenSearch Dashboards | Log dashboards/alerts for ELK |
 | Grafana IRM | On-call scheduling, escalation and incident response, integrated with Grafana Alerting |
 | Statuspage / Atlassian Statuspage | Public status communication |
+| Grafana Git Sync | Bidirectional sync of dashboards and folders between Grafana 13+ and a Git branch/path |
+| Grafana Foundation SDK | Typed builders (Go, TypeScript, Python, PHP, Java) that emit dashboard JSON |
+| Perses / `percli` | CNCF Sandbox dashboard server with an open spec, CUE and Go SDKs, lint, and a Kubernetes operator |
+| Grafonnet | Jsonnet library for generating Grafana dashboards |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: What's the difference between a dashboard and an alert, and when do you use each?**
+**Q: A team edits a provisioned dashboard in the Grafana UI and the save fails, or the edit vanishes on the next reload. Why, and how does Git Sync change that?**
+**Short:** File provisioning is one-way, so Grafana blocks or overwrites UI edits; Git Sync is bidirectional and turns a UI save into a commit or pull request on the synced branch.
+Classic file provisioning loads JSON from disk and treats the files as the source of truth. With the default `allowUiUpdates: false` the UI refuses to save, and with it set to `true` the edit is saved to the database only, so the next change to the provisioning file overwrites it. Git Sync (GA in Grafana 13.0) is a `Repository` resource pointing at a repository, branch and path. Grafana polls it every 60 seconds by default, or reacts within seconds to a webhook, and a UI save is written back as a direct commit (`workflows: [write]`) or a branch for a pull request (`workflows: [branch]`). Branch protection then decides who may change production dashboards, and UI authors keep their editor.
+
+**Q: Why generate dashboards with the Grafana Foundation SDK or Perses CUE instead of committing exported JSON?**
+**Short:** Exported JSON is a huge, unreviewable diff that copies and drifts per service; an SDK builds every service's dashboard from one typed function and catches errors at compile time.
+An exported dashboard is thousands of lines including data-source UIDs from the source instance and defaults the UI filled in, so a one-threshold change shows up as a large diff and the 40 per-service copies diverge. The Foundation SDK (Go, TypeScript, Python, PHP, Java) gives builders such as `dashboard.NewDashboardBuilder` and `timeseries.NewPanelBuilder`; a function takes the service name and returns the dashboard, CI marshals it to JSON, and Git Sync or Terraform deploys it. A wrong field type fails the build, and a template change updates all 40 dashboards in one reviewed PR. Perses offers the same model through CUE and Go SDKs plus `percli lint` for static validation.
+
+**Q: When would you pick Perses over Grafana for dashboards?**
+**Short:** When dashboards must follow an open, vendor-neutral spec and ship per namespace as Kubernetes CRDs; Perses is an Apache-2.0 CNCF Sandbox project with CUE and Go SDKs.
+Perses is a dashboard server built around an open dashboard specification, with Go and CUE SDKs, a CLI (`percli`) that lints and applies dashboards, a migration path from Grafana JSON, and an operator that reads dashboards as CRDs from each application's namespace, so a service ships its dashboard with its Helm chart. It reads Prometheus, Tempo, Loki and Pyroscope. Grafana remains the choice when you need its large plugin and data-source catalogue, Grafana Alerting or Grafana Cloud. The licence differs too: Perses is Apache-2.0, Grafana is AGPLv3, which matters if you embed the dashboard UI in a product.
+
+**Q: What's the difference between a dashboard and an alert, and when do you use each?**
 **Short:** A dashboard is a pull tool a human checks for investigation; an alert is a push tool that interrupts someone because urgent action is needed.
 
 A dashboard is a *pull* tool — a human looks at it to investigate or maintain situational awareness — while an alert is a *push* tool that interrupts a human because action is needed. Use dashboards for investigation, trends, capacity, and showing SLO/error-budget status (RED/USE methods); use paging alerts only for urgent, user-impacting, actionable conditions. Conflating them (dashboarding what should page, or paging what should be a dashboard) is the root of most observability dysfunction.
 
-**Q2: Why alert on symptoms rather than causes?**
+**Q: Why alert on symptoms rather than causes?**
 **Short:** Symptoms like error rate and latency are what users experience, catching every problem that matters, while a cause like high CPU pages constantly with no guaranteed user impact.
 
 Symptoms (high error rate, latency, SLO burn) are what users actually experience, so alerting on them catches every problem that matters and ignores causes that have no user impact. A cause like CPU > 80% pages constantly even when the autoscaler absorbs it or it's a harmless batch job, training on-call to ignore pages — which eventually causes a real page to be missed. Page on symptoms tied to user impact; keep causes on dashboards for investigation once a symptom alert fires.
 
-**Q3: What is alert fatigue and how do you fight it?**
+**Q: What is alert fatigue and how do you fight it?**
 **Short:** Alert fatigue is the desensitization from frequent non-actionable pages that eventually causes a real incident to be missed, fought by keeping every page actionable.
 
 Alert fatigue is the desensitization that happens when on-call receives frequent non-actionable alerts, so they start ignoring or auto-acking pages and eventually miss a real incident. Fight it by ensuring every page is actionable and urgent, deleting or converting noisy cause-based alerts to tickets, grouping correlated alerts so one outage is one page, using SLO burn-rate alerting instead of static thresholds, and auditing alert-to-action ratios (if nobody acts on an alert, kill it). The counterintuitive truth is that fewer, higher-quality alerts make you safer.
 
-**Q4: How do multi-window, multi-burn-rate SLO alerts work and why are they better than static thresholds?**
+**Q: How do multi-window, multi-burn-rate SLO alerts work and why are they better than static thresholds?**
 **Short:** Multi-window burn-rate alerts fire only when a threshold is exceeded over both a long and short window simultaneously, tying paging directly to SLO breach risk.
 
 They alert when the error-budget burn rate exceeds a threshold over both a long window and a short confirmation window simultaneously — e.g. a fast page at 14.4x burn over 1h confirmed by a 5m window, a slower ticket at 6x over 6h confirmed by 30m. The long window confirms the burn is real (avoiding flapping); the short window makes the alert clear quickly once it resolves and ensures prompt detection of severe burns. They're better than a static threshold because they tie paging directly to the risk of breaching the SLO, balancing fast detection against low noise.
 
-**Q5: What does Alertmanager do between a rule firing and a page?**
+**Q: What does Alertmanager do between a rule firing and a page?**
 **Short:** Alertmanager groups related alerts into one notification, deduplicates HA replicas, applies inhibition to suppress dependent alerts, and routes by label to the right receiver.
 
 Alertmanager groups related alerts so one root cause produces one notification (not 200), deduplicates identical alerts from HA Prometheus replicas, applies inhibition so a higher-severity alert suppresses dependent lower ones, honors silences during maintenance, and routes alerts by label through a tree to the right receiver. The result is that a node failure dropping 50 pods pages on-call once with a meaningful message rather than 50 times. It's the policy layer that turns raw rule firings into sane human notifications.
 
-**Q6: Explain grouping, inhibition, and silencing with examples.**
+**Q: Explain grouping, inhibition, and silencing with examples.**
 **Short:** Grouping collapses alerts sharing labels into one notification, inhibition suppresses dependent alerts when a parent fires, and silencing mutes matches for a time window.
 
 Grouping collapses alerts sharing labels into a single notification — `group_by: [alertname, cluster]` turns 50 `PodDown` alerts on one cluster into one page. Inhibition suppresses dependent alerts when a parent fires — a `ClusterDown` alert inhibits all the `PodDown` alerts for that cluster so you get the meaningful page only. Silencing mutes matching alerts for a window — you silence a service's alerts during a planned migration so expected noise doesn't page anyone.
 
-**Q7: How do you route alerts to the right people?**
+**Q: How do you route alerts to the right people?**
 **Short:** Route alerts with a label-keyed tree — `severity=page` to 24/7 on-call paging, `severity=ticket` to business-hours triage — tuning timing knobs per route.
 
 Use a routing tree keyed on labels: `severity=page` goes to the on-call escalation tool (PagerDuty, Jira Service Management Operations) for 24/7 paging, `severity=ticket` goes to Slack/Jira for business-hours triage, and team labels (`team=payments`) route to that team's specific on-call. Tune `group_wait`/`group_interval`/`repeat_interval` per route so criticals page fast and unresolved ones re-notify. The escalation policy (ack within N minutes or escalate) lives in the on-call tool (see [incident_management_and_oncall](../incident_management_and_oncall/incident_management_and_oncall.md)).
 
-**Q8: What are the RED and USE methods, and when do you use each?**
+**Q: What are the RED and USE methods, and when do you use each?**
 **Short:** RED (rate, errors, duration) fits request-driven services and maps to user experience; USE (utilization, saturation, errors) fits resources for capacity investigation.
 
 RED (Rate, Errors, Duration) is for request-driven services — it tells you how busy a service is, how often it fails, and how slow it is, which maps directly to user experience. USE (Utilization, Saturation, Errors) is for resources like CPU, disk, and network — it tells you how full and stressed the infrastructure is. Use RED for service dashboards and (its symptoms) for alerts; use USE for infrastructure dashboards and capacity investigation, generally not for paging.
 
-**Q9: How do you handle a planned maintenance window without paging everyone?**
+**Q: How do you handle a planned maintenance window without paging everyone?**
 **Short:** Create a scoped, time-boxed Alertmanager silence matching the affected labels, ideally automated from the deploy pipeline so it's reliably created and expires.
 
 Create a scoped Alertmanager silence matching the affected labels (service/cluster) for the maintenance window so expected alerts are muted, ideally automated from the deploy/maintenance pipeline so it's created and expires reliably. This prevents desensitizing on-call with alerts about work they already know about. Make the silence narrow (only the affected components) and time-boxed so unrelated real problems still page during the window.
 
-**Q10: How do dashboards connect to the rest of observability for fast diagnosis?**
+**Q: How do dashboards connect to the rest of observability for fast diagnosis?**
 **Short:** A dashboard hierarchy drills from an overview's RED/SLO status into a service's detailed view, then via a latency exemplar into its trace and exact logs.
 
 A well-built dashboard hierarchy drills down: an overview shows all services' RED metrics and SLO/error-budget status, clicking a degraded service opens its detailed dashboard with deploy markers, and clicking a latency exemplar jumps to the slow request's trace, whose `trace_id` then pulls the exact logs. This metric → trace → log pivot turns a vague "something's slow" into a precise root cause in minutes, which is why dashboards should embed exemplars and runbook links and align with the metrics, traces, and logs pillars (see [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md), [observability_tracing_and_otel](../observability_tracing_and_otel/observability_tracing_and_otel.md), [observability_logging](../observability_logging/observability_logging.md)).
 
-**Q11: How exactly does a 14.4x burn rate translate to consuming 2% of a 30-day error budget in one hour?**
+**Q: How exactly does a 14.4x burn rate translate to consuming 2% of a 30-day error budget in one hour?**
 **Short:** A 14.4x burn rate drains a 30-day budget 14.4 times faster than an even rate, consuming 14.4 times 1/720 of the budget — 2% — in a single hour.
 
 Burn rate equals the bad-event ratio divided by the error budget, so a 14.4x burn rate drains the 30-day budget 14.4 times faster than a rate that exhausts it in exactly 30 days. The error budget for a 99.9% SLO is 0.1% (0.001), and a flat rate that exhausts it in exactly 30 days would use 1/720 of the budget every hour, since 720 equals 24 times 30 hours; at 14.4 times that rate, one hour consumes 14.4 × (1/720), which is 0.02, or 2% of the entire budget in a single hour. The same arithmetic gives 6x over 6h as 5% and 3x over 1d as 10% — the design deliberately lets slower, less urgent burns consume a larger share of budget before their ticket-tier alert fires, while the fast page fires early, at only 2% consumed. When adapting these thresholds to a different SLO target, recompute the per-hour budget fraction first, one minus the SLO divided by 720, then choose multipliers based on how much budget you're willing to risk before paging.
 
-**Q12: What do `group_wait`, `group_interval`, and `repeat_interval` each control in an Alertmanager route?**
+**Q: What do `group_wait`, `group_interval`, and `repeat_interval` each control in an Alertmanager route?**
 **Short:** `group_wait` sets the wait before a new group's first notification, `group_interval` paces later updates, and `repeat_interval` controls re-notification of unresolved alerts.
 
 Each timing knob controls a different phase: `group_wait` batches an alert group's first notification, `group_interval` paces later updates, and `repeat_interval` re-notifies unresolved alerts. `group_wait`, 30 seconds by default and tuned to 10 seconds for critical routes in the sample config, is how long Alertmanager waits after the first alert in a new group before sending the initial notification, giving a few more correlated alerts time to join that same page. `group_interval`, 5 minutes, is the minimum wait before notifying about alerts that joined an already-notified group, and `repeat_interval`, 4 hours, controls how often a still-firing alert gets re-sent so on-call isn't paged every evaluation cycle for the same ongoing issue. Shorten `group_wait`/`group_interval` for critical routes so real incidents notify fast, and set `repeat_interval` long enough to avoid re-paging noise but short enough that a forgotten, still-firing incident doesn't go silent for hours.
 
-**Q13: Using the symptom-vs-cause test, would a never-draining queue and elevated GC pause time each page or stay on a dashboard?**
+**Q: Using the symptom-vs-cause test, would a never-draining queue and elevated GC pause time each page or stay on a dashboard?**
 **Short:** A never-draining queue pages because a request is stuck right now, while elevated GC pause time stays on a dashboard since it only correlates with latency.
 
 A never-draining queue pages because a user-facing request is stuck waiting right now, while elevated GC pause time stays on a dashboard as an investigatable cause. Applying the "does a user feel it right now" test, a queue that never drains means work is backing up and requests are or will imminently be delayed, which is symptom-tier and immediately actionable, matching the diagram's page examples of SLO burn, error ratio, and p99 latency; GC pauses correlate with latency but aren't guaranteed to be user-visible at any given moment, so they're better surfaced as a dashboard panel an engineer checks once a real symptom, like elevated p99, has already paged. Teams that page directly on GC pause count because it's easy to measure reproduce exactly the alert-fatigue pattern described elsewhere in this module. When in doubt, ask whether the metric is the user's experience or merely correlates with it — only the former belongs on a page.
 
-**Q14: What are the three standard alert severity tiers, and what response does each require?**
+**Q: What are the three standard alert severity tiers, and what response does each require?**
 **Short:** The three severity tiers are page/critical for 24/7 wake-up, ticket/warning for business-hours triage, and info for awareness only, chosen deliberately rather than by default.
 
 The three tiers are page/critical, ticket/warning, and info, each mapped to a different urgency and receiver. Page/critical means user impact right now and routes to PagerDuty or Jira Service Management Operations for 24/7 on-call wake-up with an immediate response expected; ticket/warning means something is degraded but not urgent, routing to Slack or Jira for triage within business hours; info is awareness-only, posted to a Slack channel or left on a dashboard with no action expected at all. A common mistake is defaulting new alerts to page/critical "to be safe," which inflates the on-call's page volume with things that were really ticket or info tier and directly causes the alert fatigue described elsewhere in this module. When writing a new alerting rule, choose the severity label deliberately based on the required response time, not by copying whatever severity a similar-looking alert already has.
 
-**Q15: Why provision Grafana dashboards and Alertmanager rules from Git instead of editing them in the UI?**
+**Q: Why provision Grafana dashboards and Alertmanager rules from Git instead of editing them in the UI?**
 **Short:** Provisioning from Git means dashboard and alert changes go through the same PR review and rollback as code, closing the drift problem of an untracked hand-edited panel.
 
 Provisioning as code means dashboards and alert rules are defined in version-controlled files that Grafana and Prometheus load on startup, rather than being hand-edited through a web UI. A provider config pointing Grafana at a file path, or a Terraform resource for a dashboard, means a change goes through the same pull request review, diff, and rollback as any other code change, and the same is true for alerting rules stored as Prometheus rule YAML or Terraform; this closes the classic drift problem where a critical panel or alert threshold was hand-tweaked in production and nobody else knows it changed. A UI-edited dashboard that isn't provisioned from Git will be silently overwritten, or will diverge invisibly, the next time the provisioner reloads its source files. Once a dashboard or alert rule matters enough to be relied on operationally, move it into the provisioned, Git-backed set immediately, and treat any UI edit as a draft to be ported back into code.
 
-**Q16: How do RED, USE, and Google's Four Golden Signals relate, and would you combine them on one dashboard?**
+**Q: How do RED, USE, and Google's Four Golden Signals relate, and would you combine them on one dashboard?**
 **Short:** RED covers request-driven services and USE covers resources, and they're often combined on one dashboard since a degrading service is frequently caused by a saturated resource beneath it.
 
 RED covers request-driven services, USE covers resources, and the Four Golden Signals is a closely related service-level framework covering latency, traffic, errors, and saturation. In practice a single service dashboard often combines both scopes: RED panels for rate, errors, and duration on the service itself, plus USE panels for CPU, memory, and disk saturation on the resources or dependencies it runs on, such as its database or message queue, because a request-driven service degrading is frequently explained by a resource underneath it saturating. The Four Golden Signals' addition of "saturation" alongside RED's three signals is effectively bridging the two views into one service-level checklist. Structure a service's overview dashboard as RED for the service plus USE for its dependencies, which answers both whether the service is healthy and, if not, whether the cause is its own logic or something it depends on, in one screen.
@@ -581,6 +662,8 @@ RED covers request-driven services, USE covers resources, and the Four Golden Si
 - **Silence planned maintenance** (ideally automated from the pipeline) and let silences expire.
 - **Build RED/USE dashboards that answer one question,** embed SLO/error-budget panels, deploy markers, and exemplars.
 - **Provision dashboards and alerts as code** (Git) and audit alert-to-action ratios; delete alerts nobody acts on.
+- **Generate dashboards from an SDK, not exported JSON,** and connect Grafana 13+ to the repository with Git Sync using the `branch` workflow so UI edits arrive as pull requests.
+- **Shard Git Sync connections by capacity, not by team:** a few path-based shards of up to about 1,000 resources each.
 
 ---
 

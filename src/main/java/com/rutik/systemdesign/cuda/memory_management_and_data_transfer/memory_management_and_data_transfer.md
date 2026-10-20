@@ -252,6 +252,17 @@ That inverts the tuning advice:
 | Sparse/scattered access | Pathological — one whole page migrates per touched cache line | Merely a remote access — no migration at all |
 | Eager whole-array prefetch | A clear win — turns a fault storm into one scheduled copy | Can be wasted bandwidth — data that is never touched still moved |
 | Primary tuning knob | `cudaMemAdvise` / `cudaMemPrefetchAsync` | Usually unnecessary — coherence is already the fast path |
+| Who manages GPU memory | The CUDA driver | From CUDA 13.4 / R615: the driver, by default (CDMM). NUMA mode, where the OS onlines GPU memory as a NUMA node, is opt-in |
+
+**NUMA mode vs. CDMM.** On a coherent platform the GPU's HBM can be handed to the OS as
+a CPU-less NUMA node (NUMA mode), or kept under the driver's control (Coherent
+Driver-based Memory Management, CDMM). From the R615 driver branch that corresponds to CUDA 13.4,
+CDMM is the default on every NVIDIA hardware-coherent platform. NUMA mode stays fully
+supported. The mode is a node-wide kernel-module parameter
+(`NVreg_CoherentGPUMemoryMode=driver` or `=numa`) and takes effect only after a driver
+reload or reboot, so pick it before the driver upgrade. A host whose tooling reads GPU
+memory as a NUMA node, through `numactl` placement for example, sees that node disappear
+after an upgrade to R615 unless it sets NUMA mode explicitly.
 
 State the consequence plainly: **the same Unified Memory source code is correct on both
 platforms and has different performance characteristics on each.** A tuning conclusion
@@ -946,6 +957,7 @@ CUDA_CHECK(cudaStreamSynchronize(stream)); // catches everything queued
 | `cudaMemPrefetchAsync` | Explicit page migration ahead of use |
 | `cudaMemAdvise` | Migration hints (read-mostly, preferred location, accessed-by) |
 | `cudaHostGetDevicePointer` | Device-side alias for mapped (zero-copy) host memory |
+| `cudaMemGetLocationInfo` / `cuMemGetLocationInfo` (CUDA 13.4+) | Query where a Unified Memory allocation currently resides, so a library can pick compute and communication resources near the data |
 | `cudaGetLastError` / `cudaPeekAtLastError` | Synchronous error-state check |
 | `cudaStreamSynchronize` / `cudaDeviceSynchronize` | Blocking wait + surfaces queued-op errors |
 | Nsight Systems | Timeline view showing copy-engine vs. compute-engine overlap (see [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md)) |

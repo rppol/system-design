@@ -424,6 +424,102 @@ broken that ordering. The price is the reserved encodings at both ends (`e = 0` 
 `e = 255` for `Inf` and `NaN`) and the hard rule that follows from all of it: never compare computed
 floats with `==`, and never store money in one — use integer cents or `Decimal`.
 
+### 4.6 Low-Precision Floats for Machine Learning
+
+The same sign / biased exponent / implicit-1 mantissa recipe works at any width. ML hardware uses
+narrow formats because a neural network tolerates rounding error far better than it tolerates
+overflow, and halving the bits halves memory traffic. The design question is how to split the bits
+between exponent (range) and mantissa (precision):
+
+```
+ format     bits  sign exponent mantissa   bias   largest finite      decimal digits
+ float32     32    1     8        23        127   3.4e38              ~7.2
+ float16     16    1     5        10         15   65504               ~3.3
+ bfloat16    16    1     8         7        127   3.4e38              ~2.4
+ FP8 E4M3     8    1     4         3          7   448                 ~1.2
+ FP8 E5M2     8    1     5         2         15   57344               ~0.9
+ FP4 E2M1     4    1     2         1          1   6                   -
+
+ bfloat16 is float32 with the low 16 mantissa bits cut off:
+   float32   s eeeeeeee mmmmmmm mmmmmmmmmmmmmmmm
+   bfloat16  s eeeeeeee mmmmmmm
+```
+
+Converting float32 to bfloat16 is therefore a 16-bit shift plus rounding, and the range is
+unchanged. float16 spends its bits the other way: more precision, but anything above 65504 becomes
+`inf`, which is why a gradient spike that is harmless in bfloat16 kills a float16 run unless a loss
+scaler rescales it.
+
+```python
+from __future__ import annotations
+import struct
+
+
+def to_bf16_bits(x: float) -> int:
+    """float32 -> bfloat16, round to nearest even (NaN handling omitted)."""
+    bits = struct.unpack("<I", struct.pack("<f", x))[0]
+    bits += 0x7FFF + ((bits >> 16) & 1)
+    return bits >> 16
+
+
+def bf16_value(b: int) -> float:
+    return struct.unpack("<f", struct.pack("<I", b << 16))[0]
+
+
+for x in (3.14159, 70000.0):
+    b = to_bf16_bits(x)
+    print(f"{x} -> 0x{b:04X} = {bf16_value(b)}")
+# 3.14159 -> 0x4049 = 3.140625      (8 significant bits)
+# 70000.0 -> 0x4789 = 70144.0       (float16 cannot hold 70000 at all)
+```
+
+**FP8 has two variants because one byte cannot buy both range and precision.** The OCP 8-bit
+floating-point (OFP8) spec, implemented by NVIDIA Hopper and Blackwell tensor cores, defines:
+
+| | E4M3 | E5M2 |
+|--|------|------|
+| Largest finite | 448 (`S.1111.110`) | 57,344 |
+| Smallest subnormal | 2^-9 = 0.00195 | 2^-16 |
+| Infinities | None: overflow saturates or becomes NaN | Yes, as in IEEE-754 |
+| NaN encodings | Only `S.1111.111` | `S.11111.xx` with nonzero `xx` |
+| Typical use | Weights and activations (forward pass) | Gradients (backward pass) |
+
+E4M3 reclaims the codes IEEE-754 would spend on infinities to extend its range from 240 to 448. Near
+the top of that range, consecutive E4M3 values are 32 apart (256, 288, 320, ..., 448), so 300 rounds
+to 288.
+
+**Block scaling (MX).** A single format-wide range is too coarse for 8 or fewer bits, so the OCP
+Microscaling (MX) spec v1.0 groups every 32 consecutive elements into a block that shares one 8-bit
+scale. The scale type E8M0 is an exponent only: it encodes a power of two from 2^-127 to 2^127.
+
+```
+ one MX block, k = 32 elements
+ +--------+-----+-----+-----+-- ... --+-----+
+ | X:E8M0 | P1  | P2  | P3  |         | P32 |     value_i = 2^X * P_i
+ +--------+-----+-----+-----+-- ... --+-----+
+   8 bits   each P_i: FP8 (E4M3/E5M2), FP6 (E3M2/E2M3), FP4 (E2M1) or INT8
+
+ storage per element:  MXFP8 = 8 + 8/32 = 8.25 bits    MXFP4 = 4 + 8/32 = 4.25 bits
+```
+
+The scale is set from the block's largest magnitude: for a block whose largest value is 20.0 stored as
+E4M3, `X = floor(log2 20) - 8 = -4` (8 is E4M3's largest exponent), so the elements store `value x 16`
+and 20.0 becomes 320, inside E4M3's 448 limit. An outlier now costs precision only in its own block of
+32 instead of across the whole tensor.
+
+**IEEE P3109.** The IEEE P3109 working group is standardizing these narrow formats. Its interim report
+(version 4.1, September 14, 2026, an unapproved draft) defines one family by four parameters: bit width
+`K`, precision `P`, signedness, and domain (finite only, or with infinities). Unlike both IEEE-754 and the
+OCP FP8 formats, every P3109 format has exactly **one NaN and no negative zero**: in a signed format the
+code point `0x80` that would be `-0` is the NaN. A signed format's exponent bias is `2^(K-P-1)`, so the
+8-bit, precision-4 signed extended format (`binary8p4se`) has bias 8, not E4M3's 7: 2.0 encodes as `0x48`
+and `+inf` as `0x7F`. It also names saturation behaviour explicitly (`SatFinite` clamps to the largest
+finite value, `SatPropagate` keeps infinities), which the OCP formats left to each implementation.
+
+See [`llm/optimization_and_quantization`](../../llm/optimization_and_quantization/optimization_and_quantization.md)
+for applied quantization and [`cuda/tensor_cores_and_mixed_precision`](../../cuda/tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)
+for the hardware that consumes these formats.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -604,6 +700,8 @@ print(is_approx_equal(1.1 - 0.6, 0.5))  # True
 
 **Java HashMap bucket index** — `HashMap.put(key, value)` computes `(n-1) & hash(key)` to choose a bucket, where n is a power of 2. This bitwise AND replaces modulo (`%`) for power-of-two sizes, which is why HashMap capacity is always a power of 2: `1 << 4 = 16, 1 << 5 = 32`, etc. The AND is 5–10× faster than integer modulo on modern CPUs.
 
+**bfloat16 and FP8 in ML accelerators**: Google designed bfloat16 for TPUs so that a float32 model could train at 16 bits with no loss scaling, since the 8-bit exponent keeps float32's range. NVIDIA Hopper added FP8 (E4M3 and E5M2) tensor cores, and the OCP MX spec's 32-element block-scaled formats (MXFP8, MXFP6, MXFP4) followed, so each block can use the full narrow range regardless of how large the tensor's outliers are (§4.6).
+
 **Cryptographic hash functions** — SHA-256's round function is built from bitwise ops (AND, XOR, NOT), bit rotations and right shifts, plus addition modulo 2³² (the one non-bitwise ingredient, and the one that supplies carry propagation between bit positions), applied over 64 rounds. The bitwise nature makes SHA-256 extremely fast (hardware can compute ~500 MB/s per core) and provides the avalanche effect (one bit change in input cascades to ~50% of output bits changing).
 
 ---
@@ -717,6 +815,8 @@ if math.isclose(x, 0.3, rel_tol=1e-9):
 | `ctypes` (Python) | Bit manipulation of memory buffers | Accessing raw C-style memory layout |
 | `socket.htonl` / `ntohl` | Host-to-network byte order conversion | Used when writing network protocols |
 | Bitset (Java) / `array` of ints | Compact bit arrays | Rolling your own Bloom filter or bitmask DP |
+| `torch.bfloat16`, `torch.float8_e4m3fn`, `torch.float8_e5m2` | Low-precision tensor dtypes in PyTorch | `e4m3fn` is OCP E4M3: finite-only, a single NaN mantissa pattern |
+| `ml_dtypes` (Python) | NumPy dtypes for bfloat16, FP8 and FP4 | Used by JAX; lets you inspect bit patterns on a CPU |
 
 ---
 
@@ -781,6 +881,18 @@ With XOR alone you cannot distinguish two missing numbers (the XOR of the pair i
 **Q15: What are IEEE-754 special values and when do they appear?**
 **Short:** IEEE-754 defines +/-Inf for overflow or division by zero, NaN for undefined results like 0.0/0.0, and a distinct -0.0 that still compares equal to 0.0.
 `+Inf` / `-Inf`: result of dividing by zero or overflow. `NaN` (Not a Number): result of `0.0/0.0`, `sqrt(-1)`, or `Inf - Inf`. `-0.0`: distinct from `0.0` in IEEE-754 but compares equal (`0.0 == -0.0` is True). `float('inf') > any_finite` is always True. `math.isnan(float('nan'))` required to check NaN — `x != x` is also True only for NaN but is obscure. These appear in scientific computing and ML (loss = NaN is a common gradient explosion symptom).
+
+**Q16: Why do large training runs use bfloat16 instead of float16?**
+**Short:** bfloat16 keeps float32's 8-bit exponent, so it covers the same range up to 3.4e38, while float16 overflows to inf above 65504; bfloat16 gives up mantissa bits instead.
+Both are 16 bits. float16 splits them 1/5/10, so it has about 3.3 decimal digits of precision but a largest finite value of 65504; one activation or gradient spike above that becomes `inf` and then NaN, which is why float16 training needs dynamic loss scaling. bfloat16 splits them 1/8/7: the same exponent as float32, so the same range, with only 8 significant bits (about 2.4 digits). Neural network training tolerates that rounding but not overflow, and converting float32 to bfloat16 is a 16-bit shift with rounding, so a model moves between the two without rescaling. Keep master weights and reductions such as softmax sums in float32 in either case, because 8 bits of mantissa lose small updates added to large values.
+
+**Q17: What is the difference between the FP8 formats E4M3 and E5M2, and which one goes where?**
+**Short:** E4M3 has 3 mantissa bits and a max of 448 for weights and activations; E5M2 has 2 mantissa bits and a max of 57,344 for gradients, which span a wider range.
+In the OCP 8-bit spec, E4M3 uses bias 7 and drops infinities: only `S.1111.111` is NaN, so `S.1111.110` encodes 448 instead of the 240 an IEEE-style layout would allow. E5M2 keeps IEEE-754 conventions, including infinities and several NaNs, and reaches 57,344 with less precision. Forward-pass tensors have a narrower, better-known range and benefit from the extra mantissa bit; gradients vary over many orders of magnitude and need the exponent bit. Both are still too narrow for one scale per tensor, so production recipes add per-tensor or per-block scale factors.
+
+**Q18: What does MX block scaling add to a 4- or 8-bit float format, and what does it cost?**
+**Short:** Each block of 32 elements shares one 8-bit power-of-two scale (E8M0), so narrow elements track local magnitude; the cost is 8/32 = 0.25 extra bits per element.
+The OCP Microscaling (MX) v1.0 spec stores `value_i = 2^X * P_i`, where `X` is an E8M0 exponent-only byte shared by 32 consecutive elements and each `P_i` is FP8, FP6, FP4 or INT8. The scale is derived from the block's largest magnitude (`floor(log2(amax))` minus the element format's largest exponent), so a block of small values uses the full element range even when another block holds an outlier 1000 times larger. With per-tensor scaling, that outlier would force every small value toward zero. MXFP4 costs 4.25 bits per element and MXFP8 8.25. The IEEE P3109 working group is standardizing narrow formats and block operations with one NaN and no negative zero.
 
 ---
 

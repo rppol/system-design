@@ -8,7 +8,7 @@ LangChain is the most widely adopted orchestration framework for LLM application
 
 LangChain Expression Language (LCEL) is the canonical API: a composable pipe-based interface where every component is a Runnable and `|` wires them together. Agents are built on top of it with `create_agent`, a configurable harness that runs on the LangGraph runtime.
 
-**Current version**: langchain / langchain-core / langchain-community 1.x (1.3.x is the current stable line; Python 3.10+). Pre-1.0 chain classes such as `LLMChain` live in a separate `langchain-classic` package, which is where you will meet them in an inherited codebase.
+**Current version**: langchain / langchain-core / langchain-community 1.x (langchain 1.4.6, 2026-10-14; Python 3.10+). Pre-1.0 chain classes such as `LLMChain` live in a separate `langchain-classic` package, which is where you will meet them in an inherited codebase.
 **Production adoption signal**: Used by Notion AI, Elastic, Replit (initially), numerous enterprise deployments. Among the most-starred LLM frameworks on GitHub, and the one you are most likely to inherit — check the live star count and release cadence before treating popularity as a selection criterion, since it moves faster than any document can track.
 
 ---
@@ -346,7 +346,7 @@ response2 = chain.invoke([system_message, HumanMessage(content="Question 2")])
 # response2.response_metadata["usage"] includes "cache_read_input_tokens"
 ```
 
-For OpenAI, automatic prefix caching is enabled by default on the current GPT-5.x models. Inspect `usage.prompt_tokens_details.cached_tokens` in the response metadata to verify cache hits. On the GPT-5.x line cached input is billed at 10% of the standard input price (a 90% discount — e.g. $0.50/1M against $5.00/1M on `gpt-5.5`); the older GPT-4.1 family discounted cached input by 75%. Cached prefixes are retained for up to 24 hours by default, and from `gpt-5.6` onward cache writes are billed at 1.25x the uncached input rate.
+For OpenAI, automatic prefix caching is enabled by default on the GPT-5.x and GPT-6 models. Inspect `usage.prompt_tokens_details.cached_tokens` in the response metadata to verify cache hits. Cached input bills at 10% of the standard input price on most of these models (e.g. $1.00/1M against $10.00/1M on `gpt-6-astra`) and 5% on `gpt-6.1-sol` ($0.10/1M against $2.00/1M); the older GPT-4.1 family discounted cached input by 75%. Cached prefixes are retained for up to 24 hours by default, and from `gpt-5.6` onward cache writes are billed at 1.25x the uncached input rate.
 
 **Cost impact**: A RAG chain with a 4096-token system prompt making 1000 calls/day: uncached = $0.02/call × 1000 = $20/day; cached = $0.002/call × 1000 = $2/day. Cache hits also cut time-to-first-token noticeably on long prompts, because the cached prefix skips prefill.
 
@@ -630,7 +630,7 @@ traffic didn't" incidents: usage per session got longer, not more frequent.
 | Tool | Category | Version Notes |
 |------|----------|---------------|
 | `langchain-core` | Core Runnable abstractions | 1.x — stable interface |
-| `langchain` | `create_agent` + LCEL primitives | 1.3.x — pin strictly |
+| `langchain` | `create_agent` + LCEL primitives | 1.4.x (1.4.6), pin strictly |
 | `langchain-classic` | Pre-1.0 chains (LLMChain, RetrievalQA) | Compatibility shim; only for inherited code |
 | `langchain-community` | 300+ third-party integrations | Moves fast, pin strictly |
 | `langchain-openai` | OpenAI-specific integration | Separate package since 0.1 |
@@ -640,7 +640,7 @@ traffic didn't" incidents: usage per session got longer, not more frequent.
 | `pydantic` v2 | Output validation | Required end-to-end in 1.x |
 
 **Version matrix (target the 1.x line):**
-- `langchain` 1.x — 1.3.x is the current stable release. Requires Python 3.10+ and pydantic v2 end-to-end. `create_agent` is the agent API; the classic chain classes ship separately in `langchain-classic`. Breaking changes are reserved for 2.0 per the published release policy.
+- `langchain` 1.x: 1.4.6 (2026-10-14) is the current release. Requires Python 3.10+ and pydantic v2 end-to-end. `create_agent` is the agent API; the classic chain classes ship separately in `langchain-classic`. Breaking changes are reserved for 2.0 per the published release policy.
 - `langchain-core` 1.x — the stable foundation (Runnable, base classes); updates are backward-compatible, so pin it loosely and pin everything else tightly.
 - A pin below `langchain==1.0` predates the LangGraph-backed agent runtime and the `langchain-classic` split; treat upgrading off it as a migration, not a version bump.
 

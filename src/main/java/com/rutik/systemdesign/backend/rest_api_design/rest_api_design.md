@@ -316,7 +316,7 @@ worth adopting deliberately:
 | Addition | What it lets you describe | Why it mattered enough to ship |
 |---|---|---|
 | `itemSchema` + sequential media types | One item of a **stream** (`text/event-stream`, `application/jsonl`, `application/x-ndjson`, `application/json-seq`), separately from `schema` which describes the whole collection | Streaming responses previously had no honest representation — teams typed an SSE endpoint as `string` or lied about it as an array |
-| The `query` HTTP method, plus `additionalOperations` | A safe, idempotent request that carries a body; and any non-standard method | Complex search that does not fit in a URL had to be a `POST`, which then falsely reads as unsafe and uncacheable |
+| The `query` HTTP method, plus `additionalOperations` | A safe, idempotent request that carries a body (the QUERY method of RFC 10008, Proposed Standard, June 2026); and any non-standard method | Complex search that does not fit in a URL had to be a `POST`, which then falsely reads as unsafe and uncacheable |
 | Tag metadata: `summary`, `parent`, `kind` | Hierarchical, described tag groups | Replaces the vendor extensions (`x-tagGroups` and friends) every renderer had invented separately |
 | OAuth 2.0 Device Authorization Flow | `deviceAuthorization` as a first-class flow in a security scheme | CLI and TV-style clients had no standard way to be documented |
 
@@ -620,6 +620,11 @@ For small files (<10 MB): multipart/form-data POST with the file as a form field
 **Short:** Set ETag plus Cache-Control for mutable resources, a long max-age for immutable ones, and no-store for sensitive data.
 
 For mutable resources: `ETag` (version identifier) + `Cache-Control: no-cache` (must revalidate, but can store) or `Cache-Control: max-age=60, private`. For immutable versioned resources: `Cache-Control: max-age=31536000, immutable`. For sensitive data: `Cache-Control: no-store`. Always set `Vary: Accept-Encoding` if responses are compressed. The `Vary` header tells caches which request headers affect the response. The same ETag does double duty for conditional requests (RFC 9110 §8.8, §13): clients send `If-None-Match` on GET to get a bodyless 304, and `If-Match` on PUT/PATCH/DELETE for optimistic concurrency — a mismatch returns 412 Precondition Failed. Note that `If-None-Match` uses weak comparison so a weak validator (`W/"v3"`) works, while `If-Match` uses strong comparison and a weak ETag will never match, so byte-exact strong ETags are required for the write path.
+
+**Q: When should a complex search use QUERY instead of POST?**
+**Short:** Use QUERY (RFC 10008) when a read needs a body: it is safe and idempotent, so clients retry it and caches store it keyed on the body.
+
+Use QUERY when the request is a read whose parameters do not fit in a URL (a nested filter, a GraphQL-style selection, a 50-ID lookup). RFC 10008 (Proposed Standard, June 2026) defines QUERY as safe and idempotent, so a client or proxy can resend it after a connection failure with no risk of a duplicate side effect, which a `POST /search` never allows. Responses are cacheable, and the cache key MUST include the request content, so two different filters to the same URL do not collide. A server advertises support with the `Accept-Query` response header, whose value lists the query media types it accepts; it can also return `Location` or `Content-Location`, a URL that a plain GET re-runs or re-reads without resending the body. The fallback matters because the method is young: an origin that does not know QUERY returns 501 (RFC 9110) or 405 with `Allow`, and a cache that does not know it forwards it without storing it. So probe with OPTIONS or `Accept-Query`, fall back to `POST /search` on 405 or 501, and keep the POST route until your gateways, CDN, and client libraries all pass QUERY through.
 
 **Q: What is HATEOAS and is it practical?**
 **Short:** HATEOAS embeds navigable links in responses but is rarely implemented in production APIs today.

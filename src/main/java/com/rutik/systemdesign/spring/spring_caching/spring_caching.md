@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Spring Cache Abstraction provides a unified caching API that decouples application code from the underlying cache store. Introduced in Spring 3.1, it allows caching method results through annotations without changing business logic. The abstraction sits on top of concrete implementations (ConcurrentMap, Redis, Caffeine, EhCache) and is driven by AOP proxies that intercept annotated methods.
+Spring Cache Abstraction provides a unified caching API that decouples application code from the underlying cache store. Introduced in Spring 3.1, it allows caching method results through annotations without changing business logic. The abstraction sits on top of concrete implementations (ConcurrentMap, Redis, Caffeine, Ehcache 3 via JCache) and is driven by AOP proxies that intercept annotated methods.
 
 The four core annotations are:
 
@@ -33,7 +33,7 @@ The four core annotations are:
 2. **Write-through with `@CachePut`.** The method always executes and the result always updates the cache — useful for keeping the cache consistent after an update.
 3. **Explicit eviction with `@CacheEvict`.** Cache entries must be explicitly removed; there is no automatic invalidation unless TTL is configured at the `CacheManager` level.
 4. **Transparent key generation.** `SimpleKeyGenerator` derives cache keys from method parameters. Custom `KeyGenerator` beans or SpEL expressions can override this.
-5. **Store-agnostic abstraction.** The same annotations work across ConcurrentMap, Redis, Caffeine, and EhCache by swapping the `CacheManager` bean.
+5. **Store-agnostic abstraction.** The same annotations work across ConcurrentMap, Redis, Caffeine, and Ehcache 3 (via JCache) by swapping the `CacheManager` bean.
 6. **AOP proxy scope.** Only public methods on Spring-managed beans are eligible. Private methods and `this.method()` calls are never intercepted.
 
 ---
@@ -47,8 +47,7 @@ The four core annotations are:
 | `ConcurrentMapCacheManager` | Dev / unit tests | No | None (unbounded) | Leaks memory in prod; no distributed support |
 | `CaffeineCacheManager` | Single JVM, high throughput | Yes | LRU/LFU/size/weight | Async refresh, stats, near-zero overhead |
 | `RedisCacheManager` | Distributed, multi-instance | Yes (per cache) | TTL-based or explicit | Requires serialization config; network latency |
-| `EhCacheCacheManager` | Single JVM legacy | Yes | LRU/LFU/FIFO | Heavy config; replaced by Caffeine in new projects |
-| `JCacheCacheManager` | JSR-107 compliance | Depends | Depends | Adapter over any JSR-107 provider |
+| `JCacheCacheManager` | JSR-107 providers: Ehcache 3, Hazelcast, Infinispan | Provider-configured | Provider-defined | Ehcache 3 plugs in here; heap, off-heap, and disk tiers |
 
 ### Caching Strategies
 
@@ -608,7 +607,7 @@ Zero parameters produce `SimpleKey.EMPTY`. One parameter produces the parameter 
 
 A cache stampede occurs when many threads simultaneously observe a cache miss and all call the underlying data source concurrently, multiplying load. `sync=true` on `@Cacheable` causes `CacheInterceptor` to use `Cache.get(key, Callable)`, which in Caffeine and ConcurrentMap serializes computation for the same key — only one thread calls the method, others wait. `CacheAspectSupport` enforces four restrictions on it, each throwing at startup: the operation may name only one cache, it may not be combined with any other cache operation on the same method, only one `sync=true` operation is allowed, and `unless` is not supported. This is a JVM-local lock only; across instances, either build the manager on `RedisCacheWriter.lockingRedisCacheWriter(cf)` (a cluster-wide lock, but held per cache rather than per key) or take a per-key distributed lock with Redisson.
 
-**Q: Explain `condition` vs `unless` in `@Cacheable`.**
+**Q: How do `condition` and `unless` differ in `@Cacheable`?**
 **Short:** condition decides before execution whether to cache at all; unless decides after execution whether to store the result.
 
 `condition` is evaluated before the method executes using SpEL; if it returns false, caching is completely bypassed for this invocation (no lookup, no store). `unless` is evaluated after the method returns and can inspect `#result`; if it returns true, the result is not stored in the cache (but the method did execute). Use `condition` to skip caching for invalid inputs (e.g., `#id > 0`) and `unless` to skip caching null or empty results (e.g., `#result == null`).

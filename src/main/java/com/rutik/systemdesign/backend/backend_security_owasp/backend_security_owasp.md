@@ -31,7 +31,7 @@ One-line analogy: security is not a door you add at the end — it is the materi
 
 Mental model: think of each OWASP category as a class of attack vector. A01 (Broken Access Control) means users can reach resources they should not — and since 2025 it also covers SSRF, where the server itself becomes a weapon the attacker aims at internal services. A05 (Injection) means the application confuses user-supplied data with trusted commands. A10 (Mishandling of Exceptional Conditions) means the abnormal path — the error, the timeout, the missing parameter — leaks internals or fails open.
 
-Why it matters: a single exploited vulnerability can expose every user record, allow privilege escalation to admin, or pivot into the internal network. The global average cost of a breach was $4.44 million, and the US average $10.22 million, in IBM's Cost of a Data Breach Report 2025 (the latest edition as of July 2026). Regulatory frameworks (PCI-DSS, HIPAA, GDPR) impose fines on top of that.
+Why it matters: a single exploited vulnerability can expose every user record, allow privilege escalation to admin, or pivot into the internal network. The global average cost of a breach was $4.99 million, up 12% and a record high, in IBM's Cost of a Data Breach Report 2026 (research by the Ponemon Institute). Regulatory frameworks (PCI-DSS, HIPAA, GDPR) impose fines on top of that.
 
 Key insight: most vulnerabilities are not exotic zero-days. They are well-understood, categorized, and preventable with known controls. The OWASP Top 10 exists precisely because these mistakes are made over and over in production.
 

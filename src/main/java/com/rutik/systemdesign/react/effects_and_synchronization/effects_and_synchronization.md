@@ -330,6 +330,8 @@ useEffect(() => {
 
 Two rules about the double invocation. It **does not happen in production builds**, so measuring "my app makes two requests" from a development server proves nothing about traffic. And the fix is never a `didInit` ref guard — a guard makes the second setup a no-op without giving the first one a cleanup, so the leak survives to the first real dependency change, where StrictMode is not watching. The only effects that legitimately need a mount-once guard are non-idempotent third-party initializations with no teardown API at all, and even those are better handled outside React.
 
+**Server-rendered roots get it too `[19.3]`.** Through React 19.2 the double invoke ran only for roots created with `createRoot`; a root started with `hydrateRoot` ran each effect once during client hydration. React 19.3 (PR #35961) runs setup, cleanup, setup on hydrated roots as well. An SSR or Next.js app that never saw the double effect in development will see it after the upgrade, and every effect it exposes, such as a second analytics beacon or a doubled socket, is one that was already missing its cleanup.
+
 ### 6.4 `useEffectEvent` `[19.2]`
 
 The problem is precise: an effect reads a value it must always have the newest copy of, but that value is not part of what the effect synchronizes.
@@ -599,7 +601,7 @@ A tooltip that measures its own height and flips above the anchor must use the l
 **Q: Why is deriving state in an effect worse than computing it during render?**
 **Short:** Computing during render produces one commit, while an effect renders with the old value, commits, sets state and renders again, briefly painting something wrong.
 
-`useEffect(() => setTotal(sum(items)), [items])` costs two full render passes per change, and on a 24-row cart the pre-edit total is visible for one frame. The derived value is not synchronization with anything external, so there is nothing for React to keep in sync. `react-hooks/set-state-in-effect` in `eslint-plugin-react-hooks` 6.0 flags exactly this. Compute it as a plain `const`, and reach for `useMemo` only after a profile shows the computation itself is expensive.
+`useEffect(() => setTotal(sum(items)), [items])` costs two full render passes per change, and on a 24-row cart the pre-edit total is visible for one frame. The derived value is not synchronization with anything external, so there is nothing for React to keep in sync. `react-hooks/set-state-in-effect` in `eslint-plugin-react-hooks` 7.0 flags exactly this. Compute it as a plain `const`, and reach for `useMemo` only after a profile shows the computation itself is expensive.
 
 **Q: How do you reset a component's state when a prop identity changes?**
 **Short:** Changing the key remounts the subtree, discarding its entire hook chain in one step rather than clearing individual fields inside an effect.

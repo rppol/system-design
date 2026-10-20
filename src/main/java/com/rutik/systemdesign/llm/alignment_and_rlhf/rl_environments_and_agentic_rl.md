@@ -537,7 +537,8 @@ Covered in §6.6: a Git-pinned dependency that resolves fine with local `uv sync
 | Sandbox runtimes (E2B, Daytona, Modal, seccomp) | Runtime | Where environment steps actually execute — full mechanics and pricing in [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md) |
 | MCP | Protocol | Carries `Toolset` tools from environment to harness; see [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) |
 | `prime env` CLI subcommands (`init`, `push`, `install`) | Packaging | The full author-to-consumer lifecycle walked through in §6.6 |
-| vLLM / SGLang | Rollout engine | The continuous-batching generation engines §6.7's caveat depends on — same engines named for GRPO rollouts in [GRPO and RLVR §6.3](grpo_and_rlvr.md) |
+| vLLM / SGLang | Rollout engine | The continuous-batching generation engines §6.7's caveat depends on, the same engines named for GRPO rollouts in [GRPO and RLVR §6.3](grpo_and_rlvr.md). vLLM moves trainer weights into the rollout engine over NCCL: stateful trainer send in v0.28.0, a sharding-aware M2N backend in v0.31.0 |
+| TitanRL (`torchtitan/rl`, August 2026) | Training + rollout | PyTorch's RL stack on TorchTitan: one model definition and one set of kernels shared by the trainer and vLLM generation. In batch-invariant mode, supported configurations produce bitwise-identical log-probs in the trainer and the generator, which removes the [rollout/train engine mismatch](grpo_and_rlvr.md) at a throughput cost; use it to debug and to run controlled on-policy studies |
 
 Reading the Layer column top to bottom traces the same path §5's diagram draws: a registry and a framework define what a task is, a training framework and its rollout engine generate against it, a harness and protocol carry the policy's actions into a runtime, and that runtime's output flows back up as the trace the trainer consumes.
 

@@ -571,6 +571,21 @@ Discriminated unions and props that make illegal states unrepresentable belong t
 
 **Manual memoization added after the compiler shipped.** A `useMemo` around every expression is now noise the compiler already handles, and it obscures the two or three places where a manual escape hatch is genuinely required. Measure first with the Profiler and Performance Tracks — [React Performance and Profiling](../react_performance_and_profiling/react_performance_and_profiling.md) — then read [The React Compiler](../the_react_compiler/the_react_compiler.md) for when `"use no memo"` is the right answer.
 
+**A string passed to `dangerouslySetInnerHTML` under a Trusted Types CSP.** Once the page sends `Content-Security-Policy: require-trusted-types-for 'script'`, the browser rejects a plain string at `innerHTML` with `This document requires 'TrustedHTML' assignment.` React 19.3 passes a `TrustedHTML`, `TrustedScript` or `TrustedScriptURL` value through to the DOM unchanged instead of coercing it with `'' + value`, so the fix is to build the value through a policy, not to drop the header.
+
+```tsx
+// BROKEN: a sanitized string is still a string. The CSP blocks it at the sink.
+<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(bio) }} />
+
+// FIX: one named policy owns sanitization, and React hands its TrustedHTML to the DOM.
+const htmlPolicy = trustedTypes.createPolicy("app-html", {
+  createHTML: (input: string) => DOMPurify.sanitize(input),
+});
+<div dangerouslySetInnerHTML={{ __html: htmlPolicy.createHTML(bio) }} />
+```
+
+The browser API and the rollout in Report-Only mode belong to [Browser Security and the Client Threat Model](../../frontend_platform/browser_security_and_the_client_threat_model/browser_security_and_the_client_threat_model.md).
+
 **Two browser routers in one document.** During a strangler migration, exactly one router may own `window.history`. Two produce duplicate entries and a back button that needs two presses.
 
 **Index as key on a reorderable list.** The classic, and it is a keys bug rather than a performance one: reordering makes React match the wrong fiber to the wrong element, so an uncontrolled input's DOM value stays with position 2 while the data moves to position 5. Use a stable id from the data. Owned by [Fundamentals and the Render Model](../react_fundamentals_and_the_render_model/react_fundamentals_and_the_render_model.md).
@@ -700,6 +715,7 @@ In Solid, Preact Signals or Svelte 5 runes, writing to a signal updates its know
 - Duplicate a component until the third call site; two occurrences do not tell you what is common.
 - Give any two-stack migration a written countdown of remaining legacy routes with a date, or the temporary state becomes the architecture.
 - Reach for a manual `useMemo` only against a Profiler measurement and a compiler bailout, never as a default.
+- On React 19.3 or later, enforce `require-trusted-types-for 'script'` and route every `dangerouslySetInnerHTML` value through one named Trusted Types policy that calls the sanitizer, so review audits the policy rather than every sink.
 
 ---
 

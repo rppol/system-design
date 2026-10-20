@@ -74,6 +74,7 @@ Membership inference is owned by [adversarial_ml_and_robustness](../adversarial_
 | PATE | Formal + architectural | Membership on private teachers | Teacher/student training |
 | Split learning | Architectural | Client shipping raw features | Client + server |
 | Homomorphic encryption | Cryptographic | Server seeing plaintext at all | Encrypted compute |
+| Trusted execution environment (confidential computing) | Hardware isolation + attestation | Operator, hypervisor and host OS reading data, updates or weights in use | CPU TEE (Intel TDX, AMD SEV-SNP) + GPU in CC mode |
 | k-anonymity / l-diversity / t-closeness | Syntactic | Re-identification via quasi-identifiers | Data release |
 
 ### 4.3 Differential privacy — the formal definition
@@ -461,54 +462,63 @@ At LLM scale this same recipe becomes **DP-LoRA** (clip and noise only the adapt
 ### 6.4 Federated averaging with Flower
 
 ```python
-import flwr as fl
 import torch
-from collections import OrderedDict
+from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.clientapp import ClientApp
+from flwr.serverapp import Grid, ServerApp
+from flwr.serverapp.strategy import FedAvg
+
+LOCAL_EPOCHS = 5
+
+client = ClientApp()
 
 
-class FlowerClient(fl.client.NumPyClient):
-    """Runs on-device: trains E local epochs on private data, returns only the
+@client.train()
+def train(msg: Message, context: Context) -> Message:
+    """Runs on-device: trains E local epochs on private data, replies with only the
     updated weights and the local sample count -- never the raw data."""
-
-    def __init__(self, model: torch.nn.Module, train_loader, local_epochs: int = 5):
-        self.model = model
-        self.train_loader = train_loader
-        self.local_epochs = local_epochs
-
-    def get_parameters(self, config) -> list:
-        return [v.cpu().numpy() for v in self.model.state_dict().values()]
-
-    def set_parameters(self, parameters: list) -> None:
-        keys = self.model.state_dict().keys()
-        state = OrderedDict({k: torch.tensor(v) for k, v in zip(keys, parameters)})
-        self.model.load_state_dict(state, strict=True)
-
-    def fit(self, parameters: list, config) -> tuple[list, int, dict]:
-        self.set_parameters(parameters)              # start from global model w_t
-        opt = torch.optim.SGD(self.model.parameters(), lr=0.01)
-        n = 0
-        for _ in range(self.local_epochs):           # E local epochs
-            for x, y in self.train_loader:
-                opt.zero_grad()
-                loss = torch.nn.functional.cross_entropy(self.model(x), y)
-                loss.backward()
-                opt.step()
-                n += len(x)
-        # return updated weights + sample count -> server weights the average by n
-        return self.get_parameters(config), n, {}
+    model = make_model()                              # app helper: same architecture on every node
+    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())  # global w_t
+    train_loader = load_local_data(context)           # this node's private partition
+    opt = torch.optim.SGD(model.parameters(), lr=0.01)
+    n = 0
+    for _ in range(LOCAL_EPOCHS):                     # E local epochs
+        for x, y in train_loader:
+            opt.zero_grad()
+            loss = torch.nn.functional.cross_entropy(model(x), y)
+            loss.backward()
+            opt.step()
+            n += len(x)
+    # FedAvg weights each reply by "num-examples" -> server averages in proportion to n
+    content = RecordDict({
+        "arrays": ArrayRecord(model.state_dict()),
+        "metrics": MetricRecord({"num-examples": n}),
+    })
+    return Message(content=content, reply_to=msg)
 
 
-# Server side: FedAvg aggregates client weights in proportion to n_k.
-# Sample only a fraction of the client fleet each round (bandwidth + straggler control).
-strategy = fl.server.strategy.FedAvg(
-    fraction_fit=0.01,          # e.g. 1% of a million-device fleet per round
-    min_fit_clients=100,        # need >=100 clients before aggregating a round
-    min_available_clients=1_000,
-)
-# fl.server.start_server(config=fl.server.ServerConfig(num_rounds=1_000), strategy=strategy)
+server = ServerApp()
+
+
+@server.main()
+def main(grid: Grid, context: Context) -> None:
+    # Sample only a fraction of the node fleet each round (bandwidth + straggler control).
+    strategy = FedAvg(
+        fraction_train=0.01,       # e.g. 1% of a million-device fleet per round
+        min_train_nodes=100,       # need >=100 nodes before aggregating a round
+        min_available_nodes=1_000,
+        fraction_evaluate=0.0,     # no @client.evaluate handler in this sketch
+    )
+    result = strategy.start(
+        grid=grid,
+        initial_arrays=ArrayRecord(make_model().state_dict()),
+        num_rounds=1_000,
+    )
+    torch.save(result.arrays.to_torch_state_dict(), "global_model.pt")
+# Launch both apps with `flwr run` (simulation or deployment runtime).
 ```
 
-**What the formula is telling you.** The aggregation the server runs is `w_global = Σ_k (n_k / N) · w_k`, and it says: "average the clients' models, but let each client speak in proportion to how much data it trained on." Returning `n` alongside the weights is not bookkeeping — it *is* the aggregation rule, and it is what makes FedAvg approximate the centralized gradient it can never compute.
+**What the formula is telling you.** The aggregation the server runs is `w_global = Σ_k (n_k / N) · w_k`, and it says: "average the clients' models, but let each client speak in proportion to how much data it trained on." Returning `n` as `num-examples` alongside the weights is not bookkeeping: it *is* the aggregation rule, and it is what makes FedAvg approximate the centralized gradient it can never compute.
 
 | Symbol | What it is |
 |--------|------------|
@@ -517,7 +527,7 @@ strategy = fl.server.strategy.FedAvg(
 | `N = Σ n_k` | Total examples across the participating clients (not the whole fleet — only this round's sample) |
 | `n_k / N` | Client k's vote share. Sums to 1 across clients, so the result stays on the same scale |
 | `E` | Local epochs before reporting. Larger E = fewer rounds = less bandwidth, but more client drift |
-| `fraction_fit` | Share of the fleet sampled per round — 0.01 of a million devices = 10,000 clients |
+| `fraction_train` | Share of the fleet sampled per round: 0.01 of a million devices = 10,000 clients |
 
 **Walk one example.** Three clients report one scalar weight after a round:
 
@@ -605,6 +615,7 @@ PATE's elegance: the privacy analysis is *data-dependent* — strong teacher con
 - **Split learning** — cut the network at a layer. The client runs layers 1..k on its raw data and sends only the *activations* ("smashed data") at the cut; the server runs the rest and sends gradients back. Raw features never leave the client, and the server never sees the full model. Weakness: activations can still leak (pair with noise), and it serializes clients unless combined with FL.
 - **k-anonymity / l-diversity / t-closeness** — syntactic anonymization of tabular releases. *k-anonymity*: every record is indistinguishable from at least k−1 others on quasi-identifiers (zip, age, sex) — defeats naive re-identification but not attribute disclosure if all k share a sensitive value. *l-diversity* fixes that by requiring l distinct sensitive values per group; *t-closeness* further requires each group's sensitive-value distribution to be within t of the global distribution. All are provably weaker than DP (the Netflix Prize de-anonymization broke k-anonymity-style releases via auxiliary data) — use DP when you can.
 - **Homomorphic encryption (HE)** — compute directly on ciphertext (Paillier is additively homomorphic; CKKS/BFV support approximate/integer arithmetic; TFHE supports arbitrary gates). The server aggregates encrypted gradients and never sees plaintext. Why it's rarely end-to-end: a single CKKS multiplication is 10³–10⁶× slower than plaintext, ciphertexts are large, and deep-network training needs enormous multiplicative depth. In practice HE appears in *narrow* spots — encrypted secure aggregation of a linear sum — not for training a whole model.
+- **Trusted execution environments (confidential computing)**: run training, aggregation or inference inside hardware-isolated memory that the machine's operator, hypervisor and host OS cannot read, and prove it with **remote attestation**: a hardware-signed report of the firmware and code image, which the data owner checks before releasing keys or data. The host side is a confidential VM (Intel TDX, AMD SEV-SNP). NVIDIA Hopper GPUs add a confidential-computing mode: the GPU attests its identity and firmware, and CPU-GPU transfers pass through encrypted bounce buffers over PCIe. The cost is that encryption, not the GPU math: Zhu et al. (arXiv:2409.03992, 2024) measured LLM inference throughput overhead of 6.85% for Llama-3.1-8B, 4.58% for Phi-3-14B, and about zero for Llama-3.1-70B on H100, because larger models spend proportionally less time moving data. Where it fits in this toolbox: an attested TEE aggregator lets an FL server compute on individual updates without the operator seeing them, at near-plaintext speed where HE costs 10^3 to 10^6 times. Where it does not fit: attestation proves *which code* runs, not that the trained model is safe to release. A TEE does nothing about membership inference or extraction from the finished model, so it stacks with DP rather than replacing it, and its trust root is the hardware vendor plus every side-channel fix in the firmware. The LLM-serving form, with Hopper, Blackwell and Rubin support and the attestation flow, is in [Privacy and Data Governance §6.5](../../llm/llm_security/privacy_and_data_governance.md).
 - **Data minimization** — collect fewer fields, aggregate on-device, shorten retention, and keep identifiers out of training sets. It is not a fancy algorithm, but it removes more risk per dollar than any cryptographic technique.
 
 ---
@@ -615,7 +626,9 @@ PATE's elegance: the privacy analysis is *data-dependent* — strong teacher con
 - **Apple on-device analytics (local differential privacy, 2016–present)** — Apple collects usage signals (popular emoji, new words, Safari energy-draining domains, health types) using **local DP**: each device adds noise to its own report *before* sending, so Apple never sees a true individual value. Apple publishes a per-datatype ε and enforces a **daily privacy budget** capping how much any user contributes; documented per-use ε values sit in the single digits (e.g. around 2–8 depending on the dataset). Local DP is weaker per-record than central DP but requires trusting no one with raw data.
 - **US Census Bureau 2020 (central differential privacy)** — the 2020 Census is the largest DP deployment ever. The **TopDown Algorithm** injects discrete-Gaussian noise under zero-concentrated DP (zCDP) and post-processes to consistent, non-negative counts. The published person-level privacy-loss budget for the redistricting data was **ε ≈ 19.61** — deliberately large, reflecting the legal mandate to publish accurate small-area counts while still bounding re-identification, and a public lesson in how ε is a *policy* choice, not just a technical one.
 - **Meta / Opacus** — Meta's open-source Opacus library made DP-SGD a drop-in for PyTorch (`PrivacyEngine.make_private_with_epsilon`), used for DP fine-tuning across industry; TensorFlow Privacy is the TF-side equivalent.
-- **Flower (flwr)** — the framework-agnostic FL system used to prototype and deploy FedAvg/FedProx across PyTorch, TensorFlow, and JAX; the code sketch in §6.4 is its client/strategy API.
+- **Google VaultGemma (DP pretraining, September 2025)**: a 1B-parameter Gemma-2-based LLM trained from scratch with DP-SGD under a sequence-level guarantee of ε ≤ 2.0 and δ ≤ 1.1e-10, where a sequence is 1,024 consecutive tokens. Google fitted DP scaling laws first (loss as a function of model size, iterations and noise-batch ratio) and used them to pick a smaller model and a much larger batch than non-private training would. It scores roughly like GPT-2 1.5B on HellaSwag, BoolQ, PIQA and ARC, and a 50-token-prefix extraction test found no detectable memorization; weights are on Hugging Face and Kaggle.
+- **Apple Private Cloud Compute (2024)**: Apple Intelligence requests too large for the device run on Apple-silicon servers built on Secure Enclave and Secure Boot, with stateless processing, no privileged runtime access for staff, and published software images that devices check before sending data. It is the consumer-scale example of the TEE pattern: the privacy claim rests on attested code and hardware isolation, not on noise or encryption of the computation.
+- **Flower (flwr)**: the framework-agnostic FL system used to prototype and deploy FedAvg/FedProx across PyTorch, TensorFlow, and JAX; the §6.4 sketch uses its Message API (`ClientApp`, `ServerApp`, `flwr.serverapp.strategy.FedAvg`), launched with `flwr run`.
 - **NVIDIA FLARE / OpenMined PySyft** — cross-silo FL in healthcare (hospitals jointly training on patient data none of them can share) and a broader privacy toolkit (FL, DP, HE, secure MPC).
 - **Cross-silo FL in healthcare (EXAM, 2021)** — a consortium of 20 hospitals across five continents trained a COVID-19 outcome-prediction model with federated learning (NVIDIA FLARE), where each hospital's patient records never left its own firewall — only model updates were shared. The federated model generalized markedly better than any single-site model precisely because it learned from all sites' distributions without centralizing protected health information, the canonical demonstration that cross-silo FL solves a data-sharing deadlock regulation would otherwise make impossible.
 
@@ -633,6 +646,7 @@ PATE's elegance: the privacy analysis is *data-dependent* — strong teacher con
 | **Homomorphic encryption** | Cryptographic on all plaintext | None (exact, up to CKKS approx) | Extreme (10³–10⁶× slowdown) | Server seeing any plaintext |
 | **PATE** | Formal (ε, δ), data-dependent | Low if teachers agree | Medium (train N teachers + student) | Membership on teachers |
 | **k-anonymity family** | Syntactic, no formal bound | Low (generalization/suppression) | Low | Naive re-identification |
+| **TEE / confidential computing** | Hardware isolation + attestation; trust in vendor | None (plaintext compute inside the enclave) | Low: about 0-7% LLM inference overhead on H100, mostly from encrypted CPU-GPU transfers | Operator or cloud provider reading data, updates or weights in use |
 
 ### 8.2 Where each lands on guarantee vs cost
 
@@ -652,9 +666,10 @@ quadrantChart
     "Federated learning": [0.55, 0.3]
     "k-anonymity": [0.15, 0.18]
     "Data minimization": [0.1, 0.6]
+    "TEE confidential computing": [0.25, 0.55]
 ```
 
-The upper-left is where you want to be: strong guarantee, low cost. Data minimization and DP-SGD/PATE dominate; homomorphic encryption is strong but priced out of end-to-end training; k-anonymity is cheap but weak. FL sits low on *formal* guarantee because it only relocates data — which is why production systems stack it with DP and secure aggregation.
+The upper-left is where you want to be: strong guarantee, low cost. Data minimization and DP-SGD/PATE dominate; homomorphic encryption is strong but priced out of end-to-end training; k-anonymity is cheap but weak. FL sits low on *formal* guarantee because it only relocates data, which is why production systems stack it with DP and secure aggregation. TEEs sit mid-height: strong against the operator at low cost, but the guarantee rests on hardware-vendor trust and says nothing about what the finished model memorized.
 
 ### 8.3 Central vs local DP
 
@@ -681,6 +696,11 @@ The upper-left is where you want to be: strong guarantee, low cost. Data minimiz
 ### Use secure aggregation when
 
 - You run FL and must guarantee the **server cannot inspect a single client's update** (gradient-inversion is a real reconstruction attack). It is nearly free in utility, so use it by default in cross-device FL.
+
+### Use a TEE (confidential computing) when
+
+- The adversary is the infrastructure operator or cloud provider, and you need compute on plaintext at near-native speed: an FL aggregator that must not see individual updates, inference on regulated data in a rented GPU cloud, or protecting your own weights on someone else's hardware.
+- You can verify attestation before releasing data or keys. Pair it with DP whenever the model or its outputs leave the enclave.
 
 ### Use PATE when
 
@@ -731,7 +751,7 @@ Local DP's per-user noise only averages out with huge N. Deploying local DP to a
 
 | Tool | Role | Notes |
 |------|------|-------|
-| Opacus (Meta) | DP-SGD for PyTorch | `PrivacyEngine.make_private_with_epsilon`; RDP accountant built in |
+| Opacus (Meta) | DP-SGD for PyTorch | `PrivacyEngine.make_private_with_epsilon`; RDP accountant built in; 1.6.0 (May 2026) adds FSDP training and a non-wrapping mode (`wrap_model=False`) that works with Hugging Face Transformers and Accelerate |
 | TensorFlow Privacy | DP-SGD / DP optimizers for TF | Moments accountant; `DPKerasSGDOptimizer` |
 | dp-accounting (Google) | Standalone RDP/PLD accountant | Compose budgets outside a training loop |
 | Flower (flwr) | Framework-agnostic federated learning | FedAvg/FedProx/FedAdam strategies; PyTorch/TF/JAX clients |
@@ -740,6 +760,7 @@ Local DP's per-user noise only averages out with huge N. Deploying local DP to a
 | OpenMined PySyft | FL + DP + secure MPC + HE toolkit | Broad privacy-tech umbrella |
 | Microsoft SEAL / OpenFHE / TenSEAL | Homomorphic encryption (BFV, CKKS) | TenSEAL wraps SEAL for tensors |
 | Google RAPPOR | Local DP for aggregate statistics | The Chrome-telemetry local-DP reference |
+| NVIDIA Confidential Computing (Hopper, Blackwell) + Intel TDX / AMD SEV-SNP | GPU and CPU TEEs for training, aggregation and inference | GPU attestation through the NVIDIA Remote Attestation Service; offered as confidential GPU VMs by major clouds |
 | ARX / sdcMicro | k-anonymity / l-diversity / t-closeness | Syntactic anonymization for tabular releases |
 | Google DP library / PipelineDP | DP aggregations at data-warehouse scale | Beam/Spark pipelines with DP SUM/COUNT/MEAN |
 | Flower Datasets / LEAF | Federated benchmark datasets (non-IID splits) | Reproducible FL experiments and partitioning |
@@ -798,6 +819,16 @@ PATE trains an ensemble of "teacher" models on disjoint shards of the private da
 
 Homomorphic encryption lets you compute on ciphertext so the server never sees plaintext, but it is roughly 10³–10⁶× slower than plaintext, which makes whole-model training economically absurd. A single CKKS multiplication is enormously expensive, ciphertexts are large, and deep-network training needs huge multiplicative depth, so end-to-end HE is a non-starter beyond toy models. In practice HE shows up only in narrow, shallow spots — encrypted secure aggregation of a linear sum of gradients — while the heavy lifting stays in plaintext protected by DP and secure aggregation instead.
 
+**Q: What does running training or inference in a TEE protect, and what does it leave exposed?**
+**Short:** A TEE hides data, updates and weights from the operator, hypervisor and host OS while in use, proven by attestation; it does nothing about what the finished model memorized.
+
+Confidential computing runs the workload in hardware-isolated memory (an Intel TDX or AMD SEV-SNP confidential VM, plus an NVIDIA Hopper or Blackwell GPU in confidential-computing mode) and issues a hardware-signed attestation of the firmware and code image, which the data owner verifies before releasing keys. That removes the operator from the trust boundary at near-native speed: Zhu et al. (2024) measured 0-7% LLM inference overhead on H100, from encrypting CPU-GPU transfers through bounce buffers. It does not bound membership inference, inversion or extraction against the trained model or its outputs, because attestation proves which code ran, not that the result is safe to publish. The trust root moves to the hardware vendor and its side-channel patches. Use it as the cheap alternative to HE for computing on plaintext the operator must not see, and stack DP on anything that leaves the enclave.
+
+**Q: When would you choose a TEE over homomorphic encryption or secure aggregation for federated learning?**
+**Short:** Choose a TEE when the aggregator must run non-linear logic on individual updates at plaintext speed; HE costs 10^3 to 10^6x and secure aggregation only computes a sum.
+
+Secure aggregation is cryptographic and cheap but limited to a masked sum: the server learns only the total, so it cannot run robust aggregation such as a coordinate-wise median or per-client norm checks against poisoning. HE can compute on encrypted updates without any hardware trust, but each CKKS multiplication runs 10^3 to 10^6 times slower than plaintext, so it fits only narrow linear steps. A TEE-hosted aggregator sees plaintext updates inside attested memory, so it can clip, filter outliers and add DP noise at near-native cost, and clients verify its attestation before uploading. The trade is the trust model: secure aggregation and HE rely on mathematics, a TEE on the hardware vendor and on side-channel resistance. Where vendor trust is acceptable, an attested aggregator plus central DP gives stronger utility than local noise on every client.
+
 **Q: Why is k-anonymity considered weak, and what replaced it?**
 **Short:** K-anonymity is weak because it gives no formal guarantee and breaks under auxiliary-data linkage attacks.
 
@@ -817,6 +848,11 @@ In central DP a trusted curator collects raw data and adds noise once to the agg
 **Short:** The clipping norm C sets the sensitivity DP-SGD's noise is calibrated against, so getting it wrong wrecks learning or privacy.
 
 C is the L2 norm each per-sample gradient is clipped to, and it is the sensitivity the noise is scaled against, so getting it wrong wrecks either learning or utility. Too small clips away the real signal and the model won't train; too large forces enormous calibrated noise and accuracy collapses. The standard starting point is C = 1.0, tuned jointly with the learning rate, sometimes with per-layer or adaptive clipping that sets C to a running quantile of observed gradient norms. DP-SGD is more sensitive to C than to nearly any other hyperparameter, so tune it first.
+
+**Q: Why does DP pretraining favour a smaller model and a much larger batch than non-private pretraining?**
+**Short:** DP noise is fixed per step while signal grows with batch size, so a big batch cuts the noise-batch ratio, and spending compute on batch leaves less for parameters.
+
+DP-SGD adds Gaussian noise with standard deviation σC to the *sum* of clipped per-sample gradients, then divides by the batch size B, so the noise in the averaged update scales with σ/B. Google's VaultGemma scaling-law work (September 2025) found that predicted loss depends mainly on model size, iterations and this noise-batch ratio, and the compute-optimal point under DP moves to much larger batches than the non-private optimum. With a fixed compute budget, the FLOPs spent on a larger batch come out of model size, so the optimum is also a smaller model. VaultGemma applied this to pick a 1B model at ε ≤ 2.0 per 1,024-token sequence. The practical consequence: copying a non-private recipe (batch size, model size) into DP-SGD wastes budget, so re-derive both from the noise-batch ratio first.
 
 **Q: How would you design a private next-word-prediction keyboard?**
 **Short:** A private keyboard combines federated learning, secure aggregation, and differential privacy, since no single layer alone suffices.

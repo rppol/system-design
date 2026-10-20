@@ -115,7 +115,7 @@ load-time only, INP is lifetime, and a page with a perfect TBT can have a 700ms 
 handler sits on a filter button nobody clicks in a lab run. A p75 of 480ms against a p50 of 96ms is
 a *bimodal* page, and no single lab run will surface it.
 
---
+---
 
 ## 5. Architecture Diagrams
 
@@ -212,32 +212,40 @@ behind it, and FCP at 780ms to LCP at 1140ms is just the 360ms the image needs.
 
 ### 6.1 Measuring in the field with the web-vitals library
 
-The `web-vitals` library (v5 is current; the `onFID` export was removed entirely) finalizes LCP on
+The `web-vitals` library (v6.2.3, 2026-10-05; `onFID` was removed in v5) finalizes LCP on
 the first interaction, groups CLS into session windows, and flushes on page hide. The **attribution
 build** is the one worth shipping — a separate entry point, roughly 3 KB gzipped more, and it turns
 "LCP is 4.2s" into "1,480ms of it is resource load delay on `div.hero`".
+
+Chrome 151 enables Soft Navigations by default. With `{ reportSoftNavs: true }`, web-vitals v6
+reports LCP, INP and CLS again for each SPA route change, with `navigationType` set to
+`'soft-navigation'`, `navigationURL` set to the route the metric belongs to, and TTFB reported as 0.
+The flag also finalizes the landing URL's CLS and INP at the first soft navigation. Browsers
+without soft-navigation support ignore it.
 
 ```js
 import { onLCP, onINP, onCLS, onTTFB, onFCP } from 'web-vitals/attribution';
 
 const queue = new Set();
 const send = (row) => queue.add(row);
+const opts = { reportSoftNavs: true };
 
-onLCP((m) => send({ name: 'LCP', v: m.value, navType: m.navigationType,
+onLCP((m) => send({ name: 'LCP', v: m.value, navType: m.navigationType, url: m.navigationURL,
   element: m.attribution.element,                     // CSS selector of the LCP element
   ttfb: m.attribution.timeToFirstByte,
   loadDelay: m.attribution.resourceLoadDelay,         // TTFB -> request start
   loadDuration: m.attribution.resourceLoadDuration,
-  renderDelay: m.attribution.elementRenderDelay }));  // bytes done -> painted
+  renderDelay: m.attribution.elementRenderDelay }), opts);  // bytes done -> painted
 
-onINP((m) => send({ name: 'INP', v: m.value,
+onINP((m) => send({ name: 'INP', v: m.value, navType: m.navigationType, url: m.navigationURL,
   target: m.attribution.interactionTarget, inputDelay: m.attribution.inputDelay,
   processing: m.attribution.processingDuration, presentation: m.attribution.presentationDelay,
   // Long Animation Frames name the offending script and function
   scripts: m.attribution.longAnimationFrameEntries.flatMap((f) =>
-    f.scripts.map((s) => ({ src: s.sourceURL, fn: s.sourceFunctionName, ms: s.duration }))) }));
+    f.scripts.map((s) => ({ src: s.sourceURL, fn: s.sourceFunctionName, ms: s.duration }))) }), opts);
 
-onCLS((m) => send({ name: 'CLS', v: m.value, target: m.attribution.largestShiftTarget }));
+onCLS((m) => send({ name: 'CLS', v: m.value, navType: m.navigationType, url: m.navigationURL,
+  target: m.attribution.largestShiftTarget }), opts);
 onTTFB((m) => send({ name: 'TTFB', v: m.value }));   // diagnostic, decomposes LCP
 onFCP((m) => send({ name: 'FCP', v: m.value }));
 
@@ -695,13 +703,20 @@ one-run assertion produces flaky failures that teams disable within a month. Lig
 Set budgets tighter than the field target (2000ms LCP against 2500ms) and assert at `error`.
 
 **Q: Do back/forward cache restores and soft navigations count, and how do they distort field data?**
-**Short:** bfcache restores report a navigation type of back-forward-cache with near-instant LCP, improving your aggregate without any code getting faster.
+**Short:** bfcache restores report near-instant LCP and flatter the aggregate; soft navigations report per route only in Chromium 151+ with reportSoftNavs, so segment field data by navigationType.
 
-A bfcache restore resumes a fully-constructed page, so its LCP is a handful of milliseconds. Those
-samples land in the same CrUX aggregate as cold loads and pull the distribution toward good, so an
-aggregate improvement can come from bfcache eligibility rather than optimization — and an `unload`
-listener silently degrades field LCP. Soft navigations are the mirror image: CrUX attributes a
-session's interactions to the initial URL, so a slow in-app route sinks your homepage.
+A bfcache restore resumes a fully-constructed page, so its LCP is a handful of milliseconds and
+`navigationType` is `'back-forward-cache'`. Those samples land in the same CrUX aggregate as cold
+loads and pull the distribution toward good, so an aggregate improvement can come from bfcache
+eligibility rather than optimization, and an `unload` listener silently degrades field LCP.
+
+Soft navigations are the mirror image. Without soft-navigation support, every interaction in an
+SPA session counts against the landing URL, so a slow in-app route sinks the homepage's INP.
+Chromium 151 enables Soft Navigations by default and emits `soft-navigation` and
+`interaction-contentful-paint` entries; web-vitals v6 with `reportSoftNavs: true` turns them into
+per-route LCP, INP and CLS tagged `'soft-navigation'`, with TTFB reported as 0. Chrome has not
+said how CrUX will report soft navigations, so RUM can grade each route while CrUX still grades
+the landing URL.
 
 ---
 

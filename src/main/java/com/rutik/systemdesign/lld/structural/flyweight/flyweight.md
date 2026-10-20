@@ -255,12 +255,11 @@ reduction   20,480,000,000 / 320,524,288                             = 63.9x
 sharing factor  N / U = 10,000,000 / 256                             = 39,062 instances/glyph
 ```
 
-That 32 B assumes HotSpot's default 12-byte object header with compressed oops, which is still the
-default through JDK 26. Run with `-XX:+UseCompactObjectHeaders` (JEP 519, a product feature since
-JDK 25 but opt-in) and the header drops to 8 bytes, so the same `GlyphInstance` fits in 24 B and the
-extrinsic total falls to 240 MB (240.5 MB with the shared table) — an 85.1x reduction instead of
-63.9x. JEP 534 makes compact
-headers the default in JDK 27, at which point 24 B becomes the number to quote.
+That 32 B assumes HotSpot's 12-byte object header with compressed oops, the default on JDK 25 LTS
+and JDK 26. JDK 27 (GA 2026-09-15) turns compact object headers on by default (JEP 534): the header
+drops to 8 bytes, so the same `GlyphInstance` fits in 24 B and the extrinsic total falls to 240 MB
+(240.5 MB with the shared table), an 85.1x reduction instead of 63.9x. On JDK 25 and 26 the same
+24 B needs `-XX:+UseCompactObjectHeaders` (JEP 519); without that flag, 32 B is the number.
 
 Result: 20.48GB collapses to 320.5MB — the difference between an OOM kill and a frame that fits
 in RAM. Notice that the shared glyph table is only 0.52MB of the 320.5MB total: past a sharing

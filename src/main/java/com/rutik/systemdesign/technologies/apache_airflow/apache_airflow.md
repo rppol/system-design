@@ -1,6 +1,6 @@
 # Apache Airflow
 
-> **Version pin:** This module targets the **Airflow 3 line, current stable 3.3.1 (2026-08-12)**; 3.3.0 shipped 2026-07-06. Where Airflow 2.x behaves differently, the delta is tagged inline as **[2.x]**; a **[3.0]** / **[3.1+]** / **[3.2]** / **[3.3]** tag marks which 3.x release first shipped the feature.
+> **Version pin:** This module targets the **Airflow 3 line, pinned at 3.3.2 (2026-09-17)**, a bug-fix release that also tightened backfill-endpoint authorization and made an explicit API credential take precedence over a session cookie; 3.3.0 shipped 2026-07-06 and 3.3.1 on 2026-08-12. Where Airflow 2.x behaves differently, the delta is tagged inline as **[2.x]**; a **[3.0]** / **[3.1+]** / **[3.2]** / **[3.3]** tag marks which 3.x release first shipped the feature.
 
 Airflow is the de-facto open-source **batch workflow orchestrator**: you declare pipelines as Python, and a control plane schedules, retries, and observes them. It runs your business logic on a schedule with dependency awareness — it does not run the logic itself.
 
@@ -29,6 +29,8 @@ Airflow was built at Airbnb in 2014, entered the Apache incubator in 2016, and b
 | UI / API | Flask + FAB | **React UI on a FastAPI server** (JWT auth) |
 
 The mental model below holds across both versions; what moved in 3.0 is the *worker-to-DB boundary* and the *data-linking primitive*. Everything about DAGs, idempotency, data intervals, and the reconciliation loop is unchanged.
+
+**Airflow 2 is end of life.** The project's supported-versions table (`airflow.apache.org/docs/apache-airflow/stable/installation/supported-versions.html`) moved the 2 line to limited maintenance (security and critical bug fixes only) on **October 22, 2025** and to **EOL on April 22, 2026**. The final release is **2.11.2**, and an EOL line "will not get any fixes or support", so a CVE in core or in the Flask-AppBuilder webserver stack that 2.x still runs stays open for good. Airflow 3 is the only maintained line. The 2 line got twelve months after 3.0 shipped on April 22, 2025 (six of full support, six of limited maintenance); 1.10 got six months after 2.0 (limited maintenance from December 17, 2020, EOL June 17, 2021). The migration path is in §6.17.
 
 For how Airflow compares with ML-specific pipeline orchestrators for training and evaluation workflows, see [ML Pipelines and Orchestration](../../mlops/ml_pipelines_and_orchestration/ml_pipelines_and_orchestration.md) in `mlops/`.
 
@@ -621,6 +623,15 @@ A rising `scheduler_loop_duration` next to a rising `total_parse_time` is the cl
 
 The metadata DB schema is versioned by Alembic migrations. `airflow db migrate` ([3.0]; **[2.x]** was `airflow db upgrade`) applies pending migrations; `airflow db check` validates connectivity. The version-upgrade playbook: (1) read the release notes for breaking changes, (2) **back up the metadata DB**, (3) run `airflow db migrate` on a maintenance window with schedulers stopped (long migrations can lock large `task_instance` tables for minutes), (4) upgrade schedulers/workers, (5) smoke-test with `dag.test()`. Major upgrades (2→3) also require a config migration (`airflow config update`) and provider re-pinning. Never run mismatched Airflow versions across scheduler and workers.
 
+**Leaving 2.x, which has been EOL since April 22, 2026.** The upgrade guide (`upgrading_to_airflow3.html`) requires 2.7 or later and recommends moving to the last 2.x release first, so a fleet on 2.4 goes 2.4 → 2.11.2 → 3.x. The order that keeps each step reversible:
+
+1. Run `airflow db clean` to trim history, then back up the metadata DB. The 3.0 migration rewrites large tables, and a smaller `task_instance` table shortens the maintenance window.
+2. Run `airflow dags reserialize` on 2.x and fix every DAG that fails to parse.
+3. Lint DAG code with Ruff 0.13.1 or later: `ruff check dags/ --select AIR301` lists breaking changes (removed imports, arguments and context keys); AIR302 covers provider moves; AIR311/AIR312 cover recommended changes. `--fix` applies the safe rewrites.
+4. Install `apache-airflow-providers-standard` while still on 2.x: `BashOperator` and `PythonOperator` live there in 3.
+5. Find tasks and plugins that open a metadata-DB session. In 3, task code cannot use the ORM; move it to the REST API through `apache-airflow-client`. A `PostgresHook` query against the metadata DB is a stopgap the guide says breaks in 3.2 and later.
+6. Run `airflow config update --fix`, then `airflow db migrate`, then start `airflow api-server` and `airflow dag-processor` as separate processes. Plugins with Flask-AppBuilder views need the FAB provider or a FastAPI rewrite, and the default auth manager is Simple Auth unless `auth_manager` is set to `FabAuthManager`.
+
 ### 6.18 Multi-tenancy limits
 
 Airflow is **not truly multi-tenant**. Per-DAG RBAC controls *who can see/trigger* a DAG, but every worker shares one Python environment and can read every Connection and Variable — a task in team A's DAG can import team B's credentials at run time. The DAG processor parses all files in one interpreter, so one team's slow import degrades everyone's scheduling. Real isolation requires *separate Airflow deployments* per tenant (the managed-service and Astronomer approach). **[3.0]**'s Task Execution API narrows the blast radius — workers no longer reach the DB directly — but shared connections and shared parsing keep hard multi-tenancy out of scope. Do not put untrusted tenants in one cluster.
@@ -1073,6 +1084,10 @@ A pool caps how many slot-consuming tasks touch a shared resource at once, and `
 **Short:** Airflow 3.0 adds a Task Execution API, promotes datasets to first-class assets, and ships a React UI on FastAPI.
 Airflow 3.0 (April 2025) adds a Task Execution API so workers no longer touch the metadata DB directly, promotes datasets to first-class assets, and ships a React UI on a FastAPI server. It also makes backfills scheduler-managed, introduces DAG versioning so the UI shows the exact code a past run used, and removes `sla`/`sla_miss_callback` outright (Deadline Alerts don't arrive until 3.1). The Task Execution API is the foundation for non-Python and remote execution, but that arrived gradually rather than in 3.0 itself — the EdgeExecutor shipped as an experimental provider package (AIP-69), and Go/Java task runtimes didn't land until 3.3. Plan upgrades around the worker-DB boundary change, the datasets-to-assets rename, and the SLA removal when migrating from 2.x.
 
+**Q: A team still runs Airflow 2.10 in October 2026 and argues it is stable, so there is no rush to move. What is wrong with that?**
+**Short:** Airflow 2 went EOL on April 22, 2026 after limited maintenance from October 22, 2025, so no 2.x release will ever get another security or bug fix.
+Stable is not the same as supported. The supported-versions table lists 2.11.2 as the last release of the 2 line, and an EOL line "will not get any fixes or support", so a CVE in core, in the Flask-AppBuilder webserver, or in a pinned dependency stays unpatched. The urgency grows with exposure: a UI reachable from a corporate network and workers that hold a direct metadata-DB connection are the riskiest parts. Plan the move as 2.10 → 2.11.2 → 3.x, use Ruff's AIR301 and AIR302 rules to find code changes, and treat direct metadata-DB access in tasks as the long pole, since Airflow 3 removes it.
+
 **Q: The metadata DB has grown to hundreds of GB and queries are slow — how do you scale and clean it?**
 **Short:** Growing task_instance, xcom, log, and dag_run tables are trimmed with scheduled airflow db clean runs.
 The `task_instance`, `xcom`, `log`, and `dag_run` tables grow unbounded, so you cap them with periodic `airflow db clean --clean-before-timestamp` runs and keep XComs tiny. Long-running clusters accumulate years of history that inflate every scheduler query, so archive or delete old rows on a schedule and offload task logs to object storage instead of the DB. Also use Postgres over MySQL for large deployments and monitor table sizes so cleanup runs before performance degrades.
@@ -1157,6 +1172,7 @@ Rarely because it wins on any single axis — Dagster models data better with ty
 - **Remote logging + `airflow db clean`.** Ship logs to S3/GCS; trim the metadata DB nightly to keep scheduler queries fast.
 - **Secrets backend, not DAG literals.** Store credentials in Vault/Secrets Manager; never hard-code them.
 - **Back up the metadata DB before every upgrade** and run `airflow db migrate` in a maintenance window.
+- **Run only the Airflow 3 line.** Airflow 2 has been EOL since April 22, 2026; a 2.x cluster goes to 2.11.2 first, then to 3.x (§6.17).
 
 **CI/CD:**
 

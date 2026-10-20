@@ -4,7 +4,7 @@
 
 Coding agents are LLM agents specialized for software engineering tasks: reading and understanding codebases, writing new code, editing existing code, running tests, debugging, generating patches, and submitting PRs. They differ from generic agents in tool design (file editors, bash shells, test runners, language servers), evaluation frameworks (SWE-bench, HumanEval, LiveCodeBench), and the central engineering challenge of operating reliably on large, real-world codebases where ground truth is "tests pass and humans approve".
 
-The landscape spans IDE-integrated agents (Cursor Composer, Claude Code, Continue, Cline), autonomous platforms (Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). Frontier models now clear 85-95% on SWE-bench Verified — 95.0% for Claude Fable 5, 88.6% for Opus 4.8, 85.2% for Sonnet 5 — which means the benchmark is close to saturated and its remaining spread says more about contamination than capability. The discriminating benchmark is now **SWE-bench Pro** (1,865 tasks over 41 actively maintained Python/Go/TypeScript/JavaScript repos, including private startup codebases, and copyleft-licensed to resist training-set leakage), where the best public-set score is around 60% and the field average is far lower. The frontier of the *product* is multi-hour autonomous tasks (Cursor Background Agents, Devin sessions, Claude Code subagents) spanning dozens of files.
+The landscape spans IDE-integrated and terminal agents (Cursor Composer, Claude Code, OpenAI Codex CLI, Gemini CLI, Continue, Cline), cloud and autonomous platforms (Codex cloud, Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). Frontier models now clear 85-95% on SWE-bench Verified (95.0% for Claude Fable 5, 88.6% for Opus 4.8, 85.2% for Sonnet 5), which means the benchmark is close to saturated and its remaining spread says more about contamination than capability. The discriminating benchmark is now **SWE-bench Pro** (1,865 tasks over 41 actively maintained Python/Go/TypeScript/JavaScript repos, including private startup codebases, and copyleft-licensed to resist training-set leakage), where the best public-set score is around 60% and the field average is far lower. The frontier of the *product* is multi-hour autonomous tasks (Cursor Background Agents, Devin sessions, Claude Code subagents) spanning dozens of files.
 
 ---
 
@@ -57,6 +57,23 @@ Autonomous "AI software engineer". Long-running sessions (hours), full VM access
 ### 4.6 Plandex
 
 Open-source autonomous coding agent. Plan-first architecture: agent produces detailed plan before executing; user approves/edits plan; agent executes with checkpointing.
+
+### 4.7 OpenAI Codex (CLI and cloud)
+
+Two surfaces on one agent. **Codex CLI** (`openai/codex`, Apache-2.0, installed with `npm install -g @openai/codex` or `brew install --cask codex`) runs locally inside an OS sandbox: Seatbelt on macOS, `bubblewrap` on Linux and WSL2, and a native sandbox on Windows. Two settings govern it. The sandbox mode is `read-only`, `workspace-write` (the default: write inside the workspace, nothing outside), or `danger-full-access`. The approval policy is `on-request` or `never`. **Codex cloud** (chatgpt.com/codex) runs each task in its own container: a setup script runs with internet access to install dependencies, then the agent phase runs with internet blocked by default, or with a domain allowlist limited to GET, HEAD, and OPTIONS. Because each cloud task is a separate container, one prompt can fan out into several parallel attempts and the user picks the diff to turn into a PR.
+
+### 4.8 Gemini CLI and Antigravity CLI
+
+Google's terminal agent. **Gemini CLI** (`google-gemini/gemini-cli`, Apache-2.0) has file, shell, web-fetch, and search tools, MCP servers configured in `~/.gemini/settings.json`, and `GEMINI.md` context files. Since 2026-06-18 Gemini CLI serves only enterprise Gemini Code Assist Standard and Enterprise licences and paid API keys. Individual and free-tier users run **Antigravity CLI**, the terminal client of Google's Antigravity platform (available to everyone from 2026-05-19), which keeps the same Skills, Hooks, Subagents, and plugin model.
+
+### 4.9 The harness layer: instruction files, hooks, plan mode, worktrees
+
+Every major agent now ships the same four control surfaces around the model loop:
+
+- **Repo instruction file.** `AGENTS.md` is the cross-vendor format (stewarded by the Agentic AI Foundation under the Linux Foundation, used by 60k+ open-source projects, read by Codex, Cursor, Copilot coding agent, Devin, Aider, Gemini CLI, Jules, and others). Claude Code reads `CLAUDE.md`; Gemini CLI reads `GEMINI.md`. The file holds build, test, and lint commands and repo conventions, so the agent does not rediscover them every session.
+- **Hooks.** Shell commands the harness runs on lifecycle events (`PreToolUse`, `PostToolUse`, `Stop`, `SessionStart` and others in Claude Code). A hook is deterministic: it runs whether or not the model "remembers" the rule.
+- **Plan mode.** A read-only permission mode: the agent reads files and proposes a plan, and nothing touches disk until the user approves (Claude Code: `--permission-mode plan` or `Shift+Tab`).
+- **Parallel agents in git worktrees.** Each agent session gets its own `git worktree` (separate checkout, separate branch, shared object store), so two agents editing the same repo never write over each other's files (Claude Code: `claude --worktree <name>`).
 
 ---
 
@@ -245,6 +262,48 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
     return {"status": "max_iterations", "iterations": max_iterations}
 ```
 
+### Instruction-File Resolution and Hook Enforcement
+
+Codex builds its instruction chain once at startup. Global scope: `~/.codex/AGENTS.override.md` if non-empty, else `~/.codex/AGENTS.md`. Project scope: start at the Git root and walk down to the working directory, taking at most one file per directory (`AGENTS.override.md`, then `AGENTS.md`, then any `project_doc_fallback_filenames`). Files are concatenated root-first, so the file nearest the working directory comes last and wins on conflict. Codex stops adding files when the total reaches `project_doc_max_bytes` (default 32 KiB). The AGENTS.md spec states the same rule as "the closest AGENTS.md to the edited file wins; explicit user chat prompts override everything".
+
+```
+repo/                                    instruction chain for cwd = repo/services/billing
+|-- AGENTS.md            (build, lint)   1. ~/.codex/AGENTS.md        (global, first)
+|-- services/                            2. repo/AGENTS.md
+|   |-- AGENTS.md        (go rules)      3. repo/services/AGENTS.md
+|   `-- billing/                         4. repo/services/billing/AGENTS.md  (last, wins)
+|       `-- AGENTS.md    (no float $)
+`-- web/AGENTS.md        (not loaded: not on the path from root to cwd)
+
+                     combined size > 32 KiB -> later (more specific) files are dropped
+```
+
+Instructions are advisory: the model reads them and can still ignore them under a long context. A rule that must hold every time belongs in a hook. In Claude Code a `PreToolUse` hook receives the tool call as JSON on stdin and blocks it by exiting with code 2 (stderr becomes the reason the model sees) or by printing `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", ...}}`. Exit code 2 blocks even if the JSON says `allow`. Hooks live in `~/.claude/settings.json` (user), `.claude/settings.json` (project, committed), `.claude/settings.local.json` (project, gitignored), or managed policy settings (organisation).
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no-force-push.sh" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "npm run lint --silent" }] }
+    ]
+  }
+}
+```
+
+### Terminal-Bench: Scoring the Whole Terminal Loop
+
+SWE-bench scores one thing: a patch that makes hidden tests pass. Terminal-Bench (Stanford and Laude Institute, run through the Harbor harness) scores an agent on end-to-end terminal tasks in a container: build a project from source, configure a server, train a small model, recover a broken environment. Each task has an instruction, a container image, a test script that checks the final state, and an oracle solution used to prove the task is solvable. Terminal-Bench 2.0 shipped with Harbor on 2025-11-07, 2.1 fixed 28 of its tasks on 2026-05-06, and 4.0 (2026-08-28) removed 8 tasks (2 saturated, 2 refused by models, 2 with public solutions, 2 broken) and set a flat 8-hour agent timeout. A task counts as saturated when every model class in the latest generation solves it 5 of 5 times. Because the score depends on the harness as much as the model, the leaderboard ranks model and agent pairs, and Harbor runs any agent the same way:
+
+```bash
+uv run harbor run -d terminal-bench/terminal-bench@latest \
+   --agent claude-code --model anthropic/claude-fable-5 --n-concurrent 100 --env modal
+```
+
 ---
 
 ## 7. Real-World Examples
@@ -260,6 +319,10 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 **Aider** — terminal-based; commits each change as separate git commit for clean history; loved by power users.
 
 **SWE-agent** — research framework demonstrating the ACI principle.
+
+**OpenAI Codex**: the same agent as a local CLI (sandboxed with Seatbelt or `bubblewrap`, reads `AGENTS.md`) and as a cloud service at chatgpt.com/codex that runs each task in its own container with internet blocked during the agent phase; the OpenAI monorepo alone carries 88 `AGENTS.md` files.
+
+**Gemini CLI / Antigravity CLI**: Google's Apache-2.0 terminal agent with `GEMINI.md` context files and MCP support; since 2026-06-18 individual users run Antigravity CLI and Gemini CLI serves enterprise Code Assist licences and paid API keys.
 
 **GitHub Copilot coding agent** — assign an issue to Copilot and it plans, edits in a GitHub Actions sandbox, and opens a PR for review; multi-step task planning and execution embedded in the GitHub PR flow.
 
@@ -380,6 +443,10 @@ if any(re.search(p, command) for p in DESTRUCTIVE_GIT):
 | Continue | VS Code agent | Open-source, model-agnostic |
 | Plandex | Terminal agent | Plan-first, checkpointing |
 | Copilot coding agent | GitHub-integrated | PR-flow native; issue-to-PR |
+| OpenAI Codex CLI / cloud | CLI agent + cloud containers | OS sandbox modes, `AGENTS.md`, parallel cloud attempts |
+| Gemini CLI / Antigravity CLI | CLI agent | `GEMINI.md`, MCP, Google model access |
+| `AGENTS.md` | Instruction-file format | One file read by 20+ agents; nearest file wins |
+| Terminal-Bench (Harbor) | Benchmark + harness | End-to-end terminal tasks scored on final container state |
 
 ---
 
@@ -393,6 +460,14 @@ ACI is the set of commands/tools the agent uses to interact with a codebase. SWE
 **Short:** Targeted grep or symbol reads cut per-call cost 10-50x versus loading whole files, which is why production coding agents avoid full-file reads.
 Whole-file reading bloats context (a 100KB file = ~25K tokens). With grep/symbol search, agent reads ~2KB relevant chunks. Cost per call drops 10-50×; context limits don't get hit; model focuses on relevant code. Industry production agents universally use this pattern.
 
+**Q: An agent ignores a rule written in the nested `services/billing/AGENTS.md`. What are the likely causes?**
+**Short:** The file is not on the root-to-cwd path the agent walked, or the combined chain passed the size cap (32 KiB in Codex) and the deepest files were dropped.
+Agents resolve `AGENTS.md` by directory: Codex walks from the Git root down to the working directory, takes at most one file per directory, and concatenates them root-first so the nearest file comes last and wins. Three failure modes follow. First, the session started in a sibling directory (`web/`), so `services/billing/` was never on the path. Second, the chain is capped by `project_doc_max_bytes` (default 32 KiB) and files are added root-first, so a bloated root file pushes out the most specific ones. Third, the chain is built once at startup, so a file edited mid-session is not reloaded. Keep the root file short (commands and conventions), put local rules next to the code, and start the agent in the directory you are changing.
+
+**Q: Why enforce "never force-push" with a hook instead of a line in `AGENTS.md` or `CLAUDE.md`?**
+**Short:** An instruction file is advisory text the model can ignore, while a `PreToolUse` hook runs on every matching tool call and can block it deterministically.
+The instruction file is context: under a long session or a conflicting user request the model can still emit `git push --force`. A Claude Code `PreToolUse` hook with matcher `Bash` receives the tool input as JSON on stdin and blocks the call by exiting with code 2 (stderr is fed back to the model as the reason) or by returning `permissionDecision: "deny"`; exit code 2 blocks even if the JSON says allow. `PostToolUse` hooks give the same guarantee in the other direction, such as running the linter after every `Edit`. Put preferences in the instruction file and invariants in hooks committed to `.claude/settings.json`, or in managed policy settings when the organisation owns the rule.
+
 **Q: How does Claude Code's subagent dispatch help with large codebases?**
 **Short:** Claude Code's subagent dispatch splits explore, implement, and review into isolated-context subagents, running 2-3x faster on multi-file tasks.
 Parent CLI agent spawns subagents with focused tools and isolated context. Explore subagent does navigation (read-only); Implementation subagent does edits (write tools); Review subagent verifies. Each subagent's context stays lean (doesn't see other subagents' work); parent synthesizes results. Wall-clock 2-3× faster than monolithic agent on multi-file tasks.
@@ -400,6 +475,10 @@ Parent CLI agent spawns subagents with focused tools and isolated context. Explo
 **Q: What is SWE-bench and why is it the standard benchmark?**
 **Short:** SWE-bench's real GitHub issues scored by passing tests became the standard because it uses real-world distribution and ground-truth tests, not judges.
 SWE-bench (Princeton, 2024): 2294 real GitHub issues from 12 popular Python repos; agent must produce a patch that passes the issue's test cases. SWE-bench Verified: 500-issue human-validated subset. It became standard because of real-world distribution (not synthetic), tests as ground truth (no LLM judges), and coverage across repos and patterns. It is now near-saturated at the frontier, so pair it with SWE-bench Pro — 1,865 tasks across 41 repos in Python, Go, TypeScript and JavaScript, copyleft-licensed and partly private specifically to resist contamination.
+
+**Q: What does Terminal-Bench measure that SWE-bench does not?**
+**Short:** Terminal-Bench scores whole terminal workflows (build, configure, debug, recover an environment) by checking the final container state, not just whether a code patch passes tests.
+SWE-bench gives the agent a repo and an issue and scores one artifact: a patch that makes hidden tests pass. Terminal-Bench (Stanford and Laude Institute, run through the Harbor harness) gives the agent a container and an instruction such as compiling a project from source or configuring a server, then a test script checks the end state; each task also ships an oracle solution that proves it is solvable. Because tool use, shell fluency, and long horizons all count, the leaderboard ranks model and agent pairs, and the same model scores differently under different harnesses. Version 4.0 (2026-08-28) dropped tasks that every frontier model class solves 5 of 5 times and set a flat 8-hour timeout, so compare scores only within one version.
 
 **Q: What's the difference between IDE-integrated agents (Cursor) and autonomous agents (Devin)?**
 **Short:** IDE agents like Cursor keep the developer reviewing each suggestion, while autonomous agents like Devin run for hours before delivering a PR.
@@ -463,6 +542,10 @@ Treat the agent as untrusted code with no production access. Concretely: [sandbo
 8. Cap autonomy with max_iterations + cost budget — prevent runaway loops.
 9. Use git per logical change (Aider pattern) for clean PR history.
 10. Run agent in dev environment with no production credentials — security-by-isolation.
+11. Keep the root `AGENTS.md` (or `CLAUDE.md`) to build, test, and lint commands plus conventions; put local rules in nested files next to the code they govern.
+12. Enforce invariants (no force-push, lint after edit) with hooks, not instruction text.
+13. Run parallel agents in separate git worktrees (`claude --worktree <name>`) or separate cloud containers so their edits never collide.
+14. Use plan mode for changes you want to review before anything touches disk.
 
 ---
 
@@ -526,7 +609,7 @@ Treat the agent as untrusted code with no production access. Concretely: [sandbo
                              │ structured issue context
                              v
   ┌─────────────────────────────────────────────────────────┐
-  │  SWE-agent (Claude claude-sonnet-5 backend)              │
+  │  SWE-agent (Claude claude-sonnet-5-5 backend)            │
   │  Sandbox: Docker container (exact CI environment)        │
   │  Tools: bash, find_file, goto, scroll, edit, run_tests   │
   │  Context: repo map (10k tokens) + issue context          │
@@ -656,7 +739,7 @@ class AgentResult:
 def run_swe_agent(
     issue: IssueContext,
     repo_path: Path,
-    model: str = "claude-sonnet-5",
+    model: str = "claude-sonnet-5-5",
     max_iterations: int = 30,
     cost_limit_usd: float = 2.00,
 ) -> AgentResult:
@@ -933,7 +1016,7 @@ def cost_aware_config() -> dict[str, object]:
         "max_iterations": 30,
         "cost_limit_usd": 2.00,
         "cost_warning_threshold_usd": 1.00,
-        "fallback_model_on_warning": "claude-haiku-4-5",
+        "fallback_model_on_warning": "claude-haiku-5-5",
     }
 ```
 

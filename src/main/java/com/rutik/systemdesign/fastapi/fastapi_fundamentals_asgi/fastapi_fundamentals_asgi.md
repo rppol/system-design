@@ -96,9 +96,10 @@ the loop. You pay for thread overhead only when you opt in to synchronous code.
 | Flask support       | native                                            | Quart (async reimplementation)                    |
 
 The ASGI specification itself names no Python floor — it only requires that applications be
-`async`/`await` coroutines. The real floor comes from the implementations: uvicorn 0.52,
-Hypercorn 0.18, Starlette 1.3 and `asgiref` 3.12 all declare `requires-python >= 3.10`, so 3.10
-is the practical minimum for any ASGI stack you would deploy today.
+`async`/`await` coroutines. The real floor comes from the implementations: Starlette 1.8.0
+(2026-10-13) and later, SQLAlchemy 2.1 and pydantic-settings 2.16 all declare
+`requires-python >= 3.11`, so 3.11 is the practical minimum for a FastAPI stack on current
+releases. Python 3.10 reached end of life on 2026-10-01.
 
 ### Response Class Hierarchy
 
@@ -273,7 +274,7 @@ stateDiagram-v2
     end note
 ```
 
-*The `dict` yielded between startup and shutdown becomes `app.state` / `request.state` for the entire `Running` period; the shutdown half only runs on graceful termination (SIGTERM/SIGINT), not `SIGKILL` (see Pitfall 1).*
+*Starlette stores the `dict` yielded between startup and shutdown in the ASGI lifespan `state`, and the server shallow-copies it into each request's `request.state` for the entire `Running` period (`app.state` is not populated); the shutdown half only runs on graceful termination (SIGTERM/SIGINT), not `SIGKILL` (see Pitfall 1).*
 
 ---
 
@@ -365,8 +366,9 @@ from fastapi import FastAPI, Request
 async def lifespan(app: FastAPI) -> AsyncIterator[dict]:
     """
     Runs at server startup (before first request) and on shutdown.
-    The dict yielded becomes app.state and is accessible per-request
-    via request.state.
+    Starlette stores the yielded dict in the ASGI lifespan state and the
+    server shallow-copies it into every request's request.state.
+    app.state is not populated.
     """
     # --- startup ---
     pool: asyncpg.Pool = await asyncpg.create_pool(
@@ -375,7 +377,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[dict]:
         max_size=20,
     )
 
-    yield {"db": pool}         # everything in this dict is injected into app.state
+    yield {"db": pool}         # copied into request.state on every request
 
     # --- shutdown (runs after yield when SIGTERM is received) ---
     await pool.close()
@@ -393,6 +395,74 @@ async def get_user(user_id: int, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="User not found")
     return dict(row)
 ```
+
+### 6.3.1 Typed lifespan state [Starlette 0.52+]
+
+The `dict` the lifespan yields is stored once; each request gets `request.state` built from a
+**shallow copy** of it. Two rules follow, and both were measured on FastAPI 0.143.0 with
+Starlette 1.7.0 (a lifespan yielding `{"counter": 0, "hits": []}`, two requests that each run
+`request.state["counter"] += 1` and `request.state["hits"].append(1)`):
+
+```
+  lifespan dict (stored once)        request 1 copy            request 2 copy
+  ---------------------------        --------------            --------------
+  "counter" -> int 0                 "counter" -> 1  (rebound, local)    "counter" -> 1
+  "hits"    -> list @0x7f..   <----  "hits" ------+             "hits" -----+
+                                                  |                         |
+                                   same list object, append on req 1 is seen on req 2
+  observed: counter = 1, 1      hits = 1, 2
+```
+
+*Rebinding a key changes only that request's copy; mutating a shared object (a list, a pool, a
+client) is visible to every later request and to every concurrent one.*
+
+So the lifespan dict is the place for shared, long-lived objects (pools, clients, models) and
+never for counters or per-request data. A mutable object stored there is shared across all
+coroutines on the event loop, so it needs the same care as a module global.
+
+Starlette 0.52.0 (2026-01-18) made `State` support dict-style access and made `Request`
+generic over the state type, so in a plain Starlette app `request: Request[State]` with a
+`TypedDict` gives `request.state["http_client"]` a real type. **In FastAPI, do not annotate a
+route or dependency parameter as `Request[State]`.** FastAPI recognises the special `Request`
+parameter with an `issubclass` check; `Request[State]` is a generic alias, not a class, so the
+check fails, FastAPI tries to build a Pydantic field from it, and app import raises
+`FastAPIError: Invalid args for response field!` (FastAPI 0.143.0). Keep the parameter as
+`Request` and put the type on a dependency instead:
+
+```python
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Annotated, TypedDict
+
+import httpx
+from fastapi import Depends, FastAPI, Request
+
+
+class State(TypedDict):
+    http_client: httpx.AsyncClient
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[State]:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        yield {"http_client": client}           # mypy checks the keys against State
+
+
+def http_client(request: Request) -> httpx.AsyncClient:
+    return request.state["http_client"]          # dict-style access, Starlette 0.52+
+
+
+HttpClient = Annotated[httpx.AsyncClient, Depends(http_client)]
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/upstream")
+async def upstream(client: HttpClient) -> dict:
+    return (await client.get("https://api.example.com/health")).json()
+```
+
+The route sees a typed `httpx.AsyncClient`, the state key is spelled once, and a test replaces
+the client with `app.dependency_overrides[http_client]` instead of patching `request.state`.
 
 ### 6.4 Path Parameter Resolution via Reflection
 
@@ -460,7 +530,7 @@ flowchart LR
     class pathP,reqQ,optQ req
 ```
 
-*This per-parameter classification runs once at startup, in the same reflection pass shown below — it decides whether Pydantic validates a value as a path segment, a required query key, or an optional one (the three-way split Q14 asks about).*
+*This per-parameter classification runs once at startup, in the same reflection pass shown below: it decides whether Pydantic validates a value as a path segment, a required query key, or an optional one (the three-way split Q16 asks about).*
 
 ### 6.5 response_model and Field Filtering
 
@@ -526,7 +596,7 @@ flowchart LR
     class leaked lossN
 ```
 
-*`response_model` runs every return value through `UserPublic.model_validate().model_dump()`, silently dropping any field the response model does not declare (Q6); skip the declaration entirely and the full internal model — `hashed_password` included — serializes as-is (Pitfall 3).*
+*`response_model` runs every return value through `UserPublic.model_validate().model_dump()`, silently dropping any field the response model does not declare (Q8); skip the declaration entirely and the full internal model, `hashed_password` included, serializes as-is (Pitfall 3).*
 
 ### 6.6 Response Classes
 
@@ -733,17 +803,19 @@ for anything on a network. Streamable HTTP is an ASGI app's natural shape, which
 and Starlette sit under most remote MCP servers. The spec requires a **single endpoint path
 serving both POST and GET** (`https://example.com/mcp`): the client POSTs a JSON-RPC message
 with `Accept: application/json, text/event-stream`, and the server answers *either* with one
-JSON object or by opening an SSE stream on that same response — a `GET` to the same path opens
-a server-to-client stream. A JSON-RPC notification or response gets `202 Accepted` with no body.
+JSON object or by opening an SSE stream on that same response. A JSON-RPC notification or
+response gets `202 Accepted` with no body.
 
-Three details make it a good exercise in this module's machinery. Session state lives in an
-`Mcp-Session-Id` response header the client must echo; a server that has expired a session
-returns **404**, which the client treats as "re-initialize", not as "endpoint missing". Version
-negotiation rides an `MCP-Protocol-Version` header on every subsequent request, and an
-unsupported value **must** be a `400`. And stream resumption is plain SSE: the server attaches
-an `id` to each event and the client reconnects with `Last-Event-ID`, so ids are a per-stream
-cursor — the same mechanism covered in
+The `2026-07-28` revision made the protocol stateless, which suits a horizontally scaled ASGI
+app. The `initialize` handshake and the `Mcp-Session-Id` header are gone: every request carries
+its protocol version and client capabilities in `_meta`, so any worker can serve any request.
+The `GET` server stream was replaced by `subscriptions/listen`, a long-lived POST-response
+stream the client opts into. SSE resumability via `Last-Event-ID` was removed, so a dropped
+stream loses the request and the client re-issues it with a new request id. That is the
+opposite of FastAPI's own SSE, covered in
 [`../websockets_sse_and_streaming/websockets_sse_and_streaming.md`](../websockets_sse_and_streaming/websockets_sse_and_streaming.md).
+[`../serving_llm_and_ai_workloads/mcp_servers_from_fastapi.md`](../serving_llm_and_ai_workloads/mcp_servers_from_fastapi.md)
+covers the full revision.
 
 The security requirements are not optional and are easy to miss on an ASGI app: the server
 **must** validate the `Origin` header on every connection, because without it a web page can
@@ -994,7 +1066,7 @@ list mutated in a route handler is shared across all concurrent requests. Use a 
 | Dimension              | Uvicorn 0.51+              | Hypercorn 0.18+            | Daphne 4.2+             | Gunicorn + uvicorn-worker  |
 |------------------------|----------------------------|----------------------------|-------------------------|----------------------------|
 | ASGI compliance        | Full ASGI 3                | Full ASGI 3                | Full ASGI 3             | Full ASGI 3                |
-| HTTP/2                 | No (HTTP/1.1 only)         | Yes                        | No                      | No (Uvicorn limitation)    |
+| HTTP/2                 | Experimental, opt-in (0.53+, `--http zttp --http2`; no WebSockets over H2) | Yes | No | No                         |
 | WebSocket              | Yes                        | Yes                        | Yes (Django Channels)   | Yes                        |
 | Graceful reload        | Yes (`--reload` dev only)  | Yes                        | No                      | Yes (SIGHUP)               |
 | Worker model           | Multi-process (--workers)  | Single process + asyncio   | Twisted reactor         | Multi-process              |
@@ -1048,15 +1120,43 @@ subclasses. You can add Starlette middleware directly to a FastAPI app, and a Fa
 can return any Starlette `Response` subclass.
 
 **Q4: Why use `lifespan` instead of `on_startup` / `on_shutdown`?**
-**Short:** lifespan replaces on_startup/on_shutdown with a yield-based structure that guarantees cleanup and shares state via app.state.
+**Short:** lifespan replaces on_startup/on_shutdown with a yield-based structure that guarantees cleanup and shares state via request.state.
 The `lifespan` context manager landed in FastAPI 0.93 and `FastAPI.on_event` now carries an
 explicit `@deprecated` marker. It solves two problems the old API could not: (1) it provides a `yield`-based
 structure so resources created in startup are automatically closed in shutdown even if an
-exception occurs; (2) the `dict` yielded from the context manager is injected into
-`app.state` and accessible via `request.state` in every route handler, removing the need
-for module-level globals. The old handlers could not share state with routes without globals.
+exception occurs; (2) the `dict` yielded from the context manager goes into the ASGI lifespan `state`, which
+the server shallow-copies into `request.state` for every request (`app.state` is untouched), removing the need
+for module-level globals. Since Starlette 0.52, `Request` is generic over the state type and
+supports dict-style access, so the state can be typed; in FastAPI the parameter stays plain
+`Request` and a typed dependency returns each resource (Section 6.3.1). The old handlers could not share state with routes without globals.
 
-**Q5: What happens when FastAPI receives a request for `/items/abc` with a route defined as `@app.get("/items/{item_id}")` where `item_id: int`?**
+**Q5: A handler runs `request.state["counter"] += 1` against a value the lifespan yielded. Why does every request still see 0 before the increment?**
+**Short:** Each request's state is a shallow copy of the lifespan dict, so rebinding a key is local to that request, while mutating a shared object leaks to all.
+
+Starlette stores the yielded `dict` once in the ASGI lifespan `state`, and the server (Uvicorn,
+Hypercorn) builds each request's `request.state` from a shallow copy of it. `+= 1` on an `int` rebinds the key to a new object in the copy, so the next
+request starts from the original 0 again. A shallow copy still shares the values themselves:
+`request.state["hits"].append(1)` mutates the one list every request references, so the change
+is visible to all later and concurrent requests (measured: counters 1 and 1, list lengths 1 and
+2 over two requests). Use the lifespan dict only for shared long-lived objects such as pools,
+clients and models; keep per-request data in local variables or dependencies, and keep shared
+counters in Redis or behind an `asyncio.Lock`.
+
+**Q6: Why does `async def route(request: Request[State])` crash a FastAPI app at import time when the same annotation works in Starlette?**
+**Short:** FastAPI detects Request with issubclass, which fails on the generic alias Request[State], so it tries to build a Pydantic field and raises FastAPIError.
+
+Starlette 0.52 made `Request` generic over the lifespan state type so that
+`request.state["key"]` can be type-checked against a `TypedDict`. FastAPI decides which
+parameters are special by checking `issubclass(annotation, Request)`; `Request[State]` is a
+`typing` generic alias rather than a class, so the check returns False and FastAPI treats the
+parameter as data. Creating a Pydantic field for it fails, and FastAPI 0.143.0 raises
+`FastAPIError: Invalid args for response field!` when the route is registered. Keep the
+parameter as plain `Request` and give the type to a dependency, for example
+`def http_client(request: Request) -> httpx.AsyncClient: return request.state["http_client"]`,
+used as `Annotated[httpx.AsyncClient, Depends(http_client)]`. That also makes the resource
+overridable in tests.
+
+**Q7: What happens when FastAPI receives a request for `/items/abc` with a route defined as `@app.get("/items/{item_id}")` where `item_id: int`?**
 **Short:** A path parameter that fails int coercion raises RequestValidationError, returning 422 without the route handler ever running.
 FastAPI resolves the path parameter at startup, noting that `item_id` maps to `int`. At
 request time, Pydantic v2 attempts to coerce the string `"abc"` to `int`. Coercion fails;
@@ -1065,7 +1165,7 @@ and serialized as a `422 Unprocessable Entity` JSON body with a `detail` array l
 exact field, location (`path`), and message (`Input should be a valid integer`). The route
 handler function is never called.
 
-**Q6: How does FastAPI filter extra fields when `response_model` is set?**
+**Q8: How does FastAPI filter extra fields when `response_model` is set?**
 **Short:** response_model filters output by re-validating it into the declared model, silently dropping any field not declared there.
 FastAPI passes the route handler's return value to `response_model.model_validate(return_value)`,
 producing a Pydantic instance containing only the fields declared in `response_model`. It then
@@ -1073,7 +1173,7 @@ calls `.model_dump()` and serializes the resulting dict to JSON. Any field prese
 handler's return value but absent from `response_model` is silently dropped. This is Pydantic v2
 behaviour; in v1 the method was `.dict()`.
 
-**Q7: When should you use `def` versus `async def` for a route handler in FastAPI?**
+**Q9: When should you use `def` versus `async def` for a route handler in FastAPI?**
 **Short:** Use async def for handlers awaiting async I/O, and plain def for blocking calls, which FastAPI offloads to a thread pool.
 Use `async def` when the handler calls other `async` functions — awaiting an async DB driver,
 making async HTTP calls with `httpx`, or reading from a Redis async client. FastAPI runs `async
@@ -1082,7 +1182,7 @@ cannot be made async — synchronous ORM calls, CPU-intensive work, legacy SDKs.
 `def` handlers in a thread pool executor (`anyio.to_thread.run_sync`), preventing event loop
 blockage. Never call a blocking function directly inside `async def`.
 
-**Q8: What does `response_class=HTMLResponse` do on a route decorator?**
+**Q10: What does `response_class=HTMLResponse` do on a route decorator?**
 **Short:** response_class=HTMLResponse wraps the handler's return value in an HTML response instead of the default JSON one.
 It tells FastAPI to wrap the handler's return value in an `HTMLResponse` instead of the
 default `JSONResponse`. This sets `Content-Type: text/html; charset=utf-8`. It also updates
@@ -1090,7 +1190,7 @@ the OpenAPI schema to show `text/html` as the response media type. The handler c
 a plain `str` and FastAPI will wrap it; or it can return an `HTMLResponse` instance directly
 for full control over status code and headers.
 
-**Q9: How does Uvicorn handle concurrent requests without multiple threads?**
+**Q11: How does Uvicorn handle concurrent requests without multiple threads?**
 **Short:** Uvicorn handles concurrency on one thread by suspending a coroutine at each await and resuming the next ready one.
 Uvicorn runs Python's `asyncio` event loop in a single thread. When an `await` expression
 suspends a coroutine (waiting for a socket read, a DB query, or an external HTTP response),
@@ -1100,7 +1200,7 @@ with one thread, as long as none of them block synchronously. The OS handles the
 non-blocking I/O via `select`/`epoll`/`kqueue`; asyncio wraps these in awaitable
 `Future` objects.
 
-**Q10: Where does FastAPI generate the OpenAPI schema and how is it customised?**
+**Q12: Where does FastAPI generate the OpenAPI schema and how is it customised?**
 **Short:** FastAPI builds the OpenAPI schema in memory at startup by inspecting every registered route, serving it at /openapi.json.
 FastAPI builds the OpenAPI 3.1.0 schema object in memory at startup by inspecting every
 registered route. Each route contributes its path, method, path/query parameters, request
@@ -1112,7 +1212,7 @@ and ReDoc at `GET /redoc`. Customisation points include: `title`, `version`, `de
 `include_in_schema=False` on individual route decorators; and `Field(description=...,
 examples=[...])` on Pydantic model fields.
 
-**Q11: What is `StreamingResponse` used for and how does it work under ASGI?**
+**Q13: What is `StreamingResponse` used for and how does it work under ASGI?**
 **Short:** StreamingResponse sends response body chunks incrementally by iterating a generator and calling ASGI send for each piece.
 `StreamingResponse` wraps an async generator (or sync generator run in a thread) that
 yields `bytes` or `str` chunks. When FastAPI serializes a `StreamingResponse`, it calls
@@ -1122,7 +1222,7 @@ and finally `send({"type": "http.response.body", "body": b"", "more_body": False
 client receives chunks incrementally. This is the mechanism behind Server-Sent Events,
 large file downloads, and real-time LLM token streaming.
 
-**Q12: How does Starlette middleware interact with FastAPI routes?**
+**Q14: How does Starlette middleware interact with FastAPI routes?**
 **Short:** Starlette middleware wraps the app in reverse order of addition, each layer able to inspect or short-circuit the scope/receive/send triple.
 Each middleware is an ASGI callable added via `app.add_middleware(SomeMiddleware, **kwargs)`.
 FastAPI wraps the middleware around the application in reverse order of addition — last added
@@ -1132,17 +1232,18 @@ modify response headers, or short-circuit the chain by sending a response direct
 calling the inner app. This mechanism is identical to how Django middleware works conceptually,
 but purely async.
 
-**Q13: What is `root_path` in the ASGI scope and when does it matter?**
+**Q15: What is `root_path` in the ASGI scope and when does it matter?**
 **Short:** root_path tells FastAPI the URL prefix a reverse proxy strips, keeping generated OpenAPI paths matched to the public URL.
 `root_path` is the URL prefix that the reverse proxy strips before forwarding to Uvicorn.
 If Nginx is configured to proxy `https://api.example.com/v1/` to `http://localhost:8000/`,
 the `root_path` is `/v1`. Without it, FastAPI generates OpenAPI paths starting at `/`, and
 the Swagger UI's "Try it out" buttons send requests to `/items/1` instead of `/v1/items/1`,
-failing. Set `root_path` via `app = FastAPI(root_path="/v1")` or via Uvicorn's `--root-path`
-flag. Alternatively, configure the proxy to pass the `X-Forwarded-Prefix` header and use
-Starlette's `ProxyHeadersMiddleware`.
+failing. Set it on the server: `fastapi run --root-path /v1` or Uvicorn's `--root-path /v1`.
+Neither Uvicorn's `--proxy-headers` (which reads only `X-Forwarded-For` and `X-Forwarded-Proto`)
+nor Starlette reads `X-Forwarded-Prefix`, so a proxy that sends that header still needs the
+same prefix passed as `--root-path`.
 
-**Q14: How are path parameters differentiated from query parameters in a FastAPI route signature?**
+**Q16: How are path parameters differentiated from query parameters in a FastAPI route signature?**
 **Short:** FastAPI classifies a parameter as a path parameter only if its name appears as a placeholder in the route's path string.
 FastAPI determines the source of each parameter at startup. A parameter is a path parameter
 if its name appears as a `{placeholder}` in the path string of the route decorator. Every
@@ -1152,7 +1253,7 @@ is purely positional: changing `@app.get("/items/{item_id}")` to `@app.get("/ite
 `item_id` from a path parameter into a required query parameter with no code change to the
 function body.
 
-**Q15: What is the difference between `FileResponse` and `StreamingResponse` for serving large files?**
+**Q17: What is the difference between `FileResponse` and `StreamingResponse` for serving large files?**
 **Short:** FileResponse streams a file from disk more memory-efficiently than StreamingResponse, which suits dynamically generated content instead.
 `FileResponse` takes a path on disk; `StreamingResponse` takes a generator you write.
 `FileResponse` streams the file with `anyio.open_file`, so the disk reads happen on a worker
@@ -1165,7 +1266,7 @@ Python heap. For files already on disk, `FileResponse` is more memory-efficient.
 dynamically generated content (S3 proxy streaming, LLM token output, live sensor data),
 use `StreamingResponse`.
 
-**Q16: Why is `--workers 1` the recommended default for Uvicorn, and when should you increase it?**
+**Q18: Why is `--workers 1` the recommended default for Uvicorn, and when should you increase it?**
 **Short:** A single Uvicorn worker handles I/O-bound load efficiently on one event loop; extra workers help only when the bottleneck is CPU.
 A single Uvicorn worker runs one asyncio event loop and handles thousands of concurrent
 I/O-bound requests efficiently. Adding workers spawns new OS processes, each with its own
@@ -1176,17 +1277,16 @@ processes itself) when the bottleneck is CPU — Python parsing, Pydantic valida
 synchronous business logic — since each extra worker can utilise an additional CPU core
 independently of the GIL.
 
-**Q17: Why is an ASGI framework like FastAPI the natural fit for a remote MCP server?**
-**Short:** MCP's Streamable HTTP transport needs one path serving POST and GET that can answer either a JSON body or an SSE stream — which is exactly what an ASGI app does.
+**Q19: Why is an ASGI framework like FastAPI the natural fit for a remote MCP server?**
+**Short:** MCP's Streamable HTTP transport answers a POST on one path with either a JSON body or an SSE stream, which is exactly what an ASGI app does.
 MCP defines two standard transports: stdio for a subprocess, and Streamable HTTP for anything
-remote. Streamable HTTP requires a **single endpoint path handling both POST and GET**, where
-the same POST may be answered with either `application/json` or `text/event-stream` depending
-on the request — and a GET on that path opens a server-to-client SSE stream. Switching a single
-route between a unary response and a long-lived stream, on one connection abstraction, is
-precisely what ASGI gives you and what WSGI cannot do at all. The rest maps onto ordinary
-FastAPI machinery: `Mcp-Session-Id` and `MCP-Protocol-Version` are header dependencies,
-resumption is SSE `id` plus `Last-Event-ID`, and a `404` on an expired session is a protocol
-signal meaning "re-initialize" rather than an error. The requirement most often missed is
+remote. Streamable HTTP uses a **single endpoint path**, where the same POST may be answered
+with either `application/json` or `text/event-stream` depending on the request. Switching a
+single route between a unary response and a long-lived stream, on one connection abstraction,
+is precisely what ASGI gives you and what WSGI cannot do at all. Since the `2026-07-28`
+revision the protocol is stateless: no `initialize` handshake, no `Mcp-Session-Id`, the
+protocol version rides in `_meta` on every request, and SSE resumability via `Last-Event-ID`
+is gone, so any worker behind a load balancer can serve any request. The requirement most often missed is
 security: the spec says a server **must** validate the `Origin` header, because otherwise a
 malicious web page can reach a developer's locally running MCP server through DNS rebinding.
 
@@ -1223,7 +1323,7 @@ custom `response_class` only for non-JSON media types.
 scrapers, and readiness probes (`/healthz`, `/readyz`) should not appear in the public API
 spec. Set `include_in_schema=False` on those routes.
 
-**Set `root_path` when running behind a reverse proxy.** Failing to set it produces broken
+**Set `--root-path` on the server when running behind a reverse proxy.** Failing to set it produces broken
 Swagger UI "Try it out" links and incorrect `servers` entries in the OpenAPI spec.
 
 **Separate `APIRouter` instances by domain.** Define routers in `routers/items.py`,

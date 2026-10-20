@@ -124,7 +124,7 @@ Key fields:
 Warning signs:
   Full GC: GC(N) Pause Full -- always bad (long STW)
   "To-space Exhausted" -- G1 ran out of survivor space, fallback to full GC
-  pause > MaxGCPauseMillis goal by 10x -- tune InitiatingHeapOccupancyPercent
+  pause > MaxGCPauseMillis goal by 10x -- tune InitiatingHeapOccupancyPercent (G1IHOP on JDK 27+)
 ```
 
 ### Heap Dump Analysis (Eclipse MAT)
@@ -655,7 +655,7 @@ With virtual threads, record the `jdk.VirtualThreadPinned` JFR event during init
 **Q9: How do you read a GC log and identify a problematic pause?**
 **Short:** Read a GC log by separating routine young pauses from problematic full GCs and to-space-exhausted events.
 
-With `-Xlog:gc*`, look for: (1) "Pause Young" (minor GC): normal, should be <50ms; (2) "Pause Full" (full GC): always problematic — long STW, investigate heap sizing and old gen growth; (3) "GC(N) To-space Exhausted": G1 couldn't fit survivors → fallback full GC; (4) pause duration vs `MaxGCPauseMillis` goal: if consistently 10× over, tune `InitiatingHeapOccupancyPercent` lower. Key metrics: GC frequency (how often), pause duration (how long), heap before/after (how much freed).
+With `-Xlog:gc*`, look for: (1) "Pause Young" (minor GC): normal, should be <50ms; (2) "Pause Full" (full GC): always problematic, long STW, investigate heap sizing and old gen growth; (3) "GC(N) To-space Exhausted": G1 couldn't fit survivors → fallback full GC; (4) pause duration vs `MaxGCPauseMillis` goal: if consistently 10× over, tune `InitiatingHeapOccupancyPercent` lower (renamed `-XX:G1IHOP` in JDK 27). Key metrics: GC frequency (how often), pause duration (how long), heap before/after (how much freed).
 
 **Q10: What is the difference between retained heap and shallow heap in a heap dump?**
 **Short:** Shallow heap is an object's own fields; retained heap is everything freed if that object were collected.
@@ -891,6 +891,8 @@ headline, not a different measurement.
 
 **Why prefer `long` cents over `BigDecimal` in a numeric hot loop?** `BigDecimal` is immutable, so every operation allocates; in a 10M-iteration loop that is tens of millions of short-lived objects driving young-gen GC. `long` arithmetic is register-resident, allocation-free, and exact for fixed two-decimal money.
 
+**How do you tune G1 to eliminate the full GCs you saw, and what is the risk?** Lower `-XX:InitiatingHeapOccupancyPercent` (`-XX:G1IHOP` on JDK 27+) so concurrent marking starts earlier (e.g. 35 instead of 45) and size regions to fit your object distribution; the risk is starting marking too early, spending CPU on concurrent work and reducing mutator throughput, so validate with GC logs that pauses drop without throughput regressing.
+
 ---
 
 ## Related / See Also
@@ -900,5 +902,3 @@ headline, not a different measurement.
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — pool sizing math and throughput measurement with realistic load
 - [Performance Profiling](../../backend/performance_profiling/performance_profiling.md) — async-profiler and JFR mechanics in production services, beyond this module's JVM-tuning focus
 - [Performance & Load Testing](../../devops/performance_and_load_testing/performance_and_load_testing.md) — load-generation methodology for validating a tuning change under realistic traffic
-
-**How do you tune G1 to eliminate the full GCs you saw, and what is the risk?** Lower `-XX:InitiatingHeapOccupancyPercent` so concurrent marking starts earlier (e.g. 35 instead of 45) and size regions to fit your object distribution; the risk is starting marking too early, spending CPU on concurrent work and reducing mutator throughput, so validate with GC logs that pauses drop without throughput regressing.

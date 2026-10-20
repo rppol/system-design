@@ -10,7 +10,7 @@ The second half of the model is the tax. Any HTML produced somewhere other than 
 
 The third half — and there are three halves, which is exactly the problem — is the business reason server rendering exists at all. Curricula that argue CSR against SSR on latency alone are incomplete. Most teams that pay for a rendering server are paying for **indexability**: a crawler that fetches raw HTML, a Slack or WhatsApp unfurl bot that never runs JavaScript, an LLM crawler that reads the response body once. Latency is a reason; discoverability is usually the reason.
 
-Boundaries with the neighbours are strict. Which component code ships to the browser at all is [Server Components and Server Functions](../server_components_and_server_functions/server_components_and_server_functions.md) — an orthogonal axis to this one, and the pair is the most common conflation in interviews. Framework configuration, routing and layouts are [Meta Frameworks and Routing](../meta_frameworks_and_routing/meta_frameworks_and_routing.md). Suspense semantics are [Suspense and Error Boundaries](../suspense_and_error_boundaries/suspense_and_error_boundaries.md). The metric definitions — LCP under 2.5 s, INP under 200 ms, CLS under 0.1, all at the 75th percentile — belong to [Web Performance and Core Web Vitals](../../frontend_platform/web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md); this module cites them and does not re-derive them. Edge caching mechanics are [CDN](../../hld/cdn/cdn.md). Target is React 19.2 and Next.js 16.3.
+Boundaries with the neighbours are strict. Which component code ships to the browser at all is [Server Components and Server Functions](../server_components_and_server_functions/server_components_and_server_functions.md), an orthogonal axis to this one, and the pair is the most common conflation in interviews. Framework configuration, routing and layouts are [Meta Frameworks and Routing](../meta_frameworks_and_routing/meta_frameworks_and_routing.md). Suspense semantics are [Suspense and Error Boundaries](../suspense_and_error_boundaries/suspense_and_error_boundaries.md). The metric definitions (LCP under 2.5 s, INP under 200 ms, CLS under 0.1, all at the 75th percentile) belong to [Web Performance and Core Web Vitals](../../frontend_platform/web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md); this module cites them and does not re-derive them. Edge caching mechanics are [CDN](../../hld/cdn/cdn.md). Target is React 19.3 and Next.js 16.4.
 
 ---
 
@@ -307,7 +307,7 @@ Read the diff as **`+` is what the client rendered, `-` is what the server sent.
 
 **What React does when it detects one.** It logs the error, then **discards the server HTML for the nearest Suspense boundary and re-renders that whole subtree on the client**. Nothing crashes, which is why these ship to production routinely. The costs are real: the discarded subtree repaints, which can move layout and register as CLS; the work is done twice; and if the boundary is the root, you have silently converted a server-rendered route into a client-rendered one while still paying to render it on the server.
 
-**Fix one — read client-only values in an effect.** The first client render must match the server, so render a stable placeholder and swap after mount:
+**Fix one: read client-only values in an effect.** The first client render must match the server, so render a stable placeholder and swap after mount:
 
 ```tsx
 "use client";
@@ -324,7 +324,30 @@ export function PostedAt({ iso }: { iso: string }) {
 
 The same shape covers `localStorage`, `window.matchMedia`, `navigator.language` and feature detection. A `typeof window !== "undefined"` check *inside render* is the anti-pattern this replaces: it is precisely a branch that evaluates differently in the two renders.
 
-**Fix two — `suppressHydrationWarning`, narrowly.** It tells React to accept a difference in **that one element's own text and attributes, one level deep**. It is not inherited by children and it is not a mismatch mute button:
+**Fix two: make the subtree client-only with `use(browser())` `[19.3]`.** `browser()` from `react-dom` returns a value that `use()` suspends on during server rendering and never suspends on in the browser. The server therefore emits the nearest Suspense fallback, and the client renders the real subtree in place of that fallback during client hydration, so there is nothing to compare and no mismatch:
+
+```tsx
+"use client";
+import { Suspense, use } from "react";
+import { browser } from "react-dom";
+
+function LocalTime({ iso }: { iso: string }) {
+  use(browser());                             // suspends on the server only
+  return <time dateTime={iso}>{new Date(iso).toLocaleString()}</time>;
+}
+
+export function PostedAt({ iso }: { iso: string }) {
+  return (
+    <Suspense fallback={<time dateTime={iso}>{iso}</time>}>
+      <LocalTime iso={iso} />
+    </Suspense>
+  );
+}
+```
+
+Against Fix one, there is no placeholder state, no effect, and no second client render to swap the value in; the component reads `localStorage` or `window` directly because it never runs on the server. `use(browser())` may be called conditionally, for example only when a query has no server-provided initial data. The cost is the same as any client-only subtree: crawlers and link unfurlers see only the fallback, so keep it to values that are meaningless on the server.
+
+**Fix three: `suppressHydrationWarning`, narrowly.** It tells React to accept a difference in **that one element's own text and attributes, one level deep**. It is not inherited by children and it is not a mismatch mute button:
 
 ```tsx
 // Correct use: the value is genuinely unstable and the difference is harmless.
@@ -388,7 +411,7 @@ Three consequences. **TTFB stops tracking your slowest query** — it tracks the
 
 ### 6.6 Next.js 16 Cache Components
 
-Next.js 16 (2025-10-21, current 16.3.x) replaced route-level static-versus-dynamic inference with **Cache Components**: an explicit `"use cache"` directive, turned on once with `cacheComponents: true` in `next.config.ts`. With it on, **everything is dynamic by default** and you mark what may be cached. The directive works at file, component or function scope:
+Next.js 16 (2025-10-21, current 16.4.x) replaced route-level static-versus-dynamic inference with **Cache Components**: an explicit `"use cache"` directive, turned on once with `cacheComponents: true` in `next.config.ts`. Projects scaffolded by `create-next-app` 16.4 or later have it on by default. With it on, **everything is dynamic by default** and you mark what may be cached. The directive works at file, component or function scope:
 
 ```ts
 "use cache";
@@ -421,6 +444,49 @@ export async function renameProduct(sku: string, name: string) {
 The distinction is the one interviewers probe. `revalidateTag` **expires** an entry against a profile: the next reader may still get the stale value while a refresh happens behind it. `updateTag` **refreshes it immediately in the same request**, so the user who just submitted the form sees their own write rather than the version they replaced. Use `updateTag` after a mutation the acting user will look at, `revalidateTag` for everything else.
 
 **How this reframes ISR and PPR.** They stop being route modes. A page whose cached parts are marked and whose uncached parts sit inside Suspense boundaries *is* a partially prerendered page: the cached output becomes the shell served from the edge, the uncached parts become streamed holes. ISR is the same primitive with a `cacheLife` profile instead of a hole. The old `experimental.ppr` and `dynamicIO` flags are gone; there is one mechanism, and the "mode" is now an emergent property of where you put the directive. An uncached read that is *not* inside a Suspense boundary is a build error, which is the whole safety story — you cannot accidentally make a route dynamic. Framework wiring is [Meta Frameworks and Routing](../meta_frameworks_and_routing/meta_frameworks_and_routing.md).
+
+**Partial Prefetching, the second flag `[16.3]`.** Next.js 16.4 treats Cache Components as two flags, and the second one is what makes client navigations instant:
+
+```ts
+// next.config.ts
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  cacheComponents: true,
+  partialPrefetching: true,
+};
+
+export default nextConfig;
+```
+
+With `partialPrefetching`, Next.js extracts a reusable loading shell from any route's `"use cache"` output and Suspense fallbacks and loads it into the client before the click, and `<Link prefetch>` can include as much or as little of the target page as you choose. Before 16.3 the choice was a `loading.tsx` shell or full-page prefetch. Three related 16.3 changes: a page left out of `generateStaticParams` serves an instant loading shell on its first visit and is prerendered in the background for every later visitor; the **Instant Insights** devtool lists navigations that are not instant; and the `instant()` helper from `@next/playwright` fails a test when the content visible at click time changes.
+
+**`ensureStatic` as a guard `[16.4]`.** "An uncached read outside a boundary is a build error" stops a route from blocking, but it still lets a `cookies()` read inside a boundary turn part of a marketing page into per-request compute. A route segment export forbids that:
+
+```tsx
+// app/(marketing)/layout.tsx
+export const ensureStatic = "navigation";   // or "prefetch" or "shell"
+
+export default function MarketingLayout({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+```
+
+`"navigation"` fails the build if any dynamic content appears in a page under that layout, so no navigation to it renders at request time. `"prefetch"` only requires that an explicit `<Link prefetch>` fetches static content, and `"shell"` only requires that the shell fetched on first discovery is static. Set it on a layout to cover every page below, and push it down to nested layouts as some pages start to need dynamic content.
+
+**Deferring work to a later stage with `navigation()` and `prefetch()` `[16.4]`.** A `<Link prefetch>` on 50 inbox rows prefetches 50 whole message threads. Awaiting `navigation()` from `next/cache` at the top of a component excludes its cached content from every prefetch and renders it only on a real navigation; awaiting `prefetch()` excludes content from the route shell and renders it only for an explicit prefetch.
+
+```tsx
+import { navigation } from "next/cache";
+
+async function Thread({ id }: { id: string }) {
+  await navigation();                  // skipped by prefetch, rendered on click
+  const thread = await getThread(id);  // a "use cache" function
+  return thread.map((m) => <Message key={m.id} message={m} />);
+}
+```
+
+Wrap `<Thread>` in Suspense so the prefetched part, the first message, renders while the thread loads after the click.
 
 ### 6.7 SEO — the reason SSR exists
 
@@ -582,8 +648,8 @@ export function Row({ order }: { order: Order }) {
 
 | Tool | Purpose |
 |------|---------|
-| React | 19.2 `hydrateRoot`, `renderToPipeableStream`, selective client hydration, metadata hoisting |
-| Next.js | 16 Cache Components, `"use cache"`, `cacheLife`, streaming App Router |
+| React | 19.3 `hydrateRoot`, `renderToPipeableStream`, selective client hydration, metadata hoisting, `browser()` |
+| Next.js | 16.4 Cache Components, `"use cache"`, `cacheLife`, Partial Prefetching, `ensureStatic`, streaming App Router |
 | React Router | v8 framework mode with its own SSR and prerender pipeline |
 | Astro | 7 islands architecture, prerendered by default with opt-in client JavaScript |
 | Vite | Dev server and build for custom SSR setups |
@@ -624,6 +690,11 @@ If a crawler must read the content, or a shared URL must unfurl with a title and
 
 It does not suppress mismatches in children, and it is not a global switch — it is an assertion that a difference at this specific node is expected. Correct uses are narrow: a rendered clock, a value a browser extension is known to rewrite, `<body>` when a password manager injects attributes. Placed on a wrapper it hides structural mismatches beneath it while normalising the idea that mismatch errors are noise. If you cannot name why the two renders differ, you are not ready to suppress it.
 
+**Q: How does use(browser()) compare with an effect placeholder and suppressHydrationWarning?**
+**Short:** use(browser()) suspends only on the server, so the HTML carries the Suspense fallback and the client renders the real subtree once, with no placeholder state and nothing to mismatch.
+
+The effect pattern renders a server-safe placeholder on both sides and swaps in the client value on a second client render, which costs an extra render and a visible swap. `suppressHydrationWarning` keeps one element's server and client text different and silences the report, so it fits only a leaf like a timestamp. `use(browser())` from `react-dom` 19.3 moves the whole subtree to the client: the server streams the nearest boundary's fallback, and the client renders the subtree in its place during client hydration, reading `window` or `localStorage` directly. Choose it for a subtree that is meaningless on the server, and remember crawlers see only the fallback.
+
 **Q: What does React do when it detects a mismatch during client hydration in React 19?**
 **Short:** React discards the server HTML for the nearest Suspense boundary and re-renders that subtree on the client, logging one error with a diff of server against client output.
 
@@ -663,6 +734,11 @@ Turning on `cacheComponents` inverts the default: nothing is cached, and the dir
 **Short:** The second argument names a cacheLife profile so the invalidation knows the entry's staleness contract, while updateTag refreshes immediately for read-your-writes.
 
 `revalidateTag(tag, "minutes")` expires the entry against that profile: readers may still receive the stale value while a refresh happens behind them, which is correct for a background publish. `updateTag(tag)` refreshes in the same request, so the user who just submitted a form sees their own write rather than the version they replaced. The rule of thumb is that the acting user's own mutation gets `updateTag` and everything else gets `revalidateTag`, and the cost of `updateTag` is that the mutation request pays the regeneration inline.
+
+**Q: How do navigation() and prefetch() from next/cache control what a prefetch costs?**
+**Short:** Awaiting navigation() defers cached content until a real navigation, and awaiting prefetch() keeps content out of the route shell until an explicit Link prefetch asks for it.
+
+Next.js 16.4 splits a navigation into three stages: the shell fetched when a link is discovered, the explicit prefetch from `<Link prefetch>` or `router.prefetch()`, and the navigation itself. Without these APIs, `<Link prefetch>` on 50 inbox rows loads 50 complete message threads the user may never open. Moving the thread into a component that first calls `await navigation()` makes the prefetch carry only the first message, and the rest renders after the click inside a Suspense boundary. `prefetch()` is the same lever one stage earlier. The opposite guard is `export const ensureStatic`, which fails the build when a route's shell, prefetch or navigation would need request-time rendering.
 
 **Q: How do crawlers handle a client-rendered page in 2026?**
 **Short:** Googlebot does execute JavaScript, but in a deferred second pass off a render queue, and other crawlers and link-preview bots mostly do not execute it at all.

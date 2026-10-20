@@ -272,6 +272,46 @@ Query duration and pool demand move together, one for one. A 10x regression in q
 
 **Where the two numbers collide.** The 8-core server above supports about 17 connections; the slow-query workload demands 150. There is no pool size that satisfies both, and raising the pool only moves the queue from the application into the database. The only real fixes are to shrink `W` (fix the query) or add database capacity — a lesson the case study in Section 14 pays for the hard way.
 
+### Pool Sizing With Virtual Threads
+
+Java 21 virtual threads (`spring.threads.virtual.enabled=true` in Spring Boot 3.2+) remove the request-thread cap but not the database cap. On platform threads, Tomcat's default `maxThreads = 200` bounded how many requests could ask HikariCP for a connection at once. With virtual threads every request gets its own thread, so 5,000 concurrent requests become 5,000 callers blocked in `getConnection()` against the same 20-connection pool.
+
+```
+  platform threads                          virtual threads
+  requests in flight   <= 200 (Tomcat)      requests in flight   = arrival rate x latency
+  waiting on pool      <= 180               waiting on pool      = thousands
+  failure mode         503 at the edge      SQLTransientConnectionException after
+                       when Tomcat queues     connectionTimeout (30 s default) per caller
+```
+
+The pool size formula does not change: it is set by database cores and Little's Law, not by thread count. What changes is where the back-pressure lives. Three rules:
+
+1. **Keep `maximumPoolSize` at the database-derived number.** Raising it to match virtual-thread concurrency moves the queue into PostgreSQL, where every extra backend costs memory and lock contention.
+2. **Bound concurrency before the pool.** Put a `Semaphore` (or a bulkhead such as Resilience4j) sized slightly above the pool in front of database calls, so excess requests are rejected fast instead of each holding memory for 30 seconds.
+3. **Cut `connectionTimeout` to 2 to 5 seconds.** A 30-second wait is harmless when 180 threads can wait; with 5,000 waiters it holds 5,000 request contexts open and turns a slow query into an outage.
+
+Pinning is no longer the main hazard. JDK 24 (JEP 491) lets a virtual thread unmount inside `synchronized`, and pgjdbc 42.6.0 replaced its internal `synchronized` blocks with `ReentrantLock`. On JDK 21 to 23 with an older driver, a virtual thread blocked on socket I/O inside `synchronized` pins its carrier, and with only one carrier per core the whole application can stall behind a few slow queries.
+
+### Sharding-Aware Poolers: PgDog and Supavisor
+
+PgBouncer multiplexes connections to one database. Two newer poolers add routing on top:
+
+| Pooler | Language | What it adds | Trade-off |
+|--------|----------|--------------|-----------|
+| PgDog | Rust | Parses each query with the PostgreSQL parser, extracts the sharding key, routes to one shard, fans out queries with no key and merges results in memory; transaction pooling; resharding through logical replication | Cross-shard merge is partial (`ORDER BY`/`GROUP BY` columns must be in the result, CTEs run on every shard); a parser in the hot path adds CPU per query |
+| PgCat | Rust | Earlier pooler by the same author: transaction pooling, replica load balancing, failover, basic sharding by comment or `SET` | Routing hints come from the application |
+| Supavisor | Elixir | Multi-tenant: one cluster pools connections for thousands of separate databases, with tenant config in a metadata store; Supabase runs it as its shared pooler | Built for many small tenants, not for sharding one large database |
+
+The sharding-aware pooler moves shard routing out of the application, the job Vitess's `vtgate` does for MySQL. It only works when every query carries the sharding key in a form the parser can see: a `WHERE tenant_id = $1` routes to one shard, while the same filter hidden inside a function call fans out to all of them.
+
+### Direct TLS Negotiation (PostgreSQL 17)
+
+A PostgreSQL TLS connection used to start with a plaintext `SSLRequest` packet and a one-byte `S` reply before the TLS handshake. PostgreSQL 17 adds the libpq option `sslnegotiation=direct`: the client opens with a TLS `ClientHello` carrying the ALPN protocol `postgresql`, saving one round trip. libpq allows it only with `sslmode=require` or stricter, so a client can never fall back to plaintext. At 0.3 ms inside a zone this hardly matters; at 70 ms cross-region it cuts about 70 ms from every new connection, which is why it matters most for serverless functions and connection storms. Both ends must speak it, including any pooler or proxy in between. A middlebox that expects `SSLRequest` will drop the connection, so test the full path before setting it.
+
+```
+  postgresql://app@db.example.com/orders?sslmode=verify-full&sslnegotiation=direct
+```
+
 ### Pool Exhaustion Diagnosis
 
 ```java
@@ -411,7 +451,7 @@ flowchart LR
     class s3 lossN
 ```
 
-Session pooling holds a server connection for the client's entire session; if 100 clients connect but only 10 are active, 90 server connections sit wasted. Transaction pooling borrows a server connection only for the duration of one transaction — 100 clients can share 10 server connections if transactions are short — but breaks anything bound to a single server connection: `SET LOCAL` session variables, `PREPARE` statements, temporary tables, and session-level advisory locks (`pg_advisory_lock`). Statement pooling is the most restrictive mode (connection returned after each statement, no multi-statement transactions) and is rarely used.
+Session pooling holds a server connection for the client's entire session; if 100 clients connect but only 10 are active, 90 server connections sit wasted. Transaction pooling borrows a server connection only for the duration of one transaction (100 clients can share 10 server connections if transactions are short) but breaks anything bound to a single server connection: session-level `SET` variables (except the parameters PgBouncer tracks, which include `search_path` on PgBouncer 1.26+ with PostgreSQL 18+), SQL-level `PREPARE`/`EXECUTE`, temporary tables, and session-level advisory locks (`pg_advisory_lock`). Protocol-level prepared statements survive on PgBouncer 1.21+ with `max_prepared_statements` above 0 (default 200 since 1.24, off before). Statement pooling is the most restrictive mode (connection returned after each statement, no multi-statement transactions) and is rarely used.
 
 ### ProxySQL for MySQL
 
@@ -529,7 +569,7 @@ DaemonSet placement (one PgBouncer per node, shared over a localhost socket by e
 |---------|------------|-----------------|------------------|
 | Connection overhead | Per-request | Amortized | Amortized (lower) |
 | DB connections held | 1 per active req | pool_size per inst | server_pool_size |
-| Prepared statements | Per connection | Per connection | Lost in txn mode |
+| Prepared statements | Per connection | Per connection | Protocol-level kept (1.21+); SQL `PREPARE` lost in txn mode |
 | Session variables | Per connection | Per connection | Lost in txn mode |
 | Operational overhead | None | Low | Medium (extra service) |
 | Kubernetes compat. | Poor | Medium | Good (DaemonSet) |
@@ -544,7 +584,7 @@ DaemonSet placement (one PgBouncer per node, shared over a localhost socket by e
 
 **Add PgBouncer when**: (1) Application instances × pool size exceeds PostgreSQL max_connections, (2) Kubernetes horizontal scaling causes connection storms, (3) Short-lived connections (serverless functions, scripts) that would otherwise connect/disconnect frequently.
 
-**Avoid PgBouncer transaction mode when**: Application uses PostgreSQL prepared statements bound to server connections, session-level advisory locks, or temporary tables. Use session pooling in those cases.
+**Avoid PgBouncer transaction mode when**: Application issues SQL-level `PREPARE`/`EXECUTE`, takes session-level advisory locks, or uses temporary tables. Use session pooling in those cases. Driver prepared statements (JDBC, libpq, asyncpg) work in transaction mode on PgBouncer 1.21+ with `max_prepared_statements` above 0.
 
 **Do You Need PgBouncer?**
 
@@ -562,7 +602,7 @@ flowchart LR
     pool --> trigger{"instances × pool size<br/>over max_connections,<br/>K8s storm, or<br/>short-lived conns?"}
     trigger -->|"no"| direct(["App pool alone<br/>is enough"])
     trigger -->|"yes"| addpgb["Add PgBouncer"]
-    addpgb --> feat{"uses prepared stmts,<br/>advisory locks, or<br/>temp tables?"}
+    addpgb --> feat{"uses SQL PREPARE,<br/>advisory locks, or<br/>temp tables?"}
     feat -->|"yes"| session(["Session<br/>pooling mode"])
     feat -->|"no"| txn(["Transaction<br/>pooling mode"])
 
@@ -573,7 +613,7 @@ flowchart LR
     class addpgb base
 ```
 
-Always start with an application-level pool; only add PgBouncer once one of the three triggers above is true, and only fall back to session pooling when the workload actually needs prepared statements, advisory locks, or temporary tables — transaction pooling is the default otherwise.
+Always start with an application-level pool; only add PgBouncer once one of the three triggers above is true, and only fall back to session pooling when the workload actually needs SQL-level `PREPARE`, advisory locks, or temporary tables; transaction pooling is the default otherwise.
 
 ---
 
@@ -583,7 +623,7 @@ Always start with an application-level pool; only add PgBouncer once one of the 
 
 **Connection leak with manual `getConnection()`**: Service code calls `dataSource.getConnection()` inside a utility method. An exception path exits without calling `close()`. Connections accumulate in "active" state, eventually exhausting the pool. Fix: always use try-with-resources; enable `leakDetectionThreshold` in HikariCP to catch leaks during testing.
 
-**PgBouncer transaction mode with prepared statements**: Application uses `PreparedStatement` (JDBC) in PgBouncer transaction mode. PgBouncer does not forward `PREPARE` statements to the server in transaction mode (each transaction can go to a different server connection). The prepared statement is not found → `PREPARE "X" does not exist` error. Fix: either use `prepareThreshold=0` in PostgreSQL JDBC driver (disables server-side prepared statements, uses client-side), or switch PgBouncer to session pooling for this use case.
+**PgBouncer transaction mode with SQL-level `PREPARE`**: Application sends `PREPARE getUser AS ...` and later `EXECUTE getUser` as SQL text through PgBouncer in transaction mode. PgBouncer passes SQL-level `PREPARE`, `EXECUTE` and `DEALLOCATE` straight through without tracking them, and the next transaction can land on a different server connection, so the `EXECUTE` fails with `prepared statement "getuser" does not exist`. The same failure hits driver prepared statements on PgBouncer older than 1.21 or with `max_prepared_statements = 0`. On 1.21+ with `max_prepared_statements` above 0 (default 200 since 1.24, off in 1.21 to 1.23), PgBouncer tracks protocol-level prepared statements (JDBC `PreparedStatement`, libpq `PQprepare`, asyncpg), renames each to `PGBOUNCER_<id>`, and prepares it on whichever server connection the transaction gets. Fix: keep `max_prepared_statements` above 0 on PgBouncer 1.21+ and move SQL `PREPARE` into driver prepared statements, or use session pooling for that workload; on PgBouncer older than 1.21, set `prepareThreshold=0` in the PostgreSQL JDBC driver.
 
 ```mermaid
 sequenceDiagram
@@ -606,6 +646,8 @@ sequenceDiagram
 
 The `PREPARE` lands on Server Conn A, but PgBouncer returns that connection to the pool as soon as the transaction commits; the next `EXECUTE` can be routed to a completely different server connection (Conn B) where the statement was never prepared, producing the error above.
 
+**`SET search_path` leaks across clients in transaction mode**: A schema-per-tenant app runs `SET search_path = tenant_42` after it connects through PgBouncer in transaction mode. The setting stays on the server connection, and the next client that gets that connection reads and writes tenant 42's tables without an error. PgBouncer 1.26.0 (September 23, 2026) tracks `search_path` by default when the server is PostgreSQL 18+, which reports it through ParameterStatus, and re-applies each client's own value; PgBouncer older than 1.26 or PostgreSQL older than 18 does not. The 1.26.1 release notes (October 14, 2026) still list known bugs in `search_path` tracking. Fix: use `SET LOCAL search_path` inside each transaction or schema-qualify every table name, on any PgBouncer version.
+
 **max_connections exhaustion during deployment restart**: Rolling deployment restarts 100 pods, each establishing connections. Old pods hold connections while new pods establish new ones. During the window, connection count doubles. Fix: use lifecycle hooks to drain connections before pod termination (`preStop: sleep 15s`), and set `minimum-idle=1` to reduce baseline connections.
 
 **idle_in_transaction connections**: A connection is checked out from the pool, begins a transaction, then the application code stalls (waiting for an external API call). The connection sits in `idle in transaction` state in PostgreSQL, holding locks and preventing VACUUM. Set `idle_in_transaction_session_timeout = 30000` (30 seconds) in PostgreSQL to kill stale idle-in-transaction connections. HikariCP's `connection-timeout` does not cover this — it only covers initial acquisition.
@@ -624,6 +666,9 @@ The `PREPARE` lands on Server Conn A, but PgBouncer returns that connection to t
 | ProxySQL      | C++      | MySQL-compatible pool + routing      |
 | pgpool-II     | C        | PostgreSQL pool + HA (older)         |
 | AWS RDS Proxy | Managed  | Managed connection pooler for RDS    |
+| PgDog         | Rust     | Sharding-aware PostgreSQL pooler: parses SQL, routes by shard key |
+| PgCat         | Rust     | PostgreSQL pooler with replica load balancing and failover |
+| Supavisor     | Elixir   | Multi-tenant PostgreSQL pooler (Supabase)|
 
 ---
 
@@ -635,14 +680,19 @@ The `PREPARE` lands on Server Conn A, but PgBouncer returns that connection to t
 A database server processes queries using OS threads or processes. Each additional concurrent connection beyond the server's natural concurrency capacity (roughly 2× CPU cores for I/O-bound queries) causes increased context switching and memory pressure. PostgreSQL spawns a backend process per connection (~5–10MB RAM each). At 500 simultaneous connections on a 16-core server, the OS scheduler juggles 500 processes but can only run 16 at once — most of the scheduler's time is spent context switching rather than executing queries. Benchmarks consistently show throughput peaking around pool_size = (cores × 2) + 1 and declining with larger pools.
 
 **Q: What is the difference between PgBouncer transaction mode and session mode and why does it matter for prepared statements?**
-**Short:** Transaction mode breaks server-side prepared statements because a client's connection can change between PREPARE and EXECUTE.
+**Short:** Transaction mode can move a client to another server connection between transactions; PgBouncer 1.21+ re-prepares protocol-level statements for it, but SQL-level PREPARE/EXECUTE still breaks.
 
-Session mode: a client connection maps to a dedicated server connection for its entire lifetime. All session-level features (prepared statements, SET variables, temporary tables, advisory locks) work correctly. Transaction mode: a client connection borrows a server connection only for the duration of each transaction and returns it afterward. The same client connection can execute subsequent transactions on different server connections. Prepared statements are bound to server connections — in transaction mode, a `PREPARE` is executed on one server connection, but the subsequent `EXECUTE` may arrive on a different server connection where the prepared statement does not exist. Fix: set PostgreSQL JDBC `prepareThreshold=0` to disable server-side prepared statements, using client-side parameter binding instead.
+Session mode: a client connection maps to a dedicated server connection for its entire lifetime. All session-level features (prepared statements, SET variables, temporary tables, advisory locks) work correctly. Transaction mode: a client connection borrows a server connection only for the duration of each transaction and returns it afterward. The same client connection can execute subsequent transactions on different server connections. Prepared statements are bound to server connections, so PgBouncer 1.21+ tracks protocol-level named prepared statements in transaction and statement pooling when `max_prepared_statements` is above 0 (default 200 since 1.24, off in 1.21 to 1.23): it gives each unique query string an internal name (`PGBOUNCER_<id>`) and prepares it on whichever server connection the client's transaction lands on. JDBC `PreparedStatement`, libpq `PQprepare` and asyncpg all use the protocol path and work. SQL-level `PREPARE`/`EXECUTE` is passed through untracked, so a `PREPARE` on one server connection followed by an `EXECUTE` on another fails with "prepared statement does not exist". Fix: use driver prepared statements and keep `max_prepared_statements` above 0, or session pooling for code that issues SQL `PREPARE`; `prepareThreshold=0` in PostgreSQL JDBC is the workaround only for PgBouncer older than 1.21. Session `SET` has the same problem: the setting stays on the server connection, not the client. PgBouncer 1.26+ tracks every parameter the server reports through ParameterStatus and re-applies the client's value on whichever server connection it gets, which covers `search_path` on PostgreSQL 18+ and `default_transaction_read_only` on 14+; any other `SET` must be `SET LOCAL` inside the transaction.
 
 **Q: How do you handle connection storms during Kubernetes pod scale-out?**
 **Short:** A per-node PgBouncer DaemonSet, staggered pod startup, or a managed proxy like RDS Proxy all absorb Kubernetes connection storms.
 
 Three strategies: (1) PgBouncer as DaemonSet: one PgBouncer per Kubernetes node; pods connect to the local PgBouncer (Unix socket or localhost). The DaemonSet maintains a fixed server pool to PostgreSQL, so pod scale-out adds PgBouncer client connections without increasing PostgreSQL connections. (2) Slow pod startup: configure HikariCP `minimumIdle=1` so each pod starts with only one connection; connections increase gradually under load rather than all at startup. Use Kubernetes pod readiness probes to stagger traffic cutover. (3) AWS RDS Proxy: managed connection pooler that absorbs connection surges, especially for Lambda-to-RDS scenarios where thousands of function invocations would otherwise create thousands of connections.
+
+**Q: Should you raise HikariCP's `maximumPoolSize` after switching a Spring Boot service to virtual threads?**
+**Short:** No; the pool size is set by database capacity, so keep it and bound concurrency in front of the pool, because virtual threads remove the 200-thread cap that used to throttle callers.
+
+Virtual threads remove Tomcat's `maxThreads = 200` limit, so request concurrency becomes arrival rate times latency, and thousands of virtual threads can block in `getConnection()` at once. The database still has the same cores and the same per-backend memory, so the `(cores x 2) + spindles` and Little's Law numbers do not move; raising the pool only shifts the queue into PostgreSQL. The real failure mode is different: with the default 30-second `connectionTimeout`, 5,000 waiters each hold a request context for 30 seconds and then fail together. Put a `Semaphore` or bulkhead sized just above the pool in front of database calls, drop `connectionTimeout` to 2 to 5 seconds, and run JDK 24+ (JEP 491) or pgjdbc 42.6.0+ so blocking I/O inside `synchronized` no longer pins carrier threads.
 
 **Q: What is HikariCP's ConcurrentBag and why is it faster than other pool implementations?**
 **Short:** ConcurrentBag avoids lock contention by having each thread check its own thread-local connection list before the shared pool.
@@ -678,6 +728,16 @@ Profile the workload: (1) Measure the average query duration under production lo
 **Short:** Odyssey's multi-threaded, event-driven design handles far more client connections per CPU than PgBouncer's single-threaded model.
 
 Odyssey is a PostgreSQL connection pooler developed by Yandex, designed for higher performance and more advanced routing than PgBouncer. Key differences: (1) Multi-threaded architecture: Odyssey uses event-driven I/O on multiple threads, handling more client connections per CPU than PgBouncer's single-threaded model. (2) Per-user/database pool configuration: fine-grained pool rules per user+database combination. (3) Built-in TLS termination and certificate-based auth. (4) Advanced client routing: route different users or query patterns to different server pools. PgBouncer remains simpler to configure and operate; Odyssey is preferred when PgBouncer becomes a throughput bottleneck (typically > 10K client connections).
+
+**Q: What does a sharding-aware pooler such as PgDog do that PgBouncer cannot?**
+**Short:** It parses each SQL statement, extracts the sharding key, and routes the query to the right PostgreSQL shard, fanning out and merging when no key is present; PgBouncer only multiplexes connections to one database.
+
+PgBouncer never looks inside a query: it hands a client's transaction to any free server connection of one database. PgDog runs the PostgreSQL parser on every statement, finds the sharding key in the `WHERE` clause or `INSERT` values, and sends the query to the shard that owns it; a query with no key goes to every shard and the results are merged in memory. It also reshards by copying data to a new cluster with logical replication, then cutting over. That gives PostgreSQL the routing tier `vtgate` gives MySQL in Vitess, without changing application code. The limits come from the parser: a key hidden in a function or a dynamic expression fans out, and cross-shard `ORDER BY` or `GROUP BY` needs the grouped columns in the result set. Supavisor solves a different problem, pooling for thousands of separate tenant databases rather than sharding one.
+
+**Q: What does PostgreSQL 17's `sslnegotiation=direct` save, and what can break when you enable it?**
+**Short:** It skips the plaintext SSLRequest exchange and starts TLS at once, saving one round trip per new connection, but every proxy or pooler on the path must accept a direct TLS handshake.
+
+Before PostgreSQL 17, a TLS connection sent an `SSLRequest` packet, waited for a one-byte `S`, and only then started the TLS handshake. With `sslnegotiation=direct` the client sends a TLS `ClientHello` (ALPN `postgresql`) right after the TCP connect, which removes one round trip: negligible at 0.3 ms inside a zone, about 70 ms per connection across regions, where serverless functions and reconnect storms pay it on every cold start. libpq allows it only with `sslmode=require` or stricter, so it cannot fall back to plaintext. The server must be 17+, and any pooler, proxy or load balancer between client and server must understand a direct TLS start; one that waits for `SSLRequest` drops the connection. Enable it per connection string after testing the whole path.
 
 **Q: Explain AWS RDS Proxy and when to use it.**
 **Short:** AWS RDS Proxy is a managed pooler that absorbs Lambda connection spikes and preserves connections through Multi-AZ failover.
@@ -720,6 +780,7 @@ Each tenant sharing a single PostgreSQL instance competes for the same fixed `ma
 - **Deploy PgBouncer before Kubernetes scale-out** — add PgBouncer as infrastructure before your application scales past a handful of instances.
 - **Use try-with-resources for all JDBC operations** — prevents connection leaks on exception paths.
 - **Set `idle_in_transaction_session_timeout` at the PostgreSQL level** — defend against application bugs that leave transactions open.
+- **Run PgBouncer 1.26.1 or later.** 1.26.1 (October 14, 2026) fixes CVE-2026-107350, where a second StartupMessage during SCRAM authentication against a nonexistent database lets a user who knows one `auth_file` password log in as other SCRAM users (1.17.0 to 1.26.0). 1.26.0 fixed CVE-2026-19888 (an unauthenticated SCRAM message without a nonce crashes PgBouncer, present since 1.11.0), CVE-2026-6668 (an oversized pre-auth packet hangs the single-threaded process), and CVE-2026-6669 (an unbounded SCRAM iteration count from the server stalls every client).
 - **Run `SHOW POOLS` in PgBouncer regularly** — check the ratio of `cl_active` (client connections in use) to `sv_active` (server connections in use) to verify multiplexing is working.
 
 ---

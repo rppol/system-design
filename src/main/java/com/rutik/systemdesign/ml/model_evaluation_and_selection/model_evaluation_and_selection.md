@@ -673,7 +673,10 @@ def tune_with_optuna(
     """
     Optuna: Bayesian optimization using TPE (Tree-structured Parzen Estimator).
     TPE models p(x|y) separately for good and bad trials, sampling from the
-    ratio to guide the next suggestion.
+    ratio to guide the next suggestion. Since Optuna 5.0, single-objective
+    TPESampler is multivariate (models parameter interactions) and uses
+    constant_liar by default, so parallel workers avoid sampling next to
+    trials that are still running.
 
     MedianPruner: stops unpromising trials early if intermediate value
       is below the median of completed trials at that step (similar to early stopping).
@@ -872,7 +875,7 @@ mape_safe = np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), epsilo
 | Tool                  | Purpose                                      | Notes |
 |-----------------------|----------------------------------------------|-------|
 | scikit-learn          | CV, metrics, calibration, GridSearchCV       | Production standard |
-| Optuna                | Bayesian hyperparameter tuning               | pip install optuna |
+| Optuna                | Bayesian hyperparameter tuning               | 5.0 (Sep 2026): TPE is the multi-objective default (replaces NSGA-II); constraints via `trial.set_constraint()` (sampler `constraints_func` deprecated); PED-ANOVA is the default `get_param_importances` evaluator; `GPSampler` is stable; `optuna.multi_objective` removed |
 | Hyperopt              | Alternative Bayesian tuning (TPE, ATPE)      | Compatible with XGBoost; was dormant for years (0.2.7 was the stable release from Nov 2021), then shipped 0.3.0 in July 2026 |
 | Ray Tune              | Distributed hyperparameter search            | Works with PyTorch, sklearn |
 | MLflow                | Experiment tracking, metric logging          | Log CV scores per trial |
@@ -908,7 +911,7 @@ Use TimeSeriesSplit whenever rows are temporally dependent — financial data, t
 
 **Q: How does Optuna's TPE sampler work and why is it better than random search?**
 **Short:** TPE models good and bad hyperparameter regions separately and samples from their ratio, focusing search where random search would waste trials.
-TPE (Tree-structured Parzen Estimator) maintains two models: `l(x)` (distribution of hyperparameter configurations associated with good results) and `g(x)` (associated with poor results). It samples the next candidate from the ratio `l(x)/g(x)`, meaning it prioritizes regions that historically produce good results while maintaining some exploration. After 50–100 trials, TPE focuses search in the most promising parameter regions, whereas random search samples uniformly throughout. Published benchmarks commonly show TPE reaching a comparable score in noticeably fewer trials than random search, but the margin is problem-dependent and random search remains a strong baseline on low-dimensional spaces — quote a speedup only if you measured it on your own task.
+TPE (Tree-structured Parzen Estimator) maintains two models: `l(x)` (distribution of hyperparameter configurations associated with good results) and `g(x)` (associated with poor results). It samples the next candidate from the ratio `l(x)/g(x)`, meaning it prioritizes regions that historically produce good results while maintaining some exploration. After 50–100 trials, TPE focuses search in the most promising parameter regions, whereas random search samples uniformly throughout. Since Optuna 5.0 the default TPESampler for single-objective studies is multivariate (one joint density over all parameters, so it captures interactions such as learning rate vs number of trees) and uses the constant-liar strategy, which treats running trials as provisionally bad so parallel workers spread out instead of piling onto one point. Published benchmarks commonly show TPE reaching a comparable score in noticeably fewer trials than random search, but the margin is problem-dependent and random search remains a strong baseline on low-dimensional spaces — quote a speedup only if you measured it on your own task.
 
 **Q: What is the Brier score and how does it relate to calibration?**
 **Short:** The Brier score is the mean squared error of probability predictions, decomposing into reliability, resolution, and an irreducible uncertainty term.

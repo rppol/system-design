@@ -127,6 +127,10 @@ from typing import TypeVarTuple, Unpack
 Ts = TypeVarTuple("Ts")
 ```
 
+Since 3.15, `TypeVarTuple` accepts the same `bound`, `covariant`, `contravariant`, and
+`infer_variance` keyword arguments as `TypeVar` and `ParamSpec`. The typing spec still leaves
+`bound` semantics undefined for it, so checkers may ignore the bound.
+
 ### 4.5 Protocol [3.8] — structural subtyping
 
 A `Protocol` class defines a structural interface. Any class that has the required attributes and
@@ -833,6 +837,54 @@ class Bad[T1 = int, T2]: ...     # checker ERROR — T2 has no default but follo
 class Good[T1, T2 = int]: ...    # OK — defaults are trailing
 ```
 
+### 4.16 PEP 728 closed TypedDict and `extra_items` [3.15]
+
+A plain `TypedDict` is open: a structural subtype may carry any extra keys, so a checker treats it
+as having unknown extra items of type `ReadOnly[object]`. Two class arguments change that.
+
+```python
+from collections.abc import Mapping
+from typing import TypedDict   # [3.15]; typing_extensions backports closed and extra_items
+
+class Labels(TypedDict, extra_items=str):   # known keys plus any extra str-valued keys
+    team: str
+
+class Point(TypedDict, closed=True):        # no keys beyond x and y, ever
+    x: int
+    y: int
+
+labels: Labels = {"team": "infra", "env": "prod"}   # OK: extra key, str value
+bad: Labels = {"team": "infra", "replicas": 3}      # ERROR: int is not str
+as_map: Mapping[str, str] = labels                  # OK only because extra items are str
+Point(x=1, y=2, z=3)                                # ERROR: closed, extra key not allowed
+```
+
+`closed=True` is the same as `extra_items=Never` and is the preferred spelling. Passing both
+arguments raises `TypeError` at runtime; nothing else is enforced at runtime. Checker support
+differs: mypy has supported `closed=True` since 2.2, but mypy 2.4 (2026-10-01) still does not
+support `extra_items`.
+
+### 4.17 PEP 747 `TypeForm` and PEP 800 `@disjoint_base` [3.15]
+
+`TypeForm[T]` annotates a value that is itself a type expression, such as `int`, `str | None`, or
+`list[int]`. `type[T]` only accepts classes, so a function like `cast` or a validator factory that
+takes `str | None` had no precise signature before.
+
+```python
+from typing import Any, TypeForm
+
+def parse[T](form: TypeForm[T], raw: Any) -> T: ...
+
+port = parse(int, "8080")            # T = int
+name = parse(str | None, None)       # T = str | None; type[T] would reject this argument
+```
+
+At runtime `TypeForm(x)` returns `x` unchanged. `@typing.disjoint_base` marks a class whose
+instances cannot share a layout with another disjoint base, which is how built-ins like `int` and
+`str` behave. Library and stub authors use it so a checker can report `class C(int, str)` as
+impossible and narrow `isinstance(x, int) and isinstance(x, str)` to `Never`; application code
+rarely needs it.
+
 ### 6.11 `get_type_hints()` vs `__annotations__`
 
 ```python
@@ -1222,15 +1274,42 @@ hints = get_type_hints(handler, include_extras=True)
 # {'age': Annotated[int, FieldInfo(ge=0, le=150)]}
 ```
 
+### Pitfall 6: Upgrading to mypy 2.x breaks `bytes` parameters (BROKEN → FIX)
+
+mypy 2.0 (2026-05-06) turned on `--strict-bytes` by default. Per PEP 688, `bytearray` and
+`memoryview` are no longer assignable to `bytes`, so code that type-checked clean on 1.x fails
+after a version bump with no source change.
+
+```python
+# BROKEN on mypy 2.0+: passes on 1.x because bytearray was promoted to bytes
+def checksum(data: bytes) -> int:
+    return sum(data) & 0xFFFF
+
+buf = bytearray(4096)
+checksum(buf)               # error: Argument 1 has incompatible type "bytearray"; expected "bytes"
+checksum(memoryview(buf))   # same error
+
+# FIX: annotate what the function accepts, not the narrowest name
+def checksum(data: bytes | bytearray | memoryview) -> int:
+    return sum(data) & 0xFFFF
+# Use collections.abc.Buffer [3.12] when the body only wraps the input in memoryview().
+```
+
+The same release also enabled `--local-partial-types` and changed `--allow-redefinition` to the
+flexible semantics of 1.x's `--allow-redefinition-new`, so a project that sets
+`--allow-redefinition` now gets an error for two annotations of one variable in a function
+(`--allow-redefinition-old` restores the old rule). Pin mypy in the lock file and upgrade it in
+its own commit.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Role | Strictness | Speed | IDE integration | Runtime overhead |
 |---|---|---|---|---|---|
-| **mypy** | Static type checker (reference implementation of the typing PEPs) | High (`--strict` mode); gradual by default | Moderate (~seconds on large codebases); compiled with mypyc | VS Code via the Mypy Type Checker extension; PyCharm built-in | None |
+| **mypy** | Static type checker (reference implementation of the typing PEPs); 2.4.0 released 2026-10-01 | High (`--strict` mode); gradual by default; 2.0 enabled `--strict-bytes` and `--local-partial-types` by default | Moderate; 2.4 makes the Ruff-based native parser the default and parallel checking (`-n N`, `-n auto`, capped at 8 workers) stable but still opt-in | VS Code via the Mypy Type Checker extension; PyCharm built-in | None |
 | **pyright** | Static type checker (Microsoft) | Very high; stricter than mypy on generics and narrowing | Fast, incremental; written in TypeScript and run on Node, so it needs no Python environment of its own | VS Code Pylance (Pylance is the pyright-backed extension); Neovim via LSP | None |
-| **pyrefly** | Static type checker (Meta), written in Rust; reached v1.0.0 on 2026-05-12, current v1.2.0 | High; default checker for Instagram's ~20M-line codebase, also adopted by PyTorch, JAX, and the NumPy/Pandas stubs | Very fast — on pyrefly's own benchmarks, checking pandas takes 1.9s versus pyright's 144s | VS Code extension | None |
+| **pyrefly** | Static type checker (Meta), written in Rust; reached v1.0.0 on 2026-05-12, v1.4.0 on 2026-10-15 | High; default checker for Instagram's ~20M-line codebase, also adopted by PyTorch, JAX, and the NumPy/Pandas stubs | Very fast — on pyrefly's own benchmarks, checking pandas takes 1.9s versus pyright's 144s | VS Code extension | None |
 | **ty** | Static type checker (Astral), written in Rust; still beta, 0.0.x versioning with breaking changes possible between releases | Improving, but not yet a safe team default given the beta status | Very fast — Astral claims 10x-100x mypy/pyright on cold checks | VS Code extension | None |
 | **ruff** | Linter + formatter; `ruff check --select=ANN` for annotation enforcement | Linting rules, not full type inference | Extremely fast (Rust) | VS Code ruff extension; pre-commit | None |
 | **beartype** | Runtime type checker | Enforces annotations at function call time | ~0.1–1 µs per decorated call, measured on CPython 3.13; O(1) strategy avoids full traversal | Minimal — decorators | Sub-microsecond per call |
@@ -1254,6 +1333,7 @@ strict = true
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+num_workers = "auto"   # mypy 2.4+: parallel checking; needs the native parser (the 2.4 default)
 ```
 
 **pyright configuration (`pyrightconfig.json`):**
@@ -1455,6 +1535,20 @@ cache key or a parsed response's primary key. `ReadOnly[int]` [PEP 705, 3.13] te
 to reject any assignment to that field after construction, the same discipline `Final` gives a plain
 variable. It is enforced only by the type checker — nothing stops a plain `dict.__setitem__` write at
 runtime — so it documents and statically defends an invariant it cannot police at runtime.
+
+**Q: How does a closed `TypedDict` differ from an open one for assignability?**
+**Short:** An open TypedDict may hold unknown extra keys typed as object, so it only fits Mapping[str, object]; closed=True (3.15) forbids extras, so its known value types decide what it fits.
+
+A plain `TypedDict` is open: any structural subtype can add keys, so the checker models it as
+having unknown extra items of type `ReadOnly[object]`. That is why `Movie` with only `str` fields is
+still not assignable to `Mapping[str, str]`, and why `.items()` yields `object` values. PEP 728
+[3.15] adds `closed=True`, which forbids extra keys (equal to `extra_items=Never`), and
+`extra_items=T`, which allows extra keys whose values are `T`. A closed `TypedDict` whose fields
+are all `str` is assignable to `Mapping[str, str]`, and one with `extra_items=str` is too. The
+direction matters: a closed or `extra_items` TypedDict is assignable to an open one with the same
+keys, but an open one is not assignable to a closed one, because its hidden extras could be
+anything. Construction follows the same rule: `Point(x=1, y=2, z=3)` errors on a closed type.
+None of it is checked at runtime, and mypy 2.4 supports `closed` but not yet `extra_items`.
 
 **Q17: How does `@deprecated` from PEP 702 change the discipline of retiring an API?**
 **Short:** warnings.deprecated() marks a callable so every static checker flags callers, turning a comment convention into an enforced signal.

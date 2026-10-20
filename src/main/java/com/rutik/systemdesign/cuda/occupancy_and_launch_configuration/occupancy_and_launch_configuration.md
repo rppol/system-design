@@ -22,9 +22,11 @@ sharedMemBytes, stream>>>` — block size (threads/block), grid size (blocks/gri
 dynamic shared-memory bytes — that determine how many blocks and warps can be resident on
 each SM simultaneously. Three hardware resources cap how many blocks an SM can host at once:
 the **register file** (65,536 32-bit registers/SM on every architecture), **shared memory**
-(100 KB/SM on compute capability 8.6/8.9/12.x, 164 KB on A100, 228 KB on H100 and B200), and
+(100 KB/SM on compute capability 8.6/8.9/12.x, 164 KB on A100, 228 KB on H100 and B200, 328 KB
+on Rubin 10.7 for a kernel that opts in to the oversized shared-memory mode), and
 fixed **block/warp slot counts** (32 resident blocks and 64 resident warps per SM on 7.0/8.0/
-9.0/10.x; 16-24 blocks and 48 warps on 8.6/8.9/12.x; 16 blocks and 32 warps on Turing 7.5).
+9.0/10.0/10.3; 16-24 blocks and 48 warps on 8.6/8.9/12.x; 16 blocks and 32 warps on Turing 7.5
+and Rubin 10.7).
 Whichever of the three runs out first — the
 *binding limiter* — sets your occupancy ceiling for that kernel. Tuning launch configuration
 means understanding which limiter binds, and deciding whether raising it (fewer registers,
@@ -113,9 +115,9 @@ which is why occupancy is a means to an end and not the end itself.
 
 - **Occupancy is a ratio, always relative to the hardware ceiling.** `active_warps /
   max_warps_per_SM`. The ceiling varies by compute capability, and *not* simply by
-  architecture family — 64 warps/SM (2048 threads) on 7.0, 8.0 (A100), 9.0 (H100) and 10.x
-  (B200); 48 warps/SM (1536 threads) on 8.6, 8.9 and 12.x (the GeForce/workstation parts of
-  Ampere, Ada and Blackwell); 32 warps/SM (1024 threads) on Turing 7.5. Query
+  architecture family — 64 warps/SM (2048 threads) on 7.0, 8.0 (A100), 9.0 (H100) and 10.0/10.3
+  (B200, B300); 48 warps/SM (1536 threads) on 8.6, 8.9 and 12.x (the GeForce/workstation parts of
+  Ampere, Ada and Blackwell); 32 warps/SM (1024 threads) on Turing 7.5 and Rubin 10.7. Query
   `cudaDeviceProp::maxThreadsPerMultiProcessor` rather than assuming a family's ceiling.
 
 ```mermaid
@@ -129,7 +131,7 @@ timeline
                   : shared mem 100 KB/SM
     Hopper 9.0 H100 (2022) : 64 warps/SM
                   : opt-in shared mem up to 228 KB/SM
-    Blackwell 10.x B200 (2024) : 64 warps/SM
+    Blackwell 10.0 B200 (2024) : 64 warps/SM
     Blackwell 12.x GeForce (2025) : 48 warps/SM (1536 threads/SM)
 ```
 
@@ -182,8 +184,8 @@ occupancy target tuned on one GPU must be re-verified on another (see the relate
 | Limiter | Per-SM Budget (typical) | How a block consumes it | Symptom when binding |
 |---------|--------------------------|--------------------------|------------------------|
 | **Registers** | 65,536 32-bit registers | `threads/block × regs/thread` | Register-heavy kernels (deep unrolling, many live temporaries, GEMM microkernels) cap occupancy first |
-| **Shared memory** | 48 KB/block default; 164 KB/SM (A100), 228 KB/SM (H100, B200), 100 KB/SM (8.6/8.9/12.x) with opt-in | `sharedMemBytes` (static + dynamic) per resident block | Large tiles (e.g. big GEMM/convolution tiles) cap blocks/SM before registers do |
-| **Block/warp slots** | 32 blocks + 64 warps per SM (7.0/8.0/9.0/10.x); 16 blocks + 48 warps (8.6); 24 blocks + 48 warps (8.9/12.x); 16 blocks + 32 warps (7.5) | 1 slot per block regardless of size; `threads/block ÷ 32` warp slots | Very small blocks (e.g. 32-64 threads) hit the block-slot ceiling before registers or shared memory do, wasting warp capacity |
+| **Shared memory** | 48 KB/block default; 164 KB/SM (A100), 228 KB/SM (H100, B200), 100 KB/SM (8.6/8.9/12.x) with opt-in; 328 KB/SM (Rubin 10.7) only with `cudaSharedMemoryModeAllowOversizedSharedMemory` | `sharedMemBytes` (static + dynamic) per resident block | Large tiles (e.g. big GEMM/convolution tiles) cap blocks/SM before registers do |
+| **Block/warp slots** | 32 blocks + 64 warps per SM (7.0/8.0/9.0/10.0/10.3); 16 blocks + 48 warps (8.6); 24 blocks + 48 warps (8.9/12.x); 16 blocks + 32 warps (7.5, Rubin 10.7) | 1 slot per block regardless of size; `threads/block ÷ 32` warp slots | Very small blocks (e.g. 32-64 threads) hit the block-slot ceiling before registers or shared memory do, wasting warp capacity |
 
 ### 4.2 Launch-Configuration Strategies
 
@@ -252,7 +254,7 @@ register ceiling forces one fewer *block* resident:
 
 ```
 SM budget: 65,536 32-bit registers/SM  |  64 max resident warps (2048 threads) — compute
-capability 7.0, 8.0, 9.0, 10.x.  Block size fixed at 256 threads/block (8 warps/block).
+capability 7.0, 8.0, 9.0, 10.0, 10.3.  Block size fixed at 256 threads/block (8 warps/block).
 
   Regs/thread   Regs/block (256thr)   Blocks/SM        Warps/SM   Occ.      Bar
   ------------- ---------------------- ----------------- ---------- --------- --------------------
@@ -846,6 +848,13 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
   per-block shared memory than the 48 KB default, but only after an explicit
   `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)` call —
   omitting it silently keeps you capped at 48 KB regardless of how much the hardware offers.
+- **Assuming a 228 KB ceiling on every 10.x part.** The CUDA Programming Guide gives Rubin
+  (compute capability 10.7) 328 KB of shared memory per SM and 327 KB per block, but only for a
+  kernel that sets `cudaSharedMemoryModeAllowOversizedSharedMemory` through
+  `cudaFuncAttributeSharedMemoryMode` or the `cudaLaunchAttributeSharedMemoryMode` launch
+  attribute. A tile-size calculator that hard-codes 228 KB for `major == 10` leaves 100 KB
+  unused on Rubin; one that requests more than 227 KB per block without setting the mode asks
+  for more than the kernel is allowed, and the attribute call or the launch returns an error.
 - **Block size not a multiple of 32.** A 100-thread block wastes 28/32 = 87.5% of its fourth
   warp's lanes permanently — always round up to the next multiple of 32.
 - **Trusting theoretical occupancy without checking achieved occupancy.** Nsight Compute's
@@ -945,8 +954,8 @@ grid-stride loop to decouple grid size from data size entirely.
 **Short:** Divide 65,536 registers by threads-per-block times regs-per-thread for reg-limited blocks/SM, then take the smallest of all three limiters.
 Divide the
 65,536-register SM budget by `threads_per_block x registers_per_thread` to get reg-limited
-blocks/SM, multiply by warps/block, and divide by the SM's max warps (64 on 7.0/8.0/9.0/10.x,
-48 on 8.6/8.9/12.x, 32 on Turing 7.5) — whichever of the register, shared-memory, and block-slot limiters gives the
+blocks/SM, multiply by warps/block, and divide by the SM's max warps (64 on 7.0/8.0/9.0/10.0/10.3,
+48 on 8.6/8.9/12.x, 32 on Turing 7.5 and Rubin 10.7) — whichever of the register, shared-memory, and block-slot limiters gives the
 smallest blocks/SM number sets the actual occupancy.
 
 **Q: What CUDA runtime API suggests a good block size automatically?**
@@ -990,13 +999,17 @@ latency left to hide.
 **Q: How does shared memory per block cap the number of resident blocks?**
 **Short:** The per-SM shared-memory pool divided by one block's request gives shared-mem-limited blocks/SM, separate from the 48 KB per-block opt-in cap.
 The per-SM
-shared-memory pool (164 KB on A100, 228 KB on H100/B200, 100 KB on 8.6/8.9/12.x) divided by
+shared-memory pool (164 KB on A100, 228 KB on H100/B200, 328 KB on Rubin 10.7 in oversized
+mode, 100 KB on 8.6/8.9/12.x) divided by
 the shared memory one block requests gives the shared-mem-limited blocks/SM; a 32 KB tile
 means only 5 (164/32) blocks can be resident on an A100 even if registers and block slots
 would allow far more. A single block is separately capped at 48 KB unless the kernel opts in
 with `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`,
 which raises its per-block ceiling to 163 KB (A100) or 227 KB (H100/B200) — the per-block
-opt-in and the per-SM pool are two different limits, and both must be satisfied.
+opt-in and the per-SM pool are two different limits, and both must be satisfied. Rubin (10.7)
+adds a third switch: its 327 KB per-block and 328 KB per-SM sizes need
+`cudaSharedMemoryModeAllowOversizedSharedMemory` set through `cudaFuncAttributeSharedMemoryMode`
+or the `cudaLaunchAttributeSharedMemoryMode` launch attribute.
 
 **Q: Why does the maximum resident block count (e.g. 32 blocks/SM) matter even when registers
 and shared memory are abundant?**
@@ -1015,12 +1028,12 @@ byte count passed at launch lets the same compiled kernel trade shared-memory si
 occupancy at runtime, which is how libraries dynamically select among several tile sizes.
 
 **Q: Why does maximum warps/SM differ between GPU generations (32 vs 48 vs 64)?**
-**Short:** The ceiling is set by compute capability, not architecture name — 64 on 7.0/8.0/9.0/10.x, 48 on 8.6/8.9/12.x, 32 on Turing 7.5.
+**Short:** The ceiling is set by compute capability, not architecture name: 64 on 7.0/8.0/9.0/10.0/10.3, 48 on 8.6/8.9/12.x, 32 on Turing 7.5 and Rubin 10.7.
 The ceiling
 is set by compute capability, not by the architecture's marketing name. Compute capability
-7.0, 8.0 (A100), 9.0 (H100) and 10.x (B200) hold 2048 threads/SM (64 warps); 8.6, 8.9 and
-12.x — the GeForce and workstation parts of Ampere, Ada and Blackwell — hold 1536 (48
-warps); Turing 7.5 holds 1024 (32 warps). The same kernel and launch configuration therefore
+7.0, 8.0 (A100), 9.0 (H100) and 10.0/10.3 (B200, B300) hold 2048 threads/SM (64 warps); 8.6, 8.9 and
+12.x (the GeForce and workstation parts of Ampere, Ada and Blackwell) hold 1536 (48
+warps); Turing 7.5 and Rubin 10.7 hold 1024 (32 warps). The same kernel and launch configuration therefore
 has a different theoretical occupancy ceiling on each, so read
 `cudaDeviceProp::maxThreadsPerMultiProcessor` and re-verify per deployed part.
 
@@ -1062,8 +1075,8 @@ reduced per-thread ILP.
 - **Opt in explicitly to >48 KB shared memory** via `cudaFuncSetAttribute` on Ampere/Hopper
   when a tile genuinely needs it — don't assume the larger budget is automatic.
 - **Re-verify occupancy targets per target compute capability** — the 32/48/64-warps-per-SM
-  split (Turing 7.5, the GeForce capabilities 8.6/8.9/12.x, and the data-center capabilities
-  7.0/8.0/9.0/10.x) changes the ceiling the same kernel is measured against.
+  split (Turing 7.5 and Rubin 10.7, the GeForce capabilities 8.6/8.9/12.x, and the data-center
+  capabilities 7.0/8.0/9.0/10.0/10.3) changes the ceiling the same kernel is measured against.
 - **Treat the ~50-60% occupancy plateau as the default target for latency-bound kernels**,
   and treat much lower occupancy as *expected and correct* for compute-bound, high-ILP
   kernels — don't chase 100% by default.

@@ -67,10 +67,12 @@ control, cancellation — is HTTP/2's stream machinery exposed through a typed A
    and evolvable — but only if numbers are treated as immutable identities. Renaming
    is free; renumbering or reusing is corruption.
 
-3. **Everything is optional on the wire.** In proto3, unset scalar fields are simply
-   absent and decode to defaults (0, "", false). There is no "required" — robustness
-   to missing fields is built in, which is what makes forward/backward compatibility
-   possible.
+3. **Everything is optional on the wire.** An unset field is simply absent and
+   decodes to its default (0, "", false). Whether the generated code can also tell
+   "absent" from "set to the default" is a per-field feature, `field_presence`, in
+   Protobuf Editions (`EXPLICIT` by default since Edition 2023; proto3 plain scalars
+   behave as `IMPLICIT`). Robustness to missing fields is built in, which is what
+   makes forward/backward compatibility possible.
 
 4. **One call = one HTTP/2 stream.** Unary and streaming differ only in how many
    messages flow on that stream and in which direction(s). Many streams multiplex
@@ -114,6 +116,27 @@ control, cancellation — is HTTP/2's stream machinery exposed through a typed A
 | I64 | 1 | fixed64, sfixed64, double |
 | LEN | 2 | string, bytes, embedded messages, packed repeated |
 | I32 | 5 | fixed32, sfixed32, float |
+
+### Protobuf Editions: the syntax line becomes a set of feature flags
+
+`syntax = "proto2"` and `syntax = "proto3"` bundled many behaviors into one switch.
+Editions replace that switch with `edition = "2023"` (first released in protobuf
+v27.0, 2024-05-23) or `edition = "2024"` (protobuf v32.0, 2025-08-14), plus named
+**features** that a file, message, or field can override. An edition is only a new
+set of feature defaults, so the wire format does not change: a proto3 file migrated
+to an edition encodes the same bytes once its features match the old behavior.
+
+| Feature | proto2 behavior | proto3 behavior | Edition 2023/2024 default |
+|---------|-----------------|-----------------|---------------------------|
+| `field_presence` | `EXPLICIT` (`required` = `LEGACY_REQUIRED`) | `IMPLICIT` for plain scalars | `EXPLICIT` |
+| `repeated_field_encoding` | `EXPANDED` | `PACKED` | `PACKED` |
+| `enum_type` | `CLOSED` | `OPEN` | `OPEN` |
+| `utf8_validation` | `NONE` | `VERIFY` | `VERIFY` |
+
+Edition 2024 also changes Java codegen: the `java_multiple_files` option is removed
+in favor of the `nest_in_file_class` Java feature, which generates each top-level
+message in its own file by default. The `optional` and `required` labels do not exist
+in editions; presence is set with `[features.field_presence = ...]`.
 
 ---
 
@@ -264,6 +287,34 @@ At the catalog service's 200 ms `GetProduct` budget in Section 14, that waste mu
 the request rate: every millisecond a downstream keeps grinding past the client's deadline
 is a thread, a DB connection, and a pool slot held for a result nobody will read.
 
+### Streaming flow control: where `isReady()` reads its answer
+
+```mermaid
+flowchart LR
+    prod(["Service loop<br/>calls onNext"]) --> gate{"isReady()?"}
+    gate -->|true| buf("Call send buffer<br/>onReady threshold 32 KiB")
+    gate -->|false| park("Return, wait for<br/>setOnReadyHandler")
+    buf --> win("HTTP/2 stream window<br/>Netty default 1 MiB")
+    win --> net("Socket")
+    net --> cli("Client reads and<br/>sends WINDOW_UPDATE")
+    cli -.->|"window reopens"| win
+    win -.->|"buffer drains"| park
+    park -.->|"onReady fires"| prod
+    classDef io fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    class prod,cli io
+    class gate base
+    class buf,win,net req
+    class park lossN
+```
+`onNext` never blocks. It appends to the call's send buffer, and `isReady()` turns
+false once more than 32 KiB (`DEFAULT_ONREADY_THRESHOLD` in grpc-java) is queued
+because the client has not opened the HTTP/2 window. A loop that ignores the gate
+keeps appending to heap until the JVM runs out of memory.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -406,6 +457,131 @@ hard to a published `.proto` contract, and `reserved` is the mechanism that make
 a *removal* — the change most likely to silently corrupt a caller — fail loudly
 at compile time instead.
 
+### 6.6 Moving a proto3 file to an edition
+
+The same `User` message in Edition 2024. The wire format does not change; what
+changes is which Java accessors `protoc` generates.
+
+```protobuf
+edition = "2024";
+package shop;
+option java_package = "com.rutik.shop.grpc";
+
+message User {
+  int64 id = 1;
+  string name = 2;
+  int32 age = 3;                                              // EXPLICIT: hasAge() exists
+  int32 score = 4 [features.field_presence = IMPLICIT];       // proto3 behavior, no hasScore()
+}
+```
+
+```java
+User u = User.parseFrom(bytes);
+if (u.hasAge()) {            // true only if age was on the wire, even when it is 0
+    validateAge(u.getAge());
+}
+```
+
+A mechanical proto3 migration keeps old behavior by adding
+`option features.field_presence = IMPLICIT;` at file level, then removes it field by
+field where presence matters. Flipping a field from `IMPLICIT` to `EXPLICIT` changes
+one encoding detail: an explicitly set default value (`age = 0`) is now written to
+the wire instead of skipped. Old readers still decode it correctly, so it is safe.
+
+### 6.7 grpc-java production knobs
+
+**Server streaming with flow control.** Cast the observer to
+`ServerCallStreamObserver` and produce only while `isReady()` is true. gRPC calls
+the on-ready handler once when the call starts and again each time the transport
+drains, always on the call's serialized executor.
+
+```java
+@Override
+public void search(SearchRequest req, StreamObserver<User> responseObserver) {
+    var obs = (ServerCallStreamObserver<User>) responseObserver;
+    Iterator<User> users = repository.search(req.getQuery()).iterator();
+    var finished = new AtomicBoolean();
+    obs.setOnCancelHandler(() -> finished.set(true));        // client gone: stop producing
+    obs.setOnReadyHandler(() -> {
+        while (obs.isReady() && users.hasNext() && !finished.get()) {
+            obs.onNext(users.next());
+        }
+        if (!users.hasNext() && finished.compareAndSet(false, true)) {
+            obs.onCompleted();
+        }
+    });
+}
+```
+
+For inbound streams (client or bidi streaming), `disableAutoRequest()` plus
+`request(n)` is the mirror image: the server pulls `n` messages at a time instead of
+letting gRPC deliver them as fast as they arrive.
+
+**Retries and hedging via service config.** In grpc-java the retry subsystem is on
+by default (`disableRetry()` turns it off), but no method is retried until a service
+config gives it a `retryPolicy`. Without one, only transparent retries happen (an RPC
+that never reached the server application). The config is a JSON-shaped `Map` whose
+numbers must be `Double`:
+
+```java
+Map<String, Object> retry = Map.of(
+        "maxAttempts", 4.0,
+        "initialBackoff", "0.1s",
+        "maxBackoff", "1s",
+        "backoffMultiplier", 2.0,
+        "retryableStatusCodes", List.of("UNAVAILABLE"));
+Map<String, Object> hedge = Map.of(
+        "maxAttempts", 3.0,
+        "hedgingDelay", "0.05s",                             // send attempt 2 after 50 ms
+        "nonFatalStatusCodes", List.of("UNAVAILABLE"));
+Map<String, Object> serviceConfig = Map.of(
+        "methodConfig", List.of(
+                Map.of("name", List.of(Map.of("service", "shop.UserService", "method", "GetUser")),
+                       "hedgingPolicy", hedge),
+                Map.of("name", List.of(Map.of("service", "shop.UserService", "method", "BulkAdd")),
+                       "retryPolicy", retry)),
+        "retryThrottling", Map.of("maxTokens", 10.0, "tokenRatio", 0.1));
+
+ManagedChannel channel = NettyChannelBuilder.forAddress("user-svc", 50051)
+        .defaultServiceConfig(serviceConfig)
+        .keepAliveTime(5, TimeUnit.MINUTES)                  // off by default
+        .keepAliveTimeout(20, TimeUnit.SECONDS)              // the default
+        .build();
+```
+
+| Knob | grpc-java default | What it bounds |
+|------|-------------------|----------------|
+| `maxAttempts` (retry or hedge) | capped at 5 by `maxRetryAttempts` / `maxHedgedAttempts` | Copies of one call, original included |
+| Retry buffer | 16 MiB per channel, 1 MiB per RPC | Sent bytes kept for replay; past the limit the call is committed and no longer retried |
+| `retryThrottling` | none | Pauses retries and hedges for a server once tokens drop below `maxTokens / 2` |
+| Client `keepAliveTime` | off; values under 10 s are raised to 10 s | Ping interval on an idle connection |
+| Client `keepAliveTimeout` | 20 s | Wait for the ping ACK before closing |
+| Server `permitKeepAliveTime` | 5 min | Fastest client ping rate the server accepts |
+
+A method gets either a `retryPolicy` or a `hedgingPolicy`, never both. Retry waits for
+a failure; hedging sends the next copy after `hedgingDelay` and cancels the losers
+when one succeeds, so only idempotent methods qualify. The call's deadline covers
+every attempt.
+
+**Executor choice.** The executor runs service methods (server) and stub callbacks
+(client). gRPC serializes callbacks per call, so message order holds with any choice.
+
+| Executor | Behavior | Use when |
+|----------|----------|----------|
+| Default (shared cached pool) | Unbounded threads, one per concurrent busy call | Prototypes; no bound on thread count under load |
+| `directExecutor()` | Runs on the Netty event-loop thread, no thread hop | Handlers that never block; one blocking call stalls every RPC on that event loop |
+| Fixed pool | Bounded threads, calls queue | You need a hard concurrency cap |
+| `Executors.newVirtualThreadPerTaskExecutor()` [Java 21] | One virtual thread per task | Blocking handlers (JDBC, downstream blocking stubs) at high concurrency |
+
+```java
+Server server = NettyServerBuilder.forPort(50051)
+        .addService(new UserServiceImpl())
+        .executor(Executors.newVirtualThreadPerTaskExecutor())
+        .permitKeepAliveTime(1, TimeUnit.MINUTES)            // allow clients pinging every 1 min
+        .build()
+        .start();
+```
+
 ---
 
 ## 7. Real-World Examples
@@ -491,6 +667,29 @@ independent of the RPC layer.
    stub then discovering it cannot do client-streaming. *Fix:* use the async stub for
    anything beyond unary + server-streaming.
 
+8. **An old protobuf runtime on a new JDK.** A service upgraded the JDK and found
+   `sun.misc.Unsafe` memory-access warnings in its logs, coming from
+   `protobuf-java`. Since JDK 24 (JEP 498) the first call to one of those methods
+   prints a warning, and JEP 471 plans to make them throw and then remove them.
+   protobuf v36.0 (2026-08-20) dropped `Unsafe` from standard generated Java code;
+   `protobuf-javalite` still uses it. *Fix:* move to protobuf v36+ and regenerate
+   the stubs before the JDK upgrade, and keep `--sun-misc-unsafe-memory-access=warn`
+   visible in staging so a Lite dependency shows up there, not in production.
+
+9. **Ignoring `isReady()` in a streaming server.** An export RPC looped over a
+   10 million row cursor calling `onNext` as fast as JDBC returned rows. A slow
+   mobile client kept the HTTP/2 window shut, `onNext` kept buffering on heap
+   because it never blocks, and the server died with `OutOfMemoryError` after a few
+   GB. *Fix:* produce inside `setOnReadyHandler` while `isReady()` is true (6.7).
+
+10. **Client keepalive faster than the server permits.** A team set
+   `keepAliveTime(10, SECONDS)` to detect dead load-balancer connections. Servers
+   permit one ping per 5 minutes by default, so each server sent `GOAWAY` with
+   `too_many_pings` and every in-flight call on that connection failed with
+   `UNAVAILABLE`. *Fix:* agree the interval with the server owner and set
+   `permitKeepAliveTime` on the server to match; gRPC guidance is to stay at or
+   above 1 minute.
+
 **The idea behind it.** On pitfall 6: "the 4 MB limit is not a size cap on your data, it is
 a cap on how much memory one call may hold at once — so the fix is to change how many
 messages carry the data, not to raise the number."
@@ -535,6 +734,7 @@ loud, early failure instead of an OOM under production load.
 |---------|-------|
 | Codegen | `protoc`, `protoc-gen-grpc-java`, `protobuf-maven-plugin`, Gradle protobuf plugin |
 | Runtime | `io.grpc:grpc-netty`/`grpc-netty-shaded`, `grpc-protobuf`, `grpc-stub` |
+| Versions (2026-10) | grpc-java 1.85.0 (2026-10-14); protobuf v36.2 (2026-09-17). grpc-java 1.84.0+ generates code for `edition = "2026"` when built against protobuf v35+ |
 | Browser | gRPC-Web, Envoy, Connect (buf) |
 | Debugging | `grpcurl`, `grpcui`, BloomRPC, Kreya, server reflection |
 | Schema mgmt | Buf (`buf lint`, `buf breaking`), Protobuf schema registry |
@@ -626,15 +826,32 @@ four modes — it is required for client/bidi streaming. The future stub returns
 Guava `ListenableFuture` and supports unary only. Choose blocking for simple
 sequential code, async whenever you stream from the client side.
 
-**Q: In proto3, how do you tell an unset field from one set to its default value?**
-**Short:** In proto3 you can't distinguish an unset scalar field from its default value unless the field is marked optional.
+**Q: How do you tell an unset protobuf field from one set to its default value?**
+**Short:** Only with explicit presence: the Edition 2023/2024 default or proto3 optional, which generates hasX(); proto3 plain scalars cannot.
 
-For plain scalar fields you cannot — an unset `int32` and one set to 0 both decode to
-0, because proto3 omits default-valued scalars from the wire. To distinguish, mark
-the field `optional` (which re-enables field presence/hasser methods in proto3) or
-use a wrapper type like `google.protobuf.Int32Value`. This is a common bug: checking
-`!= 0` or `!isEmpty()` to mean "provided" silently mishandles legitimate
-default-valued inputs.
+It depends on the field's presence. A proto3 plain scalar has implicit presence: an
+unset `int32` and one set to 0 both decode to 0 because a default-valued scalar is
+never written to the wire, and there is no `hasAge()`. Marking it `optional` in
+proto3, or using a wrapper such as `google.protobuf.Int32Value`, gives explicit
+presence and a hasser. In Edition 2023 and 2024 explicit presence is the default
+(`features.field_presence = EXPLICIT`), so `hasAge()` exists unless the field opts
+back into `IMPLICIT`. This is a common bug: checking `!= 0` or `!isEmpty()` to mean
+"provided" silently mishandles legitimate default-valued inputs.
+
+**Q: What are Protobuf Editions and how do they relate to proto2 and proto3?**
+**Short:** Editions replace the proto2/proto3 syntax switch with an edition year plus per-file, per-message or per-field feature flags; the wire format is unchanged.
+
+An edition (`edition = "2023"`, protobuf v27.0; `edition = "2024"`, protobuf v32.0)
+is a named set of feature defaults, and any file, message, or field can override a
+feature: `field_presence` (`EXPLICIT`, `IMPLICIT`, `LEGACY_REQUIRED`),
+`repeated_field_encoding` (`PACKED`, `EXPANDED`), `enum_type` (`OPEN`, `CLOSED`),
+`utf8_validation`. proto2 and proto3 become two particular feature settings, so one
+file can mix proto3-style implicit fields with explicit ones. The `optional` and
+`required` labels are gone; `required` survives only as `LEGACY_REQUIRED`. Edition
+2024 also replaces the `java_multiple_files` option with the `nest_in_file_class`
+Java feature. Migrate a proto3 file by setting the edition plus file-level
+`option features.field_presence = IMPLICIT;`, then drop the override per field where
+you want `hasX()`.
 
 **Q: Why is reusing one `ManagedChannel` important?**
 **Short:** Reusing one ManagedChannel preserves HTTP/2 connection multiplexing instead of paying a new handshake per call.
@@ -644,6 +861,29 @@ channel per call throws away connection reuse, forces a fresh TCP+TLS handshake 
 time, and can exhaust sockets — defeating the main performance benefit of HTTP/2.
 Channels are designed to be long-lived, thread-safe, and shared across the
 application; create one per target service and reuse it.
+
+**Q: Why can a grpc-java server-streaming RPC run out of memory with a slow client?**
+**Short:** onNext never blocks; it buffers on heap, so a server that ignores isReady() keeps queueing while a slow client holds the HTTP/2 window shut.
+
+`StreamObserver.onNext` appends the message to the call's send buffer and returns.
+When the client reads slowly, the HTTP/2 stream window (1 MiB by default in Netty
+grpc-java) fills, the buffer grows past the 32 KiB on-ready threshold, and
+`isReady()` turns false, but nothing stops the loop from calling `onNext` again.
+Cast the observer to `ServerCallStreamObserver`, register `setOnReadyHandler`, and
+emit only `while (obs.isReady())`; gRPC calls the handler again when the buffer
+drains. For inbound streams, `disableAutoRequest()` plus `request(n)` gives the
+same pull-based control.
+
+**Q: Why does a client with a 10-second keepalive get GOAWAY too_many_pings?**
+**Short:** gRPC servers accept at most one keepalive ping per 5 minutes by default, so faster pings get the connection closed with GOAWAY too_many_pings.
+
+Server-side `permitKeepAliveTime` defaults to 5 minutes and `permitKeepAliveWithoutCalls`
+to false. A client pinging more often is treated as abusive: the server sends `GOAWAY`
+with debug data `too_many_pings` and closes the connection, failing in-flight calls with
+`UNAVAILABLE`. Client keepalive is off by default in grpc-java, values under 10 seconds
+are raised to 10, and the ack timeout is 20 seconds. Set the client interval with the
+server owner, lower the server's `permitKeepAliveTime` to match, and stay at
+or above 1 minute as gRPC's keepalive guide recommends.
 
 **Q: What are gRPC interceptors and what do you use them for?**
 **Short:** gRPC interceptors apply cross-cutting concerns like auth, logging, and tracing without touching service logic.
@@ -661,6 +901,31 @@ Metadata is the key-value header/trailer mechanism that travels alongside the
 message payload — the place auth tokens, trace context (`traceparent`), and custom
 routing hints ride, analogous to HTTP headers. Keys ending in `-bin` carry binary
 values; others are ASCII. Interceptors are the usual place to read/write metadata.
+
+**Q: How do you configure retries and hedging in grpc-java?**
+**Short:** Through the service config: a per-method retryPolicy or hedgingPolicy plus optional retryThrottling, set with defaultServiceConfig or delivered by the resolver.
+
+The retry subsystem is on by default in grpc-java, but no method retries until a
+service config gives it a `retryPolicy` (`maxAttempts`, `initialBackoff`,
+`maxBackoff`, `backoffMultiplier`, `retryableStatusCodes`) or a `hedgingPolicy`
+(`maxAttempts`, `hedgingDelay`, `nonFatalStatusCodes`); a method takes one or the
+other. Attempts are capped at 5, the deadline covers all attempts, and replay is
+bounded by a 16 MiB per-channel and 1 MiB per-RPC buffer. `retryThrottling`
+(`maxTokens`, `tokenRatio`) pauses retries when more than half the tokens are spent,
+which stops a retry storm during an outage. Hedge only idempotent methods, because
+the losing copies may already have run.
+
+**Q: Which executor should a grpc-java server use?**
+**Short:** Virtual threads or a bounded pool for blocking handlers; directExecutor only when handlers never block, since it runs on the Netty event loop.
+
+The default is a shared cached thread pool, which grows one platform thread per busy
+call with no upper bound. `directExecutor()` skips the thread hop and runs handlers on
+the Netty event-loop thread: lowest latency for purely async code, but one blocking
+call stalls every RPC on that event loop. On Java 21+,
+`Executors.newVirtualThreadPerTaskExecutor()` lets blocking handlers (JDBC, blocking
+stubs to downstreams) scale to thousands of concurrent calls cheaply; a fixed pool is
+the choice when you want a hard concurrency cap. gRPC serializes callbacks per call,
+so per-call ordering holds with any executor.
 
 **Q: How would you safely evolve a protobuf schema?**
 **Short:** Safe protobuf evolution means only adding new field numbers and reserving retired ones, never reusing them.
@@ -716,6 +981,16 @@ maximum bytes.
 - **Put cross-cutting concerns in interceptors**, not in every service method.
 - **Use TLS/mTLS** in production; `usePlaintext()` is for local demos only.
 - **Map exceptions to meaningful `Status` codes** rather than leaking `UNKNOWN`.
+- **Gate streaming producers on `isReady()`** with `setOnReadyHandler`; `onNext` never
+  blocks, so an ungated loop buffers on heap.
+- **Configure retries in the service config**, not in hand-written loops: one
+  `retryPolicy` or `hedgingPolicy` per method, plus `retryThrottling`.
+- **Agree keepalive with the server owner**: client `keepAliveTime` at or above 1
+  minute and server `permitKeepAliveTime` set to allow it.
+- **Pick the executor on purpose**: virtual threads or a bounded pool for blocking
+  handlers, `directExecutor()` only for code that never blocks.
+- **Write new `.proto` files in an edition** and set `field_presence` per field
+  instead of relying on proto3's implicit scalars.
 
 ---
 

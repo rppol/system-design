@@ -61,10 +61,21 @@ GPT-4 (deployed by various hospitals):
   Clinical trial eligibility matching: automated patient screening
   Epic integration: ambient AI documentation
 
-Nuance DAX (Microsoft/Nuance):
-  Clinical documentation AI; deployed in 30%+ of US health systems
+Microsoft Dragon Copilot (formerly Nuance DAX Copilot):
+  Ambient clinical documentation; unifies DAX Copilot and Dragon Medical One
   Microphone in exam room → structured clinical note
   Reduces documentation time by 50% on average
+
+Abridge:
+  Ambient scribe embedded in Epic; drafts the note inside the chart the clinician signs
+  Links each sentence of the draft note back to the audio it came from,
+  so review is "check the evidence", not "re-listen to the visit"
+
+OpenEvidence:
+  Clinical question answering over licensed literature (NEJM, JAMA journals, NCCN, AMA)
+  Answers cite the source papers
+  Reported 430K+ registered US physicians and 8.5M consultations/month (July 2025),
+  760K physicians and ~18M consultations/month (December 2025)
 ```
 
 **Regulatory considerations:**
@@ -111,6 +122,13 @@ Thomson Reuters AI Assistant:
   Integrated with Westlaw and Practical Law
   Legal research + drafting + analysis
 ```
+
+**Agentic legal workflows.** The product shape has moved from a chat box to multi-step
+workflows over a matter's whole document set: run the same extraction prompt over thousands of
+documents in a vault (Harvey's Vault does this), assemble a diligence table with one row per
+contract and one column per clause, flag deviations from the firm's playbook, then draft the
+issues memo with citations back to the cell and page. Each step is checked by a lawyer, but the
+unit of work is the matter, not the question.
 
 **Regulatory considerations:**
 ```
@@ -166,6 +184,13 @@ Morgan Stanley:
   AI @ Morgan Stanley assistant: RAG over 100K+ research documents
   Deployed to financial advisors; GPT-4 based
 ```
+
+**Agentic finance workflows.** FinanceBench (below) shows why single-shot RAG over filings is not
+enough: answers need the right table from the right period, then arithmetic. Production finance
+agents therefore chain tools: a filings retriever that filters by ticker, form and fiscal period,
+a table extractor, a calculator or Python sandbox for ratios, and a spreadsheet or model-update
+step whose every number links to its source cell in the filing. The analyst reviews the
+reconciled output instead of building it.
 
 **Regulatory considerations:**
 ```
@@ -287,6 +312,29 @@ Email and communication:
   Meeting scheduling: natural language booking
   Communication style adaptation: formal/informal
 ```
+
+---
+
+### 4.7 Domain Evaluation Suites
+
+Generic benchmarks (MMLU, USMLE-style multiple choice) saturate and say little about whether a
+product is safe to ship. Four public suites test domain work in the shape users actually do it:
+
+| Suite | Domain | Size and construction | How it scores | Headline result |
+|---|---|---|---|---|
+| HealthBench (OpenAI, 2025) | Health conversations | 5,000 multi-turn conversations; 48,562 rubric criteria written by 262 physicians | Model grader checks each conversation-specific rubric criterion; points summed and normalized | o3 scored 60%; top score on HealthBench Hard 32% |
+| LegalBench (Guha et al., 2023) | Legal reasoning | 162 tasks across six legal reasoning types, built with legal professionals | Task-specific exact match or F1 | 20 open and commercial LLMs compared per reasoning type |
+| FinanceBench (Patronus AI, 2023) | Questions over public filings | 10,231 questions on publicly traded companies, answerable from 10-K/10-Q/8-K | Human review of answers (2,400 reviewed on a 150-case sample) | GPT-4-Turbo with retrieval answered wrong or refused on 81% |
+| GDPval (OpenAI, 2025) | Economically valuable work | 1,320 tasks from 44 occupations in the top 9 US GDP sectors; 220-task gold subset; tasks written by experts averaging 14 years experience | Blinded experts compare model deliverable vs expert deliverable | Claude Opus 4.1 rated as good as or better than experts on 47.6% of gold tasks |
+
+Three lessons carry into a product's own eval set. Rubrics beat reference answers for open-ended
+domain output: HealthBench grades whether a response asked for the missing history, flagged the
+emergency, and avoided a harmful dose, not whether it matched one gold answer. Retrieval is part
+of the system under test: FinanceBench's 81% failure was mostly the retrieval step, so a
+model-only eval would have missed it. And the deliverable is the unit: GDPval grades a finished
+spreadsheet or slide deck, and its own analysis shows that once expert review and fixing time are
+counted, GPT-5's naive 90x speed and 474x cost advantage shrinks to about 1.1-1.6x, which is the
+number a business case should use.
 
 ---
 
@@ -513,12 +561,52 @@ def generate_clinical_response(query: str, context: str) -> dict:
     }
 ```
 
+### Rubric-Based Domain Evaluation
+
+HealthBench's scoring generalizes to any domain where an expert can say what a good answer must
+and must not contain. Each test case carries its own rubric; positive criteria earn points,
+harmful behaviours carry negative points, and the score is points earned over points available,
+clipped to [0, 1]:
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Criterion:
+    text: str      # "Advises calling emergency services for chest pain with sweating"
+    points: int    # positive for required behaviour, negative for harmful behaviour
+
+def rubric_score(criteria: list[Criterion], met: list[bool]) -> float:
+    earned = sum(c.points for c, m in zip(criteria, met) if m)
+    possible = sum(c.points for c in criteria if c.points > 0)
+    return min(1.0, max(0.0, earned / possible)) if possible else 0.0
+
+def grade(response: str, criteria: list[Criterion], judge) -> float:
+    met = [judge(f"Does this response meet the criterion?\nCriterion: {c.text}\n"
+                 f"Response: {response}\nAnswer yes or no.").strip().lower().startswith("yes")
+           for c in criteria]
+    return rubric_score(criteria, met)
+```
+
+Validate the judge before trusting it: have two experts grade a sample, measure expert-expert
+agreement, and require the model judge to reach a similar agreement with the experts (GDPval's
+automated grader reached 65.7% agreement with human graders against 70.8% between humans, which
+is why its headline numbers still come from human graders). See
+[Error Analysis and Eval Design](../error_analysis_and_eval_design/error_analysis_and_eval_design.md)
+for rubric writing and judge alignment.
+
 ---
 
 ## 7. Real-World Examples
 
-**Nuance DAX (Microsoft) — Healthcare Documentation**
-Nuance DAX Copilot is deployed in over 30% of US health systems. Physicians use an ambient microphone during patient encounters; DAX transcribes the conversation and generates a structured clinical note in specialty-specific format (SOAP, H&P, progress note). Physician review time is approximately 3 minutes per note, compared to 15-20 minutes of manual documentation. The system integrates directly with Epic and Cerner EHR platforms, and every generated note carries a mandatory physician attestation before submission to the medical record.
+**Microsoft Dragon Copilot: Healthcare Documentation**
+Microsoft announced Dragon Copilot in March 2025 as the successor to Nuance DAX Copilot and Dragon Medical One, combining ambient listening and dictation in one assistant. Physicians use an ambient microphone during patient encounters; Dragon Copilot transcribes the conversation and generates a structured clinical note in specialty-specific format (SOAP, H&P, progress note). Physician review time is approximately 3 minutes per note, compared to 15-20 minutes of manual documentation. The system integrates directly with Epic and Cerner EHR platforms, and every generated note carries a mandatory physician attestation before submission to the medical record.
+
+**OpenEvidence: Clinical Question Answering over Licensed Literature**
+OpenEvidence answers clinicians' questions with citations to journals it licenses (NEJM and the JAMA family, plus guidelines from NCCN and the AMA). It reported more than 430,000 registered US physicians and 8.5 million consultations a month in July 2025, rising to 760,000 physicians and about 18 million a month by December 2025. The design choice that matters is the corpus: answers are grounded only in licensed, peer-reviewed sources, which is what lets a physician cite the answer instead of re-checking it from scratch.
+
+**Abridge: Ambient Scribe with Linked Evidence**
+Abridge records the visit, drafts the note inside Epic, and links every sentence of the draft to the part of the conversation it came from. Review becomes clicking a sentence and hearing the evidence, which targets the real cost of ambient scribes: clinician time spent verifying a draft they did not write.
 
 **Morgan Stanley AI @ Morgan Stanley — Financial Research RAG**
 Morgan Stanley deployed a GPT-4-based RAG system over their library of 100,000+ research documents, analyst reports, and financial briefs. Financial advisors query the system in natural language and receive synthesized answers with source citations. The system does not give investment recommendations; it surfaces relevant research that advisors then apply with their own judgment. Data residency controls ensure client data never enters the model's training pipeline, satisfying SEC record-keeping requirements.
@@ -604,8 +692,14 @@ A RAG system deployed with an empty or sparse knowledge base generates low-confi
 
 | Tool / System | Domain | Purpose | Notes |
 |---|---|---|---|
-| Nuance DAX Copilot | Healthcare | Ambient clinical documentation | Deployed in 30%+ of US health systems; Microsoft |
+| Microsoft Dragon Copilot (formerly Nuance DAX Copilot) | Healthcare | Ambient clinical documentation | Microsoft; combines DAX Copilot and Dragon Medical One (March 2025) |
 | Med-PaLM 2 | Healthcare | Clinical Q&A and documentation | Google; 85%+ USMLE; available via Cloud Healthcare API |
+| Abridge | Healthcare | Ambient documentation in Epic | Sentence-level links from note to source audio |
+| OpenEvidence | Healthcare | Clinical question answering | Grounded in licensed journals and guidelines |
+| HealthBench | Healthcare eval | Rubric-graded health conversations | 5,000 conversations, 48,562 physician-written criteria |
+| LegalBench | Legal eval | Legal reasoning tasks | 162 tasks, six reasoning types |
+| FinanceBench | Finance eval | QA over public company filings | 10,231 questions; tests retrieval plus arithmetic |
+| GDPval | Cross-domain eval | Expert-graded occupational deliverables | 1,320 tasks, 44 occupations; 220-task open gold subset |
 | Epic | Healthcare | EHR-integrated AI documentation | Ambient notes, patient messaging drafts, generated in the chart the clinician signs |
 | Harvey AI | Legal | Contract review, legal research, drafting | Used by Allen & Overy, PwC Legal; on-premise option |
 | Casetext CoCounsel | Legal | Legal research over Westlaw | Acquired by Thomson Reuters |
@@ -629,6 +723,18 @@ A RAG system deployed with an empty or sparse knowledge base generates low-confi
 **Q: How would you design a medical documentation AI that is HIPAA-compliant?**
 **Short:** A HIPAA-compliant medical scribe needs consent, PHI redaction before any external call, a BAA-covered LLM, and mandatory physician review before use.
 Key components are: (1) Consent layer — patient consent for AI processing; (2) Audio transcription — ambient microphone to Whisper or Nuance; (3) PHI detection before any external API call — NER to identify names, DOB, SSN, diagnoses, then redact or use an on-premise model; (4) Clinical LLM — on-premise fine-tuned model or cloud provider with a signed Business Associate Agreement; (5) Mandatory physician review — AI generates the draft, physician reviews and edits before any clinical use; (6) Audit logging — every AI interaction logged with timestamp, user identity, and all changes made; (7) EHR integration — final approved notes sent to Epic or Cerner. The human-in-the-loop for physician attestation is non-negotiable and is a regulatory requirement, not a design preference.
+
+**Q: Why is a USMLE or MMLU score weak evidence that a medical assistant is safe to ship, and what should you evaluate instead?**
+**Short:** Multiple-choice exams test recall, not conversation behaviour; evaluate with rubric-graded multi-turn cases like HealthBench, where o3 scored 60% and the best Hard-set score was 32%.
+A: A model can exceed 85% on USMLE-style questions and still miss a red-flag symptom, fail to ask for missing history, or give a confident dose without context, because the exam never puts it in a conversation. HealthBench grades 5,000 multi-turn conversations against 48,562 criteria written by 262 physicians, each with positive points for required behaviour and negative points for harm; o3 scored 60% and the best score on the Hard subset was 32%. For a product, build the same structure on your own traffic: conversation-specific rubrics from clinicians, a model judge validated against clinician agreement, and slices for emergencies, missing context, and uncertainty. Gate releases on the rubric score per slice, not an exam average.
+
+**Q: What do FinanceBench and GDPval teach about evaluating domain AI products?**
+**Short:** Evaluate the whole system and the finished deliverable: FinanceBench's 81% failure came from retrieval over filings, and GDPval's speed gains shrink to about 1.1-1.6x once expert review is counted.
+A: FinanceBench asked 10,231 questions answerable from public filings; on a 150-case sample GPT-4-Turbo with a retrieval system answered wrong or refused 81% of the time, mostly because the right table from the right period never reached the model, so a model-only eval would have looked fine. GDPval has experts compare model deliverables (spreadsheets, decks, documents) with expert ones across 1,320 tasks in 44 occupations; Claude Opus 4.1 matched or beat experts on 47.6% of the gold subset, but GPT-5's naive 90x speed and 474x cost advantage fell to about 1.1-1.4x and 1.2-1.6x once review and fixing time were included. Measure end-to-end, on finished work, with the human review step in the cost model.
+
+**Q: How has ambient clinical documentation changed the scribe architecture compared with dictation?**
+**Short:** Ambient scribes capture the whole multi-party visit and draft the note in the EHR, so the design shifts to making clinician verification fast, for example by linking each note sentence to its audio.
+A: Dictation transcribes what the clinician chooses to say; ambient tools such as Microsoft Dragon Copilot and Abridge listen to the whole visit, separate speakers, and draft a specialty-specific note directly in Epic for the clinician to sign. The model is no longer the bottleneck; verification is, because the clinician signs a note they did not write. Abridge links each sentence of the draft to the conversation segment it came from, so checking a claim takes one click instead of replaying the visit. Design metrics follow from that: edit distance between draft and signed note, time-to-sign, and the rate of unsupported statements (sentences with no linked evidence), plus mandatory attestation before the note enters the record.
 
 **Q: How do you defend a domain LLM application against prompt injection when it processes untrusted documents (contracts, emails, e-discovery, patient-uploaded content)?**
 **Short:** Treat retrieved or uploaded content as untrusted data, never instructions, and pair strict data/instruction separation with least-privilege tool scoping.
@@ -713,6 +819,8 @@ Route by risk and confidence so humans review only what matters, not every outpu
 9. **Maintain information barriers in multi-domain platforms** — when a platform spans multiple regulated domains, ensure knowledge bases, access controls, and audit logs are isolated by domain; cross-contamination of healthcare PHI and financial data creates compounding regulatory risk.
 
 10. **Log everything for model improvement** — every expert correction, escalation, and negative feedback signal is training data; instrument the system from launch to capture these signals and establish a regular retraining cadence.
+
+11. **Use public domain suites as a floor, your own rubrics as the gate**: run HealthBench, LegalBench, FinanceBench or GDPval-style tasks to compare models, then gate releases on conversation-specific rubrics built from your traffic, scored end to end including retrieval and expert review time.
 
 ---
 

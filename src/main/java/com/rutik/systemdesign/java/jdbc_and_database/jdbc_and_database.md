@@ -553,8 +553,12 @@ baseline the remaining pinning cause is a native frame on the stack, which for J
 **JNI-backed driver**. Check that before you migrate: pure-Java drivers (PostgreSQL JDBC,
 MySQL Connector/J, the Microsoft SQL Server driver) are fine; a driver that shells out to a
 native client library (the Oracle OCI driver in thick mode, an ODBC bridge) is not. Confirm
-it empirically rather than by reputation — run a load test with a JFR recording and check
-for `jdk.VirtualThreadPinned` events. Zero events means you are clear.
+it empirically rather than by reputation: run a load test with a JFR recording and check
+for `jdk.VirtualThreadPinned` events, and watch `VirtualThreadSchedulerMXBean` at the same
+time. The JFR event fires only when a pinned virtual thread blocks in a Java operation; a
+JNI driver that blocks inside native code emits nothing. Zero events plus a
+`getMountedVirtualThreadCount()` that stays below `getParallelism()` under load means you
+are clear.
 
 ### The 4 Isolation Levels with Concrete Scenarios
 
@@ -1000,6 +1004,8 @@ conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 
 **Why is batched `PreparedStatement` insert orders of magnitude faster?** It collapses N network round trips into one (or a few), amortizes statement parsing/planning, and with PostgreSQL `reWriteBatchedInserts=true` rewrites the batch into a single multi-row `INSERT`; the dominant cost in single inserts is per-statement round-trip latency, not the database work itself.
 
+**What does `connection.close()` actually do with HikariCP?** It returns the connection to the pool rather than closing the physical socket, so try-with-resources is the correct idiom precisely because "close" means "release back to pool"; failing to call it leaks the connection for `maxLifetime` or forever, which is why leaks manifest as gradual pool exhaustion.
+
 ---
 
 ## Related / See Also
@@ -1009,5 +1015,3 @@ conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — complete connection pool design including eviction, validation, and sizing
 - [Connection Pool Management (Database)](../../database/connection_pool_management/connection_pool_management.md) — PgBouncer, ProxySQL, K8s connection storm prevention
 - [SQL Query Optimization (Database)](../../database/sql_query_optimization/sql_query_optimization.md) — EXPLAIN ANALYZE, CBO statistics, window functions
-
-**What does `connection.close()` actually do with HikariCP?** It returns the connection to the pool rather than closing the physical socket, so try-with-resources is the correct idiom precisely because "close" means "release back to pool"; failing to call it leaks the connection for `maxLifetime` or forever, which is why leaks manifest as gradual pool exhaustion.

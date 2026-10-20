@@ -54,8 +54,9 @@ is a result. Do not re-audit them looking for something.
   says 24 resident blocks/SM and 100 KB shared memory; the Blackwell Tuning Guide says 32
   and 128 KB. `occupancy_and_launch_configuration` follows the Programming Guide. No side
   was picked.
-- CC **10.3 and 11.0** are missing from the capability enumerations. Incomplete, not wrong;
-  not filled in because guessing a hardware number is the failure mode this audit prevents.
+- CC **11.0** (Jetson Thor) is in `gpu_hardware_architecture/blackwell_and_rubin_architecture.md`
+  but missing from the capability enumerations in `occupancy_and_launch_configuration`, which
+  lists 10.0/10.3 only. Fill it from the Programming Guide table, never from a guess.
 - Unverified and deliberately left: the 3-8 us device-side child-launch figure (no NVIDIA
   source, and §5/§14 arithmetic depend on it) and a K=4095 cuBLAS sweep whose 8x drop
   likely overstates reality — now labelled illustrative with a re-measure instruction.
@@ -79,18 +80,6 @@ find "Global Load/Store Efficiency" in Nsight Compute, which is an nvprof-era me
 that does not exist in ncu. A pass that looks finished because its most visible edit
 landed is exactly what the re-audit was for.
 
-**Two items left open on purpose, needing an owner decision:**
-- NVIDIA's Programming Guide and Blackwell Tuning Guide **disagree on compute capability
-  12.x** — 24 vs 32 resident blocks/SM, and 100 KB vs 128 KB shared memory per SM.
-  `occupancy_and_launch_configuration` follows the Programming Guide. No side was picked.
-- The capability enumerations in that module omit **CC 10.3 and 11.0**, which now exist in
-  the Programming Guide table. Incomplete rather than wrong; not filled in because
-  guessing a hardware number is the failure mode this audit exists to prevent.
-
-One correction to record while it is fresh: this file has claimed the section missed the
-repo-wide `Q: ` prefix sweep. All five audited modules already carry the prefix, so that
-claim is at least partly stale — verify before scheduling any bulk relabel.
-
 ---
 
 ## Module List — 24 Modules (6 Phases)
@@ -113,19 +102,19 @@ NVIDIA CUDA is the default platform in worked examples; exactly one module (`gpu
 ## Learning Paths (Full + Senior)
 
 `README.md` documents the **Full Path** (all 24 modules = "6-Phase Learning Path") plus
-one curated tier: **Senior** (16 modules). **This section has no Principal tier and needs
+one curated tier: **Senior** (17 modules). **This section has no Principal tier and needs
 none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero
 modules, and adding a Principal heading with no members is a false alarm, not a gap.
-Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that module's
-own page (`<module>.md`) naming the files each tier takes; listing a tier joins it, omitting the tier
+Membership is declared ONCE per section, in the `<!-- study-paths -->` block in this section's
+`README.md`, naming the files each tier takes; listing a tier joins it, omitting the tier
 opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from
 `STUDY_ORDER.cuda` in `game/app.js`, so a tier is an ordered subset by construction.
 **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits
 the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in
 `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->`
 and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a
-hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case
-studies carry no tier markers, so the Case Studies tab shows all of them with no Level
+hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 8 case
+studies are all tagged `-`, so the Case Studies tab shows all of them with no Level
 filter. The README also carries a Knowledge-Question Map and a 5-week Study Plan (prose;
 no path impact).
 
@@ -134,13 +123,13 @@ learning-path position, or it sorts to the end of the Study browser.
 
 ---
 
-## Case Studies — 6 Total
+## Case Studies — 8 Total
 
 `case_studies/` — all use the 11-section principal template.
 Reference: `../llm/case_studies/design_gpu_inference_platform.md`
 Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
-optimize_matrix_multiplication_kernel, implement_high_performance_reduction, build_a_flash_attention_kernel, accelerate_2d_convolution_and_stencil, port_a_cpu_pipeline_to_gpu, optimize_llm_inference_kernels
+optimize_matrix_multiplication_kernel, implement_high_performance_reduction, build_a_flash_attention_kernel, accelerate_2d_convolution_and_stencil, port_a_cpu_pipeline_to_gpu, optimize_llm_inference_kernels, write_a_blackwell_gemm_with_cute_dsl, optimize_moe_expert_parallel_dispatch
 
 ---
 

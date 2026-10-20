@@ -1117,6 +1117,40 @@ class), versus about `0.11 us` for the equivalent ABC. Across 1 million items th
 of pure overhead — small enough that this is a code-clarity argument first and a performance argument
 second, but it is `0.2 s` you get for free by hoisting the check.
 
+### Pitfall 7: Assuming `@runtime_checkable` Is Inherited by a Sub-Protocol
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Closeable(Protocol):
+    def close(self) -> None: ...
+
+# BROKEN: a sub-protocol without its own decorator
+class Resource(Closeable, Protocol):
+    def flush(self) -> None: ...
+
+isinstance(conn, Resource)
+# 3.15: DeprecationWarning: <class 'Resource'> isn't explicitly decorated with
+#       @runtime_checkable ... This will raise a TypeError in Python 3.20.
+
+# FIX: decorate every protocol that is used with isinstance() or issubclass()
+@runtime_checkable
+class Resource(Closeable, Protocol):
+    def flush(self) -> None: ...
+```
+
+The decorator marks one class, not its descendants. Through 3.14 the check on `Resource` ran
+silently, so code that depends on it has never been flagged. 3.15 emits a `DeprecationWarning` on
+each `isinstance()` or `issubclass()` call against such a sub-protocol, and the warning text says
+3.20 will raise `TypeError`. Run the test suite with `-W error::DeprecationWarning` on 3.15 to find
+every site now.
+
+The same release tightened generic protocol definitions: `class X(P1[S], Protocol[T])` raises
+`TypeError` because `S` is not listed in `Protocol[...]`, and `class B(A[T2], Protocol[T1, T2])`
+now gets the parameter order `(T1, T2)` from the `Protocol[...]` list, where earlier versions
+inferred `(T2, T1)` at runtime.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1242,7 +1276,7 @@ is expected.
 
 **Q: What happens with `isinstance(x, P)` if `P` is a non-`@runtime_checkable` Protocol?**
 **Short:** isinstance against a non-runtime-checkable Protocol raises TypeError, since only @runtime_checkable protocols support it.
-Python raises `TypeError: Instance and class checks can only be used with @runtime_checkable protocols`. Decorate the Protocol with `@runtime_checkable` to use it with `isinstance()`; without the decorator the Protocol is a purely static construct. Do not confuse this with the other Protocol `TypeError`, which is a different failure: `Protocols with non-method members don't support issubclass(). Non-method members: 'name'.` fires on `issubclass()` — never `isinstance()` — against a Protocol that declares a plain data attribute, and it fires even when the Protocol *is* `@runtime_checkable`, because a class object cannot be inspected for an instance attribute that only exists after `__init__`.
+Python raises `TypeError: Instance and class checks can only be used with @runtime_checkable protocols`. Decorate the Protocol with `@runtime_checkable` to use it with `isinstance()`; without the decorator the Protocol is a purely static construct. Do not confuse this with the other Protocol `TypeError`, which is a different failure: `Protocols with non-method members don't support issubclass(). Non-method members: 'name'.` fires on `issubclass()` — never `isinstance()` — against a Protocol that declares a plain data attribute, and it fires even when the Protocol *is* `@runtime_checkable`, because a class object cannot be inspected for an instance attribute that only exists after `__init__`. One case does not raise yet: a sub-protocol that inherits from a `@runtime_checkable` protocol without its own decorator. Through 3.14 the check runs silently; 3.15 emits a `DeprecationWarning` that says 3.20 will raise `TypeError`, so decorate every protocol you check at runtime.
 
 **Q: How do standard-library `SupportsInt`, `Sized`, and `Iterable` relate to Protocol?**
 **Short:** SupportsInt, Sized, and Iterable are pre-defined standard-library Protocols formalizing existing dunder-method contracts.

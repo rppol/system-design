@@ -165,6 +165,15 @@ stateDiagram-v2
     Revised --> DecisionMeeting: no new objections surface
     DecisionMeeting --> Committed: decision made, stated aloud
     Committed --> [*]
+
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    class Draft,DecisionMeeting info
+    class PreWiring warn
+    class Revised accent
+    class Committed good
 ```
 
 A proposal that goes straight from Draft to DecisionMeeting has skipped the entire module.
@@ -383,26 +392,88 @@ with a decision that hasn't changed. "I've had more time to think about it and I
 like it" is not new information, and treating it as grounds to reopen is what makes a team
 stop trusting anyone's commitments, including yours.
 
+### 6.7 Cohen and Bradford's currencies: influence as exchange
+
+This module's title is a book: Allan R. Cohen and David L. Bradford, *Influence Without
+Authority* (Wiley, 1990; 2nd ed. 2005; 3rd ed. 2017). Its core claim is that influence
+without authority runs on reciprocity. People expect to be paid back for what they do,
+so getting a "yes" means offering something the other person values in exchange for what
+you ask. The book calls those valued things **currencies** and groups them into five
+categories: inspiration-related, task-related, position-related, relationship-related,
+and personal-related.
+
+```mermaid
+flowchart LR
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    s1(["Assume all are<br/>potential allies"])
+    s2("Clarify your goals<br/>and priorities")
+    s3("Diagnose the world<br/>of the other person")
+    s4("Identify relevant<br/>currencies, theirs and yours")
+    s5("Deal with<br/>relationships")
+    s6(["Influence through<br/>give and take"])
+
+    s1 --> s2 --> s3 --> s4 --> s5 --> s6
+
+    class s1 info
+    class s2,s3 warn
+    class s4 accent
+    class s5 info
+    class s6 good
+```
+
+*The Cohen-Bradford influence model's six steps. Step 3 comes before step 4 on purpose:
+you cannot pick a currency until you know what the other person is measured on, rewarded
+for and worried about.*
+
+The categories are the book's; the engineering examples are this module's mapping:
+
+| Currency category | What the other person may value | What a staff engineer can pay with |
+|-------------------|--------------------------------|-------------------------------------|
+| Inspiration-related | being part of something worth doing, doing it right | "this retires the last unpatched auth path in the company" |
+| Task-related | resources, help, information, fast response | pairing days, a migration PR you write for them, a fix to their flaky test, early API access |
+| Position-related | recognition, visibility, reputation | credit by name in the RFC and the all-hands, a co-author line, a word with their VP |
+| Relationship-related | being heard, being included early | a pre-wire before the review (§6.2), taking their objection into the design |
+| Personal-related | ownership, gratitude, their sense of themselves as the expert | making them the owner of the piece they care about, thanking them specifically and in writing |
+
+Two rules follow. **Pay in their currency, not yours.** Engineers default to offering
+elegance and visibility because those motivate engineers; a lead who is two people down
+this quarter needs task currency. **Know what you hold.** Cohen and Bradford's point for
+people with low formal power is that everyone holds some currency: review time, context
+from other teams, a working relationship with the platform team, the ability to say good
+things about someone in a calibration. And the exchange is not a bribe: it is legitimate
+when what you give is something the organization is better off with too.
+
+**Weak version** (asking a team lead to adopt your auth client)
+
+> This would be great visibility for your team, being an early adopter of the new auth
+> client. It's a much cleaner design.
+
+**Strong version**
+
+> I know you're two engineers down until March. If you adopt the new auth client, I'll
+> write the migration PRs for your three services myself and be on-call for the auth path
+> through your first release. Your team keeps the review and the merge button.
+
+**What changed:** the weak version pays in position and inspiration currency to someone
+whose shortage is task currency, so the offer costs them work and gives them nothing they
+need. The strong version diagnoses the shortage (two engineers down), pays in task
+currency (PRs written, on-call cover), and adds personal currency (they keep control of
+their code).
+
 ---
 
 ## 7. Real-World Examples
 
-- **Google's internal "20% projects that stuck"** pattern — the ones that survived past the
-  founder's attention (like early versions of Gmail's internal tooling culture) did so
-  because engineers pre-wired adoption team by team rather than mandating a company-wide
-  switch; the ones that got mandated top-down and skipped that step were the ones engineers
-  quietly stopped maintaining once the mandate's sponsor moved on.
 - **Kubernetes' governance model** at the CNCF runs almost entirely on influence without
   authority by design: SIG (Special Interest Group) leads have no reporting authority over
   contributors from other companies, so every API change of consequence goes through a KEP
   (Kubernetes Enhancement Proposal) process that is, functionally, a mandatory pre-wiring
   step — sponsors are required, and a KEP without sponsors from the affected SIGs does not
   move, no matter how technically sound it is.
-- **Stripe's internal API design reviews** are structured so that a proposal cannot be
-  scheduled for the review board until it has documented sign-off from every team whose API
-  surface it touches — the pre-wire is a checklist gate, not a cultural nicety, precisely
-  because Stripe learned that skipping it produced reviews that re-litigated design decisions
-  live instead of ratifying ones.
 - **Amazon's "working backwards" PR/FAQ process** front-loads pre-wiring by requiring a
   written narrative and mock press release before a resourcing decision — reviewers read it
   silently in the room and write comments, which forces objections onto paper where they can
@@ -491,6 +562,7 @@ proposal was about, happy to revisit" once the room was already looking for a fi
 
 | Framework / Source | What it gives you |
 |---------------------|---------------------|
+| Allan R. Cohen and David L. Bradford, *Influence Without Authority* (Wiley, 1990; 3rd ed. 2017) | The reciprocity premise, the five currency categories, and the six-step influence model in §6.7 |
 | Robert Cialdini, *Influence: The Psychology of Persuasion* (1984) | The original six principles: reciprocity, commitment and consistency, social proof, authority, liking, scarcity |
 | Robert Cialdini, *Pre-Suasion: A Revolutionary Way to Influence and Persuade* (2016) | The seventh principle, unity — shared identity as a distinct driver of persuasion, separate from liking |
 | Andrew Grove, *High Output Management* (1983, rev. 1995) | The management-by-objectives and peer-review culture that "disagree and commit" grew out of at Intel |
@@ -514,6 +586,27 @@ ratification of a consensus you already built, and it means every objection gets
 while there is still time to change the proposal instead of defend it live. The gotcha
 interviewers listen for: candidates who describe "having a great slide deck" as the answer —
 that is optimizing the wrong ten minutes.
+
+**Q: You offered a team lead "great visibility" for adopting your library and got a polite no. What went wrong, in Cohen and Bradford's terms?**
+**Short:** A currency mismatch: you paid in position currency to someone short on task currency. Diagnose what they value first, then offer that, such as writing their migration PRs.
+
+Cohen and Bradford's model puts "diagnose the world of the other person" before "identify
+relevant currencies" for exactly this reason. A lead who is two engineers down is
+measured on shipping with fewer people; visibility costs them nothing to decline and adoption
+costs them work. Offering task currency (you write the migration PRs, you cover on-call for
+the new path) removes the cost they actually face. Engineers over-offer elegance and
+visibility because those motivate engineers, which is paying in your currency, not theirs.
+
+**Q: What is the Cohen-Bradford influence model, and what are its five currency categories?**
+**Short:** Influence is exchange: find what the other person values and offer it. The currency categories are inspiration-, task-, position-, relationship- and personal-related.
+
+From *Influence Without Authority* (Cohen and Bradford, 1990; 3rd ed. 2017). The six steps:
+assume everyone is a potential ally, clarify your goals and priorities, diagnose the other
+person's world, identify relevant currencies (theirs and yours), deal with the
+relationship, and influence through give and take. For an engineer, task currency is
+pairing time, written PRs or early access; position currency is credit and visibility;
+relationship currency is including them early. The model also says everyone holds some
+currency, so lacking formal authority is not the same as having nothing to offer.
 
 **Q: Why doesn't authority work for most engineering decisions, even for a manager?**
 **Short:** Authority buys compliance, which decays; only influence buys the commitment that lasts.

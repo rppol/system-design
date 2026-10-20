@@ -281,8 +281,8 @@ Multi-modal retrieval:
   Merge results, provide relevant images AND text to LLM
 
 Generation:
-  Use any vision-capable frontier LLM (the current OpenAI GPT-5.x, Anthropic
-    Claude Opus/Sonnet 5, and Google Gemini 3.x tiers are all natively
+  Use any vision-capable frontier LLM (the OpenAI GPT-6, Anthropic
+    Claude Opus/Sonnet 5.5, and Google Gemini 3.8/4 tiers are all natively
     multimodal; the lineup turns over every few months, so benchmark rather
     than hard-code a name)
   LLM sees both text context and relevant images
@@ -910,7 +910,7 @@ Each strategy has a comprehensive standalone reference with 10+ senior-AI-engine
   │                                                             │
   │  Community detection: Leiden algorithm (min_community=5)    │
   │    → 12,400 communities (avg 40 cases per community)        │
-  │  Community summaries: claude-sonnet-5 (offline batch)       │
+  │  Community summaries: claude-sonnet-5-5 (offline batch)     │
   └──────────────────────────────────────────────────────────────┘
          |                    |
          v                    v
@@ -935,7 +935,7 @@ Each strategy has a comprehensive standalone reference with 10+ senior-AI-engine
   │     Delaware Court of Chancery + Delaware Supreme Court   │
   │  6. Context assembly: global summary + local chunks +     │
   │     graph-traversed related cases (max 8000 tokens)       │
-  │  7. claude-sonnet-5 generates answer with citations        │
+  │  7. claude-sonnet-5-5 generates answer with citations     │
   └────────────────────────────────────────────────────────────┘
 ```
 
@@ -1083,7 +1083,7 @@ async def generate_legal_answer(query: str, ctx: QueryContext) -> str:
                   for c in ctx.graph_related_cases[:10]),
     ])
     response = await client.messages.create(
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         max_tokens=2048,
         system=(
             "You are a legal research assistant. Answer the question with precise legal reasoning, "
@@ -1162,7 +1162,7 @@ Write a factual, citation-rich summary that will help a legal researcher underst
 what kinds of questions this community of cases can answer."""
 
     response = await client.messages.create(
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         max_tokens=600,
         messages=[{"role": "user", "content": prompt}],
     )

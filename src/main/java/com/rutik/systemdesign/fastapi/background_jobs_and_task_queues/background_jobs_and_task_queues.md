@@ -26,6 +26,10 @@ This module covers:
 - **Celery**: battle-tested, broker-agnostic (Redis/RabbitMQ), prefork workers, Canvas
 - **Dramatiq**: middleware-based, simpler than Celery, broker-agnostic
 - **TaskIQ**: async-native distributed task manager with typed signatures and `Depends`-style DI
+- **Postgres-backed queues** (Procrastinate, PGQueuer, pgmq): the job row commits in the same
+  transaction as the business row
+- **Durable-execution engines** (Temporal, DBOS, Hatchet): multi-step jobs that resume from the
+  last completed step after a crash
 - Idempotency keys: deduplication under at-least-once delivery
 - Retry semantics: at-least-once vs at-most-once vs exactly-once
 - Dead-letter queues (DLQ): poison-message handling and monitoring
@@ -192,7 +196,102 @@ Pick it over ARQ when you want typing and DI and a result backend; over Celery w
 codebase is async throughout and you do not need Canvas workflows or Celery's much larger
 operational ecosystem.
 
-### 4.6 Decision Matrix
+### 4.6 Postgres-Backed Queues: Procrastinate, PGQueuer, pgmq
+
+A Redis or RabbitMQ broker is a second store next to the database, so "save the order, then
+enqueue the email" is a dual write: a crash between the two loses the job, and a rollback after
+the enqueue sends an email for an order that does not exist. The Outbox pattern (Q11) fixes
+that with an outbox table and a relay. A Postgres-backed queue removes the relay: the job is a
+row in the same database, so the insert can join the business transaction.
+
+| Library | Version | Shape | Worker wake-up |
+|---|---|---|---|
+| Procrastinate | 3.10.0 | Python task library, jobs in Postgres tables, async and sync tasks, Django integration | `LISTEN/NOTIFY`, plus polling |
+| PGQueuer | 1.6.0 | Python job queue on asyncpg or psycopg, Prometheus metrics, live dashboard | `LISTEN/NOTIFY`, polling fallback |
+| pgmq | Python client 1.1.4 | Postgres extension with an SQS-style SQL API: `pgmq.send`, `pgmq.read(queue, vt, qty)`, `pgmq.archive`; sync, asyncpg and SQLAlchemy clients | Polling with visibility timeout `vt`, optional `LISTEN/NOTIFY` |
+
+All three claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED`, so many workers can pull from
+one table without taking the same row. Transactional enqueue holds only when the enqueue runs
+on the **same connection, inside the same transaction** as the business write. With pgmq that
+is plain SQL on the request's `AsyncSession`:
+
+```python
+@router.post("/orders", status_code=201)
+async def create_order(body: OrderIn, db: AsyncSession = Depends(get_db)) -> OrderOut:
+    async with db.begin():
+        order = Order(**body.model_dump())
+        db.add(order)
+        await db.flush()                                   # assigns order.id
+        await db.execute(
+            text("SELECT pgmq.send('emails', CAST(:msg AS jsonb))"),
+            {"msg": json.dumps({"order_id": order.id})},
+        )
+    # one COMMIT: both rows exist, or neither does
+    return OrderOut.model_validate(order)
+```
+
+A library that enqueues through its own connection pool (a separate connection) is back to a
+dual write, even though both writes land in Postgres. The costs are on the database: every job
+is an insert plus an update or delete, which produces dead tuples that autovacuum must clear,
+and a burst of jobs competes with request traffic for the same primary's WAL, I/O and
+connections. A queue table with a growing backlog of dead rows also makes each `SKIP LOCKED`
+scan slower. Put the queue on its own Postgres (losing transactional enqueue) or move to a
+broker once job volume is a visible share of the primary's write load.
+
+### 4.7 Durable-Execution Engines: Temporal, DBOS, Hatchet
+
+A task queue retries one function. A checkout that charges a card, reserves stock and sends a
+receipt is three side effects; with Celery chains, a worker crash after the charge leaves the
+retry logic to decide whether the charge already happened. A durable-execution engine records
+each completed step's result, and after a crash it re-runs the workflow function while
+returning the recorded results for steps that already finished, so the charge runs once. The
+engine-level mechanics (event history, determinism, versioning) are in
+[Durable Execution and Workflows](../../backend/durable_execution_and_workflows/durable_execution_and_workflows.md);
+the FastAPI part is how a route starts a workflow and makes the start idempotent.
+
+| Engine | Python package | Where state lives | What it adds to the stack |
+|---|---|---|---|
+| Temporal | `temporalio` 1.34.0 | Temporal Service event history | A separate cluster (or Temporal Cloud); history capped at 51,200 events or 50 MB per execution, warning at 10,240 events or 10 MB; 2 MB per payload |
+| DBOS | `dbos` 3.3.0 | Rows in your own Postgres | A library imported into the FastAPI process; no new service |
+| Hatchet | `hatchet-sdk` 1.42.1 | Hatchet's server, backed by Postgres | A separate service (self-hosted or Hatchet Cloud) |
+
+DBOS wired into FastAPI, with the order id as the workflow id so a retried `POST` does not start
+a second checkout (tested on `dbos` 3.3.0: two identical `POST`s ran `charge_card` once):
+
+```python
+DBOS(config={"name": "shop", "system_database_url": settings.database_url})
+
+@DBOS.step()
+async def charge_card(order_id: str) -> str: ...
+
+@DBOS.step()
+async def send_receipt(order_id: str, charge_id: str) -> None: ...
+
+@DBOS.workflow()
+async def checkout(order_id: str) -> str:
+    charge_id = await charge_card(order_id)      # recorded; not re-run after a crash
+    await send_receipt(order_id, charge_id)
+    return charge_id
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    DBOS.launch()                                # also resumes workflows a crash interrupted
+    yield
+    DBOS.destroy()
+
+@app.post("/orders/{order_id}/checkout", status_code=202)
+async def start_checkout(order_id: str) -> dict:
+    with SetWorkflowID(f"checkout-{order_id}"):
+        handle = await DBOS.start_workflow_async(checkout, order_id)
+    return {"workflow_id": handle.get_workflow_id()}
+```
+
+With Temporal the route shape is the same: a `Client` created in `lifespan`, then
+`await client.start_workflow(Checkout.run, order_id, id=f"checkout-{order_id}", task_queue="checkout")`,
+where a second start with the same running id raises `WorkflowAlreadyStartedError`. Workers run
+as separate processes in both cases, or, for DBOS, inside the API process itself.
+
+### 4.8 Decision Matrix
 
 | Concern | BackgroundTasks | ARQ | TaskIQ | Celery | Dramatiq |
 |---|---|---|---|---|---|
@@ -718,7 +817,17 @@ existing Flower/Beat deployment, not for throughput.
 | RPC (RabbitMQ) | Medium | ~1ms | Low | Synchronous `.get()` callers |
 | None (ignore result) | N/A | Zero overhead | Zero | Fire-and-forget tasks |
 
-### 8.4 Backpressure Arithmetic — What "No Durability" Costs Under Load
+### 8.4 Broker Queue vs Postgres Queue vs Durable Execution
+
+| Dimension | Redis/RabbitMQ queue (ARQ, Celery, TaskIQ) | Postgres queue (Procrastinate, PGQueuer, pgmq) | Durable execution (Temporal, DBOS, Hatchet) |
+|---|---|---|---|
+| Enqueue atomic with business write | No; needs an outbox | Yes, on the same connection and transaction | DBOS: start is a Postgres write; Temporal/Hatchet: no, start after commit or via an outbox |
+| Unit of retry | One task | One job | One step inside a workflow |
+| New infrastructure | Broker | None | Temporal/Hatchet: a service; DBOS: none |
+| Throughput ceiling | Broker (Redis ~100k msg/s) | Primary's write and vacuum capacity, shared with requests | Engine and its store |
+| Fits | High-volume independent tasks | Low-to-moderate volume where consistency with the DB matters | Multi-step flows with side effects, long waits, human approval |
+
+### 8.5 Backpressure Arithmetic: What "No Durability" Costs Under Load
 
 The row above says `BackgroundTasks` has no durability. The reason it *also* cannot carry the
 Section 14 workload is a queueing identity, not an opinion:
@@ -825,7 +934,15 @@ Three questions in sequence — synchronous need, acceptable drop risk, and CPU-
   Celery prefork or ProcessPoolExecutor instead)
 - You need sub-millisecond trigger latency — queue overhead adds 1-5ms minimum
 - The operation must be transactional with the HTTP request (use DB transactions,
-  not a queue — the Outbox pattern bridges both concerns)
+  not a queue; the Outbox pattern or a Postgres-backed queue bridges both concerns)
+
+### Use a Postgres-backed queue or a durable-execution engine when:
+
+- The job must exist if and only if the business row committed, and job volume is small next
+  to the primary's write load: Procrastinate, PGQueuer, or pgmq on the same database
+- One job is several side effects in sequence (charge, reserve, notify) that must not repeat
+  after a crash: DBOS if you want no new service, Temporal or Hatchet if you already run one or
+  need its UI, visibility and multi-language workers
 
 ---
 
@@ -958,9 +1075,15 @@ Slack notification.
 | ARQ | Redis only | asyncio event loop | Yes | No | cron built-in | arq-dashboard |
 | TaskIQ | Redis/RabbitMQ/NATS/Kafka | asyncio event loop | Yes | Pipelines | taskiq scheduler | 3rd party |
 | Celery | Redis/RabbitMQ/SQS | prefork/eventlet/gevent | No (shim) | chain/group/chord | Celery Beat | Flower |
-| Dramatiq | Redis/RabbitMQ | Thread/prefork | No | pipeline/group | APScheduler | dramatiq-dashboard |
+| Dramatiq | Redis/RabbitMQ | Thread/prefork | Yes (`async def` actors via `AsyncIO` middleware, 1.15.0+) | pipeline/group | APScheduler | dramatiq-dashboard |
 | RQ (Redis Queue) | Redis only | Sync prefork | No | No | rq-scheduler | rq-dashboard |
 | Huey | Redis/SQLite/file | Sync/async | Partial | pipeline | Built-in | None |
+| Procrastinate 3.10 | Postgres | asyncio worker | Yes | No | Periodic tasks | CLI, Django admin integration |
+| PGQueuer 1.6 | Postgres | asyncio worker | Yes | No | Cron-style schedules | Prometheus metrics, live dashboard |
+| pgmq (Python client 1.1.4) | Postgres extension | Your own consumer loop | Yes (async client) | No | `delay` on send | SQL (`pgmq.metrics`) |
+| Temporal (`temporalio` 1.34) | Temporal Service | Worker processes | Yes | Workflows as code | Schedules | Temporal Web UI |
+| DBOS (`dbos` 3.3) | Your Postgres | In-process | Yes | Workflows as code | Scheduled workflows | DBOS Conductor (optional) |
+| Hatchet (`hatchet-sdk` 1.42) | Hatchet server on Postgres | Worker processes | Yes | DAG workflows | Cron | Hatchet dashboard |
 
 **Broker comparison**:
 
@@ -968,7 +1091,7 @@ Slack notification.
 |---|---|---|---|---|---|
 | Redis | ~100k msg/s | AOF/RDB (configurable) | Yes | Yes (ZADD) | Low |
 | RabbitMQ | ~30k msg/s per quorum queue at 1 KB, RF=3 | Disk-persistent queues | Yes (exchanges) | Via TTL+DLX, or the delayed-message-exchange plugin | Medium |
-| Amazon SQS | ~3k msg/s (standard) | Managed, very high | No | DelaySeconds | Zero ops |
+| Amazon SQS | Standard: nearly unlimited TPS; FIFO: 300 msg/s per API action (3,000 with batching; higher in high-throughput mode) | Managed, very high | No | DelaySeconds | Zero ops |
 
 **Note on typing.** ARQ, Celery, Dramatiq and RQ all enqueue by function *name* plus a
 serialized argument payload, so a renamed function or a changed signature is a runtime
@@ -1084,7 +1207,35 @@ This guarantees at-least-once delivery even if the application crashes between t
 and the enqueue call. Use it for payment events, user lifecycle events, or anything where
 the database state and the queue must stay consistent.
 
-**Q12: How do you gracefully shut down a Celery or ARQ worker during a deployment?**
+**Q12: How does a Postgres-backed queue such as pgmq or Procrastinate remove the dual-write problem, and where does it stop working?**
+**Short:** The job is a row in the same database, so it commits atomically with the business row, but only if the enqueue uses the same connection and transaction.
+
+With Redis or RabbitMQ, saving an order and enqueueing its email are writes to two systems, and a
+crash between them loses the job, which is why the Outbox pattern needs a relay process. With a queue
+that lives in Postgres, the enqueue is an insert into a queue table (pgmq's `SELECT
+pgmq.send(...)`, Procrastinate's jobs table), so running it inside the request's transaction
+makes the job and the order commit or roll back together, with no relay. It stops working in
+two cases. If the library enqueues through its own connection pool, the job is a separate
+transaction and the dual write is back. And the queue shares the primary: each job is an insert
+plus an update or delete, so heavy job traffic adds WAL, vacuum and connection load to the
+database that serves requests. Use it when job volume is small relative to the primary's write
+load and consistency with the business row matters more than throughput.
+
+**Q13: A checkout charges a card, reserves stock and emails a receipt. Why would you use a durable-execution engine instead of chaining Celery tasks, and how should the FastAPI route start it?**
+**Short:** The engine records each finished step so a crash resumes after the charge instead of repeating it; the route starts the workflow with the order id as workflow id.
+
+A Celery chain retries tasks, but after a worker dies between charging and reserving, nothing
+records that the charge succeeded, so either the retry charges twice or every task needs its
+own idempotency bookkeeping. A durable-execution engine (Temporal, DBOS, Hatchet) stores each
+completed step's result; on recovery it re-runs the workflow function and returns the stored
+results for finished steps, so execution continues at the reservation. The route should start
+the workflow and return `202` with the workflow id, using a deterministic id such as
+`checkout-{order_id}`: DBOS treats a second start with that id as the same workflow (tested on
+`dbos` 3.3.0, two `POST`s ran the charge once), and Temporal rejects a duplicate running id with
+`WorkflowAlreadyStartedError`. DBOS runs as a library over the existing Postgres; Temporal adds
+a cluster and caps one execution's history at 51,200 events or 50 MB.
+
+**Q14: How do you gracefully shut down a Celery or ARQ worker during a deployment?**
 **Short:** Send SIGTERM so in-flight tasks finish before exit, never SIGKILL, which can leave a task half-processed.
 Send `SIGTERM` (not `SIGKILL`). Celery workers catch `SIGTERM`, stop fetching new tasks,
 and wait for current tasks to complete (up to `--time-limit` seconds) before exiting.
@@ -1094,7 +1245,7 @@ duration (e.g., 120 seconds), and configure `preStop` hooks to send `SIGTERM` be
 pod is killed. Never send `SIGKILL` to workers directly — it bypasses graceful shutdown
 and can leave tasks in an inconsistent state (partially processed, already acked).
 
-**Q13: What is the difference between at-most-once, at-least-once, and exactly-once task delivery?**
+**Q15: What is the difference between at-most-once, at-least-once, and exactly-once task delivery?**
 **Short:** True exactly-once delivery is impossible without distributed transactions, so production systems approximate it as idempotent at-least-once.
 At-most-once runs a task zero or one times by acking before processing, so a crash silently
 drops it; at-least-once runs it one or more times by acking after processing, so a crash
@@ -1103,7 +1254,7 @@ distributed transactions across the broker and every side effect the task touche
 systems approximate it as idempotent at-least-once — accept the possibility of redelivery and
 make replays a no-op with an idempotency key.
 
-**Q14: Why does blocking CPU work inside an ARQ task handler stall unrelated jobs on the same worker?**
+**Q16: Why does blocking CPU work inside an ARQ task handler stall unrelated jobs on the same worker?**
 **Short:** A synchronous CPU-bound call inside an ARQ handler blocks the single event loop, freezing every other coroutine on that worker.
 An ARQ worker runs one `asyncio` event loop, so a synchronous CPU-bound call like PIL image
 resizing blocks that loop for its entire duration, freezing every other concurrent coroutine
@@ -1111,7 +1262,7 @@ on the same worker process. A 50-200ms thumbnail resize means every other job as
 worker's 50-coroutine capacity stalls for the same 50-200ms window. Offload CPU-bound work to
 a `ProcessPoolExecutor` via `loop.run_in_executor` so the event loop stays free to service I/O.
 
-**Q15: Why does ARQ ship built-in cron scheduling while Celery requires a separate Beat process?**
+**Q17: Why does ARQ ship built-in cron scheduling while Celery requires a separate Beat process?**
 **Short:** ARQ's cron runs as just another coroutine in the worker process, while Celery needs a separate Beat process as a single point of failure.
 ARQ's worker already runs a single async event loop, so its cron scheduler is just another
 coroutine registered inside the same process with no extra moving parts. Celery's prefork
@@ -1120,7 +1271,7 @@ process that periodically pushes scheduled tasks onto the same broker queue the 
 The tradeoff is operational: Celery Beat is a single point of failure that must itself be kept
 running and deduplicated across replicas, while ARQ cron scales with the worker fleet automatically.
 
-**Q16: How do you choose a task result backend — Redis, PostgreSQL, RPC, or none?**
+**Q18: How do you choose a task result backend: Redis, PostgreSQL, RPC, or none?**
 **Short:** Choosing a result backend trades speed for durability: Redis writes fast but expires on TTL, PostgreSQL persists but costs more per write.
 Pick the backend based on how long the result must survive and who needs to read it. Redis
 gives sub-millisecond result writes but expires results on a TTL, so it suits short-lived
@@ -1129,7 +1280,7 @@ indefinitely, making it the right choice for audit trails or results a support t
 days later. RPC (RabbitMQ) suits callers blocking synchronously on `.get()`, and disabling the
 result backend entirely removes all storage overhead for true fire-and-forget tasks.
 
-**Q17: Where does TaskIQ fit against ARQ and Celery for a FastAPI service?**
+**Q19: Where does TaskIQ fit against ARQ and Celery for a FastAPI service?**
 **Short:** TaskIQ is the async-native queue with typed task signatures and Depends-style DI — ARQ's async model with Celery-shaped ergonomics.
 TaskIQ describes itself as an asyncio Celery implementation: the same patterns, a different
 and explicitly non-drop-in ecosystem, and a requirement that the project be asynchronous. Its

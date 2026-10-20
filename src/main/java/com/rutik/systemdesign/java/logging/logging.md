@@ -692,6 +692,8 @@ A mid-size SaaS company's security team received the public Log4Shell disclosure
 5. **`log.error("failed", e.getMessage())` instead of `log.error("failed", e)`.** Passing only the message string discards the entire stack trace — SLF4J's last-argument-as-`Throwable` overload is what actually attaches it. **Fix**: always pass the `Throwable` itself as the final argument.
 6. **`System.out.println` debug statements left in production code.** Bypasses the entire logging pipeline — no level control, no MDC context, no shipping to the aggregator, and it is synchronous by definition. **Fix**: lint rules or code review that reject raw `System.out`/`System.err` calls outside of tests and CLI entry points.
 7. **MDC leaking a previous request's correlation ID into a reused pool thread** (see §5, §6) — the single most common "why does Kibana show the wrong requestId" bug in services that dispatch work to an `ExecutorService` without a capture/restore wrapper.
+8. **An MDC value from user input that picks a `SiftingAppender` file path.** A `SiftingAppender` keyed on `tenantId` or `userId` builds each log file name from the MDC value, so a value such as `../../etc/cron.d/x` writes outside the log directory (CVE-2026-19880). Logback 1.6.3 (2026-08-14) stripped `/` and `\` from the value, which was not enough: `..`, variable references, and file-pattern characters still got through. Logback 1.6.5 (2026-09-30, CVE-2026-104721) makes `MDCBasedDiscriminator` reject any value that is empty, longer than 64 characters, contains `..`, or contains one of `/ \ $ { } [ ] ( ) | ? * + % , @`, and falls back to the discriminator's `DefaultValue`. **Fix**: upgrade to 1.6.5 or later, and map external identifiers to an allowlisted set before they reach the MDC key a `SiftingAppender` reads.
+9. **A `logback.xml` with `<if condition="...">` blocks after an upgrade to 1.5.37 or 1.6.x.** Logback 1.5.37 (2026-06-26) removed Janino-evaluated conditionals after repeated CVEs in that path, so 1.5.37 and later no longer evaluate those blocks and the config must be migrated before the upgrade. **Fix**: rewrite each block as a `<condition>` element backed by a `PropertyCondition` implementation (available since 1.5.20), and run the config through a test that asserts the expected appenders are attached.
 
 ---
 
@@ -699,8 +701,8 @@ A mid-size SaaS company's security team received the public Log4Shell disclosure
 
 | Tool / Library | Purpose | Notes |
 |----------------|---------|-------|
-| SLF4J | Logging facade/API | `slf4j-api`; code against this, never a concrete backend |
-| Logback | Default SLF4J-native implementation | Spring Boot default; `logback-classic` + `logback-core` |
+| SLF4J | Logging facade/API | `slf4j-api` 2.0.x (Logback 1.6.0 moved to 2.0.18); code against this, never a concrete backend |
+| Logback | Default SLF4J-native implementation | Spring Boot default; `logback-classic` + `logback-core`. 1.6.x is the stable line (1.6.5, 2026-09-30) and 1.5.x is legacy; 1.6.x targets SLF4J 2.0.x and runs on Java 11+ |
 | Log4j2 | Alternative implementation | Async Loggers via LMAX Disruptor; plugin architecture; source of Log4Shell |
 | java.util.logging (JUL) | JDK-bundled implementation | No extra dependency; weaker ecosystem; usually bridged away from |
 | Log4j 1.x | Legacy implementation | EOL since 2015 — migrate away, do not use in new code |
@@ -713,9 +715,9 @@ A mid-size SaaS company's security team received the public Log4Shell disclosure
 | OpenTelemetry Logs | Vendor-neutral log/trace correlation | `trace_id`/`span_id` fields tie logs to distributed traces |
 | Micrometer `context-propagation` | Context bridging library | Bridges MDC/ThreadLocal with reactive/virtual-thread contexts |
 | OWASP Dependency-Check / Snyk / Dependabot | Software composition analysis | Catches vulnerable transitive versions — the standard post-Log4Shell practice |
-| OpenTelemetry Java agent (`opentelemetry-javaagent`) | 2.31.x | `-javaagent:opentelemetry-javaagent.jar`, auto-instruments libraries with no code change; auto-populates MDC with `trace_id`/`span_id`/`trace_flags` |
-| `opentelemetry-logback-appender-1.0` | 2.31.x-alpha | Forwards Logback events directly to the OpenTelemetry Log SDK over OTLP, bypassing local disk |
-| `opentelemetry-log4j-appender-2.17` | 2.31.x-alpha | Same role for Log4j2 2.17+ |
+| OpenTelemetry Java agent (`opentelemetry-javaagent`) | 2.32.x | `-javaagent:opentelemetry-javaagent.jar`, auto-instruments libraries with no code change; auto-populates MDC with `trace_id`/`span_id`/`trace_flags` |
+| `opentelemetry-logback-appender-1.0` | 2.32.x-alpha | Forwards Logback events directly to the OpenTelemetry Log SDK over OTLP, bypassing local disk |
+| `opentelemetry-log4j-appender-2.17` | 2.32.x-alpha | Same role for Log4j2 2.17+ |
 
 ### OpenTelemetry Beyond `trace_id`/`span_id` — Auto-Instrumentation and Log Appenders
 
@@ -872,6 +874,7 @@ Choose the direct OTLP appender (`opentelemetry-logback-appender-1.0` / `opentel
 9. **Continuously scan dependencies for known CVEs** (OWASP Dependency-Check, Snyk, Dependabot) — the lasting, organization-wide lesson of Log4Shell.
 10. **Set `includeCallerData=false`** (or the Log4j2 equivalent) in production; enable it only while actively debugging.
 11. **Correlate MDC/requestId fields with your distributed-tracing IDs** (`trace_id`/`span_id`) so logs and traces can be joined during an incident.
+12. **Migrate Janino `<if>` conditionals in `logback.xml` to `<condition>`/`PropertyCondition` before moving to Logback 1.5.37 or 1.6.x**; those versions no longer support Janino expressions.
 
 ---
 

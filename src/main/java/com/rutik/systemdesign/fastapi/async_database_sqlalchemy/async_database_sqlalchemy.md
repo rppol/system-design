@@ -24,7 +24,7 @@ Core capabilities covered in this module:
 - Bulk inserts via `session.execute(insert(Model), [...])`
 - SQLModel: Pydantic+SQLAlchemy bridge — when it helps and when it hurts
 
-Python version: 3.13/3.14. SQLAlchemy version: 2.0.51. FastAPI version: 0.140+.
+Python version: 3.13/3.14. SQLAlchemy version: 2.1 (2.1.0 GA 2026-09-24; requires Python 3.11+). FastAPI version: 0.140+.
 
 ---
 
@@ -65,6 +65,9 @@ Python version: 3.13/3.14. SQLAlchemy version: 2.0.51. FastAPI version: 0.140+.
 | `aiomysql` | MySQL / MariaDB | `mysql+aiomysql` | Pure-Python async MySQL |
 | `asyncmy` | MySQL / MariaDB | `mysql+asyncmy` | Modern replacement for aiomysql, better maintained |
 | `aiosqlite` | SQLite | `sqlite+aiosqlite` | Dev/test only; single-writer, not for production |
+
+Always name the driver in the URL. In SQLAlchemy 2.1 a bare `postgresql://` URL selects `psycopg`
+(v3), not `psycopg2`, and a bare URL never selects `asyncpg`.
 
 ### 4.2 Session lifecycle strategies
 
@@ -603,7 +606,7 @@ Async SQLAlchemy 2.0 buys its high throughput with high complexity (eager loadin
 
 Pros: One class serves as both Pydantic schema and SQLAlchemy table — eliminates the duplication of maintaining separate `UserCreate`, `UserRead`, `UserInDB` models. Reduces boilerplate for small to medium projects.
 
-Cons: The Pydantic model and database model are the same object, which breaks down when validation rules and database constraints diverge (e.g., a `password` field that should never be serialized back). SQLModel also lags behind SQLAlchemy releases: declaring a column with SQLAlchemy 2.0's `Mapped[...] = mapped_column(...)` inside a `table=True` model still fails, because Pydantic cannot build a core schema for the `Mapped[...]` annotation — you have to stay on SQLModel's own `Field()`. For production systems with complex validation logic, separate Pydantic schemas plus plain SQLAlchemy models is the more maintainable pattern.
+Cons: The Pydantic model and database model are the same object, which breaks down when validation rules and database constraints diverge (e.g., a `password` field that should never be serialized back). SQLModel also lags behind SQLAlchemy releases: declaring a column with SQLAlchemy 2.0's `Mapped[...] = mapped_column(...)` inside a `table=True` model still fails, because Pydantic cannot build a core schema for the `Mapped[...]` annotation, so you have to stay on SQLModel's own `Field()` (still true on 0.0.48, which handles `Mapped[...]` only on relationships). SQLModel 0.0.48 (2026-10-06) is the first release that supports SQLAlchemy 2.1, so pin `sqlmodel>=0.0.48` before moving to 2.1. SQLModel 0.0.45 (2026-09-21) also made a breaking datetime change: a plain `datetime` field now maps to `UTCDateTime` (`DateTime(timezone=True)`), reads return aware UTC values on PostgreSQL, SQLite and MySQL alike, and passing a naive `datetime` as a database parameter raises. Code built on `datetime.utcnow()` breaks on upgrade; produce `datetime.now(tz=timezone.utc)`, or keep naive storage per field with `NaiveDatetime` or `Field(sa_type=DateTime(timezone=False))`. Existing columns are not altered, so PostgreSQL needs a migration to `timestamptz` that states the timezone of stored values. For production systems with complex validation logic, separate Pydantic schemas plus plain SQLAlchemy models is the more maintainable pattern.
 
 ---
 
@@ -865,7 +868,7 @@ by a different team.
 | **aiosqlite** | SQLite async driver | Zero-config for tests | Single writer; not for production |
 | **aiomysql / asyncmy** | MySQL/MariaDB async driver | asyncmy is actively maintained | Smaller ecosystem vs asyncpg |
 | **Alembic** | Schema migration | Autogenerate, version control | Requires `run_sync` wrapper for async |
-| **SQLModel** | Pydantic+SA bridge | One class = schema + table | Lags SA releases; limited Mapped[] support |
+| **SQLModel** | Pydantic+SA bridge | One class = schema + table | SA 2.1 needs 0.0.48+; UTC-aware datetimes by default since 0.0.45 (naive parameters raise); no `Mapped[]` columns |
 | **greenlet** | Enables sync-in-async | Powers SA's `run_sync` and the whole async layer | Hard dependency; its absence raises at first connect |
 | **PgBouncer** | Connection pooling proxy | Transaction-mode pooling reduces PG connections; tracks prepared statements itself since 1.21, on by default since 1.24 | Below 1.21, or with `max_prepared_statements = 0`, asyncpg needs `NullPool` + `prepared_statement_name_func` + `statement_cache_size=0` (Pitfall 6) |
 
@@ -1056,13 +1059,15 @@ client-side — `poolclass=NullPool` because PgBouncer is already the pool, plus
 roughly 10% statement throughput. Naming the version dependency is the answer's real content.
 
 **Q18: Your SQLAlchemy upgrade succeeded but `AsyncSession` now fails to import. What changed?**
-**Short:** SQLAlchemy 2.1 moves greenlet into the [asyncio] extra, so a plain `pip install -U sqlalchemy` will stop pulling in async support.
+**Short:** SQLAlchemy 2.1 moved greenlet into the [asyncio] extra, so a plain `pip install -U sqlalchemy` no longer pulls in async support.
 
-SQLAlchemy's async layer is built on greenlet, and 2.1 keeps greenlet entirely inside the
-`[asyncio]` extra rather than installing it by default. A plain `pip install -U sqlalchemy`
+SQLAlchemy's async layer is built on greenlet, and 2.1 (GA 2026-09-24) keeps greenlet entirely
+inside the `[asyncio]` extra rather than installing it by default. A plain `pip install -U sqlalchemy`
 therefore upgrades the package and silently drops the dependency the async engine needs. Install
-`sqlalchemy[asyncio]` instead; the extra is already valid on 2.0 — which is still the current
-stable line, with 2.1 in beta — so pin it now and the upgrade becomes a non-event. The same dependency has a second consequence worth knowing: greenlet
+`sqlalchemy[asyncio]` instead; the extra is also valid on 2.0, so a pin written before the upgrade
+keeps working. Two other 2.1 changes land in the same upgrade: Python 3.11 is the minimum, and
+autoflush now runs before every execution, including Core `text()` statements, not only ORM
+queries. The same dependency has a second consequence worth knowing: greenlet
 enabled free-threaded support in 3.3.0 and expanded it in 3.4.0, so async SQLAlchemy does run on
 `3.14t` — but greenlet calls that support "limited testing", with known memory leaks and forking
 hazards, so it is not a production data layer yet — see

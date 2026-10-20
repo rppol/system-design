@@ -44,6 +44,17 @@ For upgrading, tuning, and benchmarking these engines in production, see [Infere
 - OpenAI-compatible API
 - Wide model support: LLaMA, Mistral, Mixtral, Qwen, DeepSeek, etc.
 
+**Execution path (v0.29.0 to v0.32.0).** Model Runner V2 (MRV2) is the default runner for all
+models from v0.29.0 (2026-09-09), and Model Runner V1 is deprecated. v0.30.0 added dual-batch
+overlap to MRV2, v0.31.0 added custom logits processors and draft-model speculative decoding,
+and v0.32.0 (2026-10-18) added Elastic EP and made MRV2 the default on ROCm with the
+model-specific MRV1 exceptions removed. vLLM still falls back to MRV1 for the `suffix`,
+`medusa`, `mlp_speculator` and `custom_class` speculative methods, P-EAGLE parallel drafting,
+heterogeneous-vocabulary drafts, pipeline parallelism under `external_launcher`, and builds
+without Triton. Start the server with `vllm serve`; v0.29.0 deprecated
+`python -m vllm.entrypoints.openai.api_server`. v0.32.0 requires Python 3.11 or later and
+removed cascade attention (`--disable-cascade-attn` still parses but only warns).
+
 ```bash
 # Installation and startup
 pip install vllm
@@ -148,6 +159,11 @@ cmake -B build && cmake --build build --config Release
 - Constraint decoding: force JSON/regex output format efficiently
 - Multi-modal support
 - Better for multi-turn conversations (reuse context from previous turns)
+- Rust frontend (initial support in v0.5.17, 2026-08-08): network ingress, validation and
+  tokenization run in a multi-threaded Rust layer up to the hand-off to the GPU scheduler
+- Unified radix tree as the prefix cache for every model, including full-attention-only ones
+  (v0.5.19, 2026-09-05); from v0.5.21 (2026-10-02) its tree runs on a Rust core by default, and
+  `SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python` forces the Python core
 
 ```python
 import sglang as sgl
@@ -674,7 +690,9 @@ map cleanly onto the problem: a **Router** (a high-performance proxy plus an *En
 routing engine) doing LLM-aware balancing and queuing, an **InferencePool** that groups the pods
 serving one base model as an "LLM-optimized Service", and the **Model Server** itself. On top of
 the prefix-cache-aware routing described above it adds tiered KV storage, disaggregated
-prefill/decode across pods, latency-prediction routing, and SLO-aware autoscaling. NVIDIA's
+prefill/decode across pods, latency-prediction routing, and SLO-aware autoscaling. llm-d v0.10.0
+(2026-09-29) pins GAIE v1.5.0 CRDs and ships a well-lit path that scales model servers with
+KEDA plus fast model actuation (FMA). NVIDIA's
 **Dynamo** occupies the same layer for the NVIDIA stack; the disaggregation lineage it comes from
 (DistServe, Mooncake, Splitwise) is covered in
 [vLLM Deep Dive §7](../vllm_deep_dive/vllm_deep_dive.md).
@@ -722,10 +740,10 @@ replicas.
 
 | Engine | Throughput | Ease of Use | Hardware | Model Support | License |
 |--------|-----------|-------------|---------|---------------|---------|
-| vLLM | Excellent | Good | NVIDIA | Wide | Apache 2.0 |
+| vLLM | Excellent | Good | NVIDIA CUDA, AMD ROCm, Intel XPU, CPU (v0.32.0 wheels) | Wide | Apache 2.0 |
 | TensorRT-LLM | Best | Complex | NVIDIA only | Medium | Apache 2.0 |
 | llama.cpp | Good (CPU/edge) | Easy | Any | Wide (GGUF) | MIT |
-| SGLang | Excellent (prefix) | Medium | NVIDIA | Good | Apache 2.0 |
+| SGLang | Excellent (prefix) | Medium | NVIDIA, AMD MI30x/MI35x, Intel XPU, Xeon CPU (v0.5.21) | Good | Apache 2.0 |
 | Ollama | Good | Easiest | Any | Good | MIT |
 | TGI (archived 2026-03-21) | Good | Medium | NVIDIA | Wide (HF Hub) | Apache 2.0 |
 
@@ -796,7 +814,11 @@ A: Continuous batching (iteration-level scheduling) admits new requests and reti
 
 **Q: Why can a vLLM server OOM or refuse to start before serving a single request?**
 **Short:** vLLM preallocates GPU memory and KV pages sized to max_model_len at startup, so leaving it at a model's full training context can abort the server before any request.
-A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.9, unchanged from v0.4.2 through v0.15.0) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort — or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
+A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.92 from v0.20.0 through v0.32.0; 0.9 in v0.19 and earlier) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort, or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
+
+**Q: After upgrading vLLM, how do you confirm which model runner a deployment actually uses?**
+**Short:** Grep the startup log for "Model Runner V2 does not yet support ...; using the V1 model runner instead"; vLLM falls back silently per config, and `VLLM_USE_V2_MODEL_RUNNER` overrides it.
+A: Model Runner V2 is the default from v0.29.0, but the choice is made per configuration at startup, not per release. `VllmConfig.use_v2_model_runner` returns MRV2 unless `VLLM_USE_V2_MODEL_RUNNER` is set, Triton is missing, or the config uses a feature MRV2 lacks; in v0.32.0 that list is the `suffix`, `medusa`, `mlp_speculator` and `custom_class` speculative methods, P-EAGLE parallel drafting, heterogeneous-vocabulary drafts, and pipeline parallelism under `external_launcher`. The fallback is a single `warning_once` line ("Model Runner V2 does not yet support %s; using the V1 model runner instead"), so two replicas with different spec-decode flags can run different runners from the same image. Check that line in every replica's startup log after an upgrade, and treat it as a migration item because MRV1 is deprecated and takes no new optimizations. The reverse also bites: some features are MRV2-only (DSpark drafts, adaptive draft verification, prefill context parallelism), and forcing `VLLM_USE_V2_MODEL_RUNNER=0` makes vLLM reject them at startup.
 
 **Q: When would you use llama.cpp vs vLLM?**
 **Short:** llama.cpp targets CPU and consumer GPU inference with low memory use, while vLLM targets data-center GPU serving for many concurrent users at maximum throughput.
@@ -824,7 +846,7 @@ SGLang's radix attention uses a radix tree (prefix tree) to cache and reuse KV c
 
 **Q: How do you choose between cloud inference (vLLM/TRT-LLM) and edge inference (llama.cpp/Ollama)?**
 **Short:** Cloud engines like vLLM suit multi-user GPU serving at low TTFT, while edge engines like llama.cpp and Ollama suit single-user, low-resource, or privacy-constrained deployment.
-Cloud inference engines (vLLM, TensorRT-LLM, TGI) are designed for multi-user serving with high concurrency, while edge engines (llama.cpp, Ollama, MLC-LLM) are optimized for single-user, low-resource environments. Decision matrix: (1) Concurrency >1 user — cloud engines (edge engines serialize requests); (2) Hardware — NVIDIA GPUs — vLLM/TRT-LLM; Apple Silicon — llama.cpp/MLX; CPU only — llama.cpp; (3) Model size — >13B parameters — cloud GPUs (edge devices struggle); 1B-7B — edge viable; (4) Latency requirements — <100ms TTFT — cloud with GPU; <1s acceptable — edge; (5) Privacy — data cannot leave device — edge only. Ollama wraps llama.cpp with a user-friendly API and model management, making it ideal for developer machines and prototyping. For mobile deployment: use MLC-LLM (Android/iOS) or ONNX Runtime with quantized models. Production pattern: use cloud inference for real-time features, edge inference for offline-capable features.
+Cloud inference engines (vLLM, TensorRT-LLM, TGI) are designed for multi-user serving with high concurrency, while edge engines (llama.cpp, Ollama, MLC-LLM) are optimized for single-user, low-resource environments. Decision matrix: (1) Concurrency: many users on shared GPUs favour cloud engines (llama-server also serves concurrent requests through `--parallel` slots with continuous batching on by default, so the split is about scale and GPU efficiency, not serialization); (2) Hardware: vLLM/TRT-LLM on NVIDIA GPUs, llama.cpp/MLX on Apple Silicon, llama.cpp on CPU only; (3) Model size: cloud GPUs above 13B parameters (edge devices struggle), edge viable at 1B-7B; (4) Latency: cloud with GPU for <100ms TTFT, edge when <1s is acceptable; (5) Privacy: edge only when data cannot leave the device. Ollama adds a user-friendly API and model management on top of GGML-based inference (its own engine on GGML since 2025-05-15, multimodal models first, alongside llama.cpp), making it ideal for developer machines and prototyping. For mobile deployment: use MLC-LLM (Android/iOS) or ONNX Runtime with quantized models. Production pattern: use cloud inference for real-time features, edge inference for offline-capable features.
 
 **Q: When do you use tensor parallelism vs pipeline parallelism to serve a model too big for one GPU?**
 **Short:** Tensor parallelism needs NVLink-class bandwidth within one node, while pipeline parallelism only passes activations at stage boundaries and tolerates slower inter-node links.
@@ -859,7 +881,7 @@ An engine's router picks which existing replica a request lands on; a fleet orch
 
 ## 13. Best Practices
 
-1. **Set gpu_memory_utilization carefully** — the 0.9 default leaves only 10% of the card for CUDA graphs, NCCL buffers and fragmentation; start with 0.85 to buy headroom, and note that the fraction is per vLLM *instance*, so two instances on one GPU need 0.45 each, not 0.9.
+1. **Set gpu_memory_utilization carefully**: the 0.92 default leaves only 8% of the card for CUDA graphs, NCCL buffers and fragmentation; start with 0.85 to buy headroom, and note that the fraction is per vLLM *instance*, so two instances on one GPU need 0.45 each, not 0.92.
 2. **Set max_model_len explicitly** — don't let the engine default to model's maximum; set it to your actual max input + output.
 3. **Enable tensor parallelism across your GPUs** — multi-GPU almost always worth it for batch throughput.
 4. **Monitor queue depth** — if requests are queuing, add replicas; if GPU utilization is low, reduce replicas.

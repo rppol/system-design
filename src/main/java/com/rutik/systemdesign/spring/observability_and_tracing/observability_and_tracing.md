@@ -173,12 +173,12 @@ management:
   tracing:
     sampling:
       probability: 0.1   # 10% head-based sampling (100% in dev: 1.0)
-  otlp:
-    tracing:
-      endpoint: http://otel-collector:4318/v1/traces  # OTLP HTTP endpoint
   opentelemetry:
     enabled: true                            # false disables the OTel SDK while keeping propagators wired
     tracing:
+      export:
+        otlp:
+          endpoint: http://otel-collector:4318/v1/traces  # OTLP HTTP endpoint
       sampler: parent-based-trace-id-ratio    # or always-on, always-off, trace-id-ratio, parent-based-always-on/off
       limits:
         max-attributes: 64
@@ -329,28 +329,42 @@ public CompletableFuture<Result> processAsync(Order order) {
 }
 ```
 
-**FIX (Spring Boot 4.1+): nothing to write.** Micrometer's context — trace span, MDC, and
-baggage — is now propagated automatically to `@Async` methods. The identical method above
-carries a populated `traceId` with zero configuration; no executor wrapping, no
-`TaskDecorator`, no `AsyncConfigurer` override:
+**FIX: turn on context propagation for the executor that runs `@Async`.** Propagation is
+off by default. For the executor Spring Boot auto-configures, one property applies Spring
+Framework's `ContextPropagatingTaskDecorator`, which captures trace span, MDC, and baggage
+on the calling thread and restores them on the worker:
+
+```yaml
+spring:
+  task:
+    execution:
+      propagate-context: true   # default false in the Spring Boot 4.1 property reference
+```
+
+An application that defines its own `ThreadPoolTaskExecutor` bean does not get the
+auto-configured executor, so the property does nothing for it. Set the decorator on that
+bean instead:
 
 ```java
-@Async
-public CompletableFuture<Result> processAsync(Order order) {
-    log.info("Processing order {}", order.id());  // traceId now present — no wiring needed
-    return CompletableFuture.completedFuture(service.process(order));
+@Bean
+public ThreadPoolTaskExecutor applicationTaskExecutor() {
+    ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+    executor.setCorePoolSize(8);
+    executor.setTaskDecorator(new ContextPropagatingTaskDecorator()); // restores span + MDC
+    return executor;
 }
 ```
 
-**The narrow case that still needs a manual wrapper** is an executor Spring does not
-manage — one you construct yourself outside a `@Bean`/`@Async` and submit work to
-directly, or a raw `new Thread(...)`. There, wrap it explicitly with
+With either in place, the identical `@Async` method above logs a populated `traceId`.
+
+**The case that needs a manual wrapper** is an executor that is not a
+`ThreadPoolTaskExecutor` — a plain `ExecutorService` you submit work to directly, or a raw
+`new Thread(...)`. There, wrap it explicitly with
 `io.micrometer:context-propagation`'s `ContextSnapshot`:
 
 ```java
-// Only for an executor OUTSIDE Spring's async management — e.g. a pool built inside a
-// static utility or handed to a third-party callback. A @Bean ThreadPoolTaskExecutor
-// used via @Async already gets automatic propagation above — do not wrap that one.
+// For a plain ExecutorService, which has no TaskDecorator hook. A ThreadPoolTaskExecutor
+// takes ContextPropagatingTaskDecorator instead (above).
 @Configuration
 public class UnmanagedExecutorConfig {
 
@@ -407,18 +421,19 @@ Shopify uses the Grafana LGTM stack: Loki (logs), Grafana (dashboards), Tempo (t
 
 Spring Boot Actuator auto-instruments: `jvm.memory.used`, `jvm.gc.pause`, `hikaricp.connections.pending`, `spring.kafka.consumer.fetch-latency-avg`, `http.server.requests` (histograms with p50/p95/p99). These metrics require zero application code — just `spring-boot-starter-actuator` + a registry dependency. An operations team building Grafana dashboards for a new service gets instant visibility without instrumenting a single line of business code.
 
-### 7.4 Deleting an async-propagation workaround after a Boot 4.1 upgrade
+### 7.4 Replacing an async-propagation workaround with one property
 
-A payment-processing team had a `AsyncConfig` bean wrapping every `@Async` executor with
+A payment-processing team had an `AsyncConfig` bean wrapping every `@Async` executor with
 `ContextExecutorService.wrap(executor.getThreadPoolExecutor(), () -> ContextSnapshot.captureAll(registry))` —
 about 20 lines of boilerplate duplicated across 6 services, plus a unit test per service
-asserting the wrapped executor propagated `traceId`. After upgrading to Spring Boot 4.1,
-the team deleted the bean entirely: the automatic propagation covers the same
-`ThreadPoolTaskExecutor`-backed `@Async` methods with no code. The only executor left
-wrapped was a `ScheduledExecutorService` one service built directly in a `@PostConstruct`
-method to poll a legacy SOAP endpoint outside Spring's task infrastructure — that one kept
-its manual `ContextExecutorService.wrap()` call, because it is never touched by the
-`@Async` proxy that carries the automatic propagation.
+asserting the wrapped executor propagated `traceId`. The team deleted the bean, went back
+to Spring Boot's auto-configured executor, and set
+`spring.task.execution.propagate-context=true`, which applies `ContextPropagatingTaskDecorator`
+to that executor. They kept one test per service, because the property defaults to `false`
+and a missing line silently drops the `traceId` again. The only executor left wrapped was a
+`ScheduledExecutorService` one service built directly in a `@PostConstruct` method to poll a
+legacy SOAP endpoint; it has no `TaskDecorator` hook, so it kept its
+`ContextExecutorService.wrap()` call.
 
 ---
 
@@ -432,6 +447,27 @@ its manual `ContextExecutorService.wrap()` call, because it is never touched by 
 | Manual OTel API | Full control | Controlled | Low | When OTel-specific features needed |
 | 100% trace sampling | All requests | N/A (traces not metrics) | High storage + network | Dev/test; never in production at >100 req/s |
 | Tail-based sampling | Errors + slow | N/A | Higher collector CPU | High-value traces only |
+
+### 8.1 Deployment choice: Micrometer Tracing bridge vs OpenTelemetry Java agent
+
+Every option in the table above assumes an in-process bridge. The deployment decision that
+actually determines how a service gets traced is bridge vs agent, and it is binary, not a
+spectrum:
+
+| | Micrometer Tracing bridge (in-process) | OTel Java agent (`-javaagent`) |
+|---|---|---|
+| How it's added | `spring-boot-starter-opentelemetry` / `micrometer-tracing-bridge-otel` dependency | `-javaagent:opentelemetry-javaagent.jar` at JVM startup, no dependency |
+| Code required | Yes: `Observation`/`@Observed` calls for anything beyond auto-instrumented HTTP/JDBC/Kafka | None: bytecode instrumentation at class-load time |
+| Typed API | Yes: `Observation`, `lowCardinalityKeyValue`/`highCardinalityKeyValue` | No: spans are created wherever the agent's instrumentation module decides |
+| Library coverage | Whatever Spring auto-instruments plus what you code | Broader: 100+ libraries instrumented out of the box, including ones Spring never wires |
+| Works with Spring's own instrumentation | Yes, it *is* Spring's instrumentation | Overlaps it: the agent also instruments Spring MVC/JDBC/Kafka |
+
+**The two must not both be active.** Running the bridge and the agent together double-spans
+every auto-instrumented call and risks a class-loader `ClassCastException` between the
+agent's bundled OTel SDK and the app's own `io.opentelemetry` classes on the classpath. Pick
+one: set `management.opentelemetry.enabled=false` (§6.2) to silence the in-process SDK when
+the agent is attached, or omit the agent and use the bridge for a service you actually want
+typed `Observation` calls in. There is no supported "use both" configuration.
 
 ---
 
@@ -492,27 +528,6 @@ Dropping one digit of `sampling.probability` divides the bill by ten. That is wh
 production recommendation is `0.1` plus a tail-based rule that re-adds the traces you
 actually need.
 
-### 8.1 Deployment choice: Micrometer Tracing bridge vs OpenTelemetry Java agent
-
-Every option in the table above assumes an in-process bridge. The deployment decision that
-actually determines how a service gets traced is bridge vs agent — and it is binary, not a
-spectrum:
-
-| | Micrometer Tracing bridge (in-process) | OTel Java agent (`-javaagent`) |
-|---|---|---|
-| How it's added | `spring-boot-starter-opentelemetry` / `micrometer-tracing-bridge-otel` dependency | `-javaagent:opentelemetry-javaagent.jar` at JVM startup, no dependency |
-| Code required | Yes — `Observation`/`@Observed` calls for anything beyond auto-instrumented HTTP/JDBC/Kafka | None — bytecode instrumentation at class-load time |
-| Typed API | Yes — `Observation`, `lowCardinalityKeyValue`/`highCardinalityKeyValue` | No — spans are created wherever the agent's instrumentation module decides |
-| Library coverage | Whatever Spring auto-instruments plus what you code | Broader — 100+ libraries instrumented out of the box, including ones Spring never wires |
-| Works with Spring's own instrumentation | Yes — it *is* Spring's instrumentation | Overlaps it — the agent also instruments Spring MVC/JDBC/Kafka |
-
-**The two must not both be active.** Running the bridge and the agent together double-spans
-every auto-instrumented call and risks a class-loader `ClassCastException` between the
-agent's bundled OTel SDK and the app's own `io.opentelemetry` classes on the classpath. Pick
-one: set `management.opentelemetry.enabled=false` (§6.2) to silence the in-process SDK when
-the agent is attached, or omit the agent and use the bridge for a service you actually want
-typed `Observation` calls in. There is no supported "use both" configuration.
-
 **Why the tail-based rule exists.** Head-based sampling is uniform, so it keeps 10% of
 *errors* too. If your error rate is 0.1%, that is 1,000 req/s × 0.001 × 0.1 = 0.1 error
 traces per second — you lose 90% of exactly the traces you were going to debug. Tail-based
@@ -537,9 +552,11 @@ registry.timer("order.processing", "tier", order.customerTier().name())
 ```
 
 ### Pitfall 2: Missing trace context in async code
-See §6.7. `@Async` methods get trace context automatically — no wiring needed. The
-pitfall now only bites an executor Spring does not manage: a hand-built `ExecutorService`
-invoked directly, or a raw `Thread`. Wrap those explicitly with `ContextExecutorService.wrap()`.
+See §6.7. Context propagation to `@Async` is off by default, so a log line on the worker
+thread has no `traceId` until `spring.task.execution.propagate-context=true` is set for the
+auto-configured executor, or a custom `ThreadPoolTaskExecutor` gets a
+`ContextPropagatingTaskDecorator`. A plain `ExecutorService` or a raw `Thread` needs
+`ContextExecutorService.wrap()`.
 
 ### Pitfall 3: Actuator endpoints exposed on the public port
 ```yaml
@@ -595,7 +612,7 @@ active. Running the bridge: do not attach `-javaagent` at all.
 | `@Observed` | Micrometer 1.17 (Boot 3.2+) | Declarative method-level observation |
 | W3C `traceparent` | W3C Recommendation | Distributed trace context propagation header |
 | `logstash-logback-encoder` | 7.x | JSON structured logging for Logback |
-| `spring.logging.structured.format.console=ecs` | Spring Boot 3.4+ | Native ECS structured JSON logging |
+| `logging.structured.format.console=ecs` | Spring Boot 3.4+ | Native ECS structured JSON logging |
 | `management.tracing.sampling.probability` | Spring Boot 4.x | Head-based sampling rate (0.0–1.0), honoured by the OTel ratio samplers |
 | `management.opentelemetry.enabled` / `.tracing.sampler` / `.tracing.limits.*` / `.logging.limits.*` | Spring Boot 4.1+ | OTel SDK enable/disable, sampler selection, span/log attribute limits |
 | Grafana Tempo | Open source | Distributed trace backend (OTLP ingestion) |
@@ -607,98 +624,100 @@ active. Running the bridge: do not attach `-javaagent` at all.
 
 ## 12. Interview Questions with Answers
 
-**Q1: What are the three pillars of observability, and why is each insufficient alone?**
+**Q: What are the three pillars of observability, and why is each insufficient alone?**
 **Short:** Metrics, traces, and logs each show a different slice, and none alone explains a slow request.
 Metrics, traces, and logs. Metrics (counters, histograms, gauges) are aggregate — they tell you that p99 latency is 2 seconds but not which specific requests are slow or why. Traces are per-request causality maps — they show which service and which code path took the 2 seconds, but individual traces don't tell you how widespread the problem is. Logs are event records — they capture detailed context per event but are not structured for aggregation or causality analysis. Together: metrics alert you that something is wrong, traces tell you why a specific request was slow, and logs provide the fine-grained context (SQL queries, error messages, business fields) for debugging.
 
-**Q2: What is the W3C `traceparent` header and what are its fields?**
+**Q: What is the W3C `traceparent` header and what are its fields?**
 **Short:** It is the standard propagation header carrying version, trace ID, parent span ID, and sampling flags.
 `traceparent` is the W3C Trace Context standard for distributed trace propagation. Format: `{version}-{traceId}-{parentSpanId}-{flags}`. Example: `00-abc123def456789012345678901234-0123456789abcdef-01`. Fields: `version` (always `00`); `traceId` (128-bit hex, unique per distributed request — same across all services in one request); `parentSpanId` (64-bit hex, the calling span's ID — enables parent-child span linking); `flags` (8-bit, bit 0 = sampling flag: `01` means this trace is sampled). When Service A calls Service B, A sets `traceparent` with its own `spanId` as `parentSpanId` — Service B creates a child span with A's span as parent, building the trace tree.
 
-**Q3: What is the Micrometer Observation API, and how does it differ from directly calling `MeterRegistry`?**
+**Q: What is the Micrometer Observation API, and how does it differ from directly calling `MeterRegistry`?**
 **Short:** It creates a metric, a trace span, and MDC context together, keeping all three signals correlated.
 `MeterRegistry.counter("name").increment()` creates a metric only — no trace span, no MDC context. The Observation API (`Observation.createNotStarted("name", registry).observe(...)`) creates all three simultaneously: a timer metric (`name` with `outcome` and `exception` tags), a trace span (added as a child to the current active span), and populates MDC with `traceId`/`spanId` for the duration of the observed block. This ensures all three signals share the same name and context — when you look at a metric, a trace, and a log, they all agree on what happened. Using raw `MeterRegistry` calls scatters the instrumentation and loses correlation.
 
-**Q4: What is trace sampling and what are the tradeoffs between head-based and tail-based sampling?**
+**Q: What is trace sampling and what are the tradeoffs between head-based and tail-based sampling?**
 **Short:** Head-based decides at the root span cheaply; tail-based decides after completion so it can always keep errors.
 Head-based sampling decides at the root span (first service) whether to record the trace — all downstream services inherit the decision. It is computationally cheap but cannot make intelligent decisions: a 1% head-based sampler drops 99% of traces, including some error traces. Tail-based sampling records all trace data initially and makes the keep/drop decision after the trace is complete — allowing "always keep errors or traces > 1 second." Tail-based sampling requires a trace collector (OTel Collector, Tempo with trace-aware receiver) to buffer spans and correlate them by `traceId` before applying the sampling policy. Cost: higher collector memory + CPU. Best practice: head-based 1–10% for normal traffic, tail-based rule to always keep error traces.
 
-**Q5: What is cardinality in Prometheus metrics, and why is it dangerous to use request-level IDs as labels?**
+**Q: What is cardinality in Prometheus metrics, and why is it dangerous to use request-level IDs as labels?**
 **Short:** Each unique label combination creates a stored time series, so high-cardinality IDs can OOM Prometheus.
 Each unique combination of label values in a Prometheus metric creates one time series in Prometheus's memory. Prometheus stores all active series in memory for fast queries. Adding a label with 1 million distinct values (e.g., `userId`, `orderId`, `traceId`) creates 1 million time series — each consuming ~1–2 KB of memory = 1–2 GB per metric just for that label. This "cardinality explosion" causes Prometheus OOM and query timeouts. Rule: Prometheus labels must be low cardinality (< 1,000 distinct values): `status` (ok/error), `tier` (free/pro/enterprise), `region` (us-east/eu-west), `endpoint` (path template, not full URL). High-cardinality identifiers (userId, orderId, traceId) belong in trace span attributes — the trace backend indexes them efficiently.
 
-**Q6: How does Micrometer Tracing propagate the trace context to virtual threads or CompletableFuture?**
-**Short:** Boot 4.1 propagates it automatically for @Async; manual ContextSnapshot wrapping is only for executors outside Spring's management.
-Since Spring Boot 4.1, Micrometer's context — trace span, MDC, and baggage — is propagated automatically to `@Async` methods, including ones backed by a virtual-thread executor; no wrapping code is needed for Spring's own async infrastructure. The manual mechanism still matters for anything Spring does not manage: an `ExecutorService` you construct and submit work to directly, or a `CompletableFuture` chain built outside `@Async`. There, Micrometer Tracing's context propagation (backed by `io.micrometer:context-propagation`) captures all registered context values — trace context, MDC, Reactor context — into a `ContextSnapshot`. Wrapping such an executor with `ContextExecutorService.wrap(executor, () -> ContextSnapshot.captureAll(registry))` restores the captured context before each submitted task runs; for a bare `CompletableFuture` stage, `ContextSnapshot.captureAll(registry).wrap(runnable/callable)` does the same. A `Executors.newVirtualThreadPerTaskExecutor()` used directly (not through `@Async`) needs the identical manual wrap.
+**Q: How does Micrometer Tracing propagate the trace context to virtual threads or CompletableFuture?**
+**Short:** By capturing a ContextSnapshot on the calling thread and restoring it on the worker, through a TaskDecorator or a wrapped executor.
+Trace span, MDC, and baggage live in `ThreadLocal`s, so a virtual thread or a `CompletableFuture` stage starts with none of them unless something copies them across. For a `ThreadPoolTaskExecutor`, including one backed by virtual threads, that something is `ContextPropagatingTaskDecorator`, which Spring Boot applies to its auto-configured executor when `spring.task.execution.propagate-context=true` (default `false`). For an `ExecutorService` you construct and submit work to directly, or a `CompletableFuture` chain on such an executor, Micrometer Tracing's context propagation (backed by `io.micrometer:context-propagation`) captures all registered context values — trace context, MDC, Reactor context — into a `ContextSnapshot`. Wrapping such an executor with `ContextExecutorService.wrap(executor, () -> ContextSnapshot.captureAll(registry))` restores the captured context before each submitted task runs; for a bare `CompletableFuture` stage, `ContextSnapshot.captureAll(registry).wrap(runnable/callable)` does the same. A `Executors.newVirtualThreadPerTaskExecutor()` used directly (not through `@Async`) needs the identical manual wrap.
 
-**Q7: What is an exemplar, and how does it link Prometheus metrics to distributed traces?**
+**Q: What is an exemplar, and how does it link Prometheus metrics to distributed traces?**
 **Short:** It is a histogram sample carrying the triggering request's trace ID, letting Grafana jump to that trace.
 An exemplar is a sample data point attached to a Prometheus histogram/summary observation that carries additional metadata — specifically the `traceId` of the request that contributed to that observation. When a request with `traceId=abc123` is recorded in the `http.server.requests` histogram with a value of 0.8 seconds, the exemplar attaches `traceId=abc123` to that bucket boundary. In Grafana, a histogram visualization can display exemplars as orange dots — clicking a dot opens the Tempo trace for `abc123`. This is the "metric to trace" drill-down path. Requirements: Prometheus must be configured with `--enable-feature=exemplar-storage`; Micrometer must have both a tracing bridge and Prometheus registry active.
 
-**Q8: How do you configure distributed tracing with Spring Boot 3 to export spans to Jaeger via OTLP?**
+**Q: How do you configure distributed tracing with Spring Boot 4 to export spans to Jaeger via OTLP?**
 **Short:** Add the OTel tracing bridge and OTLP exporter dependencies, then set the OTLP endpoint and sampling probability.
-Add dependencies: `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp`. Configure:
+Add `spring-boot-starter-opentelemetry` (or `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp`). Configure:
 ```yaml
 management:
   tracing:
     sampling:
       probability: 1.0  # 100% in dev
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: http://jaeger:4318/v1/traces  # Jaeger OTLP HTTP endpoint
+      export:
+        otlp:
+          endpoint: http://jaeger:4318/v1/traces  # Jaeger OTLP HTTP endpoint
 spring:
   application:
     name: my-service   # becomes the "service.name" span attribute
 ```
-Spring Boot 3 auto-configures the OTel `SdkTracerProvider`, the `OtlpHttpSpanExporter`, and the `MicrometerTracingAutoConfiguration`. Every HTTP request, JDBC query, and Kafka consumer invocation is automatically traced and exported to Jaeger. No manual `Tracer.spanBuilder()` code is needed for auto-instrumented paths.
+Spring Boot auto-configures the OTel `SdkTracerProvider`, the `OtlpHttpSpanExporter`, and the `MicrometerTracingAutoConfiguration`. Every HTTP request, JDBC query, and Kafka consumer invocation is automatically traced and exported to Jaeger. No manual `Tracer.spanBuilder()` code is needed for auto-instrumented paths.
 
-**Q9: What is structured logging, and how does it differ from traditional log messages?**
+**Q: What is structured logging, and how does it differ from traditional log messages?**
 **Short:** It logs a JSON object of key-value fields instead of a free-text string, making logs queryable and joinable.
 Traditional logging: `log.info("Order 12345 created for user john@example.com in 245ms")` — a human-readable string. Searching for all slow orders requires regex: `grep "created.*[0-9]{4,}ms"`. Structured logging: `log.info("Order created", kv("orderId", 12345), kv("userId", "john"), kv("durationMs", 245))` — a JSON object `{"message": "Order created", "orderId": 12345, "userId": "john", "durationMs": 245, "traceId": "abc123"}`. Searching for all orders > 200ms: `level=INFO AND message="Order created" AND durationMs>200`. Structured logs are queryable, aggregatable, and linkable to traces via `traceId`. They are also parsable by log aggregation systems (Elasticsearch, Loki) without fragile regex extraction.
 
-**Q10: How do you expose and secure the `/actuator/prometheus` endpoint?**
+**Q: How do you expose and secure the `/actuator/prometheus` endpoint?**
 **Short:** Serve it only on a separate internal management port, never on the public port, with authentication.
 Never expose Actuator endpoints on the public port in production. Configure a separate management port: `management.server.port=8081`. The load balancer routes port 8080 (public) to the internet; port 8081 is internal-only (VPC security group or Kubernetes NetworkPolicy blocks external access). On port 8081, expose only the needed endpoints: `management.endpoints.web.exposure.include=health,prometheus,loggers,metrics`. For authenticated scraping: configure `management.endpoint.prometheus.enabled=true` and add Spring Security to the management port with `HttpSecurity.requestMatcher(EndpointRequest.toAnyEndpoint()).authorizeHttpRequests(auth -> auth.anyRequest().hasRole("PROMETHEUS"))`.
 
-**Q11: What is the difference between `lowCardinalityKeyValue` and `highCardinalityKeyValue` in the Observation API?**
+**Q: What is the difference between `lowCardinalityKeyValue` and `highCardinalityKeyValue` in the Observation API?**
 **Short:** Low-cardinality values become Prometheus tags; high-cardinality values become span attributes only.
 `lowCardinalityKeyValue(key, value)` produces a Prometheus metric tag (label) — it must have few distinct values (< 100). Example: `product.category=electronics`. These appear as dimensions in Prometheus time series. `highCardinalityKeyValue(key, value)` produces a span attribute only — it is never added to the Prometheus metric. Example: `product.id=12345`. High-cardinality values in Prometheus labels cause cardinality explosion; in span attributes they are fine because the trace backend indexes them efficiently (by `traceId`). Using the wrong method — putting high-cardinality data in `lowCardinalityKeyValue` — causes Prometheus OOM.
 
-**Q12: How do you ensure the `traceId` appears in every log line, including logs from async methods?**
-**Short:** Boot 4.1 auto-propagates it into @Async methods; only unmanaged executors or raw threads need manual wrapping.
-Micrometer Tracing auto-populates MDC keys `traceId` and `spanId` for the duration of every span (HTTP request, JDBC call, Observation block). For synchronous code, the MDC is automatically populated and cleared. For async code: since Spring Boot 4.1, `@Async` methods get this for free — Micrometer's context (span, MDC, baggage) is propagated to the task with zero configuration. The one remaining gap is an executor Spring does not manage: a hand-built `ExecutorService` invoked directly, or a raw `Thread`. There, wrap the task explicitly with `ContextExecutorService.wrap(...)` / `ContextSnapshot.captureAll(registry)` (§6.7). Verify: add `%X{traceId}` to your Logback pattern and write an integration test that calls an async service method and checks that the log output contains a non-empty `traceId`.
+**Q: How do you ensure the `traceId` appears in every log line, including logs from async methods?**
+**Short:** Add %X{traceId} to the log pattern; Micrometer fills the MDC per span, and async threads see it only after context propagation is enabled.
+Micrometer Tracing auto-populates MDC keys `traceId` and `spanId` for the duration of every span (HTTP request, JDBC call, Observation block). For synchronous code, the MDC is automatically populated and cleared. Async code is the gap: the MDC is a `ThreadLocal`, and propagation to `@Async` is off by default. Turn it on with `spring.task.execution.propagate-context=true` for Spring Boot's auto-configured executor, set a `ContextPropagatingTaskDecorator` on a custom `ThreadPoolTaskExecutor`, and wrap a plain `ExecutorService` or raw `Thread` task with `ContextExecutorService.wrap(...)` / `ContextSnapshot.captureAll(registry)` (§6.7). Verify: add `%X{traceId}` to your Logback pattern and write an integration test that calls an async service method and checks that the log output contains a non-empty `traceId`.
 
-**Q13: What are SLIs, SLOs, and how does Micrometer help implement them?**
+**Q: What are SLIs, SLOs, and how does Micrometer help implement them?**
 **Short:** An SLI measures quality like p99 latency, an SLO sets its target, and Micrometer supplies the raw histograms.
 SLI (Service Level Indicator) is a metric that measures service quality — e.g., p99 latency, error rate. SLO (Service Level Objective) is the target — e.g., "99% of requests complete in < 500ms". Micrometer provides: `http.server.requests` histogram (for latency SLIs), `http.server.requests{outcome=SERVER_ERROR}` counter (for error rate SLIs). In Prometheus/Grafana: `histogram_quantile(0.99, rate(http_server_requests_seconds_bucket[5m]))` computes p99 latency. An alerting rule fires when p99 > 500ms over 5 minutes — violating the SLO. Spring Boot Actuator's automatic `http.server.requests` instrumentation provides SLI data with zero custom code; SLO alerting lives in Prometheus/Grafana.
 
-**Q14: How would you trace a Spring Batch job end-to-end?**
+**Q: How would you trace a Spring Batch job end-to-end?**
 **Short:** Spring Batch auto-creates nested spans for the job, each step, and each chunk under one trace tree.
 Spring Batch 5 + Micrometer Tracing (Spring Boot 3.1+) auto-creates spans for: `JobExecution` (root span), each `StepExecution` (child span), and each chunk (child of step). The job trace shows: total job duration, per-step duration, and identifies slow steps. To add business context: use `Observation.createNotStarted("inventory.check", registry).observe(...)` inside `ItemProcessor` — creates a child span of the current step span. The full trace in Jaeger shows: `importJob` (root) → `importStep` → `chunk-0` → `inventory.check` × N. Configure `management.tracing.sampling.probability=1.0` for scheduled batch jobs (they're low-frequency, so 100% sampling is affordable).
 
-**Q15: Describe a production incident where observability tools helped diagnose the root cause.**
+**Q: How do metrics, traces, and logs together diagnose a production incident?**
 **Short:** A metric spike, an exemplar-linked trace, and a correlated log line pinpointed a HikariCP pool exhaustion in minutes.
 Scenario: Black Friday sale, checkout p99 latency spikes from 180ms to 4.2 seconds at 18:35. Grafana alert fires. Diagnosis in 4 minutes: (1) Grafana dashboard: `http.server.requests{uri=/checkout}` p99 histogram shows spike at 18:35; (2) exemplar on the spike bucket → jumps to a Tempo trace for `traceId=abc123`; (3) trace shows: checkout span 4.1s, JDBC `inventory.check` span 3.8s, DB connection `await` span 3.5s; (4) HikariCP metric `hikaricp.connections.pending` shows pool exhaustion (all 10 connections busy) at 18:35; (5) Loki query `traceId=abc123`: log line shows `connection acquire timed out after 3500ms` — HikariCP pool of 10 connections too small for Black Friday traffic; (6) fix: `spring.datasource.hikari.maximum-pool-size=25`. Resolved in 7 minutes. Without observability, this would have required hours of reading server logs.
 
-**Q16: What does `spring-boot-starter-opentelemetry` provide that adding the individual OTel dependencies did not?**
+**Q: What does `spring-boot-starter-opentelemetry` provide that adding the individual OTel dependencies did not?**
 **Short:** One managed dependency for the tracing bridge, OTel SDK, and OTLP exporter, version-aligned by the Boot BOM.
 `spring-boot-starter-opentelemetry` is Spring Boot 4's single starter for OpenTelemetry: it pulls in the Micrometer Tracing OTel bridge, the OpenTelemetry Java SDK, and the OTLP exporter together, with all three versions resolved by the Spring Boot BOM instead of declared and aligned by hand. Before it, a service added `micrometer-tracing-bridge-otel` and `opentelemetry-exporter-otlp` as two separate coordinates and relied on the BOM (or manual pinning) to keep the bridge and SDK compatible — a mismatch produced `NoSuchMethodError` at startup rather than a build failure. The starter does not add new capability over the two dependencies combined; it removes a version-skew failure mode and is the default choice for a new service. Reach for the individual artifacts only when you need to pin the bridge or SDK independently of what the starter's BOM entry carries.
 
-**Q17: What does `management.opentelemetry.enabled=false` actually disable, and when would you set it?**
+**Q: What does `management.opentelemetry.enabled=false` actually disable, and when would you set it?**
 **Short:** It turns off the OTel SDK's span/log pipeline while keeping W3C traceparent propagation configured.
 `management.opentelemetry.enabled=false` disables the OpenTelemetry SDK — the `SdkTracerProvider`, the batch span processor, and the OTLP exporter stop creating and shipping spans — while Spring still configures the W3C `traceparent` propagator, so inbound/outbound header handling and MDC population keep working. The main reason to set it: a sidecar `-javaagent` is already attached and doing the instrumentation and export, and running Spring's own SDK alongside it would create a second, competing set of spans and risk a class-loader conflict between the agent's bundled OTel classes and the app's own (§8.1). It is also useful for isolating a "propagation only, no export" configuration in a test or local-dev profile without removing the dependency.
 
-**Q18: How do you bound span size in OpenTelemetry so one over-tagged operation cannot bloat every exported span?**
+**Q: How do you bound span size in OpenTelemetry so one over-tagged operation cannot bloat every exported span?**
 **Short:** Set management.opentelemetry.tracing.limits.max-attributes and max-attribute-value-length to cap span size.
 `management.opentelemetry.tracing.limits.max-attributes` caps how many attributes (span tags) a single span can carry, and `management.opentelemetry.tracing.limits.max-attribute-value-length` caps how long any one attribute's value can be — both configure the OTel SDK's `SpanLimits`, and Boot 4.1 auto-configures them from these properties. Without a limit, a single `highCardinalityKeyValue` call that stuffs a large payload (a full JSON body, a stack trace) into a span attribute inflates every exported span's wire size, which multiplies directly into the OTLP export bandwidth and collector storage bill covered in §9's sampling math. `management.opentelemetry.logging.limits.*` applies the equivalent bound to `LogLimits` for OTel log records. Defaults are reasonable for typical attribute usage (64 attributes, 256-character values); tighten them further only if a specific instrumentation point is known to attach oversized values.
 
-**Q19: Compare running the Micrometer Tracing bridge against running the OpenTelemetry Java agent — can a service run both?**
-**Short:** No — the bridge is in-process and typed, the agent is zero-code and broader, and running both double-instruments.
-The bridge (`spring-boot-starter-opentelemetry` / `micrometer-tracing-bridge-otel`) is in-process: it requires the dependency and, for anything beyond auto-instrumented HTTP/JDBC/Kafka, explicit `Observation`/`@Observed` code, but it gives a typed API and integrates with Spring's own instrumentation and MDC population. The OTel Java agent (`-javaagent:opentelemetry-javaagent.jar`) instruments over 100 libraries by bytecode manipulation at class-load time with zero code and zero dependency, but offers no typed API — span boundaries are wherever the agent's instrumentation module draws them, not your domain boundary. They are not combinable: both instrumenting the same JDBC call produces duplicate spans, and the agent's bundled OTel SDK classes can collide with the app's own OTel classpath entries in a `ClassCastException`. Pick one — set `management.opentelemetry.enabled=false` (Q17) to run the agent alone, or skip the agent and use the bridge where typed `Observation` calls matter.
+**Q: How does the Micrometer Tracing bridge differ from the OpenTelemetry Java agent, and can a service run both?**
+**Short:** No: the bridge is in-process and typed, the agent is zero-code and broader, and running both double-instruments every call.
+The bridge (`spring-boot-starter-opentelemetry` / `micrometer-tracing-bridge-otel`) is in-process: it requires the dependency and, for anything beyond auto-instrumented HTTP/JDBC/Kafka, explicit `Observation`/`@Observed` code, but it gives a typed API and integrates with Spring's own instrumentation and MDC population. The OTel Java agent (`-javaagent:opentelemetry-javaagent.jar`) instruments over 100 libraries by bytecode manipulation at class-load time with zero code and zero dependency, but offers no typed API: span boundaries are wherever the agent's instrumentation module draws them, not your domain boundary. They are not combinable: both instrumenting the same JDBC call produces duplicate spans, and the agent's bundled OTel SDK classes can collide with the app's own OTel classpath entries in a `ClassCastException`. Pick one: set `management.opentelemetry.enabled=false` to run the agent alone, or skip the agent and use the bridge where typed `Observation` calls matter.
 
-**Q20: What changed about `@Async` trace-context propagation in Spring Boot 4.1, and does the old `ContextExecutorService.wrap()` pattern still have a use?**
-**Short:** Boot 4.1 propagates context to @Async automatically; the wrapper survives only for executors outside Spring's management.
-Before Spring Boot 4.1, `@Async` methods ran on a `ThreadPoolTaskExecutor` thread that did not inherit the calling thread's trace context — MDC's `traceId`/`spanId` were `ThreadLocal`-based and had to be explicitly captured and restored, typically by wrapping the executor with `ContextExecutorService.wrap(executor, () -> ContextSnapshot.captureAll(registry))` or applying `ContextPropagatingTaskDecorator`. Since Boot 4.1, Micrometer's context — trace span, MDC, and baggage — is propagated to `@Async` methods automatically; the broken example and its manual fix in §6.7 no longer need the fix applied for Spring-managed executors. The wrapper pattern still has exactly one live use: an executor Spring does not manage — an `ExecutorService` you build and submit to directly, or a raw `Thread` — where no `@Async` proxy is involved to apply the automatic propagation.
+**Q: Why does an `@Async` method log an empty `traceId`, and which fix fits which executor?**
+**Short:** Propagation is off by default: set propagate-context for Boot's executor, a ContextPropagatingTaskDecorator on your own, wrap() for a plain ExecutorService.
+`@Async` runs the method on an executor thread, and the trace span, MDC, and baggage are `ThreadLocal`s on the calling thread, so the worker starts with none of them. Spring Boot does not copy them by default: `spring.task.execution.propagate-context` is `false` in the Boot 4.1 property reference. Three fixes, by executor. Spring Boot's auto-configured `ThreadPoolTaskExecutor`: set `spring.task.execution.propagate-context=true`, which applies `ContextPropagatingTaskDecorator`. A `ThreadPoolTaskExecutor` bean you define yourself: the property does not reach it, so call `setTaskDecorator(new ContextPropagatingTaskDecorator())`. A plain `ExecutorService` or a raw `Thread`, which has no decorator hook: `ContextExecutorService.wrap(executor, () -> ContextSnapshot.captureAll(registry))`. Whichever applies, keep an integration test that asserts a non-empty `traceId` in the async log line, because removing one property line fails silently.
 
 ---
 
@@ -710,7 +729,7 @@ Before Spring Boot 4.1, `@Async` methods ran on a `ThreadPoolTaskExecutor` threa
 4. **Structure logs as JSON** (`logstash-logback-encoder`) with `traceId` and `spanId` in every line — enables direct Loki-to-Tempo navigation.
 5. **Separate the management port** — never expose `/actuator/prometheus` on the public port.
 6. **Set `sampling.probability=0.1` in production** (10%) for normal traffic; configure tail-based sampling in the OTel Collector to always keep error/slow traces.
-7. **Trace context now crosses `@Async` boundaries automatically** — verify it with an integration test that asserts a non-empty `traceId` in the log output, rather than hand-wiring propagation. Reserve `ContextExecutorService.wrap()` for executors Spring does not manage (a hand-built `ExecutorService`, a raw `Thread`).
+7. **Turn on context propagation for `@Async`** — `spring.task.execution.propagate-context=true` for Spring Boot's executor, or a `ContextPropagatingTaskDecorator` on your own `ThreadPoolTaskExecutor` — and keep an integration test that asserts a non-empty `traceId` in the async log output. Reserve `ContextExecutorService.wrap()` for a plain `ExecutorService` or a raw `Thread`.
 8. **Enable exemplars** (`management.metrics.distribution.percentiles-histogram.http.server.requests=true`) — essential for metric-to-trace drill-down.
 9. **Annotate spans with business context** (order tier, customer region, payment method) for root cause analysis beyond raw latency.
 10. **Define and alert on SLOs** using `histogram_quantile` Prometheus queries — observability without alerting is just expensive storage.

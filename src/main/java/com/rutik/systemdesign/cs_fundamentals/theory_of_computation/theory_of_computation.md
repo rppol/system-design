@@ -524,6 +524,27 @@ Adding a timeout does not fix this — it changes the question. "Does P halt wit
 
 **Why this lands on real tools rather than staying in the textbook.** Any request of the form "flag every program in this repo that has an infinite loop", "prove this build script always terminates", or "detect all malware by deciding whether it ever executes the payload" is the halting problem in a costume, and the correct engineering response is not a better algorithm — it is to change the question. The three standard changes are: bound it (model checkers explore up to N steps — see TLA+ in §11), accept one-sided error (static analyzers report *possible* infinite loops and tolerate false positives), or restrict the language until termination becomes provable (total-functional languages, Rust's borrow checker on a restricted grammar, SQL without recursive CTEs). Rice's theorem sharpens the warning: **every** non-trivial semantic property of a program's behavior — not just halting — is undecidable, so "does this code ever leak a secret" is in the same boat as "does this code ever stop."
 
+**The busy beaver: undecidability with a concrete number.** Among all Turing machines with n states
+and a two-symbol tape that eventually halt when started on a blank tape, `BB(n)` is the largest number
+of steps any of them runs. If `BB(n)` were computable for every n, halting would be decidable: to
+decide an n-state machine, run it for `BB(n)` steps, and if it is still running it never stops. So no
+algorithm computes `BB(n)` for all n, and `BB` grows faster than every computable function.
+
+Each individual value is still a finite question, and settling it is a proof effort rather than an
+algorithm. The bbchallenge collaboration completed the five-state case on July 2, 2024, with a proof
+checked in the Rocq proof assistant (named Coq at the time):
+
+| n | BB(n), steps | How it was settled |
+|---|--------------|--------------------|
+| 1, 2, 3 | 1, 6, 21 | Rado (1962), Lin and Rado (1965) |
+| 4 | 107 | Brady, 1983 |
+| 5 | 47,176,870 | bbchallenge, 2024, Coq-verified |
+
+The five-state champion, found by Marxen and Buntrock in 1990, writes 4,098 ones before halting. The
+proof had to classify every other five-state machine as halting sooner or provably running forever,
+and the non-halting ones needed individual arguments: exactly the "cannot tell still-running from
+never-halting" problem above, solved machine by machine instead of by one decider.
+
 ### 6.8 Reductions — and Which Direction They Go
 
 A **reduction** A ≤p B means: given a polynomial-time algorithm for B, you can build a polynomial-time algorithm for A by transforming any A-instance into a B-instance, solving it with B's algorithm, and translating the answer back. The single most common student error is running this backwards.
@@ -613,6 +634,37 @@ The whole reduction hinges on that lack of slack. If the budget were even one la
 **Hamiltonian Path/Cycle and TSP-decision**: 3-SAT also reduces to Hamiltonian path via a separate gadget chain (per-variable "diamond" widgets traversable in two directions, wired through per-clause junctions — see Sipser's *Introduction to the Theory of Computation* for the full construction). Hamiltonian Cycle reduces cleanly to **TSP-decision**: given graph G, build a complete graph with edge weight 1 for original edges and 2 otherwise, and ask "is there a tour of total weight ≤ |V|?" Any tour using even one weight-2 edge costs at least |V|+1, so a tour of weight ≤ |V| must use only original edges — i.e. it is exactly a Hamiltonian cycle in G.
 
 **Decision vs optimization**: TSP-decision ("is there a tour ≤ B?") is in NP because a proposed tour's length is checkable in polynomial time; the *optimization* version ("find the shortest tour") has no such bounded certificate to check against and is NP-hard without being classified inside NP in the same way — a subtlety worth stating explicitly in interviews.
+
+### 6.10 Time Versus Space: Williams 2025
+
+Every algorithm that runs for t steps can touch at most t memory cells, so `TIME[t] ⊆ SPACE[t]`
+trivially, and since 1975 (Hopcroft, Paul and Valiant) the best general bound was space
+`O(t / log t)`. Ryan Williams' "Simulating Time With Square-Root Space" (ECCC TR25-017, STOC 2025)
+proved:
+
+```
+ TIME[t]  ⊆  SPACE[ sqrt(t log t) ]        for multitape Turing machines, t(n) >= n
+
+ example, t = 10^12 steps (log2 t = 39.9)
+   trivial bound      t                    1,000,000,000,000 cells
+   HPV 1975           t / log t               25,085,832,972 cells
+   Williams 2025      sqrt(t log t)                6,313,726 cells    about 4,000x less than HPV
+```
+
+**How.** Split the t-step computation into blocks, so that each block's result depends on a bounded
+number of earlier blocks. Computing the final state then becomes an instance of *Tree Evaluation*:
+a tree whose leaves are the initial tape contents and whose internal nodes are block computations.
+Cook and Mertz (STOC 2024) had shown that Tree Evaluation can be solved in far less space than the
+obvious depth-first evaluation: it adds intermediate results on top of memory that already holds
+other data and later subtracts them out, so the same cells serve many subtrees.
+Williams chose block sizes so that the Cook-Mertz space bound comes out to `sqrt(t log t)`.
+
+**Why it matters.** It separates time and space quantitatively: there are problems solvable in
+`O(n)` space that need `n^(2-ε)` time on a multitape Turing machine for every `ε > 0`. It is partial
+progress toward `P ≠ PSPACE`, which remains open. It does not change engineering practice directly:
+the simulation reruns pieces of the computation many times, so it trades a large amount of time for
+the space saving. The practical reading is the one this module keeps returning to: memory is a more
+powerful resource than time, and a space bound is a much weaker constraint than an equal time bound.
 
 ---
 
@@ -819,7 +871,7 @@ NP-completeness is a statement about the **worst case**, not about every instanc
 | Z3 | SMT solver | Satisfiability modulo theories (arithmetic, arrays, bitvectors) | Widely used in program verification and symbolic execution |
 | OR-Tools CP-SAT / Gurobi / CPLEX | ILP / constraint solver | Solves NP-hard scheduling, coloring, and packing at scale | Backbone of real timetabling, routing, and assignment systems (§14) |
 | `dk.brics.automaton` | Automata library (Java) | Explicit DFA/NFA construction and minimization | Used inside Apache Lucene for regex-based queries |
-| TLA+ / Coq | Formal methods | Model checking / interactive proof assistants | Bounded model checking sidesteps undecidability by checking only up to N steps |
+| TLA+ / Rocq | Formal methods | Model checking / interactive proof assistants | Bounded model checking sidesteps undecidability by checking only up to N steps |
 
 ---
 
@@ -908,6 +960,14 @@ No — context-free languages properly contain the regular languages, with plent
 **Q: Why should recognizing that a problem is NP-complete change your approach in a coding interview?**
 **Short:** It should shift you from hunting a polynomial exact algorithm to proposing pruned exponential search, bitmask DP for small n, or a stated approximation.
 Recognizing NP-completeness should make you stop searching for a polynomial exact algorithm and instead propose exponential-with-pruning, bitmask DP for small n, or a stated approximation. Interviewers who pose a disguised NP-complete problem (graph coloring, conflict-based scheduling, subset-sum-shaped packing) are usually testing whether you can recognize the structure and explain *why* no efficient exact algorithm is known, not whether you can invent one on the spot (§14). Name the target NP-complete problem (or sketch the reduction), then pivot immediately to a bounded-input or approximate strategy — that pivot is what reads as senior.
+
+**Q: What is the busy beaver function, and how was BB(5) = 47,176,870 proved if halting is undecidable?**
+**Short:** BB(n) is the most steps a halting n-state machine can run; no algorithm computes it for all n, but each fixed n is finite, and BB(5) was proved case by case and checked in Coq in 2024.
+`BB(n)` is the maximum number of steps taken by any n-state, two-symbol Turing machine that halts from a blank tape. Computing it for every n would decide the halting problem (run any n-state machine for `BB(n)` steps; if it has not stopped, it never will), so `BB` is uncomputable and outgrows every computable function. Undecidability forbids one algorithm for all inputs, not a proof about a finite set: the bbchallenge collaboration classified every five-state machine as halting by step 47,176,870 or provably non-halting, using automated deciders plus individual proofs for the hard cases, and verified the result in Coq (completed July 2, 2024). The champion machine, found by Marxen and Buntrock in 1990, writes 4,098 ones. Each further n needs new mathematics; there is no procedure that scales.
+
+**Q: How much memory does a computation that runs for t steps actually need?**
+**Short:** O(sqrt(t log t)) cells on a multitape Turing machine, by Williams (2025), down from the O(t / log t) bound of 1975; for t = 10^12 that is about 6.3 million cells instead of 25 billion.
+Ryan Williams proved `TIME[t] ⊆ SPACE[sqrt(t log t)]` for multitape Turing machines with `t(n) >= n`, improving Hopcroft, Paul and Valiant's 1975 bound of `O(t / log t)`. The proof breaks the computation into blocks, recasts computing the final state as a Tree Evaluation instance, and applies Cook and Mertz's 2024 algorithm, which evaluates such trees in far less space than depth-first evaluation. A corollary is that some problems solvable in linear space require nearly quadratic time on these machines. The simulation spends much more time than the original computation, so it is a statement about the relative power of space and time, not a technique for saving RAM; whether P equals PSPACE is still open.
 
 ---
 
@@ -1027,6 +1087,7 @@ Because real conflict graphs are far sparser and more structured than the advers
 
 ## See Also
 
+- [Quantum and Randomized Complexity](quantum_and_randomized_complexity.md) - deep dive: RP, co-RP, ZPP, BPP, PP and BQP, plus the Shor and Grover results behind post-quantum crypto
 - [Complexity Analysis & Big-O](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — the polynomial-vs-exponential vocabulary that P vs NP and the automata hierarchy are built on
 - [Graphs, Tries, and Advanced Structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — the traversal and graph-representation mechanics reused by the coloring and Hamiltonian-path reductions in §6.9 and §14
 - [Strings and Text](../../java/strings_and_text/strings_and_text.md) — Java's regex engine internals, compact strings, and surrogate pairs

@@ -456,6 +456,55 @@ disagreement over a rating as a referendum on the relationship itself tends to m
 manager more guarded in exactly the conversations — the twelve-month one, the honest gap-
 naming one — where openness is what you actually need from them.
 
+### 6.9 AI usage as a review criterion
+
+Between April and November 2025 three large employers wrote AI use into the review
+itself. Each changed something narrower than the headlines said.
+
+| Company and date | Who wrote it | What changed |
+|------------------|-------------|--------------|
+| Shopify, April 2025 | CEO Tobi Lütke, internal memo posted publicly on X | reflexive AI use became a baseline expectation; questions on it were added to performance and peer reviews; a team asking for headcount must show why AI cannot do the work (details in [AI-Era Engineering Leadership](../ai_era_engineering_leadership/ai_era_engineering_leadership.md)) |
+| Microsoft Developer Division, June 2025 | Julia Liuson, division president, reported by Business Insider | "Using AI is no longer optional"; managers told AI use "should be part of your holistic reflections on an individual's performance and impact"; a formal usage metric was reported as under consideration, not adopted |
+| Meta, November 2025 | Janelle Gale, head of people, reported by Business Insider | "AI-driven impact" became a core expectation from 2026 reviews; individual AI usage metrics were kept out of the 2025 cycle, but people could list AI wins in self-reviews |
+
+The same year Meta also showed how hard the review system itself had become: a January
+2025 memo from Mark Zuckerberg announced cuts of about 5% of staff (roughly 3,600 of
+72,000) labelled low performers, with notices by February 10, 2025. An AI criterion added
+to a system that already cuts the bottom 5% is not a soft expectation.
+
+**What the criterion rewards, and what it does not.** Usage counts (prompts sent, Copilot
+suggestions accepted, tokens spent) are activity metrics. They are easy to inflate, and
+once a count is a target it stops measuring anything (Goodhart's law; see
+[Team Health & Sustainable Pace](../team_health_and_sustainable_pace/team_health_and_sustainable_pace.md)
+for the engineering-metrics version). A calibration committee reading "AI-driven impact"
+can only act on the same thing it acts on everywhere else in this module: an outcome, a
+number, and the artifact or person that confirms it. The AI part of the entry is the
+method, plus what you checked.
+
+**Weak version** (self-review entry)
+
+> Used AI tools heavily all year. Top 10% of the org in Copilot acceptance rate. Strong AI
+> adopter.
+
+**Strong version**
+
+> Moved the billing service off the v1 SDK in 3 weeks against the 8-week plan. An agent
+> generated 1,400 contract tests from the v1 traffic logs; I reviewed them, rejected 210
+> that asserted the old bug-for-bug behaviour, and the cutover shipped with zero Sev-2s.
+> The prompt set and the review checklist are in the team wiki and two other teams have
+> reused them (ask Dana Ruiz, Payments).
+
+**What changed:** the weak entry reports a usage rank, which a committee cannot connect to
+any result and which anyone can raise by accepting more suggestions. The strong entry
+names the outcome and its size (5 weeks saved), the verification work that made the AI
+output safe (210 rejected tests), the absence of incidents, the reuse by other teams, and
+a corroborator.
+
+**If you are the manager.** Before the cycle, write down what counts: an outcome the tool
+made possible, with the human check that made it safe. Say in writing that raw usage does
+not count. Otherwise the team learns to optimise the dashboard, and the review rewards the
+people most willing to accept unchecked suggestions.
+
 ---
 
 ## 7. Real-World Examples
@@ -469,8 +518,8 @@ naming one — where openness is what you actually need from them.
   potential yes, potential no, clear no) during an async phase before the live discussion,
   which is exactly why a packet has to stand on its own before anyone speaks on your
   behalf in the room.
-- **Ladder frameworks like Google's, Meta's, and the widely-referenced public "rent the
-  runway" and "Basis" engineering ladders** all share the same underlying shape this
+- **Ladder frameworks like Google's and Meta's, and the public Rent the Runway engineering
+  ladder and GitLab job families** all share the same underlying shape this
   module assumes: named criteria (technical direction, mentorship, cross-team scope) that
   a packet is expected to organize itself against, rather than a single undifferentiated
   "is this person good" judgment.
@@ -563,8 +612,10 @@ ability to act on it before it's already scored.
 | Framework / Source | What it gives you |
 |---|---|
 | Julia Evans, "Get your work recognized: write a brag document" (`jvns.ca`, 2019) | The clearest widely-read case for the weekly brag-doc practice |
-| Publicly documented engineering ladders (e.g., organizations that publish their leveling criteria, such as rent the runway's and Basis's public engineering ladders) | Concrete examples of named, per-level criteria a packet should be organized against |
+| Publicly documented engineering ladders (e.g., organizations that publish their leveling criteria, such as Rent the Runway's public engineering ladder and GitLab's job families at handbook.gitlab.com) | Concrete examples of named, per-level criteria a packet should be organized against |
 | Gergely Orosz, *The Pragmatic Engineer* newsletter, coverage of performance calibration practices at large tech companies | Practitioner-sourced detail on how calibration committees actually bucket and discuss packets |
+| Tobi Lütke, "Reflexive AI usage is now a baseline expectation at Shopify" (memo posted on X, April 7, 2025) | The primary text of the first large-company memo putting AI use into performance and peer reviews |
+| Business Insider reporting on Julia Liuson's Microsoft memo (June 2025) and Janelle Gale's Meta memo (November 2025) | The Microsoft and Meta wording on AI use in reviews; both memos are internal, so the reporting is the source |
 | Center for Creative Leadership, SBI (Situation-Behavior-Impact) | The same construction discipline used for feedback (see [Giving & Receiving Feedback](../giving_and_receiving_feedback/giving_and_receiving_feedback.md)) applies directly to writing packet evidence |
 
 Related modules in this section:
@@ -642,6 +693,28 @@ strong performer surrounded by other strong performers on the same team can stil
 to a colleague with a similar case on a weaker team, purely because of the cap — which is
 a real, structural cause of a "not yet" that has nothing to do with the quality of the
 work or the packet.
+
+**Q: Your company now rates "AI-driven impact". What goes in the self-review, and what does not?**
+**Short:** An outcome the AI made possible, its size, and the check you did on the output. Not usage counts such as prompts sent or suggestions accepted, which measure activity.
+
+A calibration committee acts on outcomes, numbers and corroborators, and an AI criterion
+does not change that. "Top 10% in Copilot acceptance rate" is an activity count that
+anyone can raise by accepting more suggestions; a committee cannot connect it to a result.
+"Migrated billing in 3 weeks against an 8-week plan; an agent wrote 1,400 contract tests, I
+rejected 210 that encoded the old bug, zero Sev-2s at cutover" names the outcome, the
+method, and the verification. The verification is the part that shows judgment, and it is
+what separates using the tool well from accepting its output.
+
+**Q: Which large companies tied AI use to performance reviews in 2025, and what exactly did each change?**
+**Short:** Shopify (April 2025) added AI use to performance and peer reviews; Microsoft's developer division (June 2025) told managers to weigh it; Meta made "AI-driven impact" a core expectation from 2026.
+
+Shopify's April 2025 memo from Tobi Lütke made reflexive AI use a baseline expectation,
+added it to performance and peer review questions, and required teams to show why AI could
+not do the work before asking for headcount. Julia Liuson's June 2025 memo to Microsoft's
+Developer Division said AI use is "no longer optional" and belongs in managers' assessment
+of performance and impact; a formal metric was reported as only under consideration.
+Meta's November 2025 memo from Janelle Gale made "AI-driven impact" a core expectation for
+2026 reviews while keeping individual usage metrics out of the 2025 cycle.
 
 **Q: What is the single highest-value question this module recommends asking your manager, and when should you ask it?**
 **Short:** "What would I have to be doing consistently in 12 months for this packet to be obvious?" — ask it a year early.

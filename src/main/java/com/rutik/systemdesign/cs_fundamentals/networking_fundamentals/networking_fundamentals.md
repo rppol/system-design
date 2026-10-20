@@ -243,6 +243,8 @@ The server can send application data after step 2; the client after step 3. Effe
 
 **Key exchange (ECDHE)**: Elliptic Curve Diffie-Hellman Ephemeral. Each connection uses fresh key material — compromising the server's private key does not expose past sessions (forward secrecy). TLS 1.2 RSA key exchange lacked this property.
 
+**Hybrid post-quantum key share**: the default first key share in Chrome, Firefox, OpenSSL 3.5+, Go 1.24+ and JDK 27 is `X25519MLKEM768`, defined for TLS 1.3 in RFC 10024 (August 2026). It concatenates an X25519 share with an ML-KEM-768 share, so the session key stays secret unless both are broken. The handshake shape and RTT count do not change, but the bytes do: the client key share is 1,216 bytes instead of 32, and the server share is 1,120 bytes. See [Cryptography Fundamentals](../cryptography_fundamentals/cryptography_fundamentals.md) for the post-quantum algorithms.
+
 ### 4.7 Sockets (CS-Theory Level)
 
 A **socket** is the OS abstraction for a bidirectional communication endpoint. It is identified by a 5-tuple: (protocol, local IP, local port, remote IP, remote port).

@@ -31,23 +31,23 @@ applies to any framework, or to none.
 
 ## PRIMARY TARGET VERSIONS
 
-This section pins faster-moving things than any other in the repo. Verified 2026-09-02 —
+This section pins faster-moving things than any other in the repo. Verified 2026-10-18 —
 **verify against each project's own release page before writing a version number, never
 from memory.**
 
 | Area | Pin | Note |
 |------|-----|------|
 | Node.js | **26 Current**, **24 "Krypton" Active LTS** | 24 started 2025-05-06, 30-month window; 22 in Maintenance |
-| Vite | **8**, on **Rolldown** | Rolldown is the default bundler; the esbuild-dev / Rollup-build split is gone |
+| Vite | **8**, on **Rolldown** | Rolldown bundles both dev and build; Oxc transforms and minifies JS, Lightning CSS minifies CSS |
 | ESLint | **10** | flat config only, `eslintrc` fully removed; ESLint 9 EOL 2026-08-06 |
-| typescript-eslint | **8.69.0** | does **not** yet support TypeScript 7 / tsgo — no Compiler API until 7.1 |
+| typescript-eslint | **8.71.2** | does **not** yet support TypeScript 7 / tsgo — no Compiler API until 7.1 |
 | Biome | **2.5** | |
 | oxlint type-aware | **GA 2026-07-22** | no longer alpha; docs still note incomplete rule coverage and memory use on very large repos |
-| esbuild / swc | **0.28.2** / **1.16.1** | neither is declared legacy; Rolldown displaces esbuild's dev-server role only |
-| pnpm / npm / Yarn Berry | **11.25.0** / **12.0.2** / **4.18.0** | pnpm 12 (Rust rewrite) stable 2026-08-26 under the `next-12` tag |
-| Turborepo / Nx | **2.10.12** / **23.2.0** | |
-| Prettier | **3.9.6** | |
-| Deno / Bun | **2.9** / **1.4.0** | Bun 1.4.0 (2026-08-20) is the Zig to Rust core rewrite |
+| esbuild / swc | **0.28.2** / **1.16.18** | neither is declared legacy; Vite 8 calls esbuild only on opt-in (`build.minify: 'esbuild'`) |
+| pnpm / npm / Yarn Berry | **12.14.0** / **12.2.0** / **4.18.1** | pnpm 12 (Rust rewrite) is `latest` since 2026-10-15; 11.x is `latest-11` (11.28.6) |
+| Turborepo / Nx | **2.11.9** / **23.3.0** | |
+| Prettier | **3.9.10** | |
+| Deno / Bun | **2.9** / **1.4.3** | Bun 1.4.0 (2026-08-20) is the Zig to Rust core rewrite |
 
 ### The two standards every answer is graded against
 
@@ -57,10 +57,12 @@ all three to pass overall. **INP fully replaced FID in March 2024.** Never prese
 current, and never quote a threshold without saying "at p75" — the percentile is half the
 definition.
 
-**Accessibility.** **WCAG 2.2 AA is the operative standard** — ADA, Section 508 and the
-European Accessibility Act all reference it. **WCAG 3.0 is a W3C Working Draft** (latest
-2026-03-03): 174 "requirements" rather than success criteria, Bronze/Silver/Gold in place
-of A/AA/AAA, with Bronze roughly equal to today's 2.2 AA. Candidate Recommendation is
+**Accessibility.** **WCAG 2.2 AA is the engineering target.** The laws cite older
+versions: ADA Title II adopts 2.1 AA, Section 508 incorporates 2.0 AA, and the European
+Accessibility Act applies through EN 301 549 v3.2.1, which maps to 2.1 AA; 2.2 AA meets all
+three. **WCAG 3.0 is a W3C Working Draft** (latest 2026-09-10): 180 requirements (106 core,
+74 supplemental) plus 35 assertions, conformance when every core requirement is met, and
+Bronze/Silver/Gold as reporting tiers above it. Candidate Recommendation is
 targeted **Q4 2027**; legal adoption is estimated 2030 or later. **Teach 2.2 AA as
 actionable and 3.0 as direction only** — a module that presents 3.0 as current is wrong.
 
@@ -69,7 +71,7 @@ actionable and 3.0 as direction only** — a module that presents 3.0 as current
 
 ---
 
-## Module List — 20 Modules (4 Phases)
+## Module List — 21 Modules (4 Phases)
 
 | # | Module Directory | Phase | Key Concepts |
 |---|-----------------|-------|-------------|
@@ -89,10 +91,11 @@ actionable and 3.0 as direction only** — a module that presents 3.0 as current
 | 14 | `modules_bundling_and_the_build_pipeline/` | 3 | ESM semantics, tree-shaking and what defeats it, code splitting, Vite 8 on Rolldown, Turbopack, HMR, source maps |
 | 15 | `package_management_and_supply_chain/` | 3 | npm/pnpm/yarn resolution, lockfiles, workspaces and task graphs, peer deps and duplicate React, provenance |
 | 16 | `linting_formatting_and_code_quality/` | 3 | ESLint 10 flat config, typescript-eslint type-aware rules and their cost, Biome, oxlint, Prettier |
-| 17 | `web_performance_and_core_web_vitals/` | 4 — Quality & Delivery | LCP/INP/CLS at p75, lab vs field, resource hints, images and fonts, the performance budget |
-| 18 | `accessibility_and_wcag/` | 4 | WCAG 2.2 AA, the accessibility tree, semantic HTML first, ARIA as last resort, keyboard and focus, axe in CI |
-| 19 | `pwa_service_workers_and_offline/` | 4 | Storage APIs and quotas, SW lifecycle and scope traps, caching strategies, background sync, install and update UX |
-| 20 | `frontend_delivery_and_observability/` | 4 | Static hosting and edge, immutable hashed assets, the post-deploy chunk 404, RUM, source-map upload, client OpenTelemetry |
+| 17 | `frontend_testing_and_ci/` | 3 | jsdom vs a real browser, Vitest 5 browser mode, MSW 3, Playwright traces and sharding, flake quarantine, visual regression, CI budget gates |
+| 18 | `web_performance_and_core_web_vitals/` | 4 — Quality & Delivery | LCP/INP/CLS at p75, lab vs field, resource hints, images and fonts, the performance budget |
+| 19 | `accessibility_and_wcag/` | 4 | WCAG 2.2 AA, the accessibility tree, semantic HTML first, ARIA as last resort, keyboard and focus, axe in CI |
+| 20 | `pwa_service_workers_and_offline/` | 4 | Storage APIs and quotas, SW lifecycle and scope traps, caching strategies, background sync, install and update UX |
+| 21 | `frontend_delivery_and_observability/` | 4 | Static hosting and edge, immutable hashed assets, the post-deploy chunk 404, RUM, source-map upload, client OpenTelemetry |
 
 ## Sub-Files (0)
 
@@ -116,7 +119,7 @@ normal §14:
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 20 modules) plus two curated tiers. They are
+`README.md` documents the **Full Path** (all 21 modules) plus two curated tiers. They are
 **different cuts, not nested depths** — senior is the craft, principal is the judgment.
 Membership is declared ONCE, in the `<!-- study-paths -->` block in this section's
 `README.md`. Order is never declared there — it comes from `STUDY_ORDER.frontend_platform`
@@ -125,10 +128,8 @@ gitignored `questions/paths.json`. The tier tables between `<!-- study-path-tabl
 markers are **generated** by `python3 game/extract.py --write-paths` — never hand-edit them,
 and note that `--write-paths` only fills marker pairs that already exist.
 
-Intended tier shape once modules land:
-
-- **Senior:** 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 14, 17, 18, 19
-- **Principal:** 9, 12, 13, 14, 15, 17, 20
+Shipped tier sizes: **Senior** 21 modules (every module), **Principal** 13. The README
+block holds the membership; do not restate it here.
 
 ---
 

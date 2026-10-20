@@ -348,6 +348,67 @@ Note `DefaultTyping` now lives in `tools.jackson.databind`, not nested inside `O
 - **Failure on "empty beans"** (`SerializationFeature.FAIL_ON_EMPTY_BEANS`, default `true`) throws `InvalidDefinitionException: ... no properties discovered` when Jackson finds zero serializable properties on a class — often a marker class, a class with only private fields and no getters/annotations, or (before adding the right module) a Kotlin data class.
 - **Property order is alphabetical by default** (`MapperFeature.SORT_PROPERTIES_ALPHABETICALLY` is on), so field-declaration order does not survive into the output. If a consumer or a golden-file test depends on ordering, pin it with `@JsonPropertyOrder` rather than on the declaration order of the class.
 
+### `StreamReadConstraints`: parser-level DoS limits
+
+Every parser checks its input against a `StreamReadConstraints` object held by the `JsonFactory`. The limits were added in Jackson 2.15 (April 2023) because a parser with no limits gives an attacker three cheap attacks: a deeply nested array (`[[[[...` a few hundred thousand levels) overflows the thread stack in the recursive deserializers, a 1,000,000-digit number makes `BigInteger`/`BigDecimal` parsing run in super-linear time, and a single huge string or field name forces one huge `char[]` allocation. A breach throws `StreamConstraintsException` (a `JacksonException`) at the token that crosses the limit, before any binding runs.
+
+| Constraint | Jackson 3.x default | Jackson 2.21 default | What it stops |
+|------------|--------------------|----------------------|---------------|
+| `maxNestingDepth` | 500 | 1,000 | `StackOverflowError` from deep `[`/`{` nesting |
+| `maxNumberLength` | 1,000 chars | 1,000 chars | Super-linear `BigInteger`/`BigDecimal` parsing |
+| `maxStringLength` | 100,000,000 chars | 20,000,000 chars | One giant string value buffered in heap |
+| `maxNameLength` (2.16+) | 50,000 chars | 50,000 chars | Giant field names filling the symbol table |
+| `maxDocumentLength` (2.16+) | unlimited | unlimited | Total input size |
+| `maxTokenCount` (2.18+) | unlimited | unlimited | Many small tokens, such as 10M empty arrays |
+
+The defaults are sized so that legitimate data almost never trips them, which means they are far too loose for a public endpoint. A 100 MB string limit still lets one request allocate 200 MB of `char[]`. Tighten them to the contract on any mapper that reads untrusted input:
+
+```java
+JsonFactory untrusted = JsonFactory.builder()
+        .streamReadConstraints(StreamReadConstraints.builder()
+                .maxNestingDepth(64)              // real payloads nest under 10 levels
+                .maxStringLength(1_000_000)       // largest legal field is a 500 KB note
+                .maxDocumentLength(10_000_000)    // matches the 10 MB request-body cap
+                .maxTokenCount(1_000_000)
+                .build())
+        .build();
+JsonMapper PUBLIC_API = JsonMapper.builder(untrusted).build();
+```
+
+Raise a limit the same way when a trusted batch job hits one, for example a base64 document blob larger than 100 MB. Raise it on the mapper that serves that job, not on the shared public one. `maxDocumentLength` and `maxTokenCount` are the only limits that cover input made of many small tokens, so set one of them even when the HTTP layer already caps the body size, because the HTTP cap does not apply to a message read from a queue or a file.
+
+### Jackson 2 and Jackson 3 in one JVM
+
+Jackson 3 changed both the Maven groupId (`tools.jackson.core`) and the Java package (`tools.jackson.*`), so `jackson-databind` 2.x and 3.x load side by side with no class clash. That is the normal state during a migration: a framework such as Spring Boot 4 moves to 3.x while an SDK on the classpath (an AWS, Kafka, or Elasticsearch client) still uses 2.x internally. The one shared jar is `com.fasterxml.jackson.core:jackson-annotations`, which kept its 2.x coordinates and package. Jackson 3.0 depends on `jackson-annotations` 2.20, so both mappers read the same `@JsonProperty`, `@JsonCreator`, `@JsonIgnore`, and `@JsonTypeInfo` on a DTO.
+
+```mermaid
+flowchart LR
+    dto(["DTO with @JsonProperty<br/>@JsonCreator @JsonTypeInfo"]):::io
+    ann(["jackson-annotations 2.20+<br/>com.fasterxml.jackson.annotation"]):::base
+    m2(["jackson-databind 2.x<br/>com.fasterxml.jackson.databind"]):::frozen
+    m3(["jackson-databind 3.x<br/>tools.jackson.databind"]):::train
+    a2(["@JsonSerialize, JsonSerializer,<br/>Module (2.x packages)"]):::lossN
+    a3(["@JsonSerialize, ValueSerializer,<br/>JacksonModule (3.x packages)"]):::lossN
+    dto --> ann
+    ann --> m2
+    ann --> m3
+    a2 -->|"seen only by"| m2
+    a3 -->|"seen only by"| m3
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+```
+
+Three traps follow from the split:
+
+1. **Databind-level annotations are not shared.** `@JsonSerialize`, `@JsonDeserialize`, `@JsonNaming`, and `@JsonPOJOBuilder` live in each databind's own `annotation` package. A DTO annotated with the 2.x `@JsonSerialize(using = MoneySerializer.class)` serializes correctly through the 2.x mapper and silently ignores the custom serializer on the 3.x mapper. No error is raised; the wire shape changes.
+2. **Serializers and modules do not cross over.** A 2.x `JsonSerializer` or `Module` cannot be registered on a 3.x mapper (the 3.x types are `ValueSerializer` and `JacksonModule`). A shared `MoneyModule` needs one build per major version, or a 2.x and a 3.x adapter over a common formatting function.
+3. **The annotations version is mediated across both.** A 2.x BOM older than 2.20 that is imported first pins `jackson-annotations` below what 3.x needs, and the 3.x mapper then fails at startup with `NoSuchMethodError` or `NoClassDefFoundError`. Import the 2.x BOM at 2.20 or later (2.21 LTS) together with the 3.x BOM, and check `mvn dependency:tree -Dincludes=com.fasterxml.jackson.core` or `gradle dependencyInsight --dependency jackson-annotations`.
+
+Keep the two mappers apart in code: a 2.x mapper for the SDK boundary, the 3.x `JsonMapper` for everything the application owns. Pass `String` or `byte[]` between them, never a `JsonNode`, because a 2.x `JsonNode` and a 3.x `JsonNode` are different types.
+
 ### Performance levers
 
 Beyond reusing the mapper (already covered above), the streaming API is the right tool for payloads too large to fully materialize, and **Blackbird** (`tools.jackson.module:jackson-module-blackbird`) replaces reflective getter/setter calls with `LambdaMetafactory`-generated accessors — worth a double-digit-percentage win on reflection-heavy POJO workloads, and the module to reach for when profiling actually points at bean accessors. Jackson also internally recycles parser/generator buffers and symbol tables per `TokenStreamFactory` — another reason a shared, long-lived mapper outperforms constructing fresh ones.
@@ -551,7 +612,8 @@ The multiplier is what turns a payload that "obviously fits" into an OOM. The he
 | `tools.jackson.core:jackson-databind` | `ObjectMapper`/`JsonMapper`, data binding, tree model | The artifact most code depends on directly; pulls `jackson-core` and `jackson-annotations` transitively |
 | `tools.jackson.core:jackson-core` | `JsonParser`/`JsonGenerator`, `TokenStreamFactory`, streaming | Foundation layer for the other two |
 | `com.fasterxml.jackson.core:jackson-annotations` | `@JsonProperty`, `@JsonIgnore`, etc. | The one component that kept its 2.x coordinates and package — the annotations are shared |
-| `tools.jackson:jackson-bom` | Version alignment across every Jackson artifact | Import as a platform/BOM and declare modules without versions |
+| `tools.jackson:jackson-bom` | Version alignment across every Jackson artifact | Import as a platform/BOM and declare modules without versions. 3.1 (2026-02-23) is the 3.x LTS branch; 3.2 (2026-06-08) is a non-LTS branch |
+| `com.fasterxml.jackson:jackson-bom` (2.x) | Version alignment for code still on Jackson 2 | 2.21 (2026-01-18) is the 2.x LTS branch; 2.22 (2026-05-31) is a non-LTS branch |
 | `java.time`, `Optional`, parameter names | Built into `jackson-databind` | Nothing to add; tune date/time through the `DateTimeFeature` enum |
 | `tools.jackson.module:jackson-module-blackbird` | `LambdaMetafactory`-generated accessors | The performance module to reach for when profiling points at bean accessors |
 | `tools.jackson.module:jackson-module-kotlin` | Kotlin data classes, nullability, default arguments | Without it, a Kotlin data class trips `FAIL_ON_EMPTY_BEANS` |
@@ -578,6 +640,14 @@ Because construction plus first-use reflection costs on the order of tens of mil
 **Short:** It let attacker-controlled JSON name the class to instantiate, enabling gadget-chain RCE.
 
 It let attacker-controlled JSON name the exact Java class to instantiate, enabling gadget-chain remote code execution. CVE-2017-7525 was the canonical origin (default typing plus Commons Collections on the classpath); Jackson's initial blacklist-based mitigation triggered years of whack-a-mole as new gadget classes were found in other libraries, CVE-2019-12384 among dozens that followed. A blacklist can never cover "every class on the classpath," so the fix was inverted into an allowlist: `PolymorphicTypeValidator`. Today that allowlist is not optional — default typing is activated only through the builder, and the permissive `LaissezFaireSubTypeValidator` is no longer a public class, so you cannot switch this on and inherit "permit every subtype" by accident. The dependable answer is still to avoid default typing entirely in favor of a closed `@JsonTypeInfo`/`@JsonSubTypes` set you control.
+
+**Q: What does `StreamReadConstraints` protect against, and why tighten its defaults on a public endpoint?**
+**Short:** Parser-level DoS: deep nesting, huge numbers, giant strings or names; defaults (depth 500, strings 100M chars in 3.x) are far too loose for untrusted input.
+It holds per-parser limits, added in Jackson 2.15, that stop three cheap attacks before any binding runs: deep `[`/`{` nesting that overflows the stack in recursive deserializers, a very long number whose `BigInteger`/`BigDecimal` parsing runs in super-linear time, and a giant string or field name that forces one huge `char[]`. A breach throws `StreamConstraintsException` at the offending token. The Jackson 3 defaults are nesting depth 500, number length 1,000, string length 100,000,000 chars, name length 50,000, with document length and token count unlimited. They are sized so legitimate data almost never trips them, so one request can still allocate 200 MB for a single string. On a mapper that reads untrusted input, set `maxNestingDepth`, `maxStringLength`, and `maxDocumentLength` to the contract (for example 64, 1 MB, 10 MB) through `JsonFactory.builder().streamReadConstraints(...)`.
+
+**Q: Can Jackson 2 and Jackson 3 run in the same JVM, and what breaks when they do?**
+**Short:** Yes, they use different packages and groupIds, but databind annotations such as @JsonSerialize, serializers, and modules are not shared between them.
+Yes. Jackson 3 moved `jackson-databind` and `jackson-core` to the `tools.jackson` groupId and package, so both majors load side by side, and only `jackson-annotations` (2.20+, package `com.fasterxml.jackson.annotation`) is shared. Both mappers therefore honor `@JsonProperty`, `@JsonCreator`, and `@JsonTypeInfo`. What breaks is everything at the databind level: a 2.x `@JsonSerialize(using = ...)` is silently ignored by the 3.x mapper, a 2.x `Module` or `JsonSerializer` cannot be registered on a 3.x mapper, and a 2.x `JsonNode` is a different type from a 3.x one. Version mediation is the third trap: a 2.x BOM older than 2.20 pins `jackson-annotations` too low and the 3.x mapper fails with `NoSuchMethodError`. Keep one mapper per boundary and pass `String` or `byte[]` between them.
 
 **Q: Why does `mapper.readValue(json, List.class)` silently lose the element type?**
 **Short:** Type erasure removes generics at compile time, so the call returns raw LinkedHashMaps instead.
@@ -678,6 +748,9 @@ Break the cycle with `@JsonManagedReference`/`@JsonBackReference` on the two sid
 8. **Prefer Java records for new DTOs** — Jackson binds them with zero extra annotation in the common case, and their immutability sidesteps a class of partial-construction bugs POJOs are prone to [Effective Java Item 17: "Minimize mutability"].
 9. **Add Blackbird for reflection-heavy hot paths** — measure first; the base cache alone is often enough.
 10. **Never catch and swallow `JacksonException`** — it almost always signals either a real data-contract bug or a security-relevant malformed payload, not a condition to paper over. Because it is unchecked, an untouched code path will not force you to notice it: catch it explicitly wherever a parse failure has a defined response.
+11. **Set `StreamReadConstraints` on every mapper that reads untrusted input** (nesting depth, string length, document length to the contract) instead of relying on defaults sized for trusted data.
+12. **When Jackson 2 and 3 share a classpath, import both BOMs with the 2.x BOM at 2.20 or later**, and keep custom serializers and modules per major version.
+13. **Pin services to an LTS branch through the BOM**: 3.1 for Jackson 3 and 2.21 for code still on Jackson 2. The project keeps an LTS branch open for fixes for at least two years, while a non-LTS branch such as 3.2 or 2.22 closes once the next minor ships, so a pin to it forces a minor upgrade to get the next security fix.
 
 ---
 

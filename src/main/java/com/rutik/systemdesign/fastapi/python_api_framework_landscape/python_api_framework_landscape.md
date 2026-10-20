@@ -115,20 +115,20 @@ Six categories, and the category usually decides more than the individual choice
 
 ### 4.2 What each one actually is
 
-All versions below are from PyPI, measured 2026-08-26.
+All versions below are from PyPI, measured 2026-10-19.
 
 | Framework | Version | Genuinely differentiating property |
 |---|---|---|
-| FastAPI | 0.141.1 (2026-07-29) | the default: Pydantic v2 validation, zero-config OpenAPI 3.1, `Depends`, largest ASGI ecosystem |
-| Litestar | 2.24.0 (2026-06-11) | msgspec serialization, **DI built in at app/router/controller/handler level**, rich plugin API |
-| Django Ninja | 1.6.3 (2026-08-17) | FastAPI-style ergonomics with Pydantic v2, **inside** a Django project |
-| Django REST Framework | 3.18.0 (2026-08-07) | the mature default for Django; **no async in core** |
+| FastAPI | 0.148.0 (2026-10-19) | the default: Pydantic v2 validation, zero-config OpenAPI 3.1, `Depends`, largest ASGI ecosystem |
+| Litestar | 2.25.0 (2026-10-18) | msgspec serialization, **DI built in at app/router/controller/handler level**, rich plugin API |
+| Django Ninja | 1.7.1 (2026-09-19) | FastAPI-style ergonomics with Pydantic v2, **inside** a Django project |
+| Django REST Framework | 3.18.3 (2026-10-06) | the mature default for Django; **no async in core** |
 | Flask | 3.1.3 (2026-02-19) | the smallest mental model; enormous ecosystem; WSGI |
-| Quart | 0.22.0 (2026-08-19) | Flask's API on ASGI, maintained under Pallets |
-| BlackSheep | 2.6.3 (2026-06-04) | Cython-optimised ASGI with built-in DI and OpenAPI |
+| Quart | 0.23.1 (2026-08-29) | Flask's API on ASGI, maintained under Pallets |
+| BlackSheep | 2.6.4 (2026-10-11) | Cython-optimised ASGI with built-in DI and OpenAPI |
 | Robyn | 0.88.0 (2026-06-25) | a Rust runtime core via PyO3, Python application code |
 | Sanic | 25.12.1 (2026-05-31) | one of the original async-native, uvloop-based frameworks |
-| Falcon | 4.3.1 (2026-06-16) | minimalist, low-overhead, **both WSGI and ASGI** since 4.0 |
+| Falcon | 4.4.0 (2026-09-30) | minimalist, low-overhead, **both WSGI and ASGI** since 4.0 |
 
 Two corrections to widely repeated claims, both worth carrying into an interview.
 
@@ -282,7 +282,7 @@ flowchart LR
 Ergonomics arguments are usually asserted. Here they are visible.
 
 ```python
-# FastAPI 0.141.1
+# FastAPI 0.148.0
 from fastapi import Depends, FastAPI
 from pydantic import BaseModel
 
@@ -304,7 +304,7 @@ async def create_item(item: ItemIn, repo: Repo = Depends(get_repo)) -> ItemOut:
 ```
 
 ```python
-# Litestar 2.24.0 -- note where the dependency is declared
+# Litestar 2.25.0 -- note where the dependency is declared
 from litestar import Litestar, post
 from litestar.di import Provide
 from pydantic import BaseModel
@@ -329,7 +329,7 @@ app = Litestar(route_handlers=[create_item], dependencies={"repo": Provide(get_r
 ```
 
 ```python
-# Django Ninja 1.6.3 -- inside a Django project, with the ORM available
+# Django Ninja 1.7.1 -- inside a Django project, with the ORM available
 from ninja import NinjaAPI, Schema
 
 api = NinjaAPI()
@@ -525,16 +525,16 @@ curl -s https://pypi.org/pypi/litestar/json \
 What the answer tells you: how quickly a security fix will reach you, how long after a Python release
 you will be able to upgrade, and whether the project still has maintainers. Against the versions in
 §4.2, one contrast stands out — **Hypercorn's latest release is 0.18.0 from 2025-11-08, while uvicorn
-is at 0.52.4 from 2026-08-19 and Granian at 2.8.2 from 2026-08-23.** That is not a judgement about
+is at 0.54.0 from 2026-09-25 and Granian at 2.8.4 from 2026-09-30.** That is not a judgement about
 Hypercorn's quality; it is a fact about cadence that belongs in a decision where you are picking
 something to depend on for years. The ASGI server comparison itself belongs to
 [`../production_deployment_and_scaling/production_deployment_and_scaling.md`](../production_deployment_and_scaling/production_deployment_and_scaling.md)
 §4.4 and is not re-argued here.
 
 Popularity is a weaker signal but not a useless one, because it predicts how many of your problems
-someone has already solved and written up. Measured via the GitHub API on 2026-08-26:
-fastapi/fastapi 101,862 stars; encode/django-rest-framework 30,144; vitalik/django-ninja 9,174;
-litestar-org/litestar 8,411. Always state the measurement date beside a number like that — it is a
+someone has already solved and written up. Measured via the GitHub API on 2026-10-19:
+fastapi/fastapi 103,228 stars; encode/django-rest-framework 30,210; vitalik/django-ninja 9,214;
+litestar-org/litestar 8,521. Always state the measurement date beside a number like that; it is a
 snapshot, and quoting it undated is how a stale figure becomes folklore.
 
 ### 6.7 What a migration actually costs
@@ -591,9 +591,9 @@ An interview answer that notices this is stronger than one that quotes a number 
 
 ### The main comparison
 
-Versions and star counts measured 2026-08-26; everything else is a property, not a measurement.
+Versions and star counts measured 2026-10-19; everything else is a property, not a measurement.
 
-| Dimension | FastAPI 0.141.1 | Litestar 2.24.0 | Django Ninja 1.6.3 | DRF 3.18.0 | Flask 3.1.3 |
+| Dimension | FastAPI 0.148.0 | Litestar 2.25.0 | Django Ninja 1.7.1 | DRF 3.18.3 | Flask 3.1.3 |
 |---|---|---|---|---|---|
 | Concurrency model | ASGI, async-native | ASGI, async-native | ASGI within Django | sync core | WSGI; async on a thread |
 | Validation | Pydantic v2 | msgspec (Pydantic supported) | Pydantic v2 | DRF serializers | none built in |
@@ -798,24 +798,24 @@ tests written against the new model do not know what the old one rejected.
 
 ## 11. Technologies & Tools
 
-Versions from PyPI, measured 2026-08-26.
+Versions from PyPI, measured 2026-10-19.
 
 | Tool | Role | Notes |
 |---|---|---|
-| FastAPI | ASGI framework, Pydantic-first | 0.141.1; emits OpenAPI 3.1 |
-| Litestar | ASGI framework, msgspec-first | 2.24.0; layered DI, plugin API |
-| Django Ninja | FastAPI-style API inside Django | 1.6.3; independent project, not built on FastAPI or DRF |
-| Django REST Framework | mature Django API layer | 3.18.0; no async in core |
+| FastAPI | ASGI framework, Pydantic-first | 0.148.0; emits OpenAPI 3.1 |
+| Litestar | ASGI framework, msgspec-first | 2.25.0; layered DI, plugin API |
+| Django Ninja | FastAPI-style API inside Django | 1.7.1; independent project, not built on FastAPI or DRF |
+| Django REST Framework | mature Django API layer | 3.18.3; no async in core |
 | `adrf` | async views and viewsets for DRF | the common third-party async path |
 | Flask | WSGI microframework | 3.1.3; `flask[async]` pulls `asgiref>=3.2` |
-| Quart | Flask's API on ASGI | 0.22.0; maintained under Pallets |
-| BlackSheep | Cython-optimised ASGI | 2.6.3; built-in DI and OpenAPI |
+| Quart | Flask's API on ASGI | 0.23.1; maintained under Pallets; requires Python 3.13+ |
+| BlackSheep | Cython-optimised ASGI | 2.6.4; built-in DI and OpenAPI |
 | Robyn | Rust runtime core via PyO3 | 0.88.0 |
 | Sanic | early async-native framework | 25.12.1 |
-| Falcon | minimalist, WSGI **and** ASGI | 4.3.1; dual-stack since 4.0 |
-| Starlette | the ASGI toolkit under FastAPI | 1.6.0; `requires_python >=3.10` |
-| Pydantic | validation and serialization | 2.13.4; v3 unreleased, no announced timeline |
-| msgspec | fast serialization | 0.21.1; the project's own benchmarks claim 10-20x over Pydantic v2 decode |
+| Falcon | minimalist, WSGI **and** ASGI | 4.4.0; dual-stack since 4.0 |
+| Starlette | the ASGI toolkit under FastAPI | 1.9.0; `requires_python >=3.11` since 1.8.0 |
+| Pydantic | validation and serialization | 2.14.1; v3 unreleased, no announced timeline |
+| msgspec | fast serialization | 0.22.0; the project's own benchmarks claim 10-20x over Pydantic v2 decode |
 | PyPI JSON API | maintenance-velocity check | `https://pypi.org/pypi/<pkg>/json` |
 
 ---
@@ -860,7 +860,7 @@ The estimate people give covers the parts that transfer — models, business log
 **Q: How do you assess whether a framework is safe to depend on for the next three years?**
 **Short:** Check its latest release date on PyPI — one request tells you how fast a CVE will reach you.
 
-`curl https://pypi.org/pypi/<pkg>/json` gives the current version and its upload time. That single number predicts how quickly a security fix arrives and how long after a Python release you can upgrade, and it is more useful than any latency figure. Run it for the framework, the ASGI server, and every dependency in the request path. A concrete contrast measured 2026-08-26: uvicorn 0.52.4 released 2026-08-19 and Granian 2.8.2 released 2026-08-23, against Hypercorn 0.18.0 from 2025-11-08. That is not a quality judgement, it is a cadence fact that belongs in a multi-year decision.
+`curl https://pypi.org/pypi/<pkg>/json` gives the current version and its upload time. That single number predicts how quickly a security fix arrives and how long after a Python release you can upgrade, and it is more useful than any latency figure. Run it for the framework, the ASGI server, and every dependency in the request path. A concrete contrast measured 2026-10-19: uvicorn 0.54.0 released 2026-09-25 and Granian 2.8.4 released 2026-09-30, against Hypercorn 0.18.0 from 2025-11-08. That is not a quality judgement, it is a cadence fact that belongs in a multi-year decision.
 
 **Q: A Django team says they must leave Django to get async. Are they right?**
 **Short:** Usually not — Django Ninja or adrf gets async views without giving up the ORM, admin, auth and migrations.
@@ -890,7 +890,7 @@ msgspec is a fast serializer, not a validation framework with Pydantic's feature
 **Q: What is Quart, and when is it the right answer?**
 **Short:** Flask's API reimplemented on ASGI under Pallets, and it is the right answer when an existing Flask app needs real async concurrency.
 
-Quart (0.22.0, 2026-08-19) keeps Flask's routing, blueprints and request-context idioms while running on ASGI, so an existing Flask codebase migrates far more cheaply than it would to a differently-shaped framework, and the team's mental model carries over. It is the honest recommendation for the Pitfall 1 team: they wanted concurrency, `flask[async]` cannot provide it, and Quart can without a rewrite. The caveats are ecosystem — some Flask extensions have no async equivalent — and that you are choosing a smaller community than FastAPI's, which is a real trade for a long-lived service.
+Quart (0.23.1, 2026-08-29, requires Python 3.13+) keeps Flask's routing, blueprints and request-context idioms while running on ASGI, so an existing Flask codebase migrates far more cheaply than it would to a differently-shaped framework, and the team's mental model carries over. It is the honest recommendation for the Pitfall 1 team: they wanted concurrency, `flask[async]` cannot provide it, and Quart can without a rewrite. The caveats are ecosystem (some Flask extensions have no async equivalent) and that you are choosing a smaller community than FastAPI's, which is a real trade for a long-lived service.
 
 **Q: What is the first question you ask when someone proposes a framework migration?**
 **Short:** What did the profile say, because the answer is usually queries rather than the framework.
@@ -898,7 +898,7 @@ Quart (0.22.0, 2026-08-19) keeps Flask's routing, blueprints and request-context
 Framework overhead is microseconds; the endpoints people want to fix are tens or hundreds of milliseconds, and the milliseconds are almost always in database access patterns. Ask for the profile before discussing candidates. If framework overhead is under roughly 5% of the request, no migration can pay for itself regardless of what any benchmark claims. If it genuinely dominates, replicate one endpoint on the candidate and measure it against yours, on your hardware, with your payloads — that is a measurement you can defend, unlike a published number about someone else's workload.
 
 **Q: What is the status of Pydantic v3?**
-**Short:** Unreleased with no announced timeline; current stable is 2.13.4.
+**Short:** Unreleased with no announced timeline; current stable is 2.14.1.
 
 Pydantic's own version policy states only that breaking changes will be introduced with care and that in v3 `pydantic-core` is expected to be merged in as an internal submodule rather than published standalone. No date has been announced, so anyone quoting one is guessing. The practical implication for a framework decision is that Pydantic v2 is the stable foundation to plan against, and a migration plan that depends on v3 timing depends on something nobody has published. This is also the right shape of answer to any "when will X ship" question: state the current version, state that no timeline exists, and stop.
 

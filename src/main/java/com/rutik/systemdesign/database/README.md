@@ -74,7 +74,7 @@ Phase 7: Architecture & Selection
 |--------|-------|------|--------------|
 | [Vector Databases](vector_databases/vector_databases.md) | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | [NewSQL & Distributed SQL](newsql_and_distributed_sql/newsql_and_distributed_sql.md) | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
-| [In-Memory Databases](in_memory_databases/in_memory_databases.md) | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| [In-Memory Databases](in_memory_databases/in_memory_databases.md) | Intermediate | 16 | Redis vs Memcached, Volt Active Data, Ignite, eviction, durability modes |
 | [Embedded & Edge Databases](embedded_and_edge_databases/embedded_and_edge_databases.md) | Advanced | 17 | SQLite, DuckDB, RocksDB, LMDB, litestream, local-first sync, CRDT replication |
 | [Lakehouse & Table Formats](lakehouse_and_table_formats/lakehouse_and_table_formats.md) | Expert | 16 | Iceberg v3, Delta Lake, Hudi, catalogs, snapshot isolation, compaction, time travel |
 
@@ -475,14 +475,17 @@ table — so the slot is named but not yet filled.
 | MySQL | 8.4 (2024-LTS) | Replication improvements, GTID enhancements |
 | MySQL | 9.7 (2026-LTS) | Hypergraph optimizer, JSON duality, in-database JavaScript, OpenID auth, replication applier metrics in Community |
 | MongoDB | 8.0 (2024) | ~25% better throughput, 54% faster bulk inserts, Queryable Encryption range queries, faster resharding |
-| MongoDB | 8.3 (2026) | Current stable series |
+| MongoDB | 9.0 (2026) | 9.0.0 on 28 Sept 2026; per-operation memory cap of 1 GB or 20% of server memory, server-side JavaScript on a WASM engine. 8.1/8.2/8.3 were Rapid Releases |
 | Redis | 7.4 (2024) | Hash field expiration (HEXPIRE) |
 | Redis | 8.x (2025+) | AGPLv3 option, JSON/time-series/vector-set and probabilistic types in core, Redis Query Engine, new I/O threading |
 | Redis | 8.10 (2026) | Current stable; compact hashes, `HIMPORT`, `BACKUP`. 8.8 added the Array type, `INCREX`, `XNACK` |
 | Valkey | 9.1 (2026) | BSD-3 fork at 9.1.1; lock-free I/O-thread queues, database-level ACLs, multi-DB cluster mode and atomic slot migration from 9.0 |
 | Cassandra | 5.0 (2024) | Storage-Attached Indexes (SAI), vector type + ANN search, trie memtables/SSTables, dynamic data masking |
-| Elasticsearch | 9.5 (2026) | Lucene 10.5, Better Binary Quantization GA, ES\|QL JOIN, search/IO parallelism — OpenSearch 3.7, forked at 7.10.2 |
-| ClickHouse | 26.x (2026) | Calendar versioning (YY.M); latest stable 26.7.5.10 (21 Aug 2026), newest LTS 26.8.2.7 (1 Sept 2026) |
+| Elasticsearch | 9.5 (2026) | Lucene 10.5, Better Binary Quantization GA, ES\|QL JOIN, search/IO parallelism; latest patch 9.5.5 — OpenSearch 3.9.0 (29 Sept 2026), forked at 7.10.2 |
+| ClickHouse | 26.x (2026) | Calendar versioning (YY.M); latest stable 26.9.21.9 (17 Oct 2026), newest LTS 26.8.30.8 (17 Oct 2026) |
+| Apache Druid | 38.0.0 (2026) | Released 1 Oct 2026; Java 17 no longer supported |
+| DuckDB | 1.5.6 (2026) | Released 28 Sept 2026; 2.0 is feature-frozen and unreleased |
+| Apache Arrow | 26.0.0 (2026) | Released 9 Oct 2026 |
 
 ---
 

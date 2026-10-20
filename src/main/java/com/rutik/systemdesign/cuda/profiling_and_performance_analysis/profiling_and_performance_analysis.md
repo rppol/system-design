@@ -841,7 +841,7 @@ an "after" run at throttled clocks manufactures a fake regression or a fake win.
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | Nsight Systems (`nsys`) | Whole-application timeline profiler | Start every investigation here; ~1-5% overhead |
-| Nsight Compute (`ncu`) | Per-kernel deep metric profiler | 10-100x overhead per replayed kernel; scope tightly with `-k`/`--launch-count` |
+| Nsight Compute (`ncu`) | Per-kernel deep metric profiler | 10-100x overhead per replayed kernel; scope tightly with `-k`/`--launch-count`. 2026.3 adds Rubin support, a Tile IR view on the Source page for CUDA Tile kernels, and workload-aligned PM sampling timeline data in the Python Report Interface and NvRules API, so a CI script can read the sampled timeline without the GUI. NVIDIA's Compute Triage Guide gives a top-down workflow for compute-bound kernels |
 | `nsys-ui` / `ncu-ui` | GUI viewers for `.nsys-rep`/`.ncu-rep` | Interactive exploration; both tools are also fully CLI/CI-scriptable |
 | CUDA Events (`cudaEvent_t`) | GPU-side timestamps in a stream | Correct way to time kernel execution from C++ without a full profiler |
 | NVTX (`nvtx3`) | User-defined named ranges/markers | Turns anonymous kernel timelines into labeled application phases |

@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-The context window is the maximum number of tokens an LLM can process in a single forward pass — including both input and output. Early LLMs had 2K-4K context (GPT-3: 2,048); modern models support 128K (GPT-4o, Llama 3.1 — note plain Llama 3 was 8K), 200K (Claude Haiku 4.5), and 1M (Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line). This expansion has fundamentally changed what LLM systems can do: process entire codebases, hour-long conversations, entire books, or multiple lengthy documents simultaneously.
+The context window is the maximum number of tokens an LLM can process in a single forward pass — including both input and output. Early LLMs had 2K-4K context (GPT-3: 2,048); modern models support 128K (GPT-4o, Llama 3.1 — note plain Llama 3 was 8K), 200K (Claude 3.5 Sonnet, 2024), and 1M (every current Claude model: Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5; and Gemini's Pro line). This expansion has fundamentally changed what LLM systems can do: process entire codebases, hour-long conversations, entire books, or multiple lengthy documents simultaneously.
 
 Long context creates both opportunities (simpler architecture — just put everything in context) and challenges (quadratic attention cost, "lost in the middle" phenomenon, higher token costs, and the ongoing debate: when should you use long context vs. RAG?).
 
@@ -12,9 +12,9 @@ Long context creates both opportunities (simpler architecture — just put every
 
 > **One-line analogy**: The context window is like working memory — the more you can hold in mind at once, the more sophisticated the reasoning you can do, but filling it up gets exponentially expensive.
 
-**Mental model**: An LLM can only "see" what's in its context window. 2K tokens (GPT-3) = a few pages; 1M (Claude Opus 5) = a shelf of books. Bigger context enables richer reasoning but costs quadratically more compute (O(n²) attention). The "lost in the middle" effect means models attend less to information buried in the middle of long contexts. Long context is simpler to build with (just stuff everything in) but expensive and imperfect; RAG is efficient but retrieval can miss the right context.
+**Mental model**: An LLM can only "see" what's in its context window. 2K tokens (GPT-3) = a few pages; 1M (Claude Opus 5.5) = a shelf of books. Bigger context enables richer reasoning but costs quadratically more compute (O(n²) attention). The "lost in the middle" effect means models attend less to information buried in the middle of long contexts. Long context is simpler to build with (just stuff everything in) but expensive and imperfect; RAG is efficient but retrieval can miss the right context.
 
-**Why it matters**: Long context changes what LLM systems can do — entire codebases, full legal contracts, complete conversation histories become accessible. But the cost structure matters: at Claude Sonnet 5's $2/1M input rate ($0.002/1K, as of 2026-09-04), a 200K-token prompt costs $0.40 per query. For high-frequency applications, that cost is prohibitive and RAG is necessary.
+**Why it matters**: Long context changes what LLM systems can do — entire codebases, full legal contracts, complete conversation histories become accessible. But the cost structure matters: at Claude Sonnet 5.5's $2/1M input rate ($0.002/1K, as of 2026-10-19), a 200K-token prompt costs $0.40 per query. For high-frequency applications, that cost is prohibitive and RAG is necessary.
 
 **Key insight**: Long context and [RAG](../rag_fundamentals/rag_fundamentals.md) are not competing approaches but complementary tools — use RAG for large corpora and cost sensitivity, use long context for holistic reasoning, and use both together (retrieve relevant chunks → put them in long context) for the best results.
 
@@ -31,7 +31,7 @@ Long context creates both opportunities (simpler architecture — just put every
 
 ---
 
-## 4. Positional Encoding Strategies
+## 4. Types / Architectures / Strategies
 
 ### 4.1 Absolute Positional Encoding (APE)
 
@@ -376,7 +376,8 @@ timeline
     2023 : GPT-4 Turbo — 128,000 tokens (long documents, complex tasks)
     2024 : Claude 3.5 Sonnet — 200,000 tokens (very long documents, codebases)
          : Gemini 1.5 Pro — 1,000,000 tokens (books, movies, large codebases)
-    2026 : Claude Opus 5 / Sonnet 5 / Fable 5 — 1,000,000 tokens (1M is now the frontier default)
+    2026 : Claude Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5 - 1,000,000 tokens (1M on every tier)
+         : Gemini 4 Argon - 1M context with decodes up to 1M tokens (output grows too)
 ```
 
 A ~2000× expansion (512 → 1M) — each jump changed what was buildable: 4K enabled chat, 128K enabled whole-document analysis, 1M enabled whole-codebase and multi-book reasoning. Note that GPT-4 shipped in March 2023 at 8K/32K; the 128K window arrived with GPT-4 Turbo in November 2023.
@@ -839,9 +840,12 @@ Use LONG CONTEXT when:
   ✓ Synthesizing across many documents simultaneously
   ✓ Full codebase reasoning (dependencies, patterns, architecture)
   ✓ Latency is important (no retrieval delay)
-  ✓ Budget allows (100K tokens costs $0.20 at Sonnet 5's $2/1M,
-    $0.50 at Opus 5's $5/1M, $1.00 at Fable 5's $10/1M)
+  ✓ Budget allows (100K tokens costs $0.20 at Sonnet 5.5's $2/1M,
+    $0.40 at Opus 5.5's $4/1M, $1.00 at Fable 5.1's $10/1M)
   ✓ Document is small enough: <100K tokens
+  ✓ Check for a price tier at a prompt-length threshold: Haiku 5.5 bills
+    $0.10/1M input up to 100K-token prompts and $0.50/1M above, so one
+    extra token past 100K multiplies the input bill by 5
 
 Use RAG when:
   ✓ Specific fact lookup from large corpus
@@ -855,6 +859,15 @@ Use BOTH (hybrid approach):
   ✓ Long context: put all retrieved chunks in full context
   ✓ Best of both worlds: efficiency of RAG + coherence of long context
 ```
+
+**Tiered long-context pricing moves the break-even.** Claude Haiku 5.5 (released 2026-10-07) prices
+by prompt length: input $0.10/1M and output $0.50/1M for prompts up to 100,000 tokens, and $0.50/1M
+and $2.50/1M for prompts over 100,000 tokens, with cache reads at $0.01/1M and $0.05/1M on the same
+split. A 95K-token prompt costs about $0.0095 in input; a 105K-token prompt costs about $0.0525, 5.5x
+more for 10% more tokens, and its output also costs 5x more per token. So the long-context-vs-RAG
+comparison is not one line with a fixed slope: below the threshold, stuffing the window is cheap
+enough that retrieval engineering rarely pays; just above it, trimming the prompt under 100K (or
+retrieving instead) cuts the bill by 5x. Price the request at the tier it will actually land in.
 
 For deciding *what* goes into the window and in what order (compaction, ordering, memory), see [Context Engineering](../context_engineering/context_engineering.md).
 
@@ -870,7 +883,15 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 - Note the two-tier rollout: the generally available window was 128K, with 1M behind a preview
 - Used for: long video analysis, codebase understanding, multi-document research
 
-### Claude (1M Context on Opus 5 / Sonnet 5 / Fable 5)
+### Gemini 4 Argon (1M Context, 1M-Token Decodes)
+- `gemini-4-argon`, generally available on the Gemini API since 2026-10-13; Google describes it as
+  its most capable model for complex coding, agentic, math, and science tasks
+- A unified 1M-token context window, with long decodes of up to 1M tokens
+- What changes for system design: long context now covers writing long outputs (whole modules,
+  full reports) in one call, not only reading long inputs; there, per-token decode cost and
+  KV-cache growth during generation set latency and price
+
+### Claude (1M Context on Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5)
 - Processes entire codebases for code review
 - Analyzes complete legal contracts (most <100K tokens)
 - Maintains coherent conversation over long sessions
@@ -920,7 +941,7 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 ## 10. Common Pitfalls
 
 1. **Trusting long context for high-stakes fact retrieval**: "Lost in the middle" is real. For exact fact retrieval from long documents, RAG is more reliable.
-2. **Forgetting token cost**: a 100K-token context costs $0.20/query at Claude Sonnet 5's $2/1M input rate and $1.00 at Fable 5's $10/1M — before output tokens. High-frequency applications need RAG.
+2. **Forgetting token cost**: a 100K-token context costs $0.20/query at Claude Sonnet 5.5's $2/1M input rate and $1.00 at Fable 5.1's $10/1M — before output tokens. High-frequency applications need RAG.
 3. **Assuming linear quality vs. length**: Quality can degrade non-linearly beyond the model's "effective context window."
 4. **Not tuning for long context**: A 4K-trained model with naive position scaling may have 20% accuracy at 100K. Use proper long-context fine-tuning (YaRN, etc.).
 5. **Ignoring TTFT at long context**: 200K token prefill takes 10-30 seconds even on H100. Users notice.
@@ -938,7 +959,7 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 | **LongBench** | Long-context evaluation | Standardized benchmark |
 | **RULER** | Long-context needle eval | More rigorous than simple needle test |
 | **Gemini API (Pro line)** | 1M context | Google's long-context managed API |
-| **Claude API** | 1M context on Opus 5 / Sonnet 5 / Fable 5; 200K on Haiku 4.5 | Strong on long documents |
+| **Claude API** | 1M context on Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 | Strong on long documents |
 | **Jamba (AI21)** | SSM + Transformer hybrid | Efficient long context |
 | **Mamba** | State Space Model | Linear-time; alternative to attention |
 
@@ -988,7 +1009,7 @@ A: "Context rot" (Chroma, 2025) is the finding that model reliability degrades a
 
 **Q: When should you use long context instead of RAG, and vice versa?**
 **Short:** Long context can cost roughly 80x more per query than RAG on the same document (e.g., $0.40 vs $0.005 at 200K tokens), so reserve it for reasoning across all chunks at once.
-Use long context when: (1) the entire document set fits in context (up to 1M tokens on Claude Opus 5 / Sonnet 5 / Fable 5 and Gemini's Pro line) and you need reasoning across all documents simultaneously; (2) the task requires understanding document structure, cross-references, or holistic summarization; (3) you need to answer arbitrary questions about a small, fixed document set (e.g., a single contract). Use RAG when: (1) the corpus is too large for any context window (millions of documents); (2) the corpus changes frequently (new documents added daily); (3) you need to scale to many users with different document access; (4) cost matters — processing 100K tokens per query costs $0.25 on GPT-4o at $2.50/1M, $0.20 on Claude Sonnet 5 at $2/1M, and $1.00 on Claude Fable 5 at $10/1M, before output. Hybrid approach: use RAG to retrieve relevant chunks, then use long context to process them together. Concrete numbers: Claude Sonnet 5 at 200K input tokens costs $0.40 per query; RAG with 5 chunks of 500 tokens (2,500 tokens) costs $0.005. Long context is 80x more expensive but avoids retrieval errors.
+Use long context when: (1) the entire document set fits in context (up to 1M tokens on every current Claude model and Gemini's Pro line) and you need reasoning across all documents simultaneously; (2) the task requires understanding document structure, cross-references, or holistic summarization; (3) you need to answer arbitrary questions about a small, fixed document set (e.g., a single contract). Use RAG when: (1) the corpus is too large for any context window (millions of documents); (2) the corpus changes frequently (new documents added daily); (3) you need to scale to many users with different document access; (4) cost matters — processing 100K tokens per query costs $0.25 on GPT-4o at $2.50/1M, $0.20 on Claude Sonnet 5.5 at $2/1M, and $1.00 on Claude Fable 5.1 at $10/1M, before output. Hybrid approach: use RAG to retrieve relevant chunks, then use long context to process them together. Concrete numbers: Claude Sonnet 5.5 at 200K input tokens costs $0.40 per query; RAG with 5 chunks of 500 tokens (2,500 tokens) costs $0.005. Long context is 80x more expensive but avoids retrieval errors.
 
 **Q: How does context window size affect KV cache memory and inference cost?**
 **Short:** KV cache memory scales linearly with context length via num_kv_heads and head_dim, so GQA and FP8 quantization are what make long contexts fit in GPU memory.
@@ -1036,11 +1057,11 @@ A: Because autoregressive models learn to park a large fraction of attention mas
 **Architecture:**
 ```
 Codebase: 500K tokens (2500 files × 200 tokens avg)
-Input prices used below (as of 2026-09-04): Sonnet 5 $2/1M, Opus 5 $5/1M, cache read 0.1x
+Input prices used below (as of 2026-10-19): Sonnet 5.5 $2/1M, Opus 5.5 $4/1M, cache read 0.05x
 
-Option 1: Pure long context (Claude Opus 5, 1M context)
+Option 1: Pure long context (Claude Opus 5.5, 1M context)
   Put all 500K tokens in context
-  Cost per query: 500K × $5/1M = $2.50 per question
+  Cost per query: 500K × $4/1M = $2.00 per question
   TTFT: 15-20 seconds for 500K prefill
   Quality: excellent for holistic architecture questions
 
@@ -1054,22 +1075,22 @@ Option 2: RAG only
 Option 3: Hybrid (chosen approach)
   1. Query analysis: classify as "specific" or "architectural"
   2. Specific queries (e.g., "what does function X do?"):
-     → RAG: retrieve 3-5 relevant files → 10K context (Sonnet 5) → $0.02
+     → RAG: retrieve 3-5 relevant files → 10K context (Sonnet 5.5) → $0.02
   3. Architectural queries (e.g., "explain the payment flow"):
      → Smart selection: dependency graph → select 50 most relevant files
-     → 100K context (Sonnet 5) → $0.20
+     → 100K context (Sonnet 5.5) → $0.20
   4. Full codebase queries (e.g., "identify all god classes"):
-     → Full context: Opus 5 at 500K → expensive but necessary ($2.50)
+     → Full context: Opus 5.5 at 500K → expensive but necessary ($2.00)
 
 Prompt caching:
   Repository stays fairly stable → cache the codebase prefix
-  Anthropic cache reads are billed at 0.1x base input (a 90% discount)
-  100K cached prefix: 100K × $0.20/1M = $0.02, plus the per-request delta
+  Cache reads on Opus 5.5 and Sonnet 5.5 bill at 0.05x base input (a 95% discount)
+  100K cached prefix on Sonnet 5.5: 100K × $0.10/1M = $0.01, plus the per-request delta
 
 Result:
   Specific query cost: $0.02 avg
-  Architecture query cost: $0.04 avg (with caching)
-  Full codebase query: $0.25 (500K x Opus 5 cache read $0.50/1M, with caching)
+  Architecture query cost: $0.03 avg (with caching)
+  Full codebase query: $0.10 (500K x Opus 5.5 cache read $0.20/1M, with caching)
   Architecture accuracy: 91% (vs. 73% with RAG-only) — illustrative
 ```
 
@@ -1160,7 +1181,7 @@ def review_contract_rag(contract_path: str, question: str) -> str:
 
 **What is the "lost in the middle" problem and which architectures suffer most?** Research shows that LLMs with standard attention consistently have lower accuracy on relevant information placed in the middle of long contexts versus the beginning or end. This is attributable to attention sink (high attention weight on the first few tokens) and recency bias (high weight on the last few tokens). Models with ALiBi positional encoding tend to have stronger recency bias; RoPE-based models (LLaMA, Mistral) show the same U-shaped recall curve. Mitigation: use RAG to place relevant chunks near the end of the prompt, chunk and retrieve rather than stuff full documents, or use models explicitly trained for long-context recall (the current 1M-window Claude and Gemini Pro generations).
 
-**When should you choose a 128k-token context window over a RAG pipeline?** Use a long context window when: the entire document must be coherent (a 50-page report where questions span multiple sections), retrieval recall is unacceptably low (< 80%) for the document type, or latency for chunk retrieval adds unacceptable delay. Use RAG when: documents exceed any context window, you need the freshest information (real-time web search), you need source attribution per sentence, or the cost of processing 128k tokens per query is prohibitive ($0.26 at Claude Sonnet 5's $2/1M, $0.64 at Opus 5's $5/1M, versus ~$0.01 with RAG on a retrieved 4k context).
+**When should you choose a 128k-token context window over a RAG pipeline?** Use a long context window when: the entire document must be coherent (a 50-page report where questions span multiple sections), retrieval recall is unacceptably low (< 80%) for the document type, or latency for chunk retrieval adds unacceptable delay. Use RAG when: documents exceed any context window, you need the freshest information (real-time web search), you need source attribution per sentence, or the cost of processing 128k tokens per query is prohibitive ($0.26 at Claude Sonnet 5.5's $2/1M, $0.51 at Opus 5.5's $4/1M, versus ~$0.01 with RAG on a retrieved 4k context).
 
 ---
 

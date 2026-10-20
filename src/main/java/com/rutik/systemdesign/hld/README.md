@@ -91,11 +91,13 @@ Pick 2-3 components to go deep on (interviewer often guides):
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
 | [Scalability](scalability/scalability.md) | Horizontal vs vertical, stateless services, replication | Beginner |
+| [Capacity Estimation](capacity_estimation/capacity_estimation.md) | Back-of-the-envelope QPS, storage, bandwidth and connection math | Beginner |
 | [Load Balancing](load_balancing/load_balancing.md) | Round-robin, consistent hash, L4 vs L7, health checks | Beginner |
 | [Caching](caching/caching.md) | Redis, Memcached, cache-aside, write-through, invalidation | Intermediate |
 | [Database Design](database_design/database_design.md) | ACID, CAP, SQL vs NoSQL, indexing, normalization | Intermediate |
 | [API Design](api_design/api_design.md) | REST, GraphQL, gRPC, versioning, rate limiting | Intermediate |
 | [CAP Theorem](cap_theorem/cap_theorem.md) | Consistency, availability, partition tolerance | Intermediate |
+| [Realtime Updates](realtime_updates/realtime_updates.md) | Polling vs SSE vs WebSockets, connection budgets, fan-out, gap-fill and resume | Intermediate |
 | [Message Queues](message_queues/message_queues.md) | Kafka, RabbitMQ, pub/sub, delivery guarantees | Intermediate |
 | [Microservices](microservices/microservices.md) | Service discovery, circuit breaker, saga, CQRS | Advanced |
 | [Consistent Hashing](consistent_hashing/consistent_hashing.md) | Hash ring, virtual nodes, Dynamo-style | Advanced |
@@ -106,9 +108,13 @@ Pick 2-3 components to go deep on (interviewer often guides):
 | [Consensus Algorithms](consensus_algorithms/consensus_algorithms.md) | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper, fencing tokens | Advanced |
 | [Event Sourcing & CQRS](event_sourcing_cqrs/event_sourcing_cqrs.md) | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency | Advanced |
 | [Distributed Transactions](distributed_transactions/distributed_transactions.md) | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys | Advanced |
+| [Coordination and Contention](coordination_and_contention/coordination_and_contention.md) | Distributed locks, leases, fencing tokens, hot keys | Advanced |
 | [Observability](observability/observability.md) | Three pillars (metrics, logs, traces), RED/USE methods, SLI/SLO/error budgets, cardinality, distributed tracing | Intermediate |
 | [Security and Authentication/Authorization](security_and_auth/security_and_auth.md) | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit | Intermediate |
 | [Resilience Patterns](resilience_patterns/resilience_patterns.md) | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover | Intermediate |
+| [Cell-Based Architecture](cell_based_architecture/cell_based_architecture.md) | Cells as blast-radius containment, cell routing, poison-pill isolation | Advanced |
+| [Multi-Region and Data Residency](multi_region_and_data_residency/multi_region_and_data_residency.md) | Active-active vs active-passive, write locality, residency constraints | Advanced |
+| [Stream Processing](stream_processing/stream_processing.md) | Watermarks, windowing, exactly-once, state backends | Advanced |
 
 ---
 
@@ -116,27 +122,34 @@ Pick 2-3 components to go deep on (interviewer often guides):
 
 **Phase 1 — Foundations** (start here):
 1. Scalability — understand why distributed systems are needed
-2. Load Balancing — how traffic is distributed
-3. Caching — the most impactful optimization
-4. Database Design — SQL vs NoSQL decisions
+2. Capacity Estimation — QPS, storage, bandwidth and connection math from stated inputs
+3. Load Balancing — how traffic is distributed
+4. Caching — the most impactful optimization
+5. Database Design — SQL vs NoSQL decisions
 
 **Phase 2 — Core Concepts**:
-5. CAP Theorem — the fundamental tradeoff
-6. API Design — how components communicate
-7. Message Queues — async communication patterns
-8. Rate Limiting — protecting your system
+6. CAP Theorem — the fundamental tradeoff
+7. API Design — how components communicate
+8. Realtime Updates — polling vs SSE vs WebSockets, connection budgets, fan-out
+9. Message Queues — async communication patterns
+10. Rate Limiting — protecting your system
 
 **Phase 3 — Advanced Topics**:
-9. CDN — global content delivery
-10. Consistent Hashing — elegant distributed data placement
-11. Database Sharding — scaling writes
-12. Microservices — large-scale architecture
-13. Distributed Transactions — consistency across service boundaries (2PC, Saga, TCC, outbox)
-14. Observability — instrumenting and operating what you've built (metrics, logs, traces, SLOs)
-15. Security and Authentication/Authorization — securing the system end-to-end
-16. Resilience Patterns — designing for graceful failure (circuit breakers, bulkheads, retries)
-17. Consensus Algorithms — Raft/Paxos leader election, log replication, quorum sizing, etcd/ZooKeeper
-18. Event Sourcing & CQRS — append-only event log, projections, snapshots, command/query separation
+11. CDN — global content delivery
+12. Consistent Hashing — elegant distributed data placement
+13. Database Sharding — scaling writes
+14. Geospatial Indexing — geohash, S2, H3, quadtrees, k-nearest search
+15. Microservices — large-scale architecture
+16. Distributed Transactions — consistency across service boundaries (2PC, Saga, TCC, outbox)
+17. Coordination and Contention — distributed locks, leases, fencing tokens, hot keys
+18. Observability — instrumenting and operating what you've built (metrics, logs, traces, SLOs)
+19. Security and Authentication/Authorization — securing the system end-to-end
+20. Resilience Patterns — designing for graceful failure (circuit breakers, bulkheads, retries)
+21. Cell-Based Architecture — cells as blast-radius containment, cell routing
+22. Consensus Algorithms — Raft/Paxos leader election, log replication, quorum sizing, etcd/ZooKeeper
+23. Multi-Region and Data Residency — active-active vs active-passive, write locality, residency constraints
+24. Event Sourcing & CQRS — append-only event log, projections, snapshots, command/query separation
+25. Stream Processing — watermarks, windowing, exactly-once, stateful rescaling
 
 **Phase 4 — Apply to Case Studies**:
 - [Design Twitter](case_studies/design_twitter.md)
@@ -162,8 +175,15 @@ Pick 2-3 components to go deep on (interviewer often guides):
 - [Design a Hotel Reservation System](case_studies/design_hotel_reservation.md)
 - [Design a Metrics Monitoring System](case_studies/design_metrics_monitoring.md)
 - [Design Google Drive](case_studies/design_google_drive.md)
+- [Design a Distributed Job Scheduler](case_studies/design_distributed_job_scheduler.md)
+- [Design an Email Service](case_studies/design_email_service.md)
+- [Design a Flash Sale / Ticketing System](case_studies/design_flash_sale_ticketing.md)
+- [Design a Live Streaming Platform](case_studies/design_live_streaming.md)
+- [Design Nearby Friends](case_studies/design_nearby_friends.md)
+- [Design a Top-K / Heavy-Hitters Service](case_studies/design_top_k_heavy_hitters.md)
+- [Design a Video Upload and Transcoding Pipeline](case_studies/design_youtube_upload_pipeline.md)
 
-See [case_studies/case_studies.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 23 case studies.
+See [case_studies/case_studies.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 30 case studies.
 
 ---
 
@@ -262,11 +282,11 @@ stream_processing
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 18 modules spanning the full architectural-overview curriculum, from scalability fundamentals through consensus algorithms and event sourcing. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 25 modules spanning the full architectural-overview curriculum, from scalability fundamentals through consensus algorithms and event sourcing. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **three ways through it**; the browser learning game's **Study** view surfaces them as a **Full / Senior / Principal** toggle (Full is the default).
 
-### Full Path (18 modules)
+### Full Path (25 modules)
 
-The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 23 case studies. Nothing is dropped.
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 30 case studies. Nothing is dropped.
 
 <!-- study-path-table senior -->
 ### Senior Path (19 modules)
@@ -296,7 +316,7 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 **Not in this path** (6 of 25, Full Path only): `geospatial_indexing`, `security_and_auth`, `cell_based_architecture`, `consensus_algorithms`, `multi_region_and_data_residency`, `event_sourcing_cqrs`
 <!-- /study-path-table -->
 
-A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 4 modules dropped. Each group below says why it earns senior time.
+A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 6 modules dropped. Each group below says why it earns senior time.
 
 | Group | Why it's tested |
 |-------|-----------------|
@@ -551,7 +571,7 @@ HLD stays at architectural-overview depth. For production-grade implementation d
 | Microservices | [Microservices Fundamentals](../backend/microservices_fundamentals/microservices_fundamentals.md), [API Gateway Patterns](../backend/api_gateway_patterns/api_gateway_patterns.md), [Service Mesh](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | — |
 | Message Queues | [Kafka Deep Dive](../backend/kafka_deep_dive/kafka_deep_dive.md), [Event-Driven Fundamentals](../backend/event_driven_fundamentals/event_driven_fundamentals.md), [Messaging Patterns](../backend/messaging_patterns/messaging_patterns.md) | — |
 | Caching | [Caching Strategies Deep Dive](../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md) | [Database Caching Patterns](../database/database_caching_patterns/database_caching_patterns.md), [Key-Value Stores](../database/key_value_stores/key_value_stores.md) |
-| Database Design | [Database Internals & Indexing](../backend/database_internals_and_indexing/database_internals_and_indexing.md), [Query Optimization](../backend/query_optimization/query_optimization.md) | [Database Engineering (all 29 modules)](../database/README.md) |
+| Database Design | [Database Internals & Indexing](../backend/database_internals_and_indexing/database_internals_and_indexing.md), [Query Optimization](../backend/query_optimization/query_optimization.md) | [Database Engineering (all 34 modules)](../database/README.md) |
 | Database Sharding | — | [Sharding & Partitioning](../database/sharding_and_partitioning/sharding_and_partitioning.md) |
 | CAP Theorem | — | [Consistency Models & Consensus](../database/consistency_models_and_consensus/consistency_models_and_consensus.md), [Database Fundamentals](../database/database_fundamentals/database_fundamentals.md) |
 | Consensus Algorithms | [Kafka Deep Dive](../backend/kafka_deep_dive/kafka_deep_dive.md) | [Consistency Models & Consensus](../database/consistency_models_and_consensus/consistency_models_and_consensus.md) |

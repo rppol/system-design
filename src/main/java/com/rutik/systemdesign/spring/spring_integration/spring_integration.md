@@ -120,6 +120,23 @@ the business logic stays untouched. That decoupling *is* the framework.
 - **Gateway** — request-reply; the *messaging gateway* hides messaging behind a plain
   Java interface so callers see a normal method call.
 
+### Cluster primitives: locks, leader election, idempotent receiver
+
+Running the same flow on N instances raises three questions SI answers with shared state
+in a database or Redis:
+
+| Need | SI primitive | Backing store |
+|------|--------------|---------------|
+| Only one instance processes key K at a time | `LockRegistry.obtain(K)` (`JdbcLockRegistry`, `RedisLockRegistry`, ZooKeeper) | `INT_LOCK` table or Redis keys |
+| Only one instance runs a poller at all | `LockRegistryLeaderInitiator` + endpoint `role("leader")` | Same lock registry |
+| A redelivered message is not processed twice | `IdempotentReceiverInterceptor` + `MetadataStoreSelector` | `ConcurrentMetadataStore` (`JdbcMetadataStore`, `RedisMetadataStore`) |
+| A file is not picked up twice | `FileSystemPersistentAcceptOnceFileListFilter` / `SftpPersistentAcceptOnceFileListFilter` | Same `ConcurrentMetadataStore` |
+
+SI 7.1 adds two adapter modules: `spring-integration-grpc` (`GrpcInboundGateway`,
+`GrpcOutboundGateway`, all four RPC modes, payloads are the generated protobuf types) and
+`spring-integration-cloudevents` (`ToCloudEventTransformer`/`FromCloudEventTransformer`,
+binary mode with `ce-` headers or structured mode such as `application/cloudevents+json`).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -305,7 +322,82 @@ group lives only in memory and is lost on restart. With a `JdbcMessageStore`, pa
 groups survive a crash. This mirrors the saga/outbox durability theme — buffered state
 must be persisted to survive failures.
 
-### 6.5 Error handling
+### 6.5 Distributed locks, leader election, and the idempotent receiver
+
+```java
+@Bean
+DefaultLockRepository lockRepository(DataSource ds) {
+    return new DefaultLockRepository(ds);            // INT_LOCK(LOCK_KEY, REGION, CLIENT_ID,
+}                                                    //   CREATED_DATE, EXPIRED_AFTER)
+
+@Bean
+JdbcLockRegistry lockRegistry(LockRepository repo) {
+    return new JdbcLockRegistry(repo, Duration.ofSeconds(30));   // 7.0+: registry default TTL
+}
+
+// Per-key mutual exclusion across instances
+void settle(String accountId) throws Exception {
+    lockRegistry.executeLocked("account:" + accountId, Duration.ofSeconds(2),
+        () -> ledger.settle(accountId));              // TimeoutException if not acquired in 2 s
+}
+
+// Leader election: only the lock holder runs endpoints in role "leader"
+@Bean
+LockRegistryLeaderInitiator leaderInitiator(LockRegistry lockRegistry) {
+    return new LockRegistryLeaderInitiator(lockRegistry);
+}
+
+@Bean
+IntegrationFlow sftpPoll(SessionFactory<SftpClient.DirEntry> sf) {
+    return IntegrationFlow
+        .from(Sftp.inboundAdapter(sf).remoteDirectory("/partner/in")
+                  .localDirectory(new File("/data/partner")),
+              e -> e.poller(Pollers.fixedDelay(Duration.ofSeconds(10)))
+                    .role("leader").autoStartup(false))   // started on OnGrantedEvent
+        .channel("files")
+        .get();
+}
+
+// Idempotent receiver: drop a redelivered order by business key
+@Bean
+IdempotentReceiverInterceptor orderDedup(ConcurrentMetadataStore jdbcMetadataStore) {
+    IdempotentReceiverInterceptor i = new IdempotentReceiverInterceptor(
+        new MetadataStoreSelector(m -> m.getHeaders().get("orderId", String.class),
+                                  jdbcMetadataStore));    // INT_METADATA_STORE
+    i.setDiscardChannelName("nullChannel");               // default: pass with duplicateMessage=true
+    return i;
+}
+
+@Bean
+IntegrationFlow orders(IdempotentReceiverInterceptor orderDedup) {
+    return IntegrationFlow.from("orders")
+        .handle("orderService", "place", e -> e.advice(orderDedup))
+        .get();
+}
+```
+
+```
+  leader election with a JDBC lock registry
+  ------------------------------------------
+  pod-a  --tryLock("leader")--> INT_LOCK row (CLIENT_ID=pod-a, EXPIRED_AFTER=t+30s)
+     |                                      ^
+     +-- OnGrantedEvent -> start role "leader" endpoints (SFTP poller)
+  pod-b  --tryLock("leader")--> row held, not expired -> stays follower, retries
+  pod-a dies -> row expires after TTL -> pod-b acquires -> OnGrantedEvent on pod-b
+  failover gap  =  lock TTL + retry interval  (seconds, not milliseconds)
+```
+
+Three behaviors catch people. The idempotent receiver does not drop duplicates by default:
+it adds `duplicateMessage=true` and still calls the handler, so set a `discardChannel` or
+`throwExceptionOnRejection=true`, or check the header. Without an explicit store,
+`MetadataStoreSelector` uses an in-memory `SimpleMetadataStore`, which forgets every key on
+restart and is not shared across instances. And a lock TTL shorter than the work lets a
+second instance take the lock while the first is still running; renew long work with
+`renewLock(key, ttl)` (7.0+) instead of raising the TTL so far that a crashed holder blocks
+failover for minutes. In SI 7.1, `RedisLockRegistry` uses native Redis CAS/CAD commands for
+renew and release on Redis 8.4+ and falls back to Lua scripts on older servers.
+
+### 6.6 Error handling
 
 Each flow has an error channel; failures are wrapped in a `MessagingException` (which
 carries the failed `Message`) and routed there:
@@ -424,6 +516,12 @@ reach for `spring_messaging` when the hard part is *throughput through one broke
    in a full SI flow adds ceremony with no benefit. *Fix:* reserve SI for genuinely
    multi-step, multi-system integration.
 
+8. **Idempotent receiver that never drops anything.** An `IdempotentReceiverInterceptor`
+   with no `discardChannel` marks duplicates with `duplicateMessage=true` and still calls
+   the handler, and the default in-memory metadata store resets on every restart.
+   *Fix:* set `discardChannel("nullChannel")` (or throw on rejection) and back the
+   selector with a `JdbcMetadataStore` or `RedisMetadataStore` shared by all instances.
+
 ---
 
 ## 11. Technologies & Tools
@@ -433,6 +531,8 @@ reach for `spring_messaging` when the hard part is *throughput through one broke
 | Core | `spring-integration-core`, `@EnableIntegration`, `IntegrationFlow` Java DSL |
 | Adapters | `spring-integration-file`, `-ftp`/`-sftp`, `-jms`, `-amqp`, `-http`, `-ip` (TCP/UDP), `-mqtt`, `-jdbc`, `-mail`, `-kafka` |
 | Message stores | `JdbcMessageStore`, `RedisMessageStore`, `MongoDbMessageStore` (durable groups/claim check) |
+| Cluster coordination | `JdbcLockRegistry`, `RedisLockRegistry`, ZooKeeper lock registry, `LockRegistryLeaderInitiator`, `JdbcMetadataStore`/`RedisMetadataStore` |
+| SI 7.1 modules | `spring-integration-grpc` (`GrpcInboundGateway`, `GrpcOutboundGateway`), `spring-integration-cloudevents` (`ToCloudEventTransformer`, `FromCloudEventTransformer`) |
 | Higher layers | Spring Cloud Stream (binder model on SI), Spring Batch (pairs for chunk work) |
 | Testing | `spring-integration-test`, `MockIntegration`, `@SpringIntegrationTest` |
 | Alternatives | Apache Camel, Mule ESB |
@@ -441,6 +541,18 @@ reach for `spring_messaging` when the hard part is *throughput through one broke
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: You add an `IdempotentReceiverInterceptor` with a `MetadataStoreSelector` and duplicates still reach the service. Why?**
+**Short:** By default it only marks duplicates with duplicateMessage=true and still calls the handler; set a discardChannel or throwExceptionOnRejection to drop them.
+`IdempotentReceiverInterceptor` is an advice on `MessageHandler.handleMessage()`. When its `MessageSelector` rejects a message, the default is to add the `duplicateMessage=true` header and pass it on, so the handler can decide. To keep duplicates away from the handler, set `discardChannel` (for example `nullChannel`) or `throwExceptionOnRejection=true`. The second trap is the store: a `MetadataStoreSelector` built without one uses an in-memory `SimpleMetadataStore`, which is empty after each restart and private to each instance, so a redelivery that lands on another pod or after a deploy passes as new. Back it with a shared `ConcurrentMetadataStore` (`JdbcMetadataStore` on `INT_METADATA_STORE`, or `RedisMetadataStore`) and make the key strategy return a business id such as `orderId`, which stays the same across redeliveries, unlike the message `id` header.
+
+**Q: How do you make only one instance of a clustered Spring Integration app poll an SFTP directory?**
+**Short:** Run a LockRegistryLeaderInitiator over a shared JdbcLockRegistry or RedisLockRegistry and give the poller role("leader") with autoStartup(false).
+`LockRegistryLeaderInitiator` repeatedly tries to take one lock in a distributed `LockRegistry` (`JdbcLockRegistry` on the `INT_LOCK` table, `RedisLockRegistry`, or ZooKeeper). The holder receives `OnGrantedEvent`, and SI's role controller starts every endpoint configured with `role("leader")` and `autoStartup(false)`; on `OnRevokedEvent` it stops them. When the leader dies, its lock row expires after the TTL (since 7.0 settable per registry or per lock), another instance acquires it, and the poller restarts there, so failover takes seconds. For per-key exclusion instead of one leader, call `lockRegistry.executeLocked(key, timeout, task)`. Keep the TTL longer than the longest critical section, or renew with `renewLock(key, ttl)`, otherwise two instances can both believe they hold the lock.
+
+**Q: What do the `spring-integration-grpc` and `spring-integration-cloudevents` modules added in Spring Integration 7.1 provide?**
+**Short:** The gRPC module adds inbound and outbound gRPC gateways for all four RPC modes; the CloudEvents module adds transformers to and from CloudEvents v1.0 messages.
+`spring-integration-grpc` provides `GrpcInboundGateway`, which implements `BindableService` from a generated `*ImplBase` class so Spring gRPC can register it, and `GrpcOutboundGateway`, which calls a remote service over a `ManagedChannel`. Both support unary, server-streaming, client-streaming, and bidirectional calls, carry the generated protobuf types as payloads, and map inbound errors with `Status.fromThrowable(...)`. `spring-integration-cloudevents` provides `ToCloudEventTransformer` and `FromCloudEventTransformer`, with `CloudEvents.headers()` in the DSL to set `id`, `source`, `type`, and `subject`; it writes binary mode (`ce-` headers, payload unchanged, payload must be `byte[]`) unless an `EventFormat` such as `application/cloudevents+json` selects structured mode. Together they let an SI flow sit between a gRPC API and a CloudEvents-based broker without hand-written adapters.
 
 **Q: What is Spring Integration and how is it different from spring_messaging / Kafka?**
 **Short:** Spring Integration orchestrates messaging across heterogeneous systems, while Kafka tooling maximizes throughput through one broker.

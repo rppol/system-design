@@ -323,6 +323,32 @@ A learner at `err = 0.5` is a coin flip, contributes a zero-weight vote, and lea
 
 ---
 
+### 4.8 Challengers: Tabular Foundation Models and Deep Tabular Baselines
+
+"GBDT is the default for tabular data" rested on benchmarks such as Grinsztajn et al. (2022). Two groups of models now compete with it, and an interview answer that ignores them is out of date.
+
+**Tabular foundation models (in-context learning).** A transformer is pretrained once on millions of synthetic tabular datasets drawn from a prior over structural causal models. At use time the whole training set goes into the context, and one forward pass predicts the test rows. There is no gradient training and no hyperparameter search on your data.
+
+| Model | Size limits (per vendor) | Weights license | Notes |
+|-------|--------------------------|-----------------|-------|
+| TabPFN v2 (Prior Labs, Nature, January 2025) | about 10,000 rows, 500 features | Prior Labs License (Apache 2.0 plus attribution) | The release that put TFMs on par with tuned GBDTs on small data |
+| TabPFN-2.5 (November 2025) | 50,000 rows, 2,000 features | Non-commercial | Reports a 100% win rate against default XGBoost on classification sets up to 10,000 rows and 500 features |
+| TabPFN-3.5 (September 2026, default in the `tabpfn` package) | 1,000,000 rows, 20,000 features | Non-commercial; commercial use needs a Prior Labs license | Larger context through row and cross-row attention |
+| TabICL (ICML 2025) and TabICLv2 (ICML 2026) | Strong at 300 to 100,000 rows and up to 2,000 features; 500K rows with CPU and disk offloading | Permissive open source, including pretraining code | v2 README reports beating tuned XGBoost, CatBoost, or LightGBM on about 80% of TabArena datasets and fitting 50,000 x 100 in under 10 s on an H100 |
+
+**Deep tabular baselines.** **RealMLP** (Holzmüller et al., NeurIPS 2024) is an MLP with tuned defaults: robust scaling with smooth clipping, numeric embeddings, and a tuned schedule, so it works without a search. **TabM** (Gorishniy et al., ICLR 2025) trains one MLP that emits k predictions (k = 32 by default) through BatchEnsemble-style per-member adapters and averages them, which gives most of the benefit of a deep ensemble at the cost of about one model.
+
+**TabArena** (Erickson et al., 2025) is the living benchmark for these comparisons: 51 curated IID datasets with 9 to 30 splits each and 27+ methods, each run with author-contributed search spaces, early stopping, and post-hoc ensembling so every method is compared at its best. Its BeyondArena extension adds temporal and grouped tasks across 142 datasets. The TabArena v0.1 paper found that with tuning and ensembling, CatBoost was the strongest GBDT, RealMLP and TabM were competitive with it, and TabPFNv2 and TabICL led on the small datasets inside their size limits.
+
+**What this changes in practice.**
+
+- Under about 10,000 rows, run a TFM next to the GBDT. It costs one forward pass and often wins.
+- Inference cost differs. A GBDT predicts in microseconds per row on a CPU. A TFM re-reads the training context for every prediction batch (KV caching helps), so serving at 10,000 requests per second usually means distilling the TFM into a GBDT or MLP, or keeping the GBDT.
+- License before benchmark. TabPFN-2.5 and later weights are non-commercial; TabICL and the deep baselines are permissive.
+- GBDT stays the default for large tables (millions of rows), strict CPU latency budgets, and teams that need TreeSHAP explanations and mature monitoring tooling.
+
+---
+
 ## 5. Architecture Diagrams
 
 ### Gradient Boosting Sequential Training
@@ -861,6 +887,7 @@ Standard industry setup: offline training on 7 days of click logs (100M rows), G
 - Real-time inference < 1ms latency with very large models: use quantised neural nets or linear models
 - Strong temporal dependencies: GBDT has no sequential structure; LSTM/Transformer better
 - When you need online learning (streaming updates): GBDT is batch; use online boosting variants
+- Small tables (under about 10,000 rows) with no tuning budget: test a tabular foundation model (TabICLv2, or TabPFN with a commercial license) first, since it needs no search
 
 ---
 
@@ -954,13 +981,16 @@ AdaBoost assigns exponentially growing weights to misclassified samples. If trai
 |------|---------------------|
 | sklearn GradientBoostingClassifier | Reference implementation; slow for large data |
 | sklearn HistGradientBoostingClassifier | Histogram-based, fast, native NaN handling |
-| XGBoost 2.0+ | GPU hist (`device="cuda"`), regularised objective, multi-output support |
+| XGBoost 3.0+ | GPU hist (`device="cuda"`), regularised objective, multi-output support |
 | LightGBM 4.0+ | EFB, histogram binning, fastest CPU training, categorical support; GOSS opt-in via `data_sample_strategy="goss"` |
 | CatBoost 1.2+ | Ordered boosting, native categoricals, symmetric trees |
 | SHAP 0.44+ | TreeSHAP: O(TLD^2) Shapley values; works on all tree ensembles |
-| Optuna 3.3+ | Hyperparameter search with pruning (stops unpromising trials early) |
-| MLflow 2.10+ | GBDT auto-logging: params, metrics, model artifact |
-| scikit-optimize | Bayesian optimisation for GBDT hyperparameters |
+| Optuna 5.0+ | Hyperparameter search with pruning (stops unpromising trials early) |
+| MLflow 3.0+ | GBDT auto-logging: params, metrics, model artifact |
+| TabICL / TabPFN | Tabular foundation models, scikit-learn API, one forward pass per fit-and-predict; TabPFN-2.5+ weights are non-commercial |
+| pytabkit (RealMLP), tabm | Strong deep tabular baselines with tuned defaults |
+| TabArena | Living benchmark of tuned, ensembled tabular models and TFMs |
+| Optuna `GPSampler` / BoTorch | Gaussian-process Bayesian optimisation for GBDT hyperparameters; `GPSampler` is a stable API since Optuna 5.0 |
 
 ---
 
@@ -969,6 +999,11 @@ AdaBoost assigns exponentially growing weights to misclassified samples. If trai
 **Q: What is gradient boosting and why does it fit the negative gradient rather than raw residuals?**
 **Short:** Gradient boosting fits each new tree to the negative loss gradient rather than raw residuals, a framing that unifies regression, classification, ranking, and quantile losses under one algorithm.
 Gradient boosting constructs an additive model F_M(x) = Σ η*h_m(x) by sequentially fitting weak learners h_m to the negative gradient of the loss with respect to the current predictions. For squared error loss, the negative gradient equals the raw residual y - F(x), so the two are identical. For other losses (log loss, MAE, Huber), the negative gradient is a different quantity — for log loss it is y - sigmoid(F(x)), the residual in probability space. Framing boosting as gradient descent in function space unifies all loss functions: by choosing different loss functions, you get regression, classification, ranking, and quantile regression from the same algorithmic framework.
+
+**Q: Is gradient boosting still the default for a 5,000-row tabular problem?**
+**Short:** Not automatically: tabular foundation models such as TabICLv2 and TabPFN often beat tuned GBDTs at that size in one forward pass, so benchmark both before choosing.
+
+At 5,000 rows, tabular foundation models are inside their strongest regime. TabICLv2 reports beating tuned XGBoost, CatBoost, or LightGBM on about 80% of TabArena datasets, and TabPFN-2.5 reports a 100% win rate against default XGBoost on classification sets up to 10,000 rows. They need no hyperparameter search. Check three things before switching: the license (TabPFN-2.5 and later weights are non-commercial), inference cost (the model re-reads the training set at predict time, unlike microsecond GBDT scoring), and explainability needs (TreeSHAP is mature for trees). GBDT remains the safer default for large tables and tight CPU latency budgets.
 
 **Q: What is shrinkage (learning rate) in gradient boosting and what tradeoff does it introduce?**
 **Short:** A smaller shrinkage learning rate needs more boosting rounds to reach the same training loss but generalizes better, like gradient descent with a smaller step size avoiding overshoot.
@@ -1030,6 +1065,16 @@ Prefer HistGradientBoostingClassifier (HGBT) almost always for datasets > 10K ro
 **Short:** Deviance is the per-sample negative log-likelihood, exactly cross-entropy for binary classification; sklearn selects it as loss="log_loss" and records it per round in train_score_.
 Deviance is the per-sample negative log-likelihood, which for binary classification is exactly cross-entropy and exactly what logistic regression minimises. Written out, deviance_i = -[y_i * log(p_i) + (1-y_i) * log(1-p_i)]. The term comes from generalised-linear-model theory, where it measures goodness of fit. In sklearn you ask for it by name as `GradientBoostingClassifier(loss="log_loss")`, which is also the default — "deviance" is the statistics vocabulary for the same quantity, not a separate objective. The common trap: there is no `staged_deviance_` attribute. The per-round training loss lives in `train_score_` (an ndarray of length n_estimators; with `subsample < 1` it is the in-bag loss, and `oob_improvement_` / `oob_scores_` carry the out-of-bag counterpart). Use those, or `staged_predict_proba`, for learning curves.
 
+**Q: How does a tabular foundation model "train" without gradient steps on your data?**
+**Short:** It is pretrained on millions of synthetic datasets to do in-context learning; at use time the training rows go into the context and one forward pass predicts the test rows.
+
+TabPFN and TabICL are transformers pretrained on millions of synthetic classification and regression tasks sampled from a prior over structural causal models. The pretraining objective is to predict held-out rows of each synthetic dataset given its other rows, so the network learns a general procedure for supervised learning. On a real dataset, `fit` stores the training rows and `predict` runs one forward pass with training and test rows together; attention over training rows does the work a fitted model would do. This is why there is no hyperparameter search, and also why there are row and feature limits: the context must hold the whole training set.
+
+**Q: What are TabM and RealMLP, and why do they matter for the GBDT-versus-deep-learning question?**
+**Short:** They are MLP baselines with strong defaults; TabM ensembles k members in one model via per-member adapters, RealMLP tunes preprocessing and training defaults; TabArena finds both competitive with tuned GBDTs.
+
+Older comparisons used weak neural baselines, which overstated the GBDT lead. RealMLP (NeurIPS 2024) is an MLP with carefully tuned defaults, including robust scaling with smooth clipping and numeric feature embeddings, so it performs well without a search. TabM (ICLR 2025) trains one network that outputs k predictions, 32 by default, through BatchEnsemble-style adapters on shared weights, and averages them, getting most of a deep ensemble's gain for about one model's cost. On TabArena, with tuning and post-hoc ensembling for every method, both are competitive with CatBoost, the strongest GBDT there.
+
 **Q: What is the difference between level-wise (depth-wise) and leaf-wise tree growth in gradient boosting?**
 **Short:** XGBoost's level-wise growth expands every node at a depth for balanced trees, while LightGBM's leaf-wise growth always splits the highest-loss leaf for faster but more overfit-prone convergence.
 Level-wise growth (XGBoost's default) expands every node at a depth before going deeper, while leaf-wise growth (LightGBM's default) always splits the leaf with the highest loss reduction. Level-wise keeps trees balanced; leaf-wise produces deeper, asymmetric trees. Leaf-wise converges faster and often reaches lower loss for the same number of leaves because it always chases the biggest available gain, but it overfits more easily on small datasets — which is why LightGBM exposes num_leaves and min_child_samples as the primary guards rather than max_depth. Level-wise is more conservative and easier to regularize with a simple depth cap. CatBoost takes a third path: symmetric (oblivious) trees that use the same split across an entire level for very fast inference.
@@ -1048,6 +1093,7 @@ Level-wise growth (XGBoost's default) expands every node at a depth before going
 8. For multiclass with many classes (> 50), consider hierarchical classification or a two-stage approach (GBDT for top-K, linear model for final ranking) to control training time.
 9. When using cross-validation, split by time (TimeSeriesSplit) for temporal data — random CV on time series leaks future data.
 10. Monitor validation AUC, not just training AUC, for every production model retrain. A model that trains faster because it overfit the training set is not an improvement.
+11. Before locking in a GBDT on a small table, add a tabular foundation model and a TabM or RealMLP run to the same cross-validation, and record each one's license and inference cost next to its score.
 
 ---
 

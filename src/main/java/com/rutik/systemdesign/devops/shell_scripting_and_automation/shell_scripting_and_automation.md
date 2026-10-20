@@ -2,6 +2,8 @@
 
 > Phase 1 — Foundations · Difficulty: Beginner
 
+> **Version anchor (2026-10-19).** **Bash 5.3** (2025-07-30) is the current release, at patch level 20 (2026-09-14). **ShellCheck v0.11.0** (2025-08-04) is the current linter release. `shopt -s inherit_errexit` exists since Bash 4.4; macOS still ships Bash 3.2 as `/bin/bash`, where the option is unknown.
+
 Shell scripting is the connective tissue of DevOps. Every CI pipeline, container entrypoint, health check, and break-glass runbook step is ultimately a shell command. Writing scripts that are **idempotent**, **fail loudly**, and **handle edge cases** is the difference between automation you trust at 3 a.m. and automation that silently corrupts state.
 
 ---
@@ -61,6 +63,7 @@ For anything past ~50 lines or needing data structures, JSON, or robust error ha
 | `-u` (nounset) | Error on use of an unset variable (catches typos) |
 | `-o pipefail` | Pipeline returns the **rightmost non-zero** exit code instead of only the last command's |
 | `-x` (xtrace) | Print each command before running (debugging) |
+| `shopt -s inherit_errexit` | Command substitutions `$(...)` keep `-e` instead of running with it cleared (Bash 4.4+) |
 | `IFS=$'\n\t'` | Safer word-splitting (no space-splitting surprises) |
 
 ---
@@ -108,6 +111,7 @@ flowchart LR
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s inherit_errexit   # Bash 4.4+; $(...) keeps errexit
 IFS=$'\n\t'
 
 log()  { printf '%s [%s] %s\n' "$(date -u +%FT%TZ)" "$1" "${*:2}" >&2; }
@@ -175,6 +179,43 @@ flowchart LR
     class R1 lossN
     class R2 train
 ```
+
+### Where `set -e` does not apply
+
+`set -e` is not "exit on any failure". The Bash manual lists contexts where a failing command is ignored, and each one has caught production scripts. Every row below was run under Bash 5.3 with `set -euo pipefail`:
+
+| Code | What `-e` does | Why |
+|---|---|---|
+| `v=$(false; echo cont)` | Continues, `v=cont` | Bash clears `-e` inside command substitution unless `inherit_errexit` (or POSIX mode) is on |
+| same, after `shopt -s inherit_errexit` | Exits 1 | The substitution's shell now stops at `false` and the assignment returns its status |
+| `v=$(false)` | Exits 1 | A plain assignment returns the status of its last command substitution |
+| `local v=$(false)` | Continues, `v` empty | `local` (also `export`, `declare`, `readonly`) returns its own status, 0 |
+| `if f; then`, `f \|\| die`, `f && x` | Every command inside `f` ignores `-e` | A function or compound command called in a condition or `&&`/`\|\|` list runs with `-e` suspended for its whole body |
+| `k(){ [[ -f x ]] && echo yes; }; k` | Exits 1 at the call | The `&&` list ends the function with status 1, and the call itself is not in a condition |
+
+```bash
+# BROKEN: the failure inside deploy is swallowed, and die never runs.
+deploy() {
+  kubectl apply -f manifests/      # fails...
+  echo "applied"                   # ...runs anyway: -e is off for the whole body
+}
+deploy || die "deploy failed"      # deploy returns echo's 0
+
+# FIX: check each step explicitly inside the function, or call it outside any condition.
+deploy() {
+  kubectl apply -f manifests/ || return
+  echo "applied"
+}
+deploy || die "deploy failed"
+
+# BROKEN (inside a function): local hides the status; v is empty and the script carries on.
+local v=$(aws sts get-caller-identity --query Account --output text)
+# FIX: declare, then assign, so the assignment's status reaches -e.
+local v
+v=$(aws sts get-caller-identity --query Account --output text)
+```
+
+`shopt -s inherit_errexit` fails on Bash 3.2, and under `set -e` that failure ends the script at the `shopt` line on a stock macOS `/bin/bash`. Scripts that must run there either use `#!/usr/bin/env bash` with a Homebrew Bash on `PATH` or write `shopt -s inherit_errexit 2>/dev/null || true`. ShellCheck flags the `local v=$(...)` form as SC2155.
 
 ### jq for JSON (don't parse JSON with grep/awk)
 
@@ -265,7 +306,7 @@ One thing this implementation omits deliberately worth naming: there is no **jit
 ## 7. Real-World Examples
 
 - **Container `ENTRYPOINT` scripts** render config from env vars (`envsubst`), wait for dependencies, then `exec "$@"` so the app inherits PID 1 and signals.
-- **CI pipeline steps** are shell: GitHub Actions `run:` blocks, GitLab `script:`, Jenkins `sh`. They almost always need `set -euo pipefail`, because the runner's default shell does not give you those flags — see Q8 in section 12 for the exact invocations and why a masked pipeline failure is a common cause of "green but broken" jobs.
+- **CI pipeline steps** are shell: GitHub Actions `run:` blocks, GitLab `script:`, Jenkins `sh`. They almost always need `set -euo pipefail`, because the runner's default shell does not give you those flags. See the GitHub Actions `run:` question in section 12 for the exact invocations and why a masked pipeline failure is a common cause of "green but broken" jobs.
 - **Cloud bootstrap** via EC2 user-data / cloud-init runs shell to install agents and join a cluster; must be idempotent because re-runs happen.
 - **Kubernetes liveness/readiness `exec` probes** are commands (`sh -c 'pg_isready -h localhost'`); their exit code is the health signal.
 
@@ -356,6 +397,8 @@ glob `/*`. Only `${DIR:?msg}` (or an explicit `[ -n "$DIR" ]` guard) rejects the
 
 **Pitfall 3 — Parsing structured output with line tools.** `kubectl get … | grep | awk '{print $3}'` breaks the moment column order or spacing changes. Use `-o jsonpath` / `jq` against a stable schema instead.
 
+**Pitfall 4: trusting `set -e` inside functions used as conditions.** A `preflight || die` call runs the whole body of `preflight` with errexit off, so a failed `aws sts get-caller-identity` inside it is ignored and the function returns the status of its last `echo`. FIX: end each critical command in such functions with `|| return`, assign command substitutions on their own line (`local v; v=$(...)`), and enable `shopt -s inherit_errexit` so `$(...)` stops at its first failure.
+
 ---
 
 ## 11. Technologies & Tools
@@ -376,82 +419,94 @@ glob `/*`. Only `${DIR:?msg}` (or an explicit `[ -n "$DIR" ]` guard) rejects the
 
 ## 12. Interview Questions with Answers
 
-**Q1: What does `set -euo pipefail` do and why is each flag important?**
+**Q: A function called as `deploy || die "failed"` has a failing `kubectl apply` inside it, yet `die` never runs. Why?**
+**Short:** A function called in a `||`, `&&` or `if` context runs its whole body with `set -e` suspended, so the failure is ignored and the function returns its last command's 0.
+Bash ignores errexit for any command that is part of an `if` test, a `while`/`until` condition, or any element of an `&&`/`||` list except the last, and the manual adds that a function or compound command executed in such a context has `-e` ignored for every command inside it, even if it sets `-e` itself. `kubectl apply` fails, the next `echo "applied"` runs, the function returns 0, and `die` is skipped. Write such functions so they report failure explicitly: `kubectl apply -f manifests/ || return`, or call the function as a plain statement and let `set -e` and an `ERR` trap handle the failure.
+
+**Q: Why does `v=$(curl -fsS "$URL"; echo done)` keep going after curl fails in a `set -e` script, and what does `inherit_errexit` change?**
+**Short:** Bash clears `-e` inside command substitution, so the subshell runs on to `echo done`; `shopt -s inherit_errexit` (Bash 4.4+) keeps `-e` there, so `curl` stops it and the assignment fails.
+Outside POSIX mode, Bash runs each `$(...)` in a subshell with errexit cleared. A plain `v=$(false)` still stops the script, because an assignment returns the status of its last command substitution, but any later command in the substitution resets that status, so `$(failing; echo done)` succeeds with partial output. `shopt -s inherit_errexit`, available since Bash 4.4 and on by default in POSIX mode, makes the substitution inherit `-e`, so it exits at the failing command and the assignment returns non-zero. Put it right after `set -euo pipefail`; on macOS's Bash 3.2 the `shopt` itself fails, so guard it or require a newer Bash.
+
+**Q: Why does `local account=$(aws sts get-caller-identity ...)` not stop a `set -e` script when AWS credentials are missing?**
+**Short:** The line's status is that of `local`, which is 0, not of the command substitution; declare with `local account` first, then assign on its own line so the failure reaches `set -e`.
+`local`, `export`, `declare` and `readonly` are builtins whose exit status reports whether the declaration worked. The command substitution inside them runs, fails and leaves `account` empty, but the builtin returns 0 and errexit sees success, so the script continues with an empty account ID and may build an ARN like `arn:aws:iam:::role/deploy`. Splitting the line (`local account` then `account=$(...)`) makes the assignment carry the substitution's status. ShellCheck reports the combined form as SC2155, which is why the lint gate matters even for scripts that already use `set -euo pipefail`.
+
+**Q: What does `set -euo pipefail` do and why is each flag important?**
 **Short:** `-e` exits on any failing command, `-u` errors on unset variables, and `pipefail` fails a pipeline if any stage fails — turning silent continuation into immediate failure.
 
 `-e` exits on any non-zero command so failures don't cascade; `-u` errors on unset variables, catching typos like `$DIR` vs `$DIRR`; `-o pipefail` makes a pipeline fail if *any* stage fails, not just the last. Together they convert silent, dangerous continuation into immediate, debuggable failure — the single most important line in any production script.
 
-**Q2: Why quote variables, and what breaks without it?**
+**Q: Why quote variables, and what breaks without it?**
 **Short:** Unquoted `$var` undergoes word-splitting and glob expansion, so `"$var"` must wrap it to preserve a value with spaces or wildcards as one literal token.
 
 Unquoted `$var` undergoes word-splitting (on `IFS`) and glob expansion: a path with spaces becomes multiple arguments, and a value containing `*` or `?` gets expanded against the filesystem. `"$var"` preserves it as a single literal token. The rule: quote unless you specifically want splitting. Quoting alone does not cover the *empty*-value case — `rm -rf "$DIR"/*` with `DIR=""` still expands to `rm -rf /*`, and `set -u` will not save you because the variable is set, just empty; guard those with `"${DIR:?DIR required}"`.
 
-**Q3: What makes a script idempotent and why does it matter for automation?**
+**Q: What makes a script idempotent and why does it matter for automation?**
 **Short:** An idempotent script produces the same end state whether run once or N times, which matters because automation like CI and cron retries scripts on failure.
 
 Idempotent = running it N times yields the same end state as running it once. It matters because automation is retried (CI re-runs, cron, failed-then-resumed deploys). Use `mkdir -p`, `kubectl apply` over `create`, check-before-append, and conditional creation. Non-idempotent scripts duplicate resources or fail on the second run.
 
-**Q4: When should you stop using bash and switch to Python?**
+**Q: When should you stop using bash and switch to Python?**
 **Short:** Switch to Python once you need real data structures, JSON/YAML handling, HTTP retries, concurrency, or the script passes roughly 100 lines.
 
 When you need data structures, JSON/YAML manipulation, HTTP calls with retries, concurrency, or precise error handling — or when the script passes ~100 lines. Bash excels at gluing CLIs and short pipelines; beyond that, its lack of real types, error handling, and testing makes Python/Go far safer.
 
-**Q5: How do exit codes flow through a pipeline, and how does `pipefail` change it?**
+**Q: How do exit codes flow through a pipeline, and how does `pipefail` change it?**
 **Short:** Without `pipefail`, `$?` of a pipeline is only the last command's exit code, hiding upstream failures; `pipefail` makes it the rightmost non-zero exit instead.
 
 By default `$?` of `a | b | c` is `c`'s exit code, so a failure in `a` or `b` is hidden. `set -o pipefail` makes the pipeline's exit code the rightmost non-zero one, surfacing upstream failures so `set -e` can act on them.
 
-**Q6: What is `trap` used for in production scripts?**
+**Q: What is `trap` used for in production scripts?**
 **Short:** `trap 'cmd' SIGNAL` registers a handler so cleanup runs on any exit path or lets an entrypoint forward a shutdown signal to the app it launched.
 
 `trap 'cmd' SIGNAL` registers cleanup/handlers. `trap cleanup EXIT` guarantees temp files are removed and locks released on any exit path; `trap 'graceful_shutdown' TERM INT` lets an entrypoint forward shutdown to the app. It's how scripts stay clean under both success and interruption.
 
-**Q7: Why `exec "$@"` at the end of a container entrypoint?**
+**Q: Why `exec "$@"` at the end of a container entrypoint?**
 **Short:** `exec "$@"` replaces the shell process with the app so the app becomes PID 1 and receives signals like SIGTERM directly instead of the shell swallowing them.
 
 `exec` replaces the shell process with the app, so the app becomes PID 1 and receives signals (SIGTERM) directly instead of the shell swallowing them. Without `exec`, the shell stays PID 1, doesn't forward signals, and graceful shutdown breaks.
 
-**Q8: GitHub Actions `run:` steps — what's a subtle failure mode?**
+**Q: GitHub Actions `run:` steps — what's a subtle failure mode?**
 **Short:** A `run:` step with no `shell:` key runs as `bash -e {0}`, missing both `pipefail` and `-u`, so mid-pipeline failures and typo'd variables go unnoticed.
 
 A `run:` step with no `shell:` key executes as `bash -e {0}`, which gives you `-e` but neither `pipefail` nor `-u` — so a failing stage in the middle of a pipeline is masked by the last stage's exit 0 and the step goes green, and a typo'd variable silently expands to the empty string. Declaring `shell: bash` changes the invocation to `bash --noprofile --norc -eo pipefail {0}`, which adds pipefail but still not `-u`. Put an explicit `set -euo pipefail` at the top of any multi-line `run:` block so the step's failure semantics do not depend on which shell key someone remembered to write.
 
-**Q9: How do you parse JSON safely in a shell pipeline?**
+**Q: How do you parse JSON safely in a shell pipeline?**
 **Short:** Use `jq` to parse JSON in a pipeline, since it understands the parsed structure and survives whitespace or ordering changes that break `grep`/`awk`/`cut`.
 
 Use `jq`: `jq -r '.items[].metadata.name'`. It understands JSON structure, handles escaping, and survives whitespace/order changes that break `grep|awk|cut`. For building JSON, `jq -n --arg`/`--argjson` escapes values correctly, avoiding injection from unescaped input.
 
-**Q10: What is `shellcheck` and where does it fit?**
+**Q: What is `shellcheck` and where does it fit?**
 **Short:** `shellcheck` is a static analyzer that flags unquoted variables and missing `set` flags, run as a required CI gate to catch these bugs before merge.
 
 `shellcheck` is a static analyzer that flags unquoted variables, missing `set` flags, useless `cat`, and dozens of common bugs. Running it as a required CI gate catches the exact classes of error (quoting, exit-code handling) that cause production incidents, before merge.
 
-**Q11: Why can `set -e` combined with `pipefail` abort a script even when `grep` behaves correctly?**
+**Q: Why can `set -e` combined with `pipefail` abort a script even when `grep` behaves correctly?**
 **Short:** `grep` exits 1 on zero matches, a normal outcome, but `set -e` treats that as fatal outside a conditional, killing a script on its best-case result.
 
 `grep` exits with status 1 when it finds zero matches, which is a normal outcome, not a failure, but `set -e` treats that non-zero as fatal. A bare `count=$(grep -c pattern file.log)` run outside any conditional kills the script the moment zero matches is the best-case result, like "no errors found in today's log" — exactly the outcome you wanted to report as success. Inside an `if grep -q pattern file; then` construct this is harmless because the if context suppresses -e's exit-on-error behavior, but a standalone grep, diff, or cmp (all of which use non-zero for a legitimate "no result" case) isn't protected the same way. Guard any command whose "nothing found" case is expected with an explicit `|| true` or an `if`/`case`, and don't rely on `set -e` alone to distinguish "no results" from "broken."
 
-**Q12: What happens if a script calls `trap` on EXIT more than once, and how does that bite tmpdir cleanup?**
+**Q: What happens if a script calls `trap` on EXIT more than once, and how does that bite tmpdir cleanup?**
 **Short:** Each `trap ... EXIT` call replaces the previous handler rather than adding to it, so registering it twice silently drops the earlier cleanup and leaks that resource.
 
 Each call to `trap` on EXIT replaces the previous handler instead of adding to it, so only the last-registered cleanup actually runs. A script that runs `trap 'rm -rf "$TMPDIR1"' EXIT` early on and later `trap 'rm -rf "$TMPDIR2"' EXIT` elsewhere silently drops the first handler, so TMPDIR1 leaks on every single run. This is especially common when a script sources helper libraries that each try to register their own EXIT trap, unknowingly clobbering one another with no error or warning. Register exactly one `trap cleanup EXIT` per script, and have that single cleanup function remove every temp file, directory, and lock the script created, tracked in one array.
 
-**Q13: Why is `for f in $(ls *.log); do ...` dangerous even though it looks idiomatic?**
+**Q: Why is `for f in $(ls *.log); do ...` dangerous even though it looks idiomatic?**
 **Short:** `for f in $(ls *.log)` word-splits the command substitution's output on whitespace, breaking any filename containing a space into multiple wrong loop items.
 
 The unquoted command substitution word-splits its output on whitespace, so a filename like "March 2024.log" becomes two separate loop items. `for f in $(ls *.log)` first expands the glob, then word-splits the command substitution's output again on IFS, breaking on every space, tab, and newline inside a filename, so "March 2024.log" turns into iterations "March" and "2024.log," neither of which exists on disk. The fix is to let the shell glob directly: `for f in *.log; do ... done` preserves each match as one token because globbing, unlike word-splitting, doesn't split on internal whitespace. Never loop over `ls` output — glob directly for simple cases, or use `find ... -print0` piped to a null-delimited read loop for recursive or complex matching.
 
-**Q14: What's a concrete case where a grep-based JSON extraction returns the wrong value that `jq` would get right?**
+**Q: What's a concrete case where a grep-based JSON extraction returns the wrong value that `jq` would get right?**
 **Short:** A naive `grep -o` extraction can match the wrong occurrence when a key name is nested at two levels, while `jq` walks the parsed structure and returns the correct field.
 
 A minified JSON payload with the same key name nested at two different levels makes a naive `grep -o` extraction pull the wrong occurrence. Given a payload where `status` appears both at the top level and nested inside a `metadata` object, `grep -o` matches whichever occurrence comes first in the raw text, and reformatting or minifying the JSON silently changes which value that is; `jq -r '.status'` instead walks the parsed structure and always returns the correct top-level field, regardless of nesting, whitespace, or where else that key name appears in the document. This class of bug is especially dangerous because it doesn't error — it returns a plausible-looking but wrong value, and nothing downstream signals a problem. Treat any JSON parsed by regex as a latent correctness bug, not a style nit, and require `jq` or a real parser for anything touching API responses.
 
-**Q15: Why should the `retry()` backoff loop add random jitter, not just double the delay each time?**
+**Q: Why should the `retry()` backoff loop add random jitter, not just double the delay each time?**
 **Short:** Pure exponential backoff with no jitter makes many clients retry at the exact same instants, recreating the overload; random jitter spreads retries across a window instead.
 
 Pure exponential backoff with no randomness makes many clients retry at the exact same instants, recreating the overload that caused the failures. If 500 clients all failed at once and all back off 2s, 4s, 8s, 16s deterministically, they all retry again at exactly the same wall-clock moments — the classic thundering-herd problem hitting a service that was just starting to recover. Adding jitter, for example sleeping the base delay plus a random amount up to that same delay instead of exactly the delay, spreads those same 500 retries across a window of seconds instead of a single instant. Add jitter by default to any retry loop that calls a shared service rather than a purely local operation — it costs one line and materially reduces cascading-failure risk.
 
-**Q16: How do you tune `shellcheck`'s severity in a CI gate versus a developer's local run?**
+**Q: How do you tune `shellcheck`'s severity in a CI gate versus a developer's local run?**
 **Short:** `shellcheck -S warning` fails CI on real bugs like unquoted variables without blocking on pure style nits, while a separate non-blocking job can run at `-S style`.
 
 `shellcheck` classifies findings into four severities — error, warning, info, and style — and the `-S` flag sets the minimum severity that fails the run. A CI gate typically runs `shellcheck -S warning` so it fails the build on real bugs like unquoted-variable warnings without blocking on pure style nits, while a separate, non-blocking job can run at `-S style` for extra polish suggestions. Individual findings can be suppressed inline with a `# shellcheck disable=SC2034` comment directly above the offending line when a warning is a deliberate false positive. Gate CI at `-S warning` or stricter, and require review of any inline disable comment since it silences a real check rather than fixing it.
@@ -460,7 +515,8 @@ Pure exponential backoff with no randomness makes many clients retry at the exac
 
 ## 13. Best Practices
 
-- Start every script with `#!/usr/bin/env bash` and `set -euo pipefail`.
+- Start every script with `#!/usr/bin/env bash`, `set -euo pipefail` and `shopt -s inherit_errexit`.
+- Never rely on `set -e` inside a function called from `if`, `&&` or `||`; end its critical commands with `|| return`, and split `local v=$(...)` into a declaration and an assignment.
 - Quote all expansions; use `"${var:?msg}"` to require critical inputs.
 - Make scripts idempotent; prefer declarative tools (`apply`) over imperative (`create`).
 - Use `trap … EXIT` for cleanup; `exec "$@"` in entrypoints.

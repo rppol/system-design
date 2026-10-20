@@ -282,11 +282,11 @@ def reflexion_loop(
     for attempt_num in range(max_retries + 1):
         # Actor: generate code
         actor_response = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-opus-5-5",
             max_tokens=1024,
             messages=[{"role": "user", "content": actor_prompt(state)}]
         )
-        code = actor_response.content[0].text
+        code = actor_response.content[-1].text  # Opus 5.5 puts a thinking block first
 
         # Extract code block if present
         if "```python" in code:
@@ -307,11 +307,12 @@ def reflexion_loop(
 
         # Reflector: generate verbal critique
         reflector_response = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=256,
+            model="claude-opus-5-5",
+            max_tokens=1024,
+            output_config={"effort": "low"},  # thinking counts against max_tokens
             messages=[{"role": "user", "content": reflector_prompt(task, code, feedback)}]
         )
-        reflection = reflector_response.content[0].text
+        reflection = reflector_response.content[-1].text
         state.episodic_memory.append(reflection)
         print(f"Attempt {attempt_num + 1} failed. Reflection: {reflection[:100]}...")
 

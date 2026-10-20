@@ -180,6 +180,17 @@ stateDiagram-v2
         state before it is reported.
         See the three signals in §6.5.
     end note
+
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    class Unstarted info
+    class InProgress accent
+    class Blocked bad
+    class InReview warn
+    class Landed good
 ```
 
 *The state a tech lead actually watches for is Blocked — not because it is rare, but because
@@ -645,6 +656,10 @@ cannot be misread either way.
   the premortem technique behind the "what would have to be true" question in §6.4.
 - Jon Bentley, *Programming Pearls*, *Communications of the ACM*, 1985 — the 90-90 rule
   (attributed to Tom Cargill of Bell Labs) cited in §6.10.
+- Related modules: [Team Health & Sustainable Pace](../team_health_and_sustainable_pace/team_health_and_sustainable_pace.md)
+  §6.9 for measuring delivery with DORA, SPACE, DevEx and DX Core 4 at team level, and
+  [Technical Strategy & Vision](../technical_strategy_and_vision/technical_strategy_and_vision.md)
+  for the strategy document that sits above an execution plan.
 
 ---
 

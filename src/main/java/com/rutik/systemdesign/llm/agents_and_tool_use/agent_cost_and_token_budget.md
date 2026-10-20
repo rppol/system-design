@@ -31,12 +31,12 @@ This is the single most important arithmetic fact in agent engineering, and it i
 | `c0` | Starting context: system prompt + tool schemas + the user request |
 | `g` | Tokens each step appends — the tool result plus the assistant's own message |
 | `ctx(k)` | Context billed at step `k`, which is `c0 + g x (k - 1)` |
-| `p` | Input price per token. Sonnet `$3.00 / 1M` = `3.0e-6` |
+| `p` | Input price per token. Sonnet 4.6 `$3.00 / 1M` = `3.0e-6` |
 | `sum ctx(k)` | Total input tokens for the whole run: `N x c0 + g x N(N-1)/2` |
 
 The `N(N-1)/2` piece is the quadratic term, and it carries `g` — the per-step growth — as its coefficient. That is the formal version of "tool outputs re-sent forever after."
 
-**Walk one example.** A 10-step loop, 2K starting context, 6K appended per step, Sonnet input pricing:
+**Walk one example.** A 10-step loop, 2K starting context, 6K appended per step, Sonnet 4.6 input pricing ($3/M):
 
 ```
   step   context (tok)    this call     running total
@@ -70,22 +70,23 @@ Ten calls, but you paid for 14.5 calls' worth of a flat context. Step 10 alone c
 
 ## 4. Types / Architectures / Strategies
 
-### 4.1 Pricing Reference (July 2026)
+### 4.1 Pricing Reference (2026-10-19)
 
 | Model | Input $/M | Output $/M | Cache write $/M | Cache read $/M |
 |---|---|---|---|---|
-| Claude Haiku 4.5 | $1.00 | $5.00 | $1.25 | $0.10 |
-| Claude Sonnet 4.6 | $3.00 | $15.00 | $3.75 | $0.30 |
-| Claude Opus 4.7 | $5.00 | $25.00 | $6.25 | $0.50 |
-| Claude Opus 5 | $5.00 | $25.00 | $6.25 | $0.50 |
-| gpt-5.4-nano | $0.20 | $1.25 | — | $0.02 (90% off) |
-| gpt-5.4-mini | $0.75 | $4.50 | — | $0.075 (90% off) |
-| gpt-5.4 | $2.50 | $15.00 | — | $0.25 (90% off) |
-| gpt-5.6-sol | $5.00 | $30.00 | — | $0.50 (90% off) |
-| Gemini 2.5 Flash-Lite | $0.10 | $0.40 | — | $0.01 |
-| Gemini 2.5 Pro (≤200K) | $1.25 | $10.00 | — | $0.125 |
+| Claude Haiku 5.5 (prompt ≤100K tokens) | $0.10 | $0.50 | $0.125 | $0.01 |
+| Claude Haiku 5.5 (prompt >100K tokens) | $0.50 | $2.50 | $0.625 | $0.05 |
+| Claude Sonnet 5.5 | $2.00 | $10.00 | $2.50 | $0.10 |
+| Claude Opus 5.5 | $4.00 | $20.00 | $5.00 | $0.20 |
+| Claude Fable 5.1 | $10.00 | $50.00 | $12.50 | $0.25 |
+| Claude Sonnet 4.6 (legacy; the rate the worked examples below use) | $3.00 | $15.00 | $3.75 | $0.30 |
+| gpt-6-luna | $0.10 | $0.50 | $0.125 | $0.01 |
+| gpt-6.1-sol | $2.00 | $10.00 | $2.50 | $0.10 |
+| gpt-6-astra | $10.00 | $50.00 | $12.50 | $1.00 |
+| gemini-3.5-flash-lite | $0.30 | $2.50 | n/a | $0.03 |
+| gemini-3.8-flash (to 2026-12-31; doubles on 2027-01-01) | $0.75 | $3.75 | n/a | $0.075 |
 
-Anthropic cache-write/read multipliers are `1.25×` and `0.1×` of that model's input price, so the two cache columns above are derived, not independently quoted. OpenAI's cached-input discount is 90% (cached tokens bill at 10% of the input rate) and applies automatically to repeated prefixes; Google's context-caching price is a per-token read rate plus an hourly storage charge ($1.00/M-tokens/hour for Flash-tier, $4.50 for Pro-tier).
+Anthropic cache writes cost `1.25×` the model's input price at the 5-minute TTL. Cache reads cost `0.1×` on most models, `0.05×` on Opus 5.5 and Sonnet 5.5, and `0.025×` on Fable 5.1. Haiku 5.5 bills the whole request at the higher row once its prompt, cache reads and writes included, passes 100K tokens. OpenAI applies its cached-input rate automatically to repeated prefixes (90-95% off on the rows above) and bills cache writes at 1.25× input on short-context prompts; Google's context-caching price is a per-token read rate plus an hourly storage charge ($1.00/M-tokens/hour for gemini-3.5-flash-lite, $0.50 for gemini-3.8-flash).
 
 Batch API discount (Anthropic, OpenAI, Google): 50% off input + output. 24h SLA. Full per-token pricing mechanics and self-hosting break-even analysis: [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md).
 
@@ -107,7 +108,7 @@ Don't `read_file(big_file)` — instead `read_file(big_file, grep="pattern")` or
 
 ### 4.6 Prompt Caching
 
-Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min ephemeral cache; write 1.25×, read 0.1×. Breakeven after 2 reads. Semantic caching, exact-match caching, and vLLM prefix caching are covered in [LLM Caching](../llm_caching/llm_caching.md).
+Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min ephemeral cache; write 1.25×, read 0.1× (0.05× on Opus 5.5 and Sonnet 5.5). The first read pays back the write. Semantic caching, exact-match caching, and vLLM prefix caching are covered in [LLM Caching](../llm_caching/llm_caching.md).
 
 ---
 
@@ -117,7 +118,7 @@ Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min 
 
 ```mermaid
 xychart-beta
-    title "Per-call cost by agent step (Sonnet, no cache)"
+    title "Per-call cost by agent step (Sonnet 4.6, no cache)"
     x-axis ["1", "2", "3", "4", "5", "6", "7", "8 (compact)", "9", "10"]
     y-axis "cost per call (USD)" 0 --> 0.35
     line [0.006, 0.012, 0.024, 0.048, 0.096, 0.150, 0.210, 0.300, 0.090, 0.105]
@@ -128,7 +129,7 @@ Context grows 2K → 100K tokens by step 8 — the compaction trigger for an age
 ### Cost Accumulation With Caching
 
 ```
-Step  Total context  Cached prefix  Cost (Sonnet w/ cache)
+Step  Total context  Cached prefix  Cost (Sonnet 4.6 w/ cache)
 1     5K            3K (write)     $0.006+$0.011 = $0.017
 2     6K            3K (read)      $0.009+$0.0009 = $0.010
 3     7K            3K (read)      $0.012+$0.0009 = $0.013
@@ -141,8 +142,8 @@ Total caches save ~70% on prefix portion
 
 | Symbol | What it is |
 |--------|------------|
-| `1.25x` | Cache-write multiplier. Sonnet's `$3.00/M` input becomes `$3.75/M` on the write call |
-| `0.1x` | Cache-read multiplier. That same prefix costs `$0.30/M` on every later call |
+| `1.25x` | Cache-write multiplier. Sonnet 4.6's `$3.00/M` input becomes `$3.75/M` on the write call |
+| `0.1x` | Cache-read multiplier. That same prefix costs `$0.30/M` on every later call (Opus 5.5 and Sonnet 5.5 use `0.05x`) |
 | `3K (write)` | The static prefix — system prompt plus tool schemas — paid for once |
 | `3K (read)` | The same prefix on a later call, billed at the read rate |
 | `Total context` | Everything sent; only the non-prefix remainder is billed at full input price |
@@ -178,11 +179,11 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    request(["User request"]) --> router(["Router: Haiku<br/>Classify hard?<br/>$0.0005"])
+    request(["User request"]) --> router(["Router: Haiku 5.5<br/>Classify hard?<br/>$0.00005"])
     router -->|Easy| easy(["Easy step"])
     router -->|Hard| hard(["Hard step"])
-    easy --> haiku(["Haiku<br/>$0.005"])
-    hard --> opus(["Opus<br/>$0.05"])
+    easy --> haiku(["Haiku 5.5<br/>$0.0005"])
+    hard --> opus(["Opus 5.5<br/>$0.04"])
 
     class request req
     class router mathOp
@@ -190,7 +191,7 @@ flowchart LR
     class haiku,opus train
 ```
 
-Without cascade (all Opus): $0.05/step. With cascade (80% easy, 20% hard): 0.8×$0.005 + 0.2×$0.05 = $0.014. Savings: 72%.
+Without cascade (all Opus 5.5): $0.04/step. With cascade (80% easy, 20% hard): 0.8×$0.0005 + 0.2×$0.04 = $0.0084. Savings: 79%.
 
 **Put simply.** "Your real per-step price is not the expensive model's price — it is the two prices averaged together, weighted by how often the router actually picks each one."
 
@@ -198,27 +199,27 @@ Without cascade (all Opus): $0.05/step. With cascade (80% easy, 20% hard): 0.8×
 |--------|------------|
 | `f_easy` | Fraction of steps routed to the cheap model. Here `0.8` |
 | `f_hard` | The remainder, `1 - f_easy = 0.2` — steps escalated to Opus |
-| `c_easy` | Haiku cost per step, `$0.005` |
-| `c_hard` | Opus cost per step, `$0.05` — 10× the cheap one. Note Opus list price is only 5× Haiku's per token (§4.1); the other 2× comes from hard steps generating roughly twice the output |
-| `c_router` | Classification overhead paid on *every* step, `$0.0005` |
+| `c_easy` | Haiku 5.5 cost per step, `$0.0005` |
+| `c_hard` | Opus 5.5 cost per step, `$0.04`, 80× the cheap one. Opus 5.5 list price is 40× Haiku 5.5's per token on prompts up to 100K tokens (§4.1); the other 2× comes from hard steps generating roughly twice the output |
+| `c_router` | Classification overhead paid on *every* step, `$0.00005` |
 | blended | `f_easy x c_easy + f_hard x c_hard + c_router` |
 
 **Walk one example.** Sweep the escalation rate `f_hard` and watch the savings collapse:
 
 ```
   f_hard   blended cost/step   savings vs all-Opus
-   0.00        $0.00500              90%
-   0.10        $0.00950              81%
-   0.20        $0.01400              72%    <- the case shown above
-   0.35        $0.02075            58.5%
-   0.50        $0.02750              45%
-   1.00        $0.05000               0%
+   0.00        $0.00050            98.8%
+   0.10        $0.00445            88.9%
+   0.20        $0.00840            79.0%    <- the case shown above
+   0.35        $0.01433            64.2%
+   0.50        $0.02025            49.4%
+   1.00        $0.04000               0%
 
-  with the router's own $0.0005 folded in, at f_hard = 0.20:
-     0.8 x 0.005 + 0.2 x 0.05 + 0.0005 = $0.0145   ->  71% (not 72%)
+  with the router's own $0.00005 folded in, at f_hard = 0.20:
+     0.8 x 0.0005 + 0.2 x 0.04 + 0.00005 = $0.00845   ->  78.9% (not 79.0%)
 ```
 
-**Why the 10× cost gap makes `f_hard` the only knob that matters.** Because `c_hard` is 10× `c_easy`, the hard branch dominates the average the moment `f_hard` clears about 10%: at `f_hard = 0.2` the 20% of hard steps contribute `$0.010` of the `$0.014` total — 71% of the bill from a fifth of the traffic. So cascade savings are a bet on router *precision*, not on the cheap model being cheap. A router that over-escalates from 20% to 50% keeps only half the promised win, and the router's own `$0.0005` per step is noise by comparison — it costs 1 percentage point of savings.
+**Why the 80× cost gap makes `f_hard` the only knob that matters.** Because `c_hard` is 80× `c_easy`, the hard branch dominates the average the moment `f_hard` clears about 1%: at `f_hard = 0.2` the 20% of hard steps contribute `$0.008` of the `$0.0084` total, 95% of the bill from a fifth of the traffic. So cascade savings are a bet on router *precision*, not on the cheap model being cheap. A router that over-escalates from 20% to 50% keeps under two thirds of the promised win (49% instead of 79%), and the router's own `$0.00005` per step is noise by comparison: it costs 0.1 percentage point of savings.
 
 ### Cost Attribution Per Tool Call
 
@@ -289,17 +290,17 @@ class AgentBudget:
 
 
 PRICING = {
-    "claude-sonnet-4-6": {
-        "input": 3.00e-6, "output": 15.00e-6,
-        "cache_write": 3.75e-6, "cache_read": 0.30e-6,
+    "claude-sonnet-5-5": {
+        "input": 2.00e-6, "output": 10.00e-6,
+        "cache_write": 2.50e-6, "cache_read": 0.10e-6,
     },
-    "claude-haiku-4-5": {
-        "input": 1.00e-6, "output": 5.00e-6,
-        "cache_write": 1.25e-6, "cache_read": 0.10e-6,
+    "claude-haiku-5-5": {
+        "input": 0.10e-6, "output": 0.50e-6,
+        "cache_write": 0.125e-6, "cache_read": 0.01e-6,
     },
-    "claude-opus-4-7": {
-        "input": 5.00e-6, "output": 25.00e-6,
-        "cache_write": 6.25e-6, "cache_read": 0.50e-6,
+    "claude-opus-5-5": {
+        "input": 4.00e-6, "output": 20.00e-6,
+        "cache_write": 5.00e-6, "cache_read": 0.20e-6,
     },
 }
 
@@ -310,6 +311,9 @@ def update_budget(budget: AgentBudget, usage: Any, model: str) -> None:
     out_toks = usage.output_tokens
     cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+    # Haiku 5.5 bills every meter at 5x once the whole prompt passes 100K tokens.
+    if model == "claude-haiku-5-5" and in_toks + cw + cr > 100_000:
+        p = {k: v * 5 for k, v in p.items()}
     
     budget.input_tokens += in_toks
     budget.output_tokens += out_toks
@@ -332,7 +336,7 @@ async def compact_history(messages: list[dict]) -> list[dict]:
     recent = messages[-4:]
     
     summary_resp = await client.messages.create(
-        model="claude-haiku-4-5",  # Cheap model for summarization
+        model="claude-haiku-5-5",  # Cheap model for summarization
         max_tokens=2048,
         messages=[{
             "role": "user",
@@ -343,7 +347,7 @@ async def compact_history(messages: list[dict]) -> list[dict]:
             ),
         }],
     )
-    summary = summary_resp.content[0].text
+    summary = summary_resp.content[-1].text  # thinking block comes first
     
     return [
         {"role": "user", "content": f"[COMPACTED CONTEXT]\n{summary}"},
@@ -373,7 +377,7 @@ async def cost_aware_agent(user_request: str, budget: AgentBudget) -> str:
             messages = await compact_history(messages)
         
         # Model cascade: try Haiku first, escalate on low confidence
-        model = "claude-haiku-4-5" if iteration < 2 else "claude-sonnet-4-6"
+        model = "claude-haiku-5-5" if iteration < 2 else "claude-sonnet-5-5"
         
         resp = await client.messages.create(
             model=model,
@@ -414,15 +418,15 @@ async def cost_aware_agent(user_request: str, budget: AgentBudget) -> str:
 | Symbol | What it is |
 |--------|------------|
 | `in_toks` | `usage.input_tokens` — tokens sent that were NOT served from cache |
-| `out_toks` | `usage.output_tokens` — what the model generated. Priced 5× input on Sonnet |
+| `out_toks` | `usage.output_tokens`: what the model generated, thinking included. Priced 5× input on every current Claude model |
 | `cw` | `cache_creation_input_tokens` — prefix written to cache at 1.25× input |
-| `cr` | `cache_read_input_tokens` — prefix served from cache at 0.1× input |
-| `p["input"]` | `3.00e-6` — dollars per token, i.e. `$3.00` per million |
+| `cr` | `cache_read_input_tokens`: prefix served from cache at 0.05× input on Sonnet 5.5 and Opus 5.5, 0.1× on Haiku 5.5 |
+| `p["input"]` | `2.00e-6` on Sonnet 5.5, i.e. `$2.00` per million |
 | `or 0` | Guard: these fields are absent on non-caching models, and `None + int` raises |
 
 The `getattr(..., 0) or 0` on `cw` and `cr` is the term most often dropped. Omit it and cache traffic silently costs `$0`, so `budget.cost_usd` under-reports and the `>= max_total_cost_usd` check never trips — the cap looks enforced while spend runs free.
 
-**Walk one example.** Two Sonnet calls, the first writing a 3,000-token prefix to cache and the second reading it back:
+**Walk one example.** Two Sonnet 4.6 calls, the first writing a 3,000-token prefix to cache and the second reading it back:
 
 ```
   call 1 (cache write)
@@ -482,7 +486,7 @@ it. Pass `context_management` alongside `tools`, with the
 
 ```python
 resp = client.beta.messages.create(
-    model="claude-sonnet-5",
+    model="claude-sonnet-5-5",
     max_tokens=4096,
     betas=["context-management-2025-06-27"],
     tools=TOOLS,
@@ -637,8 +641,8 @@ messages = [{"role": "user", "content": f"Today is {datetime.now()}\n\nQuery: {q
 Agent loops send the ENTIRE conversation history on every API call. After N tool calls, the input context contains all N prior tool results, plus reasoning, plus the new user message. Cost is O(N²) in conversation length, not O(N). A 20-step agent with average 3K-token tool outputs costs ~30× a single completion at the same output budget.
 
 **Q: What does Anthropic's prompt caching cost and when does it pay back?**
-**Short:** Cache writes cost 1.25x and reads cost 0.1x base price, so a five-minute cache prefix pays back on its very first reuse.
-Cache writes cost 1.25× base input price. Cache reads cost 0.1× base input price. The cache TTL is 5 minutes (ephemeral) or 1 hour (with `cache_control: {"type": "ephemeral", "ttl": "1h"}`). With the 5-minute TTL, the first read already pays the write back (1.25 + 0.1 = 1.35 vs 2.0 uncached), so any prefix used twice in the cache window is a net win; the 1-hour TTL costs 2× to write and needs three uses (2.0 + 0.2 = 2.2 vs 3.0).
+**Short:** Cache writes cost 1.25x base input and reads 0.1x (0.05x on Opus 5.5 and Sonnet 5.5), so a five-minute cache prefix pays back on its first reuse.
+Cache writes cost 1.25× base input price. Cache reads cost 0.1× base input price on most models, 0.05× on Opus 5.5 and Sonnet 5.5, and 0.025× on Fable 5.1. The cache TTL is 5 minutes (ephemeral) or 1 hour (with `cache_control: {"type": "ephemeral", "ttl": "1h"}`). With the 5-minute TTL, the first read already pays the write back (1.25 + 0.1 = 1.35 vs 2.0 uncached), so any prefix used twice in the cache window is a net win; the 1-hour TTL costs 2× to write and needs three uses (2.0 + 0.2 = 2.2 vs 3.0).
 
 **Q: How do you implement a hard cost cap on an agent?**
 **Short:** Sum usage-reported token costs after every call and abort with a partial result once cumulative spend crosses the budget.
@@ -650,7 +654,7 @@ Use Batch API when: (a) task is async/offline (overnight processing, daily repor
 
 **Q: What is the right context compaction trigger and strategy?**
 **Short:** Trigger compaction at 70 percent of a self-imposed token ceiling and summarize all but the last few tool results with Haiku.
-Trigger at 70% of your working token budget, not of the model's raw context window. Current Claude models expose a 1M-token window, and Haiku 4.5 a 200K one, but agents rarely want to pay for a full million — so set a self-imposed ceiling (say 200K) and compact at 70% of that, 140K. Strategy: summarize all-but-the-last-4 tool result pairs into 5-10 bullet points using a cheaper model (Haiku). Replace the early conversation with the summary. Keep the most recent results verbatim since they're usually the most relevant for the next decision.
+Trigger at 70% of your working token budget, not of the model's raw context window. Every current Claude model, Haiku 5.5 included, exposes a 1M-token window, but agents rarely want to pay for a full million, so set a self-imposed ceiling (say 200K) and compact at 70% of that, 140K. Strategy: summarize all-but-the-last-4 tool result pairs into 5-10 bullet points using a cheaper model (Haiku). Replace the early conversation with the summary. Keep the most recent results verbatim since they're usually the most relevant for the next decision.
 
 **Q: How do you decide which model to use in a cascade?**
 **Short:** Route routine steps to a cheap model and reserve the most capable model for complex multi-step reasoning steps.
@@ -717,7 +721,7 @@ Context editing, because it drops old tool results inside the API without the ex
 
 **Customer Support Agent Cost Optimization (B2B SaaS)**
 
-**Initial state (month 1)**: Sonnet-only agent, no caching, no compaction. Average task: 12 iterations, 80K cumulative input tokens, 6K output tokens. Cost per conversation: $0.33. Daily volume: 8K conversations. **Daily cost: $2,640. Monthly: $79,200.**
+**Initial state (month 1)**: Sonnet 4.6-only agent, no caching, no compaction. Average task: 12 iterations, 80K cumulative input tokens, 6K output tokens. Cost per conversation: $0.33. Daily volume: 8K conversations. **Daily cost: $2,640. Monthly: $79,200.**
 
 **Optimizations applied (month 2)**:
 

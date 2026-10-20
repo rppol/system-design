@@ -177,6 +177,37 @@ Both naive numbers are more than double the truth, and each is wrong for a diffe
 
 **What breaks without parallel trends.** The assumption is doing all the work, and it is untestable in the post period by construction. Suppose the treated market was already accelerating and would have gained +8.0 on its own: the true effect is +1.0, DiD still reports +3.0, and no amount of extra data corrects it. This is why the standard practice is an event-study plot of several pre-periods — if the two lines were already diverging before treatment, DiD is measuring the divergence, not the treatment.
 
+**Staggered adoption: why plain two-way fixed effects fails.** Most product rollouts do not have one treated group and one date. Markets, stores, or user cohorts switch on at different times. The usual regression, two-way fixed effects (TWFE) `Y_it = a_i + l_t + b * D_it + e_it`, looks like the natural generalization, but Goodman-Bacon (Journal of Econometrics, 2021) showed that its `b` is a weighted average of every 2x2 DiD in the panel, including "forbidden" comparisons that use already-treated units as controls. When the effect grows over time, the already-treated control is still rising from its own treatment, and that rise is subtracted from the later cohort's effect. Weights can be negative, and the sign of `b` can flip.
+
+**Walk one example.** Two cohorts, four periods, no other trend. Cohort E switches on in period 2 and its effect grows by 2 each period; cohort L switches on in period 4 with effect 2.
+
+```
+             p1   p2   p3   p4
+  E (t=2)     0    2    4    6     effects 2, 4, 6
+  L (t=4)     0    0    0    2     effect 2
+
+  Goodman-Bacon 2x2s inside the TWFE estimate:
+    E vs L (L not yet treated, p1 -> p2..p3) : (3 - 0) - (0 - 0) = +3   clean
+    L vs E (E already treated, p2..p3 -> p4) : (2 - 0) - (6 - 3) = -1   forbidden
+  TWFE b = 0.5 * (+3) + 0.5 * (-1) = +1.0
+  true average effect over treated cells = (2 + 4 + 6 + 2) / 4 = +3.5
+```
+
+TWFE reports +1.0 when every treated cell has a positive effect of at least +2. The -1 comes from treating cohort E's growing effect as if it were a time trend.
+
+**Heterogeneity-robust estimators.** The fixes all avoid forbidden comparisons:
+
+| Estimator | Idea | Control group |
+|-----------|------|---------------|
+| Callaway and Sant'Anna (Journal of Econometrics, 2021) | Estimate `ATT(g, t)` for each adoption cohort `g` and period `t` as a clean 2x2, then aggregate by event time or cohort | Never-treated or not-yet-treated units only |
+| Sun and Abraham (2021) | Event-study regression with cohort-by-relative-time interactions | Last-treated or never-treated cohort |
+| de Chaisemartin and D'Haultfoeuille (AER, 2020) | Average of switchers versus non-switchers each period | Units whose treatment did not change |
+| Borusyak, Jaravel and Spiess (REStud, 2024); Gardner `did2s` | Fit unit and time effects on untreated cells only, impute `Y(0)` for treated cells | All untreated cells |
+
+In the example above, Callaway-Sant'Anna estimates `ATT(E, 2) = 2` and `ATT(E, 3) = 4` using L as the not-yet-treated control and declines to estimate the period-4 cells, because no clean control is left. That refusal is the point: without a never-treated group, the last cohort's effect is not identified, and TWFE fills the gap with a biased number.
+
+**Synthetic DiD.** Arkhangelsky, Athey, Hirshberg, Imbens and Wager (AER, 2021) combine synthetic control and DiD. Unit weights pick control units whose weighted pre-period path parallels the treated units, time weights pick pre-periods that resemble the post period, and a weighted DiD with unit fixed effects runs on top. It needs parallel trends only for the reweighted controls, and it handles a few treated units against many controls, which is the common shape of a market-level launch.
+
 **Instrumental Variables (IV):**
 When unobserved confounders exist, use instrument Z (affects T but has no direct effect on Y).
 Two-stage least squares: (1) regress T on Z to get T_hat, (2) regress Y on T_hat. Estimates Local ATE (LATE): effect among compliers (units whose treatment changed because of Z).
@@ -700,7 +731,7 @@ def qini_coefficient(
     # Area between model curve and random (diagonal)
     qini_curve = np.array(qini_values)
     random_curve = np.linspace(0, qini_curve[-1], n)
-    return float(np.trapz(qini_curve - random_curve) / n)
+    return float(np.trapezoid(qini_curve - random_curve) / n)
 ```
 
 **Practical validation:** since true CATE is unobservable, use:
@@ -761,7 +792,7 @@ def qini_coefficient(
 ## 10. Common Pitfalls
 
 **Pitfall 1 — Ignoring positivity violations:**
-An e-commerce team estimated coupon effect using IPW. Some user segments (new users, age 18–22, mobile-only) had propensity score e(x) < 0.01 — these users almost never received coupons. IPW weights for these users reached 100x, dominating the estimate. Reported ATE: +8% conversion. True effect: +2%. Fix: always plot the propensity score distribution for treated and control groups. Trim units with e(x) < 0.05 or e(x) > 0.95, report trimming fraction, and bound sensitivity of results to the trimming threshold.
+An e-commerce team estimated coupon effect using IPW. Some user segments (new users, age 18-22, mobile-only) had propensity score e(x) < 0.01; these users almost never received coupons. IPW weights for these users reached 100x, dominating the estimate. Reported ATE: +8% conversion. True effect: +2%. Fix: always plot the propensity score distribution for treated and control groups. Trim units with e(x) < 0.05 or e(x) > 0.95, report trimming fraction, and bound sensitivity of results to the trimming threshold. With EconML, `DRLearner` supports sample trimming since 0.17 (August 2026); its `min_propensity` argument (default `1e-6`) only clips propensities to avoid division by zero and does not restore overlap.
 
 **Pitfall 2 — Unmeasured confounders (overconfidence in observational data):**
 A media company estimated the effect of their recommendation algorithm on watch time using T-learner on historical data. The study concluded the algorithm increased watch time by 15%. Later A/B test showed 3% increase. The confounder: users who engaged with the algorithm's recommendations were already high-intent viewers — this was not captured in measured features. Fix: conduct sensitivity analysis (Rosenbaum bounds: how strong must an unmeasured confounder be to explain away the effect?). Report as "suggestive" rather than causal unless validated by experiment.
@@ -775,19 +806,26 @@ A team used gradient boosted trees as the S-learner for a marketing experiment. 
 **Pitfall 5 — Leaking post-treatment features:**
 A team trained a CATE model to predict who would respond to a discount. They included features like "discount_used_last_90_days" — a post-treatment variable affected by past treatment. This created a feedback loop: users who used discounts before were estimated to have higher CATE, so they received more discounts, so their "discount_used" feature increased further. Fix: use only pre-treatment covariates (features measured before the treatment decision). Apply strict temporal cutoffs — features measured after treatment assignment are never valid covariates.
 
+**Pitfall 6: TWFE on a staggered rollout.**
+A marketplace launched a pricing feature city by city over 9 months and estimated its effect with `Y ~ treated + C(city) + C(week)`. The coefficient was +0.4% GMV with a confidence interval spanning zero, and the feature was nearly rolled back. A Callaway-Sant'Anna event study on the same panel showed effects rising from +1% in the first month to +4% by month six. The early cities, already treated and still growing, had acted as controls for the late cities and absorbed most of the effect. Fix: run a Goodman-Bacon decomposition to see how much weight sits on already-treated controls, then use a heterogeneity-robust estimator with never-treated or not-yet-treated controls.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| EconML (Microsoft) | CATE estimation: CausalForestDML, DML, DR-Learner | Production-grade; best general library |
+| EconML (PyWhy, 0.17) | CATE estimation: CausalForestDML, DML, DR-Learner | Production-grade; best general library |
 | CausalML (Uber) | Uplift modeling: T/S/X-Learner, CausalForest | Strong on marketing use cases |
-| DoWhy (Microsoft) | Causal graph specification, identification, refutation | DAG-based; forces explicit assumptions |
+| DoWhy (PyWhy) | Causal graph specification, identification, refutation | DAG-based; forces explicit assumptions |
 | grf (R) | Generalized Random Forests (CausalForest) | R ecosystem, Athey lab original |
 | doubleml (Python) | Double ML / PLM | Follows Chernozhukov et al. exactly |
 | statsmodels | DiD, IV (2SLS), propensity models | Econometrics baseline |
-| daggity | DAG drawing and identification analysis | Web tool; useful for confounding analysis |
+| did (R), csdid (Python) | Callaway-Sant'Anna group-time ATTs and event-study aggregation | Staggered adoption with never- or not-yet-treated controls |
+| bacondecomp (R, Stata) | Goodman-Bacon decomposition of a TWFE coefficient | Shows the weight on forbidden comparisons |
+| synthdid (R) | Synthetic difference-in-differences | Few treated units, many controls |
+| pyfixest (Python) | Fast fixed-effects regression, `did2s` imputation estimator, event studies | Python port of R fixest |
+| DAGitty | DAG drawing and identification analysis | Web tool; useful for confounding analysis |
 | Pyro / NumPyro | Bayesian causal models | When uncertainty quantification is critical |
 
 ---
@@ -821,6 +859,16 @@ Multiple strategies: (1) Synthetic data — simulate data with known treatment e
 **Q: What is the parallel trends assumption in DiD and when does it fail?**
 **Short:** Parallel trends requires treated and control groups to have moved identically absent treatment, and it fails whenever the groups were already trending differently before treatment.
 Parallel trends: absent the treatment, the treated and control groups would have followed the same time trend. DiD estimates ATE_DiD = (Y_treated_post - Y_treated_pre) - (Y_control_post - Y_control_pre). If control and treated groups were trending differently before treatment (e.g., one is in a declining market), parallel trends fails and DiD is biased. Diagnostic: plot pre-treatment trends for both groups — they should track closely. Event study design: include leads (pre-treatment period indicators) and test whether they are jointly zero. Synthetic control constructs a weighted combination of control units that best matches the treated unit's pre-period trend.
+
+**Q: Why can two-way fixed effects give the wrong sign on a staggered rollout?**
+**Short:** TWFE averages all 2x2 DiDs, including ones that use already-treated units as controls; when effects grow over time those comparisons are biased down and can carry negative weight.
+
+Goodman-Bacon (2021) showed that the TWFE coefficient on a treatment dummy is a weighted average of every 2x2 DiD in the panel. Some compare a late cohort against an early cohort that is already treated. If the early cohort's effect is still growing, its rise looks like a time trend and is subtracted from the late cohort's effect. With two cohorts where every treated cell has an effect of at least +2 and the true average is +3.5, TWFE can return +1.0, and stronger dynamics flip the sign. Use Callaway-Sant'Anna, Sun-Abraham, or an imputation estimator that only uses never-treated or not-yet-treated controls.
+
+**Q: How do Callaway-Sant'Anna and synthetic DiD differ, and when do you use each?**
+**Short:** Callaway-Sant'Anna estimates clean per-cohort, per-period ATTs for staggered rollouts; synthetic DiD reweights control units and periods to fit pre-trends, suited to few treated units.
+
+Callaway-Sant'Anna splits a staggered panel into adoption cohorts and estimates `ATT(g, t)` for each cohort and period as a 2x2 DiD against never-treated or not-yet-treated units, then aggregates into an event-study curve or an overall ATT. It needs many units per cohort and a clean control group. Synthetic DiD (Arkhangelsky et al., 2021) learns unit weights so the weighted controls track the treated units before treatment, plus time weights over pre-periods, then runs a weighted DiD. It suits a launch in a few markets with many untreated markets and pre-trends that do not match without reweighting.
 
 **Q: What is an instrumental variable and what are the three key conditions for validity?**
 **Short:** A valid instrument must be relevant to treatment, affect the outcome only through treatment, and be as-good-as-randomly assigned, identifying the LATE among compliers.
@@ -870,7 +918,7 @@ A doubly robust estimator combines an outcome model and a propensity model, and 
 - Check positivity before any propensity-based method. Plot propensity histograms for treated and control groups. Trim or reweight if overlap is poor.
 - Use cross-fitting (K=5 folds) for Double ML and any method involving ML nuisance models. Plain cross-validation is not sufficient.
 - For CATE estimation, prefer CausalForestDML (EconML) as the default — it provides valid confidence intervals and handles high-dimensional X.
-- Conduct sensitivity analysis: how large must unmeasured confounding be (Rosenbaum E-value) to explain away your estimate? Report this alongside the point estimate.
+- Conduct sensitivity analysis: how large must unmeasured confounding be (Rosenbaum bounds or the VanderWeele-Ding E-value) to explain away your estimate? Report this alongside the point estimate. For EconML `DML` and `DRLearner` subclasses (0.16+), call `sensitivity_analysis()` for the ATE interval under a chosen confounding level, `robustness_value()` for the confounding level that moves that interval to 0, and `sensitivity_summary()` for both, based on Chernozhukov et al. (2022).
 - Never include post-treatment variables as covariates — this opens collider bias.
 - For uplift modeling, evaluate using both Qini curves (ranking quality) and a held-out A/B test (absolute calibration).
 - Use doubly robust estimators (DR-Learner, AIPW) when you are uncertain whether the outcome model or propensity model is correctly specified — consistency under either alone.
@@ -1016,7 +1064,7 @@ def evaluate_uplift_models(
         n = len(T_ord)
         gains = np.cumsum(Y_ord * T_ord) / (np.cumsum(T_ord) + 1e-8) - \
                 np.cumsum(Y_ord * (1 - T_ord)) / (np.cumsum(1 - T_ord) + 1e-8)
-        return float(np.trapz(gains) / n)
+        return float(np.trapezoid(gains) / n)
 
     return {
         "qini_cf": qini_coefficient(tau_cf, T_test, Y_test),

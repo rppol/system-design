@@ -80,6 +80,7 @@ The asymmetry is what makes this an operational rule rather than trivia. Upsampl
 |---|---|---|---|---|
 | CTC | Marginalize over monotonic alignments via forward-backward DP + blank token | Yes (frame-synchronous) | Helps, but assumes conditional independence between output tokens | Simple, fast to train; DeepSpeech, wav2vec 2.0 fine-tuning head |
 | RNN-Transducer (RNN-T) | Same DP idea as CTC but over a 2D (t, u) lattice with an internal label predictor | Yes — production standard for on-device streaming | Built in (prediction network); can still shallow-fuse an external LM | Google's on-device Gboard/Recorder ASR |
+| Token-and-Duration Transducer (TDT) | RNN-T lattice plus a second joint-network head that predicts how many frames the emitted token covers | Yes | Same as RNN-T | Skips the predicted number of frames at decode, up to 2.82x faster than a conventional transducer (Xu et al., arXiv:2304.06795); NVIDIA Parakeet-TDT (`nvidia/parakeet-tdt-0.6b-v3`: FastConformer encoder, 600M parameters, 25 European languages, CC-BY-4.0) |
 | Attention (LAS) | Learned soft alignment via cross-attention, no conditional-independence assumption | No — needs most of the utterance | Awkward to fuse | Best offline accuracy historically; can skip/repeat words on long or noisy audio |
 | Whisper (encoder-decoder + massive weak supervision) | Attention, same family as LAS | Chunked (30 s windows), not frame-streaming | Multitask-trained in; no separate LM needed | 680K hours weakly-supervised training (see [Multimodal Models](../../llm/multimodal_models/multimodal_models.md)) |
 | wav2vec 2.0 / HuBERT + CTC head | Self-supervised pretraining, then CTC fine-tuning | Yes (via the CTC head) | Same as CTC | Best low-resource option — competitive WER from minutes of labeled data |
@@ -107,6 +108,31 @@ A small-footprint classifier — a few hundred KB, sometimes under 20K parameter
 | Vocoder | Converts the predicted mel-spectrogram to a waveform: WaveNet (autoregressive, highest quality, slowest), WaveGlow/HiFi-GAN (parallel, near real-time, standard in production since ~2020) | Same |
 
 Speech encoders built on top of these representations are usually LSTM/GRU or Transformer stacks (see [Recurrent Neural Networks](../recurrent_neural_networks/recurrent_neural_networks.md) for the gating and BPTT mechanics underneath the CTC/RNN-T/LAS encoders and decoders described in Section 6).
+
+### Neural audio codecs (discrete audio tokens)
+
+A neural audio codec is an encoder, a quantizer and a decoder trained end to end so the waveform can be stored or modelled as a short grid of integers. The quantizer is **residual vector quantization (RVQ)**: codebook 1 quantizes the encoder frame, codebook 2 quantizes what codebook 1 missed, and so on, so each extra codebook adds detail and bitrate. Training mixes a reconstruction loss with adversarial and feature-matching losses from discriminators, which is why codec output sounds sharper than a plain autoencoder's.
+
+| Codec | Audio in | Frame rate | Codebooks x size | Bitrate |
+|---|---|---|---|---|
+| EnCodec (Meta, Défossez et al., 2022) | 24 kHz mono (also 48 kHz stereo) | 75 Hz | 2 to 32 x 1024 | 1.5, 3, 6, 12, 24 kbps (`n_q` = 2, 4, 8, 16, 32) |
+| Mimi (Kyutai, Moshi paper, 2024) | 24 kHz mono | 12.5 Hz | 8 x 2048 (1 semantic + 7 acoustic) | 1.1 kbps |
+
+Mimi distills WavLM self-supervised features into its first codebook with a cosine loss, so token 1 of each frame carries mostly linguistic content and tokens 2 to 8 carry voice and acoustic detail. It is fully causal with an 80 ms frame, which is what lets Moshi run full-duplex speech dialogue.
+
+### Codec language models and flow-matching TTS
+
+Once audio is tokens, TTS can be language modelling. **VALL-E** (Microsoft, January 2023) trains on 60,000 hours of LibriLight speech, conditions on a phoneme sequence plus a 3-second enrolled recording of an unseen speaker, and predicts EnCodec 6 kbps tokens: an autoregressive model generates codebook 1, and a non-autoregressive model fills codebooks 2 to 8. Voice cloning becomes prompt continuation.
+
+**Flow matching** removes both the autoregressive loop and the duration model. The model learns a velocity field that moves Gaussian noise to the target mel-spectrogram along a near-straight path, then integrates it in a few ODE steps. **Voicebox** (Meta, 2023; over 50,000 hours) trains it as speech infilling given surrounding audio and text, so zero-shot TTS, denoising and editing are all the same task, and reported up to 20x faster inference than VALL-E. **F5-TTS** (October 2024; 100,000 hours, multilingual) uses a Diffusion Transformer, pads the text with filler tokens to the target length so no phoneme alignment or duration predictor is needed, and reports a real-time factor of 0.15.
+
+| Paradigm | Output | Alignment | Strength | Main failure |
+|---|---|---|---|---|
+| Mel + vocoder (Tacotron 2, FastSpeech 2 + HiFi-GAN) | Mel frames, then waveform | Attention or duration predictor | Small, controllable, single-speaker quality | Needs per-speaker training data for a new voice |
+| Codec LM (VALL-E family) | Codec tokens, decoded by the codec | Learned by the LM | Zero-shot cloning from a 3 s prompt; prosody variety | Word skipping and repetition from sampling; latency grows with length |
+| Flow matching (Voicebox, F5-TTS) | Mel frames (then vocoder) in parallel | None or filler-padded text | Fast parallel generation, infilling and editing | Total duration must be chosen up front |
+
+The production side of these systems, consent and watermarking for cloned voices, and the serving design are in [Design a Voice Cloning TTS Platform](../../llm/case_studies/design_voice_cloning_tts_platform.md).
 
 ---
 
@@ -302,6 +328,37 @@ Every one of these numbers is baked into the trained model. Feature-extraction p
 
 **Why window and hop are two separate knobs.** The window sets *frequency* resolution (longer window = narrower bins = finer pitch detail) while the hop sets *time* resolution (smaller hop = more frames per second). They trade against each other — this is the time-frequency uncertainty principle. A 100 ms window would give 10 Hz bins but smear a 30 ms stop consonant into mush; a 5 ms window would catch every transient but at 200 Hz bins, too coarse to separate formants. 25 ms / 10 ms is the empirical compromise, and the fact that it lands on the round integers 400 and 160 at 16 kHz is a large part of why it stuck.
 
+### Codec tokens and codec-language-model TTS (VALL-E)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    wav(["24 kHz waveform"]) --> enc["Codec encoder<br/>stride 320"]
+    enc --> q1["RVQ codebook 1<br/>coarse"]
+    q1 --> r1(("residual"))
+    r1 --> q2["codebooks 2..8<br/>finer detail"]
+    q2 --> grid(["75 x 8 tokens per second"])
+
+    txt(["Phonemes"]) --> ar["AR transformer<br/>generates codebook 1"]
+    prompt(["3 s prompt tokens"]) --> ar
+    ar --> nar["NAR transformer<br/>fills codebooks 2..8"]
+    prompt --> nar
+    nar --> dec["Codec decoder"]
+    dec --> out(["Cloned speech"])
+
+    class wav,grid,txt,prompt,out io
+    class enc,dec frozen
+    class ar,nar train
+    class q1,q2,r1 mathOp
+```
+
+The codec is frozen and shared by both halves: the top row turns training audio into token grids, the bottom row is VALL-E generating a new grid. Only codebook 1 is generated one step at a time; the other 7 levels are filled in parallel, which keeps decode steps at 75 per second of audio instead of 600.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -309,9 +366,9 @@ Every one of these numbers is baked into the trained model. Feature-extraction p
 ### Loading audio and verifying the sample rate
 
 ```python
-import torch
 import torchaudio
 from torch import Tensor
+from torchcodec.decoders import AudioDecoder
 
 TARGET_SR = 16_000  # Hz - matches wav2vec 2.0, Whisper, and LibriSpeech training data
 
@@ -323,7 +380,8 @@ def load_and_resample(path: str, target_sr: int = TARGET_SR) -> Tensor:
     bug: 8 kHz telephone audio fed into a 16 kHz-trained model degrades WER
     sharply (see Common Pitfalls, War Story 2) without ever raising an error.
     """
-    waveform, sr = torchaudio.load(path)              # (channels, samples)
+    samples = AudioDecoder(path).get_all_samples()
+    waveform, sr = samples.data, samples.sample_rate  # (channels, samples), Hz
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)  # downmix to mono
     if sr != target_sr:
@@ -655,6 +713,56 @@ def length_regulator(phoneme_embeddings: Tensor, durations: Tensor) -> Tensor:
     return torch.cat(expanded, dim=0)   # (total_frames, embed_dim)
 ```
 
+### Residual vector quantization and codec bitrate
+
+```python
+def rvq_encode(frames: Tensor, codebooks: list[Tensor]) -> tuple[Tensor, Tensor]:
+    """frames: (T, d) encoder output; each codebook: (K, d).
+    Returns codes (T, n_q) and the quantized frames (T, d) the decoder sees."""
+    residual = frames
+    quantized = torch.zeros_like(frames)
+    codes = []
+    for cb in codebooks:
+        idx = torch.cdist(residual, cb).argmin(dim=-1)  # nearest entry per frame
+        chosen = cb[idx]
+        quantized = quantized + chosen
+        residual = residual - chosen
+        codes.append(idx)
+    return torch.stack(codes, dim=-1), quantized
+```
+
+Dropping the last codebooks at inference lowers bitrate without retraining, which is how one EnCodec model serves 1.5 to 24 kbps: training randomly picks how many codebooks to use per batch.
+
+```
+bitrate = frame rate x codebooks x log2(codebook size)
+
+EnCodec 24 kHz    75   Hz x  8 x log2(1024) = 75   x  8 x 10 = 6,000 bps  (VALL-E's setting)
+EnCodec 24 kHz    75   Hz x 32 x log2(1024) = 75   x 32 x 10 = 24,000 bps
+Mimi              12.5 Hz x  8 x log2(2048) = 12.5 x  8 x 11 = 1,100 bps
+
+tokens a language model must emit for 10 s of audio
+EnCodec, 8 codebooks, flattened        75 x 8 x 10   = 6,000 tokens
+EnCodec, VALL-E split (AR on cb 1)     75 x 10       =   750 sequential steps
+Mimi, 8 codebooks                      12.5 x 8 x 10 = 1,000 tokens (125 frames)
+```
+
+The frame rate sets the sequence length a codec LM must attend over, so Mimi's 12.5 Hz frame is a 6x shorter sequence than EnCodec's 75 Hz before any codebook trick.
+
+### Conditional flow matching (the Voicebox / F5-TTS objective)
+
+```python
+def flow_matching_loss(model: nn.Module, x1: Tensor, cond: Tensor) -> Tensor:
+    """x1: target mel (B, T, n_mels); cond: text plus masked-audio context.
+    Straight path from noise x0 to data x1; the model regresses its constant velocity."""
+    x0 = torch.randn_like(x1)
+    t = torch.rand(x1.size(0), 1, 1, device=x1.device)
+    xt = (1 - t) * x0 + t * x1
+    target_velocity = x1 - x0
+    return F.mse_loss(model(xt, t.view(-1), cond), target_velocity)
+```
+
+Inference starts from noise and takes a few Euler steps `x <- x + dt * model(x, t, cond)` from `t = 0` to `t = 1`. Because the path is near-straight, a few tens of steps suffice where a DDPM sampler takes up to 1,000, and every frame is produced in parallel.
+
 ### The WER metric — worked example
 
 ```python
@@ -761,6 +869,12 @@ Note that only `S` and `D` are capped by `N` — together they can never exceed 
 
 **Voice biometrics for banking authentication**: speaker-verification systems used for phone-based identity checks typically target EER in the 1-3% range, with the acceptance threshold set as a deliberate business tradeoff between fraud risk (false accepts) and customer friction (false rejects).
 
+**Kyutai Moshi (Mimi codec)**: Moshi is a full-duplex speech-text dialogue model that listens and speaks at the same time, built on the Mimi codec (12.5 Hz, 8 codebooks of 2,048, 1.1 kbps, first codebook distilled from WavLM). Its paper reports 160 ms theoretical and 200 ms practical latency, possible because Mimi is fully causal and a 12.5 Hz frame keeps the token sequence short.
+
+**Microsoft VALL-E**: trained on 60,000 hours of LibriLight English and cloned unseen voices from a 3-second prompt by predicting EnCodec 6 kbps tokens (autoregressive codebook 1, non-autoregressive codebooks 2 to 8). It made zero-shot voice cloning a language-modelling problem, and the consent and misuse controls this demands are covered in [Design a Voice Cloning TTS Platform](../../llm/case_studies/design_voice_cloning_tts_platform.md).
+
+**Meta Voicebox and F5-TTS (flow matching)**: Voicebox (2023, over 50,000 hours) trained a non-autoregressive flow-matching model on speech infilling and reported up to 20x faster inference than VALL-E. F5-TTS (2024) trained a Diffusion Transformer with flow matching on 100,000 hours of multilingual data, dropped the duration model by padding text with filler tokens, and reported a real-time factor of 0.15.
+
 **wav2vec 2.0 for low-resource languages**: the original wav2vec 2.0 paper (Baevski et al., 2020) showed that pretraining on 53,000 hours of unlabeled audio and fine-tuning on just 10 minutes of labeled data reached a WER of 4.8/8.2 on LibriSpeech test-clean/test-other — a result that made ASR viable for languages with little to no transcribed data.
 
 ---
@@ -773,9 +887,12 @@ Note that only `S` and `D` are capped by `N` — together they can never exceed 
 |---|---|---|---|---|
 | CTC | Simple (single loss) | Fast, near non-autoregressive decode | Large labeled corpus | Good, but behind RNN-T/attention on hard audio due to conditional independence |
 | RNN-T | Moderate (2D lattice loss, memory-heavy) | Lowest — frame-synchronous, streaming | Large labeled corpus | Best of the streaming options |
+| TDT | RNN-T loss plus a duration head | Lower decode cost than RNN-T: frames skipped by predicted duration | Large labeled corpus | `parakeet-tdt-0.6b-v3` (600M) averages 6.51% WER over the Open ASR Leaderboard's 11 English short-form test sets (2026-10-17 version) |
 | LAS / Attention | Simple loss (cross-entropy), but exposure bias at inference | Highest — needs full/most of utterance | Large labeled corpus | Best offline accuracy, historically |
 | wav2vec 2.0 + CTC | Two-stage: self-supervised pretrain, then fine-tune | Same as CTC once fine-tuned | Small labeled + large unlabeled | Best in low-resource settings |
-| Whisper | Massive multitask supervised pretraining | Chunked batch (30 s), not true streaming | None (zero-shot) or small (fine-tune) | Best general-purpose/multilingual robustness |
+| Whisper | Massive multitask supervised pretraining | Chunked batch (30 s), not true streaming | None (zero-shot) or small (fine-tune) | Broad multilingual zero-shot coverage; `whisper-large-v3` averages 7.84% WER on the same 11 Open ASR Leaderboard sets |
+
+Pick an accuracy default from the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard), which scores models on shared English short-form, long-form and multilingual test sets with one text normalizer and reports both WER and RTFx (inverse real-time factor), rather than from a model's own paper.
 
 **Feature representation tradeoffs:**
 
@@ -802,6 +919,9 @@ Note that only `S` and `D` are capped by `N` — together they can never exceed 
 | Griffin-Lim | Iterative phase reconstruction, no learning | Fast | Low — robotic artifacts |
 | WaveNet | Autoregressive, sample-by-sample | Very slow (real-time factor much greater than 1 originally) | Highest historically |
 | WaveGlow / HiFi-GAN | Parallel (flow-based / GAN-based) | Near real-time | High — standard in production since ~2020 |
+| Neural codec decoder (EnCodec, Mimi) | GAN-trained decoder from RVQ tokens | Real-time, streaming when causal | High at 6 kbps; Mimi targets speech at 1.1 kbps |
+
+**TTS paradigm tradeoffs** (mel + vocoder vs codec LM vs flow matching) are tabulated in Section 4 under "Codec language models and flow-matching TTS".
 
 ---
 
@@ -826,6 +946,18 @@ Note that only `S` and `D` are capped by `N` — together they can never exceed 
 **Use Whisper when:**
 - You need robust, off-the-shelf multilingual ASR quickly and can afford GPU inference
 - Do NOT use it where sub-second frame-level streaming is required — it processes fixed 30-second chunks, not a continuous stream
+
+**Use a codec language model (VALL-E family) when:**
+- You need zero-shot voice cloning from a few seconds of audio and natural prosody variety
+- You can afford sequential decode steps and add guards for word skipping and repetition
+
+**Use flow-matching TTS (Voicebox, F5-TTS) when:**
+- You want parallel generation with a few tens of ODE steps, plus infilling and speech editing from the same model
+- Do NOT use it when the output length cannot be estimated up front, since the model generates a fixed-length canvas
+
+**Use a neural audio codec when:**
+- You need discrete audio tokens for a language model, or low-bitrate transport (Mimi at 1.1 kbps, EnCodec at 1.5 to 24 kbps)
+- Prefer a low frame rate (12.5 Hz) when a model must attend over the tokens; prefer more codebooks when reconstruction fidelity matters more than sequence length
 
 **Use keyword spotting when:**
 - You need always-on, low-power wake-word detection on an edge/embedded device
@@ -865,15 +997,16 @@ assert not (set(train_speakers) & set(test_speakers))   # zero speaker overlap, 
 This is the audio equivalent of a temporal leakage bug in tabular ML — the model was cheating on a variable (speaker identity/recording channel) that will not exist at real deployment time for a genuinely unseen speaker.
 
 **War story 2 — Sample-rate mismatch between training and a new audio channel:**
-A voice-assistant team trained their ASR model exclusively on 16 kHz far-field microphone recordings, then routed an 8 kHz telephone-support integration through the same model without resampling. `torchaudio.load` happily returned an 8 kHz tensor with no exception, but WER on phone-channel audio was 41% versus 9% on the 16 kHz test set the model was validated against — the mel-filterbank's frequency mapping no longer corresponded to any real acoustic energy once every sample was silently treated as if it were 16 kHz-spaced.
+A voice-assistant team trained their ASR model exclusively on 16 kHz far-field microphone recordings, then routed an 8 kHz telephone-support integration through the same model without resampling. The decoder happily returned an 8 kHz tensor with no exception, but WER on phone-channel audio was 41% versus 9% on the 16 kHz test set the model was validated against, because the mel-filterbank's frequency mapping no longer corresponded to any real acoustic energy once every sample was silently treated as if it were 16 kHz-spaced.
 
 ```python
 # BROKEN: no sample-rate check before feature extraction
-waveform, sr = torchaudio.load(audio_path)    # sr can be 8000, 16000, 44100...
-features = mel_transform(waveform)             # mel_transform assumes 16 kHz internally
+samples = AudioDecoder(audio_path).get_all_samples()
+features = mel_transform(samples.data)         # mel_transform assumes 16 kHz; file may be 8 kHz
 
 # FIX: assert/resample at the boundary, every time, and log when it fires
-waveform, sr = torchaudio.load(audio_path)
+samples = AudioDecoder(audio_path).get_all_samples()
+waveform, sr = samples.data, samples.sample_rate
 if sr != TARGET_SR:
     logging.warning("resampling %s: %d Hz -> %d Hz", audio_path, sr, TARGET_SR)
     waveform = torchaudio.functional.resample(waveform, sr, TARGET_SR)
@@ -921,16 +1054,33 @@ def get_features(waveform: Tensor, training: bool) -> Tensor:
     return mel   # eval/production path never masks real information
 ```
 
+**War story 5 - Codec mismatch between the codec LM and the decoder:**
+A team fine-tuned a VALL-E-style codec LM on tokens from EnCodec at 6 kbps (8 codebooks), then shipped it behind serving code that sized `n_q` from a 3 kbps bandwidth setting to save bandwidth. The decoder received only the first 4 codebooks of each frame, so speech stayed intelligible but lost speaker similarity and gained a metallic texture, and no error was raised because every token was a valid index. A second variant of the same bug: tokens produced by one codec checkpoint decoded by another give noise, since codebook indices have no meaning outside the codebooks that produced them.
+
+```python
+# BROKEN: generation and decoding disagree on the token contract
+codes = codec_lm.generate(phonemes, prompt_codes)       # (n_q=8, T) from EnCodec 6 kbps
+n_q = BANDWIDTH_TO_NQ[SERVING_KBPS]                     # 3.0 kbps -> 4 codebooks
+audio = codec.decode([(codes[:n_q].unsqueeze(0), None)])  # silently drops 4 levels
+
+# FIX: pin codec checkpoint, sample rate and n_q as one versioned contract
+assert codes.shape[0] == CODEC_CONTRACT["n_q"] == 8
+audio = codec.decode([(codes.unsqueeze(0), None)])     # all 8 levels
+```
+
+Store the codec checkpoint hash, sample rate, frame rate and `n_q` next to every codec-LM checkpoint, and assert them at load time.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Purpose |
 |------|---------|
-| `torchaudio` | Audio I/O, resampling, STFT/mel/MFCC transforms, SpecAugment, RNN-T loss |
+| `torchcodec` | Audio decode and encode (`AudioDecoder`, `AudioEncoder`); can resample and downmix on decode |
+| `torchaudio` | Resampling, STFT/mel/MFCC transforms, SpecAugment, RNN-T loss; in maintenance: audio I/O was removed in 2.9 (use `torchcodec`), and 2.11 works with torch 2.11 and every later torch release |
 | `librosa` | Research-oriented audio analysis and feature extraction |
 | Kaldi | Legacy but still-deployed GMM-HMM/hybrid ASR toolkit; origin of the x-vector recipe |
-| NVIDIA NeMo | Production ASR/TTS/speaker toolkit (Conformer, Citrinet, TitaNet) |
+| NVIDIA NeMo | Production ASR/TTS/speaker toolkit (FastConformer, TitaNet); home of the Parakeet (CTC, RNN-T, TDT) and Canary (`nvidia/canary-1b-v2`, CC-BY-4.0) checkpoints, loaded with `ASRModel.from_pretrained` after `pip install -U nemo_toolkit['asr']` |
 | ESPnet | Research toolkit spanning CTC/RNN-T/attention/SSL ASR and TTS |
 | SpeechBrain | PyTorch-native speech toolkit (ASR, speaker, diarization recipes) |
 | HuggingFace `transformers` | `Wav2Vec2ForCTC`, `WhisperForConditionalGeneration`, model hub checkpoints |
@@ -938,6 +1088,9 @@ def get_features(waveform: Tensor, training: bool) -> Tensor:
 | WebRTC VAD / Silero VAD | Voice activity detection — trims silence before feature extraction |
 | `jiwer` | Standardized WER/CER computation with configurable text normalization |
 | HiFi-GAN / WaveGlow (official repos) | Neural vocoders for TTS |
+| EnCodec (`facebookresearch/encodec`, MIT code) | Neural audio codec, 24 kHz mono at 1.5 to 24 kbps and 48 kHz stereo at 3 to 24 kbps |
+| Mimi (`kyutai-labs/moshi`) | Streaming 12.5 Hz, 1.1 kbps speech codec with a semantic first codebook |
+| F5-TTS (`SWivid/F5-TTS`) | Flow-matching DiT zero-shot TTS |
 
 Key API notes:
 - `torchaudio.transforms.MelSpectrogram(..., n_fft=400, hop_length=160, n_mels=80)` reproduces Whisper's own front-end configuration at 16 kHz.
@@ -1004,6 +1157,11 @@ CTC introduces a blank symbol and a forward-backward dynamic-programming recursi
 
 RNN-T extends CTC's alignment idea with a prediction network — a label-history language model — plus a joint network combining audio and label state at each lattice cell. Emitting blank advances the audio frame t; emitting a real label advances the label position u without waiting for more audio, so the model can stream out partial hypotheses using only past and current frames. This is exactly why Google ships RNN-T on-device for Gboard voice typing and the Recorder app: no server round-trip is needed, and latency is bounded to roughly one frame's worth of computation rather than the whole utterance. The tradeoff is a heavier, more memory-intensive training loss than plain CTC, computed over a full 2D lattice instead of a 1D one.
 
+**Q: How does a Token-and-Duration Transducer (TDT) decode faster than a standard RNN-T?**
+**Short:** TDT's joint network also predicts how many frames each emitted token covers, so decoding jumps ahead by that duration instead of visiting every encoder frame.
+
+A standard RNN-T decoder visits every encoder frame and often emits only a blank there, so most decode steps are spent advancing past frames that carry no new token. TDT (Xu et al., arXiv:2304.06795) adds a second, independently normalized output to the joint network: a distribution over durations, the number of input frames the emitted token covers. At inference the decoder skips that many frames, which the paper reports as up to 2.82x faster than a conventional transducer on speech recognition with better accuracy. Training still uses the RNN-T style lattice DP, extended with the duration term. NVIDIA's `parakeet-tdt-0.6b-v3` pairs a FastConformer encoder with a TDT decoder and averages 6.51% WER over the Open ASR Leaderboard's 11 English short-form test sets (2026-10-17 version) against 7.84% for `whisper-large-v3`.
+
 **Q: How does an attention-based (LAS) ASR model differ from CTC/RNN-T, and what is its main weakness?**
 **Short:** LAS learns non-monotonic attention alignment for strong offline accuracy but cannot stream since it needs most of the utterance.
 
@@ -1043,6 +1201,21 @@ SpecAugment applies time masking and frequency masking directly on the log-mel-s
 **Short:** FastSpeech generates mel frames in parallel via a duration predictor, unlike Tacotron 2's sequential attention decoding.
 
 Tacotron 2 generates the mel-spectrogram one frame at a time with attention-based alignment, while FastSpeech generates all frames in parallel using an explicit duration predictor. That predictor drives a length regulator which expands each phoneme embedding to as many frames as its predicted duration, so Tacotron 2 can skip or repeat words on hard inputs since its attention is not constrained to be monotonic, whereas FastSpeech is both faster and more robust to that failure mode, though its output quality is capped by how accurate the duration predictor is. Both still require a separate vocoder — WaveGlow or HiFi-GAN in production — to convert the predicted mel-spectrogram into an audible waveform. Non-autoregressive TTS is the standard choice today for latency-sensitive production systems.
+
+**Q: How does residual vector quantization in a neural audio codec set its bitrate?**
+**Short:** Each RVQ codebook quantizes the previous level's residual, so bitrate = frame rate x codebooks x log2(codebook size), e.g. EnCodec 75 Hz x 8 x 10 bits = 6 kbps.
+
+RVQ quantizes each encoder frame with codebook 1, subtracts the chosen entry, quantizes the residual with codebook 2, and repeats, so each level adds finer detail. Every codebook index costs `log2(K)` bits per frame. EnCodec at 24 kHz runs 75 frames per second with 1024-entry codebooks, so 8 codebooks give 6 kbps and 32 give 24 kbps; Kyutai's Mimi runs 12.5 Hz with 8 codebooks of 2048 for 1.1 kbps. Training with a random number of codebooks per batch lets one model serve several bitrates by dropping trailing levels. For a model that generates tokens, the frame rate matters more than the bitrate: it sets the sequence length the model must attend over.
+
+**Q: Why does VALL-E generate only the first codebook autoregressively?**
+**Short:** Codebook 1 carries the coarse content and timing that need sequential modelling; codebooks 2 to 8 refine it and can be filled in parallel, cutting decode steps 8x.
+
+VALL-E predicts EnCodec 6 kbps tokens: 8 codebooks at 75 Hz. Generating all of them flattened would be 600 sequential steps per second of audio. Codebook 1 holds most of the content, prosody and duration, so an autoregressive transformer generates it conditioned on the phonemes and the 3-second speaker prompt; that model decides how long the utterance is. A non-autoregressive transformer then predicts codebooks 2 to 8, each level in one parallel pass conditioned on the levels below and the prompt. That leaves 75 sequential steps per second. The cost of sampling the first level is the codec-LM failure mode: word skipping and repetition, which a flow-matching model avoids by not sampling tokens at all.
+
+**Q: How does flow-matching TTS such as F5-TTS generate speech without a duration predictor?**
+**Short:** It regresses a velocity field from noise to the mel-spectrogram and pads the text with filler tokens to the target length, so alignment is learned inside the model.
+
+Conditional flow matching trains a model to predict `x1 - x0` at a random point `x_t = (1 - t) x0 + t x1` on the straight path between Gaussian noise `x0` and the target mel `x1`. At inference a few tens of ODE steps move noise to speech, and every frame is computed in parallel. F5-TTS (2024, 100,000 hours, Diffusion Transformer) pads the character sequence with filler tokens to the length of the output canvas and lets attention learn which characters map to which frames, so it needs no phoneme aligner or duration model and reports a real-time factor of 0.15. Voicebox (2023) uses the same objective as infilling around masked audio. The total length still has to be chosen up front, usually from the prompt's speaking rate times the text length.
 
 **Q: Why does streaming ASR trade accuracy for latency, and how does RNN-T bound that latency?**
 **Short:** Streaming ASR trades accuracy for latency since it cannot use the future audio context that offline models exploit.

@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-AutoML automates the parts of the ML pipeline that a human normally hand-crafts: feature engineering, model/pipeline selection, hyperparameter optimization (HPO), and ensembling. The promise is that a non-expert (or a busy expert) hands over `(X, y)` and a time budget, and the system returns a deployable model that rivals a carefully tuned baseline. Frameworks span the maturity curve: Auto-sklearn (meta-learning + Bayesian search over sklearn pipelines — but see §11, it is no longer maintained), TPOT (genetic programming over pipelines), H2O AutoML (grid + stacked ensembles), AutoGluon (portfolio stacking), and managed services (Google Vertex AI AutoML, Azure AutoML).
+AutoML automates the parts of the ML pipeline that a human normally hand-crafts: feature engineering, model/pipeline selection, hyperparameter optimization (HPO), and ensembling. The promise is that a non-expert (or a busy expert) hands over `(X, y)` and a time budget, and the system returns a deployable model that rivals a carefully tuned baseline. Frameworks span the maturity curve: Auto-sklearn (meta-learning + Bayesian search over sklearn pipelines — but see §11, it is no longer maintained), TPOT (genetic programming over pipelines), H2O AutoML (grid + stacked ensembles), AutoGluon (portfolio stacking), and managed services (Agent Platform AutoML on Google Cloud, formerly Vertex AI AutoML; Azure AutoML).
 
 Neural Architecture Search (NAS) is the deep-learning-specific corner of AutoML: instead of tuning scalar hyperparameters of a fixed network, NAS *designs the network topology itself* — how many layers, which operations on each edge, how blocks connect. NAS is defined by three orthogonal axes: the **search space** (what architectures are reachable), the **search strategy** (how you explore it — RL, evolution, or gradient), and the **performance estimation strategy** (how you score a candidate cheaply — full training, weight-sharing supernet, or a proxy).
 
@@ -56,8 +56,8 @@ Key insight: **NAS meta-optimizes the validation set.** The search loop selects 
 | Auto-sklearn | meta-learning warm-start + Bayesian (SMAC) | greedy ensemble of top pipelines | tabular, sklearn ecosystem |
 | TPOT | genetic programming over pipelines | pipeline is the output | tabular, interpretable pipeline export |
 | H2O AutoML | random grid search over a fixed algorithm portfolio (no Bayesian model) | stacked ensembles (super learner) | tabular, enterprise/Java |
-| AutoGluon | fixed portfolio, minimal HPO | multi-layer stacking + bagging | tabular/vision/text, fast strong baseline |
-| Google Vertex AI AutoML | proprietary search + HPO | managed | no-infra teams; tabular and image only since the Text/Video AutoML shutdowns in 2025 |
+| AutoGluon | fixed portfolio, minimal HPO; 1.6 `extreme` preset (GPU) is led by tabular foundation models (Nori, TabICLv2, TabDPT-Turbo) plus a TabPrep LightGBM | multi-layer stacking + bagging | tabular/vision/text, fast strong baseline |
+| Google Agent Platform AutoML (formerly Vertex AI AutoML) | proprietary search + HPO | managed | no-infra teams; tabular and image only since the Text/Video AutoML shutdowns in 2025 |
 
 ### 4.3 Multi-fidelity HPO family (the resource-allocation lineage)
 
@@ -351,7 +351,7 @@ study = optuna.create_study(
 # study.optimize(objective, n_trials=200)  -> this is essentially BOHB
 ```
 
-TPESampler + HyperbandPruner is, conceptually, BOHB. See [../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) for the Hyperband/BOHB scheduling internals.
+Since Optuna 5.0 (September 2026), the default `TPESampler` is multivariate with constant liar for single-objective studies, so the sampler models parameter interactions, and parallel workers treat running trials as provisionally bad instead of sampling next to them. TPESampler + HyperbandPruner is, conceptually, BOHB. See [../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md](../experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) for the Hyperband/BOHB scheduling internals.
 
 ### 6.5 DARTS — differentiable NAS (torch sketch)
 
@@ -577,12 +577,12 @@ Running an AutoML search without `per_run_time_limit` lets one pathological pipe
 | Tool | Role | Notes |
 |------|------|-------|
 | Auto-sklearn | tabular AutoML | meta-learning warm-start + SMAC Bayesian + ensemble. **Effectively unmaintained** — last release 0.15.0, Feb 2023; will not install against current sklearn |
-| AutoGluon | tabular/vision/text AutoML | portfolio stacking, `presets="best_quality"`; actively released (1.5.x line) |
+| AutoGluon | tabular/vision/text AutoML | portfolio stacking; 1.6.3 (2026-09-18). `presets="best_quality"` on CPU; with a GPU, `presets="extreme"` (rebuilt in 1.6 around TabICLv2, Nori and TabDPT-Turbo) is the recommended preset; the 1.6 release reports 27x faster training than 1.5 `extreme`. `presets="noncommercial"` adds TabPFN-3, which needs a Prior Labs licence for commercial use. `fit(validation_structure=...)` keeps internal validation splits grouped or temporal. Models from older versions must be retrained. Tabular-FM caveats: [model selection §4.2](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md) |
 | TPOT | tabular AutoML | genetic programming; exports a sklearn pipeline. Rewritten from scratch — TPOT2 was merged back in as TPOT v1.x, and the API changed, so pre-1.0 snippets do not carry over |
 | H2O AutoML | tabular AutoML | stacked ensembles, Java/enterprise |
-| Google Vertex AI AutoML | managed AutoML | tabular and image only. The standalone "Cloud AutoML" products were shut down in 2024; Vertex AI AutoML **Text** shut down 2025-06-15 and AutoML **Video** 2025-07-31, both redirected to Gemini tuning |
+| Google Agent Platform AutoML (formerly Vertex AI AutoML) | managed AutoML | tabular and image only. The standalone "Cloud AutoML" products were shut down in 2024; Vertex AI AutoML **Text** shut down 2025-06-15 and AutoML **Video** 2025-07-31, both redirected to Gemini tuning |
 | Ray Tune | distributed HPO | `ASHAScheduler`, `HyperBandScheduler`, PBT |
-| Optuna | HPO | TPE sampler + `HyperbandPruner` (≈ BOHB) — see parent module |
+| Optuna | HPO | TPE sampler + `HyperbandPruner` (≈ BOHB), see parent module. 5.0: multivariate TPE with constant liar by default, TPE is the multi-objective default, `optuna.multi_objective` removed |
 | Microsoft NNI | NAS + HPO toolkit | DARTS, ENAS, ASHA, PBT under one API — **repository archived by Microsoft on 2024-09-18, read-only**; last release 3.0 (Sept 2023). Do not start new work on it |
 | DARTS / PyTorch | differentiable NAS | continuous relaxation, bilevel opt |
 | Once-for-All | supernet NAS | one supernet, per-target sub-nets, no retrain |

@@ -79,6 +79,8 @@ flowchart TD
 | Insertion sort | O(n) | O(n²) | O(n²) | O(1) | Yes | Best for small n (≤32) or nearly sorted |
 | TimSort | O(n) | O(n log n) | O(n log n) | O(n) | Yes | Python's built-in; detects runs |
 | Intro sort | O(n log n) | O(n log n) | O(n log n) | O(log n) | No | C++ `std::sort`; hybrid quick/heap/insertion |
+| pdqsort | O(n) | O(n log n) | O(n log n) | O(log n) | No | Go `sort` and `slices`; O(nk) for k distinct keys; linear on sorted and reversed input |
+| driftsort | O(n) | O(n log n) | O(n log n) | O(n) | Yes | Rust `slice::sort` since 1.81; quicksort average case plus mergesort run detection |
 
 ### Non-Comparison Sorts
 
@@ -422,6 +424,62 @@ def quicksort_3way(arr: List[int], lo: int, hi: int) -> None:
     quicksort_3way(arr, gt + 1, hi)
 ```
 
+### Pattern-Defeating Quicksort (pdqsort)
+
+Introsort fixes quicksort's worst case but still pays full `n log n` on inputs that are already
+sorted or full of duplicates. Orson Peters' pdqsort (2016; paper arXiv 2106.05123) keeps introsort's
+guarantee and adds detectors for those patterns. Constants below are from the reference
+implementation (`pdqsort.h`).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    start(["Partition<br/>of size n"]) --> small{"n < 24?"}
+    small -->|"yes"| ins(["Insertion sort"])
+    small -->|"no"| piv(["Median-of-3<br/>ninther if n > 128"])
+    piv --> dup{"Pivot equals<br/>previous pivot?"}
+    dup -->|"yes"| eq(["partition_left<br/>drop all equal keys"])
+    dup -->|"no"| part(["Block partition<br/>branchless"])
+    part --> bad{"Smaller side<br/>under n/8?"}
+    bad -->|"yes"| shuf(["Shuffle 4 elements<br/>heapsort after log n"])
+    bad -->|"no, 0 swaps"| pis(["Partial insertion sort<br/>give up after 8 moves"])
+    class start io
+    class small,dup,bad mathOp
+    class ins,eq,pis train
+    class shuf lossN
+    class piv,part req
+```
+
+Each detector targets one pattern:
+
+| Mechanism | Pattern it defeats | Effect |
+|-----------|-------------------|--------|
+| Pivot equals the element just left of the partition (the previous pivot) | Many duplicates | `partition_left` puts all keys equal to the pivot in one group and never recurses on them; worst case `O(nk)` for k distinct values |
+| Partition made zero swaps and is balanced | Sorted or nearly sorted input | Try insertion sort, abort after 8 element moves; sorted and reversed inputs finish in `O(n)` |
+| Smaller side under 1/8 of the range | Adversarial or patterned input that defeats median-of-3 | Swap 4 elements at fixed positions to break the pattern; after `log n` bad partitions, switch to heapsort for the `O(n log n)` bound |
+| BlockQuicksort partitioning (Edelkamp and Weiss) with 64-element index buffers | Branch mispredictions on random data | Comparisons fill buffers without branches, so a random comparison outcome does not stall the pipeline |
+
+The pattern-breaking shuffle is deterministic, so pdqsort needs no random number generator and
+always gives the same output order for the same input.
+
+**Where it ships, and what replaced it:**
+
+| Runtime | Unstable sort | Stable sort |
+|---------|---------------|-------------|
+| Go (since 1.19) | pdqsort in `sort.Sort`, `sort.Slice`, and `slices.Sort` | `sort.Stable`, `slices.SortStableFunc`: a separate in-place stable algorithm |
+| Rust (since 1.81) | ipnsort (Bergdoll and Peters): quicksort average case, heapsort fallback | driftsort (Peters and Bergdoll): quicksort average case with mergesort run detection |
+| Rust (before 1.81) | pdqsort | TimSort-style merge sort |
+
+Rust's documentation states for both 1.81 sorts: linear time on fully sorted and reversed input,
+expected `O(n log k)` on input with k distinct elements. Both also detect a comparator that is not a
+total order and may **panic** instead of returning silently scrambled data. Code that sorted floats
+with `partial_cmp(...).unwrap_or(Equal)` (NaN treated as equal to everything) breaks transitivity
+and can now panic; use `f64::total_cmp`.
+
 ### Counting Sort
 
 ```python
@@ -581,6 +639,8 @@ def min_eating_speed(piles: List[int], h: int) -> int:
 **External sort (databases)**: When sorting data that doesn't fit in RAM (multi-TB datasets), PostgreSQL and MySQL use external merge sort: split into chunks that fit in memory, sort each chunk, write to disk, then k-way merge the sorted runs. The sort-merge join is directly built on this: sort both relations on the join key, then merge in one pass.
 
 **Quicksort in C++ `std::sort`**: C++'s `std::sort` uses Introsort — start with quicksort, but if recursion depth exceeds 2·log(n) (pathological pivot selection), switch to heapsort to guarantee O(n log n). For small partitions (≤16 elements), switch to insertion sort. This hybrid achieves the best of all three algorithms.
+
+**pdqsort in Go and its successors in Rust**: Go 1.19 rewrote `sort` around pattern-defeating quicksort, which adds duplicate-key and presorted-run detectors to introsort. Rust 1.81 replaced its sorts with ipnsort (unstable) and driftsort (stable), both linear on sorted input and both able to panic on a comparator that is not a total order.
 
 **Binary search in distributed systems**: Consistent hashing (used in DynamoDB, Cassandra, Redis Cluster) distributes keys to nodes by finding the first node with a virtual-node hash ≥ key hash — this is exactly `lower_bound` on the sorted ring of virtual node positions.
 
@@ -866,6 +926,9 @@ That is what makes this pitfall so easy to hit: the input that kills you can be 
 | `Arrays.sort(Object[])` | Java | TimSort | Stable (required by Java spec for objects) |
 | `std::sort` | C++ | Introsort (hybrid quick/heap/insertion) | Not stable |
 | `std::stable_sort` | C++ | Merge sort (guaranteed stable) | O(n log n), uses O(n) memory |
+| `sort.Sort` / `slices.Sort` | Go | pdqsort (since Go 1.19) | Not stable; O(n) on sorted input |
+| `slice::sort_unstable` | Rust | ipnsort (since 1.81) | Not stable; may panic on a non-total-order comparator |
+| `slice::sort` | Rust | driftsort (since 1.81) | Stable; may panic on a non-total-order comparator |
 | `bisect` module | Python | Binary search | `bisect_left` = lower_bound, `bisect_right` = upper_bound |
 | `sortedcontainers.SortedList` | Python | B-tree-based sorted list | O(log n) insert/delete/search; mutable sorted sequence |
 
@@ -944,6 +1007,14 @@ In external sort, sorted runs are written to disk and then k-way merged using a 
 **Q18: How does dual-pivot quicksort (Java's Arrays.sort for primitives) differ from single-pivot?**
 **Short:** Dual-pivot quicksort splits into three sections with two pivots, cutting average comparisons to about 1.9n ln n, though it makes more swaps and isn't stable, so Objects still use TimSort.
 Dual-pivot quicksort uses two pivots (p1 ≤ p2) to partition into three sections: < p1, between p1 and p2, > p2. This reduces the average number of comparisons from 2n ln n to ~1.9n ln n and produces more balanced partitions. Java's implementation (by Vladimir Yaroslavskiy) is empirically 10–20% faster than single-pivot quicksort for primitive arrays. The win is fewer comparisons plus better memory/cache behaviour from the three-way scan — not fewer swaps: the standard analysis (Wild and Nebel) shows dual-pivot performs *more* swaps than single-pivot, roughly 0.6n ln n against 0.33n ln n. It is not stable and cannot be used for Object[] (where stability is required by Java spec — hence Objects use TimSort).
+
+**Q19: Why can a Rust sort call that worked for years start panicking after upgrading to Rust 1.81?**
+**Short:** Rust 1.81's driftsort and ipnsort detect a comparator that is not a total order and may panic, where the old sorts silently returned scrambled data.
+Rust 1.81 replaced `slice::sort` with driftsort and `slice::sort_unstable` with ipnsort. Both check for comparison results that contradict each other and may panic when the comparator violates the `Ord` contract; even when they return normally, the output order is unspecified. The common trigger is sorting floats with `a.partial_cmp(b).unwrap_or(Ordering::Equal)`: NaN compares equal to everything, so `1.0 == NaN == 3.0` but `1.0 < 3.0`, which breaks transitivity. The fix is a real total order such as `f64::total_cmp`, or filtering NaN before the sort. The panic exposes a bug that already existed.
+
+**Q20: What does pdqsort add on top of introsort, and where is it used?**
+**Short:** It keeps introsort's heapsort fallback and adds detectors: duplicates give O(nk) for k distinct keys, sorted runs finish in O(n). Go's sort uses it since 1.19.
+Pattern-defeating quicksort (Orson Peters) adds four mechanisms. If the new pivot equals the previous pivot, `partition_left` groups every equal key and never recurses on them, bounding the sort at `O(nk)` for k distinct values. If a partition made no swaps, it tries an insertion sort that gives up after 8 moves, so sorted and reversed inputs run in `O(n)`. If a partition leaves under 1/8 on one side, it swaps 4 elements to break the pattern and, after `log n` such partitions, switches to heapsort. For primitive keys it uses branchless BlockQuicksort partitioning. Go uses it for `sort.Sort` and `slices.Sort` since Go 1.19; Rust's `sort_unstable` used it until 1.81, when ipnsort replaced it.
 
 ---
 
@@ -1105,4 +1176,4 @@ def fixed_sort(input_path: str, output_path: str, mem_gb: int = 3) -> None:
 - [`database/`](../../database/README.md) — sort-merge join, external sort in PostgreSQL
 - [`python/collections_and_data_structures`](../../python/collections_and_data_structures/collections_and_data_structures.md) — TimSort internals, `bisect` module details
 - [`java/collections_internals`](../../java/collections_internals/collections_internals.md) — dual-pivot quicksort for primitives, TimSort for objects
-- [DSA Pattern Playbooks](../dsa_patterns/dsa_patterns.md) — apply this technique: [Modified Binary Search](../dsa_patterns/modified_binary_search.md) (binary search on a sorted array, and binary search on the answer space)
+- [DSA Pattern Playbooks](../dsa_patterns/dsa_patterns.md) — apply this technique: [Modified Binary Search](../dsa_patterns/modified_binary_search.md) (binary search on a sorted array, and binary search on the answer space), [Merge Intervals](../dsa_patterns/merge_intervals.md) (sort by start, then merge), [Sweep Line](../dsa_patterns/sweep_line.md) (sort boundary events, then sweep a running count)

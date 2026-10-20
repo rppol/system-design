@@ -507,7 +507,7 @@ This is Kafka-specific but the concept applies broadly to any partitioned system
 ### The fundamental rule:
 - Within a consumer group, each **partition** is assigned to exactly **one consumer**.
 - One consumer can handle multiple partitions.
-- You cannot have more active consumers than partitions (extras sit idle).
+- A classic consumer group cannot have more active consumers than partitions (extras sit idle). Share groups (KIP-932, production-ready in Kafka 4.2.0) remove that cap: consumers share partitions and acknowledge each record, queue-style. See the [Kafka deep dive](../../backend/kafka_deep_dive/kafka_deep_dive.md).
 
 ```mermaid
 flowchart LR
@@ -737,7 +737,7 @@ Putting a 5 MB payload in a message multiplies broker storage by the replication
 | **Replay**                | Yes (seek to offset)              | Streams only (offset/timestamp)  | No                               |
 | **Routing**               | Topic + partition key             | Exchanges, routing keys, bindings| Queue URL-based                  |
 | **Dead letter**           | Via config (DLT)                  | Built-in DLX                     | Built-in DLQ                     |
-| **Protocol**              | Custom binary (TCP)               | AMQP 0-9-1, STOMP, MQTT          | HTTPS/REST + SQS API             |
+| **Protocol**              | Custom binary (TCP)               | AMQP 1.0 and 0-9-1 (core); MQTT, STOMP (plugins) | HTTPS/REST + SQS API             |
 | **Ops overhead**          | High (KRaft controllers, brokers) | Medium                           | None (fully managed)             |
 | **Exactly-once**          | Yes (Kafka transactions)          | No                               | No (at-least-once)               |
 | **Best for**              | High-throughput event streaming   | Complex routing, RPC, tasks      | Simple decoupling on AWS         |
@@ -792,6 +792,7 @@ Amazon SQS is a fully managed queuing service with two variants:
 - **FIFO Queue**: exactly-once within a 5-minute deduplication window, strict ordering per `MessageGroupId`. Throughput is quota'd per API action rather than per message, and the quota depends on whether **high throughput mode** is enabled and whether you batch (a batch carries up to 10 messages in one API call, so batching multiplies effective message rate by up to 10x). Look up the current per-region TPS quotas in the SQS "message quotas" page — they have been raised repeatedly and vary by region.
 - **Visibility Timeout**: when a consumer receives a message, it becomes invisible to others for a configured period. If not deleted in time, the message reappears for reprocessing.
 - **Long Polling**: consumers wait up to 20 seconds for messages, reducing empty responses and cost.
+- **Fair queues**: on a standard queue, setting `MessageGroupId` to a tenant id turns on noisy-neighbor protection with no consumer change. When one tenant holds a disproportionate share of in-flight messages, SQS returns other tenants' messages first, so a single tenant's backlog raises only its own dwell time. On a standard queue the group id does not enforce ordering, and SQS never rate-limits the noisy tenant: its messages flow whenever consumers have spare capacity. Watch `ApproximateNumberOfMessagesVisibleInQuietGroups` next to the queue-wide `ApproximateNumberOfMessagesVisible` to confirm quiet tenants stay unaffected during a spike.
 
 ---
 

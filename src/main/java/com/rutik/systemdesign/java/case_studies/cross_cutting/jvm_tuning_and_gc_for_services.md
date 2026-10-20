@@ -245,7 +245,8 @@ wrong number. Fix: always set a CPU **limit** in the pod spec, or override expli
                                        # (initial value 45%; G1UseAdaptiveIHOP is on by
                                         # default, so G1 tunes the real trigger from
                                         # observed marking duration and allocation rate.
-                                        # Set G1UseAdaptiveIHOP=false to pin this value.)
+                                        # Set G1UseAdaptiveIHOP=false to pin this value.
+                                        # JDK 27+ name: -XX:G1IHOP.)
 ```
 
 ### ZGC tuning
@@ -431,7 +432,7 @@ in a Young GC pause at exactly the moment the SLO could least afford it.
 
 ## 7. Real-World Examples
 
-**LinkedIn:** Tuned `-XX:InitiatingHeapOccupancyPercent` from 45 to 30 to eliminate Full
+**LinkedIn:** Tuned `-XX:InitiatingHeapOccupancyPercent` (`-XX:G1IHOP` on JDK 27+) from 45 to 30 to eliminate Full
 GC spikes during peak traffic when the Old Gen grew faster than concurrent marking could
 reclaim it. Result: Full GCs eliminated; Mixed GC pauses stayed under 50ms.
 
@@ -578,7 +579,7 @@ Enable GC logging: `-Xlog:gc*:file=gc.log:time,uptime,level,tags`. After a laten
 grep for "Pause" entries — `Pause Young (G1 Evacuation Pause)` shows Young GC pauses;
 `Pause Full` shows Full GC. For each pause, record duration and heap occupancy before/after.
 If Full GCs appear, the Old Gen is filling before concurrent marking completes — lower
-`-XX:InitiatingHeapOccupancyPercent` or increase `-Xmx`. If Young GC pauses are long,
+`-XX:InitiatingHeapOccupancyPercent` (`-XX:G1IHOP` on JDK 27+) or increase `-Xmx`. If Young GC pauses are long,
 Young Gen is too large (collecting too many regions per pause) — reduce
 `-XX:G1MaxNewSizePercent`.
 
@@ -590,7 +591,8 @@ Old Gen regions eligible for collection. Setting it too high (e.g., 75%) means m
 starts late, and if allocation fills the heap before marking completes, G1 falls back to
 a Full GC. Setting it too low (e.g., 20%) wastes CPU on marking cycles that are rarely
 productive. Tune toward lower values if Full GCs occur; higher if marking overhead is
-visible on CPU profiles.
+visible on CPU profiles. JDK 27 renamed the flag to `-XX:G1IHOP` (JDK-8227106); the old
+name still works there with a deprecation warning.
 
 **Q: How does ZGC achieve sub-1ms pause times?**
 
@@ -695,7 +697,7 @@ G1 falls back to a serial Full GC when: (1) concurrent marking cannot complete b
 Old Gen fills (allocation races marking); (2) evacuation fails — a Young GC cannot find
 free regions to copy live objects into. Both indicate the heap is too small or Old Gen
 objects are not being collected fast enough. Prevention: (1) lower
-`-XX:InitiatingHeapOccupancyPercent` to start marking earlier; (2) increase `-Xmx` to
+`-XX:InitiatingHeapOccupancyPercent` (`-XX:G1IHOP` on JDK 27+) to start marking earlier; (2) increase `-Xmx` to
 provide more region budget; (3) identify and fix object retention causing Old Gen bloat;
 (4) increase `-XX:ConcGCThreads` (ergonomic default `(ParallelGCThreads + 2) / 4`) to speed up concurrent
 marking. Monitor `jvm.gc.pause{action=end_of_major_GC}` counter in Prometheus — any

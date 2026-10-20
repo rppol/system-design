@@ -304,6 +304,7 @@ service UserService {
 ### 6.2 Java Server Implementation (Spring Boot + gRPC)
 
 ```java
+// org.springframework.grpc.server.service.GrpcService, from spring-boot-starter-grpc-server
 @GrpcService
 public class UserGrpcService extends UserServiceGrpc.UserServiceImplBase {
 
@@ -340,6 +341,17 @@ public class UserGrpcService extends UserServiceGrpc.UserServiceImplBase {
     }
 }
 ```
+
+Spring Boot 4.1 (Spring gRPC 1.1; Boot 4.1.1 manages gRPC Java 1.83.1) exposes every `BindableService` bean, so `@GrpcService` on the generated `ImplBase` subclass is the whole server wiring. With `spring-boot-starter-grpc-server` the server runs on Netty at port 9090 (`spring.grpc.server.port`, ignored when gRPC runs inside a servlet container over HTTP/2). The client side imports generated stubs as beans:
+
+```java
+// application.properties: spring.grpc.client.channel.users.target=static://user-service:9090
+@Configuration
+@ImportGrpcClients(target = "users", types = UserServiceGrpc.UserServiceBlockingStub.class)
+class GrpcClientConfig {}
+```
+
+In tests, `@AutoConfigureTestGrpcTransport` swaps both server and channels for in-process transport with no port or channel config; use `spring.grpc.server.port=0` with `@LocalGrpcServerPort` only when the test needs a real socket.
 
 ### 6.3 Interceptors
 
@@ -467,7 +479,7 @@ public class RetryInterceptor implements ClientInterceptor {
 | `buf` | Modern protobuf toolchain (linting, breaking change detection) |
 | `grpc-gateway` | Transcodes gRPC to REST/JSON (Go) |
 | Envoy Proxy | gRPC-Web transcoding, load balancing, retries |
-| `spring-grpc-spring-boot-starter` | Official Spring gRPC starter. The long-standing community alternative is `net.devh:grpc-spring-boot-starter` |
+| `spring-boot-starter-grpc-server` / `-grpc-client` | gRPC support in Spring Boot 4.1+ (Spring gRPC 1.1; Boot 4.1.1 manages gRPC Java 1.83.1): `@GrpcService` beans on Netty port 9090, `@ImportGrpcClients` for stubs, `@AutoConfigureTestGrpcTransport` for in-process tests. The long-standing community alternative is `net.devh:grpc-spring-boot-starter` |
 | Kreya / Postman | GUI gRPC client — build requests from a `.proto` file or server reflection |
 
 ---
@@ -517,7 +529,7 @@ Safe changes: add new optional fields with new numbers, add new enum values, add
 **Q: What is the difference between proto2 and proto3?**
 **Short:** Proto3 dropped required fields and custom defaults, and gained explicit field presence via the optional label in 3.15.
 
-Proto3 is the default syntax for new .proto files and proto2 is its predecessor. Key differences: proto3 dropped `required` entirely, dropped user-specified custom defaults (the default is always the zero value), and defines a canonical JSON mapping. Proto2 had `required` fields (dangerous — adding one breaks every old sender), explicit `optional` with custom defaults, and extension ranges. Field presence is the subtle one: proto3 originally had no way to distinguish an unset scalar from one explicitly set to zero, which is why `google.protobuf.Int32Value`-style wrapper types were the old workaround — but protobuf 3.15 (February 2021) made the `optional` label generally available in proto3, and that, not a wrapper type, is now the standard way to get explicit presence. (`google.protobuf.FieldMask` is unrelated: it is a client-supplied list of paths for partial reads and updates, not a presence mechanism.) Newer still, Protobuf Editions replaces the proto2/proto3 syntax split with per-feature settings, so expect `edition = "2023"` files alongside proto3 ones.
+Proto3 is the default syntax for new .proto files and proto2 is its predecessor. Key differences: proto3 dropped `required` entirely, dropped user-specified custom defaults (the default is always the zero value), and defines a canonical JSON mapping. Proto2 had `required` fields (dangerous — adding one breaks every old sender), explicit `optional` with custom defaults, and extension ranges. Field presence is the subtle one: proto3 originally had no way to distinguish an unset scalar from one explicitly set to zero, which is why `google.protobuf.Int32Value`-style wrapper types were the old workaround — but protobuf 3.15 (February 2021) made the `optional` label generally available in proto3, and that, not a wrapper type, is now the standard way to get explicit presence. (`google.protobuf.FieldMask` is unrelated: it is a client-supplied list of paths for partial reads and updates, not a presence mechanism.) Newer still, Protobuf Editions replaces the proto2/proto3 syntax split with per-feature settings, so expect `edition = "2024"` files alongside proto3 ones.
 
 **Q: What is gRPC-Web and when do you need it?**
 **Short:** gRPC-Web lets browsers call gRPC services by encoding trailers into a data frame through a translating proxy.

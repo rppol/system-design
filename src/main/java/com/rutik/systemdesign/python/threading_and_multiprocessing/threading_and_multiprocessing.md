@@ -383,6 +383,12 @@ def run_worker_pool(items: list[Any], num_workers: int = 4) -> None:
 # queue.PriorityQueue() — min-heap; items must be comparable tuples (priority, item)
 ```
 
+When the work already comes from a generator, 3.15 can skip the queue:
+`threading.serialize_iterator(gen)` lets several threads call `next()` on one generator, each item
+going to exactly one thread, and `threading.concurrent_tee(gen, n)` gives `n` threads every item.
+A bare generator shared across threads raises `ValueError: generator already executing`; see
+[Iterators and Generators](../iterators_and_generators/iterators_and_generators.md).
+
 ### 6.5 `concurrent.futures.ThreadPoolExecutor`
 
 ```python
@@ -610,7 +616,7 @@ def heavy_computation(data: list[float]) -> float:
 
 @app.post("/compute")
 async def compute(data: list[float]) -> dict[str, float]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(_cpu_executor, heavy_computation, data)
     return {"result": result}
 ```
@@ -1009,7 +1015,7 @@ Python 3.8+ set macOS's default start method to `spawn`; Windows has only ever s
 
 7. **Protect `multiprocessing.Value` with its lock**: `Value` has a `get_lock()` method returning a `Lock`-like object. Always use `with counter.get_lock(): counter.value += 1` — the lock is not acquired automatically.
 
-8. **Prefer `asyncio` over threading for new FastAPI I/O work**: `async def` endpoints in FastAPI run on the event loop without threads. Reserve threads for legacy sync libraries that cannot be made async. Use `asyncio.get_event_loop().run_in_executor(_cpu_executor, fn, arg)` to offload CPU work from an async handler.
+8. **Prefer `asyncio` over threading for new FastAPI I/O work**: `async def` endpoints in FastAPI run on the event loop without threads. Reserve threads for legacy sync libraries that cannot be made async. Use `asyncio.get_running_loop().run_in_executor(_cpu_executor, fn, arg)` to offload CPU work from an async handler.
 
 9. **Profile before parallelizing**: Use `cProfile` or `py-spy` to confirm your bottleneck. Threading helps I/O-bound code only when the GIL is actually released. A task that holds the GIL 95% of the time gains nothing from 16 threads.
 
@@ -1195,7 +1201,7 @@ _resize_pool = ThreadPoolExecutor(max_workers=8)
 @app.post("/resize")
 async def resize_uploaded(file: UploadFile) -> dict[str, str]:
     contents = await file.read()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     # Offload blocking Pillow work to thread pool; event loop stays unblocked
     out_path = await loop.run_in_executor(
         _resize_pool,

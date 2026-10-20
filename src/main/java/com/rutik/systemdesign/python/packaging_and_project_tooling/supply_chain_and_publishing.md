@@ -169,7 +169,7 @@ than trying to police every possible attack class separately.*
 | Publish-side | Long-lived credential theft | Trusted publishing (OIDC), scoped short-lived tokens |
 | Provenance | "Did this file really come from that CI run?" | PEP 740 attestations, Sigstore signing |
 | Account | Maintainer takeover | Mandatory 2FA, Organizations |
-| Index | Malware already published | Project Quarantine, PyPI malware reporting |
+| Index | Malware already published; poisoned old releases | Project Quarantine, PyPI malware reporting, no new files on releases older than 14 days |
 | Post-install | "Am I already exposed?" | SBOM inventory + `pip-audit` / `osv-scanner` |
 
 ---
@@ -424,6 +424,24 @@ delivering; the attestation is what makes that claim checkable rather than merel
 this writing, neither `pip` nor `uv` reject an unattested or unverified package by default —
 attestation checking is something a consumer opts into, not an automatic install-time gate.
 
+### Index-Side: the 14-Day Upload Window
+
+A PyPI release is a version number with a set of files, and until July 2026 a maintainer could add
+files to any release at any time. That made old, widely pinned versions a target: with a stolen
+token, an attacker could upload a new wheel (say, for a platform or Python version the release
+never shipped) to a popular package's `2.31.0`, and every lock file that resolved to that version would pick
+it up on the next fresh install without a version bump to review.
+
+PyPI now rejects new files for any release older than 14 days (patch merged 2026-07-08, announced
+2026-07-22). The discussion restarted after the March 2026 LiteLLM and Telnyx compromises, which
+came through a mutable reference to the Trivy GitHub Action. Before
+shipping it, PyPI measured the cost: only 56 of the top 15,000 projects had published a
+`cp314` wheel more than 14 days after the release it belonged to.
+
+The consequence for publishers: wheels for a new Python version (a `cp315` build) go out in a new release, not as additions to an old one. PyPI says not to rely on the
+window as a guarantee yet: there is no API to query whether a release still accepts files, and those
+semantics will be defined with PEP 694's Upload 2.0 API.
+
 ---
 
 ## 7. Real-World Examples
@@ -640,6 +658,17 @@ because there is nothing in the database to match. A cooldown period and PyPI's 
 system are the controls that address undisclosed, actively-malicious releases; a vulnerability
 scanner addresses a different, later stage of the same problem.
 
+**Backfilling wheels onto an old release.** A release pipeline that publishes the sdist and main
+wheels first and adds slower platform wheels (musllinux, Windows ARM64, a new `cp315`) days later
+fails with a rejected upload once the release is 14 days old. Build every wheel in the release
+job, and ship support for a new Python version as a new patch release.
+
+**A mirror or proxy that only speaks the HTML simple index.** PyPI adopted PEP 833 in August 2026,
+which freezes the HTML representation of the index (PEP 503): projects keep appearing in it, but
+new metadata is added only to the PEP 691 JSON representation. A private index or caching proxy
+that serves or parses only HTML will not pass newer fields, such as PEP 792 project status, to
+installers. Serve and consume `application/vnd.pypi.simple.v1+json`.
+
 ---
 
 ## 11. Technologies & Tools
@@ -655,7 +684,9 @@ scanner addresses a different, later stage of the same problem.
 | `gh-action-pypi-publish` | Trusted publishing | GitHub Action that exchanges a job's OIDC token for a scoped PyPI upload token and attaches an attestation | Covered mechanically in the parent module, §6 |
 | PyPI Integrity API | Provenance lookup | Exposes signing identity and source workflow per uploaded file | Consumer-side programmatic verification target |
 | PyPI Project Quarantine | Index-level containment | Reversible "hidden from install, not deleted" state for a suspected-malicious project | In active use since August 2024 |
-| PyPI Organizations | Account/access management | Team-managed ownership of a project collection | Namespace *reservation* (PEP 752/755) is proposed, not yet shipped as of this writing |
+| PyPI 14-day upload window | Index-level containment | Rejects new files on any release older than 14 days, so stale releases cannot be poisoned | Merged 2026-07-08; no API yet to query a release's state (PEP 694) |
+| PEP 691 JSON simple API | Index protocol | Machine-readable index format that receives all new index metadata | PEP 833 froze the HTML (PEP 503) form on PyPI in August 2026; mirrors should serve and consume JSON |
+| PyPI Organizations | Account/access management | Team-managed ownership of a project collection | Namespace *reservation*: PEP 752 (repository namespaces) was accepted 2026-06-29; PEP 755 (the PyPI grant policy) was withdrawn 2026-10-02 |
 | Dependency-Track | SBOM platform | Continuously matches an org's SBOMs against vulnerability feeds | Common CycloneDX-ecosystem consumer |
 
 ---
@@ -808,6 +839,19 @@ by the time PyPI documented it in detail that December, and all but one containe
 malware; the single exception (an obfuscation false-positive) was corrected and released from
 quarantine, demonstrating exactly the reversibility that made the feature worth building instead
 of relying on permanent removal alone.
+
+**Q: Why does PyPI reject new files on releases older than 14 days?**
+**Short:** So a stolen token cannot add a malicious file to an old, widely pinned release that lock files already trust; new files now need a new version.
+
+A release's version number is what lock files and requirements pin, but its file set used to stay
+open forever. With a compromised token or workflow, an attacker could upload a new wheel to an old
+release (a platform tag or Python version it never had) and every fresh install resolving that pin
+would take it, with no new version for anyone to review. Since July 2026 PyPI rejects files for
+releases older than 14 days. The trigger was the March 2026 LiteLLM and Telnyx compromises through
+a mutable Trivy GitHub Action reference. The cost is small: 56 of the top 15,000 projects had
+uploaded a `cp314` wheel more than 14 days after release. Publishers ship new-Python wheels in a
+new patch release instead. PyPI says not to rely on it as a formal guarantee until PEP 694 defines
+closed releases.
 
 **Q: What's the practical difference between CycloneDX and SPDX for a team choosing an SBOM format?**
 **Short:** CycloneDX optimizes for security tooling and vulnerability matching; SPDX optimizes for license and compliance depth.

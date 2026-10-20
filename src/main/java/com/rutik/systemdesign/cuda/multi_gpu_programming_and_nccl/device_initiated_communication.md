@@ -46,7 +46,7 @@ This file covers, in order: why the host-launched floor exists and what it costs
 |------|---------------|------------------------|---------|
 | **LSA** (Load/Store Accessible) | CUDA P2P — NVLink, and some PCIe P2P paths | `ncclGetLsaPointer()` — returns a locally-addressable pointer into a peer's symmetric window | Peers reachable by ordinary load/store, intra-node |
 | **Multimem** | NVLink SHARP hardware multicast | `ncclGetLsaMultimemPointer()` | NVSwitch fabrics with SHARP — same footprint as NVLS in the parent module, now callable from inside a kernel |
-| **GIN** (GPU-Initiated Networking) | The network — RDMA-capable NIC, driven from the kernel | `ncclGin::put()` / `ncclGin::get()` (one-sided RMA) | Cross-node, since NCCL 2.28.7 |
+| **GIN** (GPU-Initiated Networking) | The network — RDMA-capable NIC, driven from the kernel | `ncclGin::put()` / `ncclGin::get()` (one-sided RMA) | Cross-node, since NCCL 2.28.7. NCCL 2.31 adds an AWS EFA GDA backend and device-side timeouts on blocking calls; NCCL 2.32 adds a TCP socket backend |
 
 Decision table:
 
@@ -402,6 +402,7 @@ Topology detection still happens at communicator setup — `ncclCommInitRank`/`n
 
   Read the last row against the parent module's ~900 GB/s per-direction NVLink 5 ceiling: 726-740 GB/s is roughly 80-82% of the wire, which is a strong result for a collective sharing bandwidth with every other kernel on the GPU. The 90 GB/s internode RDMA figure is the library's own measured number against a ConnectX-7 NIC — present it as measured, since a 400 Gb/s (50 GB/s per direction) single port cannot alone explain it, and re-deriving a NIC-count assumption from that gap is not something this file will do.
 
+- **NCCL EP** (`nccl-ep-v0.1.0`, released June 8, 2026 in the NVIDIA/nccl repository): NVIDIA's own MoE expert-parallel dispatch/combine library, built on the NCCL device API's LSA and GIN modes. It covers the same job as DeepEP. HT (high-throughput) mode supports flat and expert-major layouts; LL (low-latency) mode supports expert- and rank-major layouts with a top-K limit of 9. Its handles work inside CUDA Graphs, and an active-rank mask marks failed ranks so the remaining ranks keep communicating instead of aborting the process.
 - **NVSHMEM-based inference kernels** — before NCCL's device API existed, custom tensor-parallel and expert-parallel kernels reached for NVSHMEM directly to get one-sided `put`/`get` from inside a kernel; NVSHMEM remains the PGAS substrate of choice where a project's build does not yet track NCCL 2.28+.
 - **IBGDA-enabled inference engines** — serving stacks that need to post RDMA work requests from inside a GPU kernel (rather than via a CPU-mediated doorbell) use IBGDA specifically to keep the CPU off the per-token dispatch path in expert-parallel serving.
 - **Copy Engine collectives in bandwidth-bound AllGather/AlltoAll steps** — any workload whose SMs are already saturated by compute (a GEMM-bound MoE FFN, a fully-occupied attention kernel) is a candidate for routing its AllGather/AlltoAll through NCCL 2.28's CE path instead of an SM-resident collective kernel, trading a modest bandwidth difference (780 vs. 620 GB/s measured, Section 4.3) for zero SM contention.
@@ -520,6 +521,10 @@ float result = gathered[tid];   // now guaranteed visible
 | Tool | Role |
 |------|------|
 | **NCCL device API** (NCCL 2.28+) | `ncclDevCommCreate`, `ncclGetLsaPointer`, `ncclGetLsaMultimemPointer`, `ncclLsaBarrierSession`, `ncclGin::put`/`get`, `ncclGinBarrierSession` — the primitives this file covers |
+| **NCCL 2.31** (2.31.2, August 2026) | `ncclCollConfig_t` and `nccl*Config` APIs set algorithm and CTA options per collective call; CFT host and device APIs register window memory with CUDA logical endpoints (Blackwell, CUDA 13.3+); EFA GDA GIN backend for Put, Signal, and Flush; device-side timeouts on blocking GIN calls (Flush, Wait, WaitSignal, WaitCounter); TMA kernels on by default on Blackwell for symmetric registered memory |
+| **NCCL 2.32** (2.32.3, September 2026) | Initial Rubin (`sm107`) support without Rubin performance tuning; socket-based GIN over TCP; ring-based hierarchical copy-engine AllGather (`NCCL_HIER_CE_COLL_AG_RAIL_RING_ENABLE`); optional TLS for NCCL-owned socket traffic via `ncclSetEncryption` (OpenSSL 3 builds only); RAS GPU-resident progress counters for diagnosing stalled collective kernels |
+| **NCCL EP** (v0.1.0, June 2026) | MoE dispatch/combine on LSA and GIN, HT and LL modes, CUDA-Graph-compatible handles, active-rank mask for failed ranks |
+| **nccl4py** (0.6.0, September 23, 2026) | NCCL's Python bindings; 0.6.0 adds experimental CuTe DSL device functions for reduce and copy over LSA windows, multimem pointers, and local tensors (`lsa_reduce_sum()`, `multimem_copy()`, `local_reduce_sum_copy()`) |
 | **`ncclCommWindowRegister`** | Registers a buffer as a symmetric memory window across every rank — the precondition for any device-side addressing |
 | **Copy Engine (CE) collectives** (NCCL 2.28+) | Host-launched AllGather/AlltoAll that execute on copy-engine DMA hardware instead of an SM-resident kernel — zero SM occupancy |
 | **NVSHMEM** | NVIDIA's PGAS library for GPU-to-GPU one-sided `put`/`get`, addressed from inside a kernel; predates and remains an alternative to the NCCL device API |
@@ -560,6 +565,10 @@ CE collectives, new in NCCL 2.28, offload AllGather and AlltoAll onto the GPU's 
 **Q: What happened to DeepEP's NVSHMEM dependency?**
 **Short:** DeepEP v2 removed it — dispatch and combine now run on the NCCL Gin backend, unified behind a single ElasticBuffer interface.
 DeepEP v2 moved off NVSHMEM entirely and onto the NCCL Gin backend, which NVIDIA describes as "header-only & lightweight." This unified the previously separate high-throughput and low-latency kernel paths behind a single `ElasticBuffer` interface. This is worth stating explicitly because a lot of existing documentation and commentary still describes DeepEP as NVSHMEM-based — accurate for v1, wrong for the current architecture.
+
+**Q: What is NCCL EP, and what does it offer that a third-party MoE library like DeepEP does not?**
+**Short:** NVIDIA's own MoE dispatch/combine library on the NCCL device API (v0.1.0, June 2026), shipped in the NCCL repo, with an active-rank mask that routes around failed ranks.
+NCCL EP is an NCCL API extension for Mixture-of-Experts dispatch and combine, released as v0.1.0 on June 8, 2026 in the NVIDIA/nccl repository. It runs on the device API's LSA mode inside a node and GIN across nodes, and offers two modes like DeepEP: HT (high-throughput, flat and expert-major layouts) and LL (low-latency, expert- and rank-major layouts, top-K up to 9). Two points set it apart. It is versioned and tested with NCCL itself, so a team does not track a separate project's CUDA, PyTorch, and NCCL floors. And it has an active-rank mask: a failed rank is marked and left out of later dispatches, so the job keeps running instead of aborting. Its handles are CUDA-Graph compatible, which matters for decode loops that replay a captured graph per token.
 
 **Q: In DeepEP's measured table, EP 8x2 uses 12 SMs at 90 GB/s RDMA while EP 8x4 uses 6 SMs at 61 GB/s. What does that tradeoff represent?**
 **Short:** Doubling the SM budget from 6 to 12 buys roughly 1.5x higher per-GPU RDMA bandwidth — a direct SM-for-bandwidth tradeoff a kernel author chooses explicitly.

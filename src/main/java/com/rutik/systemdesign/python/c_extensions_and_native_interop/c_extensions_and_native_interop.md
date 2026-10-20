@@ -311,7 +311,9 @@ let CPython raise rather than silently hand you a strided view your loop will mi
 
 ### 6.1 A PyO3 extension, end to end
 
-PyO3 0.29.2 (2026-08-05) with maturin 1.15.0 (2026-08-24). The project layout:
+PyO3 0.30.1 (2026-10-14) with maturin 1.15.0 (2026-08-24). PyO3 0.30.0 dropped Python 3.8, raised the
+minimum Rust to 1.85, added Python 3.15.0 final support, and stopped `#[pyclass]` from emitting
+`FromPyObject` by default. The project layout:
 
 ```toml
 # pyproject.toml
@@ -336,7 +338,7 @@ name = "hashkit"
 crate-type = ["cdylib"]
 
 [dependencies.pyo3]
-version = "0.29.0"
+version = "0.30.0"
 features = ["abi3-py311"]   # one wheel for 3.11 and every later version
 ```
 
@@ -543,7 +545,7 @@ With PyO3 this is a Cargo feature, not a `#define`: `features = ["abi3-py311"]`.
 
 ### 6.7 `abi3t` — the Stable ABI for free-threaded builds `[3.15]`
 
-PEP 803 is Final and targets Python 3.15. It defines `abi3t` as based on `abi3` "but make the
+PEP 803 is Final and shipped in Python 3.15.0 (2026-10-09). It defines `abi3t` as based on `abi3` "but make the
 `PyObject` structure opaque. This will require users to migrate to new API for common tasks like
 defining modules and most classes."
 
@@ -554,6 +556,21 @@ free-threaded build — it is wrong. Making `PyObject` opaque forces every acces
 that both builds can implement, which is what lets one wheel serve both. The migration cost is real
 and lands on module and class definition, which is why it needed its own PEP rather than an extension
 of `abi3`.
+
+The migration, per the 3.15 "What's New":
+
+- **Instance layout.** Stop embedding `PyObject` as the first member of your instance struct. Use
+  the PEP 697 APIs from 3.12: a negative `basicsize` in the type spec asks CPython to append your
+  data after whatever header the build uses, and `PyObject_GetTypeData()` returns a pointer to it.
+- **Module export.** Replace the `PyInit_<name>` function with the PEP 793 export hook
+  `PyModExport_<name>`, which returns an array of PEP 820 `PySlot` entries (`PySlot_FUNC`,
+  `PySlot_DATA`, `PySlot_END` and related macros) in place of a `PyModuleDef`.
+- **Build selection.** meson-python, scikit-build-core, and maturin can build `abi3t` wheels. With
+  no build tool, define `Py_TARGET_ABI3T`. In PyO3 (0.29.0+) it is the `abi3t` or `abi3t-py315`
+  Cargo feature in place of `abi3-py311`.
+- **Fallback.** The Stable ABI does not expose everything. An extension that cannot move to
+  `abi3t` keeps shipping two builds: `abi3` for GIL builds and the version-specific `cp315t` for
+  free-threaded ones.
 
 ### 6.8 pybind11 and nanobind
 
@@ -577,7 +594,7 @@ safe". It also draws a distinction worth remembering: "free-threading safe modul
 global/static state (as long as access to them is thread-safe), but sub-interpreter safe modules
 cannot." Free-threading and sub-interpreter safety are different bars, and the second is higher.
 
-**nanobind 3.0.0** (2026-08-22) is the leaner successor — smaller binaries, faster builds. It "has
+**nanobind 3.1.0** (2026-09-18) is the leaner successor — smaller binaries, faster builds. It "has
 supported free-threaded Python since version 2.2.0", enabled through the `FREE_THREADED` parameter to
 `nanobind_add_module()` in CMake:
 
@@ -677,6 +694,45 @@ The shape of the conclusion matters more than any single figure, and it is why t
 ratios measured on one machine rather than absolute nanoseconds: **`ctypes` in a tight loop can be
 slower than the pure Python it replaced.** Measure your own boundary before designing around it, and
 design the interface so one call does a lot of work.
+
+### 6.11 Calling into Python from a foreign thread `[3.15]`
+
+A thread created by a native library has no Python thread state. To run a Python callback on it,
+the extension must create and attach one. PEP 788 (3.15) adds APIs that also stop the interpreter
+from being finalized while that thread uses it:
+
+- `PyInterpreterGuard` keeps an interpreter from finalizing until the guard is closed.
+- `PyInterpreterView` refers to an interpreter that may finalize or be deleted at any time, and is
+  safe to hold from any thread.
+- `PyThreadState_Ensure(guard)` / `PyThreadState_EnsureFromView(view)` attach a thread state and
+  return a token; `PyThreadState_Release(token)` detaches it.
+
+```c
+/* On the Python thread that submits the job: */
+job->view = PyInterpreterView_FromCurrent();
+
+/* Later, on the library's worker thread: */
+static void on_done(struct job *job) {
+    PyThreadStateToken *token = PyThreadState_EnsureFromView(job->view);
+    if (token == NULL) {
+        PyInterpreterView_Close(job->view);
+        return;               /* interpreter finalizing or gone: drop the result */
+    }
+    PyObject *r = PyObject_CallOneArg(job->callback, job->result);
+    if (r == NULL) {
+        PyErr_Print();
+    }
+    Py_XDECREF(r);
+    PyThreadState_Release(token);   /* the implicit guard is released here */
+    PyInterpreterView_Close(job->view);   /* an unclosed view leaks its memory */
+}
+```
+
+`PyGILState_Ensure()`, `PyGILState_Release()`, and the rest of the `PyGILState` family are soft
+deprecated in 3.15: they still work and there is no removal date, but new code should use the
+`PyThreadState_Ensure` family. All of these APIs are in the Limited API. A worker thread that
+calls back many times should keep one thread state for its lifetime, because creating and
+destroying one per call costs more on a free-threaded build.
 
 ---
 
@@ -987,17 +1043,39 @@ One call, zero copies, the loop in native code. **The API shape, not the languag
 This is why §9 warns against reaching for an extension before restructuring the interface — sometimes
 the restructuring alone is the whole win, and then no extension is needed.
 
+### Pitfall 7 - BROKEN: a native callback thread during interpreter shutdown
+
+A C library runs its own worker threads and calls back into Python when a job finishes. The
+extension wraps each callback in `PyGILState_Ensure()` / `PyGILState_Release()`. In production the
+process hangs or segfaults on exit, a few times a week, always in a callback that fired while
+`Py_FinalizeEx()` was running.
+
+```c
+/* BROKEN: no way to know the interpreter is still alive */
+static void on_done(void *arg) {
+    PyGILState_STATE st = PyGILState_Ensure();   /* hangs forever if finalizing */
+    PyObject_CallOneArg(callback, result);
+    PyGILState_Release(st);
+}
+```
+
+Attaching a thread state during finalization blocks that thread permanently, and an interpreter
+that has already been deleted turns the attach into a use-after-free. Before 3.15 there was no safe
+check. The fix is the PEP 788 API in §6.11: take a `PyInterpreterView` when the job is submitted
+and attach with `PyThreadState_EnsureFromView()`, which returns `NULL` instead of hanging once the
+interpreter is finalizing, so the callback can drop the result and return.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Current version | What it does | When to reach for it |
 |---|---|---|---|
-| **PyO3** | 0.29.2 (2026-08-05) | Rust bindings for CPython | New high-performance components; safety matters |
+| **PyO3** | 0.30.1 (2026-10-14) | Rust bindings for CPython | New high-performance components; safety matters |
 | **maturin** | 1.15.0 (2026-08-24) | Build backend for Rust extensions | Standard partner to PyO3 |
 | **Cython** | 3.3.0 (2026-08-22) | Python-like language compiled to C | Incrementally speeding up existing Python |
 | **mypyc** | Ships with mypy | Compiles type-annotated Python to C | Typed codebase, no rewrite budget |
-| **nanobind** | 3.0.0 (2026-08-22) | Lean C++17 bindings | New C++ bindings; smaller and faster than pybind11 |
+| **nanobind** | 3.1.0 (2026-09-18) | Lean C++17 bindings | New C++ bindings; smaller and faster than pybind11 |
 | **pybind11** | 3.1.0 (2026-08-06) | Mature C++ bindings | Existing pybind11 code; widest ecosystem |
 | **cffi** | — | C FFI from Python | Binding an existing C library; strong on PyPy |
 | **ctypes** | stdlib | Runtime FFI, no build step | One-off calls into a vendor `.so` |
@@ -1149,7 +1227,7 @@ is the wrong tool and `cffi` in API mode or a compiled binding is the answer.
 **Q: What is `abi3t` and why does free-threading need its own stable ABI?**
 **Short:** It is a Stable ABI variant that makes PyObject opaque, needed because free-threading changes the object header and refcounting so the old layout is no longer valid.
 
-PEP 803 (Status Final, resolved 2026-03-30) targets Python 3.15 and defines `abi3t` as based on the
+PEP 803 (Status Final, resolved 2026-03-30) shipped in Python 3.15.0 and defines `abi3t` as based on the
 existing `abi3` "but make the `PyObject` structure opaque. This will require users to migrate to new
 API for common tasks like defining modules and most classes." Opacity is the requirement, not a
 stylistic preference: the free-threaded build changes the object header layout and moves to biased
@@ -1196,6 +1274,19 @@ can run, and a thread that never yields interferes with that. There is also a pr
 essentially no extension targets free-threaded builds exclusively. The same source compiles for
 `cp314` and `cp314t`, and on the GIL-enabled build the release is not optional at all. Write the
 release once and it is correct on both.
+
+**Q: How should a native library's worker thread call back into Python safely?**
+**Short:** On 3.15, take a PyInterpreterView on the submitting thread and attach with PyThreadState_EnsureFromView(), which returns NULL instead of hanging if the interpreter is finalizing.
+
+A thread created in C has no Python thread state, so it must attach one before touching any
+object. The classic `PyGILState_Ensure()` does that but cannot tell whether the interpreter is
+alive: during `Py_FinalizeEx()` the attach blocks forever, and after the interpreter is deleted it
+is a use-after-free. PEP 788 [3.15] adds `PyInterpreterView` (a handle safe to hold while the
+interpreter may disappear), `PyInterpreterGuard` (blocks finalization while held), and
+`PyThreadState_EnsureFromView()` / `PyThreadState_Ensure()` with `PyThreadState_Release()`. Take
+the view with `PyInterpreterView_FromCurrent()` when the job is submitted, attach from the
+worker, and drop the result if the call returns `NULL`. The `PyGILState` family is soft
+deprecated: it keeps working with no removal date, but it gets no new features.
 
 **Q: How do you decide whether a performance win came from the language or the algorithm?**
 **Short:** Apply the algorithmic fix in pure Python first and measure it alone, before writing any native code.

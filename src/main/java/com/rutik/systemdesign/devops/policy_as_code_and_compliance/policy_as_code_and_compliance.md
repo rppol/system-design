@@ -2,6 +2,8 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
+> **Version anchor (2026-10-19).** Current releases: **OPA v1.21.2** (2026-10-12), **Gatekeeper v3.23.1** (2026-08-27), **Kyverno v1.19.1** (2026-09-10), **Conftest v0.71.1** (2026-10-06) and **Checkov 3.3.29** (2026-10-13).
+
 ---
 
 ## 1. Concept Overview
@@ -49,6 +51,7 @@ Model risk controls, approvals, and audit evidence for AI systems are covered in
 |-------|------|------|-------------|
 | Pre-commit / CI | Conftest, Checkov | Before merge | Yes (edit pipeline) |
 | Admission webhook | Gatekeeper, Kyverno | At API-server request | No (cluster-enforced) |
+| Manifest-loaded admission | `staticManifestsDir` policy files on the control-plane host (Kubernetes 1.37 beta) | At API-server request, from startup | Not through the API; only by editing host files (see [kubernetes_security](../kubernetes_security/kubernetes_security.md)) |
 | Audit / background | Gatekeeper audit, kube-bench | Periodic scan of live state | N/A (reporting) |
 
 ```mermaid

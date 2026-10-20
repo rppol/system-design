@@ -50,6 +50,7 @@ This is the **operator pattern**: domain expertise (how to safely back up/upgrad
 | CRD + operator | New type + reconciling controller | Day-2 automation (the operator pattern) |
 | Aggregated API server | Custom API with its own storage | Rare; advanced extension |
 | Admission webhook | Validate/mutate any object | Policy, defaulting (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)) |
+| kro `ResourceGraphDefinition` | New API type composed of existing resources; kro generates the CRD and runs a controller for it | Platform abstractions (an `App` = Deployment + Service + bucket) with no custom logic |
 
 ### Operator capability levels (maturity model)
 
@@ -169,6 +170,26 @@ spec:
       subresources: {status: {}}        # enables status subresource (separate RBAC/updates)
 ```
 
+### Change the storage version
+
+Moving `storage: true` from `v1` to `v2` only affects new writes. Objects already in etcd stay encoded as `v1` until something rewrites them, and `status.storedVersions` keeps listing `v1`. The API server rejects a CRD update that drops a version still listed there. Kubernetes 1.37 (2026-08-26) made the `StorageVersionMigration` API (`storagemigration.k8s.io/v1`, KEP-4192) stable and enabled by default, so the cluster rewrites the old objects for you:
+
+```yaml
+apiVersion: storagemigration.k8s.io/v1
+kind: StorageVersionMigration
+metadata: {name: postgresclusters-to-v2}
+spec:
+  resource: {group: db.example.com, resource: postgresclusters}
+```
+
+```bash
+kubectl wait --for=condition=Succeeded storageversionmigration/postgresclusters-to-v2
+kubectl get crd postgresclusters.db.example.com -o jsonpath='{.status.storedVersions}'   # expect ["v2"]
+# then set served: false on v1, and remove v1 from spec.versions in a later release
+```
+
+The same API rewrites Secrets after an encryption-at-rest key rotation.
+
 ### A user creates an instance
 
 ```yaml
@@ -199,6 +220,90 @@ func (r *PGReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
     return ctrl.Result{RequeueAfter: 30 * time.Second}, nil  // periodic resync (level-triggered)
 }
 ```
+
+### Status conditions and `observedGeneration`
+
+Every write to `spec` bumps `metadata.generation`; writes to `status` do not. A condition is only trustworthy if it says which generation it describes, so the standard `metav1.Condition` carries `type`, `status` (`True`, `False`, `Unknown`), `reason` (required, CamelCase), `message`, `lastTransitionTime`, and `observedGeneration`.
+
+```go
+import "k8s.io/apimachinery/pkg/api/meta"
+
+meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+    Type:               "Ready",
+    Status:             metav1.ConditionFalse,
+    Reason:             "ReplicasNotReady",
+    Message:            fmt.Sprintf("%d/%d replicas ready", ready, cr.Spec.Replicas),
+    ObservedGeneration: cr.Generation,     // the spec this verdict is about
+})
+cr.Status.ObservedGeneration = cr.Generation
+if err := r.Status().Update(ctx, &cr); err != nil { return ctrl.Result{}, err }
+```
+
+A client that waits for `Ready=True` must also check `observedGeneration == metadata.generation`; otherwise it reads the verdict on the previous spec. `kubectl wait --for=condition=Ready` makes that check only when the field exists: it reads the condition's `observedGeneration`, falls back to `status.observedGeneration`, and keeps waiting while it is older than `metadata.generation`. An operator that never sets either field gets no such protection, and `kubectl wait` returns at once on the stale `True`. `meta.SetStatusCondition` only moves `lastTransitionTime` when `status` actually flips, which keeps the field meaningful for "how long has this been failing".
+
+### Server-side apply in the reconciler
+
+`Update` sends the whole object and fails with a conflict whenever someone else wrote it since the read; `Create`-then-`Update` code also tends to overwrite fields other actors own (an HPA's `replicas`, an injected sidecar annotation). Server-side apply sends only the fields the operator has an opinion on, under a named **field manager**, and the API server merges it and records ownership in `metadata.managedFields`.
+
+```go
+import appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
+
+sts := appsv1ac.StatefulSet(cr.Name, cr.Namespace).
+    WithOwnerReferences(ownerRef(&cr)).
+    WithSpec(appsv1ac.StatefulSetSpec().
+        WithReplicas(cr.Spec.Replicas).
+        WithServiceName(cr.Name))
+// Same call on every reconcile: creates if absent, no-op if already equal.
+err := r.Apply(ctx, sts, client.FieldOwner("pg-operator"), client.ForceOwnership)
+```
+
+Three rules make this safe. Send the full intent every time, because a field the manager stops sending is removed if no other manager owns it. Use `ForceOwnership` only for fields the operator must own; it takes them from any other manager, which is right for a controller and wrong for fields a human or an HPA should be able to change. Keep the field manager name stable across releases, because a renamed manager leaves the old one owning fields it will never update again.
+
+### Validation ratcheting when tightening a schema
+
+Adding a stricter rule to a served CRD version (say `maxLength: 63` on `spec.dbName`) used to break every existing object that violated it: the next write from the operator, even a status-only label change, failed validation. With **validation ratcheting** (`CRDValidationRatcheting`, beta and on by default in 1.30, GA in 1.33) the API server accepts an update to an invalid object as long as every part that fails validation was not changed by that update. A user who edits `spec.dbName` must fix it; an operator that only touches `spec.replicas` is not blocked. Ratcheting does not cover `allOf`, `oneOf`, `anyOf`, `not`, changes to `required`, `x-kubernetes-list-type`, list map keys, or CEL rules that reference `oldSelf`; those still fail as before.
+
+### kro: a ResourceGraphDefinition instead of a controller
+
+When the "operator" would only create and wire existing resources, kro (Kube Resource Orchestrator, a Kubernetes SIG Cloud Provider subproject, API `kro.run/v1alpha1`) replaces the Go code with one object. A `ResourceGraphDefinition` declares a schema for the new API and the resources each instance creates; CEL expressions in `${...}` connect fields, and kro builds the dependency graph from those references.
+
+```yaml
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata: {name: webapp}
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: WebApp
+    spec:
+      name: string | required=true
+      image: string | default=nginx
+      replicas: integer | default=2
+    status:
+      availableReplicas: ${deployment.status.availableReplicas}
+  resources:
+    - id: deployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata: {name: "${schema.spec.name}"}
+        spec:
+          replicas: ${schema.spec.replicas}
+          selector: {matchLabels: {app: "${schema.spec.name}"}}
+          template:
+            metadata: {labels: {app: "${schema.spec.name}"}}
+            spec: {containers: [{name: app, image: "${schema.spec.image}"}]}
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata: {name: "${schema.spec.name}"}
+        spec:
+          selector: ${deployment.spec.selector.matchLabels}
+          ports: [{port: 80}]
+```
+
+Applying it makes kro validate the graph, register a `WebApp` CRD, and start a controller for it; a user then applies `kind: WebApp` with three fields. Because `service` references `deployment`, kro creates the Deployment first. The limit is logic: kro composes and orders resources, but it has no place for imperative steps such as "promote a replica when the primary fails" or "take a backup before upgrading". Those still need an operator.
 
 ### Finalizers (clean up external resources on delete)
 
@@ -269,6 +374,7 @@ controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error { mutate(cj, &cr);
 | Extension | CRD + operator | Helm chart (static) | Need reconciliation/day-2 vs one-time install |
 | Operator language | Go (controller-runtime) | Python (kopf) / Ansible | Performance/ecosystem vs barrier to entry |
 | Abstraction | Custom platform CRDs | Expose raw K8s | Self-service simplicity vs flexibility |
+| Composition-only API | Hand-written controller | kro `ResourceGraphDefinition` | Imperative day-2 logic vs no Go code to maintain (API still `v1alpha1`) |
 
 ---
 
@@ -329,6 +435,21 @@ controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error { mutate(cj); retu
 
 **Pitfall 3 — Edge-triggered logic that breaks on missed events.** Reacting only to "create" events means a controller restart (which replays nothing) leaves resources unmanaged. FIX: reconcile from current observed state with a periodic resync (`RequeueAfter`), so the controller self-heals after restarts and missed events — the level-triggered model.
 
+**Pitfall 4 - Dropping an old CRD version while etcd still holds objects in it.** Flipping `storage: true` to `v2` does not rewrite stored `v1` objects.
+
+```yaml
+# BROKEN: v1 removed right after the storage flip. The API server rejects the CRD update
+# because status.storedVersions still lists v1; force it and v1 objects become unreadable.
+versions:
+  - {name: v2, served: true, storage: true}
+
+# FIX: keep v1 served, run a StorageVersionMigration for postgresclusters, wait for
+# Succeeded and storedVersions == ["v2"], then set v1 served: false, then remove it.
+versions:
+  - {name: v1, served: false, storage: false}
+  - {name: v2, served: true,  storage: true}
+```
+
 ---
 
 ## 11. Technologies & Tools
@@ -342,73 +463,86 @@ controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error { mutate(cj); retu
 | OperatorHub.io | Discover community operators |
 | Prometheus Operator / cert-manager / CloudNativePG | Reference production operators |
 | Crossplane | Provision cloud infra via CRDs |
+| kro | Compose existing resources into a new API from a `ResourceGraphDefinition`, no controller code |
 | OLM v1 (operator-controller) | Install/upgrade operators declaratively via the `ClusterExtension` API; upstream project, also shipped in OpenShift |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is a CRD and what does it give you?**
+**Q: What is a CRD and what does it give you?**
 **Short:** A CRD registers a new API type with the API server, giving schema validation, `kubectl`, RBAC, watches, and etcd storage for free — but no behavior without a controller.
 A CustomResourceDefinition registers a new API type with the API server, so you can `kubectl apply` instances of it (custom resources) just like built-in objects — with OpenAPI schema validation, `kubectl get`, RBAC, watches, and storage in etcd, all for free. A CRD alone adds a *type*, not behavior; pairing it with a controller (operator) adds the reconciliation logic.
 
-**Q2: What is the operator pattern?**
+**Q: What is the operator pattern?**
 **Short:** It encodes operational expertise as a controller that watches custom resources and reconciles them, automating day-2 operations an SRE would otherwise do by hand.
 It's encoding operational/domain expertise as a custom controller that watches custom resources and reconciles them to desired state — applying Kubernetes' "declare + reconcile" model to complex software. Instead of an SRE manually backing up, failing over, and upgrading a database, an operator does it automatically in response to a declarative CR. It captures day-2 operations as code.
 
-**Q3: How does an operator's reconcile loop work?**
+**Q: How does an operator's reconcile loop work?**
 **Short:** It watches CRs, reads spec, observes real-world state, applies one corrective step, updates status, and requeues — level-triggered and idempotent.
 The same loop as built-in controllers: it watches CRs (via informers), and on each event (or periodic resync) it reads the CR's `spec`, observes the real-world state it manages, computes the diff, and applies one corrective step — then updates the CR's `status` and requeues. It's level-triggered (acts on current state) and idempotent (safe to re-run), so it self-heals after missed events and restarts.
 
-**Q4: Why must reconciliation be idempotent?**
+**Q: Why must reconciliation be idempotent?**
 **Short:** The loop runs repeatedly and may re-run after a restart, so non-idempotent side effects like unconditional creation produce duplicates and drift.
 Because the loop runs repeatedly — on every relevant event and on periodic resyncs — and may re-run after a controller restart. If reconciliation has non-idempotent side effects (e.g., unconditionally creating a child object), you get duplicates and drift. Idempotent reconciliation (create-or-update, skip-if-already-correct) means running it once or a hundred times converges to the same correct state.
 
-**Q5: What is level-triggered vs edge-triggered, and why does it matter for operators?**
+**Q: After `kubectl apply` changed a custom resource's spec, `kubectl wait --for=condition=Ready` returned immediately but the change had not rolled out. Why?**
+**Short:** The operator never set `observedGeneration`, so the stale `Ready=True` from the previous spec looked current; with it set, `kubectl wait` keeps waiting until the condition describes the new generation.
+Every spec write increments `metadata.generation`, but the operator's status still holds the verdict it computed for the old generation until the next reconcile finishes. `kubectl wait` compares the condition's `observedGeneration` (or `status.observedGeneration`) with `metadata.generation` and keeps waiting while it is older, but it can only do that if the field exists; this operator wrote conditions without it, so `kubectl wait` saw `True` and returned. The fix is in the operator: set `observedGeneration: cr.Generation` on each condition and on `status.observedGeneration` whenever it writes status, and have any custom client treat a condition as current only when that value equals `metadata.generation`. `kstatus`, the library Flux uses for health checks, reports a resource as `InProgress` while `status.observedGeneration` lags, so publishing the field makes the operator work correctly with those tools as well.
+
+**Q: What is level-triggered vs edge-triggered, and why does it matter for operators?**
 **Short:** Level-triggered acts on current observed state regardless of which event led there, which operators need because restarts and dropped events make edge-triggering unreliable.
 Edge-triggered reacts to specific events (the "create" happened); level-triggered acts on the current observed state regardless of which event led there. Operators must be level-triggered: a controller restart replays no events, and watch streams can drop events, so reconciling from current state (with periodic resync) is the only way to reliably converge and self-heal. Edge-triggered operators silently leave resources unmanaged after restarts.
 
-**Q6: What are finalizers and why do operators need them?**
+**Q: What are finalizers and why do operators need them?**
 **Short:** A finalizer blocks an object's deletion until removed, letting an operator clean up external resources like cloud volumes before the CR disappears.
 A finalizer is a key on an object that blocks its deletion until removed. Operators use finalizers to perform external cleanup before a CR is deleted — e.g., delete the S3 backup bucket, cloud volumes, or DNS records a `PostgresCluster` created. Without a finalizer, deleting the CR orphans those external resources, leaking cost and creating drift between Kubernetes and the cloud.
 
-**Q7: When should you write your own operator vs use an existing one?**
+**Q: When should you write your own operator vs use an existing one?**
 **Short:** Use a mature community operator whenever one fits, since getting idempotency, finalizers, and status right is subtle, and write your own only for genuinely novel needs.
 Use a mature community operator (Prometheus Operator, cert-manager, CloudNativePG) whenever one fits — operators are subtle (idempotency, finalizers, status, leader election, edge cases) and a buggy one can destroy data. Write your own only for genuinely novel needs: a custom platform abstraction, proprietary software with no operator, or organization-specific automation. Building an operator is a real engineering investment to maintain.
 
-**Q8: How do you build an operator?**
+**Q: How do you build an operator?**
 **Short:** Typically with Kubebuilder/controller-runtime, which scaffolds CRD types and a Reconcile method you fill in with idempotency, finalizers, status, and leader election.
 Typically with Kubebuilder/controller-runtime (Go), which scaffolds CRD types, a manager, informers, workqueues, and a `Reconcile` method you implement. The Operator SDK wraps this and also supports Ansible/Helm-based operators; kopf (Python) lowers the barrier. You define the CRD schema, implement idempotent reconciliation, manage finalizers, update status, and use leader election so only one replica reconciles at a time.
 
-**Q9: What's the difference between a CRD-with-operator and a Helm chart?**
+**Q: What's the difference between a CRD-with-operator and a Helm chart?**
 **Short:** A Helm chart is a one-time template render with no ongoing logic, while a CRD-plus-operator continuously reconciles and performs day-2 automation like failover.
 A Helm chart is a one-time (or upgrade-time) template render — it installs objects but has no ongoing logic. A CRD+operator provides *continuous* reconciliation and day-2 automation: it keeps watching and acting (failover, backup, scaling) long after install. Use a chart when you just need to deploy static manifests; use an operator when the software needs ongoing operational logic.
 
-**Q10: How does an operator report progress, and why does status matter?**
+**Q: How does an operator report progress, and why does status matter?**
 **Short:** It updates the CR's `status` subresource, letting users and other controllers observe real state without inspecting internals.
 By updating the CR's `status` subresource (e.g., `status.phase: Ready`, conditions, observed replicas). This lets users (`kubectl get pgc`) and other controllers observe the real state without inspecting internals, and enables tools/automation to wait on readiness. The status subresource also allows separate RBAC and avoids spec/status update conflicts. Reflecting reality in status is part of being a good API citizen.
 
-**Q11: What is leader election in an operator and why is it needed?**
+**Q: What is leader election in an operator and why is it needed?**
 **Short:** Leader election, via a Lease, ensures only one operator replica actively reconciles at a time so multiple replicas for availability don't fight over the same resources.
 When you run multiple operator replicas for availability, only one should actively reconcile at a time — otherwise two controllers fight over the same resources. Leader election (via a Lease object) ensures exactly one replica is the active leader; the others stand by and take over if the leader fails. controller-runtime provides this out of the box; forgetting it causes duplicate, conflicting actions.
 
-**Q12: How do CRDs get schema validation, and why use it?**
-**Short:** The API server validates every custom resource against the CRD's mandatory structural OpenAPI schema at admission, with CEL `x-kubernetes-validations` covering rules OpenAPI can't express.
-A CRD includes an OpenAPI v3 schema; the API server validates every custom resource against it at admission (types, required fields, enums, min/max), rejecting malformed CRs before they're stored or reconciled. In `apiextensions.k8s.io/v1` that schema is mandatory and must be *structural* — every object and array item carries a non-empty `type`, and unknown fields are pruned rather than persisted. Constraints OpenAPI can't express — cross-field rules, or "this field is immutable once set" — go in `x-kubernetes-validations` as CEL expressions, which the API server type-checks when the CRD is created and evaluates on every write. This catches user errors early (e.g., `replicas: 0` where minimum is 1) with clear messages, rather than the operator having to defensively handle garbage input at runtime.
+**Q: How do CRDs get schema validation, and why use it?**
+**Short:** The API server validates every custom resource against the CRD's mandatory structural OpenAPI schema at admission, with CEL rules for what OpenAPI can't express and ratcheting for objects already invalid.
+A CRD includes an OpenAPI v3 schema; the API server validates every custom resource against it at admission (types, required fields, enums, min/max), rejecting malformed CRs before they're stored or reconciled. In `apiextensions.k8s.io/v1` that schema is mandatory and must be *structural*: every object and array item carries a non-empty `type`, and unknown fields are pruned rather than persisted. Constraints OpenAPI can't express, such as cross-field rules or "this field is immutable once set", go in `x-kubernetes-validations` as CEL expressions, which the API server type-checks when the CRD is created and evaluates on every write. This catches user errors early (e.g., `replicas: 0` where minimum is 1) with clear messages, rather than the operator having to defensively handle garbage input at runtime. Tightening a rule later is safe because of validation ratcheting (GA in 1.33): an update to an object that violates the new rule still succeeds if it does not change the invalid part, so existing objects keep working until someone edits that field.
 
-**Q13: What do OwnerReferences give you that finalizers don't?**
+**Q: Why should a reconciler use server-side apply with a field manager instead of Get-modify-Update?**
+**Short:** Server-side apply sends only the fields the operator owns, merges with other writers instead of failing on resourceVersion conflicts, and records ownership, so the operator stops overwriting fields an HPA or a user owns.
+Get-modify-Update sends the whole object with its `resourceVersion`, so any concurrent write returns a 409 conflict and a retry, and the operator easily clobbers fields it never meant to manage, such as `spec.replicas` that an HPA scales. With server-side apply the reconciler sends a partial object holding its full intent under a stable field manager (`client.FieldOwner("pg-operator")`); the API server merges it, records per-field ownership in `metadata.managedFields`, and the same call creates the object or does nothing if it already matches, which makes the reconcile idempotent by construction. Controllers pass `ForceOwnership` to take fields another manager holds, so leave out of the apply configuration any field another actor should control. A field the operator stops sending is deleted unless another manager owns it, so always send the complete intent.
+
+**Q: When is kro a better choice than writing an operator?**
+**Short:** When the new API only creates and wires existing resources with no imperative logic; a kro ResourceGraphDefinition generates the CRD and controller, while failover, backups, or upgrade steps still need an operator.
+kro's `ResourceGraphDefinition` declares a schema (`name: string | required=true`) and a list of resource templates connected by CEL expressions such as `${deployment.status.availableReplicas}`. kro derives the dependency order from those references, registers the CRD, and runs a controller for it, so a platform team ships an `App` or `Database` API without writing, testing, and upgrading Go code. It fits composition: Deployment plus Service plus a Crossplane or ACK bucket, with status fields copied up. It does not fit imperative day-2 work such as promoting a replica, running a backup before an upgrade, or calling an external API, which is what a level 3+ operator encodes. The API is `kro.run/v1alpha1`, so budget for breaking changes.
+
+**Q: What do OwnerReferences give you that finalizers don't?**
 **Short:** OwnerReferences let the garbage collector auto-delete in-cluster children when the owner is deleted, while finalizers gate the owner's own deletion for external cleanup.
 OwnerReferences let Kubernetes' built-in garbage collector automatically delete child objects when their owner is deleted. A finalizer instead blocks and gates deletion of the *owner itself* until custom cleanup logic runs, so setting `controllerutil.SetControllerReference(&cr, cj, r.Scheme)` on a created CronJob means deleting the parent `Database` CR cascades to delete that CronJob for free with no reconcile code required, while a finalizer handles cleanup the garbage collector cannot do, like deprovisioning an external S3 bucket. In practice you use both: OwnerReferences for in-cluster children, finalizers for anything that lives outside the cluster's own garbage collection.
 
-**Q14: How do you evolve a CRD's schema without breaking existing custom resources?**
-**Short:** Add a new CRD API version rather than editing the schema in place, mark one version `storage: true`, and use a conversion webhook to translate between versions.
-Add a new API version to the CRD rather than mutating the existing version's schema in place, and mark exactly one version `storage: true` so etcd has a single source of truth while all served versions remain readable. When the new version's shape genuinely differs from the old one, you provide a **conversion webhook** that the API server calls to translate CRs between versions on the fly, so old and new clients both get a valid object. Skipping this and just editing the schema in place risks the API server rejecting every existing CR the next time it's read or reconciled.
+**Q: How do you evolve a CRD's schema without breaking existing custom resources?**
+**Short:** Add a new API version with a conversion webhook, move `storage: true` to it, run a StorageVersionMigration to rewrite stored objects, then retire the old version.
+Add a new API version to the CRD rather than mutating the existing version's schema in place, and mark exactly one version `storage: true` so etcd has a single source of truth while all served versions remain readable. When the new version's shape genuinely differs from the old one, you provide a **conversion webhook** that the API server calls to translate CRs between versions on the fly, so old and new clients both get a valid object. Skipping this and just editing the schema in place risks the API server rejecting every existing CR the next time it's read or reconciled. Moving `storage: true` only changes how new writes are encoded: objects already in etcd stay in the old version and `status.storedVersions` keeps listing it, and the API server refuses to drop a version still listed there. Create a `StorageVersionMigration` (`storagemigration.k8s.io/v1`, stable and on by default since Kubernetes 1.37) for the resource, wait for its `Succeeded` condition and for `storedVersions` to show only the new version, then set the old version `served: false` and remove it in a later release.
 
-**Q15: Why must an operator's RBAC be scoped to least privilege?**
+**Q: Why must an operator's RBAC be scoped to least privilege?**
 **Short:** An operator runs continuously with real privileges, so scoping RBAC to exactly what the reconciler touches limits damage from a bug or compromised image.
 An operator is a powerful, always-running controller, so a compromised or buggy one with cluster-wide access can modify or destroy far more than its intended scope. Scoping RBAC to exactly the API groups, verbs, and namespaces the reconciler actually touches means a bug or a supply-chain-compromised operator image can only damage what it legitimately needed to manage, not the whole cluster. This is the same least-privilege principle applied to CI tokens, just for a controller that runs continuously rather than a pipeline that runs once.
 
-**Q16: What do the operator capability levels (1-5) actually distinguish?**
+**Q: What do the operator capability levels (1-5) actually distinguish?**
 **Short:** The capability levels measure how much day-2 operational knowledge is encoded, from Level 1 install-only through Level 5 autonomous scaling and remediation.
 The maturity model measures how much day-2 operational knowledge is encoded in the controller, not how well it's built. Level 1 just installs the application, Level 2 adds patch/minor upgrades, Level 3 adds lifecycle operations like backup and failure recovery, Level 4 adds insights such as metrics and alerts, and Level 5 ("autopilot") adds autonomous scaling, tuning, and remediation without human intervention. Most production operators (CloudNativePG, Prometheus Operator) sit at Level 3-4, since reaching Level 5 is rare — autonomous remediation for stateful systems is genuinely hard to get safely right, and a Level 1 operator from OperatorHub still requires you to build your own backup/failover automation around it.
 

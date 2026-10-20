@@ -86,6 +86,7 @@ Automatically add or remove instances based on metrics:
 - **Reactive scaling**: Scale based on current CPU/memory/request-rate thresholds
 - **Predictive scaling**: Scale based on historical patterns (e.g., pre-warm before daily traffic spike)
 - **Scheduled scaling**: Manual schedule for known traffic events
+- **Scale to zero**: Remove every instance while idle. Kubernetes v1.37 lets the HPA do this (`minReplicas: 0`, `HPAScaleToZero` feature gate, Beta and on by default), but only with an object or external metric such as queue depth, because CPU and memory come from running Pods and read nothing at zero
 
 ### Stateless Design Strategies
 - Store session data in external stores (Redis, DynamoDB)
@@ -464,6 +465,7 @@ are short of nodes or short of independence.
 - Consistency guarantees — CAP theorem forces tradeoffs
 - Operational predictability — more moving parts means more failure modes
 - Development velocity early on — premature optimization is real
+- Cold-start latency when scaling from zero: the autoscaler must see the metric, schedule a Pod, and boot the app before the first request is served, and a Kubernetes Service does not buffer requests while no Pod is ready, so request-driven workloads need a buffering layer in front (Knative, KEDA HTTP add-on) or a floor of one replica
 
 ---
 
@@ -554,7 +556,7 @@ time.
 ## 11. Technologies & Tools
 
 ### Application Scaling
-- **Kubernetes (k8s)** — Container orchestration with Horizontal Pod Autoscaler (HPA)
+- **Kubernetes (k8s)** - Container orchestration with the Horizontal Pod Autoscaler (HPA), which scales to zero replicas on object or external metrics since v1.37
 - **Auto Scaling** — EC2 auto-scaling groups with lifecycle hooks
 - **Cloud Run** — Google serverless containers that scale to zero
 - **AWS Lambda**, **Cloud Run functions** — function-level scaling, no server management

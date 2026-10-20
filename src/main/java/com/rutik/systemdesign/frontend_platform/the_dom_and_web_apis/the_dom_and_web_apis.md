@@ -276,7 +276,7 @@ DOM calls ([pipeline](../browser_architecture_and_the_rendering_pipeline/browser
 | `textContent` | no | **yes** | n/a, replaces all children |
 | `createElement` plus `append` | no | **yes** | yes |
 | `innerHTML` | yes | **no** | no, every child is rebuilt |
-| `setHTML()` | yes, then sanitizes | yes, with the default config | no |
+| `setHTML()` | yes, then sanitizes | yes, with the default config, where supported | no |
 
 ```js
 const name = '<img src=x onerror="fetch(`/api/keys`).then(sendToAttacker)">';
@@ -284,6 +284,10 @@ el.textContent = name;   // renders the literal characters. The only correct def
 el.innerHTML  = name;    // parses it. The img fails to load, onerror runs. XSS.
 el.setHTML(name);        // parses, then strips event handlers and script-y URLs.
 ```
+
+MDN marks `setHTML()` Limited availability: Chrome 146 and Firefox 148 ship it, Safari does not.
+Feature-detect with `"setHTML" in Element.prototype` and fall back to DOMPurify behind a Trusted
+Types policy.
 
 `innerHTML` does **not** execute an inline `<script>` it inserts, which is why people believe
 it is safe; it executes everything else — `onerror`, `onload`, `autofocus` plus `onfocus`,
@@ -795,7 +799,8 @@ with discipline — this repo's `game/app.js` is 578 KB of dependency-free JS, n
 2. **Register teardown with an `AbortController` signal** — one `abort()` removes every
    listener a component added, with no function references to track.
 3. **Default to `textContent`**; treat every `innerHTML` assignment as a security review item,
-   and prefer `setHTML()` when markup is genuinely required.
+   and prefer `setHTML()` when markup is genuinely required, feature-detected with a DOMPurify
+   fallback behind a Trusted Types policy.
 4. **Replace every geometry poll with the matching observer** — a `getBoundingClientRect()`
    inside `scroll`, `resize` or `mousemove` is a question one of the three answers for free.
 5. **Snapshot live collections** with the spread operator before mutating during iteration, and

@@ -119,7 +119,7 @@ This module's job is the layer above both: the deployment model, not the storage
 
 ### 4.1 SQLite — the relational OLTP embedded default
 
-SQLite (current release **3.53.4**, 24 Jul 2026 — a C library, public domain, one `.c` file when
+SQLite (current release **3.54.1**, 16 Oct 2026, a patch to 3.54.0 of 9 Oct 2026; a C library, public domain, one `.c` file when
 amalgamated) is a full relational engine — SQL, transactions, triggers, views, foreign keys — that
 reads and writes a single ordinary file. It is, by the project's own accounting, the most widely
 deployed database engine in existence: it ships inside every Android and iOS device, every major
@@ -181,10 +181,10 @@ current, not historical, features.
 
 ### 4.2 DuckDB — embedded OLAP
 
-DuckDB (current stable **1.5.5**, 21 Jul 2026; **2.0** — codename "Cyanoptera" — previewed
-17 Aug 2026 with a new SQL parser, a new default storage format, and a reworked C API, targeted
-for release in fall 2026) is "the SQLite of OLAP": same deployment model — a library, one file, no
-server process — but the opposite workload. Where SQLite is optimized for many small transactional
+DuckDB (current stable **1.5.6**, 28 Sep 2026; **2.0**, codename "Cyanoptera", is unreleased:
+its `v2.0-cyanoptera` branch is feature-frozen as of the 2 Sep 2026 alpha, with a new SQL parser,
+a new default storage format, and a reworked C API, and release projected for the second half of October 2026) is "the SQLite of OLAP": same deployment model (a library, one file, no
+server process) but the opposite workload. Where SQLite is optimized for many small transactional
 reads and writes touching a few rows, DuckDB is optimized for a few large analytical queries that
 scan and aggregate millions of rows. It is columnar, vectorized, and ships a cost-based optimizer
 capable of running the TPC-H benchmark suite; see
@@ -315,6 +315,89 @@ don't bet a production system on its 1.0 boundary yet.
   an open-source project, but MongoDB ended Atlas Device Sync and the managed Realm SDK support
   path on 30 September 2025; ObjectBox is the actively developed alternative positioning itself as
   a sync-included replacement for that gap.
+
+### 4.7 Replicating a SQLite file: Litestream and LiteFS
+
+A single SQLite file on one disk is one disk failure away from data loss. Two tools ship its
+changes elsewhere without changing the application's SQL:
+
+- **Litestream** runs beside the application and streams the WAL to object storage (S3, GCS,
+  Azure Blob, SFTP). It holds a long-running read transaction so no other process can checkpoint
+  and reset the WAL before Litestream has copied it, and it runs checkpoints itself. Since v0.5
+  each sync packages new WAL pages into an **LTX** file with a monotonically increasing
+  transaction ID; files are compacted into coarser levels (30 seconds, 5 minutes, 1 hour by
+  default) and a full snapshot is taken every 24 hours. `litestream restore` takes the newest
+  snapshot before the target and applies later LTX files in order. Replication is asynchronous,
+  so a disk loss can drop the last second or so of commits, and each database replicates to one
+  destination. The optional `litestream-vfs` extension serves read queries straight from the
+  replica in object storage without restoring the whole file.
+- **LiteFS** (Fly.io) is a FUSE filesystem mounted under the SQLite file. It sees each committed
+  transaction, writes it as an LTX file, and streams it to every replica node, which stay
+  read-only. One node holds a lease (through Consul on Fly.io) and is the only writer; the others
+  forward writes to it, on Fly.io with the `fly-replay` response header. Fly.io describes LiteFS
+  as stable and in production but pre-1.0 and without vendor support, and warns that Machine
+  autostop can stop a node without regard to lease ownership and lose data.
+
+Both keep SQLite's single writer. They add durability (Litestream) or read scale-out to several
+nodes (LiteFS); neither gives multi-writer.
+
+### 4.8 Local-first sync engines and CRDT merge
+
+A local-first app keeps the working set in an embedded database on the device (SQLite, IndexedDB,
+PGlite in the browser) and syncs with a server database in the background, so reads and writes
+never wait on the network. The engines differ mainly in how writes flow back:
+
+| Engine | Server source | Read path | Write path |
+|---|---|---|---|
+| ElectricSQL | PostgreSQL | **Shapes**: a table plus `WHERE` clause and column list, streamed over HTTP (`GET /v1/shape` with `offset` and `handle`) from a logical replication slot; CDN-cacheable | Not synced; the app writes through its own API, and the change returns via the shape |
+| PowerSync | PostgreSQL, MongoDB, MySQL and others | Service replicates the source and partitions rows per user with **Sync Streams** into client SQLite | Client queues local writes and uploads them to the app's own backend, which decides how to apply them (server reconciliation, commonly per-field last-write-wins) |
+| Zero (Rocicorp) | PostgreSQL | `zero-cache` replicates Postgres into a server-side SQLite replica; clients sync the results of the queries they actually run | Mutators run optimistically on the client and again, authoritatively, on the server |
+| CRDT libraries (Automerge, Yjs, cr-sqlite) | Any, or peer to peer | Each replica holds full state | Every replica accepts writes; merge is deterministic, no server arbitration |
+
+**Server reconciliation** (Electric, PowerSync, Zero) keeps one authority: the server runs the
+write with real constraints, auth and validation, and clients rebase their optimistic state on the
+result. **CRDT merge** gives up the authority: each field or document is a data type whose merge
+is commutative, associative and idempotent (last-writer-wins registers ordered by hybrid logical
+clocks, add-wins sets, sequence CRDTs for text), so any two replicas that have seen the same
+operations converge with no coordinator. The cost is that invariants spanning rows ("stock never
+below zero", "username unique") cannot be enforced by merge alone. Pick a CRDT for collaborative
+editing and peer-to-peer, server reconciliation for business data with constraints. See
+[Consistency Models and Consensus](../consistency_models_and_consensus/consistency_models_and_consensus.md)
+for CRDT internals.
+
+```
+  server reconciliation                       CRDT merge
+  client A: qty 5 -> 4 (optimistic)           replica A: qty 5 -> 4
+  client B: qty 5 -> 4 (optimistic)           replica B: qty 5 -> 4
+  server applies A, then B: 5 -> 4 -> 3       merge as PN-counter: 5 - 1 - 1 = 3
+  server rejects B if qty would go < 0        nobody can reject; qty can go negative
+```
+
+### 4.9 SQLite at the edge: Cloudflare D1, Durable Objects, and read replicas
+
+- **Durable Objects with SQLite storage.** Each Durable Object is a single-threaded actor with
+  its own embedded SQLite database (10 GB per object on the Workers Paid plan, 1 GB on Free),
+  queried in-process with `ctx.storage.sql.exec()`. Each storage call runs in an implicit
+  transaction, input and output gates stop concurrent requests from interleaving between an
+  `await` and a write, and point-in-time recovery reaches back 30 days. The design shards by
+  object: one object per chat room, document or tenant, each a single writer.
+- **D1** is Cloudflare's managed SQLite database service, built on Durable Objects. Writes go to
+  one primary. **Read replication** keeps asynchronous read-only copies in every region (ENAM,
+  WNAM, WEUR, EEUR, APAC, OC) and is used only through the **Sessions API**: each query returns a
+  **bookmark** naming a database version, and a session started from that bookmark only reads
+  from a replica that has reached it. That gives sequential consistency within a session:
+  monotonic reads, monotonic writes, writes-follow-reads, and read-your-writes.
+- **Embedded replicas** (libSQL, section 4.5) and **edge read replicas** (D1, Turso Cloud, LiteFS)
+  share one rule: reads are local, writes travel to one primary, and the client carries a
+  position (bookmark, frame number, TXID) so it never reads older than its own last write.
+
+```
+  user in Sydney, primary in Virginia (RTT ~200 ms)
+
+  read, no session          -> nearest replica (APAC), ~5 ms, may be seconds stale
+  write                      -> primary (WNAM/ENAM), ~200 ms, returns bookmark B42
+  read with bookmark B42     -> APAC replica, which waits until it has applied B42
+```
 
 ---
 
@@ -693,8 +776,8 @@ same backup discipline — off-box copies, on a schedule, taken with the correct
 
 | Tool | Category | Notes |
 |---|---|---|
-| SQLite | Embedded relational (OLTP) | 3.53.4 (2026); public domain, single amalgamated `.c` file |
-| DuckDB | Embedded analytical (OLAP) | 1.5.5 stable (2026); 2.0 in preview, targets fall 2026, adds server mode |
+| SQLite | Embedded relational (OLTP) | 3.54.1 (Oct 2026); public domain, single amalgamated `.c` file; `.diskused` replaces `sqlite3_analyzer`; Windows Vista or later |
+| DuckDB | Embedded analytical (OLAP) | 1.5.6 stable (Sep 2026); 2.0 feature-frozen, unreleased, adds server mode |
 | MotherDuck | Managed/hybrid DuckDB | Cloud service layered on the DuckDB engine |
 | RocksDB | Embeddable LSM-tree KV library | Facebook-originated; storage layer inside MyRocks, TiKV, others |
 | LevelDB | Embeddable LSM-tree KV library | RocksDB's Google-originated predecessor; simpler, less actively evolved |
@@ -707,6 +790,14 @@ same backup discipline — off-box copies, on a schedule, taken with the correct
 | SQLite WASM + OPFS | SQLite compiled to WebAssembly, persisted via the browser's Origin-Private File System | Embedded database *inside a browser tab* |
 | Realm | Embedded object database for mobile | Client SDK remains OSS; MongoDB's managed sync path ended 30 Sep 2025 |
 | ObjectBox | Embedded object database for mobile/edge | Actively developed; positions as a sync-included Realm-sync alternative |
+| Litestream | Streams SQLite WAL as LTX files to object storage | Async backup and point-in-time restore; `litestream-vfs` reads from the replica |
+| LiteFS | FUSE filesystem replicating SQLite across nodes | One leased writer, read-only replicas; pre-1.0, no Fly.io support |
+| ElectricSQL | Postgres-to-client read-path sync over HTTP (Shapes) | Writes go through the app's own API |
+| PowerSync | Backend database to client SQLite sync | Upload queue to your backend; server reconciliation |
+| Zero | Query-driven sync from Postgres via `zero-cache` | Optimistic client mutators, authoritative server mutators |
+| Automerge / Yjs / cr-sqlite | CRDT libraries (documents, text, SQLite tables) | Coordinator-free merge; no cross-row invariants |
+| Cloudflare Durable Objects (SQLite) | Per-object embedded SQLite in an actor | 10 GB per object, 30-day PITR |
+| Cloudflare D1 | Managed SQLite on Durable Objects | Read replicas through Sessions API bookmarks |
 
 ---
 
@@ -787,7 +878,7 @@ it. DuckDB's native `.duckdb` file historically enforces the same shape at the f
 read-write connection, with any additional connections restricted to read-only. The difference is
 in trajectory, not current mechanics — DuckDB shipped a beta "Quack" client-server protocol on the
 1.5.x line that lets one DuckDB process serve a database over the network so other processes can
-attach and query it via `CONNECT`, with DuckDB 2.0 (targeted fall 2026) expected to make a proper
+attach and query it via `CONNECT`, with DuckDB 2.0 (feature-frozen, unreleased) expected to make a proper
 server mode first-class. Until that lands as the default deployment shape, plan a `.duckdb` file
 around a single writer exactly as you would a SQLite file.
 
@@ -819,6 +910,21 @@ primary database, so reads are served with pure in-process, zero-network latency
 ordinary SQLite, while writes are transparently forwarded to the primary and the result synced
 back. It's the "read locally, write to a primary" pattern — a middle ground between a fully local
 SQLite file (no sharing at all) and a full client-server database (every read pays a network hop).
+
+**Q: How does Litestream back up a live SQLite database without stopping writes, and what can it still lose?**
+**Short:** It holds a read transaction so the WAL cannot be checkpointed away, ships new WAL pages to object storage as LTX files, and checkpoints itself; being asynchronous, a disk loss drops the last second or so of commits.
+
+Litestream runs beside the application and opens a long-lived read transaction on the database, which stops any other connection from checkpointing and resetting the WAL before Litestream has read it. It then copies newly committed WAL pages into LTX files, each with the next transaction ID, uploads them to S3, GCS, Azure Blob or SFTP, and performs the checkpoint itself once the pages are safe. Files are compacted into coarser levels and a snapshot is written every 24 hours by default, so `litestream restore` replays the newest snapshot plus later LTX files to any point. Because replication is asynchronous, commits made since the last sync are lost with the disk, and each database replicates to one destination. It gives you backup and PITR for a single-writer file; for read scale-out across nodes use LiteFS or an embedded-replica service instead.
+
+**Q: When should a local-first app use CRDT merge rather than server reconciliation for sync?**
+**Short:** Use CRDTs when replicas must accept writes with no authority, as in collaborative text or peer-to-peer, and server reconciliation when business invariants like uniqueness or non-negative stock must hold.
+
+A CRDT makes each value a data type whose merge is commutative, associative and idempotent, so any replicas that have seen the same operations converge without a coordinator; that suits shared documents (Yjs, Automerge), offline editing and peer-to-peer. The cost is that merge can only enforce what the type encodes: two offline clients each decrementing stock from 1 merge to -1, and two clients claiming the same username both succeed. Server reconciliation, used by ElectricSQL, PowerSync and Zero, keeps the server as the authority: clients apply writes optimistically to local SQLite, the server runs them with real constraints and auth, and clients rebase on the result, so the second decrement is rejected. Choose by the invariants: cross-row constraints need an authority; free-form collaborative state does not.
+
+**Q: How does Cloudflare D1 give read-your-writes when reads go to asynchronous replicas?**
+**Short:** Through the Sessions API: every query returns a bookmark naming a database version, and a session carrying that bookmark only reads from a replica that has applied it, giving sequential consistency per session.
+
+D1 sends writes to one primary and keeps asynchronous read-only replicas in each region, so a plain read after a write could hit a replica that is behind. With `withSession()`, each response carries a bookmark for the version it saw or wrote; the client stores it (for example in an HTTP header) and starts the next session from it, and a replica that has not yet applied that version waits until it has before answering. Within a session this gives monotonic reads, monotonic writes, writes-follow-reads and read-your-writes, while unrelated users read the nearest replica freely. The same pattern, a client-held log position, is how libSQL embedded replicas and PostgreSQL 19 `WAIT FOR LSN` handle it; without the bookmark, replica reads are only eventually consistent.
 
 **Q: What does "the process is the availability domain" mean for an embedded database, concretely?**
 **Short:** If the process crashes or is OOM-killed, the database goes down with it, because there was never an independent server to fail over to.

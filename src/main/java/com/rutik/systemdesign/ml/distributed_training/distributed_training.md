@@ -110,7 +110,7 @@ Trading wall-clock time for VRAM is the entire deal. Accumulation buys you the *
 
 The memory rows are the point: activations are freed after each micro-batch, and gradients accumulate into the same buffer rather than stacking, so peak VRAM tracks `local_batch` and not the effective batch. The `no_sync()` row is Pitfall 5 in Section 10 — a team that skipped it paid `4x` the communication and ran 2.8x slower than plain DDP.
 
-**Checkpointing discipline**: in distributed training, only rank 0 should write checkpoints to avoid N processes writing the same file simultaneously. With FSDP2, each rank holds a shard — use `torch.distributed.checkpoint.state_dict.get_model_state_dict` to gather a full state dict for a single-file save, or save the default sharded form in parallel with `torch.distributed.checkpoint.save` and skip the gather entirely.
+**Checkpointing discipline**: a full (single-file) state dict is written by rank 0 only, so N processes never write the same file at once; a sharded save is the opposite, with every rank writing its own shard. With FSDP2, each rank holds a shard: use `torch.distributed.checkpoint.state_dict.get_model_state_dict` to gather a full state dict for a single-file save, or save the default sharded form in parallel with `torch.distributed.checkpoint.save` and skip the gather entirely.
 
 **MFU (Model FLOP Utilization)**: actual FLOP/s ÷ peak theoretical FLOP/s. A100 peak is 312 TFLOP/s (BF16 with sparsity). Well-tuned LLM training achieves 38-45% MFU. Memory-bound operations (layer norms, embeddings) drag MFU down; computation-bound (large matmuls) push it up.
 
@@ -127,6 +127,27 @@ Multi-process (one process per GPU), symmetric AllReduce — no master bottlenec
 **FSDP2 (`fully_shard`)**
 Converts each parameter to a per-parameter `DTensor` with a `Shard(dim=0)` placement, in place — not the FlatParameter-per-wrapper approach of the original FSDP class (deprecated; `fully_shard` is the current frontend). Each rank holds 1/N of every parameter, individually addressable rather than flattened into one opaque buffer. Before each forward pass, parameters are gathered via AllGather; after the backward pass, gradients are reduced via ReduceScatter. Memory per GPU scales as ~1/N of model size, enabling training models that exceed single-GPU VRAM. Overhead: roughly 2x communication compared to DDP, but enables models 10-100x larger. Per-parameter DTensor sharding also means sharded state dicts need no communication to save or load, and it composes directly with tensor and pipeline parallelism through a shared `DeviceMesh`.
 
+**HSDP (Hybrid Sharded Data Parallel)**
+Full sharding across every GPU in a cluster sends each layer's AllGather and ReduceScatter over the slow inter-node network. HSDP splits the GPUs into a 2D `DeviceMesh`: shard within a group (usually one node of 8 GPUs on NVLink) and replicate across groups (nodes on InfiniBand). Parameters, gradients and optimizer state are sharded 8 ways inside the node; after backward, each GPU's gradient shard is AllReduced with the matching shard on the other nodes. With FSDP2, passing a 2D mesh to `fully_shard` gives HSDP: dimension 0 replicates, dimension 1 shards.
+
+Worked numbers for a 7B model on 8 nodes x 8 H100 with mixed-precision Adam (16 bytes per parameter of state): full FSDP over 64 GPUs holds `112 GB / 64 = 1.75 GB` of state per GPU, but every per-layer collective crosses nodes. HSDP holds `112 GB / 8 = 14 GB` per GPU, keeps the per-layer AllGather and ReduceScatter on NVLink (900 GB/s per GPU), and sends only one gradient AllReduce per step over InfiniBand, on a 1/8 shard: `14 GB bf16 gradients / 8 = 1.75 GB` per GPU. When the model state fits in one node's memory, HSDP trades memory you have for inter-node traffic you do not want. Each replica group also holds a full copy of the model, which is what makes per-group fault tolerance (torchft, below) possible.
+
+```mermaid
+flowchart LR
+    subgraph N0[Node 0 - replica 0]
+        A0[GPU 0..7<br/>1/8 shard each]
+    end
+    subgraph N1[Node 1 - replica 1]
+        A1[GPU 0..7<br/>1/8 shard each]
+    end
+    subgraph N2[Node 2 - replica 2]
+        A2[GPU 0..7<br/>1/8 shard each]
+    end
+    A0 -. AllGather + ReduceScatter<br/>per layer, NVLink .- A0
+    A0 <== gradient AllReduce<br/>once per step, InfiniBand ==> A1
+    A1 <== gradient AllReduce ==> A2
+```
+
 **DeepSpeed ZeRO**
 Stage 1: shard only optimizer states — 4x memory reduction. Stage 2: + gradient sharding — 8x memory reduction. Stage 3: + parameter sharding — equal to FSDP in memory but with more communication. ZeRO-Infinity offloads to CPU RAM and NVMe SSD for near-infinite model capacity.
 
@@ -138,6 +159,23 @@ Split model layers into stages, each stage on a different node. Data flows forwa
 
 **3D Parallelism**
 DP × TP × PP: data parallel across super-nodes, tensor parallel within a node, pipeline parallel across nodes. Used for 100B+ parameter models. Megatron-Turing NLG (530B) used 280 × 8-way TP × 35-way PP.
+
+Two more mesh dimensions appear in LLM-scale jobs and are covered in the LLM section. **Context parallelism** shards the sequence dimension of long inputs across GPUs and passes key/value blocks between them with ring attention; see [Context Windows and Long Context](../../llm/context_windows_and_long_context/context_windows_and_long_context.md). **Expert parallelism** places the experts of a mixture-of-experts layer on different GPUs and routes tokens to them with all-to-all collectives; see [Mixture of Experts](../../llm/mixture_of_experts/mixture_of_experts.md). With these, a job's `DeviceMesh` can have up to five dimensions: replicate, shard, tensor, pipeline, and context or expert.
+
+**Fault tolerance and elastic recovery**
+Synchronous training has no slack for a dead rank: when one process crashes or its node drops, every other rank blocks inside its next collective until the process-group timeout fires (10 minutes by default for NCCL). The recovery layers, from oldest to newest:
+
+| Layer | What it does on a lost rank | What you lose |
+|---|---|---|
+| `torchrun` (TorchElastic) | Tears down every worker and restarts the whole group, up to `--max-restarts` times; `--nnodes=MIN:MAX` lets it restart on fewer nodes | All steps since the last checkpoint, plus restart and reload time |
+| `torch.distributed.checkpoint` (DCP) | Every rank writes its own shard; load reshards to the new world size, so a 16-node checkpoint loads on 15 nodes | Nothing beyond the checkpoint interval |
+| In-place process-group reconfiguration (PyTorch 2.14, experimental) | Surviving processes rebuild the process group in place instead of exiting; supported on Gloo and the experimental `nccl2` backend | The in-flight step; the APIs are experimental |
+| torchft (per-step fault tolerance) | With DDP or HSDP, a Lighthouse server tracks which replica groups are alive each step; the live groups form a quorum and keep training, and a recovered group copies weights from a healthy peer and rejoins at a step boundary | Only the failed replica group's share of the current step |
+| Flight Recorder | Keeps a per-rank ring buffer of recent collectives; the dump shows which rank stopped at which collective. Backend-agnostic since PyTorch 2.14 (NCCL-only before) | Nothing; it is a diagnosis tool |
+
+torchft (Meta PyTorch, presented at PyTorch Conference 2024) works on the replicate dimension because each replica group holds a full copy of the model. Each step, every group's Manager asks the Lighthouse for a quorum; the gradient AllReduce runs only over the groups in that quorum, through fault-tolerant process groups that can be reinitialized without killing the job. A failure inside a replica group still takes that group down, so smaller groups mean a smaller blast radius but less sharding. torchft also implements LocalSGD and DiLoCo, which synchronize replicas every few hundred steps instead of every step, for training across clusters with slow links.
+
+A straggler is the opposite case: no rank is lost, one is slow, so it needs per-rank step-time monitoring and node replacement rather than reconfiguration. PyTorch 2.14 also previews a rewritten NCCL backend (`nccl2`), opted into with `TORCH_DIST_USE_NCCL2=1`.
 
 ### The Scaling Math: Data Parallel vs Model Parallel
 
@@ -446,7 +484,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch import nn
 from typing import Optional
 
@@ -504,7 +542,7 @@ def train_ddp(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     # BF16: better numerical range than FP16, no GradScaler needed on A100/H100
     # FP16: use GradScaler to handle underflow
-    scaler = GradScaler()  # for FP16 training
+    scaler = GradScaler("cuda")  # for FP16 training
 
     for epoch in range(epochs):
         # Must set epoch so DistributedSampler reshuffles correctly each epoch
@@ -522,7 +560,7 @@ def train_ddp(
             )
 
             with sync_context:
-                with autocast(dtype=torch.float16):  # use torch.bfloat16 on A100
+                with autocast("cuda", dtype=torch.float16):  # use torch.bfloat16 on A100
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
                     loss = loss / gradient_accumulation_steps
@@ -668,6 +706,23 @@ def save_fsdp2_checkpoint(model: torch.nn.Module, save_path: str) -> None:
         torch.save(full_sd, save_path)
 ```
 
+### HSDP with FSDP2: a 2D DeviceMesh
+
+```python
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+
+# 8 nodes x 8 GPUs: replicate across nodes (dim 0), shard within a node (dim 1).
+mesh = init_device_mesh("cuda", (dist.get_world_size() // 8, 8),
+                        mesh_dim_names=("replicate", "shard"))
+for block in model.layers:
+    fully_shard(block, mesh=mesh)
+fully_shard(model, mesh=mesh)
+```
+
+Passing a 1D mesh, or no mesh, gives full FSDP over all ranks. The shard dimension should match the NVLink domain: 8 on an HGX node, larger on an NVL72 rack, where one shard group can span 72 GPUs.
+
 ### DeepSpeed ZeRO Configuration
 
 ```python
@@ -702,7 +757,7 @@ ds_config = {
 
 ## 7. Real-World Examples
 
-**Meta — LLaMA 3 (70B)**: trained on 15 trillion tokens using 2,048 H100 GPUs. Used 3D parallelism: 8-way tensor parallelism within a node (NVLink), 16-way pipeline parallelism across nodes, data parallelism across super-nodes. Achieved ~38% MFU. Training took approximately 3.4 million GPU-hours.
+**Meta LLaMA 3 (70B)**: trained on 15 trillion tokens using 2,048 H100 GPUs. Used 3D parallelism: 8-way tensor parallelism within a node (NVLink), 16-way pipeline parallelism across nodes, data parallelism across super-nodes. Achieved ~38% MFU. Training took 6.4 million H100-80GB GPU-hours per Meta's model card (1.3 million for the 8B).
 
 **Google — PaLM (540B)**: trained on 6,144 TPU v4 chips using Pathways (a cross-accelerator system). 12-way model parallelism, 24-way pipeline parallelism, data parallel across pods. TPU interconnect (ICI, 600 GB/s) enabled aggressive tensor parallelism.
 
@@ -718,7 +773,7 @@ ds_config = {
 |---|---|---|---|---|---|
 | DDP | Full model × N | AllReduce (gradients only) | Low | Fits in 1 GPU | Standard multi-GPU training |
 | FSDP2, `reshard_after_forward=False` | Full params + 1/N optimizer+grad | ReduceScatter + AllGather | Medium | ~1.5x single GPU | Model just exceeds GPU memory |
-| FSDP2, `reshard_after_forward=True` (default) | 1/N params + 1/N optimizer+grad | 2× communication | Medium | N × GPU VRAM | Large models (7B-70B) |
+| FSDP2, `reshard_after_forward=True` (default) | 1/N params + 1/N optimizer+grad | 2× communication; AllGather and ReduceScatter share one NCCL communicator and serialize unless `set_separate_reduce_scatter_group()` (PyTorch 2.13+, opt-in) gives ReduceScatter its own | Medium | N × GPU VRAM | Large models (7B-70B) |
 | DeepSpeed ZeRO-3 | Same as FSDP2 default | Similar | High (JSON config) | N × GPU VRAM | Large models, DeepSpeed ecosystem |
 | ZeRO-Infinity | ~1/N GPU + CPU/NVMe | Much slower | Very high | Virtually unlimited | Research, very large models |
 
@@ -780,12 +835,14 @@ A team implemented gradient accumulation with FSDP2 but never called `model.set_
 | DeepSpeed | ZeRO optimizer, ZeRO-Infinity, pipeline parallelism |
 | Megatron-LM | Tensor + pipeline parallelism for LLMs (NVIDIA) |
 | torchrun | PyTorch distributed launcher (replaces torch.multiprocessing.spawn) |
+| torchft | Per-step fault tolerance for DDP and HSDP: Lighthouse quorum, live peer recovery, LocalSGD, DiLoCo |
+| torchtitan | PyTorch reference LLM trainer composing FSDP2/HSDP, TP, PP, CP, and torchft |
 | NCCL | GPU collective communication library (AllReduce, AllGather) |
 | Horovod | Uber's distributed training library (less common now) |
 | Accelerate (HuggingFace) | Abstraction over DDP/FSDP/DeepSpeed with minimal code change |
 | PyTorch Lightning | Higher-level training loop with distributed strategy plugins |
 | TensorFlow MirroredStrategy | TF equivalent of DDP |
-| Vertex AI Training | Managed distributed training on Google Cloud |
+| Gemini Enterprise Agent Platform serverless training | Managed distributed training on Google Cloud |
 | AWS SageMaker Training | Managed distributed training with SMP library |
 | Weights & Biases | Experiment tracking for distributed runs |
 | NVIDIA Nsight Systems | GPU profiling for identifying bottlenecks |
@@ -810,6 +867,11 @@ Gradient accumulation postpones the optimizer update by accumulating gradients a
 **Short:** FSDP2 shards each parameter as a DTensor to roughly 1/N of DDP's per-GPU memory, temporarily AllGathering full parameters only during each forward pass.
 In DDP, each GPU holds: full model parameters (M bytes) + full gradients (M bytes) + full optimizer states (for Adam: 8M bytes for momentum and variance) = ~10M bytes total. With FSDP2's default configuration (`reshard_after_forward=True`) across N GPUs, each GPU holds: M/N bytes for parameters + M/N bytes for gradients + 8M/N bytes for optimizer states ≈ 10M/N bytes total — a linear memory reduction. FSDP2 shards each parameter individually as a `DTensor` rather than flattening a wrapping unit's parameters into one buffer, so parameters stay individually addressable. Before each forward pass, `fully_shard` issues AllGather to temporarily materialize the full parameter tensor on each GPU (then frees it after use, unless `reshard_after_forward=False`). This means peak memory during forward pass exceeds 1/N, but the steady-state footprint is 1/N.
 
+**Q: When is HSDP faster than full FSDP across all GPUs?**
+**Short:** When the model state fits in one node sharded 8 ways: HSDP keeps per-layer AllGather and ReduceScatter on NVLink and sends only one gradient AllReduce per step across nodes.
+
+Full FSDP over 64 GPUs puts every per-layer AllGather and ReduceScatter on the inter-node network, which is several times slower per GPU than NVLink. HSDP shards within a node and replicates across nodes, so per-layer traffic stays inside the node and only a gradient AllReduce of each 1/8 shard crosses InfiniBand once per step. The cost is memory: each GPU holds 1/8 of the model state instead of 1/64, so for a 7B model with Adam that is 14 GB instead of 1.75 GB. If 1/8 fits with room for activations, HSDP is usually faster; if not, widen the shard group to two nodes or use full FSDP.
+
 **Q: What is ZeRO and how do its stages differ?**
 **Short:** ZeRO Stage 1 shards optimizer states, Stage 2 adds gradient sharding, and Stage 3 additionally shards parameters, matching FSDP2's default sharding profile.
 ZeRO (Zero Redundancy Optimizer, from DeepSpeed) progressively eliminates memory redundancy across data-parallel ranks: Stage 1 shards optimizer states (Adam m/v) — each rank holds 1/N of optimizer state, reducing optimizer memory by N×. Stage 2 additionally shards gradients — gradients are immediately discarded on each rank after ReduceScatter, saving another ~M bytes. Stage 3 additionally shards parameters — equivalent to FSDP2's default configuration, which shards every parameter, gradient, and optimizer state. ZeRO-Infinity extends Stage 3 by offloading parameter and optimizer shards to CPU RAM and NVMe storage, enabling trillion-parameter models at the cost of slower training (PCIe bandwidth ~32 GB/s vs NVLink 600 GB/s).
@@ -819,8 +881,8 @@ ZeRO (Zero Redundancy Optimizer, from DeepSpeed) progressively eliminates memory
 BF16 (Brain Float 16) and FP16 both use 2 bytes per value, but BF16 allocates 8 exponent bits (same as FP32) and 7 mantissa bits; FP16 allocates 5 exponent bits and 10 mantissa bits. The larger exponent range in BF16 (same as FP32) prevents the gradient underflow/overflow that requires GradScaler in FP16 training. LLM training frequently encounters large gradient values during attention head training — FP16 overflows to infinity, causing NaN loss and training instability. BF16 handles these ranges natively. BF16 is supported natively on A100, H100, TPU v3+, and RTX 30/40 series. For older GPUs (V100), FP16 + GradScaler is the only option.
 
 **Q: How do you implement checkpointing in distributed training without bugs?**
-**Short:** Distributed checkpointing must save only from rank 0, barrier before other ranks proceed, and unwrap DDP's .module state dict to avoid partial or mismatched saves.
-Three rules: (1) only rank 0 writes checkpoints — gate all save calls with `if dist.get_rank() == 0`; (2) add a `dist.barrier()` after the save so no other rank proceeds until rank 0 finishes writing (prevents processes from loading a partially-written checkpoint); (3) save `model.module.state_dict()` (unwrap DDP) not `model.state_dict()`. For FSDP2: call `get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))` to gather all DTensor shards to rank 0's CPU RAM before saving — no context manager needed. For large models, skip the gather and save the default `SHARDED_STATE_DICT` form with `torch.distributed.checkpoint.save` instead, which writes each rank's shard in parallel with zero communication and can be reloaded onto a different world size (resharding).
+**Short:** A full state dict is saved by rank 0 only; a sharded torch.distributed.checkpoint save runs on every rank, each writing its shard. Barrier after the save and unwrap DDP's .module.
+Three rules: (1) for a full state dict, only rank 0 writes, so gate `torch.save` with `if dist.get_rank() == 0`; for a sharded `torch.distributed.checkpoint.save`, call it on every rank, since each rank writes its own shard; (2) add a `dist.barrier()` after the save so no other rank proceeds until rank 0 finishes writing (prevents processes from loading a partially-written checkpoint); (3) save `model.module.state_dict()` (unwrap DDP) not `model.state_dict()`. For FSDP2: call `get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))` to gather all DTensor shards to rank 0's CPU RAM before saving; no context manager is needed. For large models, skip the gather and save the default `SHARDED_STATE_DICT` form with `torch.distributed.checkpoint.save` instead, which writes each rank's shard in parallel with zero communication and can be reloaded onto a different world size (resharding).
 
 **Q: What is the linear scaling rule and when does it break down?**
 **Short:** The linear scaling rule multiplies learning rate by N when data-parallel workers multiply by N, holding reliably up to about 8x before needing an LR warmup.
@@ -854,6 +916,15 @@ A straggler is the slowest worker in a synchronous step; because AllReduce waits
 **Short:** NCCL hangs happen when ranks issue mismatched collectives, shapes, or batch counts, diagnosed with NCCL_DEBUG=INFO and TORCH_DISTRIBUTED_DEBUG=DETAIL.
 A NCCL hang is usually a collective mismatch — one rank calls a different collective, shape, or dtype than the others, so all ranks block forever waiting to rendezvous. Common triggers: a conditional code path that skips an AllReduce on some ranks (e.g., an early `continue` in the loop), uneven batch counts across ranks (fix with `drop_last=True`), or `find_unused_parameters=False` when the model actually has unused parameters. Debug by setting `NCCL_DEBUG=INFO` to see which collective and transport each rank reached, `TORCH_DISTRIBUTED_DEBUG=DETAIL` to catch shape/param mismatches, and check that every rank executes the same number of forward/backward passes. Timeouts also appear when one rank crashes silently — inspect all rank logs, not just rank 0.
 
+**Q: How do you make recovery from a lost rank cheap in a multi-node training job?**
+**Short:** Save sharded DCP checkpoints often so a torchrun restart on fewer nodes reshards and resumes; PyTorch 2.14 adds experimental in-place process-group rebuild so survivors skip the restart.
+The baseline is a full group restart: the dead rank makes every other rank block in its next collective until the NCCL timeout (10 minutes by default), then `torchrun` kills all workers and relaunches them, up to `--max-restarts` times. Two things make that restart cheap. First, checkpoint with `torch.distributed.checkpoint` (DCP), where each rank writes its own shard and load reshards to whatever world size comes back, so with `--nnodes=MIN:MAX` the job resumes on 15 of 16 nodes instead of waiting for a replacement. Second, set the checkpoint interval from the failure rate: lost work per failure is on average half the interval, so a 30-minute interval on a cluster that loses a node daily costs about 15 minutes of compute per failure plus reload. PyTorch 2.14 (September 2026) adds experimental in-place process-group reconfiguration on Gloo and the `nccl2` backend: the surviving processes rebuild the group instead of exiting, so only the in-flight step is lost. Use the Flight Recorder dump, backend-agnostic since 2.14, to find which rank stopped at which collective before deciding it is a dead node rather than a collective mismatch.
+
+**Q: How does torchft keep training running when a node fails, and what does it need from the parallelism layout?**
+**Short:** It needs replicated groups (DDP or HSDP); a Lighthouse forms a per-step quorum of live groups, training continues without the failed group, and it rejoins by copying weights from a peer.
+
+Plain synchronous training blocks every rank when one dies, then restarts the whole job from a checkpoint. torchft treats each replica group, which holds a full model copy, as the unit of failure. Each step a per-group Manager joins a quorum through the Lighthouse server, and the gradient AllReduce runs only across groups in the quorum using process groups that can be rebuilt in place. When a group fails, the others keep stepping with a smaller effective batch. When it comes back, it copies current weights and optimizer state from a healthy peer and joins at the next step boundary. A failure inside a group still loses that group, so the layout needs a replicate dimension.
+
 **Q: Why is Ring-AllReduce bandwidth-optimal, and how does its cost scale with GPU count?**
 **Short:** Ring-AllReduce keeps per-GPU data sent at roughly 2(N-1)/N of the gradient size regardless of GPU count, which is why it scales better than a naive parameter-server scheme.
 Ring-AllReduce moves each gradient chunk around a logical ring so the total data each GPU sends is ~2×(N−1)/N of the gradient size — nearly constant and independent of N. It runs in two phases: ReduceScatter (each GPU accumulates one chunk as it travels the ring) then AllGather (each GPU broadcasts its finished chunk), each taking N−1 steps of size M/N. The key property is that per-GPU bandwidth does not blow up as you add GPUs — unlike a naive scheme where a parameter server's ingress scales with N — which is why NCCL uses ring (and tree/hierarchical variants) to keep AllReduce time bounded at scale. Latency still grows with N (more hops), so very large clusters use hierarchical topology-aware collectives.
@@ -876,7 +947,7 @@ ZeRO-Infinity extends ZeRO-3 by offloading parameter and optimizer shards to CPU
 
 - Always use `torchrun` (not `torch.multiprocessing.spawn`) for launching distributed jobs — torchrun handles rank assignment, fault tolerance signaling, and rendezvous automatically
 - Set `NCCL_DEBUG=INFO` in early development to verify NCCL is using the correct transport (NVLink for intra-node, InfiniBand for inter-node) and detect misconfiguration
-- Use `find_unused_parameters=False` in DDP unless the model has conditional computation paths — the default True adds a hook per parameter and up to 10% overhead
+- Keep DDP's default `find_unused_parameters=False` unless the model has conditional computation paths; setting it to True makes DDP walk the autograd graph every iteration and adds up to 10% overhead
 - Apply BF16 mixed precision on A100/H100 hardware — do not use FP16 for training LLMs (overflow risk); use FP32 for loss computation and accumulation in scaler if FP16 is unavoidable
 - Profile with `torch.profiler.profile()` for 2-3 steps before tuning — identify whether training is compute-bound or communication-bound before adding nodes
 - Match global batch size to the `O(sqrt(dataset_size))` heuristic for stable training; do not increase batch size purely because more GPUs are available without adjusting LR
@@ -1046,4 +1117,6 @@ model = DDP(model, bucket_cap_mb=100)  # 10 AllReduce calls → 2× throughput
 
 ## See Also
 - [Training Infrastructure (LLM)](../../llm/training_infrastructure/training_infrastructure.md) — tensor/pipeline parallelism, ZeRO, FSDP at LLM scale (70B+ parameters)
+- [Context Windows and Long Context (LLM)](../../llm/context_windows_and_long_context/context_windows_and_long_context.md): context parallelism and ring attention
+- [Mixture of Experts (LLM)](../../llm/mixture_of_experts/mixture_of_experts.md): expert parallelism and all-to-all routing
 - [ML Platform & GPU Infrastructure (DevOps)](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) — GPU node lifecycle, cluster orchestration, cost management

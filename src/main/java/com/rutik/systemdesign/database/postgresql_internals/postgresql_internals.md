@@ -1,10 +1,9 @@
 # PostgreSQL Internals
 
-> **Version anchor — August 2026.** **PostgreSQL 18** is the current stable release and
-> everything below is PG18 behaviour unless tagged inline. **PostgreSQL 19** is in beta
-> (beta 1 on 4 June 2026, beta 2 on 16 July 2026 with the feature set frozen, beta 3 in
-> August; GA on track for September/October 2026) and changes two long-standing *defaults*
-> plus the bloat story this module spends most of §6 on — see §11.1 before you plan an
+> **Version anchor (2026-10-19).** **PostgreSQL 18** is the current stable release and
+> everything below is PG18 behaviour unless tagged inline. **PostgreSQL 19** reached RC1 on
+> 15 October 2026 (RC2 planned for 12 November, GA planned for 19 November 2026) and
+> changes several long-standing *defaults* plus the bloat story this module spends most of §6 on. Read §11.1 before you plan an
 > upgrade.
 
 ## 1. Concept Overview
@@ -178,6 +177,8 @@ ALTER TABLE high_write_table SET (
 ```
 
 Both figures are permission ceilings, not promises — real throughput stops at whatever the disk delivers, and 546 MB/sec of heap already exceeds what most attached storage can sustain. That is the practical point: at defaults the cost throttle is usually *not* the binding constraint, so the first thing to check on a lagging table is the trigger threshold (the scale factor above), not the toll. Raise `autovacuum_vacuum_cost_limit` only when you have measured that autovacuum is sleeping while the disk still has headroom; the delay is already at its practical floor of 2 ms.
+
+**Which table goes first `[19]`.** The threshold decides whether a table is eligible; it does not decide the order. Up to PG18 a worker processes eligible tables in `pg_class` order, so a hot table can wait behind hundreds of cold ones. PG19 sorts the list by score: the maximum of five components (XID age against `autovacuum_freeze_max_age`, multixact age, dead tuples against the vacuum threshold above, inserts against the insert threshold, and changes against the analyze threshold). The XID component grows sharply past `vacuum_failsafe_age`, so a table near wraparound jumps the queue. Each component has a weight GUC (`autovacuum_vacuum_score_weight`, `autovacuum_freeze_score_weight`, and three more), default `1.0`; setting all five to `0.0` restores the old order. `pg_stat_autovacuum_scores` shows the current score of every table in the database (source: PostgreSQL 19 docs, section 24.1.6.1).
 
 ### XID Wraparound
 
@@ -558,6 +559,9 @@ A table with 3650 daily partitions (10 years of data). Every query went through 
 **Pitfall 5: XID wraparound emergency**
 A low-traffic database had autovacuum disabled in development. After 2 years, the oldest unfrozen XID was within 10M of wraparound, and the log filled with `WARNING: database "app" must be vacuumed within 9998412 transactions`. When it crossed the 3M mark PostgreSQL began rejecting every statement that assigns an XID — `ERROR: database is not accepting commands that assign new XIDs to avoid wraparound data loss` — leaving the application able to read but not write. Emergency procedure: `VACUUM FREEZE` on all tables. Took 72 hours on a 10TB database. Fix: monitor `age(datfrozenxid)` for all databases. Alert at 1 billion XIDs, emergency at 1.8 billion.
 
+**Pitfall 6: `REPACK (CONCURRENTLY)` refused or failed on PG19**
+A team upgraded to PG19 and scheduled `REPACK (CONCURRENTLY)` across 8 bloated tables in parallel. Three were refused at once: each concurrent repack captures changes through logical decoding and needs its own replication slot, and `max_repack_replication_slots` defaults to `5` and only changes at server start. Two more were refused because the tables had no primary key or index-based replica identity. Other hard limits: the option is rejected on partitioned and UNLOGGED tables and inside a transaction block, the run fails if more than about 104 million rows are updated or deleted during it, and it is not MVCC-safe, so a transaction whose snapshot predates the repack sees the table as empty after it commits. Fix: size `max_repack_replication_slots` for the parallelism you plan, check the replica identity first, run it in low-write windows, and keep `pg_repack` for partitioned tables.
+
 ---
 
 ## 11. Technologies & Tools
@@ -580,16 +584,18 @@ A low-traffic database had autovacuum disabled in development. After 2 years, th
 
 ### 11.1 What changes in PostgreSQL 19
 
-PostgreSQL 19 is in beta (beta 1 on 4 June 2026, feature-frozen at beta 2 on 16 July,
-GA expected September/October 2026). Two of its changes rewrite advice given elsewhere in
-this module, and two are **default flips** that change behaviour on upgrade without anyone
+PostgreSQL 19 reached RC1 on 15 October 2026, with GA planned for 19 November 2026. Two of its changes rewrite advice given elsewhere in
+this module, and a set of **default changes** alter behaviour on upgrade without anyone
 editing a config file.
 
-**`REPACK` and `REPACK CONCURRENTLY` — bloat reclamation moves in-core.** §6 and §10 above
+**`REPACK` and `REPACK (CONCURRENTLY)`: bloat reclamation moves in-core.** §6 and §10 above
 tell you to prefer the `pg_repack` extension over `VACUUM FULL`, because `VACUUM FULL` takes
 an ACCESS EXCLUSIVE lock for the whole rewrite. PG19 makes that a built-in command:
-`REPACK` replaces `VACUUM FULL`, and `REPACK ... CONCURRENTLY` rebuilds a bloated table
-without the exclusive lock. On PG19 the answer to "how do I shrink this table" stops being
+`REPACK` replaces `VACUUM FULL` and `CLUSTER` (both old commands still run), and
+`REPACK (CONCURRENTLY)` holds only SHARE UPDATE EXCLUSIVE for the copy, replays concurrent
+changes through logical decoding, and takes ACCESS EXCLUSIVE only for the final file swap.
+Each concurrent run uses a slot from `max_repack_replication_slots` (default `5`); §10
+Pitfall 6 lists where it is refused. On PG19 the answer to "how do I shrink this table" stops being
 "install an extension" and becomes one SQL statement — but on PG18 and earlier `pg_repack`
 is still the answer, which is why every recipe above still names it.
 
@@ -600,23 +606,30 @@ to apply advice automatically by query identifier. That means a plan you have ve
 be pinned to the query that produced it, which is the missing piece in every "the plan
 changed at 3am after autovacuum updated the stats" incident.
 
-**Parallel autovacuum** (`autovacuum_max_parallel_workers`) lets a single autovacuum run
-parallelise its index vacuum phase, which is the phase that dominates on a wide table with
-many indexes — directly relevant to the 1-billion-row bloat war story in §10.
+**Parallel autovacuum** (`autovacuum_max_parallel_workers`, default `0`, plus the per-table
+`autovacuum_parallel_workers`) lets a single autovacuum run parallelise its index vacuum
+phase, which dominates on a wide table with many indexes. It is off until you raise the GUC.
 
-**The two default flips, and why they matter on upgrade:**
+**Autovacuum scoring** orders eligible tables by a weighted score instead of `pg_class`
+order, with per-table scores in `pg_stat_autovacuum_scores` (see Autovacuum Triggers in §4).
+
+**Default and compatibility changes that matter on upgrade:**
 
 | Setting | PG18 default | PG19 default | Consequence |
 |---|---|---|---|
 | `jit` | `on` (since PG12) | **`off`** | JIT compilation added latency to short OLTP queries for no benefit on most workloads. Analytical queries that relied on it must now enable it explicitly. |
 | `default_toast_compression` | `pglz` | **`lz4`** | LZ4 compresses and decompresses faster than pglz at a slightly lower ratio. New TOASTed values use LZ4; existing pglz values stay readable, so this is a forward-only change. |
+| `max_locks_per_transaction` | `64` | **`128`** | Lock table allocation changed, so the new default holds the same number of locks as `64` did. A tuned value carried over from PG18 must be doubled to keep its capacity. |
+| `log_lock_waits` | `off` | **`on`** | Any wait longer than `deadlock_timeout` (1 s) is logged, so lock-heavy workloads see more log volume after upgrade. |
+| `standard_conforming_strings` | settable | **always `on`** | A dump taken by a pre-19 `pg_dump` from a server with the setting `off` does not load correctly. Dump with the PG19 `pg_dump`. `escape_string_warning` is gone. |
+| `md5_password_warnings` | n/a | **`on`** | Every successful MD5 password login emits a warning. Move roles to SCRAM-SHA-256. |
+| RADIUS auth | supported | **removed** | `pg_hba.conf` lines with `radius` stop working. PostgreSQL only spoke RADIUS over UDP, which the project judged unfixably insecure. |
 
-Also landing in 19 and worth knowing about: **SQL/PGQ** property-graph pattern matching over
-ordinary relational tables (see
-[`graph_databases`](../graph_databases/graph_databases.md)), `FOR PORTION OF` for temporal
-`UPDATE`/`DELETE`, `ALTER TABLE ... MERGE PARTITIONS` / `SPLIT PARTITIONS`, `GROUP BY ALL`,
-online data checksums that can be toggled without a restart, and `io_method=worker` now
-auto-scaling between `io_min_workers` and `io_max_workers`.
+Also in 19: `io_method=worker` scales its I/O worker count between `io_min_workers` and
+`io_max_workers`. SQL/PGQ property-graph queries, `FOR PORTION OF` temporal
+`UPDATE`/`DELETE`, `ALTER TABLE ... MERGE PARTITIONS` / `SPLIT PARTITIONS` and online data
+checksum toggling were committed during the 19 cycle and reverted in Beta 4 (24 September
+2026), so none of them ship in PostgreSQL 19.
 
 ---
 

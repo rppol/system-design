@@ -611,7 +611,7 @@ Normalizing per modality (or fusing with explicit weights, as Section 6.3 does) 
 | **PyMuPDF (fitz)** | PDF image/text extraction | Fast, reliable; good Python API |
 | **pdfplumber** | PDF table extraction | Best Python tool for precise table extraction |
 | **CLIP / SigLIP** | Image embedding | OpenAI CLIP (ViT-L); Google SigLIP for better quality |
-| **Frontier hosted VLMs** (GPT-4o and the current GPT-5 tiers, Claude Sonnet/Opus 5, Gemini 3.x) | Vision LLM descriptions | Best quality for chart/diagram description; benchmark the current lineup on your own documents |
+| **Frontier hosted VLMs** (GPT-6 Astra / Sol / Luna, Claude Sonnet/Opus 5.5, Gemini 3.8 Flash and 4 Argon) | Vision LLM descriptions | Best quality for chart/diagram description; benchmark the current lineup on your own documents |
 | **Open-weight VLMs** (InternVL, Qwen-VL, LLaVA families) | Open-source vision LLM | Self-hosted; good for cost-sensitive indexing |
 | **Weaviate multi2vec** | Multimodal vector DB | Native multi-modal (text + image) in one index |
 | **LlamaIndex `MultiModalVectorStoreIndex`** | Multimodal RAG framework | Handles multi-modal retrieval and routing |

@@ -713,7 +713,7 @@ for batch in dataloader:
 | `torch.nn.utils.rnn.pack_padded_sequence` | Efficient variable-length sequence handling |
 | `torch.nn.utils.rnn.pad_packed_sequence` | Unpack after LSTM for variable-length |
 | `torch.nn.utils.clip_grad_norm_` | Gradient clipping (essential for RNNs) |
-| `torchtext` | Vocabulary building, tokenization for text RNNs |
+| HF `tokenizers` | Tokenization and vocabulary building for text RNNs; a plain token-to-id dict also works |
 | `torchaudio` | Audio feature extraction (MFCC, spectrograms) for speech RNNs |
 
 Key API notes:

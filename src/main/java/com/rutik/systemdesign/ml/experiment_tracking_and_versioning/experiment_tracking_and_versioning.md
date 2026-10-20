@@ -11,7 +11,7 @@ The four axes of ML reproducibility:
 - **Code versioning**: git commit SHA pinned to every run
 - **Data versioning**: dataset hash or DVC ref pinned to every run
 - **Experiment tracking**: hyperparameters, metrics, and artifacts logged per run (MLflow, W&B)
-- **Environment versioning**: Python version, library versions, CUDA version recorded (requirements.txt, Docker image SHA)
+- **Environment versioning**: Python version, a hashed lock file of every library (`uv.lock` or PEP 751 `pylock.toml`), CUDA version, and the Docker image digest
 
 A fully reproducible experiment is one where, given the git SHA + data ref + hardware type, any engineer can run the exact same training job and get metrics within floating-point variance of the original.
 
@@ -53,7 +53,7 @@ Key insight: the goal is not to log more data — it is to log the right data so
 Open-source, self-hosted or Databricks-managed. Runs are grouped under Experiments. Logs: params (str key, str value), metrics (float, with step), artifacts (any file). Auto-logging captures common framework calls automatically — `mlflow.sklearn.autolog()` patches `fit()`, while `mlflow.pytorch.autolog()` hooks **PyTorch Lightning's `Trainer.fit()` only** and is a no-op for a hand-written PyTorch loop. MLflow Model Registry adds model lifecycle management: numbered model versions carry mutable **aliases** (`@champion`, `@challenger`) plus version **tags** (`validation_status: passed`), and serving resolves a model by alias URI — `models:/fraud-model@champion`. For MLflow's own implementation — the tracking-server process and its schema, the `MLmodel` format and signature enforcement, the artifact access modes, and the MLflow 3 entity-model changes — see [MLflow Deep Dive](../mlflow_deep_dive/mlflow_deep_dive.md).
 
 **Weights & Biases (W&B)**
-SaaS (with self-hosted option). Richer visualizations than MLflow (interactive charts, side-by-side run comparison, media logging — images, audio, video). W&B Sweeps: define a hyperparameter search space, launch agents that query W&B's Bayesian optimizer for the next configuration. W&B Artifacts: versioned datasets, models, and evaluation results with lineage graph between them.
+SaaS (with self-hosted option), owned by CoreWeave since May 2025. Richer visualizations than MLflow (interactive charts, side-by-side run comparison, media logging of images, audio, and video). W&B Sweeps: define a hyperparameter search space, launch agents that query W&B's Bayesian optimizer for the next configuration. W&B Artifacts: versioned datasets, models, and evaluation results with lineage graph between them.
 
 **Comet ML**
 SaaS, automatic code capturing, diff logging. Strong in NLP research community.
@@ -65,6 +65,7 @@ Open-source, git-native. Tracks data files and pipeline stages (not experiments 
 - Grid search: all combinations — O(N^k) for N values per k hyperparameters; feasible only for 1-2 hyperparameters
 - Random search: sample configurations uniformly — beats grid search in high-dimensional spaces because most hyperparameters do not matter and the ones that do differ per dataset (Bergstra & Bengio, JMLR 2012). Its guarantee is dimension-independent: if the near-optimal region occupies 5% of the search volume, `T` random draws miss it with probability `0.95^T`, so `T = 60` hits it with probability `1 - 0.95^60 = 95%` — the same 60 trials whether the space is 2-D or 100-D
 - Bayesian optimization (Optuna TPE, SMAC): fit a surrogate model (tree-structured Parzen estimator or Gaussian process) to past results; sample next configuration in regions likely to improve over the current best — usually a few-fold saving over random search on the same problem, but the factor is problem-dependent, not a published constant
+- Optuna 5.0 defaults (September 2026): `TPESampler` runs with `multivariate=True` and `constant_liar=True` for single-objective studies, TPE replaces `NSGAIISampler` as the multi-objective default, `GPSampler` is a stable API, and constraints are set inside the objective with `trial.set_constraint()` (the sampler-level `constraints_func` arguments are deprecated)
 - Population-based training (PBT): asynchronously train a population of models; exploit good performers by copying their weights, explore by perturbing their hyperparameters mid-training
 
 **What this actually says.** `O(N^k)` means "every hyperparameter you add multiplies the entire search you already had by N" — grid search does not get gradually more expensive, it gets exponentially more expensive.
@@ -545,6 +546,40 @@ def launch_wandb_sweep() -> None:
 
 ---
 
+### Environment Lock Files
+
+`pip freeze > requirements.txt` records what happens to be installed in one environment: exact versions, but no hashes, no index URLs, and no record of which platform or Python it was resolved for. A training job rebuilt from it six months later can pull a re-uploaded or yanked artifact, a different wheel for another OS, or a package from the wrong index. A lock file fixes three things a freeze does not:
+
+| Property | `pip freeze` | `pip-compile --generate-hashes` | `uv.lock` | PEP 751 `pylock.toml` |
+|----------|--------------|--------------------------------|-----------|------------------------|
+| Exact versions of all transitive dependencies | Yes (this env only) | Yes | Yes | Yes |
+| Artifact hashes checked at install | No | Yes (`pip install --require-hashes`) | Yes | Yes |
+| Resolved for several platforms and Python versions in one file | No | No (one per platform) | Yes (universal resolution) | Yes, if the producer resolves for them |
+| Standard format other tools read | No | pip requirements syntax | uv only | Yes (PEP 751, accepted March 31, 2025) |
+
+The tools that write and read them:
+
+```bash
+uv lock                                   # resolve pyproject.toml into uv.lock (all platforms)
+uv sync --locked                          # install exactly uv.lock; fail if it is out of date
+uv export --format pylock.toml -o pylock.toml   # standard lock for other installers
+pip lock -r requirements.in -o pylock.toml      # pip 25.1+, experimental
+pip install -r pylock.toml                # pip 26.1+, experimental
+```
+
+In a training repo, commit the lock file, install with `uv sync --locked` (or `--require-hashes`) in CI and in the training image, and log the lock file as a run artifact plus its SHA-256 as a param, so any run can be traced to the exact environment:
+
+```python
+import hashlib
+import mlflow
+
+lock = open("uv.lock", "rb").read()
+mlflow.log_param("env_lock_sha256", hashlib.sha256(lock).hexdigest()[:16])
+mlflow.log_artifact("uv.lock", artifact_path="env")
+```
+
+A lock file pins Python packages, not the system below them. The NVIDIA driver, CUDA runtime, cuDNN, and NCCL come from the base image and the host, so pin the image by digest (`image@sha256:...`) and log `torch.version.cuda` and the GPU type, as `log_environment` above does. GPU wheels such as `torch` builds for a given CUDA version come from a separate index (for example `https://download.pytorch.org/whl/cu128`); declare that index in `pyproject.toml` (`[[tool.uv.index]]`) so the lock records where each wheel came from.
+
 ## 7. Real-World Examples
 
 **Google DeepMind** (Google Brain merged into DeepMind in April 2023): frontier-model research runs on internal tracking infrastructure, not a public tool. Note the limit of what tracking buys the *reader*: the Gemini technical reports deliberately withhold model sizes, exact hyperparameters, and data-mixture proportions. Internal reproducibility and external disclosure are separate decisions — good tracking enables the first and says nothing about the second.
@@ -562,7 +597,7 @@ def launch_wandb_sweep() -> None:
 | Tool | Hosting | Cost | Visualization | Hyperparameter Search | Data Versioning |
 |---|---|---|---|---|---|
 | MLflow | Self-hosted / Databricks | Free (self-host) | Basic | Via Optuna integration | No (use DVC) |
-| W&B | SaaS / self-hosted | Free tier (5 GB/mo storage), then paid | Excellent | Built-in Sweeps | W&B Artifacts |
+| W&B (CoreWeave) | SaaS / self-hosted | Free tier (5 GB/mo storage), then paid | Excellent | Built-in Sweeps | W&B Artifacts |
 | Comet ML | SaaS | Free tier, then paid | Good | No built-in | No |
 | DVC | Self-hosted (git + remote) | Free | Via DVCLive | Via DVC Experiments | Yes (core feature) |
 
@@ -640,6 +675,12 @@ The low end is just a lower prune rate, not a different mechanism — at 40% pru
 **Pitfall 5 — Shared artifact directory across experiments**
 A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — overwriting on every run. After a weekend sweep of 50 runs, the checkpoint corresponded to the last run (not the best run). The best run's model was gone. Fix: always save artifacts to paths keyed by run ID: `s3://bucket/models/{run_id}/best_model.pt`. MLflow and W&B do this automatically when you use `mlflow.log_artifact()` or `wandb.log_artifact()`.
 
+**Pitfall 6 - Unpinned HPO library changes the sampler under a running study**
+A study that resumes from shared storage after `pip install -U optuna` crosses the Optuna 5.0 boundary: `TPESampler()` with no arguments switches from independent per-parameter densities to `multivariate=True` with `constant_liar=True`, and a multi-objective `create_study()` with no sampler switches from NSGA-II to TPE. Trials before and after the upgrade come from different search policies, so a jump in best-so-far cannot be credited to the trial count. Fix: pin `optuna` in the lock file, construct the sampler with explicit arguments, and log the sampler class and its arguments as run params on the parent run.
+
+**Pitfall 7 - Rebuilding a training image from `pip freeze` output**
+A team rebuilt a six-month-old training image from its `pip freeze` file to reproduce a regression. The file pinned `torch==2.5.1+cu118` but not the index, so the install failed; an engineer dropped the `+cu118` suffix and got PyPI's default `torch==2.5.1` wheel, built for CUDA 12.4, which the image's older NVIDIA driver could not run. `torch.cuda.is_available()` returned `False`, training silently fell back to CPU and ran 40x slower, and one transitive package resolved to a wheel built differently for the new base OS. Fix: lock with `uv lock` or a PEP 751 `pylock.toml` that records hashes and source indexes, install with `uv sync --locked`, pin the base image by digest, and log the lock file with every run.
+
 ---
 
 ## 11. Technologies & Tools
@@ -650,11 +691,13 @@ A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — ove
 | MLflow Model Registry | Model lifecycle | Version aliases (`@champion`, `@challenger`) + version tags |
 | Weights & Biases | Experiment tracking | Rich visualization, Sweeps, Artifacts |
 | Comet ML | Experiment tracking | Auto code capture, diff logging |
-| Optuna | HPO | TPE sampler, Hyperband pruner, distributed |
+| Optuna 5.x | HPO | TPE sampler (multivariate by default), stable `GPSampler`, Hyperband pruner, PED-ANOVA importance, distributed via shared storage |
 | Ray Tune | HPO | Distributed HPO, PBT, integrates with all trackers |
 | Hyperopt | HPO | No longer maintained upstream — use Optuna |
 | DVC | Data + pipeline versioning | Git-native, content-addressable storage |
 | DVCLive | Metric logging for DVC | Integrates with DVC pipelines |
+| uv (`uv.lock`) | Environment locking | Universal cross-platform lock with hashes; `uv sync --locked` fails on drift; exports PEP 751 `pylock.toml` |
+| pip-tools / `pip lock` | Environment locking | `pip-compile --generate-hashes` for requirements files; `pip lock` (pip 25.1+, experimental) writes `pylock.toml` |
 | Delta Lake | Data versioning | ACID Parquet, time travel queries |
 | Git LFS | Large file versioning | Simple but not ML-optimized |
 | Pachyderm (HPE) | Data versioning | Kubernetes-native, strong lineage |
@@ -667,11 +710,11 @@ A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — ove
 
 **Q: What is the minimum set of information needed to make an ML experiment reproducible?**
 **Short:** Reliable ML reproducibility requires recording code version, data version, hyperparameters, random seeds, and environment together, since missing any one breaks it.
-Five things must be recorded: code version, data version, hyperparameters, random seeds, and environment. Concretely: (1) code version — git commit SHA of the training script and all imported libraries; (2) data version — content hash or DVC ref of every input dataset; (3) hyperparameters — all of them, including defaults that were not tuned; (4) random seeds — Python random seed, NumPy seed, PyTorch seed, and CUDA determinism settings; (5) environment — Python version, library versions (requirements.txt with hashes), CUDA version, and GPU type. Missing any one of these makes reproduction unreliable. Most teams log hyperparameters but forget data version and random seeds — those are the most common sources of irreproducibility.
+Five things must be recorded: code version, data version, hyperparameters, random seeds, and environment. Concretely: (1) code version: git commit SHA of the training script and all imported libraries; (2) data version: content hash or DVC ref of every input dataset; (3) hyperparameters: all of them, including defaults that were not tuned; (4) random seeds: Python random seed, NumPy seed, PyTorch seed, and CUDA determinism settings; (5) environment: Python version, library versions (a lock file with hashes: `uv lock`, `pip-compile --generate-hashes`, or a PEP 751 `pylock.toml`), CUDA version, and GPU type. Missing any one of these makes reproduction unreliable. Most teams log hyperparameters but forget data version and random seeds, which are the most common sources of irreproducibility.
 
 **Q: How does Bayesian optimization (Optuna TPE) work and why is it more efficient than random search?**
 **Short:** Optuna's TPE models good-trial versus bad-trial distributions and picks the next config by maximizing l(x)/g(x), usually needing fewer trials than random search.
-Bayesian optimization maintains a probabilistic surrogate model of the objective function built from past trial results. Tree-structured Parzen Estimator (TPE) splits finished trials into a "good" set and a "bad" set and fits a density to each: `l(x)` over the good trials, `g(x)` over the rest. Optuna's default split is the top `min(ceil(0.1 * n), 25)` trials — roughly the top 10%, capped at 25 — and by default it fits those densities per hyperparameter, with `multivariate=True` needed for a joint model. The next configuration is chosen to maximize the `l(x)/g(x)` ratio, which is monotonic in expected improvement, focusing new trials on promising regions. TPE usually reaches a given validation metric in fewer trials than random search, but the saving is problem-dependent — treat any fixed multiple you have seen quoted as a rule of thumb, not a measured constant.
+Bayesian optimization maintains a probabilistic surrogate model of the objective function built from past trial results. Tree-structured Parzen Estimator (TPE) splits finished trials into a "good" set and a "bad" set and fits a density to each: `l(x)` over the good trials, `g(x)` over the rest. Optuna's default split is the top `min(ceil(0.1 * n), 25)` trials (roughly the top 10%, capped at 25), and since Optuna 5.0 (September 2026) the single-objective default fits one joint (multivariate) density over all hyperparameters and turns on `constant_liar` so parallel workers do not pile onto the same point. The next configuration is chosen to maximize the `l(x)/g(x)` ratio, which is monotonic in expected improvement, focusing new trials on promising regions. TPE usually reaches a given validation metric in fewer trials than random search, but the saving is problem-dependent, so treat any fixed multiple you have seen quoted as a rule of thumb, not a measured constant.
 
 **Q: What is the difference between MLflow params, metrics, and tags?**
 **Short:** MLflow params are immutable per-run hyperparameters, metrics are step-indexed numeric time series, and tags are the only one of the three that's updatable after the run.
@@ -688,6 +731,11 @@ Pick W&B Sweeps if you already live in W&B and want managed distributed agents; 
 **Q: What is MLflow Model Registry and how does it relate to experiment tracking?**
 **Short:** MLflow Model Registry is the deployment-side counterpart to tracking: it holds numbered model versions and labels the live one with mutable aliases such as @champion plus version tags.
 MLflow Model Registry is a model lifecycle management system separate from (but linked to) the tracking server. A model is registered by linking an artifact from a completed run: `mlflow.register_model(f"runs:/{run_id}/model", "MyModel")`. The registry manages version numbers plus the labels that say which version is live. Those labels are `client.set_registered_model_alias(name, "champion", version)` plus version tags such as `validation_status: passed`, which lets one version hold several labels at once and lets you split environments into separate registered models. Teams gate production deployment on that label: CI/CD checks that the alias was moved only after human approval and validation tests passing. This creates an audit trail: every production model links back to the exact training run (and thus the exact hyperparameters, dataset version, and git SHA) that produced it.
+
+**Q: Why is `pip freeze > requirements.txt` not enough to reproduce a training environment?**
+**Short:** It pins versions for one environment but records no hashes, indexes, or target platform, so a rebuild can fetch different artifacts; use a hashed lock file such as uv.lock or pylock.toml.
+
+`pip freeze` lists what is installed in the current environment with `==` versions. It does not record artifact hashes, so a rebuild cannot detect a changed or substituted file; it does not record which index each package came from, so a `torch` build for one CUDA version (`+cu118` from the PyTorch index) can become PyPI's default build for another CUDA version that the host driver cannot run; and it reflects one OS and Python version only. A lock file from `uv lock`, `pip-compile --generate-hashes`, or PEP 751 `pylock.toml` records every transitive pin with hashes and, for uv and pylock, the source and supported platforms. Install it with `uv sync --locked` or `--require-hashes`, pin the base image by digest for CUDA and drivers, and log the lock file with the run.
 
 **Q: How do you handle random seeds for reproducibility in PyTorch?**
 **Short:** Full PyTorch determinism requires seeding Python, NumPy, and all CUDA devices, then disabling cuDNN's auto-tuning benchmark mode.
@@ -747,7 +795,7 @@ A parent run represents the whole sweep and each trial is a nested child run, so
 
 - Log ALL hyperparameters — including defaults — not just the ones you tuned; the "default" values are often the source of reproducibility failures when library versions change defaults
 - Use nested runs in MLflow (parent = HPO study, child = individual trial) to maintain clean experiment hierarchy and enable sweep-level aggregation
-- Pin every dependency with exact versions and hashes in requirements.txt (`pip freeze > requirements.txt`) — library updates can change default behavior and break reproducibility
+- Pin every dependency with exact versions and hashes in a lock file (`uv lock`, `pip-compile --generate-hashes`, or a PEP 751 `pylock.toml`; `pip freeze` writes no hashes), because library updates can change default behavior and break reproducibility
 - Set random seeds as the very first lines of the training script, before any imports that might initialize RNGs
 - Store artifact paths relative to the run ID, never as absolute paths or shared names — `s3://bucket/artifacts/{run_id}/` ensures isolation
 - Use `mlflow.set_tag("model_status", "candidate")` after successful training and `"model_status", "promoted"` after production deployment — creates an audit trail without modifying runs
@@ -938,7 +986,7 @@ The two fixes compose: throttling divides by `LOG_INTERVAL` (100x) and batching 
 
 **How do you version datasets alongside models to ensure reproducibility?** Use DVC (Data Version Control) to track datasets in Git-compatible fashion without storing large files in Git. `dvc add data/features.parquet` creates `data/features.parquet.dvc` (a small YAML pointer holding the content hash, MD5 by default) that is committed to Git. The actual data is stored in a remote (S3, GCS). When reproducing a historical experiment, check out the Git commit and `dvc pull` — you get the exact dataset used. Link the DVC dataset hash to the MLflow run via `mlflow.log_param("dataset_hash", dvc_hash)`. This creates an auditable chain: Git commit → MLflow run ID → DVC dataset hash → S3 data.
 
-**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Comet) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Vertex AI Model Registry) manages the outcome: which version currently holds `@champion` versus `@challenger`, who approved it, what tags it carries, and its lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
+**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Comet) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Agent Platform Model Registry) manages the outcome: which version currently holds `@champion` versus `@challenger`, who approved it, what tags it carries, and its lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
 
 **What is the difference between a run, an experiment, and a registered model in MLflow?** A run is a single training execution: it captures parameters, metrics, and artifacts (model weights, plots) for one specific configuration. An experiment is a named collection of runs — e.g., "fraud-model-v2-hyperparameter-search" contains 50 runs with different learning rates and regularization values. A registered model is a named entity in the model registry (separate from tracking) that links to the best run's artifact, carries numbered versions labelled by aliases and tags, and enables promotion workflows. Runs are cheap to create (log everything); experiments organize related runs; the registry manages the subset of runs that become deployable artifacts.
 

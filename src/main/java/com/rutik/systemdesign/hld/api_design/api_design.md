@@ -187,6 +187,7 @@ HTTP verbs map to operations:
 - `PUT` — replace resource entirely, idempotent
 - `PATCH` — partial update, not necessarily idempotent
 - `DELETE` — remove resource, idempotent
+- `QUERY` - read with a request body (RFC 10008, June 2026), safe and idempotent; for search or filter input too large or too structured for a URL. Responses are cacheable, and the cache key must include the request body
 
 Status codes and method semantics are defined by **RFC 9110 (HTTP Semantics, June 2022)** — the single spec that now carries the whole HTTP core:
 - `200 OK`, `201 Created`, `204 No Content`
@@ -472,6 +473,11 @@ Use cursor-based pagination instead of offset. Store the cursor as a base64-enco
 **Short:** An idempotent operation returns the same result whether it runs once or many times.
 
 An idempotent operation produces the same result whether called once or many times. GET and DELETE are naturally idempotent. POST is not; you add idempotency by accepting a client-provided key that the server uses to deduplicate retries. Critical for payment and order APIs where network failures cause retries.
+
+**Q: How do you send a complex search request: GET with a body, POST /search, or QUERY?**
+**Short:** Never GET with a body (no defined semantics). Use GET parameters while the filter fits a URL, else QUERY (RFC 10008), a safe, cacheable read with a body; POST /search as fallback.
+
+RFC 9110 gives content on a GET no defined semantics, so proxies, CDNs, and client libraries may drop it or reject the request. `POST /search` works everywhere but tells every intermediary the call is unsafe and not idempotent: clients and proxies will not retry it automatically, and shared caches in practice do not store it. `QUERY` (RFC 10008, Proposed Standard, June 2026) is a read with a request body: safe, idempotent, and cacheable, with a cache key that must include the body (a cache may first strip semantically insignificant differences in it). The server advertises support with the `Accept-Query` response header, which lists the accepted query media types, and may return a `Location` URL that repeats the same query as a plain `GET`. Use `GET` with query parameters while the filter fits in a URL, `QUERY` when it does not and your gateway and CDN pass the method through, and `POST /search` only as the fallback when some hop in the path does not support `QUERY`.
 
 **Q6: Explain REST constraints.**
 **Short:** REST constraints are statelessness, client-server separation, uniform interface, layered system, cacheability, and optional code-on-demand.
@@ -937,4 +943,4 @@ Redis cluster is the bottleneck. At 10x (8000 req/sec peak), shard Redis by `has
 Three layers: (1) unit tests force concurrent retries through CountDownLatch and verify only one execution, (2) integration tests with TestContainers Redis kill the Redis container mid-request and verify 503, (3) chaos tests in staging inject 500ms delays and verify exactly-once semantics under retry storms.
 
 **Q: What's the difference between idempotent and safe?**
-Safe (RFC 9110 §9.2.1) means no side effects — GET, HEAD, OPTIONS. Idempotent means executing N times has the same effect as executing once — PUT, DELETE, and POST-with-idempotency-key. POST without idempotency is neither safe nor idempotent.
+Safe (RFC 9110 §9.2.1) means no side effects: GET, HEAD, OPTIONS, and QUERY (RFC 10008). Idempotent means executing N times has the same effect as executing once: every safe method, plus PUT, DELETE, and POST-with-idempotency-key. POST without idempotency is neither safe nor idempotent.

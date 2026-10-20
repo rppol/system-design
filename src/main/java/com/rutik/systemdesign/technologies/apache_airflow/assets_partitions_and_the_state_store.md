@@ -1,8 +1,8 @@
 # Assets, Partitions, and the State Store
 
-> **Version anchor (2026-08-26).** Apache Airflow **3.3.1** (released **2026-08-12**), same
+> **Version anchor (2026-10-19).** Apache Airflow **3.3.2** (released **2026-09-17**), same
 > line as [the parent module](apache_airflow.md). Every API on this page is the
-> `airflow.sdk` surface shipped in 3.3.1 — `Asset`, `@asset`, `AssetAlias`, `AssetAny`,
+> `airflow.sdk` surface shipped in 3.3.2: `Asset`, `@asset`, `AssetAlias`, `AssetAny`,
 > `AssetAll`, `AssetWatcher`, `PartitionedAtRuntime`, `CronPartitionTimetable`,
 > `PartitionedAssetTimetable`, and the partition-mapper family. Asset partitioning shipped
 > in **[3.2]** and was substantially expanded in **[3.3]**; the task/asset state store

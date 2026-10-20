@@ -2,6 +2,8 @@
 
 > Phase 5 — Cloud Platforms · Difficulty: Advanced
 
+> **Version anchor (2026-10-19).** Since **2025-08-01** AWS Lambda bills the INIT phase in every configuration, including on-demand ZIP functions on managed runtimes ([AWS announcement](https://aws.amazon.com/blogs/compute/aws-lambda-standardizes-billing-for-init-phase/)). **Knative Serving v1.23.0** (2026-07-29) is the current Knative release. Lambda **durable functions** and **Lambda Managed Instances** were launched at re:Invent 2025: durable executions run up to one year via checkpoint and replay (managed-runtime support for Node.js, Python, Java and .NET; Terraform needs AWS provider 6.25.0+), and Managed Instances bill the EC2 instance price plus a 15% management fee. Lambda **response streaming** returns up to 200 MB (buffered responses stay at 6 MB).
+
 Serverless lets you run code without provisioning or managing servers — the platform handles scaling (including to zero), patching, and capacity, and you pay only for actual execution. **Function-as-a-Service (FaaS)** — AWS Lambda, Google Cloud Run functions, Azure Functions, and the Kubernetes-native **Knative** — is the purest form. This module covers the FaaS execution model, the **cold-start** problem, **event-driven** architectures, **API Gateway** as the HTTP front door, and **Step Functions** for orchestrating multi-step workflows, with concrete limits (Lambda's 15-minute max timeout, ~100ms-1s cold starts, 10 GB memory ceiling) that shape real designs.
 
 ---
@@ -77,6 +79,15 @@ Serverless GPU and the other targets for model serving are compared in [Deployme
 | Provisioned concurrency | Pre-warms N environments -> no cold start on those |
 | Account concurrency | Default 1000 (soft); shared across functions unless reserved |
 | SnapStart (Java 11+, Python 3.12+, .NET 8+) | Snapshots initialized state to cut cold starts ~10x; published versions/aliases only, and mutually exclusive with provisioned concurrency |
+
+### Lambda execution models
+
+| Model | Unit of billing | Longest run | Cold start | Concurrency per environment | Fit |
+|---|---|---|---|---|---|
+| Lambda (default) | GB-seconds + requests | 15 min per invocation | Yes, scales from zero | 1 | Spiky, short, event-driven |
+| Durable functions | Same, but waits are not billed | 1 year per durable execution (each invocation still 15 min max) | Yes | 1 | Multi-step workflows that mostly wait: approvals, polling, LLM agent loops |
+| Lambda Managed Instances | EC2 instance price + 15% management fee; Savings Plans and RIs apply to the EC2 part | 15 min per invocation; 90 min for asynchronous and event source mapping invocations | No; scales on CPU utilization, keeps a minimum | Many | High, steady, predictable volume; specific instance types such as Graviton4 |
+| Response streaming | Same as default | 15 min | Yes | 1 | Large (up to 200 MB) or incremental responses: LLM tokens, reports |
 
 ---
 
@@ -243,7 +254,7 @@ called a GB-second — which is why memory and duration are not two independent 
 | Symbol | What it is |
 |--------|------------|
 | `memory_GB` | The `memory_size` you set, in GB (512 MB = 0.5). CPU is allocated in proportion |
-| `duration_seconds` | Billed wall-clock run time of the handler, metered per millisecond |
+| `duration_seconds` | Billed wall-clock run time of the handler, plus the INIT phase on a cold start, metered per millisecond |
 | `memory_GB x duration_seconds` | One **GB-second** — the actual billed unit of compute |
 | `price_per_GB_second` | ~$0.0000166667 in us-east-1 (x86) |
 | `price_per_request` | ~$0.20 per million invocations, charged regardless of duration |
@@ -262,6 +273,8 @@ cheaper the moment it does better than halve it, while also cutting user-visible
 100 ms. This is the whole reason Section 13 says to right-size via power tuning rather than
 defaulting to the smallest setting: the smallest memory is only the cheapest for work that is
 I/O-bound, where extra CPU buys no speedup and the GB-seconds simply rise.
+
+Cold starts add to the same bill. Since 2025-08-01 AWS bills the INIT phase for every configuration, including on-demand ZIP functions on managed runtimes where it used to be free. A 1 s INIT at 1 GB is 1 GB-s, so 10,000 cold starts in the month above add 10,000 GB-s, about $0.17, on top of the $1.67 of handler compute.
 
 **The idea behind it.** The 1000-concurrency cap is Little's Law, not a request-rate limit:
 
@@ -322,10 +335,76 @@ resource "aws_sqs_queue" "work" {
 }
 ```
 
+### Durable functions: checkpoint and replay
+
+A durable function is a normal Lambda function created with `DurableConfig` (only at creation; an existing function cannot be converted) and wrapped by the Durable Execution SDK. Every `context.step()` writes a checkpoint with its result. A `context.wait()` ends the current invocation and Lambda re-invokes the function when the wait expires; the SDK then **replays** the handler from the top, returning stored results for completed steps instead of running them again. The durable execution can last up to one year, but each underlying invocation is still bounded by the function timeout of 15 minutes or less.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    inv1(["Invocation 1"]) --> s1["step charge<br/>runs, checkpoint"]
+    s1 --> w["wait 3 days<br/>invocation ends,<br/>no compute billed"]
+    w --> inv2(["Invocation 2<br/>replay from top"])
+    inv2 --> r1["step charge<br/>result read from<br/>checkpoint"]
+    r1 --> s2["step ship<br/>runs, checkpoint"]
+
+    class inv1,inv2 io
+    class s1,s2 train
+    class w frozen
+    class r1 mathOp
+```
+
+```python
+from aws_durable_execution_sdk_python import DurableContext, durable_execution, durable_step
+from aws_durable_execution_sdk_python.config import Duration
+
+@durable_step
+def charge(step_context, order_id):
+    return payments.charge(order_id, idempotency_key=order_id)   # runs once; result checkpointed
+
+@durable_step
+def close_order(step_context, order_id, receipt):
+    return orders.close(order_id, receipt["id"])
+
+@durable_execution
+def handler(event, context: DurableContext):
+    receipt = context.step(charge(event["orderId"]))
+    context.wait(Duration.from_seconds(3 * 86400))   # 3-day return window, not billed
+    # BROKEN: datetime.now() or uuid4() here returns a new value on each replay
+    return context.step(close_order(event["orderId"], receipt))
+```
+
+Four rules follow from replay. Code outside a step runs on every replay, so every side effect and every non-deterministic value (time, random, UUID) goes inside a step. Invoke a qualified ARN (version or alias): a paused execution resumes on the version it started on, while one started on `$LATEST` resumes on whatever code is deployed then and can fail replay. A synchronous invoke still waits at most 15 minutes, so long executions are started asynchronously (`--invocation-type Event`) and polled through the durable execution APIs. The role needs `AWSLambdaBasicDurableExecutionRolePolicy` for `lambda:CheckpointDurableExecution`. Durable functions support DLQs but not Lambda destinations.
+
+```hcl
+resource "aws_lambda_function" "order_flow" {
+  function_name = "order-flow"
+  runtime       = "python3.14"
+  timeout       = 60                 # per invocation; replays each get a fresh 60 s
+  durable_config {
+    execution_timeout = 604800       # 7 days for the whole durable execution, in seconds
+    retention_period  = 7            # days the execution history is kept
+  }
+  # requires hashicorp/aws >= 6.25.0
+}
+```
+
+### Lambda Managed Instances
+
+Managed Instances run the function on current-generation EC2 instances inside your account, chosen through a **capacity provider** (VPC, instance requirements, scaling settings). Publishing a version launches three instances by default, for AZ resilience, and starts three execution environments before the version goes `ACTIVE`. Three things change. One environment serves many concurrent requests, so handler code must be thread-safe and must not keep per-request state in globals. Scaling is asynchronous on CPU utilization with no cold start per request, and absorbs traffic doubling within five minutes by default, so traffic that more than doubles within five minutes can be throttled while instances launch. Cost is the EC2 price plus a 15% management fee, with Savings Plans and Reserved Instances applying to the EC2 part only, and it does not scale to zero. Isolation is containers on Nitro instances, with the capacity provider as the security boundary, instead of Firecracker microVMs on a shared fleet.
+
+### Response streaming and function URLs
+
+A **function URL** (`https://<url-id>.lambda-url.<region>.on.aws`) is a dedicated HTTPS endpoint on `$LATEST` or an alias, with `AuthType` `AWS_IAM` or `NONE` and built-in CORS. It has no request throttling or API keys of its own; reserved concurrency is the throttle (maximum RPS is 10x reserved concurrency, and reserved concurrency 0 turns the URL off with HTTP 429). With `InvokeMode: RESPONSE_STREAM`, or through `InvokeWithResponseStream` and the API Gateway proxy integration, the function writes the body incrementally: up to 200 MB instead of 6 MB, the first 6 MB at uncapped bandwidth and the rest at 2 MBps, so a 200 MB response takes about 97 s after the first 6 MB. Node.js managed runtimes stream natively; Python needs a custom runtime or the Lambda Web Adapter. Function URLs cannot stream from inside a VPC, and a streaming function keeps running and billing if the client disconnects.
+
 ### Cold-start anatomy and mitigation
 
 ```text
-Init phase (billed differently): runtime bootstrap + your global/module-level code
+Init phase (billed like handler time since 2025-08-01): runtime bootstrap + global/module-level code
   -> heavy SDK clients, large dependencies, VPC ENI attach all extend this
 Mitigations:
   - keep package small; lazy-import infrequently used modules
@@ -357,6 +436,9 @@ Mitigations:
 | Event delivery | SQS (decoupled, DLQ) | Direct sync invoke | Resilience vs latency |
 | Packaging | Zip (fast) | Container image (10 GB, custom) | Simplicity vs large deps/custom runtime |
 | Vendor lock-in | Native FaaS | Knative (portable) | Managed convenience vs portability |
+| Long workflow | Step Functions (ASL graph, 220+ service integrations) | Lambda durable functions (code, checkpoint/replay) | Visual, cross-service orchestration vs workflow logic kept in application code |
+| Steady high volume | Lambda (default), per-request billing | Lambda Managed Instances, EC2 price + 15% | Scale to zero and burst vs no cold starts, multi-concurrency and EC2 discounts |
+| HTTP front door | API Gateway | Function URL | Throttling, keys, custom domains vs one free endpoint with streaming |
 
 ---
 
@@ -364,7 +446,7 @@ Mitigations:
 
 **Use serverless/FaaS when:** workloads are spiky, event-driven, or unpredictable; you want zero ops and pay-per-use; tasks are short and stateless (image processing, webhooks, cron jobs, glue code, ETL steps); or you're prototyping and want to move fast. It shines for "glue" between managed services.
 
-**Reconsider when:** workloads are steady and high-throughput (a constantly busy service is often cheaper on reserved/containers — see [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md)); tasks exceed timeout limits (15 min Lambda) or need persistent connections/state; you need predictable sub-10ms tail latency (cold starts hurt); or you require GPUs/specialized hardware. Very chatty, latency-sensitive microservices can suffer from cold starts and per-invocation overhead — containers on [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) may fit better.
+**Reconsider when:** workloads are steady and high-throughput (a constantly busy service is often cheaper on reserved/containers — see [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md)); a single piece of work needs more than 15 minutes of continuous compute (durable functions cover long workflows that are mostly waiting) or needs persistent connections; you need predictable sub-10ms tail latency (cold starts hurt); or you require GPUs/specialized hardware. Very chatty, latency-sensitive microservices can suffer from cold starts and per-invocation overhead — containers on [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) may fit better.
 
 **Choosing FaaS vs the alternative:**
 
@@ -380,19 +462,23 @@ flowchart LR
 
     start(["New workload"]) --> d1{"Steady,<br/>high-throughput?"}
     d1 -->|"yes"| containers["Reserved instances<br/>/ containers"]
-    d1 -->|"no"| d2{"Over 15-min timeout, or<br/>needs persistent state/conns?"}
+    d1 -->|"no"| d2{"Needs persistent<br/>connections?"}
     d2 -->|"yes"| containers
-    d2 -->|"no"| d3{"Needs sub-10ms tail latency,<br/>or GPU/specialized HW?"}
+    d2 -->|"no"| d4{"One run over<br/>15 min?"}
+    d4 -->|"no"| d3{"Needs sub-10ms tail latency,<br/>or GPU/specialized HW?"}
+    d4 -->|"yes"| d5{"Each compute burst<br/>under 15 min,<br/>rest is waiting?"}
+    d5 -->|"yes"| durable(["Lambda durable<br/>functions"])
+    d5 -->|"no"| containers
     d3 -->|"yes"| containers
     d3 -->|"no"| faas(["FaaS<br/>(Lambda / Cloud Run functions)"])
 
     class start io
-    class d1,d2,d3 mathOp
+    class d1,d2,d3,d4,d5 mathOp
     class containers base
-    class faas train
+    class faas,durable train
 ```
 
-*Each "reconsider" criterion becomes a gate a workload must clear before landing on FaaS: steady high-throughput load, work exceeding Lambda's 15-minute timeout or needing persistent connections, and sub-10ms tail latency or GPU needs all route to reserved instances/containers instead.*
+*A run longer than 15 minutes no longer rules Lambda out by itself: if the time is mostly waiting between short steps, durable functions hold it for up to a year. Each "reconsider" criterion becomes a gate a workload must clear before landing on FaaS: steady high-throughput load, work exceeding Lambda's 15-minute timeout or needing persistent connections, and sub-10ms tail latency or GPU needs all route to reserved instances/containers instead.*
 
 ---
 
@@ -469,82 +555,98 @@ flowchart LR
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is a cold start, what causes it, and how do you mitigate it?**
+**Q: A Lambda durable function sends two confirmation emails for one order after resuming from a wait. Why?**
+**Short:** Replay re-runs the handler from the top; the email call sat outside `context.step`, so it ran again on replay instead of returning a checkpointed result.
+After a `context.wait()` Lambda invokes the function again and the SDK replays the handler from the first line. Completed steps return their checkpointed results without running, but plain code between steps runs on every replay. An email sent outside a step therefore goes out once per replay, and a `datetime.now()` or `uuid4()` outside a step returns a different value each time, which can send the workflow down a different branch. Put every side effect and non-deterministic value inside a `context.step()`, keep the downstream call idempotent anyway (a step can retry), and invoke a published version or alias so a paused execution does not resume on changed code.
+
+**Q: When would you choose Lambda durable functions over Step Functions?**
+**Short:** When the workflow is application logic owned by one team and is easier as sequential code; Step Functions fits visual, cross-service orchestration with its 220+ native integrations.
+Both persist workflow state, retry steps and wait without paying for compute. Durable functions keep the workflow inside one Lambda function in Node.js, Python, Java or .NET: steps, waits, callbacks and chained invokes are SDK calls, so the code is unit-testable and versioned with the function, and an execution can run up to one year. The cost is the replay discipline (deterministic code, side effects in steps) and the 15-minute ceiling per underlying invocation. Step Functions defines the graph in Amazon States Language or the visual designer, calls 220+ AWS services directly without a Lambda in between, and shows each state in the console, which suits workflows that span services and teams. A common split: Step Functions for the cross-service pipeline, durable functions for an order or agent loop inside one service.
+
+**Q: What do Lambda Managed Instances change compared with default Lambda?**
+**Short:** Functions run on EC2 instances in your account at the EC2 price plus 15%, one environment serves many concurrent requests, there are no per-request cold starts, and it does not scale to zero when idle.
+A capacity provider defines the VPC and instance requirements; publishing a version launches three instances by default and three execution environments before the version is `ACTIVE`. Each environment handles multiple invocations at once, so globals become shared mutable state and the handler must be thread-safe. Scaling follows CPU utilization asynchronously and handles traffic doubling within about five minutes by default, so it suits steady, predictable volume, not sudden spikes. Billing is the instance price plus a 15% management fee; Savings Plans and Reserved Instances discount the EC2 part, which is what makes it cheaper than per-GB-second Lambda for a function that is busy all day.
+
+**Q: How do you return a 50 MB report, or stream LLM tokens, from Lambda?**
+**Short:** Use response streaming through a function URL with `RESPONSE_STREAM`, `InvokeWithResponseStream` or API Gateway; it allows 200 MB versus 6 MB buffered, uncapped for the first 6 MB then 2 MBps.
+A buffered response is capped at 6 MB and the client sees nothing until the handler returns. With streaming the handler writes chunks as they are ready, so time to first byte drops to the first token and the payload limit rises to 200 MB. The first 6 MB stream at uncapped bandwidth and the rest at 2 MBps, so the remaining 44 MB of a 50 MB report takes about 22 s; past roughly 100 MB a presigned S3 URL is still faster for the client. Node.js managed runtimes support it natively; Python needs the Lambda Web Adapter or a custom runtime. Function URLs do not stream inside a VPC, and a disconnected client does not stop the function, so keep the timeout tight.
+
+**Q: What is a cold start, what causes it, and how do you mitigate it?**
 **Short:** A cold start is the added latency from initializing a fresh execution environment when no warm one exists, mitigated by small packages, reused clients, and provisioned concurrency.
 
 A cold start is the added latency (~100ms-1s) when the platform must initialize a new execution environment — downloading code, starting the runtime, and running your init code — because no warm one is available. It's worsened by large deployment packages, heavy module-level initialization, and (historically) VPC ENI attachment. Mitigate by minimizing package size, reusing SDK clients at module scope, using provisioned concurrency for latency-critical synchronous paths, and SnapStart on Java, Python, or .NET; for truly latency-sensitive endpoints, keep instances warm.
 
-**Q2: Why must serverless functions be idempotent?**
+**Q: Why must serverless functions be idempotent?**
 **Short:** Event sources like SQS and Kinesis guarantee at-least-once delivery, so the same event can invoke a function twice, and a non-idempotent handler would double-process it.
 
 Because event sources like SQS, Kinesis, and EventBridge guarantee at-least-once delivery, so the same event can invoke your function more than once. A non-idempotent handler would double-charge a card or double-insert a record. Make handlers idempotent by deduplicating on a stable key with a conditional write to DynamoDB or by using idempotency keys (e.g., Lambda Powertools), so reprocessing a duplicate is a no-op.
 
-**Q3: When is serverless the wrong choice?**
+**Q: When is serverless the wrong choice?**
 **Short:** Serverless is wrong for steady high-throughput workloads, tasks exceeding the timeout or needing persistent connections, single-digit-ms tail latency, or specialized hardware.
 
-When the workload is steady and high-throughput, an always-on container or reserved instance is usually cheaper than per-invocation billing; when tasks exceed the timeout (15 minutes for Lambda) or need persistent connections; when you need predictable single-digit-millisecond tail latency that cold starts violate; or when you need GPUs/specialized hardware. Serverless excels at spiky, event-driven, short, stateless work — not at constant heavy load or long-running stateful processes.
+When the workload is steady and high-throughput, an always-on container or reserved instance is usually cheaper than per-invocation billing; when one piece of work needs more than 15 minutes of continuous compute (a long workflow that mostly waits fits durable functions) or needs persistent connections; when you need predictable single-digit-millisecond tail latency that cold starts violate; or when you need GPUs/specialized hardware. Serverless excels at spiky, event-driven, short, stateless work — not at constant heavy load or long-running stateful processes.
 
-**Q4: How does Lambda's memory setting affect performance and cost?**
+**Q: How does Lambda's memory setting affect performance and cost?**
 **Short:** Lambda memory and CPU are coupled, so a CPU-bound function can run faster and sometimes cheaper at higher memory because it finishes sooner, not at the smallest setting.
 
 Memory and CPU are coupled — increasing memory proportionally increases allocated vCPU, so a CPU-bound function can run faster (and sometimes cheaper) at higher memory because it finishes sooner. Billing is memory-GB times execution-milliseconds plus per-request, so the cost-optimal setting is found by tuning (e.g., AWS Lambda Power Tuning). Don't assume the smallest memory is cheapest; faster execution at higher memory can lower total cost.
 
-**Q5: What problem do Step Functions solve that plain function chaining doesn't?**
+**Q: What problem do Step Functions solve that plain function chaining doesn't?**
 **Short:** Step Functions provide stateful orchestration — sequencing, branching, retries, and error catching — across stateless functions, unlike brittle hand-chained function calls.
 
 Step Functions provide stateful orchestration — sequencing, branching, parallelism, retries with backoff, error catching, and timeouts — across multiple stateless, time-limited functions, with a durable execution history. Chaining functions that invoke or poll each other is brittle: there's no central state, retries and error handling are hand-rolled, and debugging is hard. Use a state machine for any multi-step workflow that needs reliability and visibility, like order processing or ETL.
 
-**Q6: How do you handle failures in an event-driven serverless pipeline?**
+**Q: How do you handle failures in an event-driven serverless pipeline?**
 **Short:** Configure dead-letter queues with a `maxReceiveCount` so poison messages move off the queue after N failures instead of vanishing, and make handlers idempotent.
 
 Configure dead-letter queues (DLQs) on async invocations and SQS event sources with a `maxReceiveCount` so poison messages move to the DLQ after N failed attempts instead of vanishing, and alarm on DLQ depth. Use partial batch failure reporting for SQS so one bad record doesn't fail the whole batch, and make handlers idempotent so retries are safe. After fixing the root cause, replay messages from the DLQ.
 
-**Q7: API Gateway vs ALB in front of Lambda — how do you choose?**
+**Q: API Gateway vs ALB in front of Lambda — how do you choose?**
 **Short:** API Gateway adds rich API management like throttling and authorizers for public APIs; an ALB is cheaper at very high volume but lacks API-management features.
 
 API Gateway provides rich API features — request validation, throttling, API keys, usage plans, authorizers (JWT/IAM/Cognito), and caching — and is the default for public APIs, but costs more per request at high volume. An ALB invoking Lambda is cheaper at very high request volumes and integrates with existing VPC/WAF setups but lacks API-management features. Use API Gateway (HTTP API for lower cost) for managed public APIs and ALB-to-Lambda when you need cheap, high-volume routing alongside other targets.
 
-**Q8: What is provisioned concurrency and when do you use it?**
+**Q: What is provisioned concurrency and when do you use it?**
 **Short:** Provisioned concurrency keeps a set number of execution environments pre-initialized so requests never cold-start, used for latency-sensitive synchronous endpoints.
 
 Provisioned concurrency keeps a configured number of execution environments initialized and ready, so requests hitting them incur no cold start. You use it for latency-sensitive synchronous endpoints (user-facing APIs) where the occasional ~500ms cold start is unacceptable, accepting that you pay for the warm capacity even when idle. Reserved concurrency, by contrast, caps maximum concurrency (and guarantees a floor) but doesn't pre-warm.
 
-**Q9: How does scale-to-zero work and what's the tradeoff?**
+**Q: How does scale-to-zero work and what's the tradeoff?**
 **Short:** Scale-to-zero destroys idle execution environments so you pay nothing when there are no events, at the cost of a cold start on the next request after a quiet period.
 
 When there are no events, the platform destroys idle execution environments so you pay nothing for compute — ideal for intermittent workloads. The tradeoff is that the next request after a quiet period hits a cold start. Platforms like Cloud Run and Lambda let you set a minimum/provisioned instance count above zero to trade some cost for guaranteed warm capacity, balancing cost against tail latency.
 
-**Q10: What is Knative and why might you choose it over Lambda?**
+**Q: What is Knative and why might you choose it over Lambda?**
 **Short:** Knative brings scale-to-zero and request-driven autoscaling to your own Kubernetes cluster, chosen to avoid vendor lock-in at the cost of operating the cluster yourself.
 
 Knative is a Kubernetes-based serverless framework that brings scale-to-zero, request-driven autoscaling, and eventing to your own cluster, so functions/containers run portably on any Kubernetes (any cloud or on-prem). You'd choose it to avoid vendor lock-in, to run serverless alongside existing Kubernetes workloads, or to meet on-prem/regulatory constraints — at the cost of operating the cluster yourself, which managed FaaS abstracts away.
 
-**Q11: How do you prevent a runaway Lambda from causing a huge bill or outage?**
+**Q: How do you prevent a runaway Lambda from causing a huge bill or outage?**
 **Short:** Cap a function's maximum concurrency with reserved concurrency, avoid recursive triggers, and alarm on concurrency and error rate, since the account default is shared.
 
 Set reserved concurrency to cap a function's maximum concurrent executions, avoid recursive triggers (e.g., a function writing to the same S3 prefix that invokes it), and add CloudWatch alarms on concurrency, error rate, and DLQ depth. Account concurrency defaults to 1000 (soft), shared across functions, so one runaway function can throttle everything unless capped. Test fan-out behavior and put guardrails in before going to production.
 
-**Q12: How do you give a Lambda least-privilege access to other AWS services?**
+**Q: How do you give a Lambda least-privilege access to other AWS services?**
 **Short:** Give each function its own IAM execution role scoped to only the exact actions and resources it needs, never a broad role shared across many functions.
 
 Each function gets its own IAM execution role with a policy scoped to exactly the actions and resources it needs — for example, `dynamodb:PutItem` on one table and `s3:GetObject` on one bucket prefix — and nothing more. Avoid sharing a broad role across many functions, because that widens the blast radius if one function is compromised. Use IAM Access Analyzer and per-function roles, and reference [secrets_management](../secrets_management/secrets_management.md) for any credentials the function needs.
 
-**Q13: What are Lambda's key hard limits, and how should they shape a design?**
+**Q: What are Lambda's key hard limits, and how should they shape a design?**
 **Short:** Lambda enforces a 15-minute timeout, a 6 MB sync payload, a 250 MB unzipped package (10 GB for containers), and a shared 1000 concurrent executions.
 
-Lambda enforces a 15-minute max timeout, a 6 MB synchronous payload, a 250 MB unzipped deployment package (10 GB for container images), and a default 1000 concurrent executions per account. These push you toward short, stateless, small-footprint functions: a task needing more than 15 minutes belongs in Step Functions or a container, and a payload over 6MB should go through S3 with a presigned URL instead of the request body. The 250MB package ceiling (or 10GB container image) forces lean dependencies, which directly reduces cold-start init time too. Design any Lambda-based system around these ceilings from the start rather than discovering them under production load.
+Lambda enforces a 15-minute max timeout, a 6 MB synchronous payload, a 250 MB unzipped deployment package (10 GB for container images), and a default 1000 concurrent executions per account. These push you toward short, stateless, small-footprint functions: a task needing more than 15 minutes of continuous compute belongs in a container, a long workflow of short steps belongs in Step Functions or durable functions, and a payload over 6MB should go through S3 with a presigned URL or, for responses up to 200 MB, response streaming. The 250MB package ceiling (or 10GB container image) forces lean dependencies, which directly reduces cold-start init time too. Design any Lambda-based system around these ceilings from the start rather than discovering them under production load.
 
-**Q14: How does a poison record on a Kinesis or DynamoDB stream differ from an SQS failure, and how do you handle it?**
+**Q: How does a poison record on a Kinesis or DynamoDB stream differ from an SQS failure, and how do you handle it?**
 **Short:** A poison record on an ordered stream blocks the whole shard from progressing, unlike SQS where one bad message is isolated and redriven independently.
 
 A poison record on an ordered stream can block the entire shard from progressing, unlike SQS where one bad message is isolated and redriven to a DLQ independently. Kinesis and DynamoDB streams deliver ordered batches per shard, so if a single record repeatedly fails processing, Lambda keeps retrying that batch and no later record on the same shard is processed until it's resolved — a stuck shard, not just a stuck message. Handle it with a bounded retry count plus `BisectBatchOnFunctionError` to isolate the bad record, and an on-failure destination to remove it from the retry loop, or by catching and swallowing known-bad-record errors in the handler. Unlike SQS's per-message DLQ, stream poison-record handling has to account for ordering being blocked, not just one message being lost.
 
-**Q15: What is SnapStart, and how does it reduce Java cold starts?**
+**Q: What is SnapStart, and how does it reduce Java cold starts?**
 **Short:** SnapStart cuts Java cold starts roughly 10x by snapshotting an already-initialized environment and restoring from it, instead of rerunning JVM boot and module-level init.
 
 SnapStart cuts Java cold starts roughly 10x by snapshotting an initialized execution environment and restoring from that snapshot instead of rerunning startup. A normal cold start pays for JVM boot plus all module-level init (class loading, connection pools, DI wiring), which is especially expensive for Java; SnapStart runs that init once when you publish a function version, takes an encrypted Firecracker snapshot of the initialized environment, and resumes new environments from that snapshot on subsequent cold starts. It covers Java 11 and later, Python 3.12 and later, and .NET 8 and later — Java sees the largest win because its init is the heaviest, and Java is also the one runtime where SnapStart carries no extra charge (Python and .NET add snapshot-caching and per-restore charges). The operational constraints matter: SnapStart works only on published versions and aliases, never on `$LATEST`, and it cannot be combined with provisioned concurrency, so you pick one or the other per function. Use it for functions with expensive init, but re-test any code that assumes fresh randomness or fresh connections on every cold start, since a restored snapshot reuses whatever the init phase produced.
 
-**Q16: When would you package a Lambda as a container image instead of a zip, and what's the tradeoff?**
+**Q: When would you package a Lambda as a container image instead of a zip, and what's the tradeoff?**
 **Short:** Package as a container image when large dependencies or custom runtimes need the 10 GB size ceiling, trading a heavier build pipeline and slower cold starts for that headroom.
 
 Package as a container image when you need large dependencies, custom runtimes, or existing Docker tooling, since it raises the size ceiling to 10 GB versus 250 MB unzipped for a zip package. Container images let you reuse existing Dockerfiles and base images — useful for ML models or native libraries — and share the same ECR-based tooling as your other containerized services, at the cost of a heavier build/push pipeline and typically slower cold starts than a lean zip package. Zip packaging stays the default for simple functions because it's faster to build, deploy, and cold-start. Choose container images when dependency size or tooling consistency outweighs the cold-start and pipeline cost, not as a default.
@@ -561,6 +663,9 @@ Package as a container image when you need large dependencies, custom runtimes, 
 - **One least-privilege role per function**; never a shared wildcard role.
 - **Cap concurrency** (reserved) and add alarms to prevent runaway cost/throttling.
 - **Use HTTP API over REST API** on API Gateway for lower cost/latency when you don't need REST-only features.
+- **In durable functions, put every side effect and non-deterministic value inside a step,** and invoke a published version or alias.
+- **Move a function that is busy all day to Lambda Managed Instances** only after making the handler thread-safe; keep spiky functions on default Lambda.
+- **Stream large or incremental responses** instead of buffering them; keep timeouts tight because a disconnected client does not stop a streaming function.
 
 ---
 

@@ -417,7 +417,7 @@ const STUDY_ORDER = {
   python: [
     "python/data_model_and_objects","python/core_language_idioms","python/the_import_system","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures","python/dataclasses_enums_and_data_modeling","python/strings_bytes_encoding_and_regex","python/file_io_and_serialization",
     "python/cpython_memory_model","python/the_gil_and_free_threading","python/metaclasses_and_metaprogramming","python/the_type_system_and_typing","python/performance_and_profiling","python/c_extensions_and_native_interop","python/functional_programming",
-    "python/threading_and_multiprocessing","python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/design_patterns_in_python","python/stdlib_datetime_and_logging","python/testing_with_pytest","python/packaging_and_project_tooling",
+    "python/threading_and_multiprocessing","python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/design_patterns_in_python","python/stdlib_datetime_and_logging","python/testing_with_pytest","python/debugging_and_introspection","python/packaging_and_project_tooling",
   ],
   fastapi: [
     "fastapi/python_api_framework_landscape","fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/routing_and_request_handling","fastapi/dependency_injection_in_fastapi","fastapi/middleware_and_lifecycle","fastapi/configuration_and_settings_management",
@@ -433,7 +433,7 @@ const STUDY_ORDER = {
   frontend_platform: [
     "frontend_platform/javascript_language_semantics","frontend_platform/browser_architecture_and_the_rendering_pipeline","frontend_platform/the_dom_and_web_apis","frontend_platform/css_layout_and_the_cascade","frontend_platform/css_animation_and_motion","frontend_platform/the_event_loop_and_scheduling",
     "frontend_platform/http_in_the_browser_and_fetch","frontend_platform/cors_cookies_and_the_same_origin_model","frontend_platform/browser_security_and_the_client_threat_model","frontend_platform/auth_in_the_browser","frontend_platform/realtime_in_the_browser",
-    "frontend_platform/client_memory_and_performance_debugging","frontend_platform/the_node_and_edge_runtimes","frontend_platform/modules_bundling_and_the_build_pipeline","frontend_platform/package_management_and_supply_chain","frontend_platform/linting_formatting_and_code_quality",
+    "frontend_platform/client_memory_and_performance_debugging","frontend_platform/the_node_and_edge_runtimes","frontend_platform/modules_bundling_and_the_build_pipeline","frontend_platform/package_management_and_supply_chain","frontend_platform/linting_formatting_and_code_quality","frontend_platform/frontend_testing_and_ci",
     "frontend_platform/web_performance_and_core_web_vitals","frontend_platform/accessibility_and_wcag","frontend_platform/pwa_service_workers_and_offline","frontend_platform/frontend_delivery_and_observability",
   ],
   react: [
@@ -463,7 +463,7 @@ const STUDY_ORDER = {
     "soft_skills/precise_technical_vocabulary","soft_skills/business_and_finance_vocabulary","soft_skills/leadership_and_org_vocabulary","soft_skills/hedging_commitment_and_disagreement",
     "soft_skills/technical_writing_for_engineers","soft_skills/design_docs_rfcs_and_adrs","soft_skills/executive_communication","soft_skills/upward_and_async_communication","soft_skills/incident_communication_and_postmortems",
     "soft_skills/influence_without_authority","soft_skills/giving_and_receiving_feedback","soft_skills/difficult_conversations_and_conflict","soft_skills/negotiation_for_engineers","soft_skills/scope_prioritization_and_saying_no",
-    "soft_skills/mentorship_and_sponsorship","soft_skills/technical_leadership_and_execution","soft_skills/cross_functional_collaboration","soft_skills/team_health_and_sustainable_pace",
+    "soft_skills/mentorship_and_sponsorship","soft_skills/technical_leadership_and_execution","soft_skills/technical_strategy_and_vision","soft_skills/cross_functional_collaboration","soft_skills/team_health_and_sustainable_pace",
     "soft_skills/behavioral_interview_systems","soft_skills/story_portfolio_and_star_frameworks","soft_skills/interviewing_as_the_interviewer","soft_skills/performance_reviews_and_promotions",
     "soft_skills/ai_era_engineering_leadership",
   ],

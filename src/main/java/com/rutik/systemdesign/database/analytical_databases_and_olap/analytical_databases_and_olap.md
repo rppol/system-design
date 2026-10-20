@@ -1,12 +1,13 @@
 # Analytical Databases and OLAP
 
-> **Version anchor — August 2026.** **ClickHouse 26.7.5.10-stable** (21 Aug 2026) is the current
-> stable line and **26.8.2.7-lts** (1 Sept 2026) the newest LTS (the 26.3 LTS line is still
-> patched, latest 26.3.29.7-lts, 2 Sept 2026); versions are `YY.M.patch.build`,
+> **Version anchor (October 2026).** **ClickHouse 26.9.21.9-stable** (17 Oct 2026) is the current
+> stable line and **26.8.30.8-lts** (17 Oct 2026) the newest LTS (the 26.3 LTS line is still
+> patched); versions are `YY.M.patch.build`,
 > stable cut monthly with ~3 months of patches, LTS cut in March and August with 12+ months.
-> **Apache Druid 37.0.0** (8 May 2026), **Apache Pinot 1.5.1** (5 Jun 2026), **Apache Doris
-> 4.1.3** (13 Jul 2026), **StarRocks 4.1.3** (14 Jul 2026), **DuckDB 1.5.5** (21 Jul 2026, with
-> 2.0 announced for autumn 2026), **Apache Arrow 25.0.0** (10 Jul 2026). Version-dependent
+> **Apache Druid 38.0.0** (1 Oct 2026, Java 17 no longer supported), **Apache Pinot 1.5.1**
+> (5 Jun 2026), **Apache Doris 4.1.3** (13 Jul 2026), **StarRocks 4.1.3** (14 Jul 2026),
+> **DuckDB 1.5.6** (28 Sep 2026; 2.0 is feature-frozen and unreleased), **Apache Arrow 26.0.0**
+> (9 Oct 2026). Version-dependent
 > behaviour is tagged inline like `[26.3]`. Cross-links: the row-vs-column storage primitive lives in
 > [Storage Engines Internals](../storage_engines_internals/storage_engines_internals.md);
 > ClickHouse *as a time-series store* lives in
@@ -612,6 +613,19 @@ than an `INSERT` into that exact table — a `DROP PARTITION` or an `ALTER ... D
 source leaves the view's aggregates permanently wrong. Backfill explicitly with an
 `INSERT INTO events_hourly SELECT ... FROM events WHERE ts < <cutover>` and pick the cutover
 so it neither double-counts nor gaps.
+
+**Refreshable materialized views run on a schedule instead.** `CREATE MATERIALIZED VIEW ...
+REFRESH EVERY 1 HOUR TO target AS SELECT ...` re-runs the whole `SELECT` on the timer and by
+default swaps the target's contents atomically, so it sees every row, joins included, and is
+as stale as the interval. The cost is a full source scan per refresh. ClickHouse 26.9 adds
+`REFRESH EVERY ... APPEND INCREMENTAL` `[26.9]`, which reads only rows committed since the
+last refresh and appends them; the cursor is the source table's block-number and
+block-offset columns (`enable_block_number_column = 1`, `enable_block_offset_column = 1`),
+and for an Iceberg target the cursor is committed in the same snapshot as the data, so a
+restart resumes without replaying rows. It needs a single plain MergeTree source and rejects
+`JOIN`, `UNION`, subqueries, views and table functions, and the `APPEND INCREMENTAL` mode cannot
+be added to or removed from an existing view. It fits append-only sources (events, logs, audit
+records) and copying a MergeTree stream into an Iceberg table.
 
 **Never rely on a merge having happened.** Merges are asynchronous and there is no promise one
 ever runs. A `ReplacingMergeTree` can hold duplicates indefinitely. Either query with `FINAL`

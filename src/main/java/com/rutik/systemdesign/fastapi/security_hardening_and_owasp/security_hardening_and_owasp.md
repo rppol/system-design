@@ -73,7 +73,7 @@ Fix: declare explicit Pydantic `UpdateSchema` with only the fields users may mod
 
 No rate limiting, no request body size cap, no pagination depth limit. A single client floods the API or causes out-of-memory by sending a 500 MB JSON body.
 
-Fix: `SlowAPI` or a Redis-backed token bucket for rate limiting; `app.add_middleware(RequestSizeLimitMiddleware, max_bytes=1_048_576)` (1 MB default); `LIMIT` capped at 100 in query parameters; `max_depth` enforcement on recursive queries.
+Fix: `SlowAPI` or a Redis-backed token bucket for rate limiting; `app.add_middleware(RequestBodyLimitMiddleware, max_body_size=1_048_576)` (1 MiB, Starlette 1.6.0+); `LIMIT` capped at 100 in query parameters; `max_depth` enforcement on recursive queries.
 
 **API5: Broken Function Level Authorization**
 
@@ -97,7 +97,7 @@ Fix: allowlist of permitted domains; reject private IP ranges (`10.0.0.0/8`, `17
 
 `CORSMiddleware(allow_origins=["*"])` in production, `app = FastAPI(debug=True)` leaking stack traces, verbose error messages exposing internal paths, default admin credentials, open Swagger UI on `/docs` in production.
 
-Fix: explicit `allow_origins` list; `debug=False` in production; custom exception handler returning RFC 9457 `application/problem+json` without internal detail; `app = FastAPI(docs_url=None, redoc_url=None)` in production (or protect `/docs` with auth).
+Fix: explicit `allow_origins` list; `debug=False` in production; custom exception handler returning RFC 9457 `application/problem+json` without internal detail; `app = FastAPI(docs_url=None, redoc_url=None)` in production (or protect `/docs` with auth); keep the default `strict_content_type=True` [FastAPI 0.132+] so a JSON body without a JSON `Content-Type` is rejected (see "Strict JSON Content-Type" in Section 6).
 
 **API9: Improper Inventory Management**
 
@@ -273,45 +273,38 @@ async def delete_user(user_id: int, session: AsyncSession = Depends(get_session)
 
 ### Request Size Limit Middleware
 
+Starlette 1.6.0+ ships this as `RequestBodyLimitMiddleware`. `FastAPI()` and `APIRoute` do
+not expose a `max_body_size` parameter, so add the middleware:
+
 ```python
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from fastapi import FastAPI
+from starlette.middleware.body_limit import RequestBodyLimitMiddleware
 
-
-class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_bytes: int = 1_048_576) -> None:  # 1 MB default
-        super().__init__(app)
-        self.max_bytes = max_bytes
-
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if request.headers.get("content-length"):
-            content_length = int(request.headers["content-length"])
-            if content_length > self.max_bytes:
-                return Response(
-                    content='{"detail": "Request body too large"}',
-                    status_code=413,
-                    media_type="application/json",
-                )
-        return await call_next(request)
-
-
-app.add_middleware(RequestSizeLimitMiddleware, max_bytes=1_048_576)
+app = FastAPI()
+app.add_middleware(RequestBodyLimitMiddleware, max_body_size=1_048_576)  # 1 MiB
 ```
+
+It wraps `receive`, so it counts the body bytes the ASGI server actually delivers, including
+chunked uploads with no `Content-Length` and multipart file data. A declared `Content-Length`
+over the cap fails fast before any body is read; an absent or understated header cannot bypass
+the cap, because the running count trips at the byte that crosses it. Either way the client
+gets `413 Content Too Large`. On Starlette's own `Starlette`, `Router`, `Mount` and `Route`
+classes the same `max_body_size` parameter exists, and a nested limit can raise or lower the
+app-wide one (a 25 MiB upload mount under a 1 MiB API, for example).
 
 ### Decoding the 1 MB cap
 
-**Stated plainly.** "Read the size the client claims *before* reading the body, and if that number
-is bigger than one megabyte, answer `413` and never allocate the memory." The cap is not about
-bandwidth — it is a bound on how much RAM one request can force the process to hold at once.
+**Stated plainly.** "Stop reading the body the moment it passes one megabyte and answer `413`."
+The cap is not about bandwidth: it is a bound on how much RAM one request can force the process
+to hold at once.
 
 | Symbol | What it is |
 |--------|------------|
-| `max_bytes` | The ceiling, `1_048_576` = `1024 x 1024` = exactly 1 MiB |
-| `content-length` | The byte count the client declares in the header, before any body arrives |
-| `413` | "Payload Too Large" — the correct status; `400` hides why the request failed |
-| `call_next` | The rest of the stack. Returning before this is what makes the rejection free |
-| peak RAM | `max_bytes x concurrent uploads` — the number the cap actually controls |
+| `max_body_size` | The ceiling, `1_048_576` = `1024 x 1024` = exactly 1 MiB |
+| `content-length` | The byte count the client declares; used only to fail fast, never trusted as the limit |
+| running byte count | Bytes actually received so far; the check that chunked or lying clients cannot skip |
+| `413` | "Content Too Large" (RFC 9110); `400` hides why the request failed |
+| peak RAM | `max_body_size x concurrent uploads`, the number the cap actually controls |
 
 **Walk one example.** The same 1000 concurrent uploads, capped and uncapped:
 
@@ -319,20 +312,82 @@ bandwidth — it is a bound on how much RAM one request can force the process to
   uncapped, attacker sends 500 MB bodies
     1000 concurrent x 500 MB  = 500 GB of buffered body   -> OOM kill, instantly
 
-  capped at max_bytes = 1_048_576
+  capped at max_body_size = 1_048_576
     1000 concurrent x 1 MiB   = 1.05 GB                   -> survivable
      500 concurrent x 1 MiB   = 0.52 GB
      100 concurrent x 1 MiB   = 0.10 GB
 
-  cost of a rejected request : parse one header, return 413. No body read, no DB call.
+  cost of a rejected request : at most 1 MiB read, then 413. No handler, no DB call.
 ```
 
 The cap converts an unbounded number into a multiplication you can actually plan capacity against.
-Note that `content-length` is attacker-supplied: a client that lies about it, or uses chunked
-transfer encoding with no `content-length` at all, slips past this check. Uvicorn has no body-size
-option, so the layer that catches those is the reverse proxy (nginx `client_max_body_size`, Envoy
-`max_request_bytes`) plus a streaming byte counter over `request.stream()` inside the handler —
-which is why this middleware is one of several, not the only one.
+Keep the reverse-proxy limit too (nginx `client_max_body_size`, Envoy `max_request_bytes`): it
+rejects the oversized upload before it reaches a Python worker at all, and the middleware covers
+traffic that bypasses the proxy, such as pod-to-pod calls.
+
+### Strict JSON Content-Type [FastAPI 0.132+]
+
+FastAPI 0.132.0 (2026-02-23, PR #14978) added `strict_content_type`, default `True`: a request
+body is parsed as JSON only when `Content-Type` is `application/json` or another
+`application/*+json` type. Before 0.132, a body with no `Content-Type` header at all was also
+parsed as JSON, and that gap is a CSRF path.
+
+A browser sends a cross-origin `POST` without a CORS preflight when the request is "simple":
+no custom headers and a `Content-Type` of `text/plain`, `multipart/form-data`,
+`application/x-www-form-urlencoded`, or none. `fetch(url, {method: "POST", body: new Blob([json])})`
+sends no `Content-Type`, so it needs no preflight. The browser blocks the attacker from reading
+the response, but the server has already run the handler:
+
+```
+  attacker page https://evil.example          victim's machine
+  ---------------------------------          ----------------------------------------
+  fetch("http://localhost:8000/v1/run",      FastAPI tool on localhost, no auth,
+        {method: "POST",                     trusts "anything that can reach me"
+         body: new Blob(['{"cmd":"..."}'])})
+        |
+        |  simple request: no Content-Type, no credentials -> no preflight
+        v
+  <= 0.131 : body parsed as JSON -> Pydantic model validates -> handler runs   (CSRF)
+  >= 0.132 : body left as bytes  -> 422 model_attributes_type -> handler never runs
+```
+
+*Missing `Content-Type` was the one simple-request shape that older FastAPI still parsed as
+JSON; `text/plain` bodies were already left unparsed.*
+
+The risk is specific: an unauthenticated service that treats network reachability as its only
+access control, such as a local agent runner, a dev dashboard, or an internal admin tool. An
+internet-facing API with real authentication is not exposed this way, because the attacker's
+cross-origin request carries no token.
+
+Measured on FastAPI 0.143.0 with a Pydantic body model:
+
+| Request `Content-Type` | Result |
+|---|---|
+| `application/json` | 200 |
+| `application/json; charset=utf-8` | 200 |
+| `application/vnd.api+json` | 200 |
+| none | 422, `model_attributes_type` on `body` |
+| `text/plain` | 422 |
+
+Turn it off only for clients you cannot change, and only on the routes they call. The setting
+exists on `FastAPI()` and on `APIRouter()`, not on `include_router()` or the route decorators:
+
+```python
+legacy_hooks = APIRouter(prefix="/hooks", strict_content_type=False)
+
+@legacy_hooks.post("/vendor-x")
+async def vendor_x(event: VendorEvent, sig: Annotated[str, Header()]) -> None:
+    verify_hmac(sig)               # the signature, not Content-Type, is the defense here
+    ...
+
+app = FastAPI()                    # strict_content_type=True for everything else
+app.include_router(legacy_hooks)
+```
+
+The 422 is the upgrade symptom: a client that worked on 0.131 because it sent a JSON string with
+no header, such as `requests.post(url, data=json.dumps(body))` or `httpx.post(url, content=raw)`,
+starts getting `Input should be a valid dictionary or object to extract fields from` on 0.132+.
+The fix on the client side is `json=body`, which sets `application/json`.
 
 ### Security Headers Middleware
 
@@ -825,62 +880,75 @@ BOLA (Broken Object Level Authorization) occurs when an API allows a user to acc
 
 Returning 404 leaks the existence of the resource: an attacker who receives a different error code for "exists but not mine" versus "does not exist" can enumerate all resource IDs in the system. The correct pattern is: return 404 when the object does not exist for any caller; return 403 when it exists but the caller is unauthorized. This is the principle of not leaking more information than necessary.
 
-**Q3: What is BOPLA and how does `response_model` in FastAPI prevent it?**
+**Q3: Why does FastAPI 0.132+ return 422 for a JSON body sent without a `Content-Type` header, and which attack does that block?**
+**Short:** strict_content_type (default True) parses JSON only with a JSON Content-Type, blocking preflight-free cross-origin POSTs to unauthenticated APIs.
+
+FastAPI 0.132.0 made `strict_content_type=True` the default: the body becomes JSON only when
+`Content-Type` is `application/json` or `application/*+json`; otherwise it stays raw bytes and
+the Pydantic body model fails with `model_attributes_type`, a 422. The attack is CSRF against a
+service with no authentication, typically one on `localhost` or an internal network. A
+malicious page calls `fetch()` with a `Blob` body, which sends no `Content-Type`; that is a CORS
+"simple request", so the browser sends it without a preflight, and FastAPI 0.131 and earlier
+parsed the body as JSON and ran the handler. Authenticated internet-facing APIs are not exposed,
+because the forged request carries no token. If a client you cannot fix omits the header, set
+`strict_content_type=False` on a dedicated `APIRouter` for its routes rather than on the app.
+
+**Q4: What is BOPLA and how does `response_model` in FastAPI prevent it?**
 **Short:** A dedicated response_model strips fields a caller shouldn't see or write, preventing BOPLA leaks.
 
 BOPLA (Broken Object Property Level Authorization) occurs when a user can read or write fields they should not access — for example, reading another user's `stripe_customer_id` or writing to `is_admin`. Declaring a dedicated `ResponseSchema` (for GET) and `UpdateSchema` (for PATCH/PUT) with only the permitted fields, then using `response_model=ResponseSchema` in the route decorator, ensures Pydantic strips unauthorized fields at serialization time. The ORM model may contain 30 fields; the response model exposes 8.
 
-**Q4: How do you prevent SSRF in a FastAPI service that accepts webhook URLs from users?**
+**Q5: How do you prevent SSRF in a FastAPI service that accepts webhook URLs from users?**
 **Short:** Validate webhook URLs against an allowlist and reject private IP ranges before fetching them.
 
 Validate the URL before fetching: (1) allow only HTTPS scheme, (2) check the hostname against a domain allowlist, (3) resolve the hostname and reject private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`). Use `httpx.AsyncClient(timeout=5.0, follow_redirects=False)` to avoid redirect-based SSRF bypasses. The most dangerous case is `169.254.169.254` (AWS IMDSv1) which returns cloud instance credentials.
 
-**Q5: What is the security risk of `pickle.loads()` on user-supplied data, and what is the safe alternative?**
+**Q6: What is the security risk of `pickle.loads()` on user-supplied data, and what is the safe alternative?**
 **Short:** pickle.loads() on untrusted data can execute arbitrary code; use JSON or Pydantic validation instead.
 
 `pickle` deserialization executes arbitrary Python code embedded in the byte stream via `__reduce__`. A crafted pickle payload can execute any system command with the application's privileges. The safe alternative is JSON (`json.loads()`), which has no code execution semantics, or Pydantic model validation which enforces schema and type safety on top of JSON. Never deserialize untrusted data with `pickle`, `marshal`, or `yaml.load()` (unsafe loader).
 
-**Q6: How should you configure CORS in a production FastAPI application?**
+**Q7: How should you configure CORS in a production FastAPI application?**
 **Short:** Set allow_origins to an explicit trusted list in production, never a wildcard combined with credentials.
 
 Set `allow_origins` to an explicit list of permitted origins from configuration (e.g., `["https://app.example.com"]`), never `["*"]`. Set `allow_methods` and `allow_headers` explicitly. The combination of `allow_origins=["*"]` and `allow_credentials=True` is rejected by browsers but signals a configuration error. Credentials (cookies, Authorization header) should only cross origins when the origin is explicitly trusted.
 
-**Q7: How does `SecretStr` from Pydantic protect secrets, and what is the safe way to access the underlying value?**
+**Q8: How does `SecretStr` from Pydantic protect secrets, and what is the safe way to access the underlying value?**
 **Short:** SecretStr masks its value in repr and logs, requiring get_secret_value() to access the real secret.
 
 `SecretStr` stores the value internally but renders as `"**********"` in `__repr__`, `__str__`, and JSON serialization. This prevents accidental logging of database passwords and API keys when printing settings objects or serializing config to JSON. Access the raw value only at the point of use with `.get_secret_value()`, not at import time or in a module-level variable.
 
-**Q8: Why can't rate limiting be implemented purely in application middleware for high-traffic services?**
+**Q9: Why can't rate limiting be implemented purely in application middleware for high-traffic services?**
 **Short:** Per-process rate limiting fails under multiple workers; use a shared store like Redis for atomic counters.
 
 Application-level middleware runs in a single process. Under multiple Uvicorn workers or horizontal pod scaling, each instance has its own counter. An attacker can bypass per-process rate limits by distributing requests across instances. Production rate limiting requires a shared external store — typically Redis with atomic `INCR`/`EXPIRE` or a token-bucket LUA script — so all instances share the same counter for a given IP or account.
 
-**Q9: What is the difference between authentication and authorization, and why does FastAPI's dependency injection system make authorization easier to implement correctly?**
+**Q10: What is the difference between authentication and authorization, and why does FastAPI's dependency injection system make authorization easier to implement correctly?**
 **Short:** Authentication verifies who the caller is, while authorization checks what that caller is allowed to do.
 
 Authentication establishes who the caller is (verifies the JWT signature and returns the User object). Authorization determines what that caller may do (checks ownership, role, or scope for the specific operation). FastAPI dependencies compose: `current_user = Depends(get_current_user)` handles authentication once; `Depends(require_role("admin"))` handles role authorization; the ownership check inside the route handler handles object-level authorization. Each layer is independently testable and reusable via `dependency_overrides`.
 
-**Q10: How do you handle SQL injection in SQLAlchemy async ORM vs raw SQL?**
+**Q11: How do you handle SQL injection in SQLAlchemy async ORM vs raw SQL?**
 **Short:** ORM queries are always parameterized, but interpolating strings into text() reopens SQL injection.
 
 SQLAlchemy ORM queries (`.where(User.name == value)`) are always parameterized — the value is never interpolated into the SQL string. For raw SQL, use `text()` with bound parameters: `text("SELECT * FROM users WHERE name = :name")` executed with `{"name": value}`. The dangerous anti-pattern is `text(f"SELECT ... WHERE name = '{user_input}'")` — string interpolation into `text()` bypasses parameterization. The `LIKE`/`ILIKE` pattern uses `.ilike(f"%{value}%")` on the ORM column, which parameterizes the entire pattern string.
 
-**Q11: How would you remove Swagger UI in production without breaking the OpenAPI spec generation?**
+**Q12: How would you remove Swagger UI in production without breaking the OpenAPI spec generation?**
 **Short:** Pass docs_url=None and redoc_url=None to disable the UI while keeping the OpenAPI spec endpoint active.
 
 Pass `docs_url=None, redoc_url=None` to the `FastAPI()` constructor. This disables the `/docs` and `/redoc` HTML UIs while leaving the `/openapi.json` spec endpoint active. If the spec endpoint must also be restricted, additionally pass `openapi_url=None` or protect it with an `HTTPBasic` dependency. Internal developer portals can mount Swagger UI on a separate path behind VPN or authentication.
 
-**Q12: What tools belong in a Python security CI pipeline and what does each check?**
+**Q13: What tools belong in a Python security CI pipeline and what does each check?**
 **Short:** bandit checks code patterns, pip-audit checks dependency CVEs, and detect-secrets blocks committed secrets.
 
 `bandit` performs static analysis for common Python security issues (hardcoded passwords, `subprocess` shell injection, `pickle.loads`, `eval`, weak cryptography) and runs in under 10 seconds on most codebases. `pip-audit` compares installed packages against the OSV and PyPI Advisory databases and blocks deploys on HIGH/CRITICAL CVEs. `detect-secrets` runs as a pre-commit hook to prevent committing API keys, passwords, and tokens. Together these three cover the supply chain (pip-audit), code patterns (bandit), and accidental secret commits (detect-secrets).
 
-**Q13: What is improper inventory management (OWASP API9) and how do versioned APIRouters address it?**
+**Q14: What is improper inventory management (OWASP API9) and how do versioned APIRouters address it?**
 **Short:** Versioned APIRouters with deprecation headers prevent forgotten old API versions from staying reachable.
 
 Improper inventory management means old, forgotten, or shadow API endpoints remain accessible after newer versions ship. Attackers probe `/v1/`, `/v0/`, `/internal/`, `/debug/` paths. The FastAPI fix is explicit `APIRouter` versioning with a deprecation lifecycle: add a `Deprecated: true` header and `Sunset: <date>` header to v1 routes when v2 ships, and remove them on the sunset date. CI can count public routes via `app.routes` and alert on unexpected additions.
 
-**Q14: What is the difference between Broken Function Level Authorization (BFLA) and BOLA?**
+**Q15: What is the difference between Broken Function Level Authorization (BFLA) and BOLA?**
 **Short:** BFLA checks whether a role can perform an operation at all, while BOLA checks ownership of a specific object.
 
 BFLA is a missing check on which *operations* a caller's role permits, while BOLA is a missing
@@ -891,18 +959,29 @@ yet still lack the role to call a privileged operation like `DELETE /users/{id}`
 Apply BFLA role checks and BOLA ownership checks together — an admin-only delete route still
 needs a tenant check if admins are themselves scoped per tenant.
 
-**Q15: Why enforce a request body size limit before the handler runs, and what status code should the rejection return?**
-**Short:** A size-limit check before call_next rejects oversized bodies with 413 without ever buffering them.
+**Q16: Why enforce a request body size limit before the handler runs, and what status code should the rejection return?**
+**Short:** One request with an unbounded body can exhaust memory, so count body bytes in middleware and answer 413 once the cap is crossed, before any parsing.
 
 An unbounded request body lets a single client exhaust server memory or disk by streaming a
 multi-gigabyte payload into a handler that buffers it. This is a denial-of-service vector
-distinct from rate limiting because a single request is enough; the `RequestSizeLimitMiddleware`
-example checks `Content-Length` against a 1 MB default cap before `call_next` runs, returning
-`413 Payload Too Large` without ever reading the oversized body into memory. Reject at the
-middleware layer, before any parsing or database interaction, so an oversized request costs only
-a header inspection.
+distinct from rate limiting because a single request is enough. Starlette 1.6.0+
+`RequestBodyLimitMiddleware(max_body_size=1_048_576)` wraps `receive` and counts the bytes the
+server delivers, so it stops a chunked upload with no `Content-Length` as well as one that
+declares a size over the cap, and answers `413 Content Too Large` before the handler, body
+parsing, or any database call runs. Keep a matching reverse-proxy limit as a second layer.
 
-**Q16: Why does using UUIDv7 instead of sequential integer IDs in API paths raise the bar against enumeration attacks?**
+**Q17: Why is a middleware that rejects requests whose `Content-Length` exceeds the limit not enough to cap body size?**
+**Short:** Content-Length is client-supplied and optional; a chunked upload omits it and a liar understates it, so the limit must count the bytes actually received.
+
+The header is a claim, not a measurement. A chunked request (`Transfer-Encoding: chunked`) has
+no `Content-Length`, and a client can send a small value and then keep writing. A check that
+only reads the header passes both, and the handler then buffers whatever arrives. The fix is
+to count real bytes as `receive()` yields them and abort at the one that crosses the cap.
+Starlette 1.6.0+ does this in `RequestBodyLimitMiddleware` and uses the header only as a
+fail-fast shortcut; on older stacks the options were a reverse-proxy limit or a byte counter
+over `request.stream()` in the handler.
+
+**Q18: Why does using UUIDv7 instead of sequential integer IDs in API paths raise the bar against enumeration attacks?**
 **Short:** UUIDv7 IDs are unpredictable enough to block enumeration attacks that sequential integer IDs invite.
 
 A sequential integer ID lets an attacker increment `/invoices/1001` to `/invoices/1002` and
@@ -931,6 +1010,7 @@ authorization bug.
 - Validate every third-party API response through a strict Pydantic model (`extra="forbid"`) before inserting to the database or returning to the caller.
 - Use UUIDs (v7 for sortability) rather than sequential integers for resource IDs in API paths to raise the bar for enumeration attacks.
 - Return `403` (not `404`) when an authenticated user requests a resource they do not own.
+- Keep `strict_content_type=True` (the default since FastAPI 0.132). Scope `strict_content_type=False` to one `APIRouter` for a client that cannot send `Content-Type`, and give that router its own authentication such as an HMAC signature.
 
 ---
 
@@ -1103,7 +1183,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.cors import CORSMiddleware
-from app.middleware import SecurityHeadersMiddleware, RequestSizeLimitMiddleware
+from starlette.middleware.body_limit import RequestBodyLimitMiddleware
+from app.middleware import SecurityHeadersMiddleware
 from app.config import settings
 
 app = FastAPI(
@@ -1116,7 +1197,7 @@ app = FastAPI(
 app.add_middleware(SecurityHeadersMiddleware)
 
 # Request size limit: 1 MB
-app.add_middleware(RequestSizeLimitMiddleware, max_bytes=1_048_576)
+app.add_middleware(RequestBodyLimitMiddleware, max_body_size=1_048_576)
 
 # CORS: explicit origins only
 app.add_middleware(
@@ -1158,7 +1239,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 | BFLA | DELETE protected only by auth | `require_role("admin","billing")` |
 | Security misconfiguration | `allow_origins=["*"]`, stack traces | Explicit origins, RFC 9457 handler |
 | Secret exposure | DB URL in source code | `SecretStr` via env vars |
-| Request DoS | No body size limit | `RequestSizeLimitMiddleware` 1 MB |
+| Request DoS | No body size limit | `RequestBodyLimitMiddleware` 1 MiB |
 
 #### Discussion Questions
 

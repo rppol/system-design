@@ -51,6 +51,12 @@ Strong-consistency durable execution with first-class SDKs for TypeScript, Pytho
 
 Purpose-built for LLM agents. StateGraph nodes; `InMemorySaver` (built in; `MemorySaver` is the legacy alias), plus `SqliteSaver`, `PostgresSaver` and `RedisSaver` from separate `langgraph-checkpoint-*` packages, each with an `Async*` variant for async graphs. Resume any thread by `thread_id`. `interrupt_before` for human-in-the-loop pauses.
 
+### 4.5 Managed Agent Runtimes
+
+The provider runs the agent loop, the sandbox, and the state store, so you write no workflow code. Claude Managed Agents (beta header `managed-agents-2026-04-01`) is built on four objects: an agent (model, system prompt, tools, MCP servers, skills), an environment (an Anthropic-managed cloud sandbox or a self-hosted sandbox on your own infrastructure), a session (one running agent instance), and events (user turns, tool results, and status updates, streamed over SSE). The server persists the full event history, so a session resumes after a pause, and you steer or interrupt it by sending more events. A session budget (added 2026-08-07) is a hard spend cap at list prices: the session pauses with stop reason `budget_reached` instead of failing. The `auto` permission policy (2026-09-10) has the server run, deny, or pause each tool call for approval. Scheduled deployments run sessions on a cron schedule. OpenAI's Agents API (public beta, 2026-09-10) is the same shape: a managed Codex harness with durable sessions in OpenAI-hosted sandboxes or your own.
+
+The cost is data posture. Because sessions store history, sandbox state, and outputs server-side, Claude Managed Agents is not eligible for Zero Data Retention or HIPAA BAA coverage. You can delete sessions and files through the API.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -173,7 +179,7 @@ class AgentState(TypedDict):
 async def agent_step(state: AgentState) -> dict:
     """Single LLM call + tool execution."""
     resp = await client.messages.create(
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         max_tokens=2048,
         messages=state["messages"],
         tools=YOUR_TOOLS,
@@ -286,7 +292,7 @@ from datetime import timedelta
 
 
 @activity.defn
-async def llm_call(messages: list, model: str = "claude-sonnet-5") -> dict:
+async def llm_call(messages: list, model: str = "claude-sonnet-5-5") -> dict:
     """Idempotent: only called once per attempt; result cached."""
     resp = await client.messages.create(model=model, max_tokens=2048, messages=messages)
     return {
@@ -407,6 +413,17 @@ class DurableAgentWorkflow:
 | Cost | Self-host free / Cloud $$ | SaaS tiered | Self-host free | Free |
 | Learning curve | Steep | Gentle | Medium | Gentle |
 | Native LLM features | None | None | None | Many |
+
+**Build vs hosted runtime:**
+
+| Dimension | Durable engine + your agent loop (Temporal, LangGraph) | Managed agent runtime (Claude Managed Agents, OpenAI Agents API) |
+|---|---|---|
+| Who owns the loop, sandbox, and state store | You | Provider |
+| Model choice | Any provider | The provider's models |
+| Crash recovery | Replay or checkpoint resume you configure | Server-side event history; the session resumes |
+| Spend cap | Your own budget check in state | Session budget, pauses with `budget_reached` (Claude) |
+| Data retention | Your storage and retention policy | Provider stores history; Claude Managed Agents is not ZDR or HIPAA BAA eligible |
+| Non-agent steps (payments, ETL, approvals across systems) | First-class activities | Only through tools or MCP servers |
 
 ---
 
@@ -548,6 +565,8 @@ why the failure surfaces later and hurts less.
 | LangGraph + checkpointers | Agent-specific durability | SqliteSaver, RedisSaver, PostgresSaver, MongoDBSaver |
 | Cadence | Temporal's predecessor | Created and still maintained at Uber; Temporal is the fork by its original authors |
 | AWS Step Functions | Cloud-native workflows | JSON-based, no code agent native |
+| Claude Managed Agents | Managed agent runtime | Beta; hosted or self-hosted sandbox, server-side event history, session budgets; not ZDR eligible |
+| OpenAI Agents API | Managed agent runtime | Public beta 2026-09-10; managed Codex harness, durable sessions, hosted or own sandbox |
 | Airflow / Prefect / Dagster | DAG schedulers | Less LLM-specific |
 
 ---
@@ -581,6 +600,10 @@ Context compaction is summarizing the early conversation history to free up toke
 **Q: How do you cap cost on a long-running agent?**
 **Short:** Track cumulative token cost in state and terminate gracefully with a partial result once it crosses the budget.
 Track cumulative cost in state (input_tokens × input_price + output_tokens × output_price + cache costs). Before every LLM call, check if cost exceeds budget; if so, terminate gracefully with partial result. For multi-day workflows, also cap per-day spend (catch a runaway loop) and total budget (catch overall scope creep).
+
+**Q: When does a managed agent runtime beat a durable-execution engine, and what does it cost you?**
+**Short:** A hosted runtime wins when the agent is the whole job; it ties you to one provider and keeps history server-side, which rules out ZDR on Claude.
+A managed runtime (Claude Managed Agents, OpenAI Agents API) wins when the workflow is one agent working in a sandbox: the provider supplies the loop, the sandbox, compaction, the event history, and resume, so a team ships without running Temporal or a checkpoint database. Claude Managed Agents also gives a hard session budget that pauses the session with `budget_reached`, and an `auto` permission policy that pauses risky tool calls for approval. A durable engine wins when the agent is one step in a larger business process (payments, approvals across systems, multi-provider model routing) or when data cannot leave your control. The price of the hosted path is retention: the provider stores conversation history, sandbox state, and outputs, so Claude Managed Agents is not eligible for Zero Data Retention or HIPAA BAA coverage. A self-hosted sandbox keeps execution on your infrastructure, but the event history still lives with the provider.
 
 **Q: What's the difference between Temporal signals and queries?**
 **Short:** Signals are asynchronous buffered input to a workflow; queries are synchronous reads of its current state.

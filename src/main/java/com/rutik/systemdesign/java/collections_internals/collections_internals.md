@@ -66,6 +66,7 @@ This module covers the internal implementation of the major collection types: th
 | `Map.of(...)` | Immutable | UnsupportedOperationException | Yes |
 | `Collections.unmodifiableList(list)` | View (unmodifiable wrapper) | UnsupportedOperationException | Depends on wrapped list |
 | `List.copyOf(list)` (Java 10+) | Immutable copy | UnsupportedOperationException | Yes |
+| `List.ofLazy(n, i -> ...)`, `Map.ofLazy`, `Set.ofLazy` (JEP 531, JDK 27 preview) | Lazy, fixed size (preview, `--enable-preview`) | UnsupportedOperationException; each value computed once on first access, even under concurrent access | Yes (a computed `null` is rejected) |
 
 Key difference: `Collections.unmodifiableList()` is a *view* — modifications to the underlying list are reflected in the unmodifiable wrapper. `List.of()` is a fully independent immutable instance [Effective Java Item 17: "Minimize mutability"].
 
@@ -688,6 +689,9 @@ Map<String, Person> byDept = people.stream()
 // Fix: provide merge function
 .collect(Collectors.toMap(Person::getDept, Function.identity(), (a,b) -> a));
 ```
+
+### War Story 5: a `WeakHashMap` keyed by `Integer` or `LocalDate`
+A cache keyed `WeakHashMap<Integer, Session>` never evicted ids from -128 to 127: those boxes come from the `Integer` cache, which keeps them strongly reachable forever, so the weak keys never clear. Under JEP 401 (Value Objects, JDK 28 preview with `--enable-preview`) the boxes and `java.time` types such as `LocalDate` and `Duration` are value classes, and creating a `Reference` to a value object throws `IdentityException`, so the same `put` fails at run time; `javac` has warned about value-based classes in these APIs since JDK 25. **Fix**: key a `WeakHashMap` only by identity objects whose lifetime you control (a session or class-loader object), and use a size- or time-bounded cache for value keys.
 
 ---
 

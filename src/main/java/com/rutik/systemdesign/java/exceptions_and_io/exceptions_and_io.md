@@ -207,6 +207,46 @@ try {
 }
 ```
 
+### Helpful NullPointerException Messages [JEP 358, default since Java 15]
+
+When the JVM itself throws an NPE, `getMessage()` names the operation that failed and
+the expression that was null. JEP 358 added this in Java 14 behind
+`-XX:+ShowCodeDetailsInExceptionMessages`; JDK-8233014 turned it on by default in
+Java 15. Before that, `getMessage()` returned `null` and the stack trace gave only a
+line number, which is ambiguous on a line like `a.b().c().d()`.
+
+```java
+static int emailDomainLength(Customer c) {
+    String email = c.getProfile().getEmail();
+    return email.substring(email.indexOf('@')).length();
+}
+```
+
+| Null value | Message (class compiled with `-g`) |
+|------------|------------------------------------|
+| `c` | `Cannot invoke "com.example.Customer.getProfile()" because "c" is null` |
+| `getProfile()` returned null | `Cannot invoke "com.example.Profile.getEmail()" because the return value of "com.example.Customer.getProfile()" is null` |
+| `email` | `Cannot invoke "String.indexOf(int)" because "email" is null` |
+| `email`, class compiled without `-g` | `Cannot invoke "String.indexOf(int)" because "<local1>" is null` |
+
+Variable names come from the class file's `LocalVariableTable`, which `javac` writes
+only with `-g` (plain `javac` emits line numbers and source file, not local names).
+Maven's compiler plugin and Gradle pass `-g` by default, so most builds show real names;
+a release build with `-g:none` or `-g:lines,source` shows `<localN>` slot numbers.
+
+Three mechanics matter in production:
+
+- **Lazy.** The JVM computes the text only when `getMessage()` is called, by analyzing
+  the bytecode of the failing method. An NPE that is caught and dropped costs nothing
+  extra.
+- **JVM-thrown only.** `throw new NullPointerException()`,
+  `Objects.requireNonNull(x)` without a message, and NPEs from hidden frames (lambda
+  forms) get no generated text.
+- **It reveals code.** The message exposes method and local variable names. If an
+  error handler returns `e.getMessage()` to API clients, it leaks internals; log the
+  message server-side and send a generic error. `-XX:-ShowCodeDetailsInExceptionMessages`
+  turns the feature off.
+
 ### finally Block Edge Cases
 
 ```java
@@ -608,7 +648,10 @@ A JDBC application threw a `SQLException` in the `try` block (query failed). The
 ### War Story 3: Serialization breaks singleton
 A team was surprised to find their singleton getting duplicated after cache serialization. Deserialization does **not** run the class's own constructor — it allocates the object and runs only the no-arg constructor of the nearest non-serializable superclass (`Object`, usually), then restores the fields from the stream. That is precisely why a private constructor cannot protect a singleton: the private constructor is never called, and a second instance appears anyway. **Fix**: Implement `readResolve()` to return the canonical instance, or switch to an enum singleton.
 
-### War Story 4: `serialVersionUID` mismatch
+### War Story 4: `NullPointerException: null` in a log after a JDK 11 to 17 upgrade
+A payment service logged only `e.getMessage()` (no stack trace) to save log volume. On JDK 11 every NPE appeared as the useless line `NPE: null`. After the move to JDK 17 the same log line read `Cannot invoke "com.acme.Card.getToken()" because the return value of "com.acme.Wallet.primaryCard()" is null`, which pinned a week-old intermittent failure to wallets with no primary card in one deploy. The same upgrade exposed the flip side: a REST error mapper that echoed `e.getMessage()` to clients started returning internal class and method names. **Fix**: log the full exception server-side, return a generic error body, and never forward `getMessage()` of an unexpected exception to a caller.
+
+### War Story 5: `serialVersionUID` mismatch
 After adding a field to a serialized class without updating `serialVersionUID`, the deserialization of stored data threw `InvalidClassException`. **Fix**: Always declare `private static final long serialVersionUID = 1L;` (or IDE-generated UID) and follow versioning discipline when changing serialized classes.
 
 ---
@@ -652,47 +695,71 @@ Resources are closed in LIFO (reverse declaration) order. If the `try` body thro
 
 A suppressed exception is one that was thrown during the cleanup phase (e.g., `close()` in `try-with-resources`) when another exception was already in flight from the `try` body. Java 7 added `Throwable.addSuppressed(Throwable)` and `Throwable.getSuppressed()`. The primary exception propagates; suppressed exceptions are attached to it. Accessing them: `catch (IOException e) { Throwable[] suppressed = e.getSuppressed(); }`. Logging frameworks should log suppressed exceptions too.
 
-**Q6: Why is Java serialization a security risk?**
+**Q6: What does a helpful NullPointerException message show, and when does it include local variable names?**
+**Short:** It names the failed operation and the null expression; local names appear only if the class was compiled with -g, otherwise slots like <local1>.
+
+Since Java 15 (JEP 358, added in 14 behind a flag) an NPE thrown by the JVM carries a
+message such as `Cannot invoke "String.length()" because "name" is null`, or `because
+the return value of "com.example.Customer.getProfile()" is null` for a chained call. The
+JVM builds it from the failing method's bytecode, so it can name fields, array
+elements, and method return values. Local variable names come from the
+`LocalVariableTable`, which exists only when the class was compiled with `-g`; without
+it the message reads `"<local1>"`. Maven and Gradle compile with `-g` by default, plain
+`javac` does not. Because the message reveals code structure, do not return it to
+external callers.
+
+**Q7: When is the helpful NPE message computed, and which NPEs never get one?**
+**Short:** It is computed lazily on the first getMessage() call, and only for NPEs the JVM throws, not ones created with new or requireNonNull.
+
+The JVM does not build the text when the NPE is thrown; it analyzes the bytecode when
+`getMessage()` (or `toString()`, `printStackTrace()`) is first called, so a code path
+that catches and discards NPEs pays nothing extra. Only NPEs raised by the JVM for a
+null dereference qualify. `throw new NullPointerException()`, `Objects.requireNonNull(x)`
+with no message, and NPEs in hidden frames keep a `null` message, which is one reason
+to always pass a message to `requireNonNull` in public APIs. The feature is on by
+default and `-XX:-ShowCodeDetailsInExceptionMessages` switches it off.
+
+**Q8: Why is Java serialization a security risk?**
 **Short:** Java deserialization can execute arbitrary code because readObject() runs attacker-controlled gadget chains.
 
 Deserialization invokes `readObject()` on each object being deserialized, which can execute arbitrary Java code. Attackers craft "gadget chains" — sequences of classes in common libraries (Apache Commons Collections, Spring, etc.) whose `readObject()` methods, when chained together, execute shell commands. This has affected WebLogic, Jenkins, JBoss, Apache Camel. The attack doesn't require any special privileges — just the ability to send bytes to `ObjectInputStream.readObject()`. Fix: use JSON/protobuf; if Java serialization is required, use `ObjectInputFilter` allowlisting.
 
-**Q7: What does `transient` do?**
+**Q9: What does `transient` do?**
 **Short:** The transient keyword excludes a field from serialization, so it gets its default value on deserialization.
 
 `transient` marks a field that should be excluded from serialization. When the object is serialized, transient fields are not written; when deserialized, they get their default value (null for objects, 0 for primitives, false for boolean). Use for: sensitive data (passwords), derived values (cache fields), non-serializable objects (threads, streams). You can provide `readObject(ObjectInputStream ois)` to reinitialize transient fields after deserialization.
 
-**Q8: How does `readResolve()` work for singleton deserialization?**
+**Q10: How does `readResolve()` work for singleton deserialization?**
 **Short:** readResolve() lets a deserialized object be replaced with an existing instance, preserving singleton identity.
 
 After an object is deserialized, if it defines a `readResolve()` method, the JVM calls it and uses the returned object instead of the deserialized one. For singletons, `readResolve()` returns the existing singleton instance — the deserialized copy is discarded by GC. This prevents deserialization from breaking the singleton invariant. The method signature must be `private Object readResolve()`. Better approach: use enum-based singleton (Effective Java Item 3) — the JVM handles enum serialization correctly by design, using the name to look up the existing constant.
 
-**Q9: What is the Decorator pattern in Java I/O, and give an example?**
+**Q11: What is the Decorator pattern in Java I/O, and give an example?**
 **Short:** Java I/O implements the Decorator pattern, wrapping streams like BufferedInputStream to add behavior at runtime.
 
 The Decorator pattern adds behavior to objects by wrapping them in objects with the same interface. Java I/O is built on it: `InputStream` is the component; `FileInputStream` is the concrete component; `BufferedInputStream`, `DataInputStream`, `CipherInputStream` are decorators that each wrap an `InputStream` and add a capability (buffering, primitive reading, encryption). Example: `new BufferedReader(new InputStreamReader(new FileInputStream("file.txt"), "UTF-8"))` — 3 decorators stacked to give buffered, charset-decoded, file-backed character reading.
 
-**Q10: When would you use NIO.2 `WatchService`?**
+**Q12: When would you use NIO.2 `WatchService`?**
 **Short:** WatchService gives OS-level filesystem change notifications, avoiding the overhead of polling for changes.
 
 `WatchService` provides OS-level filesystem change notifications (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) — more efficient than polling. Use it for: hot-reloading configuration files without restart; monitoring upload directories for new files; log rotation detection; build tool file watchers (IDE hot reload). Example: `path.register(watcher, ENTRY_CREATE, ENTRY_MODIFY)` then `watcher.take()` blocks until a change, processes events, resets the key, and loops.
 
-**Q11: What is the difference between `Files.copy()` and manually copying with streams?**
+**Q13: What is the difference between `Files.copy()` and manually copying with streams?**
 **Short:** Files.copy() uses a kernel-space copy on Linux, avoiding the user-space buffering of manual stream copying.
 
 `Files.copy(src, dst, REPLACE_EXISTING)` is the idiomatic NIO.2 copy. On Linux the JDK implements it with a native kernel-space copy that prefers `copy_file_range(2)` and falls back to `sendfile(2)`, so the bytes never enter the JVM's address space at all. Manual stream copy: `while ((n = in.read(buf)) != -1) out.write(buf, 0, n)` — data goes through user-space buffer (typically 8KB). `Files.copy()` is also correct with respect to attributes, exceptions, and resource cleanup. Always prefer `Files.copy()` unless you need to transform data during the copy.
 
-**Q12: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
+**Q14: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
 **Short:** Exceptions thrown inside a submit()ed task are captured in the Future and stay invisible unless get() is called.
 
 A task submitted with `submit()` never lets its exception escape: `FutureTask.run()` catches the throwable and stores it in the `Future`, so if nobody calls `Future.get()` the failure is invisible. The fix depends on which entry point you used. With `submit()` there are two options: call `Future.get()` and handle the `ExecutionException` (its `getCause()` is the original), or subclass `ThreadPoolExecutor` and override `afterExecute(Runnable, Throwable)`, unwrapping the `Future` there — `afterExecute` receives a `null` throwable for submitted tasks precisely because the exception is inside the future. With `execute(Runnable)` the throwable does escape the worker thread, so `Thread.UncaughtExceptionHandler` (installed per-pool via a custom `ThreadFactory`, or globally via `Thread.setDefaultUncaughtExceptionHandler`) fires normally. The trap worth remembering for interviews: an `UncaughtExceptionHandler` on a pool whose tasks are all `submit()`ed will never fire once, and the team concludes the pool is healthy.
 
-**Q13: What is a memory-mapped file and when would you use `FileChannel.map()`?**
+**Q15: What is a memory-mapped file and when would you use `FileChannel.map()`?**
 **Short:** A memory-mapped file maps file bytes into the process's address space via FileChannel.map(), enabling zero-copy access.
 
 A memory-mapped file maps a region of a file into the process's virtual address space via `FileChannel.map()`, returning a `MappedByteBuffer`. The OS manages paging: reading a byte triggers a page fault that loads the 4KB OS page from disk into memory. No explicit `read()` calls needed — the buffer is accessed like a byte array. Benefits: (1) Zero-copy read — no user-space buffer, data goes from OS page cache to application directly. (2) Random access: seeking to position N is O(1) — no stream seeking needed. (3) Shared across processes — multiple JVMs mapping the same file share the OS page cache. Use when: parsing large binary files (log files, database files), implementing file-backed caches, random access to large data sets. Two limitations: the `size` argument must fit in an `int` (`Integer.MAX_VALUE`), because `ByteBuffer` indexes with an int, so a file over 2GB needs several mappings at successive offsets; and a `MappedByteBuffer` cannot be explicitly unmapped, so the mapping (and on Windows, the file lock) survives until GC collects the buffer. Java 22 added the fix for both: `channel.map(mode, offset, size, arena)` returns a `MemorySegment` whose mapping is torn down deterministically when the `Arena` closes, and it is not limited to `Integer.MAX_VALUE`.
 
-**Q14: What happens when `try`, `catch`, and `finally` all throw exceptions, and which one propagates?**
+**Q16: What happens when `try`, `catch`, and `finally` all throw exceptions, and which one propagates?**
 **Short:** A finally block's exception silently discards exceptions from both the try and catch blocks unless explicitly suppressed.
 
 When `finally` throws an exception, it **suppresses** any exception from `try` or `catch` — the `finally` exception propagates and the others are silently discarded. This is a particularly dangerous failure mode: the original exception that caused the `catch` block to execute is lost:
@@ -720,12 +787,12 @@ try {
 
 `try-with-resources` (Java 7) handles this correctly: if both the body and `close()` throw, the close exception is added as a suppressed exception via `Throwable.addSuppressed()` — the primary exception propagates and nothing is lost.
 
-**Q15: What is serialization `serialVersionUID` and what happens when it is absent or mismatched?**
+**Q17: What is serialization `serialVersionUID` and what happens when it is absent or mismatched?**
 **Short:** serialVersionUID identifies a serializable class's version; a mismatch on deserialization throws InvalidClassException.
 
 `serialVersionUID` is a 64-bit long stored in the serialized byte stream that identifies the version of the class used to serialize the object. On deserialization, the JVM compares the stream's UID with the class's UID; a mismatch throws `InvalidClassException`. When `serialVersionUID` is absent, the JVM computes a default UID from the class's structure (fields, methods, access modifiers) via a SHA-1-based algorithm. Any structural change (adding a field, renaming a method) changes the computed UID, breaking deserialization of previously serialized data. Two failure modes: (1) **Unintentional break** — adding a field to a class without declaring `serialVersionUID` silently breaks deserialization across deploys. (2) **Declared UID mismatch** — deliberately changing it signals an incompatible version change. Best practice: always declare `private static final long serialVersionUID = 1L;` in all `Serializable` classes, increment it manually only for truly incompatible structural changes.
 
-**Q16: What is the default charset on a modern JDK, and where does it still not apply?**
+**Q18: What is the default charset on a modern JDK, and where does it still not apply?**
 **Short:** Since Java 18 (JEP 400), Charset.defaultCharset() is UTF-8 everywhere, but System.out still uses the console's charset.
 
 Since Java 18 (JEP 400) `Charset.defaultCharset()` is UTF-8 on every platform, independent of the OS locale. Before that it was derived from the locale, which is why the same code read a file correctly on a developer laptop and produced mojibake in a `LANG=C` container. The locale-derived charset is still readable via the `native.encoding` property (Java 17+), and `-Dfile.encoding=COMPAT` restores the old behaviour as a migration escape hatch. The change reaches every API that takes the default charset implicitly: `FileReader`, `FileWriter`, `InputStreamReader`, `PrintStream`, `Scanner`, `Formatter`. It does **not** reach `Files.readString`/`Files.newBufferedReader`/`Files.lines`, which always specified UTF-8 anyway. The one place it still does not apply is the console: `System.out` and `System.err` encode with the terminal's charset (`stdout.encoding`/`stderr.encoding`), so a program can write valid UTF-8 to disk and still print question marks to a Windows console — which is why you diagnose encoding bugs from the bytes on disk, never from console output. The durable habit is to name `StandardCharsets.UTF_8` explicitly at every boundary you control.
@@ -738,7 +805,7 @@ Since Java 18 (JEP 400) `Charset.defaultCharset()` is UTF-8 on every platform, i
 2. **Never swallow exceptions silently** — at minimum, `log.error("Failed: {}", e.getMessage(), e)`.
 3. **Include context in exception messages** — order ID, user ID, the input that caused the failure.
 4. **Preserve exception cause** with `new WrapperException("msg", originalCause)`.
-5. **Use `Objects.requireNonNull()` with message** for early validation in public APIs.
+5. **Use `Objects.requireNonNull()` with message** for early validation in public APIs; the JVM's helpful NPE text applies only to NPEs it throws itself.
 6. **Declare `serialVersionUID` explicitly** to control serialization compatibility.
 7. **Mark sensitive fields `transient`** in serialized classes (passwords, tokens).
 8. **Use `readResolve()` or enum** for serializable singletons.

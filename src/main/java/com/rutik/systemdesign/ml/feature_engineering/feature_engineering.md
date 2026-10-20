@@ -883,7 +883,7 @@ df["amount_transformed"] = pt.fit_transform(df[["amount"]])
 | feature-engine (pip)         | Outlier cappers, lag features, cyclic encoding | Time-series friendly |
 | featuretools (pip)            | Automated deep feature synthesis          | Relational data |
 | Feast                        | Open-source feature store                 | Offline + online serving |
-| Tecton                       | Managed feature platform                  | Real-time streaming features |
+| Databricks-Tecton            | Managed feature platform (Databricks)     | Real-time streaming features |
 | Hopsworks                    | Open feature store                        | Spark + Python |
 | pandas + numpy               | Custom transformations                    | Always needed |
 | Great Expectations           | Feature validation / data quality         | Catch drift pre-pipeline |

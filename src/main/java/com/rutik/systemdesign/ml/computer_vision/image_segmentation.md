@@ -63,7 +63,7 @@ The core mental model: every pixel is a classification problem conditioned on it
 
 ### Foundation Model: SAM
 
-SAM (Segment Anything Model, Meta 2023) is a promptable segmentation model trained on SA-1B (1B masks, 11M images). Accepts three prompt types: point clicks, bounding boxes, or text. SAM 2 (2024) extends to video with memory attention for consistent instance tracking across frames.
+SAM (Segment Anything Model, Meta 2023) is a promptable segmentation model trained on SA-1B (1B masks, 11M images). Accepts point, box, and mask prompts and segments the one region each prompt indicates. SAM 2 (2024) extends to video with memory attention for consistent instance tracking across frames. SAM 3 (Meta, November 2025, SAM License) adds concept prompts, a short noun phrase or an image exemplar, and returns every matching instance in an image or video; SAM 3.1 followed in March 2026.
 
 ---
 

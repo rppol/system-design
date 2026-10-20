@@ -165,7 +165,7 @@ sequenceDiagram
 - **When notification order matters critically** — the Observer pattern does not guarantee notification order by default.
 - **When the Subject and Observer are in a tight feedback loop** — an Observer that modifies the Subject during `update()` can cause infinite loops or unexpected re-entrant calls.
 - **When observers need transactional guarantees** — if some observers must succeed and others must not be notified on failure, you need a more robust event bus with rollback support.
-- **When observers are in different threads** — naive Observer implementations are not thread-safe. Consider using a proper event bus (Guava EventBus, RxJava) instead.
+- **When observers are in different threads** — naive Observer implementations are not thread-safe. Use a container-managed or reactive mechanism instead (Spring `ApplicationEventPublisher` with `@Async`, Project Reactor, RxJava 3).
 
 ---
 
@@ -233,6 +233,12 @@ The solution uses Guava `EventBus` (synchronous, single-threaded) for in-process
 development/staging, then promotes to `AsyncEventBus` backed by a bounded `ThreadPoolExecutor`
 for production. The payment thread posts the event and returns immediately — each subscriber
 processes asynchronously within its own executor thread.
+
+Guava's own `EventBus` Javadoc says "We recommend against using EventBus": no backpressure, little
+thread control or monitoring, reflection that breaks under minifiers, and producer-subscriber links
+that are hard to trace. The scenario keeps it because it shows the async fan-out mechanics in a few
+lines. For a new service, build the same shape on Spring `ApplicationEventPublisher` with an
+`@Async` listener executor, or on a Reactor `Sinks.Many` when the subscribers need backpressure.
 
 **Scale numbers** — illustrative for this one hypothetical service (order-of-magnitude, not a
 published benchmark; Guava ships no official `EventBus` JMH numbers):
@@ -377,8 +383,9 @@ public class FraudCheckSubscriber {
 ### Famous Codebase Usages
 
 - **Guava `EventBus` / `AsyncEventBus`** (`com.google.common.eventbus`): annotation-driven subscriber
-  registration via `@Subscribe`; `AsyncEventBus` wraps any `Executor`; used extensively in Android apps
-  and backend services for in-process event decoupling.
+  registration via `@Subscribe`; `AsyncEventBus` wraps any `Executor`; found in many older Android apps
+  and backend services. Guava's Javadoc now recommends against it in favor of DI frameworks,
+  Reactor or RxJava, and Kotlin coroutines.
 - **Spring `ApplicationEventPublisher`**: `AbstractApplicationContext.publishEvent()` dispatches
   `ApplicationEvent` objects to all `ApplicationListener<E>` beans; `@TransactionalEventListener`
   guarantees delivery only after the surrounding transaction commits (eliminates phantom events).
@@ -438,10 +445,9 @@ public class PaymentSubject {
         }
     }
 }
-// Better yet: use Guava's EventBus at all. BOTH the synchronous EventBus and
-// AsyncEventBus route a subscriber's exception to the SubscriberExceptionHandler
-// (default: LoggingHandler) instead of aborting the dispatch loop or propagating to
-// the poster. AsyncEventBus additionally moves the LATENCY off the posting thread.
+// Guava's EventBus and AsyncEventBus give the same isolation: a subscriber's exception
+// goes to the SubscriberExceptionHandler (default: LoggingHandler) instead of aborting
+// the dispatch loop. Spring's multicaster does NOT isolate unless setErrorHandler(...) is set.
 ```
 
 ---
@@ -1016,7 +1022,7 @@ A: Because it lets `this` escape before the object is fully constructed: once th
 
 5. **Consider weak references** for long-lived Subjects with short-lived Observers to mitigate lapsed listener leaks.
 
-6. **Prefer Spring's `ApplicationEventPublisher`** or Guava's `EventBus` in production code over rolling your own Observer implementation.
+6. **Prefer Spring's `ApplicationEventPublisher`** or a reactive library (Project Reactor, RxJava 3) in production code over rolling your own Observer implementation. Guava's `EventBus` Javadoc recommends against using it for new code.
 
 7. **Avoid notifying from a constructor** — Observers attached before the Subject is fully initialized may receive notifications in an inconsistent state.
 
@@ -1030,7 +1036,7 @@ A: Because it lets `this` escape before the object is fully constructed: once th
 |-----------|-------------------|---------------------|
 | Spring `ApplicationEventPublisher` + `@EventListener` | Container-managed observers with type-based dispatch, ordering via `@Order`, and `@Async` for off-thread delivery | The default inside a Spring application |
 | `@TransactionalEventListener(phase = AFTER_COMMIT)` | Delivery deferred until the publishing transaction commits, so observers never react to work that gets rolled back | Any side effect (email, outbound message, cache invalidation) triggered by a database change |
-| Guava `EventBus` / `AsyncEventBus` | A standalone bus with `@Subscribe` handlers and `DeadEvent` for events nobody listened to | Non-Spring JVM applications; `DeadEvent` catches an unregistered subscriber immediately |
+| Guava `EventBus` / `AsyncEventBus` | A standalone bus with `@Subscribe` handlers and `DeadEvent` for events nobody listened to | Existing code that already uses it; Guava's Javadoc recommends against it for new code (no backpressure, reflection-based dispatch), so start new non-Spring code on Reactor, RxJava 3, or plain listener interfaces |
 | `java.beans.PropertyChangeSupport` + `PropertyChangeListener` | The JDK's bound-property mechanism: add/remove listeners and fire only when the value actually changed | Fine-grained per-property notification on a mutable object |
 | `java.util.concurrent.Flow` (JDK 9+) | The Reactive Streams contract in the JDK — `Publisher`, `Subscriber`, `Subscription.request(n)` — i.e. Observer with backpressure | A fast subject would otherwise overwhelm a slow observer |
 | Project Reactor `Flux` / `Sinks`, RxJava 3 `Observable` / `Flowable` | Composable observation: filter, map, buffer, retry, and switch schedulers between subject and observer | Streams of events that need operators rather than a single callback |

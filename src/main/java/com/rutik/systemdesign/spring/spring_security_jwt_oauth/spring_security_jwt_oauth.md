@@ -68,8 +68,8 @@ string. If your service already follows the table above, it is OAuth 2.1-shaped
 whether or not anyone has said the words.
 
 One caveat worth being precise about in an interview: **OAuth 2.1 is still an IETF
-draft, not an RFC.** As of August 2026 it is `draft-ietf-oauth-v2-1-15`, last updated
-2026-03-02, with an IESG state of "I-D Exists" and no assigned RFC number. It is
+draft, not an RFC.** As of October 2026 it is `draft-ietf-oauth-v2-1-16`, last updated
+2026-09-02, with an IESG state of "I-D Exists" and no assigned RFC number. It is
 widely treated as the de-facto target because its content is drawn from already-
 published BCPs such as RFC 9700, but "we are OAuth 2.1 compliant" is a statement about
 following a draft's guidance, not about conforming to a ratified standard.
@@ -525,6 +525,20 @@ public key from the proof's `jwk` header; confirm the key bound into the access 
 token actually presented. Miss the third and the whole scheme is decorative — an
 attacker simply attaches their own proof to the stolen token.
 
+**Spring Security runs these checks for you.** The resource server recognises the
+`Authorization: DPoP <token>` scheme and decodes the proof with
+`DPoPProofJwtDecoderFactory` (since 6.5), whose default validator checks `htm`, `htu`,
+`iat`, the `cnf.jkt` thumbprint, `ath` and `jti`. Replay protection is
+`DPoPProofReplayValidator`: it accepts a proof only if `iat` is within 30 seconds of now,
+and stores a SHA-256 of `jti` in a cache until `iat + 30s`. The default
+`InMemoryCache` holds at most 100,000 entries and 1,000 proofs per JWK thumbprint, and
+rejects new proofs when either limit is hit. That fail-closed behaviour is the fix for
+CVE-2026-41707 (2026-08-20): before 7.1.1 / 7.0.7, an attacker could flood the server to
+evict a captured proof's `jti` from the bounded cache and replay the proof. The floor is
+Spring Security 7.1.1 (Boot 4.1.1) or 7.0.7 (Boot 4.0.8). The in-memory cache works on one
+node only; a fleet behind a load balancer needs a shared `Cache` (Redis, Hazelcast) passed to
+`new DPoPProofReplayValidator(cache)`, or a proof can be replayed once per pod.
+
 **Generating a proof on the client side** uses the ordinary Spring Security JWT
 encoder:
 
@@ -760,24 +774,50 @@ return Jwts.builder()
 // For sensitive data, use JWE (JSON Web Encryption) or keep data server-side
 ```
 
+### Pitfall 7: DPoP replay cache per pod, or one that evicts
+
+A payments API turned on DPoP and ran 12 resource-server pods, each with the default
+in-memory replay cache. A captured proof is valid for 30 seconds, so an attacker who
+replays it to each pod in turn gets up to 12 uses: every pod has its own `jti` set. On
+Spring Security 7.1.0 and earlier, a single pod was also exposed: the cache was size-bounded,
+so a flood of dummy proofs evicted the real `jti` and the replay passed (CVE-2026-41707).
+
+```java
+// BROKEN: per-pod cache on a multi-node fleet, on a version where a full cache evicts
+// spring-security 7.1.0, default DPoPProofJwtDecoderFactory
+
+// FIXED: Spring Security 7.1.1+ (fails closed when full) and one cache for the fleet
+DPoPProofReplayValidator replay = new DPoPProofReplayValidator(redisBackedCache);
+DPoPProofJwtDecoderFactory factory = new DPoPProofJwtDecoderFactory();
+factory.setJwtValidatorFactory(
+    DPoPProofJwtDecoderFactory.createDefaultJwtValidatorFactory(List.of(replay)));
+```
+
+Size the cache for peak proofs per 30-second window (at 5,000 requests/sec that is 150,000
+entries, above the 100,000 default, so the in-memory cache would start rejecting valid
+requests). A full cache now returns `invalid_dpop_proof` instead of evicting, so alert on
+that error rate.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool / Library | Role | Notes |
 |---------------|------|-------|
-| Spring Security 7.x | Security filter chain, method security | Ships with Spring Boot 4.x (Boot 4.1 pairs with Security 7.1) |
+| Spring Security 7.x | Security filter chain, method security | Ships with Spring Boot 4.x; floor is 7.1.1 (Boot 4.1.1) or 7.0.7 (Boot 4.0.8), which fix DPoP replay (CVE-2026-41707) and consent-page XSS (CVE-2026-47877) |
 | spring-boot-starter-oauth2-resource-server | Resource server auto-config | Pulls in Nimbus JOSE+JWT |
 | Nimbus JOSE+JWT | JWT parsing, JWKS fetching | Default in Spring Security OAuth2 |
 | JJWT (io.jsonwebtoken) | JWT building and parsing | Fluent API; use 0.13.x+ |
 | Keycloak | Open-source Authorization Server | Self-hosted; supports OIDC, SAML |
 | Auth0 / Okta | Managed Authorization Server | SaaS; Actions for custom claims |
 | Redis | Refresh token store, blacklist | Sub-millisecond revocation lookup |
-| Spring Authorization Server | Spring-native Authorization Server | Ships inside Spring Security since 7.0 — `org.springframework.security:spring-security-oauth2-authorization-server:7.1.x`; 1.5.x was the last standalone generation |
+| Spring Authorization Server | Spring-native Authorization Server | Ships inside Spring Security since 7.0 as `org.springframework.security:spring-security-oauth2-authorization-server:7.1.x`; 1.5.x was the last standalone generation. The default consent page is XSS-vulnerable before 7.1.1 / 7.0.7 (CVE-2026-47877); upgrade or set `authorizationEndpoint(c -> c.consentPage("/oauth2/consent"))` |
 | DPoP (RFC 9449) | Sender-constrained access tokens | Key thumbprint in `cnf.jkt`; proof JWT carries `htm`/`htu`/`ath`/`jti` |
 | `NimbusJwtEncoder` | Signing a DPoP proof client-side | Encodes the proof JWT from a `JwsHeader` and a `JwtClaimsSet` |
 | `JwsHeader` | DPoP proof header | `type("dpop+jwt")` plus the public `jwk` |
 | `JwtClaimsSet` | DPoP proof claims | `htm`, `htu`, `ath`, `jti`, `iat` |
+| `DPoPProofJwtDecoderFactory` | DPoP proof verification on the resource server | Default validator checks `htm`, `htu`, `iat`, `cnf.jkt`, `ath`, `jti` |
+| `DPoPProofReplayValidator` | DPoP `jti` replay cache | Keeps `jti` until `iat + 30s`; default `InMemoryCache` is 100,000 entries, 1,000 per key, single-node only |
 | jwt.io | Token debugging | Paste token to inspect header/payload |
 | OpenSSL | Generate RSA keypairs for RS256 | `openssl genrsa -out private.pem 2048` |
 
@@ -860,7 +900,7 @@ Signature verification runs first against the cached JWKS public key, then times
 **Q: What does DPoP actually change about a stolen access token?**
 **Short:** It binds the token to a key pair the client holds, so a thief with the token but not the private key cannot use it.
 
-It removes the one property that makes a bearer token dangerous: that holding it is sufficient to use it. Under DPoP (RFC 9449) the client generates a key pair, and the authorization server records the SHA-256 thumbprint of the public key inside the access token — in the `jkt` member of the `cnf` confirmation claim for a JWT. Every request then carries a short-lived DPoP proof JWT (`typ: "dpop+jwt"`) whose `jwk` header holds the public key and whose claims pin it to this exact call: `htm` and `htu` fix the method and URI, `ath` hashes the access token being presented, and `jti` makes the proof single-use. An attacker who lifts the token from a log or a proxy now has an object they cannot present, because they cannot sign a matching proof. The resource server's job is four checks — verify the proof signature, extract the key from `jwk`, confirm it matches the token's `cnf.jkt`, and confirm `ath` hashes the token actually presented. Skipping the third check is the failure that makes the whole scheme decorative, since the attacker just attaches their own proof.
+It removes the one property that makes a bearer token dangerous: that holding it is sufficient to use it. Under DPoP (RFC 9449) the client generates a key pair, and the authorization server records the SHA-256 thumbprint of the public key inside the access token, in the `jkt` member of the `cnf` confirmation claim for a JWT. Every request then carries a short-lived DPoP proof JWT (`typ: "dpop+jwt"`) whose `jwk` header holds the public key and whose claims pin it to this exact call: `htm` and `htu` fix the method and URI, `ath` hashes the access token being presented, and `jti` makes the proof single-use. An attacker who lifts the token from a log or a proxy now has an object they cannot present, because they cannot sign a matching proof. The resource server's job is four checks: verify the proof signature, extract the key from `jwk`, confirm it matches the token's `cnf.jkt`, and confirm `ath` hashes the token actually presented. Skipping the third check is the failure that makes the whole scheme decorative, since the attacker just attaches their own proof. Spring Security's resource server runs all four, plus `htm`/`htu`/`iat`, through `DPoPProofJwtDecoderFactory`, and enforces single-use `jti` with a replay cache that must be shared across pods and, from 7.1.1 / 7.0.7, rejects proofs when full rather than evicting old `jti`s (CVE-2026-41707).
 
 **Q: When is DPoP not worth it?**
 **Short:** When the private key is no harder to steal than the token — a browser SPA holding the key in JavaScript gains little for a per-request signature.
@@ -870,7 +910,7 @@ When the key is as stealable as the token it protects. DPoP costs a signature on
 **Q: Is OAuth 2.1 a published standard, and what does it actually change?**
 **Short:** It is still an IETF draft, not an RFC; it removes implicit and ROPC, mandates PKCE, and requires exact-match redirect URIs.
 
-It is a draft — `draft-ietf-oauth-v2-1-15` as of August 2026, IESG state "I-D Exists", with no assigned RFC number — so "OAuth 2.1 compliant" means following a draft's guidance, not conforming to a ratified standard. That precision matters in an interview because the substance is nonetheless real: OAuth 2.1 consolidates OAuth 2.0 with the security best-current-practice work that followed it, and almost every clause is already published elsewhere, notably in RFC 9700. The concrete changes are the **removal of the implicit grant** and of **resource owner password credentials**, **PKCE required** for authorization-code clients rather than merely recommended for public ones, **exact string matching of redirect URIs** with no wildcards or prefix matching, and a prohibition on carrying bearer tokens in query strings. The practical test is simple: if your grant table lists only authorization code (with PKCE), client credentials, refresh token and device code, and your redirect-URI comparison is a string equality check, you are already there.
+It is a draft (`draft-ietf-oauth-v2-1-16`, 2026-09-02, as of October 2026, IESG state "I-D Exists", with no assigned RFC number), so "OAuth 2.1 compliant" means following a draft's guidance, not conforming to a ratified standard. That precision matters in an interview because the substance is nonetheless real: OAuth 2.1 consolidates OAuth 2.0 with the security best-current-practice work that followed it, and almost every clause is already published elsewhere, notably in RFC 9700. The concrete changes are the **removal of the implicit grant** and of **resource owner password credentials**, **PKCE required** for authorization-code clients rather than merely recommended for public ones, **exact string matching of redirect URIs** with no wildcards or prefix matching, and a prohibition on carrying bearer tokens in query strings. The practical test is simple: if your grant table lists only authorization code (with PKCE), client credentials, refresh token and device code, and your redirect-URI comparison is a string equality check, you are already there.
 
 ---
 
@@ -884,7 +924,7 @@ It is a draft — `draft-ietf-oauth-v2-1-15` as of August 2026, IESG state "I-D 
 6. Never embed PII (names, emails, SSNs) or secrets in JWT claims. The payload is only encoded, not encrypted.
 7. Include a `jti` (JWT ID) claim for audit logging and optional revocation via a compact blacklist (store only jti, not the full token).
 8. Configure clock skew tolerance (60 seconds is a reasonable value) to prevent false rejections from minor time drift between servers.
-9. Use Spring Authorization Server for new Authorization Server implementations, or delegate to a managed provider (Keycloak, Auth0, Okta) and run only resource servers yourself.
+9. Use Spring Authorization Server for new Authorization Server implementations, or delegate to a managed provider (Keycloak, Auth0, Okta) and run only resource servers yourself. Run Spring Security 7.1.1+ (or 7.0.7+), or replace the default consent page with your own via `authorizationEndpoint(c -> c.consentPage(...))`: the default page renders request values without HTML encoding before those versions (CVE-2026-47877).
 10. Rotate JWKS keys periodically (every 90 days). Use the `kid` claim in the JWT header so JWKS consumers can identify which key to use.
 11. Monitor token introspection / JWKS fetch latency. A slow auth server is a denial-of-service vector on your authentication pipeline.
 12. For the client credentials flow in internal services, cache the access token and reuse it until it is close to expiry. Do not request a new token for every API call.

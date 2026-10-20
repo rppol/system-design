@@ -251,7 +251,7 @@ CLIP trains a ViT image encoder and a GPT-like text encoder jointly on 400M imag
 
 ### DINOv2
 
-DINOv2 pretrains ViT using self-supervised learning (see self_supervised_vision.md for DINO details) on a curated 142M image dataset. The resulting ViT-g/14 achieves 86.5% linear probing on ImageNet — the best visual representation quality of any model as of 2024, including CLIP. DINOv2 features emerge without any labels: depth estimation, semantic correspondence, and segmentation appear from probing intermediate layers.
+DINOv2 pretrains ViT using self-supervised learning (see self_supervised_vision.md for DINO details) on a curated 142M image dataset. The resulting ViT-g/14 achieves 86.5% linear probing on ImageNet, ahead of OpenCLIP at its 2023 release. DINOv3 (Meta, August 2025) scales the recipe to a ViT-7B/16 teacher trained on LVD-1689M, adds Gram anchoring to keep dense patch features sharp over long training, and distills into ViT-S/16 through ViT-H+/16 and ConvNeXt students under the DINOv3 License. DINOv2 features emerge without any labels: depth estimation, semantic correspondence, and segmentation appear from probing intermediate layers.
 
 ---
 
@@ -764,9 +764,9 @@ Some engineers port CNN code patterns to ViT and accidentally add BatchNorm laye
 | timm (Hugging Face) | 700+ pretrained ViT/Swin/CNN models | Gold standard for CV model zoo |
 | transformers (HF) | CLIP, BEiT, ViT with HF API | Best for CLIP and NLP-aligned models |
 | open_clip | OpenCLIP (open-source CLIP reproduction) | More model variants than official CLIP |
-| flash-attention | Efficient attention (FlashAttention-2) | 2-4x faster, sub-linear memory for long sequences |
+| flash-attention | Efficient attention (FA2 Ampere/Ada, FA3 Hopper, FA4 Blackwell) | 2-4x faster, sub-linear memory for long sequences |
 | xformers | Memory-efficient attention ops | Alternative to FlashAttention |
-| DINOv2 (Meta) | Best general-purpose visual features | Available via torch.hub |
+| DINOv3 / DINOv2 (Meta) | General-purpose frozen visual features; DINOv3 for dense tasks | torch.hub; DINOv3 License vs DINOv2 Apache 2.0 |
 | torchvision.transforms.v2 | Augmentation for ViT (MixUp, CutMix) | Use v2 for modern augmentation API |
 | Triton Inference Server | ViT production serving | TensorRT FP16 export recommended |
 | ONNX Runtime | CPU/edge ViT inference | DeiT-S achieves ~40ms CPU with ONNX |
@@ -809,7 +809,7 @@ Use a heavily pretrained checkpoint (ImageNet-21k, CLIP, DINOv2) rather than Ima
 
 **Q: What is FlashAttention and how does it help ViT training?**
 **Short:** FlashAttention tiles attention computation to stay in GPU SRAM, cutting peak memory from O(n^2) to O(n) and roughly doubling training throughput.
-FlashAttention (Dao et al., 2022) is an IO-aware exact attention algorithm that tiles the attention computation to keep data in GPU SRAM, avoiding expensive HBM reads/writes of the O(n²) attention matrix. FlashAttention-2 achieves ~2x throughput over standard PyTorch attention and reduces peak memory from O(n²) to O(n). For ViT-L fine-tuning at 384×384 resolution (n=576), FlashAttention reduces peak VRAM by ~4× and training time by ~2×. It is enabled via `torch.nn.functional.scaled_dot_product_attention` in PyTorch 2.0+.
+FlashAttention (Dao et al., 2022) is an IO-aware exact attention algorithm that tiles the attention computation to keep data in GPU SRAM, avoiding expensive HBM reads/writes of the O(n²) attention matrix. FlashAttention-2 achieves ~2x throughput over standard PyTorch attention and reduces peak memory from O(n²) to O(n). For ViT-L fine-tuning at 384×384 resolution (n=576), FlashAttention reduces peak VRAM by ~4× and training time by ~2×. FlashAttention-3 (2024) targets Hopper with asynchrony and FP8, and FlashAttention-4 targets Blackwell. `torch.nn.functional.scaled_dot_product_attention` (PyTorch 2.0+) dispatches to the best available backend for the GPU.
 
 **Q: What is the difference between relative and absolute positional encodings?**
 **Short:** Absolute encodings assign a fixed embedding per position and need interpolation at new resolutions, while relative encodings like Swin's bias generalize across resolutions.
@@ -819,9 +819,9 @@ Absolute positional encodings assign a fixed or learned embedding to each positi
 **Short:** Alternating blocks shift window partitions by half a window size, so tokens on a window's boundary in one block become interior tokens in the next, enabling cross-window flow.
 In each Swin block pair, Window Multi-head Self-Attention (W-MSA) computes attention within fixed M×M windows (M=7). The next block uses Shifted Window Multi-head Self-Attention (SW-MSA), where windows are shifted by (M/2, M/2) pixels before partitioning. This means tokens at window boundaries in W-MSA are now in the interior of a shifted window, enabling cross-window information flow. Efficient cyclic shift + masking implements this without padding overhead. Without shifted windows, the model cannot capture global context across arbitrary token pairs.
 
-**Q: What is DINOv2 and why does it produce the best general-purpose visual features?**
+**Q: What is DINOv2 and why are its frozen features strong across tasks?**
 **Short:** DINOv2 trains ViT with a self-distillation objective on a 142M curated dataset, producing linearly separable features that beat supervised ImageNet pretraining.
-DINOv2 (Oquab et al., 2023) trains ViT using a self-supervised DINO objective on a curated 142M image dataset. The curation pipeline (deduplication, quality filtering, clustering) is as important as the training objective. The key insight: with a large, diverse, curated dataset and a self-distillation objective, ViTs learn representations that are superior to supervised ImageNet training for downstream tasks. DINOv2 ViT-g/14 achieves 86.5% linear probing on ImageNet — better than any supervised model on a linear probe, meaning the features encode more linearly separable information. Depth estimation, segmentation, and semantic correspondence emerge without any label supervision.
+DINOv2 (Oquab et al., 2023) trains ViT using a self-supervised DINO objective on a curated 142M image dataset. The curation pipeline (deduplication, quality filtering, clustering) is as important as the training objective. The key insight: with a large, diverse, curated dataset and a self-distillation objective, ViTs learn representations that are superior to supervised ImageNet training for downstream tasks. DINOv2 ViT-g/14 achieves 86.5% linear probing on ImageNet, better than any supervised model on a linear probe, meaning the features encode more linearly separable information. Depth estimation, segmentation, and semantic correspondence emerge without any label supervision. DINOv3 (August 2025) keeps this recipe at ViT-7B/16 scale and adds Gram anchoring, and its distilled ViT-L/16 is the stronger frozen backbone for dense tasks such as segmentation and depth.
 
 **Q: How does ViT attention differ from CNN feature maps in terms of interpretability?**
 **Short:** CNN Grad-CAM heatmaps are reliably discriminative, while raw ViT CLS attention is noisier, so production explainability instead uses Attention Rollout across layers.
@@ -847,9 +847,9 @@ ViTs keep gaining accuracy as data and model size grow, while CNNs hit diminishi
 
 ## 13. Best Practices
 
-1. Always start from the strongest available pretrained checkpoint: for general vision tasks, DINOv2 ViT-L/14; for vision-language tasks, CLIP ViT-L/14 or OpenCLIP ViT-G/14. Training ViT from scratch on fewer than 1M images is almost never justified.
+1. Always start from the strongest available pretrained checkpoint: for general vision tasks, DINOv3 ViT-L/16 (DINOv2 ViT-L/14 where the DINOv3 License does not fit); for vision-language tasks, CLIP ViT-L/14 or OpenCLIP ViT-G/14. Training ViT from scratch on fewer than 1M images is almost never justified.
 2. Use layer-wise LR decay with decay=0.65 for all ViT fine-tuning. This single change routinely gives 3–7% improvement over uniform LR.
-3. Enable FlashAttention-2 (via `torch.nn.functional.scaled_dot_product_attention` in PyTorch 2.0+ or `xformers`) to reduce memory and speed up training by 2×.
+3. Enable fused attention through `torch.nn.functional.scaled_dot_product_attention` (PyTorch 2.0+), which picks FlashAttention or the memory-efficient kernel for the GPU, to reduce memory and speed up training by 2×.
 4. For CLIP-based classification, always use an ensemble of 7–80 text prompt templates and average their text embeddings. The OpenAI ImageNet template set is publicly available and provides +5% over single templates.
 5. When fine-tuning ViT at a different resolution from pretraining, interpolate positional embeddings: use `timm`'s built-in `resize_pos_embed` utility or call `model.set_input_size(new_size)`.
 6. Apply stochastic depth (drop path) regularization: `drop_path_rate=0.1` for ViT-S, 0.2 for ViT-B, 0.3 for ViT-L. This significantly reduces overfitting on small-to-medium fine-tuning sets.

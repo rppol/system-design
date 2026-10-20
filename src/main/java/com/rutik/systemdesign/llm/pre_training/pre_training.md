@@ -350,13 +350,64 @@ Raw CC crawl: ~2.0-2.3B pages / ~345 TiB uncompressed HTML per monthly snapshot
      MinHash over n-gram shingles (5-grams are typical), Jaccard threshold 0.8
      Remove documents with >80% overlap with any other
   |
-  v  Quality classifier (trained on curated positive examples):
-     Reddit upvotes as proxy for quality (WebText/OpenWebText)
-     Wikipedia/books as high-quality reference
+  v  Model-based quality classifier (labels come from an LLM or a curated positive set):
+     FineWeb-Edu: Llama-3-70B-Instruct scores 500k pages 0-5, BERT-style regressor, keep >= 3
+     DCLM: fastText on OpenHermes-2.5 + r/ExplainLikeImFive positives, keep top 10%
+     Nemotron-CC: 3 classifiers, max-ensembled into 20 buckets, rephrase the low buckets
   |
   v  ~10% of raw CC survives RefinedWeb's published pipeline; more aggressive
      pipelines keep 1-5% (GPT-3 kept 570GB out of 45TB of compressed plaintext)
      — either way, still trillions of tokens
+```
+
+### Model-Based Quality Filtering
+
+Heuristic filters (line length, symbol ratio, stop-word counts, a KenLM perplexity cut) remove
+spam and boilerplate but cannot tell a clear explanation from a fluent product page. Since 2024 the
+open corpora that beat their predecessors all rank documents with a learned classifier and keep
+the top slice. Three recipes define the practice:
+
+| Corpus | Label source | Classifier | Cut | Result |
+|--------|-------------|------------|-----|--------|
+| FineWeb-Edu (Hugging Face, 2024) | Llama-3-70B-Instruct scores 500k FineWeb pages for educational value on a 0-5 additive scale | Regression head on Snowflake-arctic-embed-m (82% F1 at threshold 3) | score >= 3 removes 92% of FineWeb | 1.3T tokens; the score >= 2 variant keeps 5.4T |
+| DCLM-Baseline (DataComp-LM, 2024) | 100k OpenHermes-2.5 instruction samples plus r/ExplainLikeImFive answers as positives, RefinedWeb samples as negatives | fastText bigram classifier | top 10% of the 240T-token DCLM-Pool after heuristics and dedup | 3.8T tokens; a 7B model reaches 64% MMLU 5-shot on 2.6T tokens |
+| Nemotron-CC (NVIDIA, 2024) | Three classifiers with different notions of quality | Each score bucketed 0-19, ensembled by max, grouped into 5 labels by measured downstream accuracy | low buckets are rephrased, not dropped | 6.3T tokens: 4.4T real deduplicated plus 1.9T synthetic |
+
+Two mechanics matter more than the model choice:
+
+1. **The label defines the corpus.** FineWeb-Edu's prompt targets grade-school and middle-school
+   knowledge, so it lifts MMLU, ARC and OpenBookQA; the FineWeb-Edu card reports that thresholds
+   above 3 help knowledge benchmarks but hurt HellaSwag and PIQA. DCLM's instruction-shaped
+   positives select question-and-answer prose. A classifier is a mixture decision written as a model.
+2. **A strict cut buys quality with unique tokens.** Keeping 8-10% of the web is fine for a 1T-token
+   run and a problem for a 15T-token one, which then repeats the kept slice for several epochs.
+   Nemotron-CC answers with recall instead of a harder cut: the max-ensemble keeps a document any of
+   the three classifiers likes, and an LLM rewrites the low-quality buckets in Wikipedia style and
+   turns the high-quality ones into QA pairs, distillations and knowledge lists. Its paper reports
+   +5.6 MMLU over DCLM for an 8B model on a 1T-token high-quality subset, and an 8B model trained on
+   15T tokens (7.2T from Nemotron-CC) beating Llama 3.1 8B by 5 MMLU points.
+
+Classifying the 15T-token FineWeb took 6k H100 GPU hours, which is why the scorer is a small
+encoder or fastText model distilled from LLM labels rather than the LLM itself.
+
+```python
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import torch
+
+MODEL_ID = "HuggingFaceFW/fineweb-edu-classifier"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID).eval()
+
+
+def edu_scores(texts: list[str]) -> list[float]:
+    batch = tokenizer(texts, return_tensors="pt", padding="longest", truncation=True)
+    with torch.no_grad():
+        logits = model(**batch).logits.squeeze(-1)
+    return logits.float().tolist()
+
+
+def keep(texts: list[str], threshold: float = 3.0) -> list[str]:
+    return [t for t, s in zip(texts, edu_scores(texts)) if round(s) >= threshold]
 ```
 
 ### Data Mixture Optimization
@@ -818,7 +869,7 @@ amplifier, not a universal law.
 | Training tokens | More (better quality) | Fewer (cheaper training) | Is model undertrained? |
 | Data filtering | Aggressive (cleaner) | Permissive (more data) | Model quality vs. diversity |
 | Context length | Short (4K, cheaper) | Long (128K, expensive) | Use case requirements |
-| Precision | BF16 (faster) | FP32 (exact) | Always use BF16 for training |
+| Precision | BF16 mixed precision (stable, widely supported) | FP8 mixed precision (higher throughput, less memory; used by DeepSeek-V3) | BF16 by default; FP8 on H100-class or newer GPUs with fine-grained scaling and a recipe validated against a BF16 baseline |
 
 ---
 
@@ -841,7 +892,7 @@ amplifier, not a universal law.
 ## 10. Common Pitfalls
 
 1. **Training data contamination**: If benchmark test sets are in your training data, evaluation scores are inflated. Run deduplication between training data and all evaluation sets.
-2. **Epoch repetition**: For very large models, repeating data (>1 epoch) degrades quality. Use different data mixes across passes.
+2. **Epoch repetition**: Up to about 4 epochs, repeated data is nearly as good as unique data, but returns shrink after that and vanish near 16 epochs (Muennighoff et al., 2023). Plan unique-data volume upfront and use different data mixes across passes.
 3. **Imbalanced domain sampling**: Too much low-quality web content drowns out high-quality signal. Careful mixing ratios matter.
 4. **Ignoring context packing artifacts**: Naively packing documents can create cross-document attention (token at end of doc A attends to doc B). Use attention masks to prevent this.
 5. **Not monitoring training loss curves**: A flat loss for many steps indicates a learning rate issue or data issue.
@@ -861,7 +912,10 @@ amplifier, not a universal law.
 | torchtitan | PyTorch-native training platform | `pytorch/torchtitan`; released on PyPI (0.2.x), actively developed |
 | Common Crawl | Web data source | ~2.0-2.3B pages, ~345 TiB uncompressed per monthly snapshot |
 | The Pile | Curated training dataset | EleutherAI; 825GB diverse text |
-| DCLM | DataComp for LM | Curated CC dataset (DCLM-Baseline), strong quality |
+| DCLM | DataComp for LM | DCLM-Baseline: 3.8T tokens, fastText top-10% filter over a 240T-token pool |
+| FineWeb / FineWeb-Edu | Hugging Face web corpora | FineWeb 15T tokens; FineWeb-Edu 1.3T after an LLM-labeled educational classifier |
+| Nemotron-CC | NVIDIA CC corpus | 6.3T tokens; classifier ensemble plus synthetic rephrasing |
+| datatrove | Data processing library | Hugging Face; the pipeline that built FineWeb (dedup, filters, classifier scoring) |
 | RedPajama-v2 | Open training dataset | Together AI; 30T tokens |
 
 ---
@@ -888,10 +942,10 @@ A: First line of defense is gradient clipping (clip norm to 1.0). For spikes, ro
 
 A: Data contamination occurs when evaluation benchmark examples appear in the training set. The model has "seen" the answers, inflating benchmark scores. This is why LLM evaluation is difficult to trust — most teams don't fully audit their training data. Mitigation: run n-gram deduplication between training data and all benchmarks before training.
 
-**Q: Why does repeating pre-training data for multiple epochs hurt large models?**
-**Short:** Beyond roughly one epoch, repeated data pushes large models toward memorization instead of generalization, with meaningful gains continuing to about 16 epochs before returns collapse.
+**Q: When does repeating pre-training data for multiple epochs start to hurt large models?**
+**Short:** Up to about 4 epochs, repeated tokens are nearly as good as unique ones (Muennighoff et al., 2023); gains shrink after that and collapse near 16 epochs, where memorization takes over.
 
-A: Beyond roughly one pass, repeated data shifts the model from generalization toward memorization — benchmark gains flatten while verbatim regurgitation risk rises, and heavy repetition can actively degrade quality relative to training on fewer unique tokens. Empirically (Muennighoff et al., 2023, data-constrained scaling), differences are insignificant up to ~4 epochs, meaningful gains continue to roughly 16 epochs, and beyond that returns collapse — so frontier labs plan data volume upfront to keep the main run near 1 epoch. This is the opposite of classic small-data deep learning, where dozens of epochs are normal — at trillion-token scale, unique data is the binding constraint. If you must repeat, repeat only the highest-quality subsets with a different mix per pass.
+A: Repetition is cheap at first and useless later. Muennighoff et al. (2023, data-constrained scaling) found that up to about 4 epochs, loss on repeated data is nearly the same as on the same number of unique tokens. From about 4 to about 16 epochs each extra pass still helps, but by less each time. Past about 16 epochs extra compute on repeated data adds almost nothing, and the model shifts toward memorization, with verbatim regurgitation risk rising. Frontier labs still plan data volume upfront and keep the main run near 1 epoch, because a unique token is worth at least as much as a repeat. This is the opposite of classic small-data deep learning, where dozens of epochs are normal: at trillion-token scale, unique data is the binding constraint. If you must repeat, repeat the highest-quality subsets first, with a different mix per pass.
 
 **Q: Why can naive sequence packing silently hurt model quality even though it improves throughput?**
 **Short:** Packing documents without a block-diagonal attention mask lets tokens attend across document boundaries, teaching spurious cross-document dependencies that hurt single-document evaluation.
@@ -907,6 +961,16 @@ A: BF16 has the same 8-bit exponent range as FP32 (handles the dynamic range of 
 **Short:** Deduplication removes near-duplicate documents via exact hashing, MinHash/LSH on n-gram shingles, or suffix arrays, cutting memorization risk and wasted compute per token.
 
 Data deduplication removes near-duplicate documents from the training corpus, improving model quality per token while reducing wasted compute. Without dedup, models memorize repeated passages (increasing regurgitation risk) and waste compute on redundant data. Methods: (1) exact dedup — hash each document, remove duplicates (fast but misses paraphrases); (2) MinHash/LSH — approximate dedup using locality-sensitive hashing on n-gram shingles, catches near-duplicates with >80% overlap; (3) suffix array — finds repeated substrings across documents (used by LLaMA). RefinedWeb (Falcon's dataset) demonstrated that an aggressive filtering-plus-dedup pipeline retaining only about 10% of raw Common Crawl produces a corpus that matches curated datasets on downstream quality — note that the ~90% removal is the whole pipeline, with language ID and quality filtering each roughly halving the data before dedup runs. The Pile uses a combination of MinHash and exact dedup.
+
+**Q: Why can a stricter quality-classifier threshold make a long pre-training run worse?**
+**Short:** A strict cut keeps only 8-10% of the web, so a 15T-token run must repeat that slice for several epochs and loses the gain to repetition.
+
+Because a hard quality cut trades unique tokens for quality, and long runs run out of unique tokens. FineWeb-Edu at score >= 3 removes 92% of FineWeb, leaving 1.3T tokens, and DCLM-Baseline keeps the top 10% for 3.8T tokens. Those are fine for a 1-2T-token run, but a 15T-token run like Llama 3.1's would see each kept document several times, and returns from repeated data fall off after about four epochs. Nemotron-CC (NVIDIA, 2024) is the published answer: it ensembles three classifiers by taking the max score so a document any of them likes survives, and it rephrases the low-quality buckets with an LLM instead of dropping them, giving 6.3T tokens (4.4T real, 1.9T synthetic) with about 4x the unique tokens of DCLM. The threshold also shifts the benchmark profile, not just the volume: the FineWeb-Edu card reports that thresholds above 3 help knowledge and reasoning benchmarks but hurt HellaSwag and PIQA. Pick the threshold from the token budget and target tasks, not from the classifier's F1.
+
+**Q: How do model-based quality classifiers such as FineWeb-Edu and DCLM decide which web pages to keep?**
+**Short:** An LLM or a curated positive set labels a sample, a cheap classifier learns those labels, and it scores the whole crawl so only the top slice is kept.
+
+They distill a quality judgment into a classifier small enough to run over trillions of tokens. FineWeb-Edu had Llama-3-70B-Instruct score 500k FineWeb pages for educational value on a 0-5 additive scale, fine-tuned a regression head on Snowflake-arctic-embed-m (82% F1 as a binary classifier at threshold 3), and kept pages scoring 3 or more; scoring the full 15T-token FineWeb took 6k H100 GPU hours. DCLM trained a fastText bigram classifier with OpenHermes-2.5 instructions and r/ExplainLikeImFive answers as positives against RefinedWeb samples and kept the top 10%, which let a 7B model reach 64% MMLU 5-shot on 2.6T tokens. This replaced the 2019 WebText proxy (outbound links from Reddit posts with 3 or more karma) because a label you choose can target a capability, not just a popularity signal. The catch is that the label prompt defines the corpus: FineWeb-Edu's grade-school framing favors MMLU-style knowledge, and averaging scores from several judge LLMs performed worse than one consistent judge in the FineWeb-Edu ablations.
 
 **Q: How does the Chinchilla scaling law differ from the LLaMA over-training approach, and which is better?**
 **Short:** Chinchilla optimizes training compute at ~20 tokens per parameter, while LLaMA deliberately over-trains smaller models on far more tokens to minimize the cheaper, continuous cost of inference.
@@ -967,7 +1031,7 @@ A: Treat emergence as a real planning constraint but not as a magic threshold, b
 3. **Checkpoint frequently** — every 30-60 minutes at scale; rolling restarts after hardware failures are inevitable.
 4. **Monitor per-domain losses** — track validation loss separately on code, math, web text to detect if any domain is being under/over-fit.
 5. **Run eval benchmarks every N billion tokens** — validate that capabilities emerge and don't regress as training progresses.
-6. **Plan for multi-epoch carefully** — repeating data more than twice at scale hurts; plan data volume upfront.
+6. **Plan for multi-epoch carefully**: up to about 4 epochs of repetition costs little, returns shrink after that and vanish near 16 epochs; plan data volume upfront.
 
 ---
 

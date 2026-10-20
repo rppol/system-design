@@ -233,20 +233,20 @@ Anatomy, in order: **the ask**, **three supporting facts**, **cost**, **risk**, 
 requested with a date**. A complete real one:
 
 ```text
-ASK: Approve 2 engineers for 6 weeks to migrate the payments retry queue off the
-     deprecated SQS classic queue type before AWS's Dec 2026 sunset.
+ASK: Approve 2 engineers for 6 weeks to migrate the payments retry queue off our
+     queue vendor's legacy tier before its published end-of-life in Dec 2026.
 
 FACTS:
-  1. AWS has published a hard sunset date for SQS classic queues; ours processes
+  1. The vendor has published a hard end-of-life date for the legacy tier; ours processes
      ~40K payment retries/day.
-  2. Migration to standard queues requires idempotency-key changes in 3 services;
+  2. Migration to the vendor's current tier requires idempotency-key changes in 3 services;
      we've scoped this and it's a known, bounded change.
   3. We attempted this in Q1 and stopped after 1 week when a P1 pulled the team;
      the partial migration is currently the reason retries occasionally duplicate.
 
 COST: 2 engineers x 6 weeks = ~$58K fully loaded, no new infra spend.
 
-RISK: If we do nothing, the queue stops working on AWS's sunset date with no
+RISK: If we do nothing, the queue stops working on the end-of-life date with no
       warning period after that, taking payment retries down entirely.
       If we do it now, the main risk is a repeat P1 interruption; we're asking
       for the team to be shielded from non-P1 work for the 6 weeks.

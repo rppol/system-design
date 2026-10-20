@@ -721,7 +721,7 @@ Claims backed by published documentation carry their primary-source URL inline. 
 | Algolia | Hosted engine with documented typo thresholds and edge distribution |
 | Redis | Suggest-service result cache in front of the index |
 | CloudFront | 60-second micro-cache on the suggest endpoint |
-| MSW | v2. Intercepts suggest requests in tests so out-of-order responses can be forced deterministically |
+| MSW | 3. Intercepts suggest requests in tests so out-of-order responses can be forced deterministically |
 | Playwright | Drives the keyboard contract in §4.7 end to end, including Home and End |
 | Testing Library | 16.3.3. Role queries plus `toHaveAccessibleName` for the combobox assertions |
 | axe-core | Catches a missing `aria-expanded` and a listbox with no accessible name |
@@ -765,7 +765,7 @@ One flag, `typeahead.enabled`, evaluated client-side. Off, the popup never opens
 
 ### 8.5 Testing the Race Deterministically
 
-§9.1 went undetected for eleven months because on a fast network responses always land in issue order. A regression test therefore has to *force* the inversion rather than hope for it, which MSW v2 makes a four-line matter:
+§9.1 went undetected for eleven months because on a fast network responses always land in issue order. A regression test therefore has to *force* the inversion rather than hope for it, which MSW 3 makes a four-line matter:
 
 ```ts
 // SearchBox.race.test.ts

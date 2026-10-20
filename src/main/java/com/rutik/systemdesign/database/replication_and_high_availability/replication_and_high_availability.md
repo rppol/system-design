@@ -386,6 +386,68 @@ Patroni uses a Distributed Configuration Store (DCS — etcd, Consul, or ZooKeep
 
 Without fencing, the old primary could temporarily serve stale writes in a split-brain scenario: both the old and new primary accept writes, and data diverges.
 
+### CloudNativePG vs Patroni
+
+On Kubernetes the usual alternative to Patroni is CloudNativePG (CNPG), an operator that does not use Patroni, repmgr, Stolon, or any separate DCS. Its FAQ states it relies "on the Kubernetes API server to hold the status of a Postgres cluster, and use it as the only source of truth". An instance manager runs inside every PostgreSQL pod; the operator watches the pods, picks the most advanced standby on failure, promotes it, and repoints the `<cluster>-rw` Service at the new primary.
+
+| Concern | Patroni | CloudNativePG |
+|---------|---------|---------------|
+| Leader record | Lease key in etcd, Consul, ZooKeeper, or the Kubernetes API | `Cluster` resource status in the Kubernetes API server |
+| Runs on | VMs, bare metal, or Kubernetes (Spilo, Zalando postgres-operator) | Kubernetes only, one cluster; cross-cluster failover is manual |
+| Client routing | HAProxy or a VIP that checks the Patroni REST API (`/primary`) | Kubernetes Services: `-rw`, `-ro`, `-r` |
+| Sync replication | `synchronous_mode`, `synchronous_node_count` | `.spec.postgresql.synchronous`: `method` (`any` or `first`), `number`, `dataDurability` (`required` or `preferred`) |
+| Physical slots for standbys | `use_slots: true` (default) | `.spec.replicationSlots.highAvailability.enabled` (default on, prefix `_cnpg_`, positions synced every 30 s) |
+| Logical slots across failover | Permanent slots copied to replicas and advanced every `loop_wait` (PostgreSQL 11+) | `synchronizeLogicalDecoding: true`: native slot sync on PostgreSQL 17+, the `pg_failover_slots` extension on 16 and older |
+
+The choice is mostly about where the database runs. A fleet on VMs with an etcd cluster the team already operates stays on Patroni. A platform team that runs everything as Kubernetes resources and wants backups, rolling minor upgrades, and failover in one CRD picks CNPG; the cost is that the database is now tied to the health of the Kubernetes control plane, and an API server outage blocks failover even while the pods themselves are healthy.
+
+### Failover Logical Slots (PostgreSQL 17)
+
+Physical standbys survive failover because they follow WAL. Logical consumers (a Debezium connector, a `CREATE SUBSCRIPTION` subscriber) did not: before PostgreSQL 17 a logical slot existed only on the primary, so after promotion the new primary had no slot, and the consumer had to drop its state and take a fresh snapshot of every table. On a multi-terabyte CDC source that resnapshot takes hours and floods every downstream consumer with duplicate rows.
+
+PostgreSQL 17 synchronizes logical slots to standbys. Four settings, all required:
+
+```
+-- primary: mark the slot as a failover slot
+SELECT pg_create_logical_replication_slot('cdc', 'pgoutput', false, false, true);
+--   or on the subscriber:  CREATE SUBSCRIPTION ... WITH (failover = true);
+
+-- primary postgresql.conf: hold logical senders until the standby has the WAL
+synchronized_standby_slots = 'standby1_slot'
+
+-- standby postgresql.conf
+sync_replication_slots = on            -- starts the slotsync worker
+hot_standby_feedback   = on            -- keeps catalog rows the slot needs
+primary_slot_name      = 'standby1_slot'
+primary_conninfo       = '... dbname=postgres'   -- slotsync needs a database
+```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    P(Primary<br/>slot cdc, failover=true) -->|"WAL via<br/>standby1_slot"| S(Standby<br/>slotsync worker)
+    S -->|"copies cdc slot<br/>synced = true"| S
+    P -->|"logical changes only after<br/>standby1_slot confirms"| G{synchronized_<br/>standby_slots}
+    G --> C(Subscriber<br/>or Debezium)
+
+    class P io
+    class S train
+    class G mathOp
+    class C req
+```
+
+`synchronized_standby_slots` closes the second hole. Without it the subscriber can receive and confirm a change that the standby has not yet received. If the primary then dies, the promoted standby lacks that change, but the subscriber already applied it: the consumer is now ahead of the new primary, which is a silent divergence. With the setting, the primary's logical walsender waits until the named physical slots confirm the WAL, so a consumer is never ahead of the failover target. The cost is that logical consumers inherit the standby's lag, and a dead standby stalls them until it is removed from the list.
+
+Rules that decide whether a slot is usable after promotion:
+
+- Only a slot with `pg_replication_slots.synced = true` on the standby at failover time can be used. A slot that stayed temporary (for example because its subscription was disabled and the slot never advanced past what the standby holds) is lost.
+- `pg_sync_replication_slots()` syncs once by hand; the docs reserve it for testing because it does not retry.
+- After promotion, run `ALTER SUBSCRIPTION ... CONNECTION` to point at the new primary. Disable the subscription before promoting and re-enable it after, or a returning old primary can keep feeding it.
+
 ### After Failover: the Diverged Old Primary and `pg_rewind`
 
 Best Practice 7 says to enable `wal_log_hints` "for pg_rewind" — this is what that is for,
@@ -430,6 +492,29 @@ transactions are gone — which is precisely the RPO that asynchronous replicati
 up for. Patroni automates all of this when `use_pg_rewind: true` is set, and falls back to a
 full base backup when the prerequisites are missing.
 
+### Read-Your-Writes on a Standby: `WAIT FOR LSN` (PostgreSQL 19)
+
+PostgreSQL 19 adds the `WAIT` command, so a replica can block a session until a given LSN arrives. The pattern: after the write commits, the application reads `pg_current_wal_insert_lsn()` on the primary, stores it in the session (or the pooler), and on the replica runs the wait before the read.
+
+```
+-- primary, after COMMIT
+SELECT pg_current_wal_insert_lsn();          -- 0/0306EE20
+
+-- replica, before the read
+WAIT FOR LSN '0/0306EE20' WITH (TIMEOUT '200ms', NO_THROW);   -- success | timeout | not in recovery
+SELECT * FROM profile WHERE user_id = 42;
+```
+
+The default mode is `standby_replay`, which waits until the change is applied and visible. `standby_write` and `standby_flush` wait only for the WAL to reach the replica's disk, and `primary_flush` runs on the primary. Without `TIMEOUT` the wait never ends, so set one and on `timeout` send the read to the primary. Run `WAIT` outside a transaction or as its first statement: it is rejected when the session already holds a lock and the target is not reached, and it cannot run while a snapshot is held (for example, after the first query of a REPEATABLE READ transaction). A promotion mid-wait returns `not in recovery`.
+
+### Logical Replication Changes in PostgreSQL 19
+
+- **No restart to enable it.** With `wal_level = replica`, creating the first logical replication slot raises the read-only `effective_wal_level` to `logical`; dropping or invalidating the last one lowers it back. On PostgreSQL 18 and older the publisher needs `wal_level = logical`, which takes a restart.
+- **Sequences replicate.** `CREATE PUBLICATION ... FOR ALL SEQUENCES` publishes them. Values sync at `CREATE SUBSCRIPTION`, `REFRESH PUBLICATION`, and `ALTER SUBSCRIPTION ... REFRESH SEQUENCES` (values only, not which sequences exist). Sync is on demand, not continuous, so run `REFRESH SEQUENCES` at cutover.
+- **`FOR ALL TABLES EXCEPT (...)`** publishes everything but a named list, so a new table is included without editing the publication.
+- **Per-subscription `wal_receiver_timeout`**, so one slow cross-region subscriber can get a longer timeout than the rest.
+- **`pg_stat_recovery`** is a new system view that reports the recovery status of a standby.
+
 ### MySQL Binary Log and GTID Replication
 
 MySQL uses the binary log (binlog) for replication. With GTID (Global Transaction Identifier), each transaction has a globally unique ID of the format `server_uuid:transaction_id`. Replicas use GTIDs to track exactly which transactions they have applied, making failover self-healing: a new replica can connect to any primary and say "I have all transactions up to GTID X; send me the rest."
@@ -450,7 +535,7 @@ SHOW REPLICA STATUS\G
 
 ## 7. Real-World Examples
 
-**GitHub**: Runs an `orchestrator/raft` setup for MySQL HA — orchestrator monitors topology, detects failures, and performs automated failover. GitHub reports 10–13 seconds of total outage in most failovers, up to 20 seconds less often and 25 seconds in extreme cases. They pair it with semi-synchronous replication (500ms timeout) so that "any change applied on the primary is either applied or waiting to be applied on one of the replicas" — explicitly accepting that writes stall if no replica acknowledges, in exchange for lossless failover.
+**GitHub**: Its 2018 engineering post "MySQL High Availability at GitHub" describes an `orchestrator/raft` setup for MySQL HA: orchestrator monitors topology, detects failures, and performs automated failover. GitHub reports 10 to 13 seconds of total outage in most failovers, up to 20 seconds less often and 25 seconds in extreme cases. They pair it with semi-synchronous replication (500ms timeout) so that "any change applied on the primary is either applied or waiting to be applied on one of the replicas", explicitly accepting that writes stall if no replica acknowledges, in exchange for lossless failover.
 
 **Zalando**: Open-sourced Patroni, still the de facto PostgreSQL HA agent. Their Spilo/postgres-operator stack runs Patroni against etcd for automated leader election and failover.
 
@@ -552,6 +637,8 @@ flowchart TD
 
 **Use Patroni when**: You run self-hosted PostgreSQL and need automated HA. It is the de facto standard. Requires managing etcd/Consul separately.
 
+**Use CloudNativePG when**: PostgreSQL runs on Kubernetes and the platform team wants failover, backups, and upgrades declared in one CRD, with the Kubernetes API server as the leader record instead of a separate etcd.
+
 **Use managed HA (RDS Multi-AZ, Cloud SQL HA) when**: Operational simplicity trumps cost. No need to manage Patroni or etcd.
 
 **Avoid multi-primary when**: Your application is not designed for conflict resolution. The complexity cost is almost always higher than the benefit for single-region applications.
@@ -615,8 +702,11 @@ Setting `max_slot_wal_keep_size = 10GB` removes the countdown entirely: past tha
 | Tool            | Purpose                                   | Database     |
 |-----------------|-------------------------------------------|--------------|
 | Patroni         | PostgreSQL HA with DCS-based failover     | PostgreSQL   |
+| CloudNativePG   | Kubernetes operator for PostgreSQL HA; Kubernetes API server is the source of truth, no Patroni or DCS | PostgreSQL |
 | repmgr          | PostgreSQL replication management         | PostgreSQL   |
-| Orchestrator    | MySQL HA and topology management          | MySQL        |
+| Orchestrator    | MySQL HA and topology management; maintained as `percona/orchestrator` (`openark/orchestrator` is archived) | MySQL |
+| VTOrc           | Vitess component that detects and repairs MySQL topology failures | MySQL (Vitess) |
+| InnoDB Cluster  | Group Replication + MySQL Router + MySQL Shell, built-in failover | MySQL |
 | MHA             | MySQL Master HA (older, less used)        | MySQL        |
 | HAProxy         | TCP load balancing, health-check routing  | Any          |
 | PgBouncer       | Connection pooling during failover        | PostgreSQL   |
@@ -639,10 +729,20 @@ Split-brain occurs when two nodes both believe they are the primary and accept w
 
 Replication slots prevent the primary from discarding WAL that a replica has not yet consumed. If a replica disconnects (maintenance, failure, misconfiguration) and its slot is not dropped, the primary retains all WAL generated since the replica's last applied position. In a write-heavy environment, this can fill the primary's disk in hours. PostgreSQL does not automatically drop slots or limit WAL accumulation — it will crash with "no space left on device" rather than drop a slot. Always monitor `pg_replication_slots.restart_lsn` lag and alert when slot lag exceeds 10GB.
 
-**Q: How do you achieve read-your-writes consistency with read replicas?**
-**Short:** Route reads to the primary, track each session's write LSN, or stick reads to the primary briefly after a write.
+**Q: Why does a CDC connector or logical subscriber break after a PostgreSQL failover, and how does PostgreSQL 17 fix it?**
+**Short:** Before PostgreSQL 17 a logical slot lived only on the primary, so the promoted standby had none; PG17 failover slots copy it to standbys via `sync_replication_slots`.
 
-Options in increasing complexity: (1) Route all reads to the primary — simple but defeats the purpose of replicas. (2) Track the last write's LSN per session and only read from a replica that has caught up to that LSN — requires replica lag monitoring and routing logic. (3) Use sticky sessions: after a write, route all reads from that session to the primary for a brief window (e.g., 500ms). PostgreSQL `pg_stat_replication.replay_lag` provides the per-replica lag. Application frameworks like Spring Data can route reads using a custom `AbstractRoutingDataSource` with lag awareness.
+A logical replication slot records how far a consumer has read, and before PostgreSQL 17 it existed only on the primary. Physical standbys replayed the WAL but not the slot, so after promotion the new primary had no slot for Debezium or the subscriber, and the only recovery was a full resnapshot of every captured table, hours on a large source. PostgreSQL 17 adds failover slots: create the slot with `failover = true` (the fifth argument of `pg_create_logical_replication_slot`, or `CREATE SUBSCRIPTION ... WITH (failover = true)`), and on the standby set `sync_replication_slots = on`, `hot_standby_feedback = on`, `primary_slot_name`, and a `dbname` in `primary_conninfo`. The slotsync worker then copies the slot periodically. Only a slot that shows `synced = true` on the standby at failover time is usable; after promotion, run `ALTER SUBSCRIPTION ... CONNECTION` to point at the new primary. Patroni offers its own version (permanent logical slots copied and advanced every `loop_wait` on PostgreSQL 11+), and CloudNativePG enables the native one with `synchronizeLogicalDecoding: true`.
+
+**Q: What does `synchronized_standby_slots` protect against, and what does it cost?**
+**Short:** It stops a logical subscriber from receiving changes the standby does not yet have, so after failover the consumer is never ahead of the new primary; consumers inherit standby lag.
+
+Without it, the primary's logical walsender can ship a change to the subscriber before the physical standby has received that WAL. If the primary dies at that moment, the promoted standby does not have the change, but the subscriber has already applied it, so the downstream system holds a row the new primary never committed. Nothing reports this divergence. Setting `synchronized_standby_slots = 'standby1_slot'` on the primary makes logical senders wait until the named physical slots confirm the WAL, so the failover target is always at least as far ahead as every logical consumer. The cost: logical replication latency now includes standby lag, a stopped standby stalls all logical consumers until it is removed from the list, and the primary will not finish a clean shutdown until those standbys confirm the last flushed WAL. List only the standbys that are failover candidates.
+
+**Q: How do you achieve read-your-writes consistency with read replicas?**
+**Short:** Route reads to the primary, make the replica wait for the session's last write LSN (PostgreSQL 19 `WAIT FOR LSN`), or stick reads to the primary briefly after a write.
+
+Options in increasing complexity: (1) Route all reads to the primary: simple, but defeats the purpose of replicas. (2) Track the last write's LSN per session and only read from a replica that has caught up to that LSN, which requires replica lag monitoring and routing logic. (3) Use sticky sessions: after a write, route all reads from that session to the primary for a brief window (e.g., 500ms). (4) On PostgreSQL 19, save `pg_current_wal_insert_lsn()` from the primary after the commit and run `WAIT FOR LSN '<lsn>' WITH (TIMEOUT '200ms', NO_THROW)` on the replica before the read; on `timeout`, read from the primary. This gives the guarantee of (2) without polling lag. PostgreSQL `pg_stat_replication.replay_lag` provides the per-replica lag. Application frameworks like Spring Data can route reads using a custom `AbstractRoutingDataSource` with lag awareness.
 
 **Q: Explain semi-synchronous replication tradeoffs.**
 **Short:** Semi-sync waits for one replica to receive the transaction, adding one RTT, then falls back to async on timeout.
@@ -657,7 +757,7 @@ Streaming replication sends raw WAL bytes (physical replication) — the replica
 **Q: How do you perform a zero-downtime major version upgrade of PostgreSQL?**
 **Short:** Replicate logically to a new-version subscriber, wait for lag to reach zero, then cut the application over.
 
-Use PostgreSQL's built-in logical replication across versions — a subscriber may run a different major version than its publisher, which is exactly what makes this work. (1) Stand up a PostgreSQL 18 instance alongside the PG 17 primary, which must have `wal_level = logical`. (2) `CREATE PUBLICATION` on PG 17 and `CREATE SUBSCRIPTION` on PG 18; no external extension is needed. On a large database, run `pg_createsubscriber` (PostgreSQL 17+) against an existing physical standby instead — it converts the standby into the logical subscriber in place and skips the initial data copy, which is where nearly all the time goes. (3) Wait for lag to fall under a second, then put the application into read-only mode or drain writes. (4) Wait for lag to reach 0. (5) Repoint the application DSN at PG 18. (6) Retire PG 17. Caveats: sequence values are not replicated (advance them manually at cutover) and DDL is not replicated. Alternatives: `pg_upgrade --link` (fast, but needs a maintenance window; from PostgreSQL 17 it also carries replication slots forward so replicas survive), or RDS/Aurora Blue/Green Deployments.
+Use PostgreSQL's built-in logical replication across versions: a subscriber may run a different major version than its publisher, which is exactly what makes this work. (1) Stand up a PostgreSQL 18 instance alongside the PG 17 primary, which must have `wal_level = logical` (a restart). A PostgreSQL 19+ publisher needs only `wal_level = replica`: creating the first logical slot raises `effective_wal_level` to `logical` with no restart. (2) `CREATE PUBLICATION` on PG 17 and `CREATE SUBSCRIPTION` on PG 18; no external extension is needed. On a large database, run `pg_createsubscriber` (PostgreSQL 17+) against an existing physical standby instead; it converts the standby into the logical subscriber in place and skips the initial data copy, which is where nearly all the time goes. (3) Wait for lag to fall under a second, then put the application into read-only mode or drain writes. (4) Wait for lag to reach 0. (5) Repoint the application DSN at PG 18. (6) Retire PG 17. Caveats: DDL is not replicated, and sequence values are not replicated when the publisher runs PostgreSQL 18 or older, so advance them manually at cutover. With a PostgreSQL 19+ publisher, `CREATE PUBLICATION ... FOR ALL SEQUENCES` plus `ALTER SUBSCRIPTION ... REFRESH SEQUENCES` at cutover copies the current values instead. Alternatives: `pg_upgrade --link` (fast, but needs a maintenance window; from PostgreSQL 17 it also carries replication slots forward so replicas survive), or RDS/Aurora Blue/Green Deployments.
 
 **Q: What is cascading replication and when is it useful?**
 **Short:** Cascading replication chains a replica off another replica to reduce WAL sender load on the primary.
@@ -689,6 +789,11 @@ Because the old primary almost certainly committed WAL the new primary never rec
 
 STONITH (Shoot The Other Node In The Head) is a fencing mechanism that forcibly powers off or isolates a failed node before promoting its replacement. Without STONITH, a scenario arises: primary crashes and appears dead to the HA manager; new primary is promoted; old primary recovers connectivity and believes it is still primary. Both accept writes — split-brain. STONITH prevents this by cutting power to the old primary via IPMI/iLO, cloud API (AWS: terminate instance, stop EBS volume), or network-level isolation before promoting the new primary. Patroni supports STONITH via callback scripts.
 
+**Q: How does CloudNativePG's failover model differ from Patroni's, and when do you pick each?**
+**Short:** CloudNativePG keeps cluster state in the Kubernetes API server with an in-pod instance manager and no Patroni or etcd; Patroni holds a lease in its own DCS and runs anywhere.
+
+Patroni runs as an agent next to each PostgreSQL and elects a leader by holding a TTL lease in a DCS (etcd, Consul, ZooKeeper, or the Kubernetes API); clients find the primary through HAProxy or a VIP that checks Patroni's REST API. CloudNativePG is a Kubernetes operator: an instance manager runs in each pod, the `Cluster` resource status in the API server is the only source of truth, and on failure the operator promotes the most advanced standby and repoints the `-rw` Service. Synchronous replication is set with `.spec.postgresql.synchronous` (`method`, `number`, `dataDurability`), and HA physical slots are on by default with a `_cnpg_` prefix. Pick Patroni for PostgreSQL on VMs or bare metal, or when an etcd cluster already exists; pick CloudNativePG when the platform is Kubernetes-native and backups, upgrades, and failover should live in one CRD. The CNPG trade-off is coupling: failover needs a working Kubernetes control plane, and it only works within one Kubernetes cluster, so cross-cluster failover is a manual promotion of a replica cluster.
+
 **Q: Explain the differences between RPO and RTO in the context of database replication.**
 **Short:** RPO measures acceptable data loss in time; RTO measures acceptable downtime before recovery.
 
@@ -710,9 +815,9 @@ In multi-region active-passive replication, the primary is in region A and repli
 Logical replication decodes WAL into row-level change events. Debezium connects to PostgreSQL as a logical replication client using the `pgoutput` output plugin. It receives INSERT/UPDATE/DELETE events per row with old and new values, and publishes them to Kafka topics. Consumers (Elasticsearch indexers, data warehouse loaders, cache invalidation services) process these events asynchronously. The key advantage: Debezium reads the WAL directly without impacting primary performance (WAL is generated anyway) and preserves per-table commit order. Delivery is at-least-once, not exactly-once — a connector restart can replay events already published, so consumers must dedupe on the event key. The risk: the Debezium logical replication slot retains WAL if the Kafka consumer falls behind.
 
 **Q: How do you monitor and alert on replication lag in production?**
-**Short:** Alert on PostgreSQL replay_lag and MySQL seconds_behind_master with thresholds tied to your RPO.
+**Short:** Alert on PostgreSQL replay_lag and MySQL Seconds_Behind_Source with thresholds tied to your RPO.
 
-For PostgreSQL: query `pg_stat_replication.replay_lag` from the primary every 30 seconds and expose it as a Prometheus gauge. Alert at lag > 30 seconds (warning) and > 5 minutes (critical). Also monitor slot lag via `pg_replication_slots.confirmed_flush_lsn` vs `pg_current_wal_lsn()`. For MySQL: use Prometheus `mysqld_exporter` which exports `mysql_slave_status_seconds_behind_master`. For automated alerting, set PagerDuty or Slack alerts on these metrics with severity thresholds matching your RPO requirements. Test alerting quarterly by deliberately pausing a replica.
+For PostgreSQL: query `pg_stat_replication.replay_lag` from the primary every 30 seconds and expose it as a Prometheus gauge. Alert at lag > 30 seconds (warning) and > 5 minutes (critical). Also monitor slot lag via `pg_replication_slots.confirmed_flush_lsn` vs `pg_current_wal_lsn()`. For MySQL: `SHOW REPLICA STATUS` reports `Seconds_Behind_Source` (MySQL 8.4 removed `SHOW SLAVE STATUS`, so the old statement is a syntax error). Prometheus `mysqld_exporter` falls back to `SHOW REPLICA STATUS` and exports it as `mysql_slave_status_seconds_behind_source`; dashboards built on `mysql_slave_status_seconds_behind_master` go blank after the upgrade. For automated alerting, set PagerDuty or Slack alerts on these metrics with severity thresholds matching your RPO requirements. Test alerting quarterly by deliberately pausing a replica.
 
 ---
 

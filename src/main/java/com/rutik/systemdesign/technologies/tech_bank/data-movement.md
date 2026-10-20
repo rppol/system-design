@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 156 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 159 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -657,6 +657,12 @@ The connectors run inside the Flink job rather than in a separate runtime, so a 
 
 Reach for it when Flink already exists and the shape is one source, some transformation and one sink. The moment a second consumer appears the calculus inverts: each job re-reads the source, which on PostgreSQL means another replication slot on the primary with its own write-ahead-log retention, and that is precisely what a durable log in the middle exists to avoid.
 
+### Flink Kubernetes Operator
+**Short:** Apache Flink operator that runs FlinkDeployment and FlinkSessionJob resources: lifecycle, savepoint-based upgrades and autoscaling.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, platform-delivery/kubernetes-and-orchestration @2
+
 ### Flowable
 **Short:** BPMN workflow engine with modelled processes, human tasks and timers; also RxJava's Flowable stream type.
 **Kind:** tech
@@ -672,6 +678,12 @@ Reach for it for long-running, human-in-the-loop or approval-shaped processes; i
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/workflow-and-durable-execution @1, ml-lifecycle/ml-platform-and-pipelines @2
+
+### ForSt
+**Short:** Flink 2.0 disaggregated state backend, a RocksDB fork that keeps primary state on a DFS such as S3 with local disk as a cache.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-stores/key-value-and-embedded @2
 
 ### Google Cloud Composer
 **Short:** Google Cloud's managed Apache Airflow: hosted scheduler, workers and web UI for DAG orchestration.
@@ -1010,6 +1022,12 @@ Reach for it when your pipeline logic is Python and genuinely dynamic, and when 
 Airflow's core ships the scheduler, the DAG model and the executor machinery, while everything that talks to an outside system -- the Amazon, Google, Postgres, Snowflake, dbt, Kubernetes and HTTP integrations among hundreds -- lives in separately versioned `apache-airflow-providers-*` distributions. Each contributes operators, hooks, sensors, transfer operators, connection types and sometimes UI components, discovered through an entry point at startup. Because they release on their own cadence, a fix for one integration does not wait for a core release and can be pinned independently.
 
 The practical consequence is dependency management: providers pull real client libraries, so an environment installing many of them accumulates conflicting version constraints, which is the usual reason a managed Airflow environment refuses to update. Install only the providers actually used, pin them, and prefer running work in a container or pod operator when an integration's dependency set would otherwise poison the scheduler's own environment.
+
+### PyFlink
+**Short:** Python API for Apache Flink covering the Table API, SQL and the DataStream API, including Python user-defined functions.
+**Kind:** tech
+**Lang:** python
+**Roles:** data-movement/event-streaming-and-processing @1
 
 ### Ra
 **Short:** The Erlang Raft implementation underneath RabbitMQ's quorum queues, streams and Khepri metadata store.

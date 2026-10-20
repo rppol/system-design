@@ -882,7 +882,6 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 **Experiment Tracking:**
 - **MLflow Tracking** — open source, self-hosted or Databricks-managed; tracks runs, params, metrics, artifacts
 - **Weights & Biases (W&B)** — SaaS; richer visualization, team collaboration, sweeps for hyperparameter search
-- **Neptune** — SaaS alternative; strong metadata management
 
 **Model Registry:**
 - **MLflow Model Registry** — open source; the lifecycle mechanism is mutable **aliases** (`@champion`, `@challenger`) plus key-value tags, so one model version can carry several labels at once and promotion is an atomic alias move. Also provides model signatures and a REST API

@@ -332,9 +332,11 @@ Leaf-wise makes the leaf count a *continuous* dial while level-wise makes it a p
 | exact | Small datasets | Exact optimal splits, O(N log N) |
 | ~~gpu_hist~~ | GPU training | **Removed.** Since 2.0 use `tree_method="hist", device="cuda"` |
 
+Multi-target models default to `multi_strategy="one_output_per_tree"`, one tree per target per round. `multi_strategy="multi_output_tree"` grows vector-leaf trees instead: one tree per round whose leaves hold a vector with one value per target, so the targets share split structure. The `hist` vector-leaf implementation is feature-complete as of XGBoost 3.4 and still marked experimental.
+
 ### LightGBM Key Configurations
 
-All defaults in this file were checked against **XGBoost 3.3** and **LightGBM 4.7** (current releases, July 2026). Both libraries have moved defaults and removed parameters between major versions — re-check against your pin.
+All defaults in this file were checked against **XGBoost 3.4.1** (August 14, 2026) and **LightGBM 4.7**. XGBoost 3.4 changed no default parameter values, but `reg:quantileerror` and `reg:absoluteerror` now set leaf values with a smooth approximation instead of a line search, so models trained with those objectives give different predictions after the upgrade. Both libraries have moved defaults and removed parameters between major versions, so re-check against your pin.
 
 | Parameter | Classification Default | Regression Default | Notes |
 |-----------|----------------------|-------------------|-------|
@@ -1060,11 +1062,11 @@ Always ensure training data missingness patterns match production. If a feature 
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| XGBoost | 3.x | One `tree_method="hist"` for CPU and GPU, selected with `device="cuda"`; native categoricals; multi-output. `early_stopping_rounds` is a constructor arg, not a `fit()` arg. `ExtMemQuantileDMatrix` gives terabyte-scale external-memory training. Needs CUDA 12+ and Python 3.10+ |
+| XGBoost | 3.x | One `tree_method="hist"` for CPU and GPU, selected with `device="cuda"`; native categoricals; multi-output via vector-leaf trees. `early_stopping_rounds` is a constructor arg, not a `fit()` arg. `ExtMemQuantileDMatrix` gives terabyte-scale external-memory training. Needs Python 3.10+. Since 3.4 the default Linux and Windows wheels are built with CUDA 13.3; install `xgboost-cu12` for CUDA 12.9 |
 | LightGBM | 4.x | Arrow and pandas support. GOSS is requested with `data_sample_strategy="goss"` and is **not** the default (`"bagging"` is); `boosting_type` accepts `gbdt`/`dart`/`rf` |
 | CatBoost | 1.2+ | text features, embeddings, monotone constraints |
 | SHAP | 0.5x | TreeSHAP on all three (XGB/LGB/CB) |
-| Optuna | 4.x | Integrated XGBoost/LightGBM callbacks for pruning |
+| Optuna | 5.x | Integrated XGBoost/LightGBM callbacks for pruning |
 | MLflow | 3.x | Auto-logging for all three: params, metrics, artifacts |
 | Ray Tune | 2.x | Distributed hyperparameter search for XGB/LGB |
 | XGBoost Dask | 3.x | Distributed XGBoost training on multi-node clusters; import explicitly with `from xgboost import dask` |

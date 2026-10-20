@@ -49,7 +49,7 @@ Understanding these features is critical for modern Java interviews — they sho
 | Virtual threads | 21 | 21 | `Thread.ofVirtual()` |
 | Record patterns | 21 | 21 | `case Point(int x, int y)`, nested |
 | Sequenced Collections | 21 | 21 | `SequencedCollection` interface |
-| StructuredTaskScope | preview since 21 | — | still preview in Java 25 (JEP 505), 26 (JEP 525), and 27 (JEP 533); needs `--enable-preview` |
+| StructuredTaskScope | preview since 21 | none | preview in Java 21 through 27 (JEP 505 in 25, 525 in 26, 533 in 27), needs `--enable-preview`; final in JDK 28 (JEP 543) |
 | ScopedValue | 25 | 25 | final in Java 25 (JEP 506); `ThreadLocal` alternative |
 
 ### 4.2 Record Anatomy
@@ -233,13 +233,15 @@ try {
 ### StructuredTaskScope
 
 ```java
-// Preview API through Java 26 -- compile and run with --enable-preview.
+// Preview API on Java 21 through 27 -- compile and run with --enable-preview.
+// Final in JDK 28 (JEP 543) with the JDK 27 shape shown here.
 // The zero-parameter open() is the default policy: fail if ANY subtask fails.
 try (var scope = StructuredTaskScope.open()) {
     Subtask<String> user    = scope.fork(() -> fetchUser(id));
     Subtask<Order>  order   = scope.fork(() -> fetchOrder(id));
 
-    scope.join();           // wait for both; throws FailedException if either failed
+    scope.join();           // wait for both; if either failed, throws ExecutionException
+                            // with the failure as cause (FailedException on 25 and 26)
 
     return new Response(user.get(), order.get());
 }
@@ -247,12 +249,14 @@ try (var scope = StructuredTaskScope.open()) {
 // If either throws: join() throws and the scope cancels the rest
 
 // Other policies come from a Joiner passed to the one-arg open():
-//   Joiner.anySuccessfulOrThrow()  -- race: first success wins, rest cancelled
-//   Joiner.allSuccessfulOrThrow()  -- all must succeed; join() yields List<T> of results
-//   Joiner.awaitAll()              -- wait for everything, success or not
-// The names above are the Java 26 (JEP 525) spelling; on the Java 25 LTS
-// (JEP 505) the race joiner is still called anySuccessfulResultOrThrow() and
-// allSuccessfulOrThrow() yields a stream of Subtask objects rather than a list.
+//   Joiner.anySuccessfulOrThrow()       -- race: first success wins, rest cancelled
+//   Joiner.allSuccessfulOrThrow()       -- all must succeed; join() yields List<T> of results
+//   Joiner.awaitAllSuccessfulOrThrow()  -- wait for all to succeed; join() returns null
+// On JDK 27+ (JEP 533) these joiners make join() throw ExecutionException,
+// Joiner.awaitAll() is removed, and onTimeout() is replaced by timeout().
+// On the Java 25 LTS (JEP 505) the race joiner is still called
+// anySuccessfulResultOrThrow() and allSuccessfulOrThrow() yields a stream of
+// Subtask objects rather than a list.
 // A preview API is allowed to rename between releases -- pin the JDK you compile
 // against rather than assuming the signature is stable.
 ```
@@ -468,7 +472,7 @@ Sequenced collections (JEP 431, Java 21) add three interfaces for collections wi
 **Q10: What is StructuredTaskScope and when would you use it?**
 **Short:** StructuredTaskScope confines concurrent subtasks to the enclosing try-block's lifetime.
 
-`StructuredTaskScope` implements structured concurrency — it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another — the race joiner (`Joiner.anySuccessfulResultOrThrow()` on Java 25 [JEP 505], renamed `Joiner.anySuccessfulOrThrow()` from Java 26 [JEP 525] onward) for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed (its `join()` returns a `List` of the results as of Java 26), `Joiner.awaitAll()` to wait for all outcomes regardless. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is still a **preview API** — fifth preview in Java 25 (JEP 505), sixth in Java 26 (JEP 525, which also added `Joiner.onTimeout()`), seventh in Java 27 (JEP 533) — so it needs `--enable-preview` at both compile and run time. Seven previews is what a preview API costs you: a method rename or signature change per release in code you've already shipped, which is the concrete argument for wrapping a preview API behind an interface you own rather than calling it directly at every call site.
+`StructuredTaskScope` implements structured concurrency: it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another: the race joiner (`Joiner.anySuccessfulResultOrThrow()` on Java 25 [JEP 505], renamed `Joiner.anySuccessfulOrThrow()` from Java 26 [JEP 525] onward) for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed (its `join()` returns a `List` of the results as of Java 26), `Joiner.awaitAllSuccessfulOrThrow()` to wait for all subtasks without collecting results. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is a **preview API** on every released JDK through 27: fifth preview in Java 25 (JEP 505), sixth in Java 26 (JEP 525, which also added `Joiner.onTimeout()`), seventh in Java 27 (JEP 533, which added an exception type parameter, made the `...OrThrow()` joiners throw `ExecutionException`, removed `Joiner.awaitAll()`, and replaced `onTimeout()` with `timeout()`). It needs `--enable-preview` at both compile and run time until JDK 28, where JEP 543 finalizes the JDK 27 API unchanged. Seven previews is what a preview API costs you: a method rename or signature change per release in code you've already shipped, which is the concrete argument for wrapping a preview API behind an interface you own rather than calling it directly at every call site.
 
 **Q11: What is a text block and how does it handle indentation?**
 **Short:** Text blocks strip common leading whitespace based on the closing triple-quote's indentation.

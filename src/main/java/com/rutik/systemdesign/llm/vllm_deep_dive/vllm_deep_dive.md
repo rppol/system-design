@@ -50,12 +50,31 @@ For upgrading, tuning, and benchmarking vLLM in production, see [Inference Engin
 > re-check against your installed release before copying anything into production — and treat any
 > flag you find in a tutorial as unverified until `vllm serve --help` confirms it.
 >
-> **One breaking change has landed since: v0.28.0 (2026-08-26) moved `bitsandbytes` out of tree.**
-> `--quantization bitsandbytes` and `--load-format bitsandbytes` now require `vllm-bnb-plugin`
-> installed alongside vLLM; without it the model load fails outright. The pin below is kept at
-> v0.27.1 deliberately rather than swept forward, so that every other number in this document
-> stays the one that was actually verified — but §11's quantization table calls the change out
-> where it bites.
+> **Releases after the v0.27.1 pin change these things this document touches:**
+> - v0.28.0 (2026-08-26) moved `bitsandbytes` out of tree. `--quantization bitsandbytes` and
+>   `--load-format bitsandbytes` require `vllm-bnb-plugin` installed alongside vLLM; without it
+>   the model load fails. §11's quantization table calls this out.
+> - v0.29.0 (2026-09-09) made Model Runner V2 the default for all models and deprecated the
+>   V1 `GPUModelRunner`. v0.32.0 made Model Runner V2 the default on ROCm as well.
+> - v0.29.0 deprecated `python -m vllm.entrypoints.openai.api_server`. Start the server with
+>   `vllm serve`, as every example here does.
+> - v0.31.0 (2026-10-05) redirects online quantization through `--quantization fp8` to the
+>   `fp8_per_tensor` shorthand.
+> - v0.28.0 (2026-08-26) adds tiered KV-cache offloading with a disk tier, and v0.30.0
+>   (2026-09-22) adds the HiSparse host-memory tier for sparse-MLA decode (§5).
+> - v0.29.0 adds queue admission caps (`--max-num-queued-reqs`, `--max-num-queued-tokens`) and
+>   v0.31.0 adds `--max-num-active-seqs` (§4). v0.29.0 also makes the prefix-cache `NONE_HASH`
+>   deterministic, so distributed KV-cache users no longer pin `PYTHONHASHSEED`.
+> - v0.31.0 adds `vllm preload`, a daemon that keeps post-quantized weights resident in GPU memory
+>   across engine restarts.
+> - v0.32.0 (2026-10-18) breaks four things: Python 3.11 is the minimum; the default CORS origin
+>   list is empty instead of `*`, so browser clients need `--allowed-origins` (§16); `max_tokens`
+>   is an upper bound on output instead of a reservation from the context window (§14); and the
+>   Responses API streams reasoning as `response.content_part.added/done` with
+>   `part.type="reasoning_text"` instead of `response.reasoning_part.added/done`. It also removes
+>   cascade attention; `--disable-cascade-attn` still parses but only warns.
+>
+> The pin stays at v0.27.1 so every other number in this document is the one that was verified.
 
 vLLM separates concerns into three layers:
 
@@ -106,7 +125,7 @@ flowchart TD
 - **`EngineCore`** — the scheduling + model-execution loop, run in its own process so tokenization, detokenization and streaming overlap with it
 - **`Scheduler`** (`v1/core/sched/scheduler.py`) — decides which requests run each step; keeps `waiting` and `running` queues (there is no SWAPPED queue in V1)
 - **`KVCacheManager` / `BlockPool`** (`v1/core/`) — allocate KV cache blocks and map logical → physical blocks
-- **`GPUModelRunner`** (`v1/worker/gpu_model_runner.py`) — executes the forward pass with paged attention kernels
+- **`GPUModelRunner`** (`v1/worker/gpu_model_runner.py`): executes the forward pass with paged attention kernels. From v0.29.0, Model Runner V2 replaces it as the default
 - **`Sampler`** (`v1/sample/sampler.py`) — applies sampling parameters (temperature, top-p, top-k, min-p, penalties) to logits
 
 ---
@@ -390,6 +409,19 @@ flowchart LR
 - **RUNNING**: sequences currently being processed (in GPU KV cache)
 - **PREEMPTED**: sequences the scheduler evicted to free blocks — their KV cache is discarded and they go back to the head of the waiting queue
 
+### Admission Caps
+
+`max_num_seqs` caps RUNNING; on its own, the WAITING queue grows without bound, and an overloaded
+replica answers every request late instead of refusing some. v0.29.0 adds two admission caps,
+both off by default and both checked in the API server process before tokenization:
+`--max-num-queued-reqs` caps in-flight requests (waiting plus running, across every DP rank the
+server routes to), and `--max-num-queued-tokens` caps the total prompt tokens of requests still in
+prefill. A request over either cap gets HTTP 503, so the load balancer can retry it on another
+replica. Size the request cap as `data_parallel_size x max_num_seqs` plus the queue depth you
+accept, and the token cap as target TTFT times aggregate prefill throughput. v0.31.0 adds
+`--max-num-active-seqs`, which caps admission into RUNNING below `max_num_seqs` (it must not
+exceed it) without shrinking the runner's per-request buffers or CUDA graph capture.
+
 ### Preemption
 
 When GPU KV cache is full and a running sequence needs another block, the scheduler frees blocks by preempting the lowest-priority running request. **vLLM preempts by recomputation only**: the preempted sequence's KV cache is discarded and re-prefilled when it is re-scheduled. There is no GPU↔CPU swap path and no preemption-mode knob to tune. Prefix caching (§6) is what makes this cheap — a recomputed prefix usually hits the cache and collapses to near zero.
@@ -474,7 +506,13 @@ blocks in GPU HBM plus a hash table of cached blocks. Nothing spills to host mem
 scheduler's own path — preemption recomputes (§4). Offloading KV to host memory exists as an
 **opt-in cache extension**: `--kv-offloading-size <GiB>` plus
 `--kv-offloading-backend native|lmcache`, off by default. It buys prefix-cache capacity beyond
-HBM; it is not a preemption mechanism.
+HBM; it is not a preemption mechanism. v0.28.0 makes the offload tiered: blocks evicted from GPU
+go to a CPU tier and then a disk tier, with tiering metrics, and an out-of-tree secondary tier
+manager plugs in through `module_path`. v0.30.0 adds HiSparse (`HiSparseConnector`) for sparse-MLA
+decode: under GPU pressure it spills KV pages to pinned host memory, and top-k lookups that miss
+the GPU copy are served from a small per-request GPU buffer. Offload pays when loading a block back
+is faster than recomputing it: a 2K-token LLaMA-3-70B sequence holds about 650 MB of KV, about
+26 ms over PCIe 4.0 at ~25 GB/s, against a full re-prefill when the prefix is cold.
 
 Block states:
 ```
@@ -658,7 +696,7 @@ append all dynamic content after it, so the first 125 blocks always hash the sam
 
 ```bash
 # Server
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --enable-prefix-caching
 
@@ -870,7 +908,7 @@ and DSpark variants.
 #### Option 1: Draft Model
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-70B-Instruct \
     --speculative-config '{"method": "draft_model",
                            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
@@ -960,24 +998,24 @@ move to a format that is still in-tree.
 
 ```bash
 # FP8 (recommended for H100, minimal quality loss)
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-70B-Instruct \
     --dtype float16 \
     --quantization fp8
 
 # GPTQ (load pre-quantized model)
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model TheBloke/Llama-2-70B-GPTQ \
     --quantization gptq \
     --dtype float16
 
 # AWQ (better quality than GPTQ at same bit-width)
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model casperhansen/llama-3-70b-instruct-awq \
     --quantization awq
 
 # INT8 (SmoothQuant, good balance)
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model neuralmagic/Meta-Llama-3-8B-Instruct-quantized.w8a8 \
     --quantization compressed-tensors
 ```
@@ -1036,7 +1074,7 @@ Splits model weights across GPUs along the tensor dimension. Each GPU holds 1/N 
 
 ```bash
 # 4-GPU tensor parallelism (model split across 4 GPUs)
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-70B-Instruct \
     --tensor-parallel-size 4
 
@@ -1058,7 +1096,7 @@ Splits model layers across GPUs (each GPU holds consecutive layers). Micro-batch
 
 ```bash
 # 2-node, 8 GPUs each: TP=8 within node, PP=2 across nodes
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-405B-Instruct \
     --tensor-parallel-size 8 \
     --pipeline-parallel-size 2 \
@@ -1081,7 +1119,7 @@ Without the flag, vLLM shards each expert's weights across the TP group like any
 
 ```bash
 # Mixtral 8x7B: experts distributed across 4 GPUs (EP), attention still TP=4
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel
@@ -1097,7 +1135,7 @@ ray start --head --port=6379
 ray start --address='node0_ip:6379'
 
 # Launch on head node
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-405B-Instruct \
     --tensor-parallel-size 8 \
     --pipeline-parallel-size 2 \
@@ -1110,7 +1148,7 @@ native launcher on the `mp` backend — `--nnodes` / `-n`, `--node-rank` / `-r`,
 
 ```bash
 # Node 0
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-405B-Instruct \
     --tensor-parallel-size 8 --pipeline-parallel-size 2 \
     --nnodes 2 --node-rank 0 --master-addr node0_ip --master-port 29500
@@ -1155,7 +1193,7 @@ Multiple adapters can be hot-swapped or served simultaneously per request.
 ### Configuration
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --enable-lora \
     --max-lora-rank 64 \
@@ -1318,7 +1356,7 @@ Face says nothing about whether vLLM can serve it.
 ### Serving Vision Models
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model Qwen/Qwen2.5-VL-7B-Instruct \
     --max-model-len 8192
 ```
@@ -1409,6 +1447,12 @@ vLLM exposes a fully OpenAI-compatible REST API — any client using the OpenAI 
 | `POST /tokenize` | Tokenize text (vLLM extension — **not** under `/v1`) |
 | `POST /detokenize` | Detokenize token ids (vLLM extension) |
 | `POST /pooling` | Pooling for embedding models (**not** under `/v1`) |
+
+**`max_tokens` is a ceiling from v0.32.0.** Earlier releases reserved `max_tokens` from the
+context window and rejected a request whose prompt plus `max_tokens` exceeded `--max-model-len`.
+From v0.32.0 it is only an upper bound on output, clamped to the room the prompt leaves.
+Clients that set `max_tokens` near `--max-model-len` to mean "as long as needed" no longer get
+long prompts rejected, and generation still stops when the sequence reaches `--max-model-len`.
 
 ### Chat Completions
 
@@ -1746,6 +1790,14 @@ spec:
   type: ClusterIP
 ```
 
+### CORS for Browser Clients
+
+From v0.32.0 the server sends no CORS origins by default (earlier releases allowed `*`). A browser
+app calling vLLM directly fails its preflight after the upgrade while `curl` and server-side SDKs
+keep working, so the break shows up only in the browser console. Set
+`--allowed-origins '["https://app.example.com"]'` with the exact origins, or put vLLM behind a
+gateway that owns CORS and auth. Do not restore `*` on a server that also takes `--api-key`.
+
 ### Load Balancing Multiple vLLM Instances
 
 For horizontal scaling, run multiple vLLM instances and load balance:
@@ -1782,7 +1834,7 @@ Values shown are illustrative; the **defaults** are called out where they matter
 `vllm/config/*.py` at v0.27.1).
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
 
 # Model
   --model meta-llama/Meta-Llama-3-8B-Instruct  # HF model ID or local path
@@ -1793,8 +1845,11 @@ python -m vllm.entrypoints.openai.api_server \
 # Memory & Context
   --gpu-memory-utilization 0.9      # fraction of GPU memory for model + KV cache; DEFAULT 0.92
   --max-model-len 8192              # max context length (prompt + output)
-  --max-num-seqs 256                # max concurrent sequences; DEFAULT 128
-  --max-num-batched-tokens 32768    # max tokens per scheduler step; DEFAULT 2048
+  --max-num-seqs 256                # max concurrent sequences; DEFAULT 256 (A100 or <70 GiB GPU), 1024 (70 GiB+ non-A100)
+  --max-num-batched-tokens 32768    # max tokens per scheduler step; DEFAULT 2048 (A100 or <70 GiB), 8192 (70 GiB+ non-A100)
+  --max-num-queued-reqs 512         # v0.29.0+: cap on in-flight (waiting + running) requests; 503 above it
+  --max-num-queued-tokens 1000000   # v0.29.0+: cap on prompt tokens still in prefill; 503 above it
+  --max-num-active-seqs 128         # v0.31.0+: cap on RUNNING admission, must be <= max-num-seqs
 
 # Parallelism
   --tensor-parallel-size 2         # GPUs for tensor parallelism
@@ -1827,6 +1882,7 @@ python -m vllm.entrypoints.openai.api_server \
   --port 8000
   --host 0.0.0.0
   --api-key secret-token           # optional auth
+  --allowed-origins '["https://app.example.com"]'  # CORS; DEFAULT none from v0.32.0 (was "*")
   --max-log-len 100                # truncate logged prompts
 
 # Optimization
@@ -1919,7 +1975,7 @@ rewriting the scheduler in C++.
 ```bash
 # V1 is the only engine from v0.11.0 onward; there is nothing to enable.
 # On releases between v0.7.0 and v0.8.0, V1 was opt-in:
-VLLM_USE_V1=1 python -m vllm.entrypoints.openai.api_server \
+VLLM_USE_V1=1 vllm serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
@@ -2127,6 +2183,12 @@ It turns off both `torch.compile` compilation and CUDA-graph capture, trading st
 **Short:** The default infinite request rate fires every request at once, so the reported latency measures saturation, not service under real load.
 
 Because `--request-rate` defaults to `inf`, which fires every request at once, so the reported TTFT and TPOT are dominated by queueing and describe saturation rather than service under load. The `inf` run is still a legitimate measurement — it is your maximum throughput, the capacity ceiling — but a latency percentile is only meaningful at a load level you actually intend to serve. To get one, set a finite `--request-rate` (open loop: arrivals are independent of how fast the server drains them) or a `--max-concurrency` bound (closed loop: a fixed number of requests in flight), then raise it step by step until p99 breaks your SLO; that knee is the provisioning point, and `vllm bench sweep` automates the climb. Two related mistakes to avoid: benchmarking with `--dataset-name random` at a fixed length, which erases the output-length variance continuous batching profits from and understates the engine, and comparing an offline `vllm bench throughput` figure against an online `vllm bench serve` figure, which are different questions with different answers.
+
+
+**Q19: How do you stop an overloaded vLLM replica from queueing unbounded work?**
+**Short:** Set `--max-num-queued-reqs` and `--max-num-queued-tokens` (v0.29.0+); a request over either cap gets HTTP 503, so the load balancer retries it on another replica instead of it waiting.
+
+`--max-num-seqs` only caps RUNNING. Without an admission cap, every request past that limit waits in WAITING, and under a burst the replica keeps accepting work it will serve seconds late, so TTFT climbs for everyone and the load balancer never sees a failure to route around. v0.29.0 adds `--max-num-queued-reqs`, a cap on in-flight requests (waiting plus running, across the DP ranks the API server routes to), and `--max-num-queued-tokens`, a cap on prompt tokens still in prefill; both are off by default and reject with HTTP 503. Size the request cap as `data_parallel_size x max_num_seqs` plus the queue depth you accept, and the token cap as target TTFT times aggregate prefill throughput. v0.31.0 adds `--max-num-active-seqs` to cap RUNNING admission below `max_num_seqs`. Pair the caps with a load balancer that retries a 503 on another replica, and alert on the 503 rate and on `vllm:num_requests_waiting`.
 
 ---
 
@@ -2509,6 +2571,7 @@ vLLM's design is a stack of deliberate trades, and the sections above each argue
 | PagedAttention block allocation over contiguous reservation | Near-zero external fragmentation; waste bounded by `block_size - 1` tokens per sequence (at most 15 with the default 16) | A block table indirection on every attention step, and a custom kernel that must be maintained per attention variant | Never in practice for serving; the fragmentation it removes is far larger than the indirection it adds |
 | Continuous batching over static batching | Each finished sequence frees its slot immediately, so GPU utilisation stays high under mixed sequence lengths | Per-request latency now depends on what else is in the batch, so tail latency is harder to reason about | Strict per-request latency SLOs — a slow neighbour is visible in your p99 |
 | Recompute on preemption over swapping KV to host memory | Nothing is held while a request waits, and the recompute usually lands on prefix-cache hits | The preempted request repeats work it already did | Very long prompts with a cold prefix cache, where the re-prefill is a full cold start |
+| KV offload to CPU or disk tiers over recompute | A prefix evicted from HBM comes back by copy instead of re-prefill | Host RAM or disk for the tier, and PCIe bandwidth on every load | Short prefixes or a fast prefill, where recomputing is cheaper than the copy; offload wins on long, reused prefixes (multi-turn chat, agents) on a large model |
 | Chunked prefill | A long prefill no longer blocks every ongoing decode step for its full duration | Raising `--max-num-batched-tokens` improves TTFT and hurts TPOT; lowering it does the reverse, and the budget covers prefill and decode together | Workloads with both long prompts and tight inter-token latency targets — there is no setting that satisfies both |
 | Prefix caching (APC) | Shared system prompts and multi-turn history are computed once | Cached blocks occupy the same pool the active sequences need; keys fold in the LoRA id and multimodal hashes, so hit rate dilutes across tenants | Many adapters or highly diverse prompts — the cache costs memory and returns few hits |
 | Speculative decoding | Fewer target-model forward passes per token when the drafter is accurate | Drafting cost is paid on every step, accepted or not, so a low acceptance rate makes it a net loss | Unpredictable output distributions; measure acceptance before enabling it |

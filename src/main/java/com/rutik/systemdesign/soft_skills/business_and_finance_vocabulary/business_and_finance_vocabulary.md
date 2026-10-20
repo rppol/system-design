@@ -83,10 +83,10 @@ half is knowing which wrong sentence you are about to not say.
 
 ## 4. Types / Levels / Modes
 
-The finance vocabulary an engineer needs breaks into seven registers, ordered roughly by
+The finance vocabulary an engineer needs breaks into eight registers, ordered roughly by
 how often you will reach for them: the income statement itself, cash, investment
-decisions, capex vs opex, capitalizing software development, growth and unit economics,
-and engineering cost management. Each register below is a set of four-part records —
+decisions, capex vs opex, capitalizing software development (for the books and for tax),
+growth and unit economics, engineering cost management, and pricing models. Each register below is a set of four-part records:
 term, definition with its authority, a real misuse, and a correct-use sentence.
 
 ### 4.1 The income statement, top to bottom
@@ -394,11 +394,13 @@ GAAP's ASC 350-40, internal-use software development is traditionally divided in
 stages: preliminary project (exploring feasibility, expensed), application development
 (the actual build — coding, testing, installing to hardware, the capitalizable stage), and
 post-implementation/operation (maintenance, expensed again); training and data-conversion
-costs are expensed throughout, even during the capitalizable stage. This stage-based model
-is currently being replaced — FASB issued ASU 2025-06 to remove the three-stage framework
-in favor of a simpler, principles-based recognition threshold, explicitly because the old
-staging maps poorly onto agile, iterative development where there's no clean line between
-"still exploring" and "now building." Under IFRS's IAS 38, development costs are
+costs are expensed throughout, even during the capitalizable stage. FASB's ASU 2025-06
+(September 2025) removes the stages: capitalization starts once management has authorized
+and committed funding and it is probable the project will be completed and the software
+used as intended (the "probable-to-complete recognition threshold"). FASB's stated reason
+is that the stages do not address incremental, iterative (agile) development, where there's
+no clean line between "still exploring" and "now building." The ASU is effective for annual
+periods beginning after 2027-12-15, with early adoption permitted. Under IFRS's IAS 38, development costs are
 capitalized only when all six of a named set of criteria hold simultaneously — technical
 feasibility, intent to complete, ability to use or sell it, probable future economic
 benefit, adequate resources to finish, and reliable measurability — while research costs
@@ -420,6 +422,38 @@ tell that reads as a bigger gap in understanding than it is.
 that changes how it shows up on the income statement — ask whether that changes the
 approval bar, because a capitalized cost is friendlier to this quarter's reported margin
 than an expensed one."
+
+#### `IRC §174 and §174A (tax treatment of R&E)`
+
+**Definition.** A tax rule, separate from the GAAP rule above. The Tax Cuts and Jobs Act
+of 2017 amended Internal Revenue Code §174 so that, for tax years beginning after
+December 31, 2021, research and experimental (R&E) expenditures, with software
+development named explicitly, had to be capitalized and amortized for tax: 5 years for
+domestic work and 15 years for foreign work, with a mid-year convention, so only 10% of
+domestic cost (about 3.3% of foreign) was deductible in year one. Public Law 119-21,
+signed July 4, 2025, added **§174A**: domestic R&E is deductible in full again for tax
+years beginning after December 31, 2024. Foreign R&E stays on the 15-year schedule under
+§174. Unamortized domestic amounts from 2022-2024 can be deducted in 2025 or split over
+2025 and 2026, and a small business (average annual gross receipts of $31M or less) can
+elect to apply §174A back to 2022. The IRS set out the procedures in Rev. Proc. 2025-28
+(August 28, 2025).
+
+**Worked numbers.** A US company paid $10M of domestic engineering salaries in 2023.
+Under the 2022-2024 rule it deducted $1M that year, so taxable income was $9M higher than
+the cash spent suggests; at the 21% federal corporate rate that was $1.89M of extra cash
+tax in a year the company may have had no GAAP profit. The same $10M spent in 2025 is
+deducted in full. The same $10M spent by an offshore team in 2025 still deducts about
+$333K in year one, which is a real input to a build-onshore versus build-offshore case.
+
+**Misuse.** "We already capitalize under ASC 350-40, so §174 is handled." §174 and §174A
+govern the tax return; ASC 350-40 governs the financial statements. The same salary can be
+expensed on the GAAP income statement and capitalized for tax, or the reverse, and the
+two follow different definitions and schedules.
+
+**Correct use.** "§174A brings our domestic R&E deduction back to 100% from 2025, which
+lowers this year's cash tax. It changes nothing in our GAAP margin; that still follows our
+ASC 350-40 capitalization policy. The Kraków team's work stays on 15-year tax
+amortization, so put that in the offshore cost model."
 
 ### 4.6 Growth and unit economics
 
@@ -560,6 +594,37 @@ than the mistake itself warrants.
 **Correct use.** "The new servers are depreciated over five years; the platform we
 capitalized last quarter is amortized over three — different schedules, different assets,
 don't merge them in the model."
+
+### 4.8 Pricing models
+
+#### `Seat-based vs usage-based vs outcome-based pricing`
+
+**Definition.** Three ways to charge for software, each tying revenue to a different
+unit. **Seat-based**: a fixed price per user per period (GitHub Copilot Business at $19
+per user per month); revenue is predictable and independent of how much each user does.
+**Usage-based**: a price per unit consumed, such as tokens, API calls, GB stored or
+compute credits; revenue moves with consumption and so does the customer's bill.
+**Outcome-based**: a price per successful result; Intercom's Fin charges $0.99 per
+outcome (a resolved conversation or completed workflow), and Salesforce moved Agentforce
+from $2 per conversation to Flex Credits at $0.10 per action in 2025. A **hybrid** combines
+a platform fee or committed spend with usage or overage charges above it. The pricing
+unit decides what the metering pipeline must count, and which side carries the cost of a
+failed attempt.
+
+**Why it matters to an engineer.** With seat pricing, inference COGS grows with use while
+revenue does not, so a heavy user or a prompt that doubles token count cuts gross margin
+directly. With usage pricing, the same regression raises the customer's bill and becomes
+a support ticket. With outcome pricing, every unsuccessful attempt is unpaid COGS, and the
+definition of "resolved" becomes a billing contract that logs must prove.
+
+**Misuse.** "Price the AI assistant per seat like the rest of the suite; the inference
+cost is small." Inference cost per seat is an average. The top 10% of users can cost
+several times the median, and at a flat seat price they are where gross margin
+disappears.
+
+**Correct use.** "Base plan is per seat with 500 agent actions included, overage at $0.08
+per action. Our COGS is $0.03 per action at current prompt length, so overage holds a 60%+
+gross margin, and the included 500 cover the median user with headroom."
 
 ---
 
@@ -788,10 +853,11 @@ sides of the ledger.
   burn, as the operative runway metric, with concrete thresholds: cut below six months of
   net-burn runway, treat below three months as an emergency — a real policy a huge
   fraction of venture-backed engineering orgs operate under.
-- **FASB's ASU 2025-06** replaced ASC 350-40's three-stage capitalization framework with
-  a simpler, principles-based standard specifically because the old model didn't map onto
-  agile development — a concrete, current instance of an accounting standard changing to
-  catch up with how software is actually built.
+- **FASB's ASU 2025-06** (September 2025, effective for annual periods beginning after
+  2027-12-15, early adoption permitted) removes ASC 350-40's three-stage capitalization
+  framework in favor of a probable-to-complete threshold, because the stages did not
+  address agile development. It is a concrete instance of an accounting standard changing
+  to catch up with how software is built.
 
 ---
 
@@ -869,6 +935,10 @@ raw total trains its leadership to react to noise instead of the number that mat
 - FASB ASC 350-40 and ASU 2025-06; IFRS IAS 38 — the two standards governing software
   capitalization. Consult an accountant for application to a specific company; this
   module states the principle, not tax or accounting advice.
+- Internal Revenue Code §174 and §174A (Public Law 119-21, July 4, 2025) and IRS Rev.
+  Proc. 2025-28: the tax treatment of R&E expenditure, separate from the GAAP rules above.
+- Intercom Fin pricing page and Salesforce's Agentforce Flex Credits announcement (2025):
+  worked public examples of outcome- and action-based pricing for AI agents.
 - FinOps Foundation (finops.org) — the Inform/Optimize/Operate framework, and the source
   of the widely-cited estimate that roughly a third of 2023 cloud spend was wasted.
 - [Executive Communication](../executive_communication/executive_communication.md) — how
@@ -1008,6 +1078,30 @@ That changes the current quarter's reported earnings without touching the cash b
 which is exactly why some organizations ask engineers to classify their time as
 capitalizable versus non-capitalizable — the classification alone can be the difference
 between a project clearing an internal approval bar this quarter or not.
+
+**Q: Finance says engineering salaries are "capitalized under §174" and your manager says "we expense R&D". Can both be true?**
+**Short:** Yes. §174 and §174A are tax rules for the tax return, and ASC 350-40 is the GAAP rule for the income statement; the same salary can be capitalized in one and expensed in the other.
+
+From tax years beginning after 2021, §174 forced R&E, including software development, to
+be amortized for tax over 5 years (domestic) or 15 (foreign), while the GAAP books kept
+expensing most of it. §174A, added by Public Law 119-21 in July 2025, restores full
+expensing of domestic R&E for tax years beginning after 2024; foreign R&E stays on 15
+years. None of this changes reported gross margin or operating income, which follow ASC
+350-40. It changes cash tax: $10M of 2023 domestic salaries deducted only $1M that year,
+about $1.89M of extra federal tax at 21%. Ask which ledger a statement is about before
+arguing with it.
+
+**Q: You are pricing an AI support agent with real inference cost per conversation. What changes between seat, usage and outcome pricing?**
+**Short:** Per seat, cost rises with use while revenue is flat, so heavy users eat margin; per use, the customer's bill carries the cost; per outcome, you are paid only for success and failed attempts are your cost.
+
+Each model decides who pays for variance in inference cost. At a flat seat price, a
+prompt change that doubles tokens or a power user running 10x the median cuts gross
+margin directly. Usage pricing (per token, call or action) passes that cost through, at
+the price of a bill the customer may not predict. Outcome pricing, such as Intercom Fin at
+$0.99 per resolved outcome, aligns price with value but makes every failed attempt unpaid
+COGS and turns the definition of "resolved" into something your logs must prove. Most AI
+products land on a hybrid: a seat or platform fee with an included allowance and metered
+overage priced above unit cost.
 
 **Q: What's the practical difference between showback and chargeback, and when do you
 move from one to the other?**

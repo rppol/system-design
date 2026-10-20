@@ -739,7 +739,7 @@ Two cells people over-read. **Redis Cluster is not strongly consistent as a syst
 | Stream Processing | Kafka Streams | Simpler ops; embedded in Kafka ecosystem |
 | Batch Processing | Apache Spark | Industry standard for large-scale feature computation |
 | Feature Monitoring | Evidently AI | Open-source drift detection; PSI, KS, Wasserstein |
-| Feature Monitoring | whylogs | Lightweight statistical data logging, still maintained as OSS. Note WhyLabs, the commercial platform behind it, wound down in 2025 — treat it as a library, not a managed service |
+| Feature Monitoring | whylogs | Lightweight statistical data profiles. Do not start new work on it: the last PyPI release is 1.6.4 (2024-12-03) and WhyLabs, the company behind it, has wound down. The Apache-2.0 code still runs, but no vendor maintains it |
 
 ---
 

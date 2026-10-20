@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Spring Session decouples HTTP session storage from the servlet container. In a stock Spring Boot app, `HttpSession` is managed by Tomcat/Jetty/Undertow and its state lives in that one JVM's heap. Spring Session replaces this with a `Session` abstraction backed by a pluggable `SessionRepository` — Redis or JDBC under Spring Boot, with Hazelcast and MongoDB variants maintained outside Boot by their own teams — so session state becomes an external, shared resource that any application instance can read and write.
+Spring Session decouples HTTP session storage from the servlet container. In a stock Spring Boot app, `HttpSession` is managed by Tomcat or Jetty and its state lives in that one JVM's heap. Spring Session replaces this with a `Session` abstraction backed by a pluggable `SessionRepository` (Redis or JDBC under Spring Boot, with Hazelcast and MongoDB variants maintained outside Boot by their own teams), so session state becomes an external, shared resource that any application instance can read and write.
 
 The mechanism is deliberately transparent. A single servlet filter, `SessionRepositoryFilter`, wraps every incoming `HttpServletRequest` and overrides `getSession()` / `getSession(boolean)` so that your controllers, Spring MVC, and Spring Security keep calling the ordinary Servlet API but silently talk to the repository instead of the container. No application code changes; the container's own session machinery is bypassed entirely.
 
@@ -47,8 +47,8 @@ Spring Session 4.1 ships with Spring Boot 4.1 / Spring Framework 7.0 on the Jaka
 
 | Backend | Starter | Best For | Notes |
 |---|---|---|---|
-| Redis | `spring-session-data-redis` | Most web apps; low-latency shared store | Sub-ms reads; native TTL expiry; the default choice |
-| JDBC | `spring-session-jdbc` | Teams already running a relational DB; no new infra | `SPRING_SESSION` + `SPRING_SESSION_ATTRIBUTES` tables; scheduled cleanup job |
+| Redis | `spring-boot-starter-session-data-redis` | Most web apps; low-latency shared store | Sub-ms reads; native TTL expiry; the default choice |
+| JDBC | `spring-boot-starter-session-jdbc` | Teams already running a relational DB; no new infra | `SPRING_SESSION` + `SPRING_SESSION_ATTRIBUTES` tables; scheduled cleanup job |
 | Hazelcast | `spring-session-hazelcast` | Teams already running a Hazelcast grid | Hazelcast-team-led, outside Spring Boot's auto-configuration since Boot 4.0 — wire the repository bean yourself |
 | MongoDB | `spring-session-data-mongodb` | Mongo-centric stacks | Community-led, outside Spring Boot's auto-configuration since Boot 4.0; document per session, TTL index for expiry |
 
@@ -56,7 +56,7 @@ Spring Session 4.1 ships with Spring Boot 4.1 / Spring Framework 7.0 on the Jaka
 
 | Repository | Enable | Principal Index | Expired-Session Events | Cost |
 |---|---|---|---|---|
-| `RedisSessionRepository` (Boot's Redis default) | `spring.session.redis.repository-type=default` | No | No | One key per session; pure TTL |
+| `RedisSessionRepository` (Boot's Redis default) | `spring.session.data.redis.repository-type=default` | No | No | One key per session; pure TTL |
 | `RedisIndexedSessionRepository` | `@EnableRedisIndexedHttpSession` or `repository-type=indexed` | Yes (`findByPrincipalName`) | Yes (needs keyspace notifications) | Extra index keys + a background cleanup task |
 
 Pick `indexed` only when you need concurrent-session control, logout-everywhere, or `SessionExpiredEvent`. Otherwise `default` is cheaper.
@@ -191,14 +191,16 @@ On authentication the id is rotated (a new key replaces the old one) so a pre-lo
 
 ## 6. How It Works — Detailed Mechanics
 
-### Enabling Redis-backed sessions (Spring Boot 3.x)
+### Enabling Redis-backed sessions (Spring Boot 4)
 
-Add `spring-boot-starter-data-redis` and `spring-session-data-redis`, then either annotate or use properties.
+Add `spring-boot-starter-session-data-redis`, then either annotate or use properties, not both.
 
 ```java
 @Configuration
 @EnableRedisHttpSession(maxInactiveIntervalInSeconds = 1800) // 30 min default TTL
 public class SessionConfig {
+    // Boot's session auto-configuration backs off when this annotation is present,
+    // so spring.session.* properties are ignored; set everything on the annotation.
 
     // LettuceConnectionFactory is auto-configured from spring.data.redis.* properties.
     // No other beans are required — @EnableRedisHttpSession registers:
@@ -208,15 +210,15 @@ public class SessionConfig {
 ```
 
 ```yaml
-# Equivalent property-driven configuration (Boot 3.x)
+# Equivalent property-driven configuration (Boot 4, no @EnableRedisHttpSession)
 spring:
   session:
-    store-type: redis
-    timeout: 30m                 # session max inactive interval
-    redis:
-      namespace: "spring:session"
-      flush-mode: on_save        # write to Redis only when the request completes
-      repository-type: default   # 'indexed' to enable principal index + expiry events
+    timeout: 30m                   # session max inactive interval
+    data:
+      redis:
+        namespace: "spring:session"
+        flush-mode: on_save        # write to Redis only when the request completes
+        repository-type: default   # 'indexed' to enable principal index + expiry events
   data:
     redis:
       host: redis.internal
@@ -393,7 +395,7 @@ With `HttpSessionCsrfTokenRepository`, the CSRF token rides inside the Spring Se
 
 ### Horizontally-scaled monolith behind a round-robin load balancer
 
-A classic Spring MVC e-commerce app runs 8 identical instances behind an L7 balancer. Adding `spring-session-data-redis` and one `@EnableRedisHttpSession` line externalizes the cart and login session to Redis. The balancer drops sticky routing entirely; rolling deploys no longer log anyone out because a restarting instance holds no session state.
+A classic Spring MVC e-commerce app runs 8 identical instances behind an L7 balancer. Adding `spring-boot-starter-session-data-redis` and one `@EnableRedisHttpSession` line externalizes the cart and login session to Redis. The balancer drops sticky routing entirely; rolling deploys no longer log anyone out because a restarting instance holds no session state.
 
 ### Blue-green and canary deploys
 
@@ -560,7 +562,7 @@ redis-cli config set notify-keyspace-events Egx      # persist in redis.conf too
 
 ```properties
 # Application: switch to the indexed repository (default repository publishes no events)
-spring.session.redis.repository-type=indexed
+spring.session.data.redis.repository-type=indexed
 ```
 
 Also remember Redis does not deliver expired notifications instantly — the event may lag until the key is accessed or the background sweep runs, so never depend on it for tight, real-time timing.
@@ -605,6 +607,35 @@ Putting large collections, entire entity graphs, or file blobs into session attr
 // Spring Security. Do not override the order unless you truly understand the chain.
 ```
 
+### Pitfall 7: Object Identity Does Not Survive the Session Store
+
+An in-JVM `HttpSession` hands back the same object you put in, so `==` against a constant
+works. A session restored from Redis or JDBC holds a freshly deserialized copy, and every
+identity check against a singleton or constant turns false. Spring Security hit exactly this
+in its passkey code (CVE-2026-47841, 2026-08-20): the WebAuthn options stored in the session
+carried `UserVerificationRequirement.REQUIRED`, a `Serializable` constant-holder class (not
+an `enum`) with no `equals` and no `readResolve`, and after a round trip through Spring
+Session the restored value no longer matched the constant. User verification was skipped
+silently, so a stolen authenticator signed in without its PIN or biometric.
+
+```java
+// BROKEN: a constant-holder class; deserialization creates a second instance
+public final class Level implements Serializable {
+    public static final Level REQUIRED = new Level("required");
+    private final String value;
+    private Level(String value) { this.value = value; }
+}
+boolean strict = session.getAttribute("level") == Level.REQUIRED;   // false after Redis
+
+// FIX: use an enum (deserialized to the same constant), or give the class
+// value-based equals/hashCode and a readResolve that returns the canonical constant
+private Object readResolve() { return "required".equals(value) ? REQUIRED : this; }
+```
+
+Spring Security 7.1.1 added value-based `equals`, `hashCode` and `readResolve` to
+`UserVerificationRequirement`. Passkeys with user verification set to `REQUIRED` on a shared
+session store need 7.1.1 (Boot 4.1.1) or 7.0.7 (Boot 4.0.8).
+
 ---
 
 ## 11. Technologies & Tools
@@ -612,8 +643,8 @@ Putting large collections, entire entity graphs, or file blobs into session attr
 | Technology | Role | Notes |
 |---|---|---|
 | `spring-session-core` | Core `Session` / `SessionRepository` / filter abstractions | Store-agnostic |
-| `spring-session-data-redis` | Redis-backed sessions | The default production choice; sub-ms reads |
-| `spring-session-jdbc` | Relational store | `SPRING_SESSION` tables + scheduled cleanup; no new infra |
+| `spring-boot-starter-session-data-redis` | Redis-backed sessions (`spring-session-data-redis`) | The default production choice; sub-ms reads |
+| `spring-boot-starter-session-jdbc` | Relational store (`spring-session-jdbc`) | `SPRING_SESSION` tables + scheduled cleanup; no new infra |
 | `spring-session-hazelcast` | Data-grid store | `MapSession` in a distributed `IMap`; Hazelcast-team-led, no Boot auto-configuration |
 | `spring-session-data-mongodb` | Document store | TTL index for expiry; community-led, no Boot auto-configuration |
 | Redis (Lettuce) | Backing store + native TTL | `spring.data.redis.*`; enable `notify-keyspace-events` for indexed events |

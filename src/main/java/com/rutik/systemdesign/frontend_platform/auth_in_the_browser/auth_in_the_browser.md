@@ -778,6 +778,8 @@ recovers them in seconds. OAuth calls this a public client, and the browser flow
 it: no `client_secret` at the token endpoint, PKCE instead, and exact-match `redirect_uri`
 registration so the issuer knows where a code may be delivered.
 
+---
+
 ## 13. Best Practices
 
 1. **Default to an `HttpOnly; Secure; SameSite=Lax` cookie session** for a first-party

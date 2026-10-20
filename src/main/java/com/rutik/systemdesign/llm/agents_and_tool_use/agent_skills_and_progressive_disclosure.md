@@ -63,19 +63,22 @@ Working through four concrete requests against the table clarifies the boundarie
 - *"Triage this on-call page the way our team always does"* (a stable, reused, describable procedure) — a Skill. This is the incident-triage example built out fully in §6.
 - *"Draft a reply in the tone of our brand voice"* (the model does not reliably do this even when told, across hundreds of attempts) — a candidate for fine-tuning, if a written style guide genuinely cannot close the gap.
 
-### 4.2 Where a Skill runs — three surfaces, three different environments
+### 4.2 Where a Skill runs: four surfaces, four different environments
 
 The spec is one shape; the runtime around it is not. A Skill written against one surface's assumptions can silently misbehave on another.
 
 | Surface | Distribution | Sandbox | Network access | Pre-built skills available |
 |---|---|---|---|---|
-| Claude API | Upload via the `/v1/skills` endpoints; requires the code execution tool | Sandboxed container | None; no runtime package installation | Yes — `skill_id` values `pptx`, `xlsx`, `docx`, `pdf` |
+| Claude API | Upload via the `/v1/skills` endpoints (GA since 2026-08-19; no `skills-2025-10-02` beta header needed); requires the code execution tool | Sandboxed container | None; no runtime package installation | Yes, `skill_id` values `pptx`, `xlsx`, `docx`, `pdf` |
 | Claude Code | Filesystem — a directory under a skills path, no upload step | The user's own machine | Full — same as any program the user runs | No — the document skills are API-only |
 | claude.ai | Upload as a zip in Settings > Features | Code-execution sandbox, same family as the API's | Varies by user/admin setting | Depends on plan; individual per user, not org-managed |
+| Claude Managed Agents (beta) | The agent's `skills` array (uploaded `skill_*` IDs or Anthropic skills), or a mounted GitHub repository whose root `.claude/skills/<name>/SKILL.md` directories are discovered at session start (2026-08-07) | Anthropic cloud sandbox; repository discovery does not run in self-hosted sandboxes | Cloud sandboxes have network access | Yes, `type: "anthropic"` with `pptx`, `xlsx`, `docx`, `pdf`; up to 500 skills per session |
 
-The consequence worth remembering: **a custom Skill does not sync across these three surfaces.** One uploaded to claude.ai is not available to the API, and a Claude Code skill on a laptop is separate from both — see Pitfall (f) in §10. Anthropic also documents Agent Skills as available on Claude Platform on AWS and on Microsoft Foundry, where the Foundry path requires a Hosted-on-Anthropic deployment.
+The consequence worth remembering: **a custom Skill does not sync across these surfaces.** One uploaded to claude.ai is not available to the API, and a Claude Code skill on a laptop is separate from both — see Pitfall (f) in §10. Anthropic also documents Agent Skills as available on Claude Platform on AWS and on Microsoft Foundry, where the Foundry path requires a Hosted-on-Anthropic deployment.
 
-A practical way to choose among the three when a skill could plausibly live on more than one: pick Claude Code when the procedure genuinely needs the user's own network and filesystem (an internal deploy script that only resolves inside the corporate VPN); pick the Claude API when the procedure should run the same way for every user of a product regardless of what machine they're on, and does not need live network access; pick claude.ai when the audience is an individual user working interactively rather than an integrated product. Getting this wrong does not fail loudly — it fails as Pitfall (f), the skill simply not being there on the surface someone else expected it on.
+Repository-loaded skills on Managed Agents follow the checked-out branch or commit and are scanned once at session start, so commits pushed mid-session are not picked up. They also load with no review step, which makes anyone who can commit to that repository part of the agent's trust boundary (see Pitfall (e)).
+
+A practical way to choose among the first three when a skill could plausibly live on more than one: pick Claude Code when the procedure genuinely needs the user's own network and filesystem (an internal deploy script that only resolves inside the corporate VPN); pick the Claude API when the procedure should run the same way for every user of a product regardless of what machine they're on, and does not need live network access; pick claude.ai when the audience is an individual user working interactively rather than an integrated product. Getting this wrong does not fail loudly — it fails as Pitfall (f), the skill simply not being there on the surface someone else expected it on.
 
 ---
 

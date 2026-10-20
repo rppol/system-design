@@ -14,7 +14,8 @@ Key capabilities this module covers:
 
 - Path operations: all HTTP methods, `response_model`, `status_code`, `tags`, `summary`
 - Five parameter sources: path, query, body, header, cookie — with `Annotated` constraints
-- `APIRouter` for modular route organisation: prefix, tags, router-level dependencies
+- `APIRouter` for modular route organisation: prefix, tags, router-level dependencies, and the
+  route tree `include_router()` builds [FastAPI 0.137+]
 - The `Request` and `Response` objects and when you need them directly
 - Built-in response classes: `JSONResponse`, `HTMLResponse`, `FileResponse`,
   `StreamingResponse`, `RedirectResponse`
@@ -82,8 +83,8 @@ them. This mirrors the principle of least knowledge: a `users` router should not
 `orders` routes.
 
 **6. Sync routes run in a thread pool.**
-If you define `def get_user(...)` (sync), FastAPI runs it in `asyncio.to_thread` via
-`run_in_executor`. If you define `async def get_user(...)` (async), it runs on the event loop
+If you define `def get_user(...)` (sync), FastAPI runs it on the anyio thread pool via
+`anyio.to_thread.run_sync` (40 tokens by default). If you define `async def get_user(...)` (async), it runs on the event loop
 directly. Never do blocking I/O in an async handler — it stalls every other request.
 
 ---
@@ -159,6 +160,11 @@ router = APIRouter(
     dependencies=[Depends(require_admin)],
 )
 ```
+
+**Include order does not matter** [FastAPI 0.137+]. `include_router()` stores the router object
+itself, so a route added to `users.router` after `app.include_router(users.router)` is served,
+and a parent can include an empty sub-router and have it filled later. §6.10 covers the
+mechanism and the code it breaks.
 
 ### 4.4 Response Class Hierarchy
 
@@ -656,6 +662,83 @@ async def health_ui() -> str:
     return "<html><body><h1>OK</h1></body></html>"
 ```
 
+### 6.9 Serving a built SPA with `app.frontend()` [FastAPI 0.138+]
+
+`app.frontend()` (or `router.frontend()`) serves the output of `npm run build` and replaces a
+`StaticFiles` mount plus a hand-written `index.html` catch-all route:
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+app.include_router(api_router, prefix="/api")
+app.frontend("/", directory="dist")    # /assets/app.js -> dist/assets/app.js
+```
+
+- **Fallback.** The default `fallback="auto"` serves `404.html` with status 404 if the directory
+  has one; otherwise it serves `index.html` for unknown paths so client-side routing (React Router,
+  Vue, Angular) works on a hard refresh. The fallback answers only `GET`/`HEAD` requests whose
+  `Accept` includes `text/html`, so a missing `.js` or `.css` file still returns 404.
+- **Dependencies.** App, router, and `include_router()` dependencies run for frontend responses
+  too, so a cookie-auth dependency on the router protects the frontend; HTTP middleware applies.
+- **`check_dir="auto"`** (0.141.0+, the default). When `FASTAPI_ENV=development` (which
+  `fastapi dev` sets) a missing `dist/` only logs a warning, so the backend starts before the first
+  frontend build; in any other environment app creation raises, so a deploy without the build
+  fails at startup instead of on the first page load.
+- It serves static build output only; it does not run server-side rendering.
+
+### 6.10 How `include_router()` stores a router [FastAPI 0.137+]
+
+FastAPI 0.137.0 (2026-06-14, PR #15745) changed `include_router()` from copying routes to
+keeping the router. Before it, `app.include_router(users)` rebuilt every `APIRoute` in `users`
+with the prefix, tags and dependencies applied, and appended the copies to the app's flat route
+list. A route registered on `users` after that call existed only on `users` and returned 404.
+Since 0.137, the include adds one `_IncludedRouter` node that holds a reference to the original
+router plus the include-time options (prefix, tags, dependencies, `strict_content_type`):
+
+```
+  FastAPI <= 0.136: app.routes is a flat list of copies
+    /openapi.json  /docs  /docs/oauth2-redirect  /redoc
+    APIRoute /v1/users/me                 copied at include time
+    (GET /v1/users/{uid} added later -> never copied -> 404)
+
+  FastAPI >= 0.137: app.routes is a tree of references
+    /openapi.json  /docs  /docs/oauth2-redirect  /redoc
+    _IncludedRouter(prefix="/v1") ------> v1 (APIRouter)
+                                           +-- _IncludedRouter(prefix="/users") --> users
+                                                                                     +-- /me
+                                                                                     +-- /{uid}
+```
+
+*The same app before and after 0.137: the copy is a snapshot taken at include time, while the
+reference sees every route the sub-router gets later.*
+
+Each `APIRouter` keeps a version counter that goes up when a route is added. An
+`_IncludedRouter` caches the effective routes (prefix and options applied) and rebuilds the
+cache when the counter has changed, so the per-request cost stays a lookup and a late route
+shows up on the next request.
+
+Effects to plan for on upgrade:
+
+- **Late registration works.** Plugins that add routes after the app is assembled no longer
+  need to run before `include_router()`.
+- **`router.routes` is a tree.** Code that walks `app.routes` and expects only `APIRoute`
+  objects sees `_IncludedRouter` nodes instead, and filtering on `isinstance(r, APIRoute)`
+  returns an empty list for a fully modular app (Pitfall 5). The release notes call
+  `router.routes` an internal detail. `fastapi.routing.iter_route_contexts(app.routes)`
+  [0.137.2+] walks the tree and yields one `RouteContext` per route, whose `path_format` and
+  `dependencies` include every prefix and include-level dependency (0.143.1 fixed the
+  included-route metadata, so pin at least that).
+- **The original route keeps its own path.** `request.scope["route"]` is the `APIRoute` object
+  as declared, so for `GET /v1/users/3` its `.path` is `/users/{uid}`, without the `/v1`
+  include prefix. Metrics or logs that label requests with that attribute merge `/v1` and `/v2`
+  traffic into one series; check the labels in a test after upgrading.
+- **OpenAPI is unchanged.** `app.openapi()["paths"]` still lists every route in the schema
+  with its full path.
+- **Router subclasses.** Because instances survive, `APIRouter` subclasses can override the new
+  `matches()` and `handle()` methods (for header-based versioning, for example). The release
+  notes mark this as alpha and undocumented.
+
 ---
 
 ## 7. Real-World Examples
@@ -770,6 +853,10 @@ async def get_me() -> dict:
 async def get_user(user_id: int) -> dict:  # Also changed to int for type safety
     return {"user_id": user_id}
 ```
+
+The same shadowing hits a `StaticFiles` mount at `/` or an SPA catch-all `/{path:path}` registered
+before the API routers. `app.frontend()` (§6.9) is exempt: FastAPI checks every path operation
+first and consults frontend routes only when none matched, whatever the registration order.
 
 ### Pitfall 2: Blocking I/O in an Async Handler
 
@@ -914,6 +1001,35 @@ async def webhook(request: Request) -> dict:
     return {"status": "ok"}
 ```
 
+### Pitfall 5: Walking `app.routes` as a flat list [FastAPI 0.137+]
+
+```python
+# BROKEN on FastAPI 0.137+: every APIRoute sits inside an _IncludedRouter node,
+# so a modular app yields [] and the startup check passes with nothing checked.
+from fastapi.routing import APIRoute
+
+def assert_all_routes_authenticated(app: FastAPI) -> None:
+    for route in app.routes:
+        if isinstance(route, APIRoute) and not route.dependencies:
+            raise RuntimeError(f"{route.path} has no auth dependency")
+```
+
+```python
+# FIX (FastAPI 0.143.1+): iter_route_contexts walks the tree and returns each
+# route with its effective path and the dependencies inherited from includes.
+from fastapi.routing import APIRoute, iter_route_contexts
+
+def assert_all_routes_authenticated(app: FastAPI) -> None:
+    for ctx in iter_route_contexts(app.routes):
+        if isinstance(ctx.original_route, APIRoute) and not ctx.dependencies:
+            raise RuntimeError(f"{ctx.path_format} has no auth dependency")
+```
+
+The broken check fails silently: an empty loop raises nothing. Reading `ctx.original_route`
+alone is a second trap, because the declared route carries only its own dependencies; an auth
+dependency set on `APIRouter(prefix="/v1", dependencies=[...])` appears in `ctx.dependencies`
+and not in `ctx.original_route.dependencies`.
+
 ---
 
 ## 11. Technologies & Tools
@@ -923,10 +1039,10 @@ async def webhook(request: Request) -> dict:
 | FastAPI | Decorator + type hints | Pydantic v2 | OpenAPI 3.1 (Swagger + ReDoc) | Yes | ~20k req/s single worker; 0.3–0.5 ms overhead |
 | Flask | Decorator + `@app.route` | Manual / marshmallow | Requires flask-apispec | No (Quart for async) | Mature; larger ecosystem; no built-in validation |
 | Django REST Framework | `ViewSet` + `Router` | Serializers | Browsable API; DRF-Spectacular | No (WSGI) | Best for teams already on Django |
-| Litestar | Decorator + type hints | Attrs / Pydantic | OpenAPI 3.1 | Yes | Faster than FastAPI on benchmarks; smaller community |
+| Litestar | Decorator + type hints | Attrs / Pydantic | OpenAPI 3.1 | Yes | msgspec-first serialization; its own benchmarks page declines a fastest-framework claim; smaller community |
 | Starlette | Decorator (manual) | None built-in | None | Yes | FastAPI is built on this; use directly for ultra-low overhead |
 | aiohttp | `@routes.get` | None built-in | None | Yes | Older async framework; no automatic docs |
-| Falcon | `responder` class | None | None | Partial | Extremely low overhead; used by PayPal at scale |
+| Falcon | `responder` class | None | None | Yes (full ASGI since 4.0; also WSGI) | Extremely low overhead; used by PayPal at scale |
 
 ---
 
@@ -997,7 +1113,32 @@ If you register `GET /users/{user_id}` before `GET /users/me`, the string "me" m
 specific (non-parameterised) routes before parameterised ones with overlapping prefixes. This is
 a static router — there is no specificity scoring unlike some other frameworks.
 
-**Q7: How do you return a 201 status code for a `POST` endpoint?**
+**Q7: On FastAPI 0.137+, what happens to a route added to a router after `include_router()` was already called?**
+**Short:** It is served, because include_router() keeps a reference to the router instead of copying its routes at include time.
+
+Up to FastAPI 0.136, `include_router()` copied each `APIRoute` from the sub-router into the
+parent at call time, so a route registered afterwards stayed on the sub-router only and the app
+answered 404 for it, with no error at startup. FastAPI 0.137.0 (2026-06-14) stores an
+`_IncludedRouter` node that points at the original router; the node rebuilds its cached
+effective routes when the sub-router's version counter changes, so the late route is served on
+the next request. The same change means a parent can include an empty sub-router and fill it
+later. The old advice "include routers last" still reads well, but it is no longer needed for
+correctness on 0.137+.
+
+**Q8: Why does a startup check that loops over `app.routes` looking for `APIRoute` objects find nothing on FastAPI 0.137+?**
+**Short:** Since 0.137 app.routes is a tree whose included routers appear as _IncludedRouter nodes, so a flat isinstance(APIRoute) filter skips them all.
+
+FastAPI 0.137.0 turned `router.routes` from a flat list of copied `APIRoute` objects into a tree:
+each `include_router()` call adds one `_IncludedRouter` node wrapping the original router. A
+loop such as `[r for r in app.routes if isinstance(r, APIRoute)]` now returns only the routes
+declared directly on `app`, which in a modular app is none, so an audit that raises on a
+missing auth dependency silently checks nothing. The release notes call `router.routes` an
+internal detail. Walk the tree with `fastapi.routing.iter_route_contexts(app.routes)`
+(0.137.2+, metadata fixed in 0.143.1): each `RouteContext` has the effective `path_format`
+(`/v1/users/{uid}`) and the merged `dependencies`, while the wrapped `original_route` keeps only
+what was declared on it.
+
+**Q9: How do you return a 201 status code for a `POST` endpoint?**
 **Short:** Set status_code=201 in the route decorator, or override it dynamically via the injected Response object.
 
 Set `status_code=201` in the decorator: `@app.post("/users", status_code=201)`. This is the
@@ -1005,7 +1146,7 @@ default HTTP status for that endpoint. You can still override it dynamically by 
 `Response` subclass with an explicit `status_code` argument. If you need to return a different
 status on some code paths, inject `Response` as a parameter and set `response.status_code`.
 
-**Q8: What is `include_in_schema=False` used for and when would you set it?**
+**Q10: What is `include_in_schema=False` used for and when would you set it?**
 **Short:** include_in_schema=False hides a working route from the OpenAPI docs without disabling it.
 
 `include_in_schema=False` prevents the route from appearing in the OpenAPI JSON and the Swagger
@@ -1013,7 +1154,7 @@ UI. Use it for: internal health-check endpoints that should not be documented pu
 introspection endpoints, and endpoints that internal load balancers call but external clients
 should not know about. The route still functions — it just does not appear in `/openapi.json`.
 
-**Q9: How do you accept a list of query parameters (e.g., `?tags=a&tags=b`)?**
+**Q11: How do you accept a list of query parameters (e.g., `?tags=a&tags=b`)?**
 **Short:** Declare the parameter as list[str] with Query() so FastAPI collects every repeated query value.
 
 Declare the parameter as `list[str]` with a `Query` annotation:
@@ -1021,7 +1162,7 @@ Declare the parameter as `list[str]` with a `Query` annotation:
 from the query string and coerces them into a list. Without `Query()`, FastAPI would not know
 to collect multiple values and would only capture the first occurrence.
 
-**Q10: How do you handle file uploads in FastAPI?**
+**Q12: How do you handle file uploads in FastAPI?**
 **Short:** UploadFile combined with File() spools large uploads to disk while keeping small ones in memory.
 
 Use `UploadFile` as the parameter type, combined with `File()`:
@@ -1032,7 +1173,7 @@ files and JSON fields, use `Form()` for text fields and `UploadFile` for files. 
 mix a Pydantic body model with `File()`/`Form()` in the same handler — use `Form()` for each
 field individually.
 
-**Q11: What is the purpose of `Annotated` in parameter declarations?**
+**Q13: What is the purpose of `Annotated` in parameter declarations?**
 **Short:** Annotated separates a parameter's base type from FastAPI's validation and source metadata.
 
 `Annotated[T, metadata]` ([3.9]) separates the base type from validation metadata. FastAPI reads
@@ -1042,7 +1183,7 @@ OpenAPI descriptions. The type checker only sees `T`, so `Annotated[int, Path(ge
 as `int` by mypy/pyright. This keeps type annotations valid for static analysis while giving
 FastAPI rich runtime metadata.
 
-**Q12: How do you customise the `operationId` in the OpenAPI schema?**
+**Q14: How do you customise the `operationId` in the OpenAPI schema?**
 **Short:** Pass operation_id to the route decorator to control the generated client SDK method name.
 
 Pass `operation_id="my_custom_id"` to the decorator: `@app.get("/users", operation_id="listUsers")`.
@@ -1051,7 +1192,7 @@ produces IDs like `get_user_users__user_id__get`. Custom operation IDs matter wh
 client SDKs — the operation ID becomes the generated method name. Many teams set
 `generate_unique_id_function` on the `FastAPI` instance to control the naming strategy globally.
 
-**Q13: When would you use `StreamingResponse` vs returning a Pydantic model?**
+**Q15: When would you use `StreamingResponse` vs returning a Pydantic model?**
 **Short:** Use StreamingResponse for incrementally generated or oversized bodies that can't fit in memory at once.
 
 Use `StreamingResponse` when the response body is generated incrementally (database cursor,
@@ -1061,7 +1202,7 @@ memory (~4 KB per yield). Pydantic model responses require the entire object to 
 to serialise. `StreamingResponse` cannot use `response_model` — serialisation is your
 responsibility inside the generator.
 
-**Q14: How does FastAPI handle the conversion of header names?**
+**Q16: How does FastAPI handle the conversion of header names?**
 **Short:** Header() automatically converts a parameter's underscores to hyphens when looking up the HTTP header.
 
 HTTP headers use hyphen-separated names (`X-Request-Id`), but Python identifiers use underscores.
@@ -1070,7 +1211,7 @@ the header. So `x_request_id: Annotated[str | None, Header()] = None` looks up `
 in the request headers. You can disable this with `convert_underscores=False` in `Header()`.
 This is a common source of `None` bugs when developers forget the conversion rule.
 
-**Q15: What happens when an `APIRouter` prefix and a route path both declare a path parameter with the same name?**
+**Q17: What happens when an `APIRouter` prefix and a route path both declare a path parameter with the same name?**
 **Short:** FastAPI raises a startup error when a router prefix and route path reuse the same path parameter name.
 
 FastAPI raises a startup error because the resolved path would contain the same parameter name
@@ -1079,7 +1220,7 @@ mounted with `prefix="/orgs/{org_id}"` combined with a route decorated `@router.
 resolves to `/orgs/{org_id}/members/{org_id}`, an ambiguous duplicate. Give the nested resource a
 distinct parameter name, such as `{member_id}`, so both values are extractable independently.
 
-**Q16: What is the difference between returning `RedirectResponse(url=..., status_code=301)` and the default `307`?**
+**Q18: What is the difference between returning `RedirectResponse(url=..., status_code=301)` and the default `307`?**
 **Short:** 307 preserves the original method and body on redirect, making it safer than 301 after POST or PUT.
 
 `301 Moved Permanently` tells clients and caches the resource has moved for good, so browsers and
@@ -1309,6 +1450,7 @@ async def get_order(order_id: Annotated[int, Path(ge=1)]) -> OrderOut: ...
 
 3. `BackgroundTasks` calls `send_confirmation_email` synchronously (it is a regular `def`). If
    `send_confirmation_email` takes 500 ms due to SMTP latency, does it block the next request?
-   (Answer: yes — Starlette's `BackgroundTask` runs the sync callable in the current event loop
-   iteration after the response. For SMTP with 500 ms latency, use `asyncio.to_thread` inside
-   the background task, or offload to Celery/ARQ.)
+   (Answer: no. Starlette's `BackgroundTask` runs a sync callable through `run_in_threadpool`
+   after the response is sent, so the event loop stays free. It does hold one of the 40 anyio
+   thread tokens for 500 ms, and sync routes share that pool, so a burst of 40 slow sends stalls
+   every sync route. For SMTP at that latency, offload to Celery/ARQ.)

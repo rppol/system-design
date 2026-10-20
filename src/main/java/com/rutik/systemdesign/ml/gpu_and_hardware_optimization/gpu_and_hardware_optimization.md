@@ -67,11 +67,13 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 - Custom CUDA kernels: for operations not covered by PyTorch, write custom CUDA kernels (or use Triton to write them in Python)
 
 **GPU selection**:
-- B200 180GB SXM (Blackwell): current flagship for frontier training and high-throughput inference; ~2,250 TFLOP/s BF16 dense, 8 TB/s HBM3e, 1.8 TB/s NVLink; ~$7/hr on cloud
+- GB300 NVL72 (Blackwell Ultra B300): 72 GPUs in one NVLink domain per rack; 20 TB HBM3e and 576 TB/s HBM bandwidth per rack (about 8 TB/s per GPU), 130 TB/s NVLink (1.8 TB/s per GPU), 360 PFLOP/s BF16 per rack with sparsity
+- B200 180GB SXM (Blackwell): frontier training and high-throughput inference; ~2,250 TFLOP/s BF16 dense, 8 TB/s HBM3e, 1.8 TB/s NVLink; ~$7/hr on cloud
 - H200 141GB SXM: H100 compute with far more memory and bandwidth — the practical inference GPU for large KV caches; 1,979 TFLOP/s BF16 (with sparsity), 4.8 TB/s HBM3e, 900 GB/s NVLink
 - H100 80GB SXM: the volume training GPU; 989 TFLOP/s BF16 (with sparsity), 3.35 TB/s HBM3, 900 GB/s NVLink; ~$4/hr on cloud
 - A100 80GB SXM: still ubiquitous and the cheapest way to get NVLink; 312 TFLOP/s BF16, 2 TB/s HBM2e, 600 GB/s NVLink; ~$2-3/hr on cloud
-- RTX 4090 24GB: best cost/performance for training medium models (<20B with quantization); 330 TFLOP/s BF16, 1 TB/s GDDR6X; ~$2,000 purchase
+- RTX 5090 32GB (Blackwell): GDDR7 on a 512-bit bus; the consumer card that followed the 4090 for local fine-tuning and inference
+- RTX 4090 24GB (Ada): previous consumer generation, still a cheap option for medium models (<20B with quantization); 330 TFLOP/s BF16, 1 TB/s GDDR6X; ~$2,000 purchase
 - T4 16GB: inference workloads; 65 TFLOP/s FP16; very cost-effective for batch inference (~$0.35/hr on AWS)
 - L4 24GB: efficient inference + fine-tuning; 121 TFLOP/s BF16; $0.72/hr on GCP
 - A10G 24GB: AWS g5 instances; good for inference + LoRA fine-tuning; ~$1-4/hr
@@ -770,7 +772,7 @@ to FSDP/ZeRO sharding or 8-bit optimizers — precision alone cannot fix an opti
 
 **NVIDIA A100 Tensor Core alignment**: a team observed that their custom attention variant ran at 60 TFLOP/s (19% of A100's BF16 peak) instead of the expected 140 TFLOP/s. Profiling showed the weight matrices were (768, 500) — 500 is not a multiple of 8, so at BF16's two bytes per element the rows are not 16-byte aligned. cuBLAS still ran the GEMM on Tensor Cores; it simply could not pick a kernel that issues 128-bit vector loads, and had to handle a ragged edge tile. Padding to (768, 512) increased throughput to 145 TFLOP/s. Rule: pad dimensions under your control to a multiple of 8 for BF16 (64 by convention on A100), 16 for INT8 — the wasted compute on the padding is far cheaper than running every step on the unaligned-edge kernel.
 
-**Google's TPU vs GPU decision**: TPUs use systolic arrays optimized for dense matrix multiplications with minimal flexibility. GPUs are general-purpose but programmable. Google trains LLMs on TPU pods (v4: 4,096 chips, 1.1 exaFLOP/s) for cost reasons; inference migrates to GPUs where dynamic batching and speculative decoding require flexible control flow that TPUs handle poorly.
+**Google's TPU vs GPU decision**: TPUs use systolic arrays optimized for dense matrix multiplications with minimal flexibility. GPUs are general-purpose but programmable. Google trains LLMs on TPU pods (v4: 4,096 chips, 1.1 exaFLOP/s) for cost reasons and serves Gemini on TPUs too. Ironwood (TPU v7, GA November 2025) is the TPU generation Google built for inference.
 
 ---
 
@@ -778,6 +780,7 @@ to FSDP/ZeRO sharding or 8-bit optimizers — precision alone cannot fix an opti
 
 | GPU | VRAM | BF16 TFLOP/s | HBM Bandwidth | NVLink | Cloud Cost/hr | Best For |
 |---|---|---|---|---|---|---|
+| B300 (GB300 NVL72) | ~278 GB | ~5,000* | ~8 TB/s | 1.8 TB/s | varies | Rack-scale frontier training and inference |
 | B200 180GB SXM | 180 GB | 2,250 | 8 TB/s | 1.8 TB/s | ~$7 | Frontier training, high-throughput inference |
 | H200 141GB SXM | 141 GB | 1,979* | 4.8 TB/s | 900 GB/s | varies | Large-KV-cache inference |
 | H100 80GB SXM | 80 GB | 989* | 3.35 TB/s | 900 GB/s | ~$4 | Volume training |
@@ -866,7 +869,7 @@ with torch.no_grad():             # disable autograd graph construction
 | NVIDIA Nsight Compute | Kernel-level profiling: occupancy, memory access patterns, FLOP utilization |
 | nvtx (NVIDIA Tools Extension) | Annotate Python code regions visible in Nsight Systems |
 | torch.compile | JIT compilation with kernel fusion (PyTorch 2.0+) |
-| Flash Attention 2 (Tri Dao) | Fused attention kernel, 2-4x faster than standard attention |
+| FlashAttention (Tri Dao) | Fused attention kernels, 2-4x faster than standard attention: FA2 for Ampere/Ada, FA3 for Hopper (FP8), FA4 for Blackwell |
 | xFormers (Meta) | Memory-efficient attention and transformer primitives |
 | Triton (OpenAI) | Python-like DSL for writing GPU kernels without CUDA C++ |
 | CUDA (NVIDIA) | GPU computing platform, C++ API for custom kernels |
@@ -888,7 +891,7 @@ A compute-bound operation's runtime is limited by the number of arithmetic opera
 
 **Q: What is Flash Attention and why is it faster than standard scaled dot-product attention?**
 **Short:** Flash Attention fuses QK^T, softmax, and V matmuls into one kernel that never materializes the full N x N score matrix in HBM, cutting attention memory from O(N^2) to O(N).
-Standard attention computes softmax(QK^T/sqrt(d))V by first materializing the full N×N attention score matrix in HBM (N = sequence length). For N=8192 and batch=8, this is 8 × 8192 × 8192 × 2 bytes = 1 GB — a massive HBM read/write. Flash Attention fuses the QK^T matmul, softmax, and V matmul into a single kernel that tiles the computation into blocks that fit in shared memory (SRAM, 19 TB/s). The attention scores are never materialized in HBM. Result: attention memory scales as O(N) instead of O(N^2), and runtime is 2-4x faster because it eliminates 2-3 round trips to HBM. Flash Attention 2 further optimizes work partitioning across warps. Use via `torch.nn.functional.scaled_dot_product_attention()` (PyTorch 2.0+) or the `flash-attn` package.
+Standard attention computes softmax(QK^T/sqrt(d))V by first materializing the full N×N attention score matrix in HBM (N = sequence length). For N=8192 and batch=8, this is 8 × 8192 × 8192 × 2 bytes = 1 GB of HBM reads and writes. Flash Attention fuses the QK^T matmul, softmax, and V matmul into a single kernel that tiles the computation into blocks that fit in shared memory (SRAM, 19 TB/s). The attention scores are never materialized in HBM. Result: attention memory scales as O(N) instead of O(N^2), and runtime is 2-4x faster because it eliminates 2-3 round trips to HBM. Flash Attention 2 further optimizes work partitioning across warps; FlashAttention-3 (2024) adds Hopper asynchrony, warp specialization, and FP8; FlashAttention-4 targets Blackwell. Use via `torch.nn.functional.scaled_dot_product_attention()` (PyTorch 2.0+), which dispatches to the best available backend, or the `flash-attn` package.
 
 **Q: What is the roofline model and how do you use it to guide optimization?**
 **Short:** The roofline model plots achievable FLOP/s against arithmetic intensity, showing whether an op sits below the ridge point (memory-bound, fix via fusion) or above it (compute-bound).

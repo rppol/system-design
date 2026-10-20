@@ -489,6 +489,16 @@ Server errors get `type: "server"` so the next client re-validation can clear th
 
 Two React 19 hooks finish the submit path. `useFormStatus()` reads the enclosing form's `pending` flag from a **child** component, which is what lets a shared `SubmitButton` disable itself with no prop threading; called in the same component that renders the `<form>`, it returns `pending: false` forever, because it reads a context the form provides to its subtree. And `useOptimistic(state, reducer)` renders the pending row before the server confirms it — the optimistic value is discarded automatically when the action settles, so there is no rollback to write. What it does not do is report failure: the row simply vanishes, which reads as the app eating what somebody typed, so pair it with an error path that restores the text or offers a retry, and mark the pending item `aria-busy`.
 
+**The automatic reset fires `onReset` `[19.3]`.** After an action passed to `<form action>` succeeds, React resets the form's uncontrolled fields. From React 19.3 that reset dispatches the form's `reset` event, so `onReset` is the one hook for clearing state the DOM reset cannot reach: RHF's `reset()`, a "dirty" banner, or client-side error messages left from the previous attempt.
+
+```tsx
+<form action={formAction} onReset={() => reset()}>
+  {/* fields registered with RHF */}
+</form>
+```
+
+Without it, the DOM inputs clear while RHF still holds the old values and errors, and the next keystroke validates against stale state. React 19.3 also includes the `submitter` in `submit` events, so `onSubmit` can tell which of two submit buttons, such as Save draft and Publish, sent the form.
+
 ### 6.8 Wizards, durability and autosave
 
 Put the step in the URL and the answers in a draft.

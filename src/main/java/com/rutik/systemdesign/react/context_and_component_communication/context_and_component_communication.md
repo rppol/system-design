@@ -35,7 +35,7 @@ This module assumes [React Fundamentals and the Render Model](../react_fundament
 - **Composition beats both drilling and context.** `children` passed from above means the expensive subtree is created once by the owner and merely relocated by the intermediate component.
 - **Anything outside React needs `useSyncExternalStore`.** `useState` plus an effect cannot see a store mutation that lands mid-render, and concurrent rendering makes that window real.
 - **Read the value through one guard hook, never `useContext` at call sites.** The hook throws when the provider is missing, so consumers never type `undefined` handling.
-- **A Server Component has no context.** The provider is a Client Component wrapping `{children}` that remain server-rendered.
+- **A Server Component cannot read context, but it can provide one.** From React 19.3 it renders a `"use client"` context directly, `<UserContext value={user}>`; a provider that holds client state is still a Client Component wrapping server-rendered `{children}`.
 
 ---
 
@@ -184,13 +184,13 @@ flowchart LR
     classDef cliC fill:#2c313a,stroke:#61afef,color:#abb2bf
     classDef badC fill:#2c313a,stroke:#e06c75,color:#abb2bf
 
-    L(["Server layout,<br/>no hooks available"]):::srvC --> P(["ThemeProvider,<br/>use client"]):::cliC
+    L(["Server layout,<br/>renders the context"]):::srvC --> P(["UserContext value,<br/>defined in use client"]):::cliC
     P -->|"children arrive<br/>already rendered"| C(["Server page and<br/>server sections"]):::srvC
     C --> W(["Client widget,<br/>reads the context"]):::cliC
     L -.->|"useContext here<br/>throws at build"| X(["not allowed in a<br/>Server Component"]):::badC
 ```
 
-The provider is a client island whose `children` are server-rendered output passed through it. The subtree stays on the server; only the provider shell and the leaf consumers ship JavaScript.
+The context is a client reference whose `children` are server-rendered output passed through it. A server layout renders `<UserContext value={user}>` itself `[19.3]`, the subtree stays on the server, and only the leaf consumers ship JavaScript.
 
 ---
 
@@ -452,7 +452,33 @@ One caveat worth stating: `undefined` as the sentinel is better than `null`, bec
 
 A Server Component runs once, on the server, with no state, no effects and no hooks. It therefore cannot call `useContext` — attempting it fails the build with `useContext only works in Client Components. Add the "use client" directive at the top of the file to use it.`
 
-The provider must be a Client Component. The pattern that keeps almost everything on the server is a thin client provider that renders `{children}`:
+Providing is different from reading. Since React 19.3 a Server Component can render a context created in a `"use client"` module directly, so a value the server already knows needs no wrapper component:
+
+```tsx
+// user-context.ts
+"use client";
+import { createContext } from "react";
+
+export const UserContext = createContext<User | null>(null);
+```
+
+```tsx
+// app/layout.tsx -- a Server Component
+import { UserContext } from "./user-context";
+
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const user = await getCurrentUser();               // server-only work, no hooks
+  return (
+    <html><body>
+      <UserContext value={user}>{children}</UserContext>   {/* value crosses as a prop */}
+    </body></html>
+  );
+}
+```
+
+The value crosses the client boundary like any prop, so it must be serializable: a plain object, not a class instance or a function. Before 19.3 the same layout needed a separate `Providers.tsx` client component whose only job was to forward the value.
+
+A provider that owns client state, such as a theme toggle with `useState`, is still a Client Component. The pattern that keeps almost everything on the server is a thin client provider that renders `{children}`:
 
 ```tsx
 // theme-provider.tsx
@@ -472,7 +498,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 import { ThemeProvider } from "./theme-provider";
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const settings = await db.settings.get();          // server-only work, no hooks
   return (
     <html><body>
       <ThemeProvider>{children}</ThemeProvider>       {/* children stay server-rendered */}
@@ -664,9 +689,9 @@ Both read the same value from the nearest matching provider. `useContext` is an 
 Declare `createContext<AuthApi | undefined>(undefined)`, then export one `useAuthApi()` that reads it and throws `useAuthApi must be used within an AuthProvider` when the value is `undefined`. Do not export the context object itself, so nobody bypasses the guard. Consumers get a named error with a useful stack instead of `Cannot read properties of undefined` fifteen frames away. Prefer `undefined` over `null` as the sentinel, so `null` stays available for a genuine absence such as a logged-out user.
 
 **Q: Can a Server Component use context?**
-**Short:** Server Components never run hooks, so the provider has to be a Client Component and the standard pattern wraps server-rendered children inside it.
+**Short:** A Server Component cannot read context because it runs no hooks, but from React 19.3 it can provide one by rendering a context defined in a use-client module with a value prop.
 
-Calling `useContext` in a Server Component fails with `useContext only works in Client Components. Add the "use client" directive at the top of the file to use it.` The pattern is a thin `"use client"` provider whose body is `<Ctx value={v}>{children}</Ctx>`, rendered from a server layout. The `{children}` passed to it are already-rendered server output travelling through as a prop, so the pages inside ship no JavaScript. Prefer explicit props for server-to-client data and keep context for values many scattered client leaves need.
+Calling `useContext` in a Server Component fails with `useContext only works in Client Components. Add the "use client" directive at the top of the file to use it.` Providing works: a context created in a `"use client"` module can be rendered from a server layout as `<UserContext value={user}>{children}</UserContext>`, with the value serialized like any prop, so a provider that only forwards a server value needs no wrapper file. A provider holding client state, such as a theme toggle with `useState`, is still a thin `"use client"` component that wraps `{children}`. In both shapes the `{children}` are already-rendered server output passed through as a prop, so the pages inside ship no JavaScript. Prefer explicit props for server-to-client data and keep context for values many scattered client leaves need.
 
 **Q: When is the default passed to createContext actually used?**
 **Short:** Default values only apply when no matching provider exists anywhere above the consumer, never as a substitute for a provider that publishes undefined.

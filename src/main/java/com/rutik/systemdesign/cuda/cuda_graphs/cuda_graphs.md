@@ -887,6 +887,7 @@ CUDA_CHECK(cudaGraphDestroy(newGraph));
 | `cudaGraphDestroy` / `cudaGraphExecDestroy` | Release graph / executable resources |
 | Nsight Systems | Timeline view distinguishing graph-launch overhead from per-node eager launches; visualizes graph node dependency structure |
 | `torch.cuda.CUDAGraph` | PyTorch's raw capture object (`capture_begin`/`capture_end`/`replay`) |
+| `CUDAGraph.get_graph_data()` | PyTorch 2.13+: returns the captured graph's topology for inspection from Python |
 | `torch.cuda.graph` | Context-manager wrapper around `CUDAGraph` capture |
 | `torch.cuda.make_graphed_callables` | High-level wrapper capturing an `nn.Module`'s forward and backward |
 | vLLM / TensorRT-LLM | Production inference engines using bucketed CUDA graphs to remove decode-step launch overhead |

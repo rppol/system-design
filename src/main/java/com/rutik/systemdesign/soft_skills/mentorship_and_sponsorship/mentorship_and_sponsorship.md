@@ -164,6 +164,15 @@ stateDiagram-v2
     TheyDriveYouWatch: They drive, you watch
     TheyDriveYouReview: They drive, you review
     TheyOwnEscalationPath: They own it, you are on the escalation path
+
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    class Pairing info
+    class TheyDriveYouWatch accent
+    class TheyDriveYouReview warn
+    class TheyOwnEscalationPath good
 ```
 
 *Four rungs, each meant to last weeks to months, not days — the failure at every rung is

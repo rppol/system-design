@@ -220,6 +220,39 @@ the built-ins lack — embeddings rather than lexical matching, or a routing
 classifier — which the API still accommodates by letting a custom tool return
 `tool_reference` blocks of its own.
 
+### 4.7 Cache-preserving dynamic tool sets
+
+Deferred loading decides which tools the model *sees*. A different problem is changing the tool
+set itself partway through a conversation: a new MCP server connects, a tool's schema changes, or
+a phase of the task ends and its tools should go away. Editing the `tools` array does this, but
+prompt caching hashes the prefix in the order `tools`, then `system`, then `messages`, and `tools`
+comes first, so any edit there misses the cache for the whole conversation.
+
+Anthropic's mid-conversation tool changes move the change into the message history instead. A
+mid-conversation `role: "system"` message carries `tool_addition` or `tool_removal` blocks, which
+apply from that point on and leave `tools` untouched:
+
+```json
+{"role": "system", "content": [
+  {"type": "tool_removal",  "tool": {"type": "tool_reference", "name": "get_weather"}},
+  {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": {
+      "name": "db_query", "description": "Run a read-only SQL query against the analytics database.",
+      "input_schema": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}}}
+]}
+```
+
+| Form | What it carries | Header |
+|---|---|---|
+| By reference (beta, 2026-07-24) | `tool_reference` naming a tool already in `tools`; declare it with `defer_loading: true` to keep it hidden until added | `mid-conversation-tool-changes-2026-07-01` (Claude API, Bedrock, Google Cloud) |
+| Inline (beta, 2026-09-22) | `tool_definition` with the full definition; the tool need not be in `tools` | `inline-tools-2026-09-15` (Claude API); add `mcp-client-2026-09-15` to add an MCP toolset |
+
+Inline definitions also let you change a schema or move a server tool to a newer version without
+a cache miss. Keep at least one non-deferred tool in `tools`: defining the first tool by value
+changes the start of the rendered prompt and costs one full cache miss. The message goes after a
+`user` turn and must end `messages` or be followed by an `assistant` turn. See
+[Context Engineering](../context_engineering/context_engineering.md) for the same append-only rule
+applied to the rest of the prompt.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -1022,6 +1055,10 @@ Use GPT-4 to generate 50-200 synthetic queries per tool category, labelled with 
 **Q: When should you use a provider's deferred tool loading instead of building RAG-over-tools yourself?**
 **Short:** A provider's deferred tool loading keeps the cached prompt prefix intact, unlike a client-side registry that invalidates the cache each turn.
 Reach for the provider's version first: it deletes the retrieval layer entirely and, unlike a client-side registry, preserves prompt caching. The mechanism is that you still send every tool definition on every request but mark the non-essential ones `defer_loading: true`; those are kept out of the cached system-prompt prefix, and the model pulls them in on demand through a search tool that returns `tool_reference` blocks. That caching property is the decisive argument, and it is the one candidates usually miss — a FAISS registry that rewrites the `tools` array each turn changes the prefix on every call and invalidates the cache, so the token savings it reports on paper are partly given back at the cache layer. Build your own when you need a retrieval method the built-in regex and BM25 variants cannot express (embedding similarity, a trained routing classifier, cross-server re-ranking), when you must run against a provider that offers nothing equivalent, or when tool selection has to be auditable and reproducible offline. The hybrid is supported too: a custom client-side tool can return `tool_reference` blocks so your embedding search drives the provider's expansion machinery. Note what neither approach fixes — description quality and namespacing still determine whether any search finds the right tool.
+
+**Q: How do you add or replace a tool mid-conversation without losing the prompt cache?**
+**Short:** Never edit the tools array; append a mid-conversation system message with tool_addition or tool_removal blocks, so the cached tools prefix stays byte-identical.
+The prompt cache matches the prefix byte for byte in the order `tools`, `system`, `messages`, so editing `tools` on turn 30 re-bills the whole conversation at the uncached rate. On the Claude API, a mid-conversation `role: "system"` message with `tool_addition` or `tool_removal` blocks changes availability from that point on while `tools` stays the same. A reference add (beta `mid-conversation-tool-changes-2026-07-01`) names a tool already declared, usually with `defer_loading: true`; an inline add (beta `inline-tools-2026-09-15`) carries the full definition, which also covers schema changes and server-tool version bumps. Keep one non-deferred tool in `tools` so the first inline definition does not change the start of the prompt. The general rule is that a long agent conversation should be append-only: instructions, effort, and tools all change through new messages, not edits.
 
 **Q: What is schema drift and how do you detect it at runtime?**
 **Short:** Fingerprint each tool's parameter schema and recompute it on deploy to detect a stale embedding index.

@@ -51,6 +51,12 @@ A **hash table** maps arbitrary keys to values using a hash function that conver
 - Deletion: cannot simply remove — must leave a tombstone/sentinel, or rehash all following entries.
 - Better cache performance than chaining (no pointer chasing), but clustering problems with linear probing.
 
+**Group probing / SwissTable: Abseil `absl::flat_hash_map`, Rust `std::collections::HashMap` (the `hashbrown` crate since Rust 1.36), Go `map` since Go 1.24**:
+- Open addressing where the probe unit is a *group* of slots (16 in Abseil and hashbrown on SSE2, 8 in Go), not one slot.
+- A separate array of 1-byte *control bytes*, one per slot, marks each slot empty, deleted, or full; a full slot's byte holds 7 bits of the hash (`h2`). The rest of the hash (`h1`) picks the starting group.
+- A lookup compares `h2` against every control byte in the group at once (one SIMD compare, or a 64-bit bit trick), so it touches the key array only for the roughly 1-in-128 slots whose 7 bits match by chance.
+- Tolerates a 7/8 maximum load factor where linear probing is usually capped near 0.5-0.75. See §6.6.
+
 ### 4.2 Key Design Patterns
 
 **Frequency count**: `Counter({})` or `defaultdict(int)`. O(n) to build.
@@ -454,11 +460,99 @@ def longest_consecutive(nums: list[int]) -> int:
 # Total iterations: O(2n) = O(n).
 ```
 
+### 6.6 SwissTable Group Probing and the 2025 Open-Addressing Bounds
+
+The linear-probing table in §6.2 compares a full key at every probe. A SwissTable splits each hash
+into `h1` (the upper 57 bits in Go 1.24) and `h2` (the lower 7 bits) and keeps a control byte per
+slot in a separate array:
+
+```
+ control byte values           slot state
+ 1000 0000  (0x80)             EMPTY
+ 1111 1110  (0xFE)             DELETED (tombstone)
+ 0hhh hhhh  (0x00-0x7F)        FULL, low 7 bits of the hash = h2
+
+ one 8-slot group (Go 1.24): 64-bit control word, byte i describes slot i
+ slot:     0     1     2     3     4     5     6     7
+ ctrl:   0x15  0x80  0x3A  0x15  0xFE  0x7F  0x80  0x02
+ lookup key with h2 = 0x15  ->  candidate slots {0, 3}; compare full keys there only
+ group has EMPTY bytes {1, 6} ->  a miss stops here, no next group needed
+```
+
+A lookup for `h2 = 0x15` reads one 8-byte word and inspects two keys instead of eight. Because
+the group contains an EMPTY byte, the key cannot be further along its probe sequence, so a miss
+also ends after one group.
+
+```python
+from __future__ import annotations
+
+LSB = 0x0101010101010101
+MSB = 0x8080808080808080
+EMPTY = 0x80
+DELETED = 0xFE
+
+
+def match_h2(ctrl: int, h2: int) -> list[int]:
+    """Candidate slots in an 8-slot group whose control byte equals h2 (no SIMD needed)."""
+    x = ctrl ^ (LSB * h2)                      # matching bytes become 0x00
+    bits = ((x - LSB) & ~x & MSB) & 0xFFFFFFFFFFFFFFFF
+    return [i for i in range(8) if bits >> (8 * i + 7) & 1]
+
+
+def match_empty(ctrl: int) -> list[int]:
+    return [i for i in range(8) if (ctrl >> (8 * i)) & 0xFF == EMPTY]
+
+
+ctrl = sum(b << (8 * i) for i, b in enumerate([0x15, EMPTY, 0x3A, 0x15, DELETED, 0x7F, EMPTY, 0x02]))
+print(match_h2(ctrl, 0x15))    # [0, 3]
+print(match_empty(ctrl))       # [1, 6]
+```
+
+The bit trick can flag a byte that sits just above a true match (borrow propagation), which is
+harmless: every candidate is confirmed by a full key compare. With 7 hash bits, a full but
+unrelated slot matches with probability 1/128, so a full 16-slot group yields about 16/128 = 0.125
+wasted key compares per lookup.
+
+**What each implementation adds:**
+
+| Implementation | Group width | Max load | Notable detail |
+|----------------|-------------|----------|----------------|
+| Abseil `flat_hash_map` (C++) | 16 (SSE2) | 7/8 | Origin of the design (Google, CppCon 2017) |
+| Rust `HashMap` (`hashbrown`) | 16 (SSE2), 8 (generic) | 7/8 | Default since Rust 1.36 |
+| Go `map` (Go 1.24) | 8 | 7/8 | Each map is several Swiss tables of at most 1024 entries, selected by upper hash bits (extendible hashing), so a single insert copies at most 1024 entries when one table splits |
+
+The Go team reports map microbenchmarks up to 60% faster than Go 1.23 and a 1.5% geometric-mean
+CPU improvement across full application benchmarks.
+
+**Deletion without tombstone build-up.** If the slot's group still has an EMPTY byte, no probe
+sequence can have passed through this group, so the slot is marked EMPTY directly. Only a full
+group forces a DELETED byte. This is the reason SwissTables accumulate far fewer tombstones than
+the textbook linear-probing table in §6.2.
+
+**The 2025 theory result.** Farach-Colton, Krapivin and Kuszmaul, "Optimal Bounds for Open
+Addressing Without Reordering" (arXiv 2501.02305), studied a table of n slots filled to `1 - delta`
+with no element ever moved after insertion:
+
+| Scheme | Amortized expected probes | Worst-case expected probes (one insert) |
+|--------|---------------------------|----------------------------------------|
+| Uniform probing (the classic baseline) | `Theta(log 1/delta)` | `Theta(1/delta)` |
+| Funnel hashing (greedy: takes the first free slot in its probe order) | - | `O(log^2 1/delta)` |
+| Elastic hashing (non-greedy: may skip free slots) | `O(1)` | `O(log 1/delta)` |
+
+Yao conjectured in 1985 ("Uniform Hashing is Optimal") that every greedy scheme needs about
+`1/delta` probes for the worst insertion; funnel hashing disproves it. Elastic hashing shows that
+`O(1)` amortized does not need reordering. All bounds have matching lower bounds. As orders of
+growth at `delta = 1/1024` (99.9% full): `1/delta = 1024`, `log^2 = 100`, `log = 10`. At a
+SwissTable's 7/8 cap (`delta = 1/8`) the same terms are 8, 9 and 3, which is why the results
+change what a nearly-full table can do, not the default settings of production maps.
+
 ---
 
 ## 7. Real-World Examples
 
 **CPython dict** — uses open addressing with random probing (not linear) to avoid clustering. As of Python 3.7, dicts are insertion-ordered: a compact index array points into a dense entries array. This gives good cache performance and O(1) iteration. Resize happens at 2/3 load factor; the table size is always a power of 2.
+
+**Go `map`, Rust `HashMap`, Abseil `flat_hash_map`**: all three are SwissTables (§6.6): 7-bit hash tags in a control-byte array, probed a group at a time. Go switched its built-in `map` in Go 1.24; Rust's standard `HashMap` has been the `hashbrown` port since Rust 1.36.
 
 **Java HashMap internals** — uses separate chaining. Each bucket starts as a singly-linked list. In Java 8+, when a bucket has ≥ 8 entries, it converts to a red-black tree, giving O(log n) worst-case lookup for that bucket. This prevents hash-collision DoS attacks. The default initial capacity is 16; load factor 0.75 means resize at 12 entries.
 
@@ -589,6 +683,10 @@ def max_sum_k_fixed(arr: list[int], k: int) -> int:
 | `defaultdict` | Python | Auto-init missing keys |
 | `Counter` | Python | Frequency map, arithmetic, `most_common(k)` |
 | `set` | Python | Hash-set, same O(1) ops as dict |
+| `frozenset`, `frozendict` | Python | Immutable, hashable set and mapping (`frozendict` built in since 3.15, PEP 814; hashable when its keys and values are); usable as dict keys and cache keys |
+| `absl::flat_hash_map` | C++ | SwissTable: 16-slot groups, SSE2 control-byte match, max load 7/8 |
+| `HashMap` (`hashbrown`) | Rust | SwissTable port; SipHash-1-3 by default for hash-flooding resistance |
+| `map` | Go | SwissTable since Go 1.24; 8-slot groups, tables of at most 1024 entries |
 | `HashMap` | Java | Default cap 16, load 0.75; tree-bin at 8 entries in a bin once the table has ≥ 64 buckets |
 | `LinkedHashMap` | Java | Insertion order preserved |
 | `TreeMap` | Java | Red-black BST; O(log n) all ops; sorted iteration |
@@ -639,7 +737,7 @@ Build a frequency map (`Counter`). For each distinct value x, if `-x` exists in 
 
 **Q10: How does Python's `set` differ from a `frozenset`?**
 **Short:** `set` is mutable and unhashable, while `frozenset` is immutable and hashable, so only a `frozenset` can serve as a dict key or a set element.
-Both are hash sets with O(1) membership testing. `set` is mutable (supports `add`, `discard`, `update`). `frozenset` is immutable and therefore hashable — it can be used as a dictionary key or as an element of another set. `frozenset` is useful when you need a set as a cache key (e.g., grouping states in a BFS problem).
+Both are hash sets with O(1) membership testing. `set` is mutable (supports `add`, `discard`, `update`). `frozenset` is immutable and therefore hashable — it can be used as a dictionary key or as an element of another set. `frozenset` is useful when you need a set as a cache key (e.g., grouping states in a BFS problem). Mappings have the same split since Python 3.15 (PEP 814): the built-in `frozendict` is immutable and hashable when all its keys and values are hashable, and its `==` and `hash` ignore insertion order, so `frozendict(d)` works directly as a dict key or `functools.lru_cache` argument where older code built `tuple(sorted(d.items()))`, which also fails when the keys are not mutually comparable.
 
 **Q11: What is the time complexity of `in` for Python list vs set?**
 **Short:** `x in list` is an O(n) linear scan while `x in set` is an O(1) average hash lookup, so using a list for membership checks in a loop silently creates O(n^2) code.
@@ -673,6 +771,14 @@ Two strings are anagrams if they contain the same characters with the same frequ
 **Short:** Dict lookup compares keys with `==` (value equality via `__eq__`) after hashing, while `is` checks object identity and should never be used for value comparisons.
 Dict lookup uses `hash(key)` first, then `key == stored_key` (the `__eq__` method). `is` checks identity (same object in memory), not equality. Two distinct objects with the same value compare equal (`"abc" == "abc"`) but `is` would be False unless Python interns them. Never use `is` for value comparisons. For small integers (-5 to 256) and interned strings, Python caches objects so `is` incidentally returns True, but this is an implementation detail, not a language guarantee.
 
+**Q19: How does a SwissTable (Abseil flat_hash_map, Rust HashMap, Go 1.24 map) find a key with fewer key comparisons than linear probing?**
+**Short:** It stores 7 hash bits per slot in a control-byte array and compares a whole group of 8-16 bytes at once, so full keys are compared only for slots whose 7 bits match.
+The hash splits into `h1`, which picks the starting group, and `h2`, the low 7 bits stored in that slot's control byte (EMPTY is `0x80`, DELETED is `0xFE`, a full slot is `0x00`-`0x7F`). A lookup broadcasts `h2` and compares it against every control byte in the group with one SIMD instruction (16 slots in Abseil and hashbrown) or 8 slots at a time in Go 1.24 (8-byte SIMD on amd64, a 64-bit bit trick elsewhere). Only matching slots get a full key compare, and an unrelated full slot matches with probability 1/128. If the group holds any EMPTY byte, a miss stops there. This density of useful work per cache line is what lets these tables run at a 7/8 load factor.
+
+**Q20: What did the 2025 open-addressing result disprove, and does it change how you configure a hash map?**
+**Short:** It disproved Yao's 1985 conjecture that greedy open addressing needs about 1/delta probes per worst insert; funnel hashing needs O(log^2 1/delta). Production maps stay at 7/8 load.
+Farach-Colton, Krapivin and Kuszmaul (arXiv 2501.02305) studied a table filled to `1 - delta` where elements never move after insertion. Uniform probing costs `Theta(1/delta)` expected probes for the worst insertion; their greedy *funnel hashing* gets `O(log^2 1/delta)`, and their non-greedy *elastic hashing* gets `O(1)` amortized and `O(log 1/delta)` worst-case expected, all with matching lower bounds. The gap matters only when the table is nearly full: at `delta = 1/1024`, `1/delta` is 1024 while `log^2 1/delta` is 100; at a SwissTable's 7/8 cap it is 8 versus 9. Use it as a fact about what is possible at high load, not as a reason to raise a production map's load factor.
+
 ---
 
 ## 13. Best Practices
@@ -682,7 +788,7 @@ Dict lookup uses `hash(key)` first, then `key == stored_key` (the `__eq__` metho
 3. **Use `collections.deque` for O(1) popleft** — never `list.pop(0)` in hot loops.
 4. **Define the sliding window invariant in a comment** before coding the loop — it prevents off-by-one errors.
 5. **Prefer `''.join(parts)` over string concatenation** in any loop that builds a string.
-6. **Use `frozenset` or `tuple` as dict keys** when you need a collection as a key.
+6. **Use `frozenset`, `tuple` or `frozendict` (Python 3.15+) as dict keys** when you need a collection as a key.
 7. **For large n, pre-allocate arrays** — `[0] * n` in Python or `new int[n]` in Java to avoid repeated resizing.
 8. **Normalise keys for grouping** — sort, canonical form, or a frozenset captures equivalence classes without collision.
 

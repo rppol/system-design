@@ -17,14 +17,14 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `training_infrastructure/` | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | — |
 | `synthetic_data_generation/` | Self-Instruct, Evol-Instruct, quality filtering, LIMA | — |
 | `fine_tuning/` | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation | lora, qlora, peft_methods, instruction_tuning, domain_adaptation |
-| `alignment_and_rlhf/` | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models | grpo_and_rlvr |
+| `alignment_and_rlhf/` | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models | grpo_and_rlvr, rl_environments_and_agentic_rl |
 | `prompt_engineering/` | CoT, few-shot, ReAct, structured outputs, system prompts | — |
 | `rag_fundamentals/` | Chunking, vector DBs, retrieval, reranking, hybrid search | chunking_strategies, embedding_models, retrieval_methods, reranking |
 | `advanced_rag/` | Agentic RAG, Graph RAG, multimodal RAG, evaluation | agentic_rag, corrective_rag, graph_rag, multimodal_rag, query_transformation, self_rag |
 | `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | — |
 | `code_generation/` | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | — |
-| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability, reflexion_and_self_correction, tree_of_thoughts_for_agents, tool_selection_at_scale, sandboxed_code_execution, subagents_and_delegation, agent_ux_patterns, durable_long_running_agents, agent_cost_and_token_budget |
-| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor, openai_agents_sdk, claude_agent_sdk, pydantic_ai, smolagents, strands_aws, mastra_typescript, litellm_routing, google_adk |
+| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability, reflexion_and_self_correction, tree_of_thoughts_for_agents, tool_selection_at_scale, sandboxed_code_execution, subagents_and_delegation, agent_ux_patterns, durable_long_running_agents, agent_cost_and_token_budget, agent_skills_and_progressive_disclosure, reasoning_models_vs_scaffolds |
+| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK, Microsoft Agent Framework | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor, openai_agents_sdk, claude_agent_sdk, pydantic_ai, smolagents, strands_aws, mastra_typescript, litellm_routing, google_adk, microsoft_agent_framework |
 | `multi_agent_systems/` | Orchestrator, debate, ChatDev, MetaGPT, Swarm, Magentic-One, A2A | orchestrator_worker_pattern, agent_debate_and_consensus, chatdev_and_software_simulation, openai_swarm_and_handoffs, magentic_one_and_autogen_v04, agent_to_agent_protocols, agentic_commerce_and_payments, multi_agent_security |
 | `agentic_workflow_patterns/` | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer | — |
 | `coding_agents/` | SWE-agent, OpenHands, Aider, Devin, Cursor, Claude Code, SWE-bench | — |
@@ -53,7 +53,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `llm_testing_strategies/` | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | — |
 | `knowledge_distillation_and_model_merging/` | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | — |
 | `llm_observability_and_monitoring/` | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | — |
-| `llm_security/` | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | privacy_and_data_governance |
+| `llm_security/` | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | privacy_and_data_governance, agent_identity_and_authorization |
 | `prompt_management_and_promptops/` | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, injection-safe templates | — |
 | `context_engineering/` | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | — |
 | `llm_caching/` | Exact-match, semantic cache, provider prompt caching, vLLM APC, embedding cache, threshold tuning, invalidation | — |
@@ -71,7 +71,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 Every module page (`<module>/<module>.md`) and deep-dive sub-file follows the **14-section template** in root
 `CLAUDE.md`, with one recorded exception:
 
-- **`vllm_deep_dive/vllm_deep_dive.md` is EXEMPT** — it uses a bespoke 21-section layout and stays
+- **`vllm_deep_dive/vllm_deep_dive.md` is EXEMPT** — it uses a bespoke 23-section layout and stays
   that way (owner-ruled 2026-07-28). Do not normalize it. This exception was previously
   undocumented, which is why an audit kept re-flagging it.
 

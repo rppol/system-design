@@ -81,7 +81,8 @@ header.
 
 | Library | Async | Sync | HTTP/2 | Connection pool | Use case |
 |---------|-------|------|--------|-----------------|----------|
-| `httpx` | Yes | Yes | Yes | Yes | Default choice: same API sync+async, HTTP/2, good ergonomics |
+| `httpx2` | Yes | Yes | Yes | Yes | Default choice: Pydantic-maintained successor to `httpx` with the same API sync+async, HTTP/2 |
+| `httpx` | Yes | Yes | Yes | Yes | Existing code only: no release since 0.28.1 (2024-12-06) |
 | `aiohttp` | Yes | No | No (1.x) | Yes | High-concurrency async workloads, slightly lower per-request overhead |
 | `requests` | No | Yes | No | Yes | Legacy sync scripts, CLI tools, not for async FastAPI routes |
 
@@ -764,18 +765,28 @@ with increasing delays (30s, 120s, 3600s).
 
 ### 8.1 httpx vs aiohttp
 
-| Dimension | httpx | aiohttp |
+| Dimension | httpx / httpx2 | aiohttp |
 |-----------|-------|---------|
 | Sync support | Yes | No |
 | HTTP/2 | Yes | No (planned) |
 | Throughput (async) | Good | Directionally better under very high concurrency; the gap is workload-specific, so measure your own |
 | Connection pool | `httpx.Limits` | `TCPConnector(limit=N)` |
 | Testing | `respx`, `MockTransport` | `aioresponses` |
-| Current release | 0.28.1 (pre-1.0, API stable in practice) | 3.x |
+| Current release | `httpx` 0.28.1 (2024-12-06, no release since); `httpx2` 2.14.0 (2026-10-18) continues it | 3.x |
 | Ecosystem | Starlette, FastAPI native | Broader async ecosystem |
 
-**Recommendation:** Use `httpx` as the default — it is what Starlette's `TestClient` and
-FastAPI's own docs build on, so one client library covers both production calls and tests.
+**Recommendation:** Use `httpx2` as the default. Pydantic took over maintenance of `httpx` under
+that name (2.0.0 on 2026-05-12) with the same API under `import httpx2`; Starlette's `TestClient`
+accepts it since 1.2.0, `fastapi[standard]` pulls it since 0.143.4, and the official `mcp` SDK
+depends on it, so one client library covers production calls and tests. Migration is a
+dependency swap plus `import httpx2` (or `import httpx2 as httpx` for a one-line diff); both
+packages can be installed side by side, but their classes and exceptions do not cross over, so
+an `httpx.Client` passed to code written against `httpx2` fails `isinstance` checks. When
+third-party code still imports `httpx`, call `httpx2.alias_httpx()` (2.9.1+) at the top of the
+application entrypoint: from then on `import httpx` resolves to `httpx2` and `httpcore` to
+`httpcore2` process-wide. It raises `RuntimeError` if `httpx` was already imported, it is for
+applications only (never call it from a library), and each spawned worker process must call it
+again.
 Switch to `aiohttp` only when profiling of *your* workload shows `httpx` is the bottleneck.
 Resist picking on a published benchmark: the two are close enough that connection-pool sizing,
 DNS caching and TLS session reuse move the number more than the library choice does.
@@ -1018,7 +1029,7 @@ async def lifespan(app: FastAPI):
 
 | Tool | Purpose | Async | Notes |
 |------|---------|-------|-------|
-| `httpx` | HTTP client | Yes + Sync | Default choice; HTTP/2; same API sync/async |
+| `httpx2` | HTTP client | Yes + Sync | Default choice; Pydantic-maintained successor to `httpx` (no release since 0.28.1, 2024-12-06); HTTP/2; same API sync/async |
 | `aiohttp` | Async HTTP client | Yes | Higher throughput at extreme concurrency |
 | `requests` | Sync HTTP client | No | Legacy sync scripts only |
 | `tenacity` | Retry library | Yes (`AsyncRetrying`) | Decorator-based, rich policy config |
@@ -1133,7 +1144,24 @@ caching and TLS session reuse move throughput far more than the library choice d
 "measure it on your traffic" is the position to defend — reciting a percentage you have not
 reproduced is the trap here.
 
-**Q11: How does HTTP/2 multiplexing change connection pool sizing compared to HTTP/1.1?**
+**Q11: Your service calls partners through `httpx` 0.28.1, which has had no release since December 2024. Why is that a production risk, and how do you move off it?**
+**Short:** A CVE in an unmaintained client in the request path has no upstream fix; swap to the API-identical httpx2 and use alias_httpx() for dependencies still importing httpx.
+
+The HTTP client parses untrusted bytes from every upstream (headers, redirects, chunked
+bodies, TLS), so a parser or redirect bug there is remotely reachable. With no maintainer
+cutting releases, a disclosed vulnerability leaves you to vendor a patch or fork under
+pressure, and a 0.x version signals no API stability promise either. Pydantic picked the
+project up as `httpx2` (2.0.0 on 2026-05-12, a fork of 0.28.1 with the same public API;
+2.14.0 on 2026-10-18), and Starlette's `TestClient` and `fastapi[standard]` already accept or
+install it. The move is: replace the dependency, change `import httpx` to `import httpx2`, and
+update anything matched on names the rename touched (the `python-httpx2/<version>`
+User-Agent, the `httpx2` and `httpcore2.*` logger names). Libraries you do not control can
+keep importing `httpx` side by side, but their classes and exceptions differ from yours;
+`httpx2.alias_httpx()` called first thing in the entrypoint makes them share one set. Treat
+"last release date" and "who cuts security releases" as part of the review for any library
+that sits in the request path.
+
+**Q12: How does HTTP/2 multiplexing change connection pool sizing compared to HTTP/1.1?**
 **Short:** HTTP/2 multiplexes many streams per connection, letting max_connections shrink for equal concurrency.
 
 HTTP/1.1 supports one in-flight request per connection; to achieve 100 concurrent requests you
@@ -1144,7 +1172,7 @@ reducing both memory and OS file descriptor usage. The trade-off is that a TCP-l
 event on that single connection stalls all multiplexed streams simultaneously (head-of-line blocking
 at the TCP layer, which HTTP/3/QUIC addresses with per-stream loss recovery).
 
-**Q12: What is the risk of calling `asyncio.create_task` inside a webhook handler and how do you mitigate it?**
+**Q13: What is the risk of calling `asyncio.create_task` inside a webhook handler and how do you mitigate it?**
 **Short:** An untracked create_task can silently swallow exceptions and vanish if the process shuts down mid-run.
 
 `asyncio.create_task` schedules background work but does not track the task. If the task raises
@@ -1155,7 +1183,7 @@ which prevents garbage collection and surfaces exceptions. (2) For durability, p
 persistent queue (Redis, Kafka) and process with a worker that acknowledges only after success.
 This survives process restarts.
 
-**Q13: Why does `httpx.Auth` require both a sync `auth_flow` and an `async_auth_flow` generator method?**
+**Q14: Why does `httpx.Auth` require both a sync `auth_flow` and an `async_auth_flow` generator method?**
 **Short:** async_auth_flow is the only place an async token refresh can legally await inside httpx's Auth flow.
 
 httpx's sync `auth_flow` cannot express an async token refresh: an `await` there is a
@@ -1169,7 +1197,7 @@ coroutine before yielding the authenticated request. Implement `async_auth_flow`
 explicitly whenever the client is async and the token refresh itself is a network call
 that needs to be awaited.
 
-**Q14: Why does the webhook fix reject events whose timestamp is more than 300 seconds old, even though the HMAC signature is valid?**
+**Q15: Why does the webhook fix reject events whose timestamp is more than 300 seconds old, even though the HMAC signature is valid?**
 **Short:** A timestamp window stops an attacker from replaying a captured, still-validly-signed webhook forever.
 
 A valid signature alone only proves the payload was not tampered with, not that it is being seen
@@ -1179,7 +1207,7 @@ verifies. Binding the signature to a timestamp (`payload = f"{timestamp}."+ body
 anything outside a 300-second window means a captured request becomes unusable after five minutes,
 bounding the attacker's replay window without requiring server-side request-id tracking.
 
-**Q15: Why does creating `aiohttp.ClientSession()` at module import time raise `RuntimeError: no running event loop`?**
+**Q16: Why does creating `aiohttp.ClientSession()` at module import time raise `RuntimeError: no running event loop`?**
 **Short:** ClientSession binds to the running event loop at construction, and no loop exists yet at import time.
 
 `aiohttp.ClientSession` binds internal resources to the currently running asyncio event loop at
@@ -1188,7 +1216,7 @@ event loop once the ASGI server begins running the application, which happens af
 have already been imported. Create the session inside the `lifespan` context manager, where the
 event loop is guaranteed to be running, and store it on `app.state` for handlers to reuse.
 
-**Q16: When does `tenacity` provide a clearer win over a hand-rolled retry loop?**
+**Q17: When does `tenacity` provide a clearer win over a hand-rolled retry loop?**
 **Short:** Tenacity pays off once several call sites need the same declarative, composable retry policy.
 
 `tenacity` earns its dependency once retry policy needs to be composed declaratively across

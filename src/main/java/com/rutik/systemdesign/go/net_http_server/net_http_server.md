@@ -747,6 +747,71 @@ are migrating a `Director`, the mechanical translation is `func(r *http.Request)
 `FlushInterval: -1` means flush after every write. Without it, a proxied
 `text/event-stream` is buffered and the client sees nothing for seconds at a time.
 
+### 6.11 CSRF with `http.CrossOriginProtection` `[1.25]`
+
+Cross-site request forgery needs a browser: a page on `evil.example` submits a form or a
+`fetch` to your API, and the browser attaches the victim's cookies. `net/http` blocks this
+without tokens by reading headers the browser sets and page JavaScript cannot forge.
+`Sec-Fetch-Site` (in every major browser since 2023) says where the request came from:
+`same-origin`, `same-site`, `cross-site`, or `none` for a typed URL or bookmark. `Origin` is
+the fallback for older browsers.
+
+```mermaid
+flowchart LR
+    classDef req  fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef ok   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef deny fill:#e06c75,stroke:#c0392b,color:#ffffff
+    classDef mid  fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+
+    IN(["request"]) --> M{"GET, HEAD<br/>or OPTIONS?"}
+    M -->|"yes"| A1(["allow"])
+    M -->|"no"| S{"Sec-Fetch-Site"}
+    S -->|"same-origin or none"| A2(["allow"])
+    S -->|"same-site or cross-site"| EX{"bypass pattern or<br/>trusted Origin?"}
+    S -->|"absent"| O{"Origin header"}
+    O -->|"absent"| A3(["allow: not a browser"])
+    O -->|"host equals Host"| A4(["allow"])
+    O -->|"other host"| EX
+    EX -->|"yes"| A5(["allow"])
+    EX -->|"no"| D(["403, or the<br/>deny handler"])
+
+    class IN,M,S,O req
+    class A1,A2,A3,A4,A5 ok
+    class EX mid
+    class D deny
+```
+
+```go
+cop := http.NewCrossOriginProtection() // the zero value also works
+if err := cop.AddTrustedOrigin("https://admin.example.com"); err != nil {
+    log.Fatal(err) // scheme://host[:port] only, no path
+}
+// The IdP auto-posts a SAML assertion from its own origin; the handler verifies the signature.
+cop.AddInsecureBypassPattern("POST /sso/saml/acs")
+cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    slog.Warn("cross-origin request rejected", "origin", r.Header.Get("Origin"), "path", r.URL.Path)
+    http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+}))
+
+handler := Chain(mux, Recover, Logging, RequestID, cop.Handler, Auth)
+```
+
+`cop.Handler` has the `func(http.Handler) http.Handler` shape, so it drops into the chain
+as a method value; put it before `Auth` so a forged request is rejected before any session
+lookup. `cop.Check(r)` returns the error without writing a response, for code that is not a
+handler chain.
+
+Four consequences follow from the algorithm. `GET`, `HEAD` and `OPTIONS` always pass, so a
+handler that changes state on `GET` is unprotected. `same-site` is rejected: a SPA on
+`app.example.com` posting to `api.example.com` with cookies needs
+`AddTrustedOrigin("https://app.example.com")`, which is stricter than the `SameSite=Lax`
+cookie rule that treats sibling subdomains as one site. A request with neither header passes,
+because `curl`, server-to-server calls and mobile clients do not carry a victim's ambient
+cookies. And an `Origin` matching `Host` passes even when the scheme differs, so an old browser
+posting from `http://` to `https://` is allowed; HSTS closes that gap. CORS is a separate
+control: it decides which origins may **read** a response, and a simple cross-origin form
+`POST` is sent before CORS is consulted, which is the request this middleware stops.
+
 ---
 
 ## 7. Real-World Examples
@@ -1100,6 +1165,7 @@ to start.
 | gin, echo | full frameworks with binding and validation | large CRUD surfaces where binding dominates |
 | fiber | fasthttp-based framework | allocation-bound workloads, accepting the ecosystem break |
 | `golang.org/x/net/http2/h2c` | h2c handler wrapper | pre-`[1.24]` codebases; `Server.Protocols` replaces it |
+| `http.CrossOriginProtection` `[1.25]` | token-less CSRF middleware from `Sec-Fetch-Site` and `Origin` | any cookie-authenticated browser-facing API |
 | `github.com/rs/cors` | CORS middleware | browser-facing APIs |
 | `golang.org/x/time/rate` | token-bucket limiter | per-client rate limiting in middleware |
 | `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp` | tracing/metrics handler wrapper | one-line OTel instrumentation |
@@ -1166,6 +1232,18 @@ readiness to failing while continuing to serve normally, then sleep longer than 
 detection window, and only then call `Shutdown`. In Kubernetes this is a `preStop` sleep plus
 a `terminationGracePeriodSeconds` that exceeds the sleep and the drain combined. The drain
 itself was never the hard part.
+
+**Q: After adding CrossOriginProtection, why does your SPA on app.example.com get 403 from api.example.com while GET endpoints stay open to attack?**
+**Short:** Sibling subdomains are same-site, which it rejects unless trusted, and GET, HEAD and OPTIONS always pass, so state changes on GET stay unprotected.
+
+The check is per origin, not per registrable domain, so `https://app.example.com` posting to
+`api.example.com` arrives with `Sec-Fetch-Site: same-site` and is refused; fix it with
+`cop.AddTrustedOrigin("https://app.example.com")`, not with a bypass pattern that would admit
+every origin, cross-site included, on that route. This is stricter than `SameSite=Lax` cookies, which treat
+the whole `example.com` site as one. The other half of the trap is method-based: safe methods
+are never checked, so a `GET /account/delete` or a logout link fired from an `<img>` tag goes
+straight through. Audit routes for state changes behind `GET`, move them to `POST` or `DELETE`,
+and the middleware then covers them.
 
 **Q: In a middleware chain, which wrapper runs first, and where does panic recovery belong?**
 **Short:** The outermost wrapper runs first on the way in and last on the way out, so recovery and total-duration logging must sit there.
@@ -1333,6 +1411,19 @@ stream appear frozen. Migrating older code is a mechanical change from a
 `func(*http.Request)` operating on the outbound request to a `func(*httputil.ProxyRequest)`
 operating on `pr.Out`.
 
+**Q: How does http.CrossOriginProtection stop CSRF without a token?**
+**Short:** It rejects non-GET/HEAD/OPTIONS requests whose browser-set Sec-Fetch-Site is same-site or cross-site, or whose Origin host differs from Host.
+
+CSRF works because the browser attaches cookies to a request a hostile page triggered, and
+the same browser labels that request: `Sec-Fetch-Site` is a forbidden header that page
+JavaScript cannot set, present in every major browser since 2023. `same-origin` and `none` pass;
+`same-site` and `cross-site` get a 403 unless the path matches an `AddInsecureBypassPattern`
+or the `Origin` was added with `AddTrustedOrigin`. With no `Sec-Fetch-Site`, it compares the
+`Origin` host to `Host`, and with neither header it allows the request, since a client that
+sends neither is not a browser carrying someone else's cookies. It shipped in Go 1.25, wraps
+a handler with `cop.Handler(mux)`, and replaces the synchronizer-token middleware a Go service
+used to need for cookie-authenticated forms.
+
 **Q: Should a Go service use a web framework, and what actually changes if it does?**
 **Short:** The server is already production grade, so a framework buys routing ergonomics and request binding — and the real question is whether it replaces the http.Handler contract.
 
@@ -1393,6 +1484,8 @@ documented way to abandon a response without a stack trace.
   fallback and a `terminationGracePeriodSeconds` larger than sleep plus drain.
 - **Use `ResponseController` for streaming endpoints** rather than lowering `WriteTimeout` for
   the whole process.
+- **Wrap cookie-authenticated routes in `http.CrossOriginProtection`** and keep every state
+  change off `GET`; list sibling-subdomain frontends with `AddTrustedOrigin`.
 - **Test routing with `httptest.NewServer` and handler logic with `httptest.NewRecorder`**,
   reaching for `httptest.NewTestServer` `[1.27]` plus `testing/synctest` when the assertion is
   about time.

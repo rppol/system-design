@@ -20,9 +20,12 @@ matters:
 The target is **ECMAScript 2026**, ratified 2026-06-30 (Ecma 131st General Assembly, ECMA-262
 17th edition). New at Stage 4 in this edition: `JSON.parse` source-text access, Iterator
 Sequencing, `Uint8Array` to/from Base64, `Math.sumPrecise`, `Error.isError`, `Array.fromAsync`
-and `RegExp.escape`. **Temporal is Stage 4 and in ES2026, but MDN marks it "Limited availability
-— not Baseline"** — do not assume it is present. **Decorators sit at Stage 2.7**, below Stage 3,
-because TC39 inserted 2.7 as an intermediate checkpoint and re-slotted existing proposals into
+and Upsert (`Map.prototype.getOrInsert` and `getOrInsertComputed`, Stage 4 at the 2026-01
+meeting). **Temporal reached Stage 4 at the 2026-03 TC39 meeting and is listed for ES2027, and
+MDN marks it "Limited availability, not Baseline"**, so do not assume it is present.
+**Explicit Resource Management** (`using`, `await using`, `Symbol.dispose`, `DisposableStack`)
+is also Stage 4 and listed for ES2027; Chrome 134 and Firefox 141 ship it and Safari does not.
+**Decorators sit at Stage 2.7**, below Stage 3, because TC39 inserted 2.7 as an intermediate checkpoint and re-slotted existing proposals into
 it, a process change rather than a rejection. **Records & Tuples were withdrawn**, archived
 2025-04-15.
 
@@ -521,6 +524,77 @@ value instanceof Error;               // false for an error thrown inside an ifr
 and a Node `vm` context each carry their own intrinsics, so a structurally perfect error fails the
 check. `Error.isError` is the guard; forward the options to `super` or the cause is dropped.
 
+### 6.11 Deterministic cleanup: `using`, `await using`, `DisposableStack`
+
+Garbage collection frees memory, never a listener, an interval, an observer or a socket, and
+those are what an SPA leaks. `using` binds a value whose `[Symbol.dispose]()` runs when the
+enclosing block exits, by any path: normal completion, `return`, `break` or a throw.
+
+```js
+{
+  using a = open("a");                  // disposed second
+  using b = open("b");                  // disposed first: always reverse declaration order
+  work(a, b);                           // fragment: open() returns { [Symbol.dispose]() {...} }
+}                                       // both disposers have run here, even if work() threw
+```
+
+The rules worth knowing: the binding is `const`; `null` and `undefined` are allowed and skipped;
+disposal runs last-in, first-out; and if the body throws and a disposer also throws, the result
+is a `SuppressedError` whose `.error` is the disposer's failure and `.suppressed` the original,
+so neither is lost. `await using` calls `[Symbol.asyncDispose]()` (falling back to
+`[Symbol.dispose]`) and awaits it, which is what a stream, a file handle or a database
+transaction needs. Every built-in iterator inherits `[Symbol.dispose]` from `Iterator.prototype`,
+and it calls `return()`.
+
+Most browser resources predate the protocol, so `DisposableStack` adapts them. The pattern that
+fixes partial-setup leaks is `using` on the stack plus `move()` on success:
+
+```js
+function mountChart(el, poll) {
+  using stack = new DisposableStack();
+  const ac = stack.adopt(new AbortController(), (c) => c.abort());
+  window.addEventListener("resize", poll, { signal: ac.signal });
+  const ro = stack.adopt(new ResizeObserver(poll), (o) => o.disconnect());
+  ro.observe(el);
+  const id = setInterval(poll, 5_000);
+  stack.defer(() => clearInterval(id));
+  return stack.move();                  // success: the caller owns one disposer
+}                                       // a throw above: everything acquired so far is undone
+
+const chart = mountChart(el, refresh);
+// on unmount
+chart.dispose();                        // abort, disconnect, clearInterval, in reverse order
+```
+
+`adopt(value, onDispose)` registers a resource without a disposer, `defer(fn)` registers a bare
+callback, `use(value)` registers a value that already has `[Symbol.dispose]`, and `move()` hands
+everything to a fresh stack so the `using` exit does nothing. A component that returns one
+disposer cannot forget one of four teardown calls, which is the bug class
+[Client Memory and Performance Debugging](../client_memory_and_performance_debugging/client_memory_and_performance_debugging.md)
+finds in heap snapshots. TypeScript downlevels the `using` syntax for Safari, but
+`Symbol.dispose` and `DisposableStack` still need a polyfill there (core-js ships both).
+
+### 6.12 Upsert: `getOrInsert` and `getOrInsertComputed`
+
+The "read, and insert a default when missing" idiom took a `has`, a `set` and a `get`, or a
+`??` with a helper. Upsert, ES2026, puts it on `Map` and `WeakMap`:
+
+```js
+const byDay = new Map();
+for (const e of events) byDay.getOrInsert(e.day, []).push(e);       // one lookup per event
+
+const inflight = new Map();
+const load = (url) => inflight.getOrInsertComputed(url, (u) => fetch(u));  // dedupes requests
+
+const deps = new WeakMap();
+deps.getOrInsertComputed(widget, () => new Map());   // replaces the `?? seed()` helper in §14
+```
+
+`getOrInsert(key, value)` evaluates `value` on every call, hit or miss, so `getOrInsert(k, [])`
+allocates a throwaway array on each hit. `getOrInsertComputed(key, fn)` calls `fn(key)` only on
+a miss, which is the one to use whenever the default allocates, computes or starts I/O. Chrome
+145, Firefox 144 and Safari 26.2 ship both methods.
+
 ---
 
 ## 7. Real-World Examples
@@ -586,6 +660,13 @@ yields `"at"` — the classic Prototype.js-era breakage. The same discipline is 
 | Cycles | TDZ `ReferenceError` on a `const` | Partially-populated `exports` |
 | Tree-shaking | Provable from the syntax | Effectively impossible |
 | Top-level `await` | Supported | Not supported |
+
+| Dimension | `try`/`finally` | `using` with `DisposableStack` |
+|-----------|-----------------|--------------------------------|
+| Cleanup order for N resources | whatever you wrote, often wrong | reverse acquisition, always |
+| Setup throws after 2 of 4 acquisitions | the 2 leak unless every step has its own `finally` | the 2 are disposed |
+| Two failures, body and cleanup | the cleanup error replaces the body error | `SuppressedError` keeps both |
+| Runtime support | everywhere | Chrome 134, Firefox 141, no Safari without a polyfill |
 
 ---
 
@@ -685,12 +766,13 @@ Object.create(good).first = "Grace";   // returns "Grace" — the getter saw the
 | V8 | Engine in Chrome, Edge, Node and Deno | Owns prototype lookup and inline caches |
 | JavaScriptCore | Safari and Bun's engine | Second implementation, where conformance gaps surface |
 | Node.js | Server runtime, 26 Current / 24 LTS | ESM-CJS interop, realms via `vm` |
-| Bun | Runtime and toolkit, 1.4.0 | JavaScriptCore semantics, Zig-to-Rust core rewrite |
+| Bun | Runtime and toolkit, 1.4.3 | JavaScriptCore semantics, Zig-to-Rust core rewrite |
 | ESLint | Linter, 10, flat config only | `no-prototype-builtins`, `eqeqeq`, `no-var` |
 | Immer | Copy-on-write immutable updates | A `Proxy` draft whose `set` trap clones one branch |
 | Valtio | Proxy state for React | `get`/`set` traps drive per-component subscriptions |
 | MobX | Observable state | Proxy observables plus a derivation graph |
 | core-js | Standard-library polyfills | The reference for descriptor-correct shims |
+| TypeScript | Typed superset and downleveling compiler | Emits `using` and `await using` for engines that lack them |
 
 ---
 
@@ -822,6 +904,26 @@ renders the chain; before ES2022 the options were string concatenation or a besp
 `Worker` and a Node `vm` context each carry separate intrinsics. The old workaround was
 `Object.prototype.toString.call(v)`; `Error.isError(v)` tests the internal slot instead.
 
+**Q: What does a `using` declaration guarantee, and in what order does disposal run?**
+**Short:** `using` calls the value's `Symbol.dispose` method when the block exits by any path, in reverse declaration order, and keeps both errors in a SuppressedError if cleanup also throws.
+
+It is `try`/`finally` the language writes for you: normal exit, `return`, `break` and a throw all
+dispose. Two declarations dispose last-in, first-out, so a connection opened inside a session
+closes before the session. `null` and `undefined` are skipped, and `await using` awaits
+`Symbol.asyncDispose`. For resources without the protocol, `DisposableStack.adopt` and `defer`
+register cleanups, and `stack.move()` at the end of a setup function hands ownership to the
+caller only once every acquisition succeeded. Chrome 134 and Firefox 141 ship it; Safari needs
+TypeScript downleveling plus a polyfill for `Symbol.dispose` and `DisposableStack`.
+
+**Q: When should you use `getOrInsertComputed` instead of `getOrInsert`?**
+**Short:** Use getOrInsertComputed whenever the default allocates or does work, because getOrInsert evaluates its default argument on every call, including hits.
+
+`map.getOrInsert(k, [])` creates a new array on every call and discards it on a hit, which is
+fine in a loop of 100 and wasteful in a hot path of 10 million. `getOrInsertComputed(k, fn)`
+calls `fn(k)` only when the key is missing, so it suits a memo cache, a per-key `Map` in a
+`WeakMap`, or deduping in-flight requests with `getOrInsertComputed(url, (u) => fetch(u))`. Both
+are ES2026 on `Map` and `WeakMap`, shipped in Chrome 145, Firefox 144 and Safari 26.2.
+
 ---
 
 ## 13. Best Practices
@@ -839,6 +941,8 @@ renders the chain; before ES2022 the options were string concatenation or a besp
 7. **Brand with a `#private` field, not `instanceof`**, across a realm boundary.
 8. **Enumerate with `Object.keys` or `Object.entries`, never `for...in`**, which walks the chain.
 9. **Attach `{ cause }` on every rethrow**, and **key by `WeakMap`** when the object is not yours.
+10. **Return one disposer from every setup function**, built with `DisposableStack` and
+    `stack.move()`, so partial setup cannot leak and unmount cannot forget a step.
 
 ---
 

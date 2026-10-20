@@ -33,18 +33,20 @@ Long polling was the original workaround: the client sends a request and the ser
 
 ### 4.1 Comparison Matrix
 
-| Feature | HTTP Long Polling | WebSocket | SSE |
-|---------|-----------------|-----------|-----|
-| Direction | Bidirectional | Bidirectional | Server to Client only |
-| Connection | New per message | Persistent | Persistent |
-| Protocol | HTTP/1.1 | WS/WSS | HTTP/1.1 or HTTP/2 |
-| Auto-reconnect | Manual | Manual | Built-in (EventSource) |
-| HTTP/2 support | Yes | No (WS over HTTP/2 exists but rare) | Yes (multiplexed) |
-| Proxy/firewall | Works | Sometimes blocked | Works |
-| Browser support | Universal | Universal | Universal (no IE, but IE is dead) |
-| CDN support | Yes | Limited | Limited |
-| Load balancing | Standard | Requires sticky/pub-sub | Requires sticky/pub-sub |
-| Message format | JSON | Binary or text | Text/UTF-8 only |
+| Feature | HTTP Long Polling | WebSocket | SSE | WebTransport |
+|---------|-----------------|-----------|-----|--------------|
+| Direction | Bidirectional | Bidirectional | Server to Client only | Bidirectional |
+| Connection | New per message | Persistent | Persistent | Persistent session with many independent streams |
+| Protocol | HTTP/1.1 | WS/WSS | HTTP/1.1 or HTTP/2 | HTTP/3 over QUIC (`draft-ietf-webtrans-http3-16`, Internet-Draft in WG Last Call, not an RFC) |
+| Auto-reconnect | Manual | Manual | Built-in (EventSource) | Manual |
+| HTTP/2 support | Yes | Yes, as an extended CONNECT stream (RFC 8441); HTTP/3 via RFC 9220; only if the server advertises it | Yes (multiplexed) | No (needs HTTP/3) |
+| Proxy/firewall | Works | Sometimes blocked | Works | Fails where UDP 443 is blocked; keep a WebSocket fallback |
+| Browser support | Universal | Universal | Universal (no IE, but IE is dead) | Chrome 97, Firefox 114, Safari 26.4 (MDN) |
+| CDN support | Yes | Limited | Limited | Limited |
+| Load balancing | Standard | Requires sticky/pub-sub | Requires sticky/pub-sub | Requires a QUIC-aware L4/L7 balancer plus pub-sub |
+| Message format | JSON | Binary or text | Text/UTF-8 only | Binary streams plus unreliable datagrams |
+
+WebTransport runs each stream as its own QUIC stream, so a lost packet stalls only that stream, not the session; WebSocket over TCP stalls every message behind one lost segment. Its datagrams are never retransmitted, which suits game state or live media where a late update is worthless. The draft also permits running the capsule-based protocol of `draft-ietf-webtrans-http2` over a single HTTP/3 stream; in that mode all streams share head-of-line blocking and datagrams are retransmitted, so endpoints should prefer the native mapping. QUIC itself is covered in [UDP and QUIC](../udp_and_quic/udp_and_quic.md).
 
 ### 4.2 WebSocket Frame Structure
 
@@ -110,7 +112,27 @@ wire unpredictable, so no attacker-chosen sequence survives to the proxy. Server
 because the attack has no reverse direction — and the 4 bytes it would cost per frame are pure
 waste on the high-volume side of a fan-out.
 
-### 4.3 STOMP over WebSocket
+### 4.3 WebSocket over HTTP/2 and HTTP/3 (RFC 8441, RFC 9220)
+
+The `Upgrade` header and the `101` status do not exist in HTTP/2 or HTTP/3, so the HTTP/1.1 handshake cannot run there. RFC 8441 (September 2018) instead opens a WebSocket as one HTTP/2 stream, using an extended `CONNECT`; RFC 9220 (June 2022) does the same for HTTP/3 over QUIC.
+
+| Step | HTTP/1.1 (RFC 6455) | HTTP/2 (RFC 8441) / HTTP/3 (RFC 9220) |
+|------|---------------------|----------------------------------------|
+| Server opt-in | none | Server sends `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` (setting id `0x8` in both) |
+| Request | `GET` + `Upgrade: websocket` + `Sec-WebSocket-Key` | `:method = CONNECT`, `:protocol = websocket`, `:scheme`, `:path`, `:authority` |
+| Success | `101 Switching Protocols` + `Sec-WebSocket-Accept` | `200` on that stream; no key and no accept hash |
+| What carries the frames | the whole TCP connection | one stream; DATA frames carry RFC 6455 frames unchanged |
+| Close | close frame, then TCP FIN | close frame, then `END_STREAM` on that stream only |
+
+The RFC 6455 frame format, masking included, stays the same inside the stream. Three operational effects follow:
+
+- **Multiplexing.** Many WebSockets, plus ordinary requests, share one TCP (or QUIC) connection and one TLS handshake. A browser tab with ten sockets to one origin opens one connection, not ten. Over HTTP/2 a lost TCP segment still stalls every stream on the connection; over HTTP/3 only the stream that lost the packet stalls.
+- **Fallback is silent.** A browser uses extended CONNECT only after it sees the setting on an existing HTTP/2 connection. A server or proxy that does not send it gets a separate HTTP/1.1 connection with the classic `Upgrade`. nginx does not implement RFC 8441, so every WebSocket through nginx runs on its own HTTP/1.1 connection even when the page loads over HTTP/2.
+- **Proxies translate.** Envoy accepts RFC 8441 when `allow_connect: true` is set in `http2_protocol_options` (`allow_extended_connect` in `http3_protocol_options`, marked work-in-progress in the Envoy API), and turns the stream back into an HTTP/1.1 `GET` + `Upgrade` toward the upstream. HAProxy accepts it from 2.4. The backend app therefore usually still sees an HTTP/1.1 upgrade, and a stream-level timeout on the proxy (Envoy `stream_idle_timeout`, 5 minutes by default) now applies to a long-lived socket.
+
+Load-balancing changes too. With HTTP/1.1 one socket is one TCP connection, so an L4 balancer spreads sockets. With extended CONNECT many sockets ride one connection, so an L4 balancer pins all of them to one backend; only an L7 proxy that terminates HTTP/2 can spread them stream by stream.
+
+### 4.4 STOMP over WebSocket
 
 STOMP (Simple Text Oriented Messaging Protocol) adds a pub/sub messaging layer over WebSocket. Spring's Spring WebSocket + SockJS stack supports STOMP:
 
@@ -147,6 +169,27 @@ One 101 response upgrades the same TCP connection into a persistent, full-duplex
 
 The `Sec-WebSocket-Accept` is computed as:
 SHA1(Sec-WebSocket-Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"), Base64-encoded.
+
+### WebSocket over HTTP/2 Extended CONNECT
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant E as Envoy (HTTP/2 front)
+    participant A as App (HTTP/1.1)
+
+    B->>E: HTTP/2 connection preface
+    E-->>B: SETTINGS ENABLE_CONNECT_PROTOCOL=1
+    B->>E: stream 5 HEADERS<br/>:method=CONNECT :protocol=websocket<br/>:path=/ws
+    E->>A: GET /ws HTTP/1.1<br/>Upgrade: websocket
+    A-->>E: 101 Switching Protocols
+    E-->>B: stream 5 HEADERS :status=200
+    Note over B,E: RFC 6455 frames ride in DATA frames on stream 5
+    B->>E: stream 7 GET /api/profile (same TCP connection)
+    B->>E: stream 5 DATA (close frame) + END_STREAM
+```
+
+The socket is one stream among many on the browser connection, and the proxy converts it to a classic HTTP/1.1 upgrade on the hop to the app. Without the SETTINGS line, the browser opens a new HTTP/1.1 connection instead.
 
 ### SSE Event Stream
 
@@ -396,6 +439,39 @@ registry.enableSimpleBroker("/topic").setHeartbeatValue(new long[]{10000, 10000}
 // [server sends heartbeat every 10s, wants client heartbeat every 10s]
 ```
 
+### 6.5 permessage-deflate Memory per Connection
+
+permessage-deflate (RFC 7692) compresses each message with DEFLATE and sets the RSV1 bit on the first frame. With context takeover (the default), each side keeps its LZ77 window between messages, so repeated JSON keys compress well. That window and the zlib state are per connection and live for the life of the socket.
+
+zlib documents its own memory use (`zconf.h`): deflate needs `(1 << (windowBits + 2)) + (1 << (memLevel + 9))` bytes, inflate needs `1 << windowBits` plus about 7 KB.
+
+```
+  defaults: windowBits = 15, memLevel = 8
+    deflate  = 2^17 + 2^17          = 262,144 B  ~ 256 KB
+    inflate  = 2^15 + ~7 KB         ~  39 KB
+    per socket, both directions     ~ 295 KB
+
+  x 1,000,000 sockets               ~ 295 GB of RAM for compression state alone
+
+  tuned: server_max_window_bits = 10, client_max_window_bits = 10, memLevel = 1
+    deflate  = 2^12 + 2^10          =   5 KB
+    inflate  = 2^10 + ~7 KB         ~   8 KB
+    per socket                      ~  13 KB  ->  ~13 GB at 1M sockets
+```
+
+The levers, in the order they are usually pulled:
+
+1. Negotiate `server_no_context_takeover`. The server resets its compressor after every message and can release or pool the deflate state between messages. Compression ratio drops on small, repetitive messages.
+2. Shrink `server_max_window_bits` / `client_max_window_bits` toward 8 to 10, and lower `memLevel`.
+3. Skip compression for small messages. The Node `ws` library compresses only messages over `threshold` (1024 bytes by default) and caps parallel zlib work with `concurrencyLimit` (10 by default).
+4. Turn it off. The `ws` README disables the extension on the server by default, citing significant CPU and memory overhead and memory fragmentation under high concurrency in Node.js. Compress large payloads at the application layer instead.
+
+### 6.6 Receive Backpressure and WebSocketStream
+
+The browser `WebSocket` API has no receive backpressure. Every incoming message fires a `message` event whether or not the page has handled the last one, so a fast server can fill tab memory. On the send side the only signal is `bufferedAmount`, which the code must poll. TCP flow control does not help: the browser drains the socket into its event queue as fast as packets arrive.
+
+`WebSocketStream` exposes the socket as a `ReadableStream` and a `WritableStream`. The browser reads from the network only when the page calls `reader.read()`, so a slow consumer fills the TCP receive window and the server's send buffer, and the server sees backpressure. `await writer.write()` resolves only when the data is queued, so the sender slows down with no polling. It is Chromium-only and non-standard (MDN, standardisation tracked in `whatwg/websockets` PR 48), so cross-browser code still needs application-level flow control: credits, acknowledgements, or a server-side per-socket send queue with a byte cap that drops or disconnects slow consumers.
+
 ---
 
 ## 7. Real-World Examples
@@ -436,23 +512,27 @@ flowchart LR
 
     start(["Real-time push<br/>needed?"]) --> bidir{"Client also sends<br/>at high frequency?"}
 
-    bidir -->|"yes: gaming, trading,<br/>collaborative editing"| ws(["WebSocket"])
+    bidir -->|"yes: gaming, trading,<br/>collaborative editing"| loss{"Stale updates useless,<br/>or many independent streams?"}
+    loss -->|"yes, and UDP 443<br/>is reachable"| wt(["WebTransport<br/>(WebSocket fallback)"])
+    loss -->|"no"| ws(["WebSocket"])
     bidir -->|"no: server-to-client or<br/>occasional client sends"| proxy{"Strict corporate proxy<br/>blocks persistent streams?"}
 
     proxy -->|"yes"| lp(["Long polling<br/>(SockJS fallback)"])
     proxy -->|"no"| sse(["SSE<br/>(+ REST POST if client<br/>sends occasionally)"])
 
     class start io
-    class bidir,proxy mathOp
-    class ws,sse train
+    class bidir,proxy,loss mathOp
+    class ws,sse,wt train
     class lp lossN
 ```
 
-The decision collapses to two questions: does the client need to send at high frequency, and does the network path even allow a persistent connection — SSE (optionally paired with REST POST, as Twitter/X does) and long polling are both server-push-oriented fallbacks for when the answer to the first question is no.
+The decision turns on three questions: does the client need to send at high frequency, if so can it tolerate dropped or out-of-order updates (WebTransport) or not (WebSocket), and does the network path even allow a persistent connection? SSE (optionally paired with REST POST, as Twitter/X does) and long polling are both server-push-oriented fallbacks for when the answer to the first question is no.
 
 **SSE**: Use when only the server needs to push data to the client, and the data is text/JSON. SSE works through HTTP/2 transparently (each SSE stream is one HTTP/2 stream), through most corporate proxies, and has built-in reconnection with Last-Event-ID resume.
 
 **WebSocket**: Use when the client needs to send data at high frequency and the latency of a new HTTP request per send is unacceptable. Do not use WebSocket when SSE would suffice — WebSocket requires more infrastructure work (sticky sessions or pub/sub fan-out).
+
+**WebTransport**: Use when the client and server both send often and either a late message is worthless (game state, live cursor positions, media) or many independent streams must not block each other. It needs HTTP/3 end to end, and the spec is still an Internet-Draft (`draft-ietf-webtrans-http3-16`, July 2026, in WG Last Call), so ship a WebSocket fallback for networks that block UDP.
 
 **Long polling**: Use only as a last resort in environments that block WebSocket and SSE (some strict corporate proxies). The SockJS library falls back to long polling automatically.
 
@@ -467,6 +547,8 @@ The decision collapses to two questions: does the client need to send at high fr
 **Not handling WebSocket disconnects gracefully**: Clients disconnect without sending a Close frame (network failure, mobile app backgrounded, browser tab closed). The server must detect these via ping-pong timeouts or connection-level TCP keep-alive. Without detection, the server accumulates phantom sessions and leaks memory. Clean up all subscriptions and resource allocations when a session is closed.
 
 **SSE and proxy timeout**: Enterprise HTTP proxies often close connections idle for more than 60 seconds. SSE streams may have no events for minutes. Send SSE comment lines (`: heartbeat\n\n`) every 30 seconds to keep the connection alive through intermediary proxies. The browser's EventSource ignores comments; proxies see activity and keep the connection open.
+
+**permessage-deflate on by default at 1M connections**: With context takeover and zlib defaults, compression state costs about 295 KB per socket, which is roughly 295 GB across a million sockets before any application data. Load tests with a few thousand sockets do not show it. Negotiate `server_no_context_takeover` and smaller window bits, or leave the extension off and compress only large payloads (see 6.5).
 
 **WebSocket message framing for large messages**: WebSocket applications that try to send large messages (>1 MB) as a single frame can exhaust memory and cause buffering issues. Fragment large messages into multiple frames or redesign the protocol to send smaller chunks. Use Binary frames for non-text data — UTF-8 validation overhead on Text frames is significant for large payloads.
 
@@ -485,6 +567,8 @@ The decision collapses to two questions: does the client need to send at high fr
 | Redis Pub/Sub | Shared state for multi-server WebSocket |
 | RabbitMQ STOMP plugin | STOMP broker relay for production |
 | Netty | High-performance WebSocket server (underlies Spring WebFlux) |
+| Envoy (`allow_connect`) | Terminates WebSocket over HTTP/2 (RFC 8441) and converts it to an HTTP/1.1 upgrade upstream |
+| `WebSocketStream` | Chromium-only streams API with read and write backpressure |
 | WebSocket King | Browser extension for WebSocket testing |
 
 ---
@@ -499,12 +583,22 @@ The client sends an HTTP/1.1 GET request with headers: `Upgrade: websocket`, `Co
 **Q: What is the difference between WebSocket and SSE?**
 **Short:** WebSocket is bidirectional; SSE is server-to-client only but reconnects automatically over plain HTTP.
 
-WebSocket is bidirectional — both client and server can send frames at any time. SSE is unidirectional — only the server can push events. SSE uses standard HTTP; browsers handle reconnection automatically via the EventSource API and Last-Event-ID. WebSocket requires manual reconnection logic. SSE works with HTTP/2 multiplexing natively; WebSocket does not (WebSocket over HTTP/2 is defined but rarely deployed). Use SSE for server-push-only scenarios; WebSocket for full-duplex communication.
+WebSocket is bidirectional: both client and server can send frames at any time. SSE is unidirectional: only the server can push events. SSE uses standard HTTP; browsers handle reconnection automatically via the EventSource API and Last-Event-ID. WebSocket requires manual reconnection logic. SSE works with HTTP/2 multiplexing with no server opt-in; WebSocket shares an HTTP/2 or HTTP/3 connection only when the server advertises extended CONNECT (RFC 8441, RFC 9220), otherwise it gets its own HTTP/1.1 connection. Use SSE for server-push-only scenarios; WebSocket for full-duplex communication.
 
 **Q: How do you scale WebSocket connections horizontally?**
 **Short:** Scale WebSocket servers with sticky sessions or, more resiliently, a shared Redis Pub/Sub fan-out backend.
 
 WebSocket connections are stateful — a client is connected to a specific server. Horizontal scaling requires either: (1) sticky sessions — load balancer routes all requests from a client to the same server (by IP or cookie); (2) shared pub/sub backend — each server publishes messages to Redis Pub/Sub, all servers subscribe, and each delivers to its locally connected clients. Option 2 is more resilient to server failure. Sticky sessions can cause imbalanced load if some connections are more active.
+
+**Q: Your site serves over HTTP/2, yet every WebSocket still opens its own TCP connection. Why?**
+**Short:** The server or proxy never advertised SETTINGS_ENABLE_CONNECT_PROTOCOL, so the browser fell back to an HTTP/1.1 Upgrade on a fresh connection.
+
+HTTP/2 has no `Upgrade` header and no `101` status, so a WebSocket can share an HTTP/2 connection only through RFC 8441 extended CONNECT: `:method = CONNECT`, `:protocol = websocket`, answered by `200` on that stream. The browser uses it only after the server sends `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` on the existing connection; otherwise it silently opens a new HTTP/1.1 connection and runs the classic handshake. nginx does not implement RFC 8441, so every socket behind it gets its own connection; Envoy does when `allow_connect: true` is set, and converts the stream back to an HTTP/1.1 upgrade toward the app. RFC 9220 defines the same mechanism for HTTP/3. Check the browser network panel: the protocol column reads `h2` or `http/1.1` for the WebSocket row.
+
+**Q: Why can permessage-deflate exhaust memory on a server holding a million WebSocket connections?**
+**Short:** With context takeover and zlib defaults each socket keeps about 295 KB of compression state, so a million sockets need about 295 GB.
+
+permessage-deflate (RFC 7692) keeps a DEFLATE context per connection so later messages can reference earlier ones. zlib's documented cost is `2^(windowBits+2) + 2^(memLevel+9)` bytes for deflate and `2^windowBits` plus about 7 KB for inflate: 256 KB plus 39 KB at the defaults of 15 and 8. That state lives as long as the socket, idle or not. Fixes: negotiate `server_no_context_takeover` so the server can free or pool its compressor between messages, cut window bits to 10 (about 13 KB per socket), skip messages under about 1 KB, or leave the extension off. The Node `ws` library ships it disabled on the server for this reason.
 
 **Q: What is the WebSocket ping-pong mechanism?**
 **Short:** WebSocket Ping and Pong control frames act as a keep-alive; a missing Pong marks the connection dead.
@@ -565,6 +659,11 @@ Masking exists to prevent cache-poisoning and request-smuggling attacks against 
 **Short:** Set proxy_buffering off and send X-Accel-Buffering: no, or nginx holds SSE events until its buffer fills.
 
 Nginx buffers upstream responses by default, holding SSE events until the buffer fills or the response completes. This defeats the purpose of a live event stream, since the client receives nothing until the buffer flushes, sometimes minutes after the events were actually generated. Disable it by setting `proxy_buffering off;` in the nginx location block and by sending an `X-Accel-Buffering: no` response header from the backend, both of which tell nginx to forward each chunk to the client immediately as it is written. Always verify SSE endpoints behind nginx with a manual curl test, since buffering bugs are invisible in local development without a reverse proxy in front.
+
+**Q: How do you stop a fast WebSocket server from overwhelming a slow browser client?**
+**Short:** The classic WebSocket API cannot push back on receive, so use WebSocketStream in Chromium or add credit-based flow control in the protocol.
+
+The `WebSocket` API fires a `message` event for every arrival and drains the TCP socket regardless of how fast the page handles events, so TCP flow control never reaches the server and the tab's memory grows. Send-side throttling exists only as polling `bufferedAmount`. `WebSocketStream` reads from the network only when the page calls `reader.read()`, so a slow reader fills the TCP window and the server's send buffer blocks; `await writer.write()` gives send backpressure. It is Chromium-only and not yet in a standard, so portable code grants credits (client acks every N messages, server stops at zero credit) and caps each socket's server-side send queue in bytes, dropping or disconnecting a consumer that exceeds it.
 
 **Q: How do you safely handle large WebSocket messages (over 1MB)?**
 **Short:** Split a large payload across continuation frames, with FIN=0 on all but the final chunk.

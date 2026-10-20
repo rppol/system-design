@@ -777,9 +777,10 @@ itself catches it.
 
 ## 11. Technologies & Tools
 
-- **RedisBloom** — a Redis module adding native Bloom filter (`BF.*`), cuckoo filter (`CF.*`),
-  Count-Min Sketch (`CMS.*`), t-digest (`TDIGEST.*`), and top-K commands, so these structures
-  live server-side instead of being re-implemented per client.
+- **Redis probabilistic data types** - Redis Open Source 8.0+ (GA May 2025) ships Bloom filter
+  (`BF.*`), cuckoo filter (`CF.*`), Count-Min Sketch (`CMS.*`), t-digest (`TDIGEST.*`), and top-K
+  (`TOPK.*`) commands built in, next to HyperLogLog (`PF*`), so these structures live server-side
+  instead of being re-implemented per client. Redis 7.x and earlier need the RedisBloom module.
 - **Apache DataSketches** — the Yahoo/Apache library (Java, with a Python and C++ port) behind
   Apache Druid's approximate-analytics queries; the reference implementation for HLL, CPC,
   theta, quantile, and frequency sketches with careful mergeability guarantees.
@@ -891,7 +892,7 @@ An exact hash set or counter table is O(n) in space — it grows linearly with t
   it as a breaking change requiring a full rebuild of every existing sketch — a per-process
   random seed is the right default for a standalone filter, and the wrong default the moment a
   merge is anywhere on the roadmap (§14).
-- **Prefer a maintained library (RedisBloom, Apache DataSketches, `probables`) over a hand-rolled
+- **Prefer a maintained library (Redis `BF.*`/`CMS.*`, Apache DataSketches, `probables`) over a hand-rolled
   implementation for anything production-facing** — correct hash mixing, tested merge semantics,
   and known error bounds are easy to get subtly wrong by hand, and the cost of getting them wrong
   is a silent wrong answer, not a crash.

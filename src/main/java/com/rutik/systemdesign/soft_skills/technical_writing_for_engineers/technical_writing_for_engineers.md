@@ -173,6 +173,15 @@ stateDiagram-v2
     Revise --> Draft
     Review --> Shipped: approved
     Shipped --> [*]
+
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    class Draft,SelfEdit info
+    class Review warn
+    class Revise accent
+    class Shipped good
 ```
 
 *The revision loop from §6. Most documents cycle through this once or twice before
@@ -344,6 +353,103 @@ guess, and a vague request, became three sentences — each one claim, the third
 owner and a date. A run-on rarely hides one complex idea; it usually hides several simple
 ones the writer didn't stop to separate.
 
+### Writing with an LLM, and writing for one
+
+**An LLM-drafted doc is still your doc.** The model writes fluent text whether or not the
+facts in it exist. The best-known cost is *Mata v. Avianca* (S.D.N.Y., June 22, 2023):
+two lawyers filed a brief with six court decisions ChatGPT had invented and were fined
+$5,000. The engineering version is a design doc that cites a config flag the library never
+had, or a p99 the dashboard never showed, and a reviewer who approves it because the prose
+reads like an expert wrote it.
+
+```mermaid
+flowchart LR
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+
+    draft(["Model draft"])
+    claims("List every number,<br/>name, link, API")
+    check{"Matches the<br/>source?"}
+    fix("Fix or delete")
+    cut("Cut filler openers<br/>and straw-man options")
+    note("Add a one-line<br/>AI-use note")
+    send(["Send"])
+
+    draft --> claims --> check
+    check -->|"no"| fix --> check
+    check -->|"yes"| cut --> note --> send
+
+    class draft info
+    class claims,cut info
+    class check warn
+    class fix bad
+    class note,send good
+```
+
+*The verification pass on a model-drafted doc. Every checkable claim goes back to its
+source; a claim with no source is deleted, not softened.*
+
+The pass, in order:
+
+1. **Extract every checkable claim**: numbers, version strings, flag and API names,
+   links, quotes, people's names. Check each against the dashboard, the docs, the code.
+   Delete what you cannot source.
+2. **Cut the model's habits**: throat-clearing openers (failure 7 above), "robust and
+   scalable", and an options list where one option is a straw man so the recommended one
+   wins. A reviewer who spots one straw man stops trusting the rest.
+3. **Add a one-line disclosure** where it changes how the reader weighs the text: "Drafted
+   with Claude from the incident timeline; every number checked by me against the
+   `payments-latency` dashboard." It tells the reader what was checked and who answers for
+   it.
+
+**Weak version** (sent as-is from the model)
+
+> Our robust caching layer leverages Redis's `maxmemory-eviction-ratio` setting to
+> seamlessly reduce evictions by approximately 40%.
+
+**Strong version**
+
+> Setting `maxmemory-policy allkeys-lfu` cut evictions from 1,900/s to 1,150/s in the
+> March 4 load test (dashboard: `cache-evictions`).
+
+**What changed:** the weak sentence cites a setting that does not exist and a percentage
+nobody measured, wrapped in filler. The strong one names a real directive, the before and
+after numbers, the test, and where to check them.
+
+**Writing for an agent as the reader.** A file such as `AGENTS.md` is documentation whose
+reader is a coding agent. The format (agents.md, maintained by the Agentic AI Foundation
+under the Linux Foundation) calls it "a README for agents"; its site reports use in over
+60,000 open-source projects, and Codex, Cursor, Jules, Gemini CLI and GitHub Copilot's
+coding agent all read it. The agent reads the nearest file up the directory tree, so a
+monorepo can carry one per package; OpenAI's own main repository had 88 at the time the
+site was written. `CLAUDE.md` plays the same role for Claude Code.
+
+Writing for this reader differs from writing for a person in three ways:
+
+- **Every line is executed literally, every run.** A person skims past a stale line; an
+  agent follows it. A wrong build command in `AGENTS.md` costs a failed task on every
+  invocation until someone fixes it.
+- **Vague advice does nothing.** "Be careful with the database" gives the agent no action.
+  "Never run `make db-reset`; it drops the shared dev database" does.
+- **State the constraint and its reason in one line.** The reason lets the agent handle
+  the case the rule did not name.
+
+**Weak version** (an `AGENTS.md` entry)
+
+> Please make sure to follow our testing conventions and keep the code clean.
+
+**Strong version**
+
+> Run `pnpm test --filter <package>` before every commit; CI runs the same command and
+> blocks merges on failure. Never edit files under `generated/`; `pnpm codegen` rewrites
+> them.
+
+**What changed:** the weak entry names no command, no path, and no consequence, so the
+agent cannot act on it. The strong entry gives the exact command, the reason it matters,
+the path that must not change, and how that path gets rewritten.
+
 ---
 
 ## 7. Real-World Examples
@@ -477,6 +583,10 @@ ones the writer didn't stop to separate.
 - Amazon's narrative-memo and PR/FAQ practices, as described by Jeff Bezos in Amazon
   shareholder letters and widely documented since — the fullest public example of BLUF and
   MECE enforced as a company-wide writing standard.
+- agents.md, the AGENTS.md format site (Agentic AI Foundation, Linux Foundation): the file
+  format, the nearest-file rule, and the list of agents that read it.
+- *Mata v. Avianca, Inc.*, No. 22-cv-1461 (S.D.N.Y. June 22, 2023), sanctions opinion by
+  Judge P. Kevin Castel: the reference case for publishing model output without checking it.
 - [Design Docs, RFCs and ADRs](../design_docs_rfcs_and_adrs/design_docs_rfcs_and_adrs.md)
   — where this sentence-level craft gets applied to a full document template.
 - [Executive Communication](../executive_communication/executive_communication.md) — BLUF
@@ -497,6 +607,29 @@ in general; it's specifically naming the actor: "Platform decided to deprecate t
 endpoint; I made the call after the Q2 incident review." Passive voice is not always wrong
 — see the dedicated Q&A below on when it's fine — but hiding an actor who exists and
 matters is the specific failure.
+
+**Q: You used an LLM to draft a design doc. What do you owe the reader before you send it?**
+**Short:** A check of every number, name, link and API against its source, deletion of what you cannot source, and a one-line note on how the model was used.
+
+The model writes fluent prose whether or not its facts exist, and fluency is what makes a
+reviewer trust a doc. So the author lists every checkable claim (numbers, versions, flag
+and API names, links, quotes) and checks each against the dashboard, the docs or the code,
+deleting anything without a source. Then cut the model's habits: filler openers and an
+options list with a straw man. Finish with a disclosure such as "drafted with Claude from
+the incident timeline, numbers checked against the `payments-latency` dashboard", which
+tells the reader what was verified and who answers for it. *Mata v. Avianca* (2023), where
+lawyers were fined $5,000 for filing invented citations, is what skipping the check costs.
+
+**Q: How is writing an AGENTS.md different from writing a README for people?**
+**Short:** An agent executes every line literally on every run, so each entry must be an exact command or hard constraint with its reason; a stale or vague line becomes repeated wrong behaviour.
+
+A person skims past an outdated README line and asks someone. A coding agent reads the
+nearest `AGENTS.md` (or `CLAUDE.md` for Claude Code) on every task and acts on it. "Follow
+our testing conventions" gives it nothing to do; "run `pnpm test --filter <package>`
+before every commit, CI blocks on failure" does. Put the reason next to the rule so the
+agent can handle a case the rule did not name, keep one file per package in a monorepo
+since the nearest file wins, and treat the file like code: a wrong build command costs a
+failed task every time until someone fixes it.
 
 **Q: What is BLUF, and why does most engineering writing violate it?**
 **Short:** Bottom Line Up Front — state the conclusion or ask first; most docs bury it because writers think in discovery order.

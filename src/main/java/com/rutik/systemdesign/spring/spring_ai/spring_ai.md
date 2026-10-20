@@ -68,7 +68,7 @@ conditional beans, and `@ConfigurationProperties` carries over.
 ## 3. Core Principles
 
 1. **Portability over lock-in.** Program against `ChatModel`/`ChatClient`/`VectorStore`, not a vendor SDK; switch providers via starter + properties.
-2. **Auto-configuration drives wiring.** A `spring-ai-*-spring-boot-starter` plus an API key in properties auto-configures the model bean — `@ConditionalOnClass`/`@ConditionalOnMissingBean` let you override.
+2. **Auto-configuration drives wiring.** A `spring-ai-starter-model-<vendor>` starter plus an API key in properties auto-configures the model bean; `@ConditionalOnClass`/`@ConditionalOnMissingBean` let you override.
 3. **Advisors compose cross-cutting prompt concerns.** RAG, chat memory, safety guards, and logging are advisors layered around a call — the same interceptor model as Spring AOP / `HandlerInterceptor`.
 4. **Structured output closes the loop with the type system.** Responses map to records via `BeanOutputConverter`, turning free-text LLM output into typed Java objects.
 5. **RAG = retrieval + augmentation as a pipeline.** Ingest (ETL) into a `VectorStore`, then at query time retrieve top-k similar chunks and inject them as context.
@@ -98,7 +98,7 @@ conditional beans, and `@ConfigurationProperties` carries over.
 
 Spring AI 2.0 narrowed the core to a focused set of providers and pushed the rest out to
 their vendors. Everything below is `groupId` `org.springframework.ai`, versionless under the
-`spring-ai-bom` (2.0.0).
+`spring-ai-bom` (2.0.1).
 
 | Provider | Starter artifact | Notes |
 |---|---|---|
@@ -124,7 +124,7 @@ vector stores follow the same pattern (`spring-ai-starter-vectorstore-pgvector`,
 | Strategy | How | When |
 |---|---|---|
 | Naive RAG (`QuestionAnswerAdvisor`) | Single top-k retrieval, stuff context | Simple FAQ/docs |
-| Advanced RAG (`RetrievalAugmentationAdvisor`) | Query transform → retrieve → rerank → augment | Quality-critical, large corpora |
+| Modular RAG (`RetrievalAugmentationAdvisor`, `spring-ai-rag`) | `QueryTransformer` → `QueryExpander` → `DocumentRetriever` → `DocumentJoiner` → `DocumentPostProcessor` → `QueryAugmenter` | Follow-up questions, multilingual corpora, re-ranking, quality-critical answers |
 | Tool-based retrieval | Model calls a `@Tool` search method on demand | Agentic, multi-step |
 
 ### 4.4 Output Strategies
@@ -342,6 +342,92 @@ lets the result come back empty, which is what makes "answer only from the provi
 context, otherwise say you don't know" an achievable instruction rather than wishful
 prompting. This is the pitfall the Section 14 case study fixes by moving `0.7` to `0.75`.
 
+#### Modular RAG with `RetrievalAugmentationAdvisor`
+
+`QuestionAnswerAdvisor` is one fixed step: embed the raw user text, search, stuff the prompt.
+`RetrievalAugmentationAdvisor` (artifact `spring-ai-rag`) breaks the same flow into six
+interfaces, each an optional bean slot, following the "Modular RAG" paper (arXiv 2407.21059):
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    q(["User query<br/>+ history"]) --> qt("QueryTransformer<br/>compress, rewrite,<br/>translate")
+    qt --> qe("QueryExpander<br/>1 query to N")
+    qe --> dr("DocumentRetriever<br/>per query")
+    dr --> dj("DocumentJoiner<br/>merge, dedupe")
+    dj --> pp("DocumentPostProcessor<br/>re-rank, trim")
+    pp --> qa("QueryAugmenter<br/>build final prompt")
+    qa --> llm(["ChatModel"])
+
+    class q,llm io
+    class qt,qe mathOp
+    class dr,dj req
+    class pp frozen
+    class qa train
+```
+
+| Stage | Interface | Built-in | Extra LLM call |
+|---|---|---|---|
+| Pre-retrieval | `QueryTransformer` | `CompressionQueryTransformer` (history + follow-up to one standalone query), `RewriteQueryTransformer`, `TranslationQueryTransformer` | Yes, one per transformer |
+| Pre-retrieval | `QueryExpander` | `MultiQueryExpander` (`numberOfQueries`, includes the original by default) | Yes, one |
+| Retrieval | `DocumentRetriever` | `VectorStoreDocumentRetriever` (`topK`, `similarityThreshold`, static or `Supplier` filter expression) | No, one vector search per query |
+| Retrieval | `DocumentJoiner` | `ConcatenationDocumentJoiner` (keeps the first copy of a duplicate, scores unchanged) | No |
+| Post-retrieval | `DocumentPostProcessor` | None in the reference docs; you implement re-ranking or compression | Depends on your implementation |
+| Generation | `QueryAugmenter` | `ContextualQueryAugmenter` (refuses to answer on empty context unless `allowEmptyContext(true)`) | No |
+
+```java
+@Bean
+Advisor ragAdvisor(VectorStore vectorStore, ChatClient.Builder builder) {
+    // Transformers and expanders should run at temperature 0: the default chat
+    // temperature makes rewritten queries vary between calls and hurts retrieval.
+    ChatClient.Builder deterministic = builder.clone()
+        .defaultOptions(ChatOptions.builder().temperature(0.0));
+
+    return RetrievalAugmentationAdvisor.builder()
+        .queryTransformers(
+            CompressionQueryTransformer.builder().chatClientBuilder(deterministic).build(),
+            TranslationQueryTransformer.builder().chatClientBuilder(deterministic)
+                .targetLanguage("english").build())
+        .queryExpander(MultiQueryExpander.builder()
+            .chatClientBuilder(deterministic).numberOfQueries(3).build())
+        .documentRetriever(VectorStoreDocumentRetriever.builder()
+            .vectorStore(vectorStore)
+            .topK(5)
+            .similarityThreshold(0.70)
+            .filterExpression(() -> new FilterExpressionBuilder()
+                .eq("tenant", TenantContext.current()).build())   // evaluated per request
+            .build())
+        .documentJoiner(new ConcatenationDocumentJoiner())
+        .documentPostProcessors(crossEncoderReranker)              // your bean: keep best 5
+        .queryAugmenter(ContextualQueryAugmenter.builder().build())
+        .build();
+}
+```
+
+**Walk the cost of that configuration for one question.**
+
+```
+  LLM calls before the answer:  compress 1 + translate 1 + expand 1      = 3
+  vector searches:              original + 3 expansions = 4 queries x 1  = 4
+  candidate chunks:             4 x topK 5                               = up to 20
+  after join (dedupe):          typically 8-12 distinct chunks
+  after re-rank:                keep 5 x 800 tokens                      = 4,000 prompt tokens
+
+  QuestionAnswerAdvisor baseline: 0 extra LLM calls, 1 search, 4 chunks  = 3,200 tokens
+```
+
+The modular pipeline adds three model round trips of latency before the answering call even
+starts, so add a stage only for a failure you measured: `CompressionQueryTransformer` for
+follow-up questions such as "and its second largest city?" that retrieve nothing on their own,
+`TranslationQueryTransformer` when queries arrive in languages the embedding model handles
+poorly, `MultiQueryExpander` for low recall, and a re-ranking post-processor when the right
+chunk is retrieved but ranked below position `topK`.
+
 ### 6.5 Tool Calling — the loop lives in the advisor chain
 
 ```java
@@ -363,10 +449,27 @@ String reply = chatClient.prompt()
 
 `ChatClient` auto-registers a `ToolCallingAdvisor` unless you disable it with
 `spring.ai.chat.client.tool-calling.enabled=false`, and `DefaultChatClient` refuses to
-build a chain containing two `ToolAdvisor`s. Tool call volume is capped by
-`DefaultToolCallingManager` — 40 calls per individual tool and 150 total per request —
-so a model stuck in a loop burns a bounded amount of money rather than an unbounded
-amount.
+build a chain containing two `ToolAdvisor`s.
+
+**Tool call limits (2.0.1 and later).** `DefaultToolCallingManager` caps tool calls by
+default: 40 calls per tool and 150 in total, counted per turn (from the last `UserMessage`
+onward), so a `ChatMemory` advisor that replays earlier turns into the prompt does not
+inflate the count. Set them with `spring.ai.tools.limits.*` (`max-calls-per-tool-default`,
+`max-calls-per-tool.<name>`, `excluded-tools`, `max-total-tool-calls`; `-1` means
+unlimited) or on `DefaultToolCallingManager.Builder` (`maxCallsPerTool(n)`,
+`maxCallsPerTool(name, n)`, `excludeToolFromLimit(name)`, `maxTotalToolCalls(n)`). An
+excluded tool still counts toward the total. On a breach the manager throws
+`ToolCallLimitExceededException` carrying the partial result already executed, and
+`ToolCallingAdvisor` returns that partial result as the final response. With
+`onLimitExceeded(ToolCallLimitBehavior.RETURN_ERROR_RESPONSE)` the manager skips the call
+and returns an error tool response instead, which suits a hand-rolled loop that calls
+`executeToolCalls` directly. An agent that legitimately calls one tool more than 40 times in
+a turn returns a truncated answer after the 2.0.1 upgrade, so raise its limit first.
+
+2.0.1 also defaults OpenAI tool `strict` mode to `false`. The schema generator leaves
+optional parameters out of `required`, a shape OpenAI's strict mode rejects with HTTP 400,
+so every tool with an optional parameter failed under the old `true` default. Opt in per
+call with `OpenAiChatOptions#strict`.
 
 ```java
 // BROKEN on Spring AI 2.0: ChatModel no longer executes tools for you.
@@ -485,6 +588,10 @@ transport is not supported. An MCP server exposing real business operations is a
 authenticated API like any other — treat "MCP has no auth story in core yet" as a
 design constraint, not a detail.
 
+From 2.0.1 the MCP server takes `maxSessions` and `sessionIdleTimeout`, which cap how many
+client sessions it holds open and close the ones left idle. They apply to a stateful
+Streamable HTTP server; stateless mode keeps no sessions.
+
 **The three ways an MCP server goes wrong.** First, an **unbounded tool catalogue**:
 every tool's schema is prompt text, so exposing two hundred tools spends your context
 window on descriptions the model will not read — that is exactly what
@@ -520,7 +627,7 @@ A finance assistant registers `@Tool` methods for `getAccountBalance`, `listTran
 `transferFunds` (the last guarded by a confirmation step). The model orchestrates multi-step
 requests ("move 200 from savings to checking if my checking is below 100"); the
 `ToolCallingAdvisor` drives each round trip while business logic stays in ordinary,
-individually testable Spring beans, and `DefaultToolCallingManager`'s 150-call ceiling bounds
+individually testable Spring beans, and `DefaultToolCallingManager`'s 150-call ceiling (2.0.1 and later) bounds
 what a confused model can spend.
 
 ### 7.4 An Internal Service Catalogue as an MCP Server
@@ -543,7 +650,7 @@ catalogue small enough that its schemas do not crowd out the user's actual quest
 | Vendor portability | High (swap starter) | None (locked in) | High |
 | Spring integration | Native (DI, Boot, Actuator) | Manual | Good |
 | Auto-configuration | Yes | No | Partial |
-| Maturity (vs Python LangChain) | 2.0 GA (June 2026), on the Boot 4 train | Vendor-stable | Mature in JVM space |
+| Maturity (vs Python LangChain) | 2.0 GA (June 2026), on the Boot 4 train; 1.x OSS support ended 2026-06-30 | Vendor-stable | Mature in JVM space |
 | Advisor/RAG abstractions | Built-in | Hand-rolled | Built-in (chains) |
 | Learning curve for Spring devs | Low (familiar idioms) | Medium | Medium |
 | Cutting-edge model features | May lag vendor SDK | Immediate | Varies |
@@ -605,7 +712,8 @@ out-of-band or guard with a content hash so only changed documents are re-embedd
 | Tool / Feature | Version | Purpose |
 |---|---|---|
 | Spring AI | 2.0 GA (2026-06-12) | Core framework, `ChatClient`, advisors, MCP |
-| `spring-ai-bom` | 2.0.0 | Imports every artifact below without a version |
+| Spring AI 1.0.x / 1.1.x | OSS support ended 2026-06-30 | Commercial support only: 1.0.x to 2027-06-30, 1.1.x to 2032-06-30 |
+| `spring-ai-bom` | 2.0.1 | Imports every artifact below without a version |
 | Spring Boot | 4.0.x / 4.1.x | Auto-configuration and starters baseline |
 | `spring-ai-starter-model-openai` | 2.0 | OpenAI chat/embedding/image |
 | `spring-ai-starter-model-anthropic` | 2.0 | Anthropic Claude; rebuilt on the official `anthropic-java` SDK |
@@ -613,9 +721,11 @@ out-of-band or guard with a content hash so only changed documents are re-embedd
 | `spring-ai-starter-vectorstore-pgvector` | 2.0 | Postgres vector similarity search |
 | `spring-ai-starter-vectorstore-redis` | 2.0 | Redis `VectorStore` backend |
 | `ToolCallingAdvisor` | 2.0 | The single tool-execution loop, in the advisor chain |
+| `spring.ai.tools.limits.*` | 2.0.1 | Per-tool (40) and per-turn total (150) tool call caps; `-1` disables |
 | `ToolSearchToolCallingAdvisor` | 2.0 | Progressive tool disclosure; `spring-ai-starter-tool-search-advisor` |
 | `StructuredOutputValidationAdvisor` | 2.0 | Feeds validation failures back for self-correction |
 | `QuestionAnswerAdvisor` | 2.0 | Naive RAG over a `VectorStore` |
+| `RetrievalAugmentationAdvisor` (`spring-ai-rag`) | 2.0 | Modular RAG: query transformers and expanders, retrievers, joiners, post-processors, augmenter |
 | `@Tool` | 2.0 | Declarative tool definition on any bean method |
 | `ToolCallback` | 2.0 | The core tool abstraction all three definition styles produce |
 | `@McpTool` | 2.0 | A model-callable action on an ordinary bean |
@@ -631,82 +741,92 @@ out-of-band or guard with a content hash so only changed documents are re-embedd
 
 ## 12. Interview Questions with Answers
 
-**Q1: What problem does Spring AI solve, and how does it relate to the raw vendor SDKs?**
+**Q: What problem does Spring AI solve, and how does it relate to the raw vendor SDKs?**
 **Short:** Spring AI provides portable, auto-configured abstractions over LLM providers so AI code uses ordinary Spring idioms.
 
 Spring AI provides portable, auto-configured abstractions over LLM providers so that Spring applications integrate AI with the same idioms as everything else — DI, starters, `@ConfigurationProperties`, fluent clients, and Micrometer observability. Instead of coding against OpenAI's or Anthropic's REST SDK directly (vendor lock-in, hand-rolled retries, manual JSON parsing), you program against `ChatClient`/`ChatModel`/`VectorStore`. Switching providers becomes a matter of changing a starter dependency and properties. The tradeoff is that cutting-edge vendor features may arrive in the raw SDK before Spring AI exposes them.
 
-**Q2: What is `ChatClient` and how does it differ from `ChatModel`?**
+**Q: What is `ChatClient` and how does it differ from `ChatModel`?**
 **Short:** `ChatModel` is the low-level model-call interface; `ChatClient` is the fluent, advisor-aware builder API on top of it.
 
 `ChatModel` is the low-level, portable interface representing a chat model call (synchronous `call` and streaming variants) — analogous to `JdbcTemplate`. `ChatClient` is a higher-level fluent API built on top of a `ChatModel`, analogous to `RestClient`: it supports a builder, default system prompts, prompt templates, an **advisor chain** (RAG, memory, logging), tools, and structured output via `.entity(...)`. You typically inject the auto-configured `ChatClient.Builder`, customize defaults per bean, and call `.prompt().user(...).call().content()`. Use `ChatModel` directly only for low-level control.
 
-**Q3: What is an Advisor in Spring AI and what is it analogous to in core Spring?**
+**Q: What is an Advisor in Spring AI and what is it analogous to in core Spring?**
 **Short:** An `Advisor` intercepts a `ChatClient` call around-style, the same model as Spring AOP advice or a `HandlerInterceptor`.
 
 An `Advisor` is an interceptor that wraps a `ChatClient` call, able to mutate the request on the way down and the response on the way back up — exactly the around-advice model of Spring AOP or the pre/post pattern of a `HandlerInterceptor`. Advisors compose cross-cutting prompt concerns: `QuestionAnswerAdvisor` injects retrieved RAG context, `MessageChatMemoryAdvisor` injects conversation history, `SafeGuardAdvisor` blocks unsafe content, and custom advisors add logging or token budgeting. They are ordered, so you control whether memory is injected before or after retrieval. This is the key abstraction that keeps RAG/memory/safety out of business code.
 
-**Q4: How does RAG work in Spring AI, end to end?**
+**Q: How does RAG work in Spring AI, end to end?**
 **Short:** Documents are chunked and embedded into a `VectorStore` offline, then similar chunks are retrieved and injected into the prompt at query time.
 
 RAG has two phases. **Ingestion (ETL, offline):** a `DocumentReader` parses source files into `Document`s, a `TextSplitter` chunks them (~hundreds of tokens each), and `VectorStore.add()` embeds and stores the chunks in a vector database (PgVector, Redis, etc.). **Query (online):** the user's question is embedded, `VectorStore.similaritySearch(topK, threshold)` returns the nearest chunks, and a `QuestionAnswerAdvisor` injects those chunks into the prompt as grounding context before calling the model. The point is to ground answers in your private data and reduce hallucination. Setting a `similarityThreshold` and handling the low-confidence case prevents the model from confabulating when nothing relevant is retrieved.
 
-**Q5: What is a `VectorStore` and how do you choose a backend?**
+**Q: In a multi-turn chat, why does a follow-up like "and what about its pricing?" retrieve nothing, and which Spring AI RAG module fixes it?**
+**Short:** The follow-up alone has no subject to embed; CompressionQueryTransformer rewrites history plus follow-up into one standalone query before retrieval.
+
+`QuestionAnswerAdvisor` embeds the raw user message, and "and what about its pricing?" carries no entity, so its vector lands near generic pricing text or below the similarity threshold. `RetrievalAugmentationAdvisor` accepts `QueryTransformer` beans that run before retrieval; `CompressionQueryTransformer` sends the conversation history and the follow-up to a model and gets back a standalone query such as "What is the pricing of Spring AI's Anthropic integration?", which is what gets embedded. Configure the transformer's `ChatClient.Builder` at temperature 0, because the Spring AI docs note that default chat temperatures make rewritten queries vary between calls and lower retrieval quality. Each transformer is an extra model call before the answer, so pair it with a cheap, fast model. `RewriteQueryTransformer` handles verbose or badly phrased single-turn questions and `TranslationQueryTransformer` handles queries in a language the embedding model handles poorly.
+
+**Q: What does each module in Spring AI's `RetrievalAugmentationAdvisor` pipeline do, and which ones add latency?**
+**Short:** Transformers and the expander call an LLM before retrieval; the retriever searches; the joiner merges and dedupes; post-processors re-rank; the augmenter builds the prompt.
+
+The advisor runs six optional stages in order. `QueryTransformer`s (compression, rewrite, translation) and the `QueryExpander` (`MultiQueryExpander`, N variants plus the original) each make a model call. The `DocumentRetriever` (`VectorStoreDocumentRetriever` with `topK`, `similarityThreshold` and a per-request filter `Supplier` for tenant isolation) runs one vector search per query. The `DocumentJoiner` (`ConcatenationDocumentJoiner`) merges the per-query lists and keeps the first copy of a duplicate without re-scoring. `DocumentPostProcessor`s are where re-ranking and compression go; you supply the implementation. Finally `ContextualQueryAugmenter` writes the context into the prompt and, by default, tells the model not to answer when no documents survived, which is the safe behaviour for a grounded assistant. With compression, translation and a 3-way expansion that is three LLM round trips and four searches before the answering call, so add stages only for a measured failure.
+
+**Q: What is a `VectorStore` and how do you choose a backend?**
 **Short:** `VectorStore` is Spring AI's SPI for embedding storage and similarity search, swappable between PgVector, Redis, and dedicated vector DBs.
 
 `VectorStore` is Spring AI's SPI for storing embeddings and performing similarity search — the `Repository` analogue for vectors. Implementations include PgVector (reuse your existing Postgres, good default), Redis (low latency), Chroma/Milvus/Weaviate (purpose-built vector DBs), and an in-memory `SimpleVectorStore` for tests. Choose PgVector when you already run Postgres and want one operational surface; choose a dedicated vector DB at very large scale or when you need advanced indexing (HNSW tuning, hybrid search). All are swappable behind the same interface, so you can start with PgVector and migrate later without changing application code.
 
-**Q6: How does structured output work and what are its failure modes?**
+**Q: How does structured output work and what are its failure modes?**
 **Short:** `.entity(MyRecord.class)` appends format instructions and parses the reply into a typed object, but malformed model output throws.
 
 `.call().entity(MyRecord.class)` instructs Spring AI to append format instructions to the prompt and parse the model's text response into a typed Java object via `BeanOutputConverter` (which generates a JSON schema from the record and deserializes the reply). This turns free-text output into compile-time-typed data, e.g., a `Triage` record fed straight into a workflow. The failure mode is non-conforming output — if the model returns prose or malformed JSON, parsing throws. Mitigate by lowering temperature, providing a clear schema/example, and wrapping the call in a retry so a one-off malformed response is re-requested.
 
-**Q7: What is tool/function calling and how does Spring AI implement it?**
+**Q: What is tool/function calling and how does Spring AI implement it?**
 **Short:** Tool calling lets the model invoke an `@Tool`-annotated Spring bean method and feed the result back into its own answer.
 
 Tool calling lets the *model* decide to invoke your code. You annotate a Spring bean method with `@Tool(description=...)`; when registered on a `ChatClient` call via `.tools(...)`, Spring AI advertises the method's name, description, and parameter schema to the model. If the model returns a tool-call request, Spring AI invokes your Java method, feeds the result back, and lets the model compose the final answer — possibly across multiple tool calls. This is the foundation of agentic behavior. Critically, the business logic stays in ordinary, individually testable Spring beans; Spring AI only orchestrates the function-calling round trips.
 
-**Q8: How do you make a Spring AI application portable across model providers?**
+**Q: How do you make a Spring AI application portable across model providers?**
 **Short:** Program against `ChatClient`/`ChatModel`/`VectorStore` abstractions and swap the provider starter, never a vendor SDK type directly.
 
 Program against the abstractions (`ChatClient`, `ChatModel`, `EmbeddingModel`, `VectorStore`), never a vendor's concrete SDK type, and supply the provider via a `spring-ai-starter-model-<vendor>` starter plus properties. Auto-configuration creates the right `ChatModel` bean from the classpath and config. For multi-model routing, define multiple `ChatClient` beans with `@Qualifier`s (e.g., a cheap "fast" model and a capable "smart" model) and select per request. Because everything is bean-wired, you can also mock the `ChatModel` in tests. The anti-pattern is `new OpenAiChatModel(...)` in application code, which re-introduces lock-in and untestability.
 
-**Q9: How do you observe and control the cost of Spring AI calls?**
+**Q: How do you observe and control the cost of Spring AI calls?**
 **Short:** Spring AI emits Micrometer observations for latency and token usage, and cost is controlled by windowing memory and capping tokens.
 
 Spring AI emits Micrometer `Observation`s for model and vector-store calls, capturing latency and token usage (prompt/completion tokens), which surface through Actuator/Micrometer into Prometheus/Grafana like any other Boot metric. To control cost: cap context with a windowed `ChatMemory` (don't append unbounded history), set `topK`/chunk sizes deliberately in RAG, route easy queries to cheaper models, lower `max-tokens`, and cache deterministic responses. Token usage is the dominant cost driver, so the same observability you use for latency should alert on token spend.
 
-**Q10: How does Spring AI handle streaming, and what is the underlying mechanism?**
+**Q: How does Spring AI handle streaming, and what is the underlying mechanism?**
 **Short:** `.stream().content()` returns a Reactor `Flux<String>` of tokens as the model produces them, built on the same foundation as WebFlux.
 
 `chatClient.prompt().user(q).stream().content()` returns a `Flux<String>` that emits tokens as the model produces them, ideal for `text/event-stream` SSE endpoints so users see output incrementally. Under the hood this is Reactor (Project Reactor) — the same reactive foundation as Spring WebFlux. The implication is that streaming handlers must remain non-blocking: doing blocking work in the subscriber on a Netty event-loop thread stalls other connections. For non-streaming use cases, `.call()` is the simpler synchronous path.
 
-**Q11: What is the ETL pipeline in Spring AI and why split documents into chunks?**
+**Q: What is the ETL pipeline in Spring AI and why split documents into chunks?**
 **Short:** Documents are extracted, split into a few hundred tokens each, then embedded into a `VectorStore` for precise, budget-fitting retrieval.
 
 The ETL pipeline is `DocumentReader` (extract: PDF/HTML/Markdown/Tika → `Document`s) → `DocumentTransformer`/`TextSplitter` (transform: chunk and enrich metadata) → `VectorStore` (load: embed and store). Documents are split into chunks of a few hundred tokens because (1) embedding models have input limits, (2) retrieval is more precise when each chunk is a focused unit of meaning, and (3) you can fit several relevant chunks into the prompt's context budget rather than one giant document. Chunk size and overlap are tuning knobs: too large dilutes relevance, too small loses context. The `TokenTextSplitter` handles this with configurable size/overlap.
 
-**Q12: How do you test a Spring AI application without calling a real, paid model?**
+**Q: How do you test a Spring AI application without calling a real, paid model?**
 **Short:** Mock the `ChatModel`/`ChatClient` bean for unit tests, and use `SimpleVectorStore` or a local Testcontainers/Ollama instance for RAG.
 
 Mock the `ChatModel`/`ChatClient` bean (with Mockito or a test configuration) to return canned responses for unit and slice tests, asserting that your advisors, prompt templates, and structured-output mapping behave correctly. For integration tests of RAG, use a `SimpleVectorStore` or a Testcontainers PgVector/Ollama instance so embeddings and similarity search run locally without external cost. Spring AI's portability is itself a testing asset: point the same code at a local Ollama model in CI. Avoid asserting on exact LLM text (non-deterministic); assert on structure, tool invocation, and that retrieval injected the expected context.
 
-**Q13: What is chat memory and how do you keep it from blowing the context window?**
+**Q: What is chat memory and how do you keep it from blowing the context window?**
 **Short:** `ChatMemory` persists conversation turns per id, and a windowed memory retaining only the last N turns prevents unbounded growth.
 
 `ChatMemory` persists conversation turns so the model has context across requests — `MessageChatMemoryAdvisor` injects prior messages into each prompt, keyed by a conversation id (analogous to `HttpSession`). The risk is unbounded growth: appending every turn eventually exceeds the model's context window and inflates token cost linearly. The fix is a windowed memory (`MessageWindowChatMemory`) that retains only the last N turns, optionally with a summarization step that compresses older history into a short summary message. Persist memory in Redis/JDBC for multi-instance services rather than in-memory.
 
-**Q14: How does Spring AI's auto-configuration decide which model bean to create, and how do you override it?**
+**Q: How does Spring AI's auto-configuration decide which model bean to create, and how do you override it?**
 **Short:** A `@ConditionalOnClass`/`@ConditionalOnMissingBean` autoconfiguration creates the model bean, so defining your own bean overrides it.
 
 The provider starter contributes an `AutoConfiguration` class registered in `AutoConfiguration.imports`, gated by `@ConditionalOnClass` (the vendor classes are on the classpath) and properties like `spring.ai.openai.api-key`. It creates the `ChatModel`/`EmbeddingModel` and a `ChatClient.Builder` bean, each guarded by `@ConditionalOnMissingBean` so you can override by simply defining your own bean of that type. This is the standard Boot back-off pattern (see [spring_boot_autoconfiguration](../spring_boot_autoconfiguration/spring_boot_autoconfiguration.md)). With multiple provider starters on the classpath you disambiguate via properties and `@Qualifier`s.
 
-**Q15: When would you choose Spring AI over LangChain4j or the raw SDK, and when not?**
+**Q: When would you choose Spring AI over LangChain4j or the raw SDK, and when not?**
 **Short:** Choose Spring AI on a Spring stack for native DI and portability; choose the raw SDK for a one-off script needing a brand-new feature.
 
 Choose Spring AI when you are on the Spring/Boot stack and want native DI, auto-configuration, Actuator observability, and provider portability with minimal new concepts — the LLM feature becomes "just another Spring service." Choose the **raw vendor SDK** for one-off scripts, single-provider apps with no Spring context, or when you need a brand-new vendor feature immediately. Consider **LangChain4j** if you want a more mature, chain-oriented JVM framework with a larger catalog of integrations and don't mind a less Spring-native feel. The deciding factors are: how Spring-centric your stack is, how much you value portability vs. bleeding-edge features, and how much custom orchestration you need beyond advisors and tools.
 
-**Q16: Describe a production concern unique to LLM-backed Spring services and how you'd address it.**
+**Q: What production concern is unique to LLM-backed Spring services, and how do you address it?**
 **Short:** LLM calls are slow, costly, and non-deterministic, so treat them as a flaky remote dependency with timeouts, retries, and a circuit breaker.
 
 LLM calls are slow (hundreds of ms to seconds), non-deterministic, costly per token, and can fail or return unsafe/hallucinated content — unlike a deterministic DB call. Address these with: timeouts and retries (Resilience4j) around model calls; a circuit breaker and a graceful fallback ("I'm unable to answer right now"); a `similarityThreshold` plus "answer only from context" prompting to curb hallucination; token-usage metrics and budget alerts via Micrometer; `SafeGuardAdvisor`/content filtering for safety; and caching deterministic prompts. Treat the model as an unreliable, expensive remote dependency and apply the same resilience patterns you'd use for any flaky third-party API.
@@ -716,10 +836,15 @@ LLM calls are slow (hundreds of ms to seconds), non-deterministic, costly per to
 
 Because the loop moved. In Spring AI 1.x, every `ChatModel` implementation — OpenAI, Anthropic, Ollama, DeepSeek, Bedrock, Mistral and the rest — carried its own internal tool-execution loop that spotted a tool call in the response, invoked the tool, and fed the result back to the model. That was eight subtly different implementations of one behaviour, which is why 2.0 deleted all of them and lifted the loop into the advisor chain as `ToolCallingAdvisor`. `ChatModel.call(prompt)` now returns exactly what the model said, tool call included and unexecuted, so code that dropped down to `ChatModel` for "a bit more control" gets an empty or nonsensical answer rather than an error. The fix is to go through `ChatClient`, which auto-registers the advisor unless `spring.ai.chat.client.tool-calling.enabled=false`. The payoff for the disruption is that tool behaviour is now identical across providers, and `DefaultChatClient` enforces exactly one `ToolAdvisor` per chain so you cannot accidentally stack two loops.
 
-**Q: How do you expose hundreds of tools to a model without destroying the context window?**
-**Short:** Use ToolSearchToolCallingAdvisor — it indexes the tools once per session and injects a single search tool the model queries by natural language.
+**Q: After an upgrade to Spring AI 2.0.1, an agent returns a partial answer instead of an exception. What changed?**
+**Short:** 2.0.1 caps tool calls at 40 per tool and 150 per turn; on a breach `ToolCallingAdvisor` returns the partial result as the final answer.
 
-Do not put them all in the prompt. Every tool you register contributes its name, description and parameter schema as prompt text, so a few hundred tools can consume more context than the user's actual question — and the model reads them worse the more there are. `ToolSearchToolCallingAdvisor` inverts this: it indexes the full tool set once per session and injects only a built-in `toolSearchTool`, which the model calls with a natural-language query to retrieve the handful of tools relevant to the current request. That is progressive disclosure — the catalogue stays large, the prompt stays small. Add `spring-ai-starter-tool-search-advisor` and set `spring.ai.chat.client.tool-search-advisor.enabled=true`. The complementary guard is `DefaultToolCallingManager`'s ceiling of 40 calls per individual tool and 150 total per request, which bounds what a model looping over a large catalogue can spend before you notice.
+2.0.1 added default tool call limits to `DefaultToolCallingManager`: 40 calls per tool and 150 in total, counted from the last `UserMessage`, so history replayed by a memory advisor does not count. When a call would cross a limit, the manager throws `ToolCallLimitExceededException` with the partial result already executed, and `ToolCallingAdvisor` catches it and returns that partial result as the response, so the caller sees a short answer rather than a stack trace. A batch agent that walks 60 records by calling `getRecord` once per record hits the per-tool cap at the 41st call. Fix it by raising that tool's limit (`spring.ai.tools.limits.max-calls-per-tool.getRecord=100`), by excluding it with `excluded-tools` (it still counts toward the total), or by giving the model a bulk tool that takes a list of ids. Do not set both limits to `-1` to make the symptom go away: the caps are the only bound on what a looping model spends in one turn.
+
+**Q: How do you expose hundreds of tools to a model without destroying the context window?**
+**Short:** Use ToolSearchToolCallingAdvisor: it indexes the tools once per session and injects a single search tool the model queries by natural language.
+
+Do not put them all in the prompt. Every tool you register contributes its name, description and parameter schema as prompt text, so a few hundred tools can consume more context than the user's actual question, and the model reads them worse the more there are. `ToolSearchToolCallingAdvisor` inverts this: it indexes the full tool set once per session and injects only a built-in `toolSearchTool`, which the model calls with a natural-language query to retrieve the handful of tools relevant to the current request. That is progressive disclosure: the catalogue stays large, the prompt stays small. Add `spring-ai-starter-tool-search-advisor` and set `spring.ai.chat.client.tool-search-advisor.enabled=true`. The complementary guard is `DefaultToolCallingManager`'s ceiling of 40 calls per individual tool and 150 total per turn (2.0.1 and later), which bounds what a model looping over a large catalogue can spend before you notice.
 
 **Q: What is MCP in Spring AI, and what are the three primitives a server exposes?**
 **Short:** MCP lets any model host call your beans; a server exposes tools (@McpTool), resources (@McpResource) and prompts (@McpPrompt).

@@ -1,16 +1,18 @@
 # CDC Across Failover and Into the Lakehouse
 
-> **Version anchor (2026-08-26).** **PostgreSQL 18.6** is the current stable major version
-> (PostgreSQL 19 is in beta), but the mechanism this page is built on is a **PostgreSQL 17**
-> feature — logical replication failover, unchanged in essence through 18 — layered on
-> **PostgreSQL 16**'s prerequisite of logical decoding on a standby. **Debezium 3.6.0.Final**
-> exposes it as `slot.failover`, added **`[3.0.5.Final]`** (2024-12-18). On the lakehouse side:
-> **Apache Iceberg 1.11.0** (the parent module's pin) ships the **Iceberg Kafka Connect Sink**
-> in the same release train; **Apache Flink CDC 3.6.0** (2026-03-30) added AWS Glue and
-> BigQuery catalog support to its Iceberg pipeline connector and a new Apache Hudi sink
-> pipeline connector; **Apache Paimon** is at the **1.4** docs line; **Apache Hudi** has
-> shipped a Debezium Avro source for Deltastreamer since **0.10.0**. Version-gated behaviour
-> is tagged inline.
+> **Version anchor (2026-10-19).** **PostgreSQL 18.6** is the current stable major version
+> (PostgreSQL 19 RC1 shipped 2026-10-15), but the mechanism this page is built on is a
+> **PostgreSQL 17** feature, logical replication failover, unchanged in essence through 18,
+> layered on **PostgreSQL 16**'s prerequisite of logical decoding on a standby. **Debezium
+> 3.7.0.Final** (2026-09-29) exposes it as `slot.failover`, added **`[3.0.5.Final]`**
+> (2024-12-18). On the lakehouse side: **Apache Iceberg 1.12.0** (the parent module's pin)
+> ships the **Iceberg Kafka Connect Sink** in the same release train; **Apache Flink CDC
+> 3.7.0** (announced 2026-10-10) moves its Paimon pipeline sink to Paimon 2.0.0 and adds Hive
+> sync to its Hudi pipeline sink, on top of the AWS Glue and BigQuery catalog support that
+> 3.6.0 added to the Iceberg pipeline connector; **Apache Paimon** is at **2.1.0**
+> (2026-10-12), the second release of the 2.x line that began with 2.0.0 (2026-08-07);
+> **Apache Hudi** has shipped a Debezium Avro source for Deltastreamer since **0.10.0**.
+> Version-gated behaviour is tagged inline.
 
 This page extends [`debezium_change_data_capture`](debezium_change_data_capture.md) along two
 threads it deliberately leaves open. §6.3 there already covers PostgreSQL failover slots as a
@@ -326,6 +328,18 @@ Nothing in the connector's status or logs states "this slot is not a failover sl
 verification is querying `pg_replication_slots.failover` directly, which is why parent §6.3
 already calls this out as its own trap — this page's addition is naming exactly which two
 conditions produce the silent no-op, since "check the config" is not actionable without them.
+
+**Capturing from a standby, with incremental snapshots `[3.7]`.** PostgreSQL 16's logical
+decoding on a standby lets a connector stream from a hot standby and keep decoding load off the
+primary. Until 3.7.0.Beta1 (2026-08-26) an incremental snapshot there could not survive a
+restart: a connector with `read.only=true` that restarted mid-snapshot called
+`pg_current_xact_id()` to resume it, a standby refuses to assign a transaction ID, and the task
+failed (dbz#2431). From 3.7 the read-only incremental snapshot runs on a hot standby. With `read.only=true` (PostgreSQL 13+) the connector writes no signal-table rows:
+it uses the in-progress transaction as the low and high watermarks, compares them with the
+transaction IDs of WAL and heartbeat events, and takes `execute-snapshot` signals over a channel
+other than the source table (Kafka, JMX or file). The trade against the failover-slot setup
+above: a slot created on the standby lives only on that node, so losing that standby loses the
+position, exactly as a primary-side slot without `failover` does.
 
 ### 6.3 Amazon RDS for PostgreSQL — verified, with the exact parameter set
 

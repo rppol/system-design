@@ -13,7 +13,10 @@ because MLflow 3 extended the same record-keeping to GenAI traces, prompts and j
 **This module targets MLflow 3.15.1**, released 2026-08-03 (3.15.0 landed 2026-07-31). Every
 default, constant and file layout quoted below was read out of that package, not from
 documentation. Where a behaviour changed at a known version the tag is inline —
-`[MLflow 3.0+]`, `[2.9+]`, `[2.10+]`.
+`[MLflow 3.0+]`, `[2.9+]`, `[2.10+]`. Since 3.15.1: 3.16.0 (2026-09-03) made basic-auth
+return 403 on any route with no authorization rule, made Traces V4 the default traces UI and deprecated the experiment Sessions tab;
+3.17.0 (2026-10-06) added run, trace and version permissions and a schema migration that needs
+every writer stopped (see the upgrade note in §6).
 
 The thesis of this page, and the sentence to carry into an interview:
 
@@ -88,7 +91,7 @@ never heard of your training code can open, read one YAML file, and know how to 
 model, what shape to feed it, and what environment to build. That file is the interface
 boundary between the team that trains and the team that serves. It is what turns "give me your
 model" from a two-week integration into a URI, and it is why MLflow shows up as the *export
-format* even inside platforms that have their own tracker — SageMaker, Vertex AI and Azure ML
+format* even inside platforms that have their own tracker — SageMaker, Google's Agent Platform and Azure ML
 all ingest MLflow models directly.
 
 Put the priority in that order when you explain MLflow. The UI is the part people see; the
@@ -186,7 +189,7 @@ wrong shape.
 **Registry backends** split three ways: the open-source SQL registry (same database as
 tracking by default, or a separate one via `--registry-store-uri`); Databricks Unity Catalog,
 where a model is a three-level `catalog.schema.model` name with real governance and no stages;
-and third-party registries that speak the MLflow API (SageMaker, Vertex AI, Azure ML all
+and third-party registries that speak the MLflow API (SageMaker, Google's Agent Platform, Azure ML all
 ingest MLflow models, with varying fidelity on aliases).
 
 ### The serving strategies, ranked by how much production they survive
@@ -1151,7 +1154,7 @@ def answer(question: str) -> str:
     return llm.invoke(prompt.format(docs=docs, q=question))
 ```
 
-A trace is one row in `trace_info` plus its `spans`; spans carry inputs, outputs, latency,
+Since 3.16.0 the UI shows Traces V4 by default, and session grouping in the traces view replaces the deprecated experiment Sessions tab. A trace is one row in `trace_info` plus its `spans`; spans carry inputs, outputs, latency,
 token counts and errors. The model is OpenTelemetry-shaped — spans, attributes, parent links —
 and MLflow can export to an OTLP collector, so it slots beside your existing tracing rather
 than replacing it. What MLflow adds over a generic tracer is that traces live in the same
@@ -1277,6 +1280,10 @@ mlflow db upgrade postgresql://…                # run migrations before a vers
 mlflow gc --older-than 30d --backend-store-uri postgresql://…
 ```
 
+`mlflow db upgrade` to 3.17.0 is a coordinated schema upgrade: stop every writer (all server
+replicas and any job writing straight to the database), take a restorable backup, migrate, then
+start all replicas on 3.17. Mixed-version rolling upgrades are not supported.
+
 `mlflow gc` **only touches runs already in the `deleted` lifecycle stage.** Deleting a run in
 the UI is a soft delete: it flips a flag, leaves every row in the database and every byte in
 the bucket. A team that "cleaned up six months of runs" and saw no change in the S3 bill has
@@ -1293,9 +1300,14 @@ is off by default and is not a security boundary on its own.
 
 **Authentication — say the thinness out loud.** The built-in plugin is enabled with
 `mlflow server --app-name basic-auth`. It is **HTTP Basic authentication**, credentials in a
-`basic_auth.ini`-configured store, with per-experiment and per-registered-model permissions
-(`READ`, `EDIT`, `MANAGE`, `NO_PERMISSIONS`), and it is still marked **experimental**. There is
-no SSO, no OIDC, no groups, no token expiry and no audit log. Nobody should treat it as the
+`basic_auth.ini`-configured store. Admins assign users **roles**, each a list of
+`(resource_type, pattern, permission)` grants on experiments, registered models, prompts,
+scorers and gateway resources, at `READ`, `USE`, `EDIT` or `MANAGE`; a user with no matching grant gets `default_permission`
+(`READ` unless changed). A route with no authorization rule returns 403 by default `[3.16+]`
+(`MLFLOW_BASIC_AUTH_FAIL_CLOSED`), and runs, traces and model versions are grantable as
+wildcard-only sub-resource tiers with an explicit `DENY` level `[3.17+]`. It is still marked
+**experimental**, and there is no built-in SSO, OIDC, groups, token expiry or audit log (for OIDC
+the docs point to the community `mlflow-oidc-auth` plugin or a reverse proxy). Nobody should treat it as the
 access control layer for a shared production registry.
 
 What to do instead: terminate auth in front of the server — an OAuth2-proxy, an ingress with
@@ -1319,7 +1331,7 @@ Catalog**, where a model is `catalog.schema.model` with real governance and no s
 that the format, not the server, is the durable part. Azure Machine Learning treats MLflow as
 its native tracking and packaging format — an MLflow model deploys to a managed endpoint with
 no scoring script. AWS ships a managed MLflow tracking server as a SageMaker feature, so the
-tracking API you already call is the one the platform hosts. Google's Vertex AI Model Registry
+tracking API you already call is the one the platform hosts. Google's Agent Platform Model Registry
 imports MLflow-format artifacts. In each case what crosses the boundary is a directory with an
 `MLmodel` file.
 
@@ -1345,16 +1357,16 @@ interview: MLflow's charting is deliberately basic, and pretending otherwise is 
 
 **MLflow against the alternatives**
 
-| Axis | MLflow | Weights & Biases | Neptune | ClearML | Databricks-managed MLflow |
-|---|---|---|---|---|---|
-| Licence / hosting | Apache-2.0, self-host | SaaS, self-host tier | SaaS, self-host tier | Apache-2.0, self-host or SaaS | Managed |
-| Visualisation | Basic | Excellent | Very good | Good | Basic plus platform UI |
-| Model packaging format | **`MLmodel`, portable, an ecosystem standard** | Artifacts, W&B-shaped | Artifacts | Artifacts | Same as MLflow |
-| Registry | Versions, aliases, tags | Model registry with lineage | Model registry | Model registry | Unity Catalog governance |
-| Built-in HPO | No — pair with Optuna | Sweeps | No | HPO service | No |
-| Orchestration | **None, by design** | None | None | Agents and queues | Databricks Jobs |
-| Auth / RBAC | Experimental basic-auth | Full SaaS RBAC | Full SaaS RBAC | Full RBAC | Enterprise SSO plus UC |
-| Air-gapped | Yes | Self-host tier only | Self-host tier only | Yes | No |
+| Axis | MLflow | Weights & Biases | ClearML | Databricks-managed MLflow |
+|---|---|---|---|---|
+| Licence / hosting | Apache-2.0, self-host | SaaS, self-host tier | Apache-2.0, self-host or SaaS | Managed |
+| Visualisation | Basic | Excellent | Good | Basic plus platform UI |
+| Model packaging format | **`MLmodel`, portable, an ecosystem standard** | Artifacts, W&B-shaped | Artifacts | Same as MLflow |
+| Registry | Versions, aliases, tags | Model registry with lineage | Model registry | Unity Catalog governance |
+| Built-in HPO | No; pair with Optuna | Sweeps | HPO service | No |
+| Orchestration | **None, by design** | None | Agents and queues | Databricks Jobs |
+| Auth / RBAC | Experimental basic-auth | Full SaaS RBAC | Full RBAC | Enterprise SSO plus UC |
+| Air-gapped | Yes | Self-host tier only | Yes | No |
 
 **Decisions inside MLflow**
 
@@ -1522,9 +1534,9 @@ own `requirements.txt`. Pin the image digest alongside the model version, valida
 - **Orchestrators that run above it:** **Airflow**, **Argo Workflows**, **Kubeflow Pipelines**, **Ray**, **Metaflow**
 - **Autologged training frameworks:** **scikit-learn**, **XGBoost**, **LightGBM**, **PyTorch Lightning**, **Apache Spark**, **transformers**
 - **Search and tuning alongside it:** **Optuna**
-- **Managed and hosted variants:** **Databricks**, **Unity Catalog**, **AWS SageMaker**, **Azure Machine Learning**, **Vertex AI**
-- **Competing registries:** **SageMaker Model Registry**, **Vertex AI Model Registry**
-- **Competing trackers:** **Weights & Biases**, **Neptune**, **Comet ML**, **ClearML**
+- **Managed and hosted variants:** **Databricks**, **Unity Catalog**, **AWS SageMaker**, **Azure Machine Learning**, **Gemini Enterprise Agent Platform** (formerly Vertex AI)
+- **Competing registries:** **SageMaker Model Registry**, **Agent Platform Model Registry**
+- **Competing trackers:** **Weights & Biases**, **Comet ML**, **ClearML**
 - **Adjacent, not overlapping:** **DVC**, **Delta Lake**, **Feast**, **Evidently AI**, **Langfuse**, **OpenTelemetry**, **Prometheus**, **Grafana**
 - **Model interchange:** **ONNX**
 ---
@@ -1577,7 +1589,7 @@ With `--serve-artifacts` (the **default** in 3.15.1) the experiment's artifact r
 
 **Q: What is the `MLmodel` file and why is it the reason MLflow succeeded?**
 **Short:** It is the YAML manifest naming a model's flavours, signature and environment, so any consumer can load and score it without knowing the training framework.
-`MLmodel` is a YAML manifest at the root of a logged-model directory. It names one or more **flavours** (a native one such as `sklearn` plus the universal `python_function`), the loader module and weights file, the Python version, pointers to `conda.yaml` / `python_env.yaml`, the **signature**, and in MLflow 3 the `model_id`. Its importance is that it is an interface boundary: a process that has never seen your training code reads one YAML file and knows how to load the model, what shape to feed it, and what environment to build. Every tracker in 2018 had runs and charts, several with nicer charts than MLflow; none had a portable model directory. That is why SageMaker, Vertex AI and Azure ML all ingest MLflow models directly, and why "give me your model" became a URI instead of a two-week integration.
+`MLmodel` is a YAML manifest at the root of a logged-model directory. It names one or more **flavours** (a native one such as `sklearn` plus the universal `python_function`), the loader module and weights file, the Python version, pointers to `conda.yaml` / `python_env.yaml`, the **signature**, and in MLflow 3 the `model_id`. Its importance is that it is an interface boundary: a process that has never seen your training code reads one YAML file and knows how to load the model, what shape to feed it, and what environment to build. Every tracker in 2018 had runs and charts, several with nicer charts than MLflow; none had a portable model directory. That is why SageMaker, Google's Agent Platform and Azure ML all ingest MLflow models directly, and why "give me your model" became a URI instead of a two-week integration.
 
 **Q: What is the `python_function` flavour and what does it guarantee?**
 **Short:** It is the universal flavour giving every logged model a generic predict(data, params) callable, which is what serving, Spark UDFs and Docker builds all use.
@@ -1649,7 +1661,7 @@ No, and the evidence is that MLflow moved on too. An `MLproject` declares entry 
 
 **Q: How do you do authentication and multi-tenancy on open-source MLflow?**
 **Short:** You largely do not — the built-in `--app-name basic-auth` plugin is experimental HTTP Basic auth with no SSO, so terminate identity in a proxy in front of the server.
-Say the thinness out loud in an interview. The built-in plugin (`mlflow server --app-name basic-auth`) is HTTP Basic authentication with per-experiment and per-registered-model grants of `READ`, `EDIT`, `MANAGE` or `NO_PERMISSIONS`, and it is still marked **experimental**: no SSO, no OIDC, no groups, no token expiry, no audit log. Nobody should make it the access control for a shared production registry. The workable pattern is to terminate identity in front — an OAuth2 proxy, an OIDC ingress, or a service mesh — keep the server off the public internet, set `--allowed-hosts` and `--cors-allowed-origins` explicitly, and back everything with bucket-level IAM so a leaked tracking token cannot read another team's artifacts. For tenancy the honest options are one server per team, an experiment-naming convention plus bucket prefixes, or `--enable-workspaces` for logical isolation — which is not a security boundary. On Databricks, Unity Catalog supplies the real thing.
+Say the thinness out loud in an interview. The built-in plugin (`mlflow server --app-name basic-auth`) is HTTP Basic authentication with role-based grants of `READ`, `USE`, `EDIT` or `MANAGE` on experiments, registered models, prompts and gateway resources. Since 3.16.0 any route with no authorization rule returns 403 by default, while a user with no grant still gets `default_permission` (`READ` unless changed), and 3.17.0 added wildcard grants on runs, traces and model versions plus an explicit `DENY`. It is still marked **experimental**: no built-in SSO, OIDC, groups, token expiry or audit log. Nobody should make it the access control for a shared production registry. The workable pattern is to terminate identity in front (an OAuth2 proxy, an OIDC ingress, or a service mesh), keep the server off the public internet, set `--allowed-hosts` and `--cors-allowed-origins` explicitly, and back everything with bucket-level IAM so a leaked tracking token cannot read another team's artifacts. For tenancy the honest options are one server per team, an experiment-naming convention plus bucket prefixes, or `--enable-workspaces` for logical isolation, which is not a security boundary. On Databricks, Unity Catalog supplies the real thing.
 
 **Q: How does dataset lineage work in MLflow, and why is it better than logging a path as a param?**
 **Short:** `mlflow.data` records a content-derived digest alongside the source, so two runs claiming the same S3 path with different bytes are distinguishable.
@@ -1683,7 +1695,7 @@ Pin the four axes on every run: git SHA as a tag, dataset digest via `mlflow.log
 - **Pin the container image digest as a run param.** MLflow's captured environment cannot see CUDA, system libraries or the base image, so the digest is the actual reproducibility guarantee and the captured `requirements.txt` is a strong hint.
 - **Put a real identity proxy in front of the server.** The built-in basic-auth plugin is experimental and has no SSO or audit log. Terminate OIDC at the ingress, set `--allowed-hosts` and `--cors-allowed-origins`, and back it with bucket-level IAM.
 - **Delete deliberately, with a bucket lifecycle policy behind it.** Deleting a run reclaims nothing; `mlflow gc --older-than 30d` with `MLFLOW_TRACKING_URI` exported is the only thing that does, and it will not check whether a live model version depends on the run.
-- **Run `mlflow db upgrade` as a deliberate step before every version bump**, and read the release notes for removals — MLflow 3 deleted four flavours, Recipes, the deployment server and several keyword arguments.
+- **Run `mlflow db upgrade` as a deliberate step before every version bump**, and read the release notes for removals: MLflow 3 deleted four flavours, Recipes, the deployment server and several keyword arguments. For 3.17.0, stop every writer and take a restorable backup first; a rolling upgrade with mixed server versions is not supported.
 - **Let MLflow hand off.** Package with `build-docker --enable-mlserver` or export for Triton; do not put `mlflow models serve` in front of traffic because it happened to work in staging.
 
 ---

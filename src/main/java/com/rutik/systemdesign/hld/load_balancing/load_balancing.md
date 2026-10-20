@@ -579,7 +579,7 @@ Round Robin routes evenly by request count but not by cost. One request that tak
 |------|-------|-------------|
 | Katran (Meta) | L4 | XDP program in the NIC driver path; consistent hashing for backend selection; forwarding never reaches userspace |
 | Cilium | L4 | eBPF replacement for `kube-proxy`; O(1) hash-map service lookup instead of O(n) iptables chains; no per-pod sidecar |
-| IPVS | L4 | In-kernel L4 balancing; the pre-eBPF answer, still the default in many Kubernetes clusters |
+| IPVS | L4 | In-kernel L4 balancing; the pre-eBPF answer. kube-proxy `ipvs` mode is deprecated since Kubernetes v1.35, off by default from v1.40, and removed in v1.43; `iptables` is the default mode in v1.37 and `nftables` is the successor |
 
 ### Cloud Managed Load Balancers
 | Service | Layer | Key Feature |

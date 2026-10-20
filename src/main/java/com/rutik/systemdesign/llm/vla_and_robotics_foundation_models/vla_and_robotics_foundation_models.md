@@ -104,6 +104,12 @@ alongside the instruction text, and the model's final hidden states are decoded 
   low-dimensional action vector instead of pixels). This avoids discretization error and can
   produce a whole *chunk* of future actions in one pass.
 
+- **Compressed action tokens (FAST, pi-0-FAST)**: still discrete and autoregressive, but each token
+  encodes frequency content of a whole chunk rather than one bin of one timestep (§6.5). This keeps
+  the plain next-token training of RT-2 while fixing the reason per-step binning fails at high
+  control rates: consecutive per-step bins are nearly identical, so the next-token loss is easy to
+  minimize without learning anything useful.
+
 ### 3.3 Action Chunking
 
 Rather than predicting one action and immediately re-running the full VLM for the next, most modern
@@ -159,6 +165,8 @@ design discussion must explicitly account for it**.
 | **Octo** | 2023, UC Berkeley/Stanford et al. | Continuous, via **diffusion** action head | Open generalist policy; transformer backbone + diffusion-based action head producing action chunks; trained on Open X-Embodiment subset |
 | **OpenVLA** | 2024, Stanford/Berkeley/TRI/UC Berkeley | Discretized tokens | **7B, fully open weights** — Prismatic VLM backbone (Llama2-7B language model + DINOv2 + SigLIP dual vision encoders), trained on ~970K trajectories from Open X-Embodiment; the reference open-source VLA for fine-tuning experiments |
 | **pi-0 / pi-0.5** (Physical Intelligence) | 2024-2025 | Continuous, via **flow-matching "action expert"** | VLM backbone (PaliGemma-class) + a separate, smaller flow-matching transformer ("action expert") conditioned on the VLM's hidden states; produces continuous action chunks at high frequency; pi-0.5 extended to longer-horizon, more autonomous tasks (e.g., cleaning a real apartment) |
+| **pi-0-FAST** (Physical Intelligence) | January 2025 | Discrete, **FAST** DCT + BPE tokens (§6.5) | pi-0 backbone trained with plain next-token loss on compressed action tokens; matches diffusion pi-0 with up to 5x less training time, but autoregressive decoding is slower at inference |
+| **pi*0.6** (Physical Intelligence) | November 2025 | Continuous action expert, **RL fine-tuned** (§6.8) | pi-0.6 improved with Recap: advantage-conditioned training on its own deployment experience and human corrections; over 2x throughput on its hardest tasks |
 | **Gemini Robotics** | 2025, Google DeepMind | Continuous (via action decoder on Gemini backbone) | Gemini 2.0 extended with embodied reasoning and action output; emphasizes "thinking before acting" — explicit reasoning traces over the scene before emitting actions |
 | **Helix** (Figure AI) | 2025 | Continuous, **dual-system** (System 1 fast / System 2 slow) | Full-upper-body humanoid control (including individual finger control); System 2 (slow VLM, ~7-9Hz) does scene/task understanding, System 1 (fast network, ~200Hz) executes — see §5.4 |
 | **GR00T N1** (NVIDIA Isaac) | 2025 | Continuous, **dual-system** (diffusion-based fast policy + VLM slow reasoner) | Foundation model for humanoid robots, built for the NVIDIA Isaac platform; emphasizes large-scale synthetic data generation (Isaac Sim) to address real-data scarcity |
@@ -175,6 +183,25 @@ design discussion must explicitly account for it**.
   low-level actions). This is explicitly analogous to Kahneman's "thinking fast and slow," and to
   the broader [Agentic Workflow Patterns](../agentic_workflow_patterns/agentic_workflow_patterns.md) orchestrator/worker
   split, applied to the control-frequency problem.
+
+### 4.2 World Models for Robotics
+
+A VLA maps observation to action. A **world model** maps observation plus action to the next
+observation: it predicts what happens if the robot acts. It is used in two ways, and neither replaces
+the policy.
+
+| | V-JEPA 2 (Meta, June 11, 2025) | Cosmos (NVIDIA, January 6, 2025) |
+|---|---|---|
+| What it predicts | Embeddings of future frames, not pixels (joint-embedding predictive architecture) | Pixels: future video frames, via diffusion and autoregressive models |
+| Training data | Over 1M hours of video plus 1M images, self-supervised; then V-JEPA 2-AC, action-conditioned on 62 hours of DROID robot data | Large curated video corpus; NVIDIA reports curating 20M hours of video in 14 days on Blackwell |
+| Size | 1.2B parameters | Family of models under the NVIDIA open model license |
+| How robots use it | **Planning**: model-predictive control. Sample candidate action sequences, roll them out in latent space, score distance to a goal image, execute the first action, re-plan | **Data**: generate photoreal synthetic video and scenario variations to train and evaluate policies (Cosmos Transfer, Cosmos Predict) |
+| Reported result | 65% to 80% pick-and-place success with new objects in unseen environments, zero-shot, no task-specific training | Early adopters include 1X, Agility, Figure AI, Skild AI and others |
+
+The design question is whether the model needs to render pixels. Predicting in embedding space
+(V-JEPA 2) skips unpredictable detail such as texture and lighting, which keeps planning cheap enough
+to run per step. Pixel prediction (Cosmos) is what you need when the output is training data for
+another model or a video a human must review.
 
 ---
 
@@ -624,6 +651,135 @@ class VLAControlLoop:
         ...  # send to robot controller
 ```
 
+This loop appends the new chunk after the old one, so the first action of chunk N+1 was planned
+from an observation that is already one inference delay old and need not match where chunk N left
+the arm. §6.6 fixes that seam.
+
+### 6.5 FAST Action Tokenization
+
+FAST (Frequency-space Action Sequence Tokenization; Pertsch et al., Physical Intelligence,
+January 16, 2025) compresses an action chunk the way JPEG compresses an image block:
+
+1. Normalize each action dimension (quantiles mapped to [-1, 1]).
+2. Run a discrete cosine transform (DCT) over time, separately for each dimension. Smooth motion
+   puts almost all energy in the first few low-frequency coefficients.
+3. Scale and round the coefficients. Most high-frequency coefficients become 0.
+4. Flatten low frequencies first, interleaving dimensions, and compress the integer sequence with
+   byte-pair encoding (BPE). Runs of zeros collapse into a few tokens.
+
+```
+One chunk: H = 50 steps (1 s at 50 Hz) x 7 dims = 350 values
+
+Per-step binning (RT-2 / OpenVLA)       FAST
+  350 tokens, one per value              DCT per dim -> 50 coefficients x 7 dims
+  t:   0    1    2    3   ...            round(scale * c):
+  x: 131  131  132  132   ...              dim x: [ 12, -4,  1,  0,  0,  0, ...]
+  y:  97   97   97   98   ...              dim y: [ -8,  3,  0,  0,  0,  0, ...]
+  next token ~= previous token           interleave low-freq first, BPE merges zero runs
+  -> loss is low, signal is weak         -> tens of tokens, each one carries information
+```
+
+The left column is why OpenVLA-style binning degrades as control frequency rises: the more steps
+per second, the more each token copies its neighbor. The right column spends tokens only where the
+trajectory changes.
+
+```python
+import numpy as np
+from scipy.fft import dct, idct
+
+
+def fast_encode(chunk: np.ndarray, scale: float = 10.0) -> np.ndarray:
+    """chunk: (H, D) normalized actions -> flat int sequence, low frequencies first."""
+    coeffs = dct(chunk, axis=0, norm="ortho")          # (H, D)
+    q = np.round(coeffs * scale).astype(np.int32)
+    return q.reshape(-1)                                # row-major: freq 0 for all dims, then freq 1
+
+
+def fast_decode(flat: np.ndarray, horizon: int, dims: int, scale: float = 10.0) -> np.ndarray:
+    q = flat.reshape(horizon, dims).astype(np.float64) / scale
+    return idct(q, axis=0, norm="ortho")
+
+
+t = np.linspace(0, 1, 50)
+chunk = np.stack([np.sin(np.pi * t) * 0.5, t - 0.5], axis=1)   # smooth 2-dim trajectory
+codes = fast_encode(chunk)
+recon = fast_decode(codes, 50, 2)
+assert np.count_nonzero(codes) < 0.3 * codes.size              # mostly zeros before BPE
+assert np.abs(recon - chunk).max() < 0.06                      # rounding error stays small
+```
+
+BPE (trained once on the action dataset) then maps the integer sequence to vocabulary tokens; the
+code above stops before that step. Reported results: with the pi-0 backbone, pi-0-FAST matches the
+diffusion pi-0 policy while cutting training time by up to 5x. FAST+, a universal tokenizer trained
+on 1M real robot trajectories, works across embodiments without refitting. The cost is at inference:
+decoding is autoregressive, so pi-0-FAST took about twice as long as flow-matching pi-0 to finish
+the same bussing task in Physical Intelligence's comparison.
+
+### 6.6 Real-Time Action Chunking (RTC)
+
+Real-time chunking (Black, Galliker and Levine, June 9, 2025; NeurIPS 2025) removes the seam between
+chunks for any flow-matching or diffusion policy, at inference time and without retraining.
+
+Let `d` be the inference delay in control steps. While the model computes chunk N+1, the robot keeps
+executing the first `d` remaining actions of chunk N; those are certain to run. RTC treats the new
+chunk as an inpainting problem: the first `d` actions are **frozen** to the values already
+committed, the overlapping actions after them are guided toward the old chunk with a weight that
+decays over the overlap, and the rest are generated freely. The guidance is applied during the
+flow-matching denoising steps, the same way image inpainting fills a masked region.
+
+```
+control step:      t0   t1   t2   t3   t4   t5   t6   t7   t8   t9
+chunk N plan:      a0   a1   a2   a3   a4   a5   a6   a7
+inference starts at t0, takes d = 3 steps; robot keeps executing chunk N
+chunk N+1 plan:   [a0'  a1'  a2'] a3'  a4'  a5'  a6'  a7'  a8'  a9'
+                   frozen = a0..a2  guided toward a3..a7  free
+                   (already run)    (weight decays)
+```
+
+Naive concatenation (§6.4) jumps at the boundary; waiting for the full chunk to finish before
+inferring adds a pause every chunk. RTC keeps both continuity and reactivity, and the paper reports
+it stays robust as inference delay grows, on 12 dynamic simulated tasks and 6 real bimanual tasks
+including lighting a match.
+
+### 6.7 Knowledge Insulation
+
+Training a flow-matching action expert end to end with the VLM backbone sends noisy gradients from
+a freshly initialized module into a pretrained model, which erodes its language and visual
+knowledge and slows training. Knowledge insulation (Driess et al., Physical Intelligence, May 28,
+2025) splits the objectives:
+
+- The 3B VLM backbone trains on next-token prediction of FAST action tokens (§6.5), plus web
+  vision-language data and high-level robot commands.
+- The 300M flow-matching action expert reads the backbone's features through a **stop-gradient**:
+  its loss never updates the backbone.
+- At inference the FAST head is unused; actions come from the expert, so control runs at pi-0 speed.
+
+Reported effect on a bussing task: about 7.5x fewer training steps than pi-0 to reach the same
+performance, inference as fast as pi-0, and correct instruction following where the end-to-end
+model grasped the wrong object (trash instead of the spoon).
+
+### 6.8 RL Fine-Tuning of VLAs (Recap, pi*0.6)
+
+Imitation learning copies demonstrations, so a policy is capped by its demonstrator and has no
+signal about which of its own mistakes matter. Physical Intelligence's Recap (RL with Experience
+and Corrections via Advantage-conditioned Policies, November 17, 2025) adds RL on the robot's own
+experience without on-policy PPO, which is too slow and unsafe on hardware:
+
+1. Collect demonstrations, then deploy the policy and collect its autonomous episodes, plus human
+   teleoperated corrections when it goes wrong.
+2. Train a value function that predicts task progress from a state. The change in predicted value
+   after an action is its **advantage**.
+3. Train the VLA on all of the data, good and bad actions alike, with the advantage as an extra
+   conditioning input.
+4. At deployment, condition on "high advantage" so the policy produces the actions the value
+   function rated best.
+
+The resulting pi*0.6 more than doubled throughput and cut failure rates by 2x or more on its hardest
+tasks: making espresso drinks (run from 5:30am to 11:30pm), folding novel laundry in an unseen home,
+and assembling 59 chocolate-packaging boxes in a factory. The design point: advantage conditioning
+turns RL into supervised learning on a relabeled dataset, so the same training stack as imitation
+learning applies.
+
 ---
 
 ## 7. Real-World Examples
@@ -645,7 +801,12 @@ class VLAControlLoop:
   PaliGemma-class VLM backbone. pi-0.5 demonstrated **long-horizon, multi-step autonomous tasks in
   real, never-before-seen homes** (e.g., a full apartment cleanup involving multiple rooms, novel
   furniture layouts, and dozens of sequential sub-tasks) — a substantial step beyond the
-  single-tabletop-manipulation evaluations typical of earlier VLA work.
+  single-tabletop-manipulation evaluations typical of earlier VLA work. pi-0.7 (2026-04-16) is the
+  steerable successor. Since 2026-10-13 the Pi API beta lets a team upload its own robot data,
+  fine-tune Physical Intelligence's models, and run cloud-hosted inference on its own robots. That
+  is the managed alternative to self-hosting OpenVLA: no training cluster or inference GPU to run,
+  but the weights stay with the vendor and every control step crosses the network, so the robot
+  must execute action chunks locally while the next chunk is in flight.
 
 - **Figure Helix (Figure AI, 2025)** — first VLA to demonstrate **full upper-body humanoid control
   including individual finger actuation**, using the dual-system architecture (§5.4): System 2
@@ -857,6 +1018,11 @@ a cheaper specialist policy.
 |---|---|
 | **Open X-Embodiment dataset** | The standard cross-embodiment training corpus (1M+ trajectories, 22 embodiments, 527 skills); basis for RT-X, OpenVLA, Octo |
 | **OpenVLA (open weights + training/fine-tuning code)** | The reference open VLA — 7B, Prismatic VLM backbone; standard base for fine-tuning research and production prototyping |
+| **Pi API (Physical Intelligence, beta since 2026-10-13)** | Hosted VLA service: upload robot data, fine-tune Physical Intelligence's models, and serve cloud-hosted inference to your own robots. The managed counterpart to self-hosting OpenVLA |
+| **FAST tokenizer** (`physical-intelligence/fast` on Hugging Face) | Universal FAST+ action tokenizer (DCT + BPE, trained on 1M trajectories); loaded through `transformers` `AutoProcessor` |
+| **openpi** (Physical Intelligence) | Open-source code and checkpoints for pi-0, pi-0-FAST and pi-0.5, with fine-tuning recipes |
+| **V-JEPA 2 / V-JEPA 2-AC** (Meta) | Open 1.2B latent world model; action-conditioned variant for model-predictive-control planning |
+| **NVIDIA Cosmos** | World foundation models (Predict, Transfer, Reason) for synthetic video data and policy evaluation |
 | **LeRobot (HuggingFace)** | Open-source library for robot policy training/fine-tuning/deployment, with pretrained checkpoints (including ACT, diffusion policies, and VLA integrations) and standardized dataset formats |
 | **NVIDIA Isaac Sim / Isaac Lab** | Photorealistic robot simulation for synthetic data generation and sim-to-real research; underpins GR00T's data pipeline |
 | **MuJoCo** | Physics simulator widely used for robot learning research, RL environments, and sim-to-real domain randomization |
@@ -930,6 +1096,18 @@ Cross-embodiment training provides positive transfer for *shared* structure (vis
 **Q16: From a systems-design perspective, where does a VLA inference server fit in a robot's software stack, and what are the key SLAs?**
 **Short:** A VLA inference server's key SLAs are bounded p99 forward-pass latency relative to chunk size and an even tighter-latency safety layer that gates every action.
 The VLA inference server is typically a ROS2 node (or equivalent) that subscribes to camera/proprioception topics, runs the model (on a GPU, often co-located with or networked closely to the robot given latency sensitivity), and publishes action-chunk messages consumed by the low-level controller. Key SLAs mirror §3.7 and §8.3: **p99 forward-pass latency** must be bounded relative to the chunk size and control period (a single slow inference shouldn't stall the action queue — Pitfall 10.2), and the **safety layer** (Pitfall 10.7, often a separate node/process) must have a tighter latency bound than the VLA itself, since it gates every action regardless of VLA latency. Unlike a typical LLM-serving SLA (p50/p99 in seconds is often fine for chat), VLA serving SLAs are in the tens-of-milliseconds range, closer to real-time systems than to typical [LLM deployment](../deployment_and_mlops/deployment_and_mlops.md) SLAs.
+
+**Q17: Why does per-step action binning get worse as control frequency rises, and how does FAST fix it?**
+**Short:** At high control rates consecutive per-step bins are nearly identical, so next-token loss is trivially low; FAST tokenizes DCT coefficients of the whole chunk, so each token carries new information.
+With RT-2/OpenVLA-style binning, each token is one bin of one action dimension at one timestep. At 50 Hz the arm barely moves between steps, so each token almost equals the previous one, the model can minimize next-token loss by copying, and training learns little about the actual motion; Physical Intelligence found naive tokenization fails on high-frequency dexterous tasks for this reason. FAST (January 2025) applies a discrete cosine transform over time to each normalized dimension of the chunk, scales and rounds the coefficients so most high-frequency ones become zero, flattens low frequencies first, and compresses the result with BPE, so a 50-step chunk becomes tens of informative tokens instead of 350 redundant ones. With the pi-0 backbone, pi-0-FAST matched the diffusion pi-0 while cutting training time by up to 5x, and FAST+, trained on 1M real trajectories, works across robots. The trade-off is inference: decoding stays autoregressive, and pi-0-FAST took about twice as long as flow-matching pi-0 on the same task, so use FAST as a training signal or where latency allows, and a flow-matching expert where the control loop is tight.
+
+**Q18: What goes wrong at the boundary between two action chunks, and how does real-time chunking fix it?**
+**Short:** The next chunk is planned from an observation one inference delay old, so naive switching jerks the arm; real-time chunking freezes the actions that will run during inference and inpaints the rest to match.
+If inference takes d control steps, the robot keeps executing the old chunk while the new one is computed, and the new chunk was planned from a stale observation, so its first actions can disagree with where the old chunk actually took the arm. Switching at the boundary produces a jump; pausing until inference finishes adds a stall every chunk; averaging the two chunks (temporal ensembling) can blend two different strategies into a third, invalid one, such as passing between two grasp points. Real-time chunking (Black, Galliker and Levine, June 2025) treats the new chunk as inpainting during flow-matching sampling: the first d actions are frozen to what will certainly be executed, the overlap after them is guided toward the old chunk with a decaying weight, and the tail is free. It needs no retraining, works with any flow or diffusion policy, and stayed robust as delay grew on 12 dynamic simulated tasks and 6 real bimanual tasks including lighting a match. Measure your p99 inference delay in control steps and set d from it, not from the p50.
+
+**Q19: How do you apply reinforcement learning to a VLA on real hardware without on-policy PPO?**
+**Short:** Train a value function on demonstrations, autonomous episodes and human corrections, then condition the VLA on each action's advantage and ask for high-advantage actions at deployment, as in Recap for pi*0.6.
+On-policy RL needs fresh rollouts after every update, which is slow, wears hardware and is unsafe on a real robot, while pure imitation caps the policy at its demonstrator. Physical Intelligence's Recap (November 2025) is off-policy and supervised in form: collect demonstrations, deploy the policy and log its own episodes plus teleoperated corrections when it fails, train a value function that predicts task progress, compute each action's advantage as the change in predicted value, and train the VLA on all of the data with the advantage as an extra input; at deployment, condition on high advantage. Bad actions stay in the training set and teach the model what not to do, rather than being filtered out. The resulting pi*0.6 more than doubled throughput and cut failure rates by 2x or more on espresso making, laundry folding and box assembly, running for hours, including 5:30am to 11:30pm on espresso. The practical lesson is that the expensive part is the data loop (deploy, log, correct, relabel), not the optimizer, so build that logging and correction tooling before choosing an RL algorithm.
 
 ---
 

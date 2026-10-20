@@ -109,7 +109,11 @@ ALTER TABLE users ADD COLUMN phone TEXT DEFAULT '';
 ALTER TABLE users ADD COLUMN phone TEXT;  -- Instant (nullable, no default)
 -- Deploy new code that writes phone
 -- Backfill: UPDATE users SET phone = '' WHERE phone IS NULL; (batched)
--- Add NOT NULL constraint: ALTER TABLE users ALTER COLUMN phone SET NOT NULL; -- PG 11+: instant check from stats
+-- Add NOT NULL without a long ACCESS EXCLUSIVE scan (PG 12+):
+ALTER TABLE users ADD CONSTRAINT users_phone_nn CHECK (phone IS NOT NULL) NOT VALID;
+ALTER TABLE users VALIDATE CONSTRAINT users_phone_nn;  -- full scan under SHARE UPDATE EXCLUSIVE
+ALTER TABLE users ALTER COLUMN phone SET NOT NULL;      -- no scan: the valid CHECK proves no nulls
+ALTER TABLE users DROP CONSTRAINT users_phone_nn;
 ```
 
 **DROP COLUMN — safe approach**:
@@ -380,8 +384,14 @@ BEGIN
         PERFORM pg_sleep(0.01); -- Throttle to reduce I/O pressure
     END LOOP;
 END$$;
--- After backfill: add NOT NULL constraint (fast if all values present)
-ALTER TABLE users ALTER COLUMN score SET NOT NULL;  -- PG 11+: validates from stats
+-- After backfill: a bare SET NOT NULL scans the whole table under ACCESS EXCLUSIVE.
+-- Prove "no nulls" first with a validated CHECK so SET NOT NULL skips the scan (PG 12+):
+ALTER TABLE users ADD CONSTRAINT users_score_nn CHECK (score IS NOT NULL) NOT VALID;
+ALTER TABLE users VALIDATE CONSTRAINT users_score_nn;  -- scans, but allows reads and writes
+ALTER TABLE users ALTER COLUMN score SET NOT NULL;      -- metadata-only now
+ALTER TABLE users DROP CONSTRAINT users_score_nn;
+-- PG 18: ALTER TABLE users ADD CONSTRAINT users_score_nn NOT NULL score NOT VALID;
+--        then VALIDATE CONSTRAINT users_score_nn, with no CHECK detour
 ```
 
 The loop's runtime is fully determined by three knobs:
@@ -422,6 +432,38 @@ The sleep adds under two minutes across the entire run, yet it is what keeps the
 
 **Why the batch key range and the row count are not the same thing.** The loop advances `v_cursor` through `id` values, so `batches` is `max_id / batch_size` — and on a table with heavy deletion history, `max_id` can far exceed the live row count. A table with 100M rows but `max_id = 900M` runs 90,000 iterations, most of them updating nothing, turning a 10-minute backfill into a 90-minute one that looks stalled. Batching by a keyset cursor over actual rows, rather than by an id arithmetic range, is what avoids this.
 
+### Tools Past gh-ost: pgroll, Spirit, and `pg_upgrade --swap`
+
+**pgroll (PostgreSQL 14+, Xata).** pgroll runs expand-contract for you and serves both schema versions at once. `pgroll start` applies the additive half to the physical table, then creates a new Postgres schema (for example `public_02_add_email`) that holds one view per table. For a breaking column change it adds a new physical column, backfills it from the old one in batches, and installs triggers that keep the two columns in sync on every write. Old pods keep `search_path = public_01_initial`; new pods set `search_path = public_02_add_email`. `pgroll complete` drops the old version's views and columns and renames the new ones; `pgroll rollback` drops the new ones instead.
+
+```
+                 old pods                          new pods
+       search_path=public_01_initial     search_path=public_02_add_email
+                     |                                 |
+       view users (id, mail)            view users (id, email NOT NULL)
+                     \                                 /
+                      v                               v
+         physical users (id, mail, _pgroll_new_email)
+                      ^ trigger: write to mail -> copy to _pgroll_new_email
+                      ^ trigger: write to _pgroll_new_email -> copy to mail
+```
+
+The two views over one table are what let a rolling deploy run old and new code against the same rows with no dual-write logic in the application. The cost is a trigger on every write to the table while the migration is open, and a second `search_path` that every connection pool must set correctly.
+
+**Spirit (MySQL 8.0+, Block).** Spirit is a reimplementation of gh-ost. It reads the binlog like gh-ost, but copies rows and applies binlog events with several threads, sizes chunks to a target time, writes checkpoints so an interrupted run resumes instead of restarting, and runs a checksum of old against new table before cutover (it refuses to cut over on a mismatch). It first tries `ALGORITHM=INSTANT` and metadata-only `INPLACE`, so an `ADD COLUMN` that MySQL can do instantly never copies a row. gh-ost's single-threaded applier is the reason it can fall behind a hot table for hours (Pitfall 4); Spirit's parallel applier is the fix for that case.
+
+**`pg_upgrade --swap` and kept statistics (PostgreSQL 18).** `pg_upgrade` has five transfer modes: `--copy` (default), `--link`, `--clone`, `--copy-file-range` (PostgreSQL 17), and `--swap` (PostgreSQL 18). `--swap` moves the old cluster's data directories into the new cluster instead of copying or hard-linking each file, and the release notes call it potentially the fastest mode. Like `--link`, it leaves the old cluster unusable once the swap starts. PostgreSQL 18 also carries the planner statistics across the upgrade. Before 18, a freshly upgraded cluster had empty `pg_statistic`, and early traffic ran on default selectivity estimates until `vacuumdb --analyze-in-stages` finished; on a multi-terabyte cluster that pass runs for tens of minutes. Extended statistics (`CREATE STATISTICS`) are still not carried over, so run `vacuumdb --all --analyze-only --missing-stats-only` after the upgrade to fill only those gaps.
+
+**`pg_createsubscriber` (PostgreSQL 17).** For the logical-replication blue-green path, `pg_createsubscriber` converts an existing physical standby into a logical subscriber in place, so the initial copy of a multi-terabyte database is the standby's own data files instead of a `COPY` of every table. See [Replication and High Availability](../replication_and_high_availability/replication_and_high_availability.md) and [PostgreSQL Internals](../postgresql_internals/postgresql_internals.md) for the procedure.
+
+| Tool | Database | Mechanism | Pick it when |
+|------|----------|-----------|--------------|
+| pgroll | PostgreSQL 14+ | Versioned views + sync triggers | Rolling deploys need old and new schema live at once |
+| gh-ost | MySQL | Binlog tail, single applier | Existing runbooks, MySQL 5.7 still in the fleet |
+| Spirit | MySQL 8.0+ | Binlog tail, parallel copy and apply, checksum | Large hot tables where gh-ost lags |
+| `pg_upgrade --swap` | PostgreSQL 18 target | Directory swap, stats kept | Short maintenance window acceptable, no logical replication |
+| `pg_createsubscriber` | PostgreSQL 17+ | Standby turned logical subscriber | Blue-green major upgrade of a large database |
+
 ---
 
 ## 7. Real-World Examples
@@ -442,6 +484,7 @@ The sleep adds under two minutes across the entire run, yet it is what keeps the
 | gh-ost / pt-osc | Very Low | Slow | High |
 | Expand-contract | None | Slow (multiple deploys) | High |
 | Flyway/Liquibase | Low (schema migration only) | Fast | Low (tool manages it) |
+| pgroll | None | Slow (backfill + triggers) | Medium (tool runs expand-contract) |
 
 ---
 
@@ -498,6 +541,10 @@ A migration created a new NOT NULL column. The deployment was rolled back due to
 | `pg_partman` | Automated partition management/creation |
 | Atlas | Schema-as-code, drift detection, migration planning |
 | Skeema | MySQL schema management as code (git-workflow) |
+| pgroll | PostgreSQL expand-contract with versioned schema views (14+) |
+| Spirit | Multi-threaded online schema change for MySQL 8.0+ |
+| `pg_upgrade --swap` | PostgreSQL 18 major upgrade by directory swap, planner statistics kept |
+| `pg_createsubscriber` | PostgreSQL 17+: turn a physical standby into a logical subscriber |
 
 ---
 
@@ -506,7 +553,7 @@ A migration created a new NOT NULL column. The deployment was rolled back due to
 **Q: How do you add a NOT NULL column to a 500M-row production table without downtime?**
 **Short:** PostgreSQL 11+ adds a NOT NULL column with a constant default instantly by storing the default in the catalog, no table rewrite.
 
-In PostgreSQL 11+: `ALTER TABLE t ADD COLUMN col TYPE NOT NULL DEFAULT value` is instant — PostgreSQL stores the default in the catalog (pg_attrdef) and returns the default for any existing row that doesn't have the value stored yet, without rewriting the table. In PostgreSQL 10 and below, or when the default is not constant: (1) Add column as nullable (instant). (2) Backfill in batches with commit every 10,000 rows (no long transaction). (3) After all rows populated, add NOT NULL constraint — PostgreSQL 12+ can use `NOT VALID` first to skip the full scan, then `VALIDATE CONSTRAINT` during a low-traffic window. (4) After validation, add `SET NOT NULL` (fast on PG 11+ since it checks pg_statistic for null fractions).
+In PostgreSQL 11+: `ALTER TABLE t ADD COLUMN col TYPE NOT NULL DEFAULT value` is instant: PostgreSQL stores the default in the catalog (pg_attrdef) and returns the default for any existing row that doesn't have the value stored yet, without rewriting the table. In PostgreSQL 10 and below, or when the default is not constant: (1) Add column as nullable (instant). (2) Backfill in batches with commit every 10,000 rows (no long transaction). (3) After all rows are populated, add `CHECK (col IS NOT NULL) NOT VALID` (instant), then `VALIDATE CONSTRAINT`, which scans the table under a SHARE UPDATE EXCLUSIVE lock that does not block reads or writes. (4) Run `SET NOT NULL`: on PostgreSQL 12+ it skips the full-table scan because the valid CHECK constraint already proves there are no nulls (a bare `SET NOT NULL` scans the whole table under ACCESS EXCLUSIVE), then drop the CHECK. PostgreSQL 18 shortens this to `ADD CONSTRAINT ... NOT NULL col NOT VALID` followed by `VALIDATE CONSTRAINT`.
 
 **Q: What is the expand-contract pattern and which schema operations require it?**
 **Short:** Expand-contract adds new schema elements before code depends on them and removes the old ones only after every reader has moved off.
@@ -542,6 +589,21 @@ Flyway marks the migration as failed in the `flyway_schema_history` table (`succ
 **Short:** Logical replication to a new major-version instance lets a database upgrade cut over in seconds instead of a full outage.
 
 Logical replication approach: (1) Set up a PostgreSQL 16 instance. (2) Create a logical replication publication on PG14 for all tables. (3) Create a subscription on PG16 — it copies all data and applies ongoing changes. (4) Verify PG16 is caught up (replication lag < 1s). (5) Stop all write traffic to PG14 (maintenance page, load balancer cutover). (6) Wait for PG16 to apply remaining lag (< 1s). (7) Promote PG16 to primary. (8) Update application connection string to PG16. (9) Resume traffic. Downtime: seconds. Alternative: `pg_upgrade --link` (hard links, fast) but requires stopping PG14 first (longer downtime). The logical replication approach enables sub-minute downtime for any table sizes.
+
+**Q: What does PostgreSQL 18 change about `pg_upgrade` downtime and query plans right after the upgrade?**
+**Short:** PostgreSQL 18 adds pg_upgrade --swap, which moves data directories instead of copying files, and carries planner statistics across, so plans are sane from the first query.
+
+Two changes. First, `--swap` joins `--copy`, `--link`, `--clone` and `--copy-file-range`: it moves the old cluster's data directories into the new cluster rather than copying or hard-linking each file, which the release notes call potentially the fastest mode; like `--link`, the old cluster cannot be started once the swap begins, so take a backup or keep a standby first. Second, `pg_upgrade` now keeps optimizer statistics. Before 18, the new cluster started with empty `pg_statistic`, so every query ran on default selectivity guesses until `vacuumdb --analyze-in-stages` finished, and on a multi-terabyte database that meant tens of minutes of bad plans after the outage itself ended. Extended statistics from `CREATE STATISTICS` are still not carried, so finish with `vacuumdb --all --analyze-only --missing-stats-only`. The maintenance window is still required; for near-zero downtime use the logical-replication path, seeded with `pg_createsubscriber`.
+
+**Q: How does pgroll let old and new application versions use the same table during a breaking column change?**
+**Short:** pgroll exposes each schema version as a Postgres schema of views over one physical table, with triggers syncing old and new columns, and each pod picks its version via search_path.
+
+`pgroll start` adds the new column physically, backfills it in batches, and installs triggers that copy each write between the old and new column. It then creates a schema such as `public_02_add_email` whose views present the table in the new shape, while `public_01_initial` keeps presenting the old shape. Old pods connect with `search_path = public_01_initial`, new pods with `public_02_add_email`, so a rolling deploy runs both versions against the same rows with no dual-write code in the application. `pgroll complete` drops the old views and column; `pgroll rollback` drops the new ones. The costs are a trigger on every write while the migration is open and a per-version `search_path` that every pool and every ad hoc client must set, since a client left on `public` sees the raw physical table with the temporary columns.
+
+**Q: When is Spirit a better choice than gh-ost for a MySQL online schema change?**
+**Short:** On MySQL 8.0+ with large hot tables: Spirit copies rows and applies binlog events in parallel, resumes from checkpoints, and checksums before cutover, where gh-ost applies binlog single-threaded.
+
+Spirit is a reimplementation of gh-ost from Block that only supports MySQL 8.0 and later. Both tail the binlog instead of using triggers, but gh-ost applies binlog events with one thread, so on a table taking thousands of writes per second the shadow table can fall further behind than it catches up and the migration never reaches cutover. Spirit runs the row copy and the binlog applier with several threads, sizes chunks to a target time, writes checkpoints so a killed run resumes with about a minute lost, and runs a checksum of old against new before cutover, refusing to cut over on a mismatch. It also tries `ALGORITHM=INSTANT` first, so changes MySQL can apply as metadata never copy a row. Keep gh-ost where MySQL 5.7 is still in the fleet or the team's runbooks depend on its hooks; use Spirit on 8.0+ fleets where gh-ost lag is the bottleneck.
 
 **Q: How do you validate that a migration didn't break anything before rolling it to production?**
 **Short:** Validating a migration means replaying it against a production-sized clone and comparing query plans before touching production.

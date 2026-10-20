@@ -31,10 +31,10 @@ edge runtimes that look like Node and are not. It does not own:
 | Framework route config and rendering modes | [Meta-Frameworks and Routing](../../react/meta_frameworks_and_routing/meta_frameworks_and_routing.md) |
 | `epoll`, readiness vs completion, the general theory | [Async I/O and Event Loops](../../cs_fundamentals/processes_threads_and_context_switching/async_io_and_event_loops.md) |
 
-**Versions, verified 2026-09-02:** Node **26** Current, Node **24 "Krypton"** Active LTS
+**Versions, verified 2026-10-19:** Node **26** Current, Node **24 "Krypton"** Active LTS
 (initial release 2025-05-06, promoted to Active LTS in October 2025; the 30-month support
 window is measured from the initial release), Node **22** in Maintenance. Deno **2.9**,
-Bun **1.4.0**. Node's native TypeScript type stripping is stable and unflagged.
+Bun **1.4.3** (2026-10-10). Node's native TypeScript type stripping is stable and unflagged.
 
 ---
 
@@ -622,7 +622,7 @@ does real work blocked every concurrent request to do it.
 | Node.js | Runtime | 26 Current, 24 Krypton Active LTS, 22 Maintenance |
 | libuv | Event-loop library | Phases, the 4-thread pool, epoll and kqueue |
 | Deno | Runtime | 2.9, secure by default, npm compatible |
-| Bun | Runtime | 1.4.0, JavaScriptCore, bundler and test runner built in |
+| Bun | Runtime | 1.4.3, JavaScriptCore, bundler and test runner built in |
 | Cloudflare Workers | Edge platform | workerd isolates, KV, D1, Durable Objects |
 | Vercel Edge | Edge platform | Edge runtime for routes and proxy |
 | Deno Deploy | Edge platform | Deno-based isolates |

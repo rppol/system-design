@@ -28,7 +28,7 @@ This module covers paging (the dominant memory management scheme), page table st
 
 ## 3. Core Principles
 
-**Paging**: Divide physical memory into fixed-size frames (4 KB standard on x86-64 and most Linux; **16 KB on Apple Silicon macOS**, and 4/16/64 KB granules on ARM64; plus 2 MB or 1 GB "huge pages"). Divide virtual address space into pages of the same size. The page table maps virtual page number → physical frame number + flags (present, dirty, accessed, read-only, user/kernel). Paging eliminates external fragmentation (no contiguous allocation needed) at the cost of internal fragmentation (last page partially filled).
+**Paging**: Divide physical memory into fixed-size frames (4 KB standard on x86-64 and most Linux; **16 KB on Apple Silicon macOS and on Android 15+ 16 KB devices**, and 4/16/64 KB granules on ARM64; plus 2 MB or 1 GB "huge pages"). Divide virtual address space into pages of the same size. The page table maps virtual page number → physical frame number + flags (present, dirty, accessed, read-only, user/kernel). Paging eliminates external fragmentation (no contiguous allocation needed) at the cost of internal fragmentation (last page partially filled).
 
 **Page fault**: When the CPU accesses a virtual address whose page table entry has present-bit = 0, the MMU raises a page-fault exception. The OS handler: (1) checks if the access is valid (not a segfault), (2) finds the required page (in swap, from a file, or zero-filled on first access), (3) loads the page into a free physical frame, (4) updates the page table entry (sets present-bit), (5) resumes the faulting instruction.
 
@@ -433,9 +433,15 @@ def measure_tlb_impact(size_mb: int = 256, strides: list[int] = None) -> dict[in
 
 **Huge pages**: x86-64 supports 2 MB and 1 GB huge pages. Benefits: fewer TLB entries needed for the same memory coverage (one 2 MB huge-page TLB entry covers what 512 regular 4 KB TLB entries would). For databases (PostgreSQL, MySQL), memory-mapped files, and JVM heaps, huge pages reduce TLB miss rate dramatically. In Linux: `mmap(MAP_HUGETLB)` against a pre-reserved hugetlbfs pool, or Transparent Huge Pages (THP). THP's mode is per-distribution — read `/sys/kernel/mm/transparent_hugepage/enabled` to see whether yours ships `always` or `madvise`; only `always` promotes regions you never asked to be promoted.
 
+**Multi-size THP (mTHP)**: since Linux 6.8 THP can also allocate anonymous memory in power-of-2 blocks between 4 KB and 2 MB, such as 16, 32 or 64 KB, each its own folio. These stay mapped by ordinary PTEs, so they do not shrink the page-table walk the way a 2 MB page does, but they cut page faults by 4x to 16x, clear far less memory per fault than a 2 MB page, and on CPUs with contiguous-PTE TLB compression (ARM64 `contpte`) they also save TLB entries. Each size has its own switch at `/sys/kernel/mm/transparent_hugepage/hugepages-<size>kB/enabled`, and every size other than PMD-sized defaults to `never`. Swap uses the same units: Linux 7.2 (August 2026) allocates anonymous and shmem swap per folio and drops the static per-slot swap array, which saves about 512 MB of metadata when mounting a 1 TB swap device.
+
 **Memory-mapped files**: `mmap()` maps a file into the virtual address space. Reads and writes go through the page cache — the file is loaded page-by-page as needed (demand paging). Databases (SQLite WAL, PostgreSQL shared buffers) and executables (ELF loading via dynamic linker) use mmap. The OS flushes dirty mmap pages to the file asynchronously; `msync()` forces synchronous flush.
 
 **Android's swap mechanism (zRAM)**: Android devices typically have no swap partition. Instead, Linux's `zram` driver creates a compressed in-memory swap device. Pages evicted to zRAM are compressed (~2:1 ratio), effectively extending RAM. A 4 GB device effectively has ~6 GB of "available memory" via zRAM. Compressing or decompressing one 4 KB page with lzo-rle or zstd costs only a few microseconds, one to two orders of magnitude less than the ~100 µs of an SSD swap read — which is the entire reason zRAM is worth the CPU.
+
+**Android 16 KB pages**: Android 15 added support for devices whose kernel uses a 16 KB page size, and Google Play has required apps targeting Android 15+ to support 16 KB pages since November 1, 2025 (updates that do not support them are blocked from release after February 1, 2027). Google's measurements on 16 KB devices: app launch under memory pressure 3.16% faster on average (up to 30% for some apps), 4.56% less power during launch, camera hot start 4.48% and cold start 6.60% faster, and boot about 8% (roughly 950 ms) faster, at the cost of slightly higher memory use. The gain is the same TLB-reach arithmetic as huge pages, at 4x instead of 512x. Apps written only in Java or Kotlin are unaffected; native libraries must have ELF `LOAD` segments aligned to 16 KB (NDK r28+ does this by default, older NDKs need `-Wl,-z,max-page-size=16384`), and code must not assume 4096 (see Pitfall 6).
+
+**CXL memory tiering**: Compute Express Link (CXL) memory expanders add DRAM over a PCIe-based link. Linux presents that memory as a NUMA node with no CPUs, slower than local DRAM. Instead of letting allocations land there at random, the kernel treats it as a lower *tier*: with `/sys/kernel/mm/numa/demotion_enabled`, reclaim *demotes* cold pages from local DRAM to the CXL node before resorting to swap, and with `kernel.numa_balancing = 2` (`NUMA_BALANCING_MEMORY_TIERING`), NUMA-balancing page faults *promote* hot pages back. This is Meta's TPP (Transparent Page Placement), most of which merged in Linux 5.18; on Meta's fleet it kept a tiered system within 1% of an all-local-DRAM baseline and 18% ahead of the previous Linux behaviour. It is the page-replacement idea from §4 applied between two kinds of RAM instead of between RAM and disk.
 
 ---
 
@@ -484,7 +490,9 @@ quadrantChart
 
 | Page size | TLB coverage | Internal fragmentation | Page fault cost | Used in |
 |-----------|-------------|----------------------|-----------------|---------|
-| 4 KB | 4 KB per entry | Low | Low per fault | Default on x86-64 and most Linux (Apple Silicon macOS uses 16 KB; some ARM64 distros use 64 KB) |
+| 4 KB | 4 KB per entry | Low | Low per fault | Default on x86-64 and most Linux (some ARM64 distros use 64 KB) |
+| 16 KB | 16 KB per entry | Low to moderate | Fewer faults, 4x TLB reach | Apple Silicon macOS and iOS; Android 15+ 16 KB devices |
+| 16-64 KB (mTHP) | 4 KB per entry (more with ARM64 contiguous PTEs) | Low to moderate | Fewer faults, cheap zeroing | Anonymous memory with mTHP enabled, Linux 6.8+ |
 | 2 MB | 2 MB per entry | High (last 2MB partially used) | Higher per fault | Databases, JVM heap |
 | 1 GB | 1 GB per entry | Very high | Very high per fault | Large in-memory databases |
 
@@ -530,7 +538,7 @@ The "Low / High / Very high" column above is doing a lot of unquantified work. T
 
 **Use huge pages when**: your application has a large, stable working set (database buffer pool, JVM heap > 8 GB, in-memory cache). The reduction in TLB misses can yield 10–30% performance improvements for memory-intensive workloads.
 
-**Disable Transparent Huge Pages (THP) for databases**: THP automatically promotes contiguous 4KB pages to 2MB huge pages. For workloads with unpredictable allocation patterns (Redis, MongoDB, MySQL), THP can cause large memory compaction stalls (the OS periodically compacts memory to create 2MB-aligned regions — this causes multi-millisecond latency spikes). Redis, MongoDB, and many databases explicitly recommend disabling THP.
+**Set Transparent Huge Pages (THP) per database, from its own docs**: THP automatically promotes contiguous 4KB pages to 2MB huge pages. For workloads with unpredictable allocation patterns (Redis, MySQL), THP can cause large memory compaction stalls (the OS periodically compacts memory to create 2MB-aligned regions, which causes multi-millisecond latency spikes), and Redis recommends disabling it. MongoDB 8.0+ is the opposite: its per-CPU TCMalloc wants THP `enabled=always` with `defrag=defer+madvise`. MongoDB 7.0 and earlier, and MongoDB on PPC64LE or s390x (legacy TCMalloc), still need THP disabled.
 
 **Use mmap for large read-mostly files**: Memory-mapped files integrate with the OS page cache and allow demand-loading — only pages that are accessed consume physical memory. Appropriate for read-only datasets, log files, and memory-mapped databases (SQLite, LMDB).
 
@@ -628,6 +636,31 @@ FIX: pin PostgreSQL to physical memory:
   4. Allocate huge pages for shared_buffers: huge_pages=on in postgresql.conf
 ```
 
+### Pitfall 6: hard-coding a 4 KB page size in native code
+
+An Android NDK library that worked on every phone for years crashes or fails to load on a 16 KB
+page device. Two separate causes produce this: the `.so` file's `LOAD` segments are aligned to
+4 KB, so the dynamic linker cannot map them, or the code computes page-aligned offsets with the
+constant 4096.
+
+```c
+/* BROKEN: assumes 4 KB pages. mmap() needs the file offset to be a multiple of the
+   real page size, so on a 16 KB kernel any offset like 4096 or 12288 returns EINVAL. */
+#define MY_PAGE 4096
+off_t off = file_offset & ~(off_t)(MY_PAGE - 1);
+void *p = mmap(NULL, len + (file_offset - off), PROT_READ, MAP_PRIVATE, fd, off);
+
+/* FIX: ask the kernel. Works on 4 KB, 16 KB and 64 KB kernels. */
+long page = sysconf(_SC_PAGESIZE);
+off_t off = file_offset & ~(off_t)(page - 1);
+void *p = mmap(NULL, len + (file_offset - off), PROT_READ, MAP_PRIVATE, fd, off);
+```
+
+The same assumption hides in guard-page arithmetic, custom allocators that round sizes to 4096, and
+`mprotect()` calls on 4 KB-aligned addresses. For the linker side, build with NDK r28+ or pass
+`-Wl,-z,max-page-size=16384`, then confirm that `llvm-readelf -l lib.so` shows `LOAD` alignment
+`0x4000`. Test on a 16 KB emulator image; a 4 KB device never exposes either bug.
+
 ---
 
 ## 11. Technologies & Tools
@@ -642,6 +675,8 @@ FIX: pin PostgreSQL to physical memory:
 | `mlock` / `mlockall` | Pin pages to RAM (prevent swap) | Requires root or CAP_IPC_LOCK |
 | `madvise` | Hint to OS about access patterns | MADV_SEQUENTIAL, MADV_RANDOM, MADV_WILLNEED |
 | `numactl` | NUMA memory policy (bind to node) | For multi-socket servers; latency-critical processes |
+| `getconf PAGESIZE` / `sysconf(_SC_PAGESIZE)` | Report the running kernel's page size | Use instead of a 4096 constant; returns 16384 on 16 KB Android and Apple Silicon |
+| `/sys/kernel/mm/numa/demotion_enabled` | Demote cold pages to a slower memory tier (CXL) during reclaim | Pair with `sysctl kernel.numa_balancing=2` to promote hot pages back |
 | `sysctl vm.swappiness` | Control swap tendency (0–200 since Linux 5.8; 0–100 before) | 0 = avoid swap until reclaim has no alternative; 60 = default; >100 favours evicting anonymous pages over page cache |
 
 ---
@@ -708,13 +743,21 @@ Paging: memory divided into fixed-size pages (4 KB). No external fragmentation; 
 **Short:** It scores each process on RSS plus swap usage plus page-table size, adjusted by `oom_score_adj`, and kills whichever process scores highest.
 The OOM killer selects the process with the highest `oom_score`. The kernel's `oom_badness()` is deliberately simple: points = RSS + swap entries + page-table bytes, expressed as a fraction of total memory, plus `oom_score_adj` scaled into the same units. `oom_score_adj` (-1000 to +1000) lets you tune it: -1000 makes a task unkillable, +1000 kills it first. So in practice the biggest memory consumer dies, and only three things are exempt — kernel threads, PID 1, and anything at `oom_score_adj = -1000`. (The old pre-2.6.36 heuristic that also weighed process age, `nice` value and child count is long gone; do not quote it.) To protect a service: set `OOMScoreAdjust=-900` in its systemd unit file.
 
+**Q16: Why does a native library that runs on every 4 KB-page phone fail on an Android 16 KB-page device?**
+**Short:** Its ELF LOAD segments are aligned to 4 KB, or its code assumes a 4096-byte page in mmap/mprotect arithmetic; both break when the kernel page is 16 KB.
+The kernel can map memory only in whole pages, so on a 16 KB kernel every `mmap()` file offset, `mprotect()` address and ELF segment boundary must be a multiple of 16384. A library linked with 4 KB `LOAD` alignment cannot be mapped by the dynamic linker, and code that rounds offsets with a 4096 constant gets `EINVAL` from `mmap()` on any offset like 12288. Android 15 added 16 KB page support, and Google Play has required apps targeting Android 15+ to support it since November 1, 2025. The fix is NDK r28+ (16 KB alignment by default) or `-Wl,-z,max-page-size=16384`, plus `sysconf(_SC_PAGESIZE)` wherever code needs the page size. Pure Java or Kotlin apps need no change.
+
+**Q17: How does Linux use CXL-attached memory without slowing down hot data?**
+**Short:** It treats CXL DRAM as a slower, CPU-less NUMA tier: reclaim demotes cold pages there before swapping, and NUMA-balancing faults promote hot pages back to local DRAM.
+A CXL memory expander shows up as a NUMA node with memory but no CPUs, with higher latency than local DRAM. With `/sys/kernel/mm/numa/demotion_enabled` set, page reclaim on the fast node migrates cold pages to the CXL node instead of writing them to swap. With `kernel.numa_balancing = 2` (memory-tiering mode), the kernel periodically unmaps pages, and a fault on a page sitting in the slow tier marks it hot and migrates it up. This is Meta's TPP design, mostly merged in Linux 5.18, which measured within 1% of an all-local-memory baseline on Meta's fleet. The trade-off is migration traffic: if the hot set is larger than local DRAM, pages bounce between tiers, so size local DRAM for the hot working set and use CXL for capacity.
+
 ---
 
 ## 13. Best Practices
 
 **Monitor RSS and swap usage, not just virtual size**: Use `free -h` (system-wide), `vmstat 1` (swap in/out rates), and `/proc/<pid>/status` (per-process). Alert on RSS > 80% of container memory limit and on any swap I/O (si/so > 0).
 
-**Disable THP for latency-sensitive databases**: Redis, MongoDB, and MySQL all recommend `echo never > /sys/kernel/mm/transparent_hugepage/enabled`. THP compaction stalls cause multi-millisecond latency spikes at unpredictable intervals.
+**Disable THP for latency-sensitive databases that ask for it**: Redis and MySQL deployments use `echo never > /sys/kernel/mm/transparent_hugepage/enabled`; MongoDB 8.0+ on Linux (except PPC64LE and s390x) needs THP `always` instead, so check the database version before copying the setting. THP compaction stalls cause multi-millisecond latency spikes at unpredictable intervals.
 
 **Enable huge pages for predictable high-throughput workloads**: PostgreSQL with `huge_pages=on`, Java with `-XX:+UseLargePages` (HotSpot's flag; `-XX:+UseHugePages` does not exist), and Oracle DB with hugepage configurations consistently show 5–20% performance improvements for memory-intensive workloads.
 

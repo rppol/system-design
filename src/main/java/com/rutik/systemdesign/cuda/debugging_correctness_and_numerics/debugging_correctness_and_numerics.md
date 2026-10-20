@@ -766,6 +766,7 @@ comparison per thread.
 | `torch.cuda.synchronize()` | PyTorch's `cudaDeviceSynchronize()` equivalent | Pins async CUDA errors and timing to the call site during debugging |
 | `torch.use_deterministic_algorithms(True)` | Forces PyTorch to prefer deterministic kernels, raise on unsupported ops | Guarantees run-to-run reproducibility on the same stack, not cross-hardware bit-exactness |
 | `torch.autograd.set_detect_anomaly(True)` | Framework-level NaN/Inf backward-pass localization | Python/PyTorch-specific; complements but does not replace `compute-sanitizer` |
+| Triton FpSan (Triton 3.8.0) | Compiler instrumentation that checks whether two kernel variants compute the same symbolic floating-point expression | Adds `tl.expect_zero`; compares an optimized variant against a reference by the expression it computes, not by an output tolerance |
 
 ---
 

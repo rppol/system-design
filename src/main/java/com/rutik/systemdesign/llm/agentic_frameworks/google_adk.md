@@ -251,7 +251,7 @@ loop always burns the full 5 × 2 = 10 LLM calls (§6.4).
     calls  =  i x A  =  2 x 2   =   4 LLM calls
     saved  =  10 - 4            =   6 calls         =  60%
 
-  cost at $0.004 per gemini-2.5-flash call
+  cost at $0.004 per gemini-3.8-flash call (~2K in, ~700 out)
     broken   10 x $0.004        =  $0.040 / run
     working   4 x $0.004        =  $0.016 / run
 ```
@@ -337,7 +337,7 @@ def get_order_status(order_id: str) -> dict:
 
 support_agent = LlmAgent(
     name="support_agent",
-    model="gemini-2.5-flash",
+    model="gemini-3.8-flash",
     instruction=(
         "You help customers check their order status. "
         "Use get_order_status when the user provides an order ID."
@@ -358,12 +358,12 @@ from google.adk.agents import LlmAgent, SequentialAgent, ParallelAgent
 
 # Two independent research angles, run concurrently
 market_research = LlmAgent(
-    name="market_research", model="gemini-2.5-flash",
+    name="market_research", model="gemini-3.8-flash",
     instruction="Research the competitive landscape for {topic}.",
     output_key="market_findings",
 )
 technical_research = LlmAgent(
-    name="technical_research", model="gemini-2.5-flash",
+    name="technical_research", model="gemini-3.8-flash",
     instruction="Research the technical feasibility of {topic}.",
     output_key="technical_findings",
 )
@@ -374,7 +374,7 @@ parallel_research = ParallelAgent(
 
 # Synthesis step reads BOTH branch outputs via state templating
 synthesizer = LlmAgent(
-    name="synthesizer", model="gemini-2.5-pro",
+    name="synthesizer", model="gemini-4-argon",
     instruction=(
         "Combine these findings into a recommendation:\n"
         "Market: {market_findings}\nTechnical: {technical_findings}"
@@ -399,18 +399,18 @@ in the enclosing `SequentialAgent`) can read both keys.
 from google.adk.agents import LlmAgent
 
 billing_agent = LlmAgent(
-    name="billing_agent", model="gemini-2.5-flash",
+    name="billing_agent", model="gemini-3.8-flash",
     instruction="Handle billing questions: invoices, payment methods, charges.",
     tools=[...],   # billing-specific tools
 )
 tech_support_agent = LlmAgent(
-    name="tech_support_agent", model="gemini-2.5-flash",
+    name="tech_support_agent", model="gemini-3.8-flash",
     instruction="Handle technical issues: bugs, errors, outages.",
     tools=[...],   # tech-support-specific tools
 )
 
 coordinator = LlmAgent(
-    name="coordinator", model="gemini-2.5-pro",
+    name="coordinator", model="gemini-4-argon",
     instruction=(
         "Classify the user's request and transfer to billing_agent for "
         "billing issues, or tech_support_agent for technical issues. "
@@ -432,13 +432,13 @@ coordinator = LlmAgent(
 from google.adk.agents import LlmAgent, LoopAgent
 
 generator = LlmAgent(
-    name="generator", model="gemini-2.5-flash",
+    name="generator", model="gemini-3.8-flash",
     instruction="Write a product description for {product}. "
                 "Incorporate any feedback in {critique}.",
     output_key="draft",
 )
 critic = LlmAgent(
-    name="critic", model="gemini-2.5-flash",
+    name="critic", model="gemini-3.8-flash",
     instruction="Critique {draft}. List specific issues, or say 'APPROVED'.",
     output_key="critique",
     # NOTHING here ever calls tool_context.actions.escalate = True
@@ -469,7 +469,7 @@ def approve_or_continue(approved: bool, tool_context: ToolContext) -> dict:
     return {"approved": approved}
 
 critic_fixed = LlmAgent(
-    name="critic_fixed", model="gemini-2.5-flash",
+    name="critic_fixed", model="gemini-3.8-flash",
     instruction=(
         "Evaluate {draft}. Call approve_or_continue(approved=True) if it "
         "meets quality standards, otherwise approve_or_continue(approved=False) "

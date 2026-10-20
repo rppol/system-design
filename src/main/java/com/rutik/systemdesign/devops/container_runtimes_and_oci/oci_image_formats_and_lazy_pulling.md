@@ -1,6 +1,6 @@
 # OCI Image Formats and Lazy Pulling
 
-> **Version anchor (2026-08-27).** **OCI Image Spec v1.1.1** (2025-03), **Runtime Spec v1.3.0** (2024-11), **Distribution Spec v1.1.1** (2025-01). **containerd v2.3.0** (2026-04-30) — Kubernetes 1.35 is the last release supporting containerd 1.x. **SOCI** (`awslabs/soci-snapshotter`) is on Index Manifest v2; v1 has been disabled since SOCI v0.10.0, and ECS/Fargate support requires Linux platform version 1.4.0. **Nydus** (v2.4.0) is a sub-project of **Dragonfly**, which **graduated from the CNCF in January 2026**. **Docker Content Trust / Notary v1 is being retired outright — `notary.docker.io` shuts down on 2026-12-08**; the replacements are Notation (Notary v2) and Sigstore cosign.
+> **Version anchor (2026-08-27).** **OCI Image Spec v1.1.1** (2025-03), **Runtime Spec v1.3.0** (2025-11), **Distribution Spec v1.1.1** (2025-01). **containerd v2.3.0** (2026-04-30); Kubernetes 1.35 is the last release supporting containerd 1.x. **SOCI** (`awslabs/soci-snapshotter`) is on Index Manifest v2; v1 has been disabled since SOCI v0.10.0, and ECS/Fargate support requires Linux platform version 1.4.0. **Nydus** (v2.4.0) is a sub-project of **Dragonfly**, which **graduated from the CNCF in January 2026**. **Docker Content Trust / Notary v1 is being retired outright: `notary.docker.io` shuts down on 2026-12-08**; the replacements are Notation (Notary v2) and Sigstore cosign.
 
 ---
 

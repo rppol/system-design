@@ -504,7 +504,7 @@ A: Query transformations improve semantic similarity-based retrieval but don't a
 
 **Q: What are the cost implications of query transformation at production scale?**
 **Short:** A single cheap-model rewrite call costs well under a cent per query even at a million queries a day, dwarfed by retrieval and reranking cost at that scale.
-A: At 10,000 queries/day, each transformation adds one LLM call. With gpt-4o-mini at $0.00015/1K input tokens and 500-token transformation prompts, that is $0.000075 per query, so rewriting costs ~$0.75/day per technique — negligible. At 1M queries/day, rewriting costs ~$75/day — still cheap. Multi-query at 4 variants costs 4× more (~$300/day at 1M queries). The dominant cost at scale is usually the retrieval and reranking, not the transformation LLM call. Use a small fast model (gpt-4o-mini, gpt-5.4-nano, claude-haiku-4-5) for transformations; save the capable model for final generation.
+A: At 10,000 queries/day, each transformation adds one LLM call. With gpt-4o-mini at $0.00015/1K input tokens and 500-token transformation prompts, that is $0.000075 per query, so rewriting costs ~$0.75/day per technique — negligible. At 1M queries/day, rewriting costs ~$75/day — still cheap. Multi-query at 4 variants costs 4× more (~$300/day at 1M queries). The dominant cost at scale is usually the retrieval and reranking, not the transformation LLM call. Use a small fast model (gpt-4o-mini, gpt-5.4-nano, claude-haiku-5-5) for transformations; save the capable model for final generation.
 
 **Q: What are HyDE's specific failure modes and how do you detect them in production?**
 **Short:** Hallucinated hypotheses, distributional mismatch, and recency blindness on rapidly changing topics; detect by comparing HyDE recall to direct-embedding recall per query type.
@@ -535,7 +535,7 @@ A: It rewrites the turn into a standalone question first, using the conversation
 ## 13. Best Practices
 
 1. **Measure first** — run retrieval with and without each transformation on a labeled eval set before deploying. A transformation that doesn't improve recall@10 won't help production.
-2. **Use a cheap model for transformation** — GPT-4o-mini or claude-haiku-4-5 is sufficient for query rewriting and multi-query expansion; save stronger models for generation.
+2. **Use a cheap model for transformation** — GPT-4o-mini or claude-haiku-5-5 is sufficient for query rewriting and multi-query expansion; save stronger models for generation.
 3. **Always rerank after multi-query expansion** — never pass 80+ candidates directly to the LLM; rerank to top-5 to 10.
 4. **Deduplicate by document ID, not text hash** — texts may differ slightly (different retrieval scores) but represent the same chunk.
 5. **Cache transformed queries** — many users ask the same questions; cache (raw_query → transformed_queries) with a 1-24 hour TTL.

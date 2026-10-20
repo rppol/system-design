@@ -346,6 +346,54 @@ stated as a fact rather than a threat: "I have another offer at $X — I'd genui
 join here, is there room to get closer to that" reads very differently from "match this or
 I walk," even though both convey the same information.
 
+**Posted-range laws and salary-history bans.** In a growing list of places the employer
+has to show the range first and may not ask what you earn now. That moves the opening of
+the negotiation: you no longer fish for the range, you negotiate where in it you land.
+
+| Jurisdiction and law | What it requires | In force |
+|----------------------|------------------|----------|
+| Colorado, Equal Pay for Equal Work Act | postings carry a good-faith pay range and a benefits summary | January 1, 2021 |
+| New York City, Local Law 32 of 2022 | postings for NYC roles (employers with 4+ staff) show a good-faith minimum and maximum | November 1, 2022 |
+| California, SB 1162 | employers with 15+ staff put the pay scale in the posting | January 1, 2023 |
+| Washington, SB 5761 | employers with 15+ staff put the wage scale and benefits in the posting | January 1, 2023 |
+| California Labor Code §432.3, Massachusetts pay-equity act, NYC Local Law 67 of 2017 | employer may not ask for salary history | January 1, 2018; July 1, 2018; October 31, 2017 |
+| EU, Pay Transparency Directive (EU) 2023/970, Art. 5 and 7 | candidate gets the initial pay or range before the interview; employer may not ask pay history; an employee may request their own pay and the average pay by sex for the same work, answered within two months | transposition deadline June 7, 2026 |
+
+The EU directive binds private employers only through each member state's national law.
+At the June 7, 2026 deadline most of the 27 member states had not fully transposed it
+(law-firm trackers counted between two and four that had), so check the law of the
+country the job is in, not the directive. Gender pay-gap reports under Art. 9 start in
+June 2027 for employers with 150+ staff and June 2031 for those with 100-149.
+
+What changes in practice:
+
+- **A posted range is the employer's own objective criterion.** Fisher and Ury's fourth
+  principle hands it to you. A NYC posting that says $190-260K is not "the band is
+  whatever"; the question becomes "what puts an offer at $250K rather than $190K at this
+  level?", and the answer is usually level and scope, which is why level is the first
+  thing on the "usually flexible" list above.
+- **A ban covers the question, not your answer.** You may still volunteer your current
+  pay. Do not, if you were underpaid: the number anchors the offer and the law that
+  protected you no longer helps once you said it.
+- **After you join, EU Art. 7 is a second negotiation tool.** An engineer in a transposed
+  state can request the average pay for the same work and use the gap, with the employer's
+  own data, as the objective criterion at the next review.
+
+**Weak version** (recruiter for a California role asks your current salary)
+
+> I'm on $148K base right now, so anything above that works.
+
+**Strong version**
+
+> I'd rather focus on what this role pays. The posting says $175-230K, and from
+> levels.fyi and two peers at this level I'm targeting $215K base. What would put an
+> offer there?
+
+**What changed:** the weak version volunteers a low anchor the employer was not allowed
+to ask for, and caps the conversation at $148K plus a bump. The strong version keeps the
+history private, uses the employer's own posted range as the frame, and asks a calibrated
+question about what moves an offer to the top of it.
+
 ### 6.6 Negotiating on-call and toil
 
 This is the most commonly lost negotiation in engineering, and arguably the one with the
@@ -416,11 +464,11 @@ and one that doesn't.
   compensation negotiation at scale — their existence is precisely Fisher and Ury's
   fourth principle (insist on objective criteria) made into a public good, and engineers
   who use them systematically negotiate from real market data instead of a guess.
-- **Google's public leveling guides and internal calibration process**, referenced widely
-  in engineering-career writing, are an example of an employer pre-committing to
-  objective criteria for a title/level negotiation rather than leaving it to whoever
-  argues hardest in a room — reducing (not eliminating) the positional-bargaining problem
-  Fisher and Ury describe.
+- **GitLab's public job families** (handbook.gitlab.com/job-description-library) publish
+  the expectations for Intermediate, Senior, and Staff Backend Engineer. An employer that
+  publishes its level criteria pre-commits to objective criteria for a title or level
+  negotiation instead of leaving it to whoever argues hardest in a room. This reduces,
+  but does not remove, the positional-bargaining problem Fisher and Ury describe.
 - **The FBI's Crisis Negotiation Unit**, the origin of Chris Voss's *Never Split the
   Difference* techniques, is the sourced, verifiable origin of labelling, mirroring, and
   calibrated questions — Voss's book documents specific kidnapping and barricade
@@ -513,6 +561,9 @@ running to the end just because you can.
 - Deepak Malhotra and Max Bazerman — *Negotiation Genius* (Bantam, 2007). Adjacent
   academic-grounded framework covering anchoring effects and multi-party negotiation, not
   quoted directly in this module but a natural next read.
+- Directive (EU) 2023/970 of the European Parliament and of the Council (May 10, 2023)
+  on pay transparency. Art. 5 covers pay information before employment and the
+  pay-history ban; Art. 7 the employee's right to information; Art. 9 pay-gap reporting.
 - Related module: [Difficult Conversations & Conflict](../difficult_conversations_and_conflict/difficult_conversations_and_conflict.md)
   — what to do once a negotiation has broken down into a personal conflict rather than a
   productive exchange.
@@ -545,6 +596,28 @@ explicitly offer flexibility on how the gap closes (base, sign-on, equity, start
 Citing a source depersonalizes the ask; it's no longer "I think I deserve more," it's "the
 market says this role is worth more than this offer," which is a much easier conversation
 for a recruiter to actually move on.
+
+**Q: A recruiter for a New York City or California role asks for your current salary. How do you answer?**
+**Short:** Both ban the question. Decline it politely, frame the talk on the posted range and your market data, and do not volunteer a number that anchors you low.
+
+NYC (Local Law 67 of 2017) and California (Labor Code §432.3) bar employers from asking
+salary history, and both also require a pay range in the posting (NYC Local Law 32 of
+2022, California SB 1162). The ban covers the question, not your answer, so the trap is
+answering anyway. Say: "I'd rather focus on what this role pays. The posting lists
+$175-230K and I'm targeting $215K based on levels.fyi and peers at this level." If you
+were underpaid, volunteering it costs you the protection the law gave you, because the
+number now anchors the offer.
+
+**Q: What does the EU Pay Transparency Directive (2023/970) give a candidate and an employee?**
+**Short:** Before the interview, the initial pay or its range and no pay-history question. After hiring, the right to ask your own pay and the average pay by sex for the same work.
+
+Art. 5 gives the applicant the starting pay or range before the interview and bars the
+employer from asking pay history. Art. 7 lets an employee request their pay level and the
+average pay, broken down by sex, for workers doing the same work or work of equal value,
+with an answer within two months. The transposition deadline was June 7, 2026, and the
+rules reach a private employer through national law, which many member states passed
+late, so the country of employment decides what applies. Use Art. 7 data at the next
+review as the objective criterion: "the average for this role is X, I'm at Y."
 
 **Q: What is BATNA and why does knowing yours change the negotiation?**
 **Short:** Best Alternative To a Negotiated Agreement — your only real anchor for whether an offer is worth taking.

@@ -1,11 +1,13 @@
 # Dynamo and the NVIDIA Serving Stack
 
-> **Version anchor (2026-08-26).** NVIDIA Dynamo **v1.4.1** (released 2026-08-22,
+> **Version anchor (2026-10-19).** NVIDIA Dynamo **v1.5.1** (released 2026-10-07,
 > `github.com/ai-dynamo/dynamo`), building on the **Dynamo 1.0** production-grade release
-> announced at GTC 2026. TensorRT-LLM **1.2.x** (official release-notes page, top entry
-> "TensorRT-LLM Release 1.2"). Triton NGC container **26.07-py3** (server release 2.71.0,
-> confirmed current at time of writing — a later monthly tag may exist by the time you read
-> this; always check `catalog.ngc.nvidia.com`). NVIDIA's own product page brands the
+> announced at GTC 2026. Dynamo v1.5.0 (2026-09-21) deprecated the KV Block Manager (KVBM)
+> with removal targeted for v1.7.0, removed the Go Endpoint Picker in favour of the Rust EPP,
+> and renamed AIConfigurator to AISimulate. TensorRT-LLM **1.2.x** (official release-notes
+> page, top entry "TensorRT-LLM Release 1.2"). Triton NGC container **26.09-py3** (server
+> release 2.73.0, 2026-09-30); NVIDIA ships a new monthly tag, so check
+> `catalog.ngc.nvidia.com` before pinning. NVIDIA's own product page brands the
 > classic server **"NVIDIA Dynamo-Triton"** — the Dynamo *platform* name applied to the
 > Triton *product* — a naming umbrella, not a replacement. Tag version-specific behavior
 > inline.
@@ -100,7 +102,7 @@ reason to exist.
 
 ## 4. Types / Architectures / Strategies
 
-Six deployment shapes, roughly ordered by operational cost:
+Seven deployment shapes; 4.1 to 4.5 are roughly ordered by operational cost, and 4.6 and 4.7 are packaging and integration options:
 
 ### 4.1 Single-node Triton
 One Triton process, one or a few models, `instance_group` handles GPU sharing. No routing
@@ -129,8 +131,8 @@ reaching for disaggregation.
 Separate worker pools for prefill and decode, connected by NIXL for KV-cache transfer. A
 request's prompt is processed on a prefill worker, the resulting KV cache is moved (RDMA,
 zero-copy, non-blocking) to a decode worker, and generation proceeds there. This is the
-shape that needs the SLO Planner, the KV Router, NIXL, and the KV Block Manager all working
-together — the highest operational cost, reserved for fleets large enough that
+shape that needs the SLO Planner, the KV Router, and NIXL all working
+together, plus engine-side KV offloading for host and disk tiers: the highest operational cost, reserved for fleets large enough that
 independently scaling prefill and decode capacity actually pays for itself.
 
 ### 4.6 NIM as a packaged unit
@@ -138,6 +140,19 @@ A `docker run`-able container with the engine, the model, and the OpenAI-compati
 already assembled. NIM can front either a single-node deployment or sit in front of a
 Dynamo fleet for multi-node — it is a packaging choice, orthogonal to whether the thing
 underneath is one GPU or a hundred.
+
+### 4.7 Triton models behind the Dynamo Frontend (`dynamo.triton`, experimental `[1.5]`)
+Dynamo v1.5.0 added a `dynamo.triton` backend, launched like every other runtime with
+`python -m dynamo.triton`, that serves models from a Triton model repository as Dynamo
+workers. Vision, embedding and other tensor-in, tensor-out models then sit behind the same
+Dynamo Frontend, discovery, health checks and metrics as the LLM workers, so one endpoint
+can serve both. It is experimental: interfaces and defaults may change without a
+deprecation cycle, and no prebuilt image ships for v1.5.0, so you build it from Dynamo's
+Triton runtime recipe on an `nvcr.io/nvidia/tritonserver` base. Use it when a pipeline
+needs an embedder or a vision encoder next to an LLM behind one front door; keep a plain
+Triton fleet for a large non-LLM estate that gains nothing from Dynamo routing.
+
+The seven shapes side by side:
 
 | Shape | Ops burden | Multi-node | KV-cache aware | Right for |
 |---|---|---|---|---|
@@ -147,6 +162,7 @@ underneath is one GPU or a hundred.
 | Dynamo aggregated | Medium | Yes | Yes | Most multi-node LLM deployments |
 | Dynamo disaggregated | High | Yes | Yes | Large fleets where P:D ratio must flex independently |
 | NIM | Low (packaging only) | Depends what's inside | Depends what's inside | Fast turnkey deploy, less tuning control |
+| `dynamo.triton` behind Dynamo Frontend | Medium, experimental | Yes | N/A for the Triton models | A few non-LLM models that must share an endpoint with Dynamo LLM workers |
 
 ---
 
@@ -278,12 +294,16 @@ fallback** (works anywhere, slowest), **NVMe-oF** (spilling to fast local storag
 non-blocking GPU-to-GPU handoff — no trip through host DRAM, no request-response
 round-trip, just a direct write into the decode worker's cache pool.
 
-### 6.3 KV Block Manager — the Memory Hierarchy
+### 6.3 KV-Cache Tiering and the KVBM Deprecation
 
 GPU HBM is the fastest and smallest place to hold KV cache; not every active or
-recently-used conversation fits. The **KV Block Manager** manages cache blocks across a
-tiered hierarchy — **GPU HBM → host DRAM → NVMe or object storage** — evicting cold blocks
-downward and promoting a block back to HBM (via NIXL) when a request needs it again. This
+recently-used conversation fits. The answer is a tiered hierarchy, **GPU HBM, then host
+DRAM, then NVMe or object storage**: cold blocks are evicted downward and a block is
+promoted back to HBM when a request needs it again. Dynamo shipped this as the **KV Block
+Manager (KVBM)**, which Dynamo v1.5.0 (2026-09-21) deprecated with removal targeted for
+v1.7.0. The v1.5.0 migration note points host and disk tiering at the inference engine's
+native KV offloading (vLLM, SGLang, TensorRT-LLM), and scopes cross-node KV sharing to the
+separate, early-stage KV Cache Runner project, which does not replace KVBM. This
 is the mechanism that makes a KV-cache "hit" possible even for a conversation that has been
 idle for minutes: the block did not have to survive in the fastest tier the whole time, it
 only had to survive *somewhere* Dynamo knows how to find and re-fetch quickly.
@@ -383,8 +403,8 @@ different nodes, with a cache transfer in between. `instance_group.count` gives 
 *copies* of the same, whole model — replication, not phase-splitting. Building
 disaggregation into Triton would mean the dynamic batcher tracking per-request phase state
 across a network hop and a live hand-off to a different server process — a different
-scheduler with a different unit of work, which is exactly what Dynamo's router, NIXL, and
-KV Block Manager are.
+scheduler with a different unit of work, which is exactly what Dynamo's router and NIXL
+are.
 
 ### 6.9 Benchmarking — AIPerf, GenAI-Perf, and Token-Level Metrics
 
@@ -457,7 +477,7 @@ built to close — see the war story in §10 for what that conflation costs in p
 | | Aggregated | Disaggregated |
 |---|---|---|
 | Worker does both phases | Yes | No — separate prefill/decode pools |
-| Needs NIXL / KV Block Manager | No | Yes |
+| Needs NIXL for KV transfer | No | Yes |
 | Scales P and D independently | No | Yes |
 | Extra failure mode | None beyond a normal worker | KV-transfer path (network) becomes a dependency |
 | Right for | Most multi-node deployments | Large fleets with a P:D ratio that shifts under real traffic |
@@ -543,9 +563,9 @@ the list only when you have the traffic and the measurements to justify it.
   a unified metrics surface in the process. Triton ships a new NGC container every month;
   it was not deprecated. Fix: read the release cadence and the actual documentation before
   treating a rebrand as an end-of-life signal.
-- **Ignoring the KV Block Manager's eviction policy under bursty idle periods.** A chat
-  application's users frequently pause mid-conversation for minutes; the KV Block Manager
-  evicts idle blocks down to host DRAM or further, and a burst of returning users all hit a
+- **Ignoring the KV offload tier's eviction policy under bursty idle periods.** A chat
+  application's users frequently pause mid-conversation for minutes; the engine's KV
+  offloading evicts idle blocks down to host DRAM or further, and a burst of returning users all hit a
   cold cache simultaneously, causing a latency spike that looks like a capacity problem but
   is actually a hierarchy-tier miss. Fix: size the DRAM tier for the realistic idle-return
   distribution, not just the hot-path working set, and watch cache-tier hit rates as their
@@ -563,7 +583,7 @@ the list only when you have the traffic and the measurements to justify it.
 | Dynamo SLO Planner | Autoscaler that sizes prefill and decode replica counts to hit TTFT/ITL latency targets. |
 | Dynamo KV Router | Routes requests by KV-cache overlap score instead of round-robin, minimizing redundant recompute. |
 | NIXL | Low-latency transfer library moving KV-cache blocks GPU-to-GPU across RDMA, RoCE, TCP, NVMe-oF or S3. |
-| Dynamo KV Block Manager | Manages KV-cache blocks across GPU HBM, host DRAM, and cold storage tiers. |
+| Dynamo KV Block Manager | Tiered KV-cache block manager (HBM, DRAM, cold storage); deprecated in v1.5.0, removal targeted for v1.7.0. |
 | Grove | Kubernetes CRD for topology-aware gang scheduling of multi-component disaggregated deployments. |
 | KAI Scheduler | Kubernetes scheduler performing gang scheduling and fair-share queuing beneath Grove. |
 
@@ -595,7 +615,7 @@ No. Triton was folded into NVIDIA's broader "Dynamo" product umbrella and rebran
 
 **Q: Why can't you just turn on disaggregated prefill/decode in Triton's config?**
 **Short:** Triton's dynamic batcher groups requests into one execute() call on one instance; it has no concept of splitting one request across two processes.
-Because the dynamic batcher's unit of work is a batch of requests dispatched to one model instance's `execute()` call, in one process, against one loaded engine — a decision made before any forward pass runs. Disaggregation needs a single request's own generation to run its prefill phase on one process/GPU and its decode phase on a different one, with a live KV-cache transfer across a network boundary in between — a different scheduling model entirely, not a batching-policy tweak. `instance_group.count` gives you more replicas of the same whole model, not a phase split. That capability is what Dynamo's router, NIXL, and KV Block Manager exist to provide.
+Because the dynamic batcher's unit of work is a batch of requests dispatched to one model instance's `execute()` call, in one process, against one loaded engine — a decision made before any forward pass runs. Disaggregation needs a single request's own generation to run its prefill phase on one process/GPU and its decode phase on a different one, with a live KV-cache transfer across a network boundary in between — a different scheduling model entirely, not a batching-policy tweak. `instance_group.count` gives you more replicas of the same whole model, not a phase split. That capability is what Dynamo's router and NIXL exist to provide.
 
 **Q: What is `trtllm-serve`, and why would you use it over Triton for an LLM?**
 **Short:** trtllm-serve is TensorRT-LLM's own OpenAI-compatible server with no Triton process in the request path.
@@ -617,9 +637,9 @@ It tokenizes the request into fixed-size blocks and checks each candidate worker
 **Short:** NIXL moves KV-cache blocks GPU-VRAM-to-GPU-VRAM directly, non-blockingly, without a host round-trip.
 A normal RPC framework serializes data through host memory and a request/response cycle, which is far too slow and blocking for moving gigabytes of live KV cache between GPUs on every prefill-to-decode handoff. NIXL instead exposes each worker's registered KV-cache memory as addressable blocks and issues direct RDMA read/write operations against them, so the transfer is zero-copy, GPU-to-GPU, and non-blocking — the source GPU keeps serving other requests while the transfer happens. It supports RDMA/InfiniBand, RoCE via UCX, a TCP fallback, NVMe-oF, and an S3-compatible backend, so the same API works whether the destination is another GPU on the rack or a cold storage tier.
 
-**Q: What does the KV Block Manager's memory hierarchy actually contain, top to bottom?**
-**Short:** GPU HBM at the top, then host DRAM, then NVMe or object storage as the coldest tier.
-GPU HBM holds the hottest, actively-used KV cache; blocks that go cold are evicted down to host DRAM, and the coldest blocks can spill further to NVMe or S3-compatible object storage via NIXL's corresponding backends. A block is promoted back to HBM on demand when a request needs it again, which is what lets a conversation that paused for minutes still get a cache hit instead of a full recompute — the block only had to survive somewhere reachable, not stay resident in the fastest tier the whole time. Size the DRAM tier for your realistic idle-return traffic pattern, not just the always-hot working set.
+**Q: What does a Dynamo deployment's KV-cache memory hierarchy contain, top to bottom, now that KVBM is deprecated?**
+**Short:** GPU HBM, then host DRAM, then NVMe or object storage; since Dynamo v1.5.0 the engine's native KV offloading runs the lower tiers, not KVBM.
+Dynamo v1.5.0 deprecated the KV Block Manager (removal targeted for v1.7.0) and points host and disk tiering at the engine's native KV offloading. The tiers are unchanged. GPU HBM holds the hottest, actively-used KV cache; blocks that go cold are evicted down to host DRAM, and the coldest blocks can spill further to NVMe or S3-compatible object storage via NIXL's corresponding backends. A block is promoted back to HBM on demand when a request needs it again, which is what lets a conversation that paused for minutes still get a cache hit instead of a full recompute: the block only had to survive somewhere reachable, not stay resident in the fastest tier the whole time. Size the DRAM tier for your realistic idle-return traffic pattern, not just the always-hot working set.
 
 **Q: What does the SLO Planner actually scale, and on what signal?**
 **Short:** It scales prefill and decode replica counts independently, targeting TTFT and inter-token-latency SLAs directly.
@@ -639,7 +659,7 @@ The Open Inference Protocol (OIP) is the current name for what was the KServe v2
 
 **Q: When is aggregated Dynamo the better choice over disaggregated, even at multi-node scale?**
 **Short:** When traffic doesn't stress a fixed prefill:decode ratio enough to justify NIXL, the Planner, and a new failure mode.
-Aggregated Dynamo — KV-aware routing across a fleet where each worker still does both prefill and decode — is the better choice whenever the traffic's prefill:decode balance is roughly stable and a fixed replica ratio per worker pool isn't leaving throughput on the table. Disaggregation earns its cost (NIXL as a new dependency, the Planner, the KV Block Manager, a network-crossing failure mode) only when prefill and decode genuinely need to scale at different rates under real traffic. Start aggregated, measure whether one phase is starving the other, and disaggregate only once that measurement justifies it.
+Aggregated Dynamo — KV-aware routing across a fleet where each worker still does both prefill and decode — is the better choice whenever the traffic's prefill:decode balance is roughly stable and a fixed replica ratio per worker pool isn't leaving throughput on the table. Disaggregation earns its cost (NIXL as a new dependency, the Planner, engine-side KV offload tiers, a network-crossing failure mode) only when prefill and decode genuinely need to scale at different rates under real traffic. Start aggregated, measure whether one phase is starving the other, and disaggregate only once that measurement justifies it.
 
 **Q: How would you benchmark whether disaggregation is worth adopting for your workload, concretely?**
 **Short:** Compare TTFT and ITL under realistic concurrency on aggregated versus disaggregated, using AIPerf against real token-length distributions.
@@ -724,6 +744,14 @@ ensembles, ragged batching, and unified multi-framework metrics surface for no b
   traffic to reuse. Disaggregation is deliberately **not** adopted yet — the team measures
   first with AIPerf and finds prefill and decode are not yet contending badly enough on the
   current traffic mix to justify NIXL, the Planner, and Grove.
+
+**Considered and deferred: `dynamo.triton`.** Dynamo v1.5.0's experimental `dynamo.triton`
+backend could put the 40 CV and tabular models behind the same Dynamo Frontend as the LLMs,
+giving one endpoint and one metrics surface. The team keeps them on the Triton fleet: the
+backend is experimental with no prebuilt image, those models gain nothing from KV-aware
+routing, and moving 40 models to save one ingress would repeat the whole-fleet mistake above.
+They revisit it only if an LLM pipeline starts calling one of the embedders on every request,
+where sharing a front door with the LLM would remove a network hop.
 
 **Measured effect of the routing change alone.** Before: round-robin across 6 chat-assistant
 replicas meant a returning user's follow-up turn had roughly an 83% (5-in-6) chance of

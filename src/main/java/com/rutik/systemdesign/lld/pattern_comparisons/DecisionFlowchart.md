@@ -335,9 +335,9 @@ The last node in every decision tree above should be the same question: **does t
 | Mediator | Spring `ApplicationEventPublisher`; Guava `EventBus`; Spring Integration; Vert.x event bus | Coordination rules that are themselves domain logic |
 | Memento | Records; `UndoManager`; Jackson or Kryo deep copy; Axon or EventStoreDB snapshots | Delta-based history with domain-specific compaction |
 | Observer | Spring `@EventListener` and `@TransactionalEventListener`; Guava `EventBus`; `java.util.concurrent.Flow`; Reactor | A tight in-object callback where a bus would be overkill |
-| State | `enum` with per-constant bodies; sealed interfaces plus `switch` patterns; Spring Statemachine; Temporal | The FSM is small, in-memory, and needs no durability |
+| State | `enum` with per-constant bodies; sealed interfaces plus `switch` patterns; Temporal; AWS Step Functions | The FSM is small, in-memory, and needs no durability |
 | Strategy | `java.util.function`, `Comparator`, `ServiceLoader`; Spring `Map<String, Strategy>` injection | Always fine to write — this is the cheapest pattern to own |
-| Template Method | `AbstractList`, `HttpServlet`; Spring `JdbcTemplate` and Batch; JUnit 5 lifecycle | Your own algorithm skeleton, and only when a callback will not do |
+| Template Method | `AbstractList`, `HttpServlet`; Spring `JdbcTemplate` and Batch; JUnit 6 lifecycle | Your own algorithm skeleton, and only when a callback will not do |
 | Visitor | Sealed types plus `switch` patterns (Java 21+); `FileVisitor`; ASM; ANTLR generated visitors | A closed hierarchy predating sealed types |
 
 ---

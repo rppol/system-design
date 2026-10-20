@@ -347,7 +347,7 @@ public class PaymentService {
   `KafkaTransactionManager` are interchangeable strategies; `@Transactional` resolves the right one.
 - **Spring Security `AuthenticationProvider`**: `DaoAuthenticationProvider`, `LdapAuthenticationProvider`,
   `JwtAuthenticationProvider` are strategies for the `AuthenticationManager.authenticate()` template.
-- **Spring MVC `HttpMessageConverter`**: `MappingJackson2HttpMessageConverter`, `StringHttpMessageConverter`,
+- **Spring MVC `HttpMessageConverter`**: `JacksonJsonHttpMessageConverter`, `StringHttpMessageConverter`,
   `ByteArrayHttpMessageConverter` — Spring selects the right converter strategy based on `Accept` header.
 - **Hibernate `IdentifierGenerator`** (`org.hibernate.id`): `SequenceStyleGenerator`, `TableGenerator`,
   `UUIDGenerator` — pluggable strategy for primary key generation.
@@ -470,7 +470,7 @@ public class PaymentController {
         return paymentService.process(req);  // controller knows nothing about strategies
     }
 }
-// PaymentService delegates to PaymentStrategySelector — tested with @MockBean, no HTTP layer.
+// PaymentService delegates to PaymentStrategySelector — tested with @MockitoBean, no HTTP layer.
 ```
 
 ---

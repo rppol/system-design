@@ -132,7 +132,7 @@ def read_url(url: str) -> str:
 
 
 # CodeAgent with sandboxed execution
-model = LiteLLMModel(model_id="anthropic/claude-sonnet-5")
+model = LiteLLMModel(model_id="anthropic/claude-sonnet-5-5")
 
 code_agent = CodeAgent(
     tools=[web_search, read_url],
@@ -376,7 +376,7 @@ Yes for narrow tasks with proper sandboxing. The minimalist code base is auditab
 - CodeAgent with tools: `read_csv(path)`, `plot(data, type)`, `save_to_pdf(plots)`
 - `additional_authorized_imports=["pandas", "numpy", "matplotlib"]`
 - `executor_type="e2b"` (free tier — limited concurrency but no infrastructure)
-- Model: Claude Haiku 4.5 (cheap, fast enough for educational use)
+- Model: Claude Haiku 5.5 ($0.10/$0.50 per 1M tokens on prompts up to 100K; fast enough for educational use)
 - max_steps=8
 
 **Example interaction**:

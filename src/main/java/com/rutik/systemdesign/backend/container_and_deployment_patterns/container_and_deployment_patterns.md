@@ -196,6 +196,13 @@ exact incident. Note also that 75% is a ceiling, not a reservation: the 25% rema
 budget for everything the JVM allocates outside the heap, and a service with heavy Netty
 direct buffers may need to drop to 60–65% rather than assume the default is safe.
 
+The same cgroup limits also pick the garbage collector. JDK 25 LTS still selects SerialGC when it
+sees one CPU or less than 1,792 MB of memory, so a pod with `limits.cpu: 1` or `limits.memory: 1Gi`
+runs a single-threaded stop-the-world collector unless the image sets `-XX:+UseG1GC`. JDK 27
+(September 15, 2026) removes that split with JEP 523, which makes G1 the default in all
+environments, and JEP 534, which turns on compact object headers by default (12 to 8 bytes per
+object; `-XX:-UseCompactObjectHeaders` turns them off). On JDK 25, set the collector explicitly.
+
 ### Kubernetes Deployment with Rolling Update
 
 ```yaml
@@ -277,8 +284,8 @@ spec:
           # Graceful shutdown: stop accepting new requests, drain in-flight
           lifecycle:
             preStop:
-              exec:
-                command: ["/bin/sleep", "10"]  # wait for iptables to propagate
+              sleep:
+                seconds: 10  # kubelet sleeps; distroless images have no /bin/sleep for exec
 ```
 
 **What the numbers are telling you.** "Every probe is really a stopwatch — `failureThreshold × periodSeconds` is the only number that matters, and each of the three probes is buying a different guarantee with it."
@@ -385,6 +392,40 @@ spec:
         topic: order-events
         lagThreshold: "100"  # 1 replica per 100 messages of lag
 ```
+
+On Kubernetes 1.37+ the `HPAScaleToZero` gate is beta and on by default, so a plain HPA can hold a
+workload at zero when at least one metric is an object or external metric. The external metric
+still needs an adapter (Prometheus Adapter or KEDA's metrics server) to publish the lag:
+
+```yaml
+# Native HPA scale-to-zero (Kubernetes 1.37+)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-processor-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-processor
+  minReplicas: 0           # rejected by the API server if every metric is type Resource
+  maxReplicas: 30
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: kafka_consumergroup_lag
+          selector:
+            matchLabels:
+              consumergroup: order-processor-group
+        target:
+          type: AverageValue
+          averageValue: "100"
+```
+
+While the HPA holds the workload at zero it sets the `ScaledToZero` status condition to `True`. A
+Deployment someone set to `replicas: 0` by hand stays paused; the HPA wakes only a workload it
+scaled down itself.
 
 ### Blue-Green Deployment
 
@@ -548,7 +589,9 @@ Do NOT set CPU limits on JVM applications unless absolutely necessary — CFS (C
 
 **Memory limit set too low causing OOM**: A team set `memory: limit: 512Mi` but did not set `MaxRAMPercentage`. The JVM defaulted to allocating 25% of total host RAM (e.g., 8GB) for heap = 2GB heap in a 512Mi container. The container was OOM-killed repeatedly. Fix: always set `-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport` on containerized JVMs. This tells the JVM to use 75% of the container's memory limit for heap, not the host's total RAM.
 
-**No preStop sleep with rolling update**: During a rolling update, old pods received connection refused errors for 2-3 seconds after shutdown. iptables rules from kube-proxy take time to propagate to load balancers. The pod stopped accepting connections before all load balancers were updated. Fix: add `lifecycle.preStop.exec: ["/bin/sleep", "10"]` — this sleeps 10 seconds before SIGTERM, giving iptables propagation time.
+**HPA scale-to-zero on CPU alone**: A team set `minReplicas: 0` on an HPA whose only metric was CPU utilization, and the API server rejected the object. CPU and memory come from running pods, so at zero replicas there is nothing to measure and no signal to scale back up. Fix: drive the 0-to-1 step from an object or external metric that exists without the pods, such as broker lag or queue depth. For HTTP services, add a buffering layer (KEDA HTTP add-on, Knative activator), because a Service does not hold requests while no pod is ready.
+
+**No preStop sleep with rolling update**: During a rolling update, old pods received connection refused errors for 2-3 seconds after shutdown. iptables rules from kube-proxy take time to propagate to load balancers. The pod stopped accepting connections before all load balancers were updated. Fix: add `lifecycle.preStop.sleep.seconds: 10` (stable since Kubernetes 1.34, runs in the kubelet so it works on distroless images with no shell or `/bin/sleep`), which delays SIGTERM by 10 seconds and gives iptables propagation time.
 
 **Blue-green with database migrations**: A team deployed a new service version with additive DB migrations (new columns) alongside the blue-green deployment. After switching to green, they ran `ALTER TABLE` to remove the columns that blue required. In the next incident, they rolled back to blue — but blue was reading columns that no longer existed. Fix: use expand-contract pattern for DB migrations; never run destructive migrations until the old version is fully decommissioned.
 
@@ -613,14 +656,14 @@ HPA (Horizontal Pod Autoscaler) queries the metrics API (CPU from metrics-server
 The 12-factor app is a methodology for building cloud-native applications. The most critical factors for containerized Java services: Factor III (Config via environment variables — no config in image; inject via Kubernetes ConfigMap/Secret), Factor VI (Processes — stateless; store session in Redis, not in-memory), Factor IX (Disposability — fast startup for rapid scaling; graceful shutdown for zero-downtime deploys), Factor X (Dev/Prod parity — use Testcontainers to have dev/test match production infrastructure), Factor XI (Logs as streams — write to stdout/stderr; let the container platform capture and ship logs). These directly affect deployment reliability, scalability, and operability.
 
 **Q: What can KEDA scale on that a standard Kubernetes HPA cannot?**
-**Short:** KEDA scales on external event-source metrics like Kafka lag or queue depth, and supports true scale-to-zero, which HPA cannot do.
+**Short:** KEDA reads event sources like Kafka lag or queue depth through built-in scalers, while plain HPA needs a hand-wired external metrics adapter to see them.
 
-KEDA scales on external event-source metrics like Kafka consumer lag or SQS queue depth, while standard HPA is limited to metrics-server CPU/memory or a manually wired custom metrics adapter. The `ScaledObject` in §6 scales `order-processor` directly on Kafka consumer lag with `lagThreshold: "100"`, adding roughly one replica per 100 messages of lag up to `maxReplicaCount: 30`, a signal standard HPA cannot see without bolting on a Prometheus Adapter and hand-writing a custom metrics query. KEDA also supports `minReplicaCount: 0`, true scale-to-zero, which vanilla HPA cannot do at all since its floor is 1 replica. Under the hood, KEDA actually generates and manages a standard HPA object once replicas are above zero — it is a metrics adapter and scale-to-zero controller layered on top of HPA, not a replacement for it.
+KEDA scales on external event-source metrics like Kafka consumer lag or SQS queue depth, while standard HPA is limited to metrics-server CPU/memory or a manually wired custom metrics adapter. The `ScaledObject` in §6 scales `order-processor` directly on Kafka consumer lag with `lagThreshold: "100"`, adding roughly one replica per 100 messages of lag up to `maxReplicaCount: 30`, a signal standard HPA cannot see without bolting on a Prometheus Adapter and hand-writing a custom metrics query. Both can scale to zero: Kubernetes 1.37 (August 2026) enables the `HPAScaleToZero` beta by default, so HPA accepts `minReplicas: 0` when it has at least one object or external metric, and KEDA's `minReplicaCount: 0` also works on clusters older than 1.37. Under the hood, KEDA actually generates and manages a standard HPA object once replicas are above zero — it is a metrics adapter and scale-to-zero controller layered on top of HPA, not a replacement for it.
 
-**Q: How does KEDA achieve scale-to-zero for a Kafka consumer, and why does that matter for cost?**
-**Short:** KEDA polls Kafka lag externally at zero replicas, avoiding compute cost during idle periods until lag crosses a trigger threshold.
+**Q: Why can a Kafka consumer scale to zero on lag but not on CPU, and why does that matter for cost?**
+**Short:** Lag lives on the broker and stays readable with zero pods running; CPU exists only on running pods, so a CPU-only autoscaler has no signal to wake from zero.
 
-KEDA keeps a lightweight external poller running even at zero replicas, watching Kafka lag directly, then creates the first pod once lag crosses the trigger threshold. Below `minReplicaCount`, no HPA object drives scaling at all because HPA needs at least one running pod to sample metrics from; KEDA's operator instead polls the broker's consumer group offsets independently of any running pod, so a `ScaledObject` with `minReplicaCount: 0` can run zero pods, zero CPU and memory cost, during idle periods like overnight batch windows. This matters most for bursty, non-latency-critical consumers: a nightly reconciliation job that runs 20 minutes and sits idle the other 23.6 hours pays for compute only during that window instead of 1-3 replicas running around the clock. The tradeoff is cold-start latency — the first message in a new burst waits for a pod to schedule and the JVM to boot before it is consumed, so scale-to-zero is wrong for anything with a tight end-to-end SLA.
+The 0-to-1 step needs a metric that exists without the workload. Consumer group lag is stored by the broker, so a controller can read it while no consumer runs and create the first pod once lag crosses the threshold. CPU and memory are measured on running pods, which is why Kubernetes 1.37 accepts HPA `minReplicas: 0` only when at least one metric is an object or external metric, and rejects a CPU-only HPA. Two controllers can own that step: the native HPA on 1.37+ reading lag through an external metrics adapter, or the KEDA operator, which polls the consumer group offsets itself and also works on older clusters. Either way, the consumer runs zero pods and zero CPU and memory cost during idle periods like overnight batch windows. This matters most for bursty, non-latency-critical consumers: a nightly reconciliation job that runs 20 minutes and sits idle the other 23.6 hours pays for compute only during that window instead of 1-3 replicas running around the clock. The tradeoff is cold-start latency: the first message in a new burst waits for a pod to schedule and the JVM to boot before it is consumed, so scale-to-zero is wrong for anything with a tight end-to-end SLA.
 
 **Q: What happens when a PodDisruptionBudget makes a voluntary node drain impossible to complete?**
 **Short:** The drain blocks indefinitely because the eviction API refuses any eviction that would violate the PDB's minAvailable.

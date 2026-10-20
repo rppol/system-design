@@ -293,14 +293,14 @@ DistilBERT — 40% smaller, 60% faster, 97% of BERT-base's GLUE score.*
 
 ### PyTorch Dynamic Quantization (PTQ)
 
-**API status (checked July 2026).** Eager-mode quantization lives at
+**API status (checked October 2026).** Eager-mode quantization lives at
 `torch.ao.quantization`; the pre-1.13 `torch.quantization` alias still forwards to it but
 is legacy. PyTorch's own docs now say quantization development has been centralized in
 the separate **torchao** package, and that eager mode (`torch.ao.quantization.quantize`,
 `quantize_dynamic`) and FX graph mode should migrate to `torchao.quantization.quantize_`
 and the pt2e API respectively — with `torch.ao.quantization` slated for deletion "in 2.10
 if there are no blockers, or the earliest PyTorch version until all the blockers are
-cleared." That deletion has slipped: the current stable docs (2.13) still carry the full
+cleared." That deletion has slipped: the 2.14 stable docs (2.14.1, 2026-09-30) still carry the full
 `torch.ao.quantization` reference behind that banner, so the eager-mode code below runs
 today. Treat it as a maintenance path and reach for torchao on new work — and re-check
 the banner before you build anything long-lived on it, because the removal is scheduled

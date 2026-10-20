@@ -80,7 +80,7 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `backend_security_owasp/` | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 |
-| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation; `passkeys_and_authn_frontier.md` | 40 |
+| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation; `authorization_frontier.md` (PAR, RAR, token exchange, CIBA, SD-JWT, SCIM, agent auth) | 40 |
 
 ### Phase 7 — Testing & Quality
 

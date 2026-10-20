@@ -38,8 +38,8 @@ actually happens.
 
 This file assumes JDK 25 (current LTS) and covers three JFR JEPs that shipped
 in that release — cooperative sampling, method timing/tracing, and
-experimental CPU-time profiling — plus a redaction JEP targeted for JDK 27
-(not yet shipped; GA 2026-09-15).
+experimental CPU-time profiling, plus JEP 536 redaction, delivered in JDK 27
+(GA 2026-09-15).
 
 ---
 
@@ -507,17 +507,20 @@ repository for the event volume you actually produce, not just the time
 window you want.
 
 **4. A `.jfr` file attached to a support ticket containing a database
-password.** Today, a recording can capture the JVM's command line,
-environment variables, and system properties verbatim — including a
-`-Ddb.password=...` argument or a secret passed via environment variable
-at startup. Teams routinely attach `.jfr` files to tickets and share them
-outside the security boundary without realizing what is embedded. **JEP
-536, targeted for JDK 27 (not yet shipped — GA 2026-09-15)**, adds
-default redaction of sensitive command-line arguments and the initial
-values of environment variables and system properties, controllable via
-`-XX:FlightRecorderOptions:redact-key=+<filter>` and
-`-XX:FlightRecorderOptions:redact-argument=+<filter>`. Until that ships,
-treat every `.jfr` file as containing secrets and handle it accordingly.
+password.** Before JDK 27, a recording captures the JVM's command
+line (`jdk.JVMInformation`), environment variables
+(`jdk.InitialEnvironmentVariable`), and system properties
+(`jdk.InitialSystemProperty`) verbatim, including a `-Ddb.password=...`
+argument. Teams attach `.jfr` files to tickets and share them outside the
+security boundary without knowing what is embedded. JEP 536 (JDK 27)
+redacts these by default, writing `[REDACTED]` for any key or argument
+that matches the default glob filters (`*password*`, `*passwd*`, `*pwd*`,
+`*secret*`, `*token*`, `*api*key*`, `*credential*`, and others). The
+filters match names, not values: an environment variable called `DB_PASS`
+matches none of them and is recorded in clear. Add your own names with
+`-XX:FlightRecorderOptions:redact-key=+*pass*` and confirm what was
+redacted with `-Xlog:jfr+redact=debug`. On JDK 26 and earlier, treat every
+`.jfr` file as containing secrets.
 
 **5. `profile.jfc` left on permanently on a latency-critical service.**
 `profile.jfc`'s ~2% overhead is fine for a bounded diagnostic window; left
@@ -586,10 +589,10 @@ Starting `JFR.start` in response to a page captures whatever the JVM is doing fr
 
 A repository bounded by both `maxage` and `maxsize` evicts chunks whichever limit is hit first — a high event-volume service under `profile.jfc` can roll past a small `maxsize` in minutes, discarding chunks the time-based window would have kept. The practical fix is to size `maxsize` for the actual event volume the settings profile produces, not just for the time window you intend to retain.
 
-**Q: A `.jfr` file was attached to a support ticket. What might be exposed, and is there a fix coming?**
-**Short:** JVM command-line arguments and initial environment/system-property values can leak secrets like a database password embedded in the recording.
+**Q: A `.jfr` file was attached to a support ticket. What might be exposed, and what does JDK 27 redact?**
+**Short:** Startup args, env vars, and system properties can hold secrets; JDK 27 redacts only names matching its default filters, such as any name containing password.
 
-A recording can capture the process's command line, environment variables, and system properties as they were at startup, and a secret passed as `-Ddb.password=...` or via an environment variable lands in the file verbatim. JEP 536, targeted for JDK 27 (not yet released — GA is 2026-09-15), adds default redaction of sensitive arguments and property/environment initial values, with explicit opt-in control via `-XX:FlightRecorderOptions:redact-key=+<filter>` and `redact-argument=+<filter>`. Until that ships, every `.jfr` file should be handled as if it may contain secrets before it leaves a trusted boundary.
+A recording captures the process's command line (`jdk.JVMInformation`), environment variables (`jdk.InitialEnvironmentVariable`), and system properties (`jdk.InitialSystemProperty`) as they were at startup. Before JDK 27, a secret passed as `-Ddb.password=...` or through an environment variable lands in the file verbatim. JEP 536 (JDK 27, GA 2026-09-15) turns redaction on by default and writes `[REDACTED]` in place of the value. The default `redact-key` filters are `*api*key*`, `*auth*`, `*client*secret*`, `*credential*`, `*jaas*config*`, `*passphrase*`, `*passwd*`, `*password*`, `*private*key*`, `*pwd*`, `*secret*`, and `*token*`; `redact-argument` uses the same list without `*auth*` (it would match "author"), plus `-*password *` forms that also redact the next argument. The filters match names, so `DB_PASS` slips through: add it with `-XX:FlightRecorderOptions:redact-key=+*pass*` (a leading `+` adds to the defaults, `none` disables, `@file` loads one filter per line) and check the result with `-Xlog:jfr+redact=debug`. JDK 27 also drops command-line arguments from the `jdk.SystemProcess` event (JDK-8384164).
 
 **Q: A custom JFR event is disabled in the active recording, but production CPU usage is still elevated. What's the likely cause?**
 **Short:** Expensive field population running outside the `shouldCommit()` guard still costs CPU even when the event itself is disabled.
@@ -665,9 +668,10 @@ Execution sampling under `default.jfc` runs cheaply across every thread and surf
   in-JVM window — a dump that lands on ephemeral pod storage needs to be
   shipped to durable storage (object storage, a sidecar upload) before the
   pod recycles, per [JVM in Containers](jvm_in_containers.md).
-- **Treat every `.jfr` file as containing secrets** until JEP 536 ships in
-  JDK 27 — scrub or restrict access before attaching one to a ticket, and
-  do not assume redaction is already happening.
+- **Treat every `.jfr` file from JDK 26 or earlier as containing secrets**,
+  and restrict access before attaching one to a ticket. On JDK 27, add your
+  own secret names to `redact-key` (the default filters miss names such as
+  `DB_PASS`) and check `-Xlog:jfr+redact=debug` once per service.
 - **Reserve `profile.jfc` for time-boxed investigations**, and set a
   reminder or alert if it has been running longer than the investigation
   window intended.

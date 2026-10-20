@@ -304,7 +304,7 @@ class DynamicBatchingServer:
     Accumulates incoming requests into batches for efficient GPU/CPU inference.
     Fires the batch when max_batch_size is reached or max_wait_ms expires.
 
-    This is the core pattern used by Triton Inference Server, TorchServe,
+    This is the core pattern used by Triton Inference Server, Ray Serve (`@serve.batch`),
     and TF Serving for high-throughput ML serving.
     """
 

@@ -253,8 +253,8 @@ exception rather than the default.
 
 Before writing any code in this section, the `claude-api` skill was loaded for
 current model IDs and parameter shapes — `thinking: {"type": "adaptive"}` plus
-`output_config.effort` is the current adaptive-thinking surface on Claude Opus 5
-and Claude Sonnet 5; `budget_tokens` is removed on both. The two functions below
+`output_config.effort` is the adaptive-thinking surface on Claude Opus 5.5
+and Claude Sonnet 5.5; `budget_tokens` is removed on both. The two functions below
 implement the **identical task** — resolve a refund request by looking up an
 order and deciding approve/deny — twice. `react_refund_agent()` is a classic
 hand-rolled ReAct loop with a prompted `Thought:` field. `thin_refund_agent()`
@@ -302,7 +302,7 @@ FINISH: approve <order_id> | deny <order_id> <reason>
 Refunds under $50 are auto-approved if the order was delivered."""
 
 
-def react_refund_agent(order_id: str, model: str = "claude-sonnet-5") -> str:
+def react_refund_agent(order_id: str, model: str = "claude-sonnet-5-5") -> str:
     messages = [{"role": "user", "content": f"Refund request for order {order_id}."}]
     for _ in range(6):
         resp = client.messages.create(
@@ -342,18 +342,18 @@ exactly: approve <order_id> | deny <order_id> <reason>."""
 
 
 def _price_usd(usage, model: str) -> float:
-    # List pricing (2026-09-04): Sonnet 5 $2.00 / $10.00 per 1M in/out,
-    # Opus 5 $5.00 / $25.00; thinking tokens bill at the OUTPUT rate.
+    # List pricing (2026-10-19): Sonnet 5.5 $2.00 / $10.00 per 1M in/out,
+    # Opus 5.5 $4.00 / $20.00; thinking tokens bill at the OUTPUT rate.
     # See Agent Cost & Token Budget §4.1 for the full pricing table.
-    rates = {"claude-sonnet-5": (2.00e-6, 10.00e-6),
-             "claude-opus-5": (5.00e-6, 25.00e-6)}
+    rates = {"claude-sonnet-5-5": (2.00e-6, 10.00e-6),
+             "claude-opus-5-5": (4.00e-6, 20.00e-6)}
     rate_in, rate_out = rates[model]
     return usage.input_tokens * rate_in + usage.output_tokens * rate_out
 
 
 def thin_refund_agent(
     order_id: str,
-    model: str = "claude-sonnet-5",
+    model: str = "claude-sonnet-5-5",
     max_steps: int = 6,
     max_cost_usd: float = 0.05,
 ) -> str:
@@ -533,7 +533,7 @@ Final Answer: <answer>
 """
 
 response = client.messages.create(
-    model="claude-opus-5",
+    model="claude-opus-5-5",
     max_tokens=4096,
     thinking={"type": "adaptive"},      # native search is ALREADY on
     system=BROKEN_SYSTEM,               # ...and now prompted to redo it in text
@@ -560,7 +560,7 @@ FIXED_SYSTEM = """Resolve the request. Call tools as needed, then answer
 with exactly: approve <id> | deny <id> <reason>."""
 
 response = client.messages.create(
-    model="claude-opus-5",
+    model="claude-opus-5-5",
     max_tokens=4096,
     thinking={"type": "adaptive"},
     output_config={"effort": "high"},   # tune depth here, not with prose
@@ -588,7 +588,7 @@ rate) can run the call all the way to `max_tokens` on their own.
 # BROKEN: no ceiling on how much a single step may think, and no routing
 # by step difficulty.
 resp = client.messages.create(
-    model="claude-opus-5", max_tokens=32000,
+    model="claude-opus-5-5", max_tokens=32000,
     thinking={"type": "adaptive"},
     output_config={"effort": "max"},      # every step, regardless of difficulty
     tools=tools, messages=messages,
@@ -610,7 +610,7 @@ this shows only the thinking-specific half.
 EFFORT_BY_STEP = {"classify": "low", "tool_call": "medium", "final_decision": "high"}
 
 with client.beta.messages.stream(
-    model="claude-opus-5", max_tokens=32000,
+    model="claude-opus-5-5", max_tokens=32000,
     thinking={"type": "adaptive"},
     output_config={
         "effort": EFFORT_BY_STEP[step_type],

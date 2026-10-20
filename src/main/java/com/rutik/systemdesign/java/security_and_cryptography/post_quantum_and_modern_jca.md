@@ -2,11 +2,11 @@
 
 ## 1. Concept Overview
 
-Every TLS session, VPN tunnel, and encrypted archive built on RSA or elliptic-curve key exchange today is protected by a hardness assumption — factoring or discrete log — that a large enough fault-tolerant quantum computer would break in polynomial time via Shor's algorithm. No such machine exists yet. That does not make this a problem for 2035. An adversary who **records encrypted traffic today and decrypts it once the machine arrives** — "harvest now, decrypt later" — needs no quantum computer at capture time, only patience and disk space. Any payload whose confidentiality must outlive the hardware that protected it in transit is already exposed, right now, on 2026-08-26.
+Every TLS session, VPN tunnel, and encrypted archive built on RSA or elliptic-curve key exchange today is protected by a hardness assumption, factoring or discrete log, that a large enough fault-tolerant quantum computer would break in polynomial time via Shor's algorithm. No such machine exists yet. That does not make this a problem for 2035. An adversary who **records encrypted traffic today and decrypts it once the machine arrives**: "harvest now, decrypt later", needs no quantum computer at capture time, only patience and disk space. Any payload whose confidentiality must outlive the hardware that protected it in transit is already exposed.
 
-That reframes the migration as a **data-lifetime** problem, not a **calendar** problem. A 2FA session token that expires in 10 minutes is safe to protect with plain ECDHE for another decade — nobody profits from decrypting it in 2040. A patient's genomic record, a state secret, a 30-year mortgage contract, or an encrypted backup an enterprise is required to retain for seven years is a different animal: if it is transiting a network today over classical key exchange, its confidentiality window has already started leaking. This module covers the JDK's answer — `javax.crypto.KEM`, ML-KEM, ML-DSA, the new `KDF` API, and the hybrid TLS 1.3 groups landing in JDK 27 — and, just as importantly, how to write Java code today that can adopt them without a rewrite.
+That reframes the migration as a **data-lifetime** problem, not a **calendar** problem. A 2FA session token that expires in 10 minutes is safe to protect with plain ECDHE for another decade; nobody profits from decrypting it in 2040. A patient's genomic record, a state secret, a 30-year mortgage contract, or an encrypted backup an enterprise is required to retain for seven years is a different animal: if it is transiting a network today over classical key exchange, its confidentiality window has already started leaking. This module covers the JDK's answer, `javax.crypto.KEM`, ML-KEM, ML-DSA, the new `KDF` API, and the hybrid TLS 1.3 groups delivered in JDK 27 (JEP 527), and, just as importantly, how to write Java code today that can adopt them without a rewrite.
 
-The engineering mistake this module is written to prevent is not "picking the wrong algorithm" — the JDK, NIST, and the industry have already converged on a reasonable answer for that. The mistake is treating this as a single migration event scheduled for whenever JEP 527 ships, rather than as groundwork that should already be underway. By the time a JDK finally ships the hybrid TLS groups, the services that spent the intervening time removing hardcoded algorithm strings and fixed-size buffers adopt it in an afternoon; the services that didn't spend that time face a rewrite under time pressure, often the same week a security questionnaire or a compliance deadline forces the question.
+The engineering mistake this module is written to prevent is not "picking the wrong algorithm"; the JDK, NIST, and the industry have already converged on a reasonable answer for that. The mistake is treating this as a single migration event scheduled for the day the fleet reaches a JDK with JEP 527, rather than as groundwork that should already be underway. By the time the fleet's JDK carries the hybrid TLS groups, the services that spent the intervening time removing hardcoded algorithm strings and fixed-size buffers adopt it in an afternoon; the services that didn't spend that time face a rewrite under time pressure, often the same week a security questionnaire or a compliance deadline forces the question.
 
 **Signatures do not carry the same urgency, and that asymmetry is worth internalizing before anything else in this file.** A signature's job is to resist forgery *at the moment it is verified* — an attacker who breaks ECDSA in 2040 cannot retroactively forge a signature you verified in 2026 and already acted on. A key exchange's job is to protect data whose secrecy must hold for the data's entire useful life, which can span decades. So: prioritize key-exchange migration for anything long-lived, and treat signature migration as important but less time-pressured — with the narrow exception of long-lived code-signing and firmware-signing roots, where a forged signature decades from now would still be catastrophic today.
 
@@ -42,7 +42,7 @@ This is also a useful way to explain in one sentence *why* the public and privat
 - **Signature migration and key-exchange migration are different projects with different clocks**, per §1's asymmetry. Don't let a KEM rollout schedule dictate a code-signing rollout schedule, or vice versa.
 - **Track what's shipped vs targeted with the same discipline you'd track a library's actual installed version** — JEP status is not settled by "I read about it," it's settled by which JDK is on the classpath. §4 is this discipline applied to the whole PQ surface.
 - **A migration that lands on a version bump beats a migration that lands on a rewrite.** The measure of whether the crypto-agility work in a given service is done is whether adopting the next algorithm — ML-KEM today, whatever supersedes it in a decade — requires touching that service's source code at all, or only its configuration and its JDK version.
-- **Internal, TLS-independent PQ adoption does not wait on TLS-layer JEPs.** Envelope encryption of data at rest, JAR/artifact signing, and any application-level use of `KEM`/`ML-KEM`/`ML-DSA`/`KDF` are all available today (JDK 24/25) and have no dependency on JEP 527 landing — conflating "the TLS handshake JEP isn't final" with "there's nothing to do yet" leaves real, available progress on the table.
+- **Internal, TLS-independent PQ adoption does not wait on TLS-layer JEPs.** Envelope encryption of data at rest, JAR/artifact signing, and any application-level use of `KEM`/`ML-KEM`/`ML-DSA`/`KDF` are all available today (JDK 24/25) and have no dependency on JEP 527. Conflating "our JDK lacks the hybrid TLS groups" with "there's nothing to do yet" leaves real, available progress on the table.
 
 ---
 
@@ -50,15 +50,16 @@ This is also a useful way to explain in one sentence *why* the public and privat
 
 ### 4.1 The JDK's post-quantum and modern-JCA surface, by JEP
 
-| Capability | JEP | Status (as of JDK 25, today 2026-08-26) | What it's for |
+| Capability | JEP | Status (as of JDK 27 GA, 2026-09-15) | What it's for |
 |---|---|---|---|
 | **KEM API** (`javax.crypto.KEM`) | 452 | **Final, JDK 21.** Never went through preview. | Uniform engine class for *any* key encapsulation mechanism — classical or PQ — replacing ad hoc `KeyAgreement` patterns for KEM-shaped algorithms. |
 | **ML-KEM** | 496 | **Final, JDK 24.** Not preview. | NIST FIPS 203 lattice-based key encapsulation — the PQ replacement for ECDH/RSA key transport. |
 | **ML-DSA** | 497 | **Final, JDK 24.** Not preview. | NIST FIPS 204 lattice-based digital signatures — the PQ replacement for ECDSA/RSA signatures. |
 | **KDF API** (`javax.crypto.KDF`) | 510 | **Final, JDK 25.** Was preview as JEP 478 in JDK 24. | Uniform engine class for key-derivation functions (HKDF today), used to turn a raw shared secret into a usable symmetric key. |
+| **HPKE** (RFC 9180) as a `Cipher` | none (JDK-8325448) | **Final, JDK 26.** No JEP, no preview. | `Cipher.getInstance("HPKE")` plus an `HPKEParameterSpec` runs KEM, HKDF, and AEAD as one public-key encryption call. The JDK 26 and 27 `HPKEParameterSpec` constants name only classical DHKEM suites (P-256, P-384, P-521, X25519, X448), so an ML-KEM envelope is still wired by hand (§6.8). |
 | **Permanently Disable the Security Manager** | 486 | **Final, JDK 24.** | Not PQ-related, but a same-era JCA-adjacent security change with real migration traps — covered here because it lands in the same upgrade window. |
-| **PEM Encodings** | 470 / 524 / 538 | **Still preview.** 470 = 1st preview (JDK 25); 524 = 2nd preview (JDK 26); 538 = 3rd preview, **targeted JDK 27 — not shipped**. | Standard `PEMEncoder`/`PEMDecoder` API — no more hand-rolled Base64 framing for keys and certs. |
-| **PQ Hybrid Key Exchange for TLS 1.3** | 527 | **Targeted JDK 27 — NOT SHIPPED as of today.** | Adds `X25519MLKEM768`, `SecP256r1MLKEM768`, `SecP384r1MLKEM1024` as negotiable TLS 1.3 named groups, **default-first** in the group preference list. |
+| **PEM Encodings** | 470 / 524 / 538 | **Still preview.** 470 = 1st preview (JDK 25); 524 = 2nd preview (JDK 26); 538 = 3rd preview (JDK 27). JEP 542 (status Completed, release 28) finalizes the API without change. | Standard `PEMEncoder`/`PEMDecoder` API, no more hand-rolled Base64 framing for keys and certs. |
+| **PQ Hybrid Key Exchange for TLS 1.3** | 527 | **Final, JDK 27.** Not in JDK 25 LTS or JDK 26. | Adds `X25519MLKEM768`, `SecP256r1MLKEM768`, `SecP384r1MLKEM1024` as TLS 1.3 named groups. `X25519MLKEM768` is enabled and **first** in the default list, and clients send key shares for it and `x25519`; the other two hybrid groups are off by default. |
 | **SLH-DSA** (FIPS 205, hash-based signatures) | — | **No JDK JEP exists.** | A conservative, hash-based PQ signature alternative to ML-DSA; not on the JDK roadmap today — say so plainly rather than implying it's coming. |
 | **Composite / hybrid signatures** (e.g. Composite ML-DSA) | — | **Not natively supported in the JDK.** No JEP. | Combining a classical and PQ signature into one artifact; available in the IETF drafts and some non-JDK libraries, not here. |
 
@@ -92,9 +93,11 @@ The dangerous row is `doPrivileged`: it does not throw, it does not warn, it sim
 | Artifact | X25519 | ECDSA P-256 | ML-KEM-768 | ML-DSA-65 |
 |---|---|---|---|---|
 | Public key | 32 B | — | 1184 B | 1952 B |
-| Secret/private key | 32 B | — | 2400 B (expanded form; a 32-byte seed form also defined) | 4032 B |
+| Secret/private key | 32 B | 32 B | 64 B seed (d, z), the JDK 27 default PKCS#8 form; 2400 B expanded form | 32 B seed (xi), the JDK 27 default PKCS#8 form; 4032 B expanded form |
 | Ciphertext / signature | — | 64 B raw (r‖s), ~70–72 B DER | 1088 B (ciphertext) | 3309 B (signature) |
 | Shared secret out | 32 B | — | 32 B | — |
+
+JDK 27 (JDK-8347938) changed which private-key form `KeyPairGenerator` and `KeyFactory` write into PKCS#8: the default moved from `expandedKey` to `seed`, using the CHOICE formats of RFC 9935 (ML-KEM) and RFC 9881 (ML-DSA). The security properties `jdk.mlkem.pkcs8.encoding` and `jdk.mldsa.pkcs8.encoding` take `seed`, `expandedKey`, or `both`, and a system property of the same name overrides them. The July 2026 updates 25.0.4 and 26.0.2 carry the same change. JDK 27 decodes all three forms. JDK 24, JDK 25 before 25.0.4, and JDK 26 before 26.0.2 write `expandedKey` and do not accept a seed-form key by default. The seed is the smaller and more canonical form: the expanded key is recomputed from it at load time.
 
 A hybrid `X25519MLKEM768` client key share concatenates the X25519 public key and the ML-KEM-768 public key: 32 + 1184 = 1216 bytes, against 32 bytes for classical-only — roughly **38x**. That single number is what drives the MTU and middlebox concerns in §8 and §10; nothing about CPU cost changes at all.
 
@@ -104,7 +107,7 @@ The PEM API is not itself post-quantum, but it's worth flagging in a PQ-focused 
 
 ```java
 // Forward-looking — requires --enable-preview on a JDK where PEM is still preview,
-// and the API surface can still change before it finalizes (targeted JDK 27, not shipped).
+// (third preview in JDK 27; JEP 542 finalizes it unchanged for JDK 28).
 // import java.security.PEMEncoder;
 // PEMEncoder encoder = PEMEncoder.of();
 // String pem = encoder.encodeToString(mlKemKeyPair.getPublic());
@@ -284,11 +287,11 @@ SecretKey derivedAesKey = hkdf.deriveKey("AES",
 
 This is the step naive PQ code skips most often: treating `receiverSharedSecret` (or its raw bytes) as if it were already an AES key. Every classical KEX-based protocol — TLS included — runs the raw shared secret through a KDF before it touches a cipher; ML-KEM's output deserves exactly the same treatment, and `KDF`/`HKDFParameterSpec` is the JDK 25 way to do it without hand-rolling HMAC calls.
 
-### 6.4 Configuring hybrid TLS 1.3 named groups (JEP 527, JDK 27 — forward-looking)
+### 6.4 Configuring hybrid TLS 1.3 named groups (JEP 527, JDK 27)
 
 ```java
-// On a JDK that has JEP 527, X25519MLKEM768 is placed FIRST by default — no code
-// change required. To pin or reorder explicitly (e.g. during a staged rollout):
+// On JDK 27+ (JEP 527), X25519MLKEM768 is placed FIRST by default, so no code is
+// required. To pin or reorder explicitly (e.g. during a staged rollout):
 System.setProperty("jdk.tls.namedGroups",
     "X25519MLKEM768,x25519,secp256r1,secp384r1,secp521r1,x448,ffdhe2048,ffdhe3072,ffdhe4096");
 
@@ -346,7 +349,7 @@ The fix is not "use ML-KEM" — it's removing every place a byte count or an alg
 
 ### 6.6 Feature-detecting a JEP that may not be on this JDK yet
 
-Because §4's table spans final, preview, and merely-targeted rows, code that must run across a fleet of mixed JDK versions during a migration window should check for a capability rather than assume it from a version number comparison alone — a version check is brittle against backports and vendor-specific builds, while a direct capability probe is not:
+Because §4's table spans final and preview rows, and JDK 25 and JDK 27 differ on hybrid TLS, code that must run across a fleet of mixed JDK versions during a migration window should check for a capability rather than assume it from a version number comparison alone: a version check is brittle against backports and vendor-specific builds, while a direct capability probe is not:
 
 ```java
 public final class KemAvailability {
@@ -372,7 +375,7 @@ This is the same crypto-agility principle from §3 applied at the JDK-version bo
 
 ### 6.7 Building a client `SSLContext` that prefers hybrid groups without hardcoding a JDK assumption
 
-Putting §6.4's named-group configuration together with §6.6's feature-detection habit produces the pattern an actual TLS client should ship with today, so it is already correct the day JEP 527 lands:
+Putting §6.4's named-group configuration together with §6.6's feature-detection habit produces the pattern an actual TLS client should ship with, so one build is correct on both JDK 25 and JDK 27:
 
 ```java
 import javax.net.ssl.SSLContext;
@@ -386,8 +389,8 @@ public final class PqAwareTlsClient {
     /** Builds the named-group preference list, including PQ groups only where the JDK supports them. */
     private static String[] preferredNamedGroups() {
         List<String> groups = new ArrayList<>();
-        // These group names only resolve once the running JDK has JEP 527. Listing
-        // them ahead of that is the §6.6 feature-detection habit applied here too —
+        // These group names resolve only on JDK 27+ (JEP 527). Listing
+        // them on an older JDK is the §6.6 feature-detection habit applied here too,
         // verify against this specific JDK/provider's documented handling of an
         // unrecognized named-group name before relying on it in a hot path.
         groups.add("X25519MLKEM768");
@@ -410,18 +413,47 @@ public final class PqAwareTlsClient {
 }
 ```
 
-Nothing in this class checks a JDK version number. On JDK 25 today, the PQ group names have no meaning yet, so the negotiated result falls back to `x25519`; the day the fleet's JDK gains JEP 527, the exact same code starts negotiating hybrid groups with zero further changes — which is the whole thesis of §3 made concrete in one class.
+Nothing in this class checks a JDK version number. On JDK 25, the PQ group names have no meaning, so the negotiated result falls back to `x25519`; on JDK 27, the exact same code negotiates hybrid groups with zero further changes, which is the whole thesis of §3 made concrete in one class.
+
+### 6.8 HPKE as a `Cipher` (JDK 26)
+
+JDK 26 (JDK-8325448) implements RFC 9180 Hybrid Public Key Encryption as a `Cipher` named `"HPKE"`. It does the KEM, the HKDF key schedule, and the AEAD in one engine, and it derives a distinct nonce for each `doFinal` from an internal sequence counter, so the caller never manages an IV:
+
+```java
+import javax.crypto.Cipher;
+import javax.crypto.spec.HPKEParameterSpec;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+
+KeyPair recipient = KeyPairGenerator.getInstance("X25519").generateKeyPair();
+HPKEParameterSpec suite = HPKEParameterSpec.of(
+        HPKEParameterSpec.KEM_DHKEM_X25519_HKDF_SHA256,
+        HPKEParameterSpec.KDF_HKDF_SHA256,
+        HPKEParameterSpec.AEAD_AES_256_GCM)
+    .withInfo("dek-wrap-v1".getBytes());
+
+Cipher sender = Cipher.getInstance("HPKE");      // never "HPKE/mode/padding"
+sender.init(Cipher.ENCRYPT_MODE, recipient.getPublic(), suite);
+byte[] enc = sender.getIV();                    // the KEM encapsulation, sent with the ciphertext
+byte[] wrappedDek = sender.doFinal(dek);
+
+Cipher receiver = Cipher.getInstance("HPKE");
+receiver.init(Cipher.DECRYPT_MODE, recipient.getPrivate(), suite.withEncapsulation(enc));
+byte[] dekAgain = receiver.doFinal(wrappedDek);
+```
+
+For classical envelope encryption this replaces the hand-wired `KeyAgreement` + `KDF` + `Cipher("AES/GCM/NoPadding")` chain, and with it the two usual bugs in that chain: a reused GCM nonce and a missing context binding (`withInfo`). It does not yet give a post-quantum envelope. The `HPKEParameterSpec` constants in JDK 26 and 27 cover only DHKEM over P-256, P-384, P-521, X25519, and X448, so wrapping a DEK under ML-KEM still means §6.1's `KEM` call, §6.3's `KDF` step, and an AEAD you configure yourself.
 
 ---
 
 ## 7. Real-World Examples
 
 - **Chrome and other major browsers** have shipped `X25519Kyber768`/`X25519MLKEM768` support for TLS 1.3 key exchange with large CDNs and cloud providers, so a meaningful share of real HTTPS traffic today already negotiates a hybrid PQ key exchange without the end user noticing — the negotiation-based design in §3 means it degrades gracefully to classical when either side doesn't support it.
-- **Major CDN and cloud-edge providers** have enabled hybrid PQ key exchange by default on their TLS-terminating edges, ahead of any JDK support landing — proof that the mechanism (TLS 1.3 named-group negotiation) was general enough to add PQ support without a protocol version bump.
+- **Major CDN and cloud-edge providers** have enabled hybrid PQ key exchange by default on their TLS-terminating edges, years before JDK 27 added it, which shows that the mechanism (TLS 1.3 named-group negotiation) was general enough to add PQ support without a protocol version bump.
 - **Signal and other end-to-end-encrypted messengers** have deployed post-quantum-augmented ratchets for their long-lived session state, motivated by exactly the harvest-now-decrypt-later concern in §1 — message confidentiality that must hold for years cannot rely solely on classical ECDH, however strong today.
-- **The JDK's own arrival is JDK 27** (JEP 527) — until then, a Java service reaches hybrid PQ TLS the same way it reaches any pre-GA capability: an early-access build, a third-party TLS provider, or simply waiting, while doing the agility groundwork in §3 and §6 so the eventual upgrade is a version bump, not a rewrite.
+- **The JDK's own support arrived in JDK 27** (JEP 527, GA 2026-09-15). JDK 27 is a non-LTS feature release, so a fleet that stays on JDK 25 LTS reaches hybrid PQ TLS through a third-party TLS provider or a TLS-terminating proxy, while doing the agility groundwork in §3 and §6 so its own JDK upgrade is a version bump, not a rewrite.
 - **VPN and enterprise remote-access vendors** have begun shipping hybrid PQ key exchange options in their IPsec/TLS-based products, driven by the same government and financial-sector procurement guidance referenced in §12's CNSA answer — this is often where "post-quantum" first becomes a line item in a security questionnaire a Java shop has to answer, well before it becomes a JDK feature they can point to directly.
-- **Security questionnaires and vendor-risk assessments** in regulated industries (finance, healthcare, government contracting) increasingly carry a line item asking whether a vendor supports or has a roadmap for post-quantum key exchange — a Java shop that has done §3's agility refactor can answer "yes, on a version bump" today, ahead of any JDK actually shipping the TLS-layer feature.
+- **Security questionnaires and vendor-risk assessments** in regulated industries (finance, healthcare, government contracting) increasingly carry a line item asking whether a vendor supports or has a roadmap for post-quantum key exchange; a Java shop that has done §3's agility refactor can answer "yes, on a version bump" whether or not its deployed JDK has the TLS-layer feature.
 - **Internal PQ envelope encryption** (§14's Phase 4 pattern — wrapping data-at-rest DEKs with ML-KEM rather than RSA-OAEP) is where several organizations with long-retention data obligations have started, precisely because it needs only the already-final `KEM`/`ML-KEM`/`KDF` APIs and has no dependency on TLS-layer negotiation shipping first.
 
 ---
@@ -441,17 +473,19 @@ Nothing in this class checks a JDK version number. On JDK 25 today, the PQ group
 | **Migration cost, if crypto-agility was already in place** | — | Config change + JDK/library version bump | This is the payoff §3 is arguing for — the entire point of the agility refactor in §6.5 and §14 is to make this row true |
 | **Migration cost, if algorithms were hardcoded** | — | Source change across every call site, plus a schema migration for every fixed-size column | This is the cost the agility refactor exists to avoid paying later |
 
+JDK 27 (JDK-8384353) widened the CPU gap further on x86_64 with AVX-512: optimized SHA-3 intrinsics gave ML-KEM key generation, encapsulation, and decapsulation +46% to +48%, and ML-DSA key generation +60%, signing +38%, and verification +74% in the JDK's own JMH benchmarks.
+
 The rows worth re-reading twice are the CPU-cost and migration-cost ones, because both cut against common intuition. Engineers who have not benchmarked ML-KEM assume "post-quantum" means "computationally heavier," and budget accordingly for extra server capacity that mostly isn't needed — the real capacity planning question is network and storage headroom for larger artifacts, not CPU headroom. And engineers who have not done a crypto-agility refactor assume a future algorithm swap is inherently a big project; whether it is or isn't is entirely a function of whether §3's discipline was already applied, which is a choice made months or years before the swap itself.
 
 ---
 
 ## 9. When to Use / When NOT to Use
 
-**Move to hybrid PQ key exchange now** for anything whose confidentiality must outlive a decade or more: health records, government and legal archives, long-term corporate secrets, biometric data, anything under a multi-year regulatory retention mandate, and any traffic pattern an adversary would plausibly bother recording today for future decryption. This is where §1's harvest-now-decrypt-later argument is not theoretical. Because JEP 527 hasn't shipped, "move to hybrid PQ key exchange now" in practice means the internal, TLS-independent path from §7 and §14 — envelope-encrypting the data itself with ML-KEM — rather than waiting on a TLS feature that doesn't exist on any released JDK yet.
+**Move to hybrid PQ key exchange now** for anything whose confidentiality must outlive a decade or more: health records, government and legal archives, long-term corporate secrets, biometric data, anything under a multi-year regulatory retention mandate, and any traffic pattern an adversary would plausibly bother recording today for future decryption. This is where §1's harvest-now-decrypt-later argument is not theoretical. On JDK 27, existing TLS 1.3 code already negotiates `X25519MLKEM768` by default. On JDK 25 LTS, which lacks JEP 527, "move now" means either a JDK 27 runtime for the services that carry such data, or the internal, TLS-independent path from §7 and §14: envelope-encrypting the data itself with ML-KEM.
 
 **Plain ECDHE is still a reasonable choice today** for short-lived session confidentiality where the data's usefulness expires long before a cryptographically relevant quantum computer plausibly exists — a live video call, an ephemeral OAuth token, a 5-minute API session. Don't spend the size/latency budget on PQ for data that is worthless to an attacker who decrypts it in ten years.
 
-Between those two ends sits the largest population of real services: session-scoped but not truly ephemeral — a customer support chat transcript, an internal API call carrying a business-sensitive payload that's meaningful for a few years but not decades. §5.4's quadrant chart plots exactly this middle ground, and the honest answer for most of it is "plan the agility refactor now, adopt hybrid PQ once JEP 527 ships" rather than either extreme.
+Between those two ends sits the largest population of real services: session-scoped but not truly ephemeral: a customer support chat transcript, an internal API call carrying a business-sensitive payload that's meaningful for a few years but not decades. §5.4's quadrant chart plots exactly this middle ground, and the honest answer for most of it is "plan the agility refactor now, adopt hybrid PQ when the fleet reaches JDK 27 or a later LTS" rather than either extreme.
 
 **Do not move to pure-PQ ahead of hybrid.** Skipping the classical component to save bytes trades a decades-scrutinized hardness assumption for exclusive reliance on cryptography that is a few years old — hybrid mode costs extra bytes in exchange for needing *both* assumptions broken, which is the safer trade while ML-KEM/ML-DSA implementations are still accumulating cryptanalysis and production mileage.
 
@@ -465,7 +499,7 @@ Between those two ends sits the largest population of real services: session-sco
 
 **Distinguish "no JDK support exists" from "not urgent yet."** SLH-DSA's missing JEP (§4.1, §12) is a tooling gap, not a signal about priority — a team with a genuine SLH-DSA requirement (e.g. a specific compliance mandate for hash-based signatures) should reach for BouncyCastle today rather than waiting on a JDK feature that isn't on the roadmap, while a team with no such mandate has no reason to chase it at all.
 
-**Do not wait for JEP 527 to start the internal PQ work.** Envelope encryption of data at rest (§14's Phase 4) needs only `KEM`, `ML-KEM`, and `KDF` — all final since JDK 24/25 — and has nothing to do with TLS negotiation at all. A team that tells itself "we can't do anything PQ until the TLS JEP ships" is confusing one narrow, still-pending capability (automatic hybrid TLS negotiation) with the much broader, already-available capability (PQ primitives usable anywhere in application code).
+**Do not wait for a JDK 27 upgrade to start the internal PQ work.** Envelope encryption of data at rest (§14's Phase 4) needs only `KEM`, `ML-KEM`, and `KDF`, all final since JDK 24/25, and has nothing to do with TLS negotiation at all. A team that tells itself "we can't do anything PQ until we upgrade to the JDK with the TLS JEP" is confusing one narrow capability that needs JDK 27 (automatic hybrid TLS negotiation) with the much broader, already-available capability (PQ primitives usable anywhere in application code).
 
 ---
 
@@ -482,7 +516,8 @@ Between those two ends sits the largest population of real services: session-sco
 - **Assuming a JEP that is "final" in one JDK is available on the JDK actually deployed.** JEP 496/497 being final in JDK 24 tells you nothing about whether the fleet's actual runtime — often still on an older LTS during a migration window — has it; the only authoritative check is the deployed JDK's own `java -version` and a runtime probe like §6's provider-enumeration snippet, not a changelog read months earlier.
 - **Treating "standardized by NIST" as synonymous with "supported in the JDK".** SLH-DSA (FIPS 205) is fully standardized and has no JDK JEP at all — conflating NIST standardization status with JDK API availability leads to designs that assume an API exists before checking whether it does.
 - **Prioritizing by "how interesting the algorithm is" instead of by data lifetime and current exposure.** It's tempting to start a PQ migration with whichever service is easiest to demo, rather than with the service actually holding the 7-year-retention customer records; §5.4's quadrant chart and §14's phased plan exist specifically to keep the prioritization question answerable in one picture instead of by gut feel.
-- **Skipping the internal, TLS-independent PQ work because "we're waiting on JEP 527."** As §9 and §13 both note, envelope encryption of data at rest needs none of JEP 527's TLS negotiation — treating the whole PQ effort as blocked on one still-pending JEP leaves months of available, lower-risk progress (§14 Phase 4) sitting undone for no technical reason.
+- **JDK 27 writes ML-KEM and ML-DSA private keys that a JDK 25.0.3 or older build cannot read.** JDK 27, 25.0.4, and 26.0.2 (JDK-8347938) switched the default PKCS#8 encoding to `seed`. In a mixed fleet where a JDK 27 service generates a key and stores it in a shared keystore, a secrets manager, or a PEM file, every consumer on JDK 24, JDK 25 before 25.0.4, or JDK 26 before 26.0.2 fails to load it, while the reverse direction keeps working, because the new builds still decode the old `expandedKey` form. The break appears only on the first key generated or rotated after the rollout, so it can surface weeks after the upgrade. Fix: set `jdk.mlkem.pkcs8.encoding=expandedKey` and `jdk.mldsa.pkcs8.encoding=expandedKey` on the JDK 27 nodes for the mixed window, and re-encode any key already written with `KeyFactory.translateKey`.
+- **Skipping the internal, TLS-independent PQ work because "we're waiting for the JDK 27 upgrade."** As §9 and §13 both note, envelope encryption of data at rest needs none of JEP 527's TLS negotiation, so treating the whole PQ effort as blocked on one JDK upgrade leaves months of available, lower-risk progress (§14 Phase 4) sitting undone for no technical reason.
 
 ---
 
@@ -498,11 +533,11 @@ The two-provider split in the table below (`SunJCE` for KEM/ML-KEM, `SUN` for ML
 | `javax.crypto.KDF` (JEP 510) | Uniform key-derivation engine class, JDK 25+; `HKDFParameterSpec` |
 | `keytool -genkeypair -keyalg ML-DSA -groupname ML-DSA-65` | Generate a PQ signing keypair from the CLI, JDK 24+ |
 | `jarsigner` | JAR signing with ML-DSA, JDK 26+ (JDK-8349732, RFC 9882/PKCS#7) |
-| `jdk.tls.namedGroups` system property / `SSLParameters.setNamedGroups(...)` | Configure or reorder TLS 1.3 named-group negotiation, including the hybrid PQ groups once JEP 527 lands |
+| `jdk.tls.namedGroups` system property / `SSLParameters.setNamedGroups(...)` | Configure or reorder TLS 1.3 named-group negotiation, including the hybrid PQ groups (JDK 27+, JEP 527) |
 | `-Djavax.net.debug=ssl,handshake` | Trace which named group and key-exchange algorithm a handshake actually negotiated |
 | BouncyCastle | Non-JDK PQ coverage (e.g. SLH-DSA, composite signatures) where the JDK has no JEP at all |
 | `Security.getProviders(String filter)` | Runtime check of which provider actually answers a given algorithm — the §6 pattern for never assuming |
-| `PEMEncoder` / `PEMDecoder` (JEP 470/524/538, preview) | Standard PEM read/write once it exits preview — replaces hand-rolled Base64 framing of keys and certs |
+| `PEMEncoder` / `PEMDecoder` (JEP 470/524/538, preview through JDK 27) | Standard PEM read/write once it exits preview, replaces hand-rolled Base64 framing of keys and certs |
 | `SSLParameters.setNamedGroups(String[])` | Same negotiation control as `jdk.tls.namedGroups`, scoped to one connection instead of the whole JVM |
 | `keytool -importkeystore` | Migrate a legacy JKS store forward while also planning for PQ-signed certificate chains |
 | Java Flight Recorder (JFR) | Profile the actual CPU cost of a KEM/KDF swap under load rather than assuming from §8's table alone |
@@ -525,15 +560,15 @@ A digital signature's security property is "nobody could forge this *at the mome
 
 **Q: Are ML-KEM and ML-DSA preview features in the current JDK?**
 **Short:** No — both ML-KEM (JEP 496) and ML-DSA (JEP 497) shipped final in JDK 24, never as preview.
-ML-KEM finalized under JEP 496 and ML-DSA under JEP 497, both in JDK 24, both final on arrival — neither ever required an `--enable-preview` flag. What is still preview in this space is the PEM encoding API (JEP 470/524/538, currently in its third preview round targeted for JDK 27) — don't confuse the two; the crypto primitives are settled, the encoding convenience API is not.
+ML-KEM finalized under JEP 496 and ML-DSA under JEP 497, both in JDK 24, both final on arrival; neither ever required an `--enable-preview` flag. What is still preview in this space is the PEM encoding API (JEP 470/524/538, in its third preview round in JDK 27). Don't confuse the two; the crypto primitives are settled, the encoding convenience API is not.
 
 **Q: Has hybrid PQ key exchange for TLS 1.3 shipped in the JDK yet?**
-**Short:** No — JEP 527 is targeted for JDK 27, which has not been released as of today.
-JEP 527 adds `X25519MLKEM768` and related named groups to TLS 1.3, but it is targeted for JDK 27, whose GA is scheduled after today's date — it has not shipped. JDK 25 (the current LTS) and JDK 26 do not include it. Anyone claiming to run hybrid PQ TLS "in the JDK" today is either on a non-GA early-access build, using a third-party TLS provider, or mistaken about the JEP's status — checking the actual JDK version on the classpath settles it every time.
+**Short:** Yes, in JDK 27 (JEP 527, GA 2026-09-15). JDK 25 LTS and JDK 26 do not have it, so check the deployed runtime.
+JEP 527 is final in JDK 27, released 2026-09-15. It adds `X25519MLKEM768`, `SecP256r1MLKEM768`, and `SecP384r1MLKEM1024` to TLS 1.3. `X25519MLKEM768` is enabled and first in the default named-group list, and a JDK 27 client sends two key shares by default, one for `X25519MLKEM768` and one for `x25519`; the other two hybrid groups must be enabled explicitly. JDK 25, the LTS most fleets run, and JDK 26 do not include it, and JDK 27 is a non-LTS feature release. A service on JDK 25 that reports hybrid PQ TLS is using a third-party TLS provider or a TLS-terminating proxy. `-Djavax.net.debug=ssl,handshake` shows which group a handshake actually negotiated.
 
 **Q: What does JEP 527's hybrid TLS support actually require of application code?**
 **Short:** Nothing — the new named groups are negotiated automatically and placed first in the default preference list.
-JEP 527 is designed to be transparent: `X25519MLKEM768` is placed first in the JDK's default `jdk.tls.namedGroups` list, so once the JDK ships it, existing TLS 1.3 code negotiates the hybrid group automatically with no source changes. This is only possible because TLS 1.3 already negotiates named groups from a preference-ordered list rather than hardcoding one — the crypto-agility was designed into the protocol years before PQ groups existed to plug into it.
+JEP 527 is designed to be transparent: `X25519MLKEM768` is placed first in the JDK's default `jdk.tls.namedGroups` list, so on JDK 27 existing TLS 1.3 code negotiates the hybrid group automatically with no source changes. This is only possible because TLS 1.3 already negotiates named groups from a preference-ordered list rather than hardcoding one; the crypto-agility was designed into the protocol years before PQ groups existed to plug into it.
 
 **Q: Which provider supplies ML-KEM, and which supplies ML-DSA — are they the same?**
 **Short:** No — ML-KEM resolves through the SunJCE provider, while ML-DSA resolves through the SUN provider.
@@ -550,6 +585,10 @@ JEP 486 permanently disabled the Security Manager: `System.setSecurityManager(..
 **Q: Why is a fixed-size buffer or database column a real migration risk for PQ crypto?**
 **Short:** PQ key and ciphertext sizes are far larger than classical ones, so hardcoded sizes silently truncate or reject them.
 An X25519 public key is 32 bytes and an ECDSA P-256 signature is roughly 70 bytes — sizes small enough that a fixed 32- or 256-byte buffer or column "just worked" for years. ML-KEM-768's public key is 1184 bytes and ML-DSA-65's signature is 3309 bytes, both large enough to overflow or truncate a size hardcoded against classical assumptions. The fix is the same discipline as algorithm agility: size storage and buffers for whatever the negotiated algorithm actually produces, never for the algorithm you happened to test with.
+
+**Q: Why can a JDK 25.0.3 service fail to load an ML-KEM private key that a JDK 27 service just generated?**
+**Short:** JDK 27, 25.0.4, and 26.0.2 write PKCS#8 ML-KEM and ML-DSA keys in the seed form by default, and earlier builds accept only the expanded form.
+ML-KEM and ML-DSA private keys have two encodings: a short seed (64 bytes for ML-KEM, d and z; 32 bytes for ML-DSA) from which the full key is recomputed, and the expanded key (2400 bytes for ML-KEM-768, 4032 bytes for ML-DSA-65). JDK 24, JDK 25 before 25.0.4, and JDK 26 before 26.0.2 write the expanded form. JDK 27 (JDK-8347938), and the 25.0.4 and 26.0.2 updates that carry the same change, write the seed form by default, following RFC 9935 and RFC 9881. These builds still read all forms, so only keys flowing from new to old break. The fix for a mixed fleet is to set `jdk.mlkem.pkcs8.encoding` and `jdk.mldsa.pkcs8.encoding` to `expandedKey` on the new side until every reader is upgraded, and to convert keys already written with `KeyFactory.translateKey`.
 
 **Q: Why can pushing a hybrid PQ `ClientHello` past one TCP segment break real connections?**
 **Short:** Some older TLS-inspecting middleboxes silently drop or mishandle a ClientHello that no longer fits one segment.
@@ -570,6 +609,10 @@ Unlike ML-KEM and ML-DSA, SLH-DSA (the hash-based, more conservative PQ signatur
 **Q: What is envelope-style thinking applied to a KEM shared secret, and why does it matter?**
 **Short:** A raw KEM shared secret must be passed through a KDF before use as a cipher key, never used directly.
 The output of `KEM.Decapsulator.decapsulate(...)` is raw shared-secret material, not a ready-to-use `SecretKey` for a cipher — exactly like a raw ECDH shared secret was never meant to be used directly as an AES key either. It needs to go through a key-derivation step (`KDF`/`HKDFParameterSpec`, extract-then-expand) to produce a properly distributed symmetric key, optionally bound to context via the `info` parameter. Skipping this step and feeding the raw KEM output straight into `SecretKeySpec` for AES is the PQ-era version of the classical mistake of using a raw ECDH secret as a key.
+
+**Q: Does `Cipher.getInstance("HPKE")` on JDK 26 give you a post-quantum envelope encryption scheme?**
+**Short:** No. JDK 26 HPKE bundles KEM, HKDF and AEAD in one Cipher, but its suite constants name only classical DHKEM, so an ML-KEM envelope is still hand-wired.
+JDK 26 (JDK-8325448) implements RFC 9180 HPKE as a `Cipher` named exactly `"HPKE"`, configured by an `HPKEParameterSpec` that picks a KEM, a KDF, and an AEAD. The sender reads the KEM encapsulation with `getIV()`, the receiver passes it back through `withEncapsulation(...)`, and the cipher derives a fresh nonce for every `doFinal`, which removes the nonce-reuse bug of hand-built ECDH + HKDF + AES-GCM code. The KEM constants in JDK 26 and 27 are DHKEM over P-256, P-384, P-521, X25519, and X448 only. Use HPKE for classical envelope encryption today; for a quantum-resistant DEK wrap, combine `KEM` (ML-KEM), `KDF`, and AES-GCM yourself.
 
 **Q: What's wrong with `KDF.deriveKey("AES", HKDFParameterSpec.extractThenExpand(...))`?**
 **Short:** There is no such static method — the extract-then-expand flow is built by chaining ofExtract().addIKM()...thenExpand().
@@ -635,7 +678,8 @@ Like ML-KEM's 512/768/1024 sets, ML-DSA-44/65/87 trade artifact size against sec
 - **Feature-detect JEP availability at runtime rather than branching on a hardcoded JDK version check** — a `NoSuchAlgorithmException` catch (§6.6) survives backports, vendor JDK differences, and stripped-down runtime images that a bare version-number comparison does not.
 - **Keep the KEM decapsulation output and the derived AES key in separate variables in code review** — a diff that skips the `KDF` step and passes a raw shared secret straight to `SecretKeySpec` should be as obviously wrong on sight as skipping a password hash and comparing plaintext.
 - **Re-verify provider resolution (`SunJCE` vs `SUN`) after any provider-list change** — inserting a new provider at high priority (BouncyCastle, an HSM provider) can shadow the JDK's own ML-KEM/ML-DSA implementations if it also claims those algorithm names; `Security.getProviders(filter)` (§6) is the cheap way to confirm nothing shifted unexpectedly.
-- **Start the internal, TLS-independent PQ work (envelope encryption of long-retention data) now** — it needs only APIs final since JDK 24/25, and does not wait on JEP 527 at all; see §7 and §14's Phase 4.
+- **Start the internal, TLS-independent PQ work (envelope encryption of long-retention data) now**: it needs only APIs final since JDK 24/25, and does not wait on a JDK 27 upgrade; see §7 and §14's Phase 4.
+- **Pin `jdk.mlkem.pkcs8.encoding` and `jdk.mldsa.pkcs8.encoding` to `expandedKey` while any JDK 24, pre-25.0.4, or pre-26.0.2 node reads PQ private keys** that JDK 27 nodes write. Remove the pin, and let the JDK 27 default `seed` form apply, only after the last older reader is gone.
 - **Test hybrid handshakes against the specific network paths and middleboxes production traffic actually crosses**, not just against a clean lab network — the failure mode in §10's `ClientHello`-fragmentation pitfall is invisible until it's tested against real corporate proxies or legacy load balancers.
 
 ---
@@ -644,7 +688,7 @@ Like ML-KEM's 512/768/1024 sets, ML-DSA-44/65/87 trade artifact size against sec
 
 ### Planning a post-quantum migration for an existing Java TLS fleet
 
-A mid-size financial services company runs ~40 Java 17 microservices behind an internal service mesh, all communicating over mTLS, plus a public-facing API gateway terminating customer TLS. Several services persist encrypted customer records with a 7-year regulatory retention requirement — squarely in §1's "already exposed" category. Leadership asks for a PQ migration plan; no JDK on the roadmap yet ships JEP 527. The plan below is deliberately paced against real JEP availability rather than against wishful thinking.
+A mid-size financial services company runs ~40 Java 17 microservices behind an internal service mesh, all communicating over mTLS, plus a public-facing API gateway terminating customer TLS. Several services persist encrypted customer records with a 7-year regulatory retention requirement, squarely in §1's "already exposed" category. Leadership asks for a PQ migration plan. The fleet runs only LTS releases, and JEP 527 shipped in JDK 27, a non-LTS feature release, so no JDK on the fleet's roadmap has it yet. The plan below is deliberately paced against real JEP availability rather than against wishful thinking.
 
 | Phase | Duration | Services touched | Depends on JEP 527? |
 |---|---|---|---|
@@ -652,33 +696,33 @@ A mid-size financial services company runs ~40 Java 17 microservices behind an i
 | 2. Crypto-agility refactor | 6 weeks | 15 | No |
 | 3. JDK upgrade audit | 1 week | 40 | No (JDK 25 only) |
 | 4. Internal PQ pilot | 4 weeks | 2 | No |
-| 5. Hybrid TLS adoption | Version bump, no fixed date | 38 (the rest) | **Yes — waits on it** |
+| 5. Hybrid TLS adoption | Version bump, no fixed date | 38 (the rest) | **Yes: waits on the first LTS with it** |
 
-Laying the phases out this way for leadership makes the actual dependency on JEP 527 visible: four of five phases, covering the entire fleet, do not need it at all. Only the final phase — which costs a version bump once it becomes available — is gated on a JDK that hasn't shipped, which is the argument for starting Phases 1-4 now rather than waiting.
+Laying the phases out this way for leadership makes the actual dependency on JEP 527 visible: four of five phases, covering the entire fleet, do not need it at all. Only the final phase, which costs a version bump once it becomes available, is gated on an LTS JDK the fleet has not adopted, which is the argument for starting Phases 1-4 now rather than waiting.
 
 **Phase 1 — inventory (2 weeks).** Grep the entire codebase for hardcoded algorithm strings (`"ECDH"`, `"RSA"`, `"ECDSA"`, explicit cipher-suite lists) across all 40 services; the audit turns up 11 services with a hardcoded `KeyAgreement.getInstance("ECDH")` and 4 with a fixed 32-byte shared-secret buffer identical to the broken example in §6.5. Separately, catalog every data store holding customer records under the 7-year retention mandate — this identifies the systems where §1's confidentiality-lifetime argument applies most urgently, and where migration priority should land first regardless of overall rollout order. The same pass greps `pom.xml`/`build.gradle` files across all 40 services for a pinned JDK toolchain version, since Phase 3's upgrade needs to know which services are already close to JDK 25 and which are still several majors behind.
 
-A secondary finding from this inventory: 6 of the 40 services still target JDK 11 or JDK 17 explicitly in their build files, meaning the JDK-upgrade phase for those 6 is really two upgrades (to an LTS with the PQ JEPs, then eventually to whatever ships JEP 527) rather than one — this gets folded into Phase 3's timeline rather than surfacing as a surprise mid-migration.
+A secondary finding from this inventory: 6 of the 40 services still target JDK 11 or JDK 17 explicitly in their build files, meaning the JDK-upgrade phase for those 6 is really two upgrades (to an LTS with the PQ JEPs, then eventually to the first LTS that carries JEP 527) rather than one; this gets folded into Phase 3's timeline rather than surfacing as a surprise mid-migration.
 
 **Phase 2 — crypto-agility refactor (6 weeks), no PQ yet.** Before touching any PQ code, the 11 hardcoded-algorithm services are refactored to read the KEX algorithm from configuration and the 4 fixed-buffer services move to length-prefixed or dynamically-sized storage, exactly per §6.5's fix. Each of the 11 gets the §6.6 feature-detection helper wired in as well, so the eventual PQ cutover in Phase 4/5 is a configuration flip rather than a code change. This phase alone, done with zero PQ dependency, is what makes every later phase a config change instead of a rewrite — and it is the single highest-leverage phase in the whole plan, since it's the one that turns every future NIST or JDK change into a non-event.
 
 Code review for this phase uses a narrow, mechanical checklist rather than a general security review: does every `getInstance(...)` call in the diff read its algorithm string from a constant, a config value, or a negotiated parameter (never a literal)? Does every new byte-array field for key material or shared secrets use a length-prefixed or dynamically-sized encoding? That narrowness is deliberate — it keeps a 6-week, 15-service refactor reviewable in normal-sized PRs instead of becoming one enormous change nobody can meaningfully review.
 
-**Phase 3 — JDK upgrade audit (1 week).** All 40 services are already on JDK 17; upgrading to JDK 25 (current LTS) picks up final ML-KEM/ML-DSA/KEM/KDF (JEPs 452/496/497/510) for any service that wants to experiment with PQ primitives directly (e.g., an internal envelope-encryption layer wrapping DEKs with ML-KEM instead of RSA-OAEP), even though JEP 527's automatic TLS hybrid negotiation is not yet available on any shipped JDK. The same upgrade sweep greps every startup script and Dockerfile for `-Djava.security.manager=`, per §10 — this fleet finds one legacy service still setting it, caught in staging rather than as a production outage.
+**Phase 3, JDK upgrade audit (1 week).** All 40 services are already on JDK 17; upgrading to JDK 25 (current LTS) picks up final ML-KEM/ML-DSA/KEM/KDF (JEPs 452/496/497/510) for any service that wants to experiment with PQ primitives directly (e.g., an internal envelope-encryption layer wrapping DEKs with ML-KEM instead of RSA-OAEP), even though JEP 527's automatic TLS hybrid negotiation is not in JDK 25. The same upgrade sweep greps every startup script and Dockerfile for `-Djava.security.manager=`, per §10, this fleet finds one legacy service still setting it, caught in staging rather than as a production outage.
 
-**Phase 4 — internal PQ pilot (4 weeks).** The two services handling the 7-year-retention customer records adopt ML-KEM-768 directly for envelope-encrypting long-lived data at rest — not for TLS (JEP 527 isn't available yet), but for the encryption layer wrapping DEKs before they're written to storage, following §6.1's KEM round trip and §6.3's KDF derivation. Storage columns are sized per §6.5's fix pattern. This pilot validates the crypto-agility refactor from Phase 2 under real PQ key sizes — the ~1184-byte ML-KEM-768 public key and ~1088-byte ciphertext confirm the `VARBINARY(MAX)` schema change handles real PQ artifacts without truncation, well before TLS-layer PQ is even an option.
+**Phase 4, internal PQ pilot (4 weeks).** The two services handling the 7-year-retention customer records adopt ML-KEM-768 directly for envelope-encrypting long-lived data at rest, not for TLS (JEP 527 is not in JDK 25), but for the encryption layer wrapping DEKs before they're written to storage, following §6.1's KEM round trip and §6.3's KDF derivation. Storage columns are sized per §6.5's fix pattern. This pilot validates the crypto-agility refactor from Phase 2 under real PQ key sizes, the ~1184-byte ML-KEM-768 public key and ~1088-byte ciphertext confirm the `VARBINARY(MAX)` schema change handles real PQ artifacts without truncation, well before TLS-layer PQ is even an option.
 
-**Phase 5 — measure and wait for JEP 527 (ongoing).** With Phases 1-4 complete, the fleet is positioned to adopt JEP 527's hybrid TLS groups the moment a JDK ships it, at the cost of a version bump and zero code changes — exactly the outcome §3 and §6.4 describe. In the meantime, the team monitors published NIST/CNSA transition guidance (§12's CNSA 2.0 answer) as one input to re-prioritizing which of the remaining 29 services get PQ envelope encryption next, ranked by data confidentiality lifetime rather than by convenience of implementation.
+**Phase 5, measure and wait for an LTS with JEP 527 (ongoing).** With Phases 1-4 complete, the fleet is positioned to adopt JEP 527's hybrid TLS groups the moment its LTS JDK carries them, at the cost of a version bump and zero code changes, exactly the outcome §3 and §6.4 describe. In the meantime, the team monitors published NIST/CNSA transition guidance (§12's CNSA 2.0 answer) as one input to re-prioritizing which of the remaining 38 services get PQ envelope encryption next, ranked by data confidentiality lifetime rather than by convenience of implementation.
 
-**Outcome, in numbers:** 15 of 40 services (the 11 hardcoded-algorithm plus 4 fixed-buffer) needed the agility refactor; 2 of 40 (the long-retention data stores) got PQ envelope encryption in the pilot; 1 startup script would have hard-failed on the JDK 24+ upgrade had the grep not caught it; 6 of 40 needed a two-step JDK upgrade rather than one; and the remaining 38 services are TLS-hybrid-ready with a version bump alone once JEP 527 ships — no service in the fleet requires a second migration project once JEP 527 lands, because the redeploy-costly work (Phase 2) was done exactly once, ahead of the primitive it was preparing for.
+**Outcome, in numbers:** 15 of 40 services (the 11 hardcoded-algorithm plus 4 fixed-buffer) needed the agility refactor; 2 of 40 (the long-retention data stores) got PQ envelope encryption in the pilot; 1 startup script would have hard-failed on the JDK 24+ upgrade had the grep not caught it; 6 of 40 needed a two-step JDK upgrade rather than one; and the remaining 38 services are TLS-hybrid-ready with a version bump alone once their JDK carries JEP 527. No service in the fleet requires a second migration project when it does, because the redeploy-costly work (Phase 2) was done exactly once, ahead of the primitive it was preparing for.
 
-**Lessons carried into the next migration.** Three things this fleet's team flagged as worth repeating on any future cryptographic transition, PQ or otherwise: (1) the inventory phase's grep-based approach found real problems in under two weeks that a manual per-service audit would likely have taken months to surface, because "search for a hardcoded string" scales linearly while "read every service's crypto code" does not; (2) sequencing the agility refactor strictly before any PQ code, rather than doing them together, meant the refactor's own regressions were caught against known-good classical crypto instead of being tangled up with new-algorithm bugs; and (3) the two-week head start spent confirming exactly which JEPs were final versus targeted (§4's table, essentially built for this fleet) prevented at least one early planning draft that assumed JEP 527 was already available and would have blocked the whole rollout on a JDK that didn't exist yet.
+**Lessons carried into the next migration.** Three things this fleet's team flagged as worth repeating on any future cryptographic transition, PQ or otherwise: (1) the inventory phase's grep-based approach found real problems in under two weeks that a manual per-service audit would likely have taken months to surface, because "search for a hardcoded string" scales linearly while "read every service's crypto code" does not; (2) sequencing the agility refactor strictly before any PQ code, rather than doing them together, meant the refactor's own regressions were caught against known-good classical crypto instead of being tangled up with new-algorithm bugs; and (3) the two-week head start spent confirming exactly which JEPs were final versus targeted (§4's table, essentially built for this fleet) prevented at least one early planning draft that assumed JEP 527 was in JDK 25 and would have blocked the whole rollout on a JDK the fleet does not run.
 
 The plan's real deliverable, in the end, was not "PQ crypto deployed" — only 2 of 40 services actually run PQ code by the end of Phase 4. It was 40 of 40 services no longer holding a hardcoded algorithm assumption or a fixed-size crypto buffer, which is the condition under which every future cryptographic transition this fleet faces — PQ or otherwise — becomes a bounded, low-risk change instead of an emergency rewrite. That is §3's thesis, verified against a real fleet rather than argued in the abstract.
 
 ---
 
-The version of this section that ages worst, deliberately, is §4's status table — every row in it is a snapshot as of today, 2026-08-26, and the correct way to keep using this module a year from now is to re-verify each row against the JDK actually deployed rather than trust the table blindly. That instinct, more than any specific algorithm name, is the actual skill this module is trying to teach.
+The version of this section that ages worst, deliberately, is §4's status table: every row in it is a snapshot as of JDK 27 GA, 2026-09-15, and the correct way to keep using this module a year from now is to re-verify each row against the JDK actually deployed rather than trust the table blindly. That instinct, more than any specific algorithm name, is the actual skill this module is trying to teach.
 
 Everything else in this module — the lattice intuition in §2, the KEM/KDF API shapes in §6, the size arithmetic in §4.4 and §5.2, the prioritization logic in §5.4 and §9 — is built to survive that re-verification intact even when the status table's specific rows move. An algorithm can finalize, a JEP can ship, a parameter set can be superseded, and none of that touches why hybrid beats pure-PQ, why signatures wait longer than key exchange, or why a hardcoded algorithm string is the wrong thing to ship regardless of which algorithm it names.
 

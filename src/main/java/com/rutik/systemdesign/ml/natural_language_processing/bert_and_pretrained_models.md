@@ -1033,7 +1033,7 @@ Fine-tuning instability comes from the tiny training set, the aggressive Adam le
 ## 13. Best Practices
 
 1. Start with DeBERTa-v3-base before BERT-base — it consistently outperforms BERT-base by 3-5 GLUE points with similar inference speed on modern hardware.
-2. Use the HuggingFace `Trainer` with `evaluation_strategy="epoch"` and `load_best_model_at_end=True` — prevents returning a model from an overfit epoch.
+2. Use the HuggingFace `Trainer` with `eval_strategy="epoch"` and `load_best_model_at_end=True` — prevents returning a model from an overfit epoch.
 3. Apply weight decay (0.01) to all parameters except biases and LayerNorm weights — these should use 0.0 weight decay, as regularizing them degrades performance.
 4. Use dynamic padding (padding="longest") for variable-length text — reduces GPU memory and speeds training by 2-5x for short-text tasks.
 5. Monitor gradient norms during fine-tuning — if they spike above 5.0 in early epochs, the learning rate is too high.

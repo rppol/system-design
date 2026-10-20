@@ -1036,6 +1036,44 @@ next(gen)           # prime: advance to first yield
 gen.send("hello")   # echo: hello
 ```
 
+### Pitfall 6 - Sharing One Generator Across Threads
+
+A thread pool drains one generator of work items. Under load a worker dies with
+`ValueError: generator already executing`: a generator frame can run in one thread at a time, and
+a second `next()` that arrives while the first is still inside the frame is rejected, not queued.
+On a free-threaded build the risk widens: the Python docs state that sharing any iterator across
+threads is not thread-safe and threads "may see duplicate or missing elements".
+
+```python
+import threading
+
+def jobs():
+    for i in range(1_000_000):
+        yield i
+
+# BROKEN: four threads call next() on the same generator
+source = jobs()
+workers = [threading.Thread(target=lambda: [handle(j) for j in source]) for _ in range(4)]
+```
+
+```python
+# FIX [3.15]: serialize next() with a lock; each item goes to exactly one thread
+source = threading.serialize_iterator(jobs())
+
+# Or wrap the generator function once, so every iterator it returns is serialized
+@threading.synchronized_iterator
+def jobs():
+    for i in range(1_000_000):
+        yield i
+
+# When every thread must see every item, use concurrent_tee in place of itertools.tee
+left, right = threading.concurrent_tee(jobs(), n=2)
+```
+
+On 3.14 and earlier, wrap `next()` in a `threading.Lock` yourself, or feed a `queue.Queue` from
+one producer thread. `itertools.tee()` is not a fix: its copies are not safe to consume from
+different threads.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1144,6 +1182,18 @@ They are, in order, what the generator gives out, what it takes in, and what it 
 **Short:** aggregate_by_merchant is the only stage whose memory grows with distinct merchant IDs, not with the number of rows processed.
 
 Every stage before it — `read_lines`, `parse_rows`, `filter_valid` — is a generator that holds at most one line or one row dict in memory at a time, so their memory footprint is O(1) regardless of file size. `aggregate_by_merchant` must accumulate a running total per merchant in a `defaultdict`, so its memory is proportional to the number of *distinct* merchant IDs, not the 80 million rows processed — the case study assumes roughly 50,000 merchants at about 150 bytes each, for 7.5 MB total. This is why the same pipeline processes a 10 GB file in about 7.5 MB of peak memory — the streaming stages contribute under 2 KB between them: cardinality of the aggregation key, not row count, is what determines memory for any stage that must remember state across the stream. Design pipelines so only the final aggregation stage buffers, and keep every upstream stage a pure pass-through generator.
+
+**Q: Why does sharing one generator between threads fail, and how do you fix it?**
+**Short:** A generator frame runs in one thread at a time, so a concurrent next() raises ValueError; on 3.15 wrap it in threading.serialize_iterator, earlier use a lock or a queue.
+
+A generator keeps one suspended frame. If thread B calls `next()` while thread A is still inside
+that frame, CPython raises `ValueError: generator already executing` instead of waiting. On a
+free-threaded build, plain iterators shared across threads can also skip or duplicate items. 3.15
+adds `threading.serialize_iterator(it)`, which takes a lock around `__next__()` (and `send()`,
+`throw()`, `close()`) so each item goes to exactly one caller, the `@threading.synchronized_iterator`
+decorator for generator functions, and `threading.concurrent_tee(it, n)`, which gives each thread
+its own iterator over every item. On 3.14 and earlier, guard `next()` with a `threading.Lock` or
+have one producer push items into a `queue.Queue`.
 
 **Q: How does `itertools.batched` [3.12] differ from a hand-rolled `islice`-based chunker?**
 **Short:** batched yields tuples and its final batch is short unless strict=True [3.13] raises instead.

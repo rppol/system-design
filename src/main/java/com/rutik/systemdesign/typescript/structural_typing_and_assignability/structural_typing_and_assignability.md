@@ -589,7 +589,7 @@ set, and `noUncheckedIndexedAccess` when the keys are genuinely dynamic.
 |------|------|---------------------------|
 | TypeScript | The compiler and checker (7.0, native Go binary) | Owns the relation; `--checkers` parallelises it |
 | tsc6 | The 6.0 binary shipped as `@typescript/typescript6` | The only stable Compiler API until 7.1 |
-| typescript-eslint | Type-aware linting (8.69.0) | `no-unsafe-assignment` catches `any` crossing boundaries |
+| typescript-eslint | Type-aware linting (8.71.2) | `no-unsafe-assignment` catches `any` crossing boundaries |
 | ts-morph | Programmatic AST and type manipulation | Queries checker assignability results in codemods |
 | Vitest | Test runner with `expectTypeOf` | `toMatchTypeOf` is an assignability assertion |
 | Zod | Runtime schema validation | Closes the gap assignability leaves at the network edge |

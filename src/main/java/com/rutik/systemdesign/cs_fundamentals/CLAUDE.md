@@ -100,10 +100,10 @@ Code examples use Python (type-hinted, runnable-shaped) as the default language 
 | Phase | Modules |
 |-------|---------|
 | 1 — Complexity & Computation | complexity_analysis_and_big_o, discrete_math_for_engineers, number_systems_and_bit_manipulation, character_encoding_deep_dive, recursion_and_problem_solving_patterns |
-| 2 — Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures |
-| 3 — Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer, graph_and_string_algorithms |
-| 4 — Operating Systems | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization |
-| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals, theory_of_computation, how_code_runs_compilers_and_interpreters |
+| 2 — Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures, probabilistic_and_streaming_structures |
+| 3 — Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer, graph_and_string_algorithms, dsa_patterns (pattern playbooks topic) |
+| 4 — Operating Systems | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization, memory_models_and_concurrency_theory |
+| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals, theory_of_computation, information_theory_and_compression, how_code_runs_compilers_and_interpreters |
 
 `character_encoding_deep_dive` sits in **Phase 1**, at position 4 in `STUDY_ORDER.cs_fundamentals` — directly after `number_systems_and_bit_manipulation`, because bits -> bytes -> code points is one chain. It was documented as Phase 5 for a while; the shipped order was always Phase 1, and the tables now agree with it.
 
@@ -200,7 +200,8 @@ Files:
 - `dsa_patterns/dsa_patterns.md` — master recognition engine (decision tree, cue→pattern table, constraints→complexity table, complexity cheat sheet, pattern index)
 - `dsa_patterns/interview_execution_playbook.md` — UMPIRE method, L5 rubric, communication scripts, mock dialogue, "what to say when stuck"
 - `dsa_patterns/study_plans.md` — which curated problem list to work at which stage (Blind 75 -> NeetCode 150 / LeetCode Top Interview 150 -> company tags), pattern-mapped, with LeetCode links, difficulty, and a 7-phase order
-- 25 pattern playbook files (one per pattern — see the master page `dsa_patterns/dsa_patterns.md` §6 Pattern Index for the full list)
+- `dsa_patterns/ai_assisted_round_playbook.md` — the AI-assisted coding round: format, driving the assistant, verifying its output
+- 26 pattern playbook files (one per pattern — see the master page `dsa_patterns/dsa_patterns.md` §6 Pattern Index for the full list)
 
 ### Pattern-File Template (NEW — third template alongside module and case-study templates)
 
@@ -260,7 +261,7 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 
 ## Learning Paths (Full + Senior)
 
-`README.md` documents the **Full Path** (all 24 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (17 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — which is how `dsa_patterns/` names its 25 playbook files plus the two guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
+`README.md` documents the **Full Path** (all 27 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (19 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — which is how `dsa_patterns/` names its 26 playbook files plus the three guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
@@ -287,7 +288,7 @@ See `README.md` §7 for the authoritative per-file `pending`/`done` status table
 - Chunk P5: DONE — `interview_execution_playbook.md`, `study_plans.md` + 100 bidirectional See Also links across the 12 Phase 1-3 concept modules
 - Chunk P6: DONE (2026-06-10) — comprehensive audit: all 24 problem banks expanded to ≥15 problems with full variation coverage; `matrix_traversal.md` added as pattern #25 and wired into the `dsa_patterns` master page §3/§4/§6, study plans, and the `arrays_strings_and_hashing` See Also
 
-All 25 pattern files + the `dsa_patterns/dsa_patterns.md` master page + 2 guides are complete and verified (structure, Q&A counts, code sanity, link integrity, conventions). No further dsa_patterns/ chunks are queued. If this sub-section is revisited, see "Planned Topics" above for candidate additions to the broader cs_fundamentals section instead.
+All 26 pattern files + the `dsa_patterns/dsa_patterns.md` master page + 3 guides are complete and verified (structure, Q&A counts, code sanity, link integrity, conventions). No further dsa_patterns/ chunks are queued. If this sub-section is revisited, see "Planned Topics" above for candidate additions to the broader cs_fundamentals section instead.
 
 On finishing a module/chunk:
 1. Flip status to `done` in `README.md` §7

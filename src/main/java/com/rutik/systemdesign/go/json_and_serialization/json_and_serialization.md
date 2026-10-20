@@ -25,8 +25,9 @@ library packages. `json/v2` replaces the fixed-behaviour API with an options-bas
 `UnmarshalDecode`, each taking variadic `Options` — and tightens the defaults so that
 invalid UTF-8 and duplicate object names are rejected instead of quietly repaired.
 `jsontext` sits underneath it as the token-and-value layer for code that needs to read or
-write JSON syntax without ever building a Go value. Both are on by default; the escape
-hatch is `GOEXPERIMENT=nojsonv2`.
+write JSON syntax without ever building a Go value. The v1 `encoding/json` package now
+runs on the v2 engine: marshal and unmarshal behaviour is kept, but error message text can
+differ. Building with `GOEXPERIMENT=nojsonv2` restores the original v1 implementation.
 
 This module covers the reflection machinery and its cost, every struct-tag option including
 the `omitempty`/`omitzero` distinction that trips up nearly everyone, nil-versus-empty
@@ -663,13 +664,28 @@ The stricter defaults are the migration risk worth planning for:
 | Invalid UTF-8 in a string | Replaced with U+FFFD, no error | Error |
 | Duplicate object name | Last occurrence wins, no error | Error |
 
+Code written against the `GOEXPERIMENT=jsonv2` preview needs these changes for the final
+1.27 API (Go 1.27 release notes):
+
+| Preview API | Go 1.27 |
+|-------------|---------|
+| `inline` tag option | Renamed `embed` |
+| `format` tag option | Removed |
+| `unknown` tag option | Removed |
+| `DiscardUnknownMembers` marshal option | Removed |
+| `SkipFunc` sentinel error | Removed |
+| `jsontext` numeric `Token` accessors | Also return an error |
+
 `jsontext` is the layer beneath: a `jsontext.Encoder` and `jsontext.Decoder` operating on
 `jsontext.Token` and `jsontext.Value`. Reach for it when you are transforming JSON rather
 than materialising it — redacting fields in a log pipeline, re-keying a document, or
 validating syntax without allocating a Go value per node.
 
-Adoption is incremental. `json/v2` is enabled by default; `GOEXPERIMENT=nojsonv2` turns it
-off if a dependency breaks. The safe order is: turn strictness on in a test build first,
+Adoption is incremental. Existing `encoding/json` call sites already run on the v2 engine
+with v1 semantics, so the first visible change is error text: a test that compares
+`err.Error()` to a string can fail after the toolchain bump. Match on error types or
+`errors.As` instead. `GOEXPERIMENT=nojsonv2` at build time restores the original v1
+implementation if a dependency breaks. The safe order is: turn strictness on in a test build first,
 fix what fails, then migrate call sites package by package — the two import paths coexist
 in one binary.
 
@@ -724,7 +740,7 @@ one long text blob.
 | Approach | Throughput | Binary size | Schema coupling | Debuggability |
 |----------|-----------|-------------|-----------------|---------------|
 | `encoding/json` reflection | Baseline | Smallest | None | Best — `curl` shows you everything |
-| `encoding/json/v2` `[1.27]` | Faster than v1 | Small | None | Same as v1 |
+| `encoding/json/v2` `[1.27]` | Marshal at parity with v1, Unmarshal significantly faster (1.27 release notes) | Small | None | Same as v1 |
 | Generated JSON codec (`easyjson`, `go-json` style) | 3–6x baseline | Grows with type count | Regenerate on struct change | Same wire format |
 | Protobuf + `protoc-gen-go` | Fastest | Largest | Strong, versioned | Needs `protoc --decode` |
 
@@ -1021,6 +1037,19 @@ type: `type alias Money` has identical layout and fields but inherits no methods
 computed fields. Test every exported wire type with a table-driven
 `json.Marshal` round trip; the recursion shows up on the first call.
 
+**Q: You upgraded to Go 1.27 and changed no code. What changed in your JSON path?**
+**Short:** `encoding/json` now runs on the v2 engine with v1 behaviour kept, but error text can differ, so tests matching `err.Error()` may break.
+
+From 1.27 the v1 API runs on the v2 implementation, configured with options that reproduce
+v1 semantics, so marshal and unmarshal results are preserved: nil slices still encode as
+`null`, and invalid UTF-8 is still repaired rather than rejected. Two things move. Error message text is
+not part of the compatibility promise, so a test asserting an exact `err.Error()` string can
+fail; assert on `*json.SyntaxError` or `*json.UnmarshalTypeError` with `errors.As`. Unmarshal
+gets significantly faster while Marshal stays at parity, per the 1.27 release notes. If a
+dependency breaks, build with `GOEXPERIMENT=nojsonv2` to restore the original v1
+implementation, and treat that as temporary: the release notes say the opt-out is expected
+to go away.
+
 **Q: When should you use `json.RawMessage`?**
 **Short:** When you want the decoder to keep a sub-document's bytes without interpreting them — for polymorphic payloads, opaque pass-through, or deferring the parse.
 
@@ -1065,8 +1094,7 @@ at compile time is now a value you pass at the call site and can share across a 
 The `Write`/`Read` variants work directly against an `io.Writer` and `io.Reader`, removing
 the intermediate buffer that v1's `Marshal` forced on you. The duplicate-name rejection is
 the security-relevant one: a repeated key is how a payload sneaks a second value past a
-proxy that validated only the first. It ships enabled; `GOEXPERIMENT=nojsonv2` is the
-escape hatch if a dependency breaks. Migrate by turning strictness on in tests first, then
+proxy that validated only the first. Migrate by turning strictness on in tests first, then
 moving call sites package by package — both import paths coexist in one binary.
 
 **Q: What is `encoding/json/jsontext` `[1.27]` for?**

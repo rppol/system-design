@@ -33,6 +33,10 @@ Method. The concurrency column describes the reference implementation, not the p
 | Rate Limiter | [RateLimiter.md](RateLimiter.md) | Strategy (4 algorithms), Simple Factory (algorithm selection) | No | Yes — `ConcurrentHashMap` + per-client monitor |
 | Tic-Tac-Toe | [TicTacToe.md](TicTacToe.md) | Strategy (AI move selection), enum `GameState` gating | Yes | None |
 | Splitwise | [Splitwise.md](Splitwise.md) | Strategy (split type), Simple Factory (split-strategy selection) | No | None |
+| Key-Value Store | [KeyValueStore.md](KeyValueStore.md) | Unit of Work (transaction write layers), stack of layers for nested transactions, optimistic version check | No | Yes, `ReentrantReadWriteLock` on the committed map; first-committer-wins at commit |
+| Pub-Sub / Message Queue | [PubSub.md](PubSub.md) | Strategy (partitioner), Mediator (consumer group assignment), pull-based Observer | No | Yes, a monitor per partition log and per consumer group |
+| In-Memory File System | [FileSystem.md](FileSystem.md) | Composite (sealed `FsNode`), Iterator (stack-based `find`) | No | Yes, one `ReentrantReadWriteLock` over the tree |
+| Meeting Scheduler | [MeetingScheduler.md](MeetingScheduler.md) | Strategy (room selection), Observer (invites and cancellations) | No | `synchronized` book and cancel across room and attendee calendars |
 
 ---
 

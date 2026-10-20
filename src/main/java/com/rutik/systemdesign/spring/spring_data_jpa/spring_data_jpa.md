@@ -317,20 +317,32 @@ List<UserDTO>     dtos      = repo.findByStatus(ACTIVE, UserDTO.class);
 
 ### 6.4 Specifications (Criteria API Wrapper)
 
+Spring Data JPA 4.0 (Spring Data 2025.1, GA November 2025, shipped with Boot 4.0) splits the
+Specification model by query type, because the Criteria API gives SELECT, UPDATE and DELETE
+different root query objects:
+
+| Interface | Lambda shape | Executor method | Use |
+|---|---|---|---|
+| `PredicateSpecification<T>` | `(From<?, T> from, CriteriaBuilder cb)` | `findAll`, `findOne`, `count`, `exists`, `delete`, `findBy` | Reusable filter that does not touch the query object; works for any query type |
+| `Specification<T>` | `(Root<T>, CriteriaQuery<?>, CriteriaBuilder)` | `findAll(spec, pageable)`, `findAll(spec, countSpec, pageable)` | SELECT-only needs: `query.distinct(true)`, fetch joins, subqueries |
+| `UpdateSpecification<T>` | `(Root<T>, CriteriaUpdate<T>, CriteriaBuilder)` | `long update(spec)` (4.0) | Bulk `UPDATE ... SET ... WHERE` |
+| `DeleteSpecification<T>` | `(Root<T>, CriteriaDelete<T>, CriteriaBuilder)` | `long delete(spec)` | Bulk `DELETE ... WHERE` |
+
 ```java
-// Composable predicate building — avoids long derived method names
-public class UserSpecifications {
+// Reusable filters: PredicateSpecification has no CriteriaQuery parameter,
+// so the same predicate serves SELECT, COUNT, UPDATE and DELETE.
+public final class UserSpecs {
 
-    public static Specification<User> hasStatus(UserStatus status) {
-        return (root, query, cb) -> cb.equal(root.get("status"), status);
+    public static PredicateSpecification<User> hasStatus(UserStatus status) {
+        return (from, cb) -> cb.equal(from.get("status"), status);
     }
 
-    public static Specification<User> createdAfter(LocalDateTime date) {
-        return (root, query, cb) -> cb.greaterThan(root.get("createdAt"), date);
+    public static PredicateSpecification<User> createdAfter(LocalDateTime date) {
+        return (from, cb) -> cb.greaterThan(from.get("createdAt"), date);
     }
 
-    public static Specification<User> emailLike(String pattern) {
-        return (root, query, cb) -> cb.like(cb.lower(root.get("email")), pattern.toLowerCase());
+    public static PredicateSpecification<User> emailLike(String pattern) {
+        return (from, cb) -> cb.like(cb.lower(from.get("email")), pattern.toLowerCase());
     }
 }
 
@@ -338,14 +350,39 @@ public class UserSpecifications {
 public interface UserRepository extends JpaRepository<User, Long>,
                                          JpaSpecificationExecutor<User> { }
 
-// Composition at service layer:
-Specification<User> spec = Specification
-    .where(UserSpecifications.hasStatus(ACTIVE))
-    .and(UserSpecifications.createdAfter(LocalDateTime.now().minusDays(30)))
-    .and(UserSpecifications.emailLike("%@example.com%"));
+// Optional search-form filters: start from unrestricted(), never from where(null).
+Specification<User> spec = Specification.unrestricted();
+if (status != null) spec = spec.and(UserSpecs.hasStatus(status));
+if (since != null)  spec = spec.and(UserSpecs.createdAfter(since));
+if (domain != null) spec = spec.and(UserSpecs.emailLike("%@" + domain));
 
-Page<User> result = userRepository.findAll(spec, PageRequest.of(0, 20));
+Page<User> page = userRepository.findAll(spec, PageRequest.of(0, 20));
+
+// Fluent query: projection + sort + first row, all inside the query function
+Optional<UserSummary> newest = userRepository.findBy(UserSpecs.hasStatus(ACTIVE),
+    q -> q.as(UserSummary.class).sortBy(Sort.by("createdAt").descending()).first());
+
+// Bulk update with a reused predicate. Bypasses the persistence context:
+// managed User instances in this transaction keep their old status.
+long n = userRepository.update(
+    UpdateSpecification.<User>update((root, update, cb) -> update.set("status", DORMANT))
+        .where(UserSpecs.createdAfter(cutoff).and(UserSpecs.hasStatus(ACTIVE))));
 ```
+
+Specification rules in 4.0:
+
+- `Specification.where(Specification)` rejects `null` (Javadoc: "does not accept null values
+  since 4.0, use `unrestricted()` instead"). 4.0 also added a `where(PredicateSpecification)`
+  overload, so the 3.x idiom `Specification.where(null).and(...)` stops compiling (ambiguous
+  call). A variable that holds `null` still compiles and throws `IllegalArgumentException` on
+  the first request.
+- `Specification.unrestricted()` (since 4.0) is a null-like spec that is dropped from every
+  `and`/`or`, so `unrestricted().and(x)` equals `x`. `allOf()` and `anyOf()` with an empty list
+  return `unrestricted()`, which matches every row.
+- A spec whose lambda returns a `null` Predicate still means "no constraint". That is how the
+  case study in §14 builds optional filters, and it remains valid.
+- `findAll(spec, countSpec, pageable)` (since 3.5) takes a separate count spec, so the COUNT
+  query can drop joins that only the SELECT needs.
 
 ### 6.5 N+1 Solutions
 
@@ -436,6 +473,53 @@ boolean hasNext = slice.hasNext();  // cheaper: fetches pageSize+1 rows, checks 
 Page<User> findByRole(@Param("role") String role, Pageable pageable);
 ```
 
+**Scroll API: `Window<T>` and keyset scrolling.** `Page` and `Slice` both use `OFFSET`, and
+the database must read and discard every skipped row: `OFFSET 1000000 LIMIT 20` reads
+1,000,020 rows to return 20. The Scroll API (Spring Data 3.1+) returns a `Window<T>` and takes
+a `ScrollPosition`. With `ScrollPosition.keyset()` Spring Data rewrites the WHERE clause to
+start after the last row it returned, so an index on the sort columns serves page 50,000 as
+fast as page 1.
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+    // Sort columns must be non-null; Spring Data appends the primary key as a tiebreaker.
+    Window<Order> findFirst20ByCustomerIdOrderByCreatedAtDesc(Long customerId, ScrollPosition position);
+}
+
+// Batch job: WindowIterator applies positionAt(last) for you.
+WindowIterator<Order> it = WindowIterator
+    .of(pos -> orderRepository.findFirst20ByCustomerIdOrderByCreatedAtDesc(42L, pos))
+    .startingAt(ScrollPosition.keyset());
+while (it.hasNext()) { process(it.next()); }
+
+// REST cursor: return the last row's keys, rebuild the position on the next request.
+Window<Order> window = orderRepository.findFirst20ByCustomerIdOrderByCreatedAtDesc(42L, position);
+KeysetScrollPosition last = (KeysetScrollPosition) window.positionAt(window.size() - 1);
+Map<String, ?> cursor = last.getKeys();          // {createdAt=..., id=...}, encode as an opaque token
+ScrollPosition next = ScrollPosition.forward(cursor);
+```
+
+```
+Keyset query for page N (sort: createdAt DESC, id DESC as appended tiebreaker)
+
+  SELECT ... FROM orders
+  WHERE customer_id = ?
+    AND (created_at < :lastCreatedAt
+         OR (created_at = :lastCreatedAt AND id < :lastId))
+  ORDER BY created_at DESC, id DESC
+  LIMIT 21                       <- one extra row sets window.hasNext()
+
+  Index (customer_id, created_at DESC, id DESC): seek, then read 21 rows.
+  Cost is the same for page 2 and page 50,000. OFFSET cost grows with N.
+```
+
+Keyset scrolling only works when the sort properties are non-nullable (SQL comparison with
+`NULL` yields unknown, so rows vanish), when the query returns every sort property (an
+interface or DTO projection must include them), and when the client accepts "next/previous"
+in place of "jump to page 37". `ScrollPosition.offset()` gives the same `Window` API on top of
+plain OFFSET for callers that need the uniform type. Note that `ScrollPosition.offset(0)` skips
+the first row, because positions are exclusive.
+
 ### 6.8 Auditing
 
 ```java
@@ -475,6 +559,34 @@ public class User extends Auditable {
     // inherits all audit fields
 }
 ```
+
+### 6.9 AOT Repositories (Spring Data JPA 4.0+)
+
+The startup work shown in §5 (parse every method name into a `PartTree`, parse every `@Query`
+string, build the query objects) runs by reflection on every boot. AOT repositories move it
+to build time: during Spring AOT processing, Spring Data generates Java source for each query
+method into a fragment named `<Repository FQCN>Impl__AotRepository` in the repository's
+package, plus a JSON metadata file listing each method and its final query string.
+
+| Property | Default | Effect |
+|---|---|---|
+| `spring.aot.repositories.enabled` | `true` | Generate source for repository query methods |
+| `spring.aot.jpa.repositories.enabled` | `true` | Same switch scoped to JPA only |
+| `spring.aot.repositories.metadata.enabled` | `true` | Emit the per-repository JSON metadata |
+| `spring.aot.jpa.repositories.use-entitymanager` | `false` | Boot a real `EntityManagerFactory` at build time when type scanning cannot find the entities |
+
+The generated fragments are used only when the application runs in AOT mode: a GraalVM native
+image, or a JVM started with `-Dspring.aot.enabled=true` after `process-aot`. A plain
+`java -jar` on a non-AOT build still uses the reflective path.
+
+Covered at build time: derived queries, `@Query`/`@NativeQuery`, named queries, `@Procedure`,
+`@Modifying` returning `void` or `int`, `@QueryHints`, `Page`/`Slice`/`Stream`/`Optional`
+returns, and interface and DTO projections. Left on the runtime path: `CrudRepository` base
+methods, Querydsl, Query by Example, methods that take a `ScrollPosition`, dynamic projections,
+and reactive repositories. AOT processing requires Hibernate as the JPA provider.
+
+The JSON metadata has a second use: it is a build artifact listing every query the service can
+issue, which a reviewer or a DBA can diff between releases without starting the application.
 
 ---
 
@@ -768,67 +880,77 @@ spring.jpa.properties.hibernate.generate_statistics=true
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is the difference between CrudRepository, JpaRepository, and PagingAndSortingRepository?**
+**Q: What is the difference between CrudRepository, JpaRepository, and PagingAndSortingRepository?**
 **Short:** JpaRepository extends CrudRepository and PagingAndSortingRepository, adding flush, batch deletes, and Example queries.
 
 CrudRepository provides basic CRUD: save, findById, findAll, delete, count, existsById. PagingAndSortingRepository provides findAll(Pageable) and findAll(Sort) — and since Spring Data 3.0 it extends `Repository` directly, NOT `CrudRepository`, so a read-only paging repository exposes no write methods at all. JpaRepository reaches both by extending `ListCrudRepository` and `ListPagingAndSortingRepository` (the `List*` variants return `List<T>` rather than `Iterable<T>`), and adds JPA-specific operations: flush, saveAndFlush, deleteAllInBatch, getReferenceById (proxy without SELECT), and Example-based queries. In practice, you almost always extend JpaRepository unless you are writing a library that should work with non-JPA Spring Data modules (MongoDB, Redis) where extending CrudRepository keeps the interface provider-agnostic.
 
-**Q2: How does Spring Data generate the SQL for a derived query method like findByEmailAndStatus?**
+**Q: How does Spring Data generate the SQL for a derived query method like findByEmailAndStatus?**
 **Short:** Spring Data parses the method name into a PartTree once at startup and compiles it into a cached JPA query.
 
 The whole translation happens once at startup, not per call. Spring Data parses the method name with PartTree: it strips the subject (findBy, countBy, etc.) and splits the predicate on And/Or/Between/LessThan etc., mapping each token to a JPA Criteria expression. The resulting PartTreeJpaQuery is compiled once and cached. On each invocation, Spring binds runtime parameters to the pre-built query. If a token does not match any field on the entity, startup fails with PropertyReferenceException — this means bugs are caught at boot, not at runtime.
 
-**Q3: What is the N+1 select problem and how do you fix it?**
+**Q: What is the N+1 select problem and how do you fix it?**
 **Short:** N+1 means one query for parents plus one extra query per parent's lazy collection, fixed with JOIN FETCH or batch fetching.
 
 N+1 occurs when loading N parent entities triggers N additional SELECT statements to load their lazy-fetched child collections. For example, loading 100 Orders and then accessing each Order's items fires 1 + 100 = 101 queries. Fix options: (A) JOIN FETCH in JPQL loads everything in one query using a Cartesian JOIN, but can produce duplicate parent rows (use DISTINCT). (B) @EntityGraph generates a LEFT OUTER JOIN. (C) Setting hibernate.default_batch_fetch_size=25 causes Hibernate to use IN (?1,?2,...,?25) clauses, reducing 100 queries to 4. Choice depends on cardinality: JOIN FETCH for single collections; batch fetching for multiple or large collections.
 
-**Q4: Explain FetchType.LAZY vs FetchType.EAGER and the risks of each.**
+**Q: What is the difference between FetchType.LAZY and FetchType.EAGER, and what are the risks of each?**
 **Short:** LAZY loads an association on first access; EAGER loads it immediately, risking Cartesian-product blowups on collections.
 
 LAZY means the association is loaded on first access (generates an extra SELECT or proxy stub). EAGER means the association is always loaded with the parent, usually via a JOIN or subselect. LAZY is the default for @OneToMany and @ManyToMany; EAGER is the default for @ManyToOne and @OneToOne. The risk of LAZY is LazyInitializationException when accessing the association after the persistence context closes. The risk of EAGER on collections is Cartesian product explosion when multiple EAGER @OneToMany associations exist on the same entity. Best practice: always use LAZY on collections and fetch explicitly per use case with @EntityGraph or JOIN FETCH.
 
-**Q5: What is a persistence context and what are the four entity states?**
+**Q: What is a persistence context and what are the four entity states?**
 **Short:** The persistence context is a first-level cache with four entity states: transient, managed, detached, and removed.
 
 The persistence context is a first-level cache managed by the EntityManager within a transaction. It tracks all entities loaded or saved during that transaction. The four states are: Transient (new object, not associated with any row or context), Managed (associated with a row and tracked for dirty checking), Detached (was managed, context closed or entity evicted — changes not tracked), and Removed (scheduled for deletion on flush). Understanding states is critical: calling save() on a detached entity triggers a SELECT + UPDATE even if nothing changed; mutating a managed entity without calling save() still persists via dirty checking on flush.
 
-**Q6: What does @Modifying do, and when should you set clearAutomatically=true?**
+**Q: What does @Modifying do, and when should you set clearAutomatically=true?**
 **Short:** @Modifying marks a @Query as UPDATE/DELETE, and clearAutomatically=true prevents stale reads from the first-level cache.
 
 @Modifying marks a @Query method as an UPDATE or DELETE operation, which causes Spring Data to execute it as an executeUpdate() call instead of getResultList(). Without it, Hibernate throws an exception for write operations in JPQL. clearAutomatically=true is required when you perform a bulk update and then query entities in the same transaction, because the bulk UPDATE bypasses the persistence context (first-level cache). Without clearing, subsequently fetched entities may show stale values from the L1 cache. flushAutomatically=true ensures any pending dirty-checked changes are flushed before the bulk update executes, preventing the bulk query from operating on out-of-date DB state.
 
-**Q7: How does optimistic locking work with @Version?**
+**Q: How does optimistic locking work with @Version?**
 **Short:** Optimistic locking adds a @Version column to every UPDATE's WHERE clause, throwing on a zero-row match from concurrent writes.
 
 You declare a @Version field (Long, Integer, or Timestamp) on the entity. Hibernate includes the version in every UPDATE: UPDATE user SET email=?, version=version+1 WHERE id=? AND version=?. If the WHERE clause matches zero rows (another transaction already incremented the version), Hibernate throws ObjectOptimisticLockingFailureException. The caller must catch this and retry or surface a conflict error to the user. This avoids holding a DB lock but requires application-level retry logic. Use optimistic locking when concurrent modification of the same row is rare. The @Version field is also used in @Modifying updates automatically if you include the entity's version in your query.
 
-**Q8: When would you choose pessimistic locking over optimistic locking?**
+**Q: When would you choose pessimistic locking over optimistic locking?**
 **Short:** Pessimistic locking beats optimistic locking under high contention, since retries would thrash instead of succeed.
 
 Pessimistic locking is appropriate when contention is high and retry overhead would degrade user experience or cause thundering herd issues. For example, a seat reservation system where many users simultaneously try to book the last seat — optimistic locking would cause repeated failures and retries. PESSIMISTIC_WRITE (@Lock(LockModeType.PESSIMISTIC_WRITE)) issues SELECT FOR UPDATE, blocking other writers for the duration of the transaction. The trade-off is reduced throughput and deadlock risk. Pessimistic locking should be scoped to the narrowest possible transaction to minimize lock hold time.
 
-**Q9: What is the difference between Page<T> and Slice<T>?**
+**Q: What is the difference between Page<T> and Slice<T>?**
 **Short:** Page<T> runs an extra COUNT query for total pages; Slice<T> skips it by fetching one extra row to detect a next page.
 
 Page<T> extends Slice<T> and additionally includes a COUNT(*) query to determine the total number of elements and pages. This makes it suitable for UI pagination with "Page 3 of 47" indicators but expensive on large tables where COUNT scans the full index. Slice<T> fetches pageSize+1 rows, uses the extra row to determine if a next page exists, then discards it — no COUNT query. Use Slice<T> for infinite scroll, mobile feeds, or any scenario where total count is unnecessary. For very large datasets (100M+ rows), even Slice with offset-based pagination is slow; cursor-based pagination (keyset pagination) using a WHERE id > lastSeenId is the production solution.
 
-**Q10: Explain interface-based projections and how Spring implements them.**
+**Q: Why does deep OFFSET pagination get slow, and how does the Spring Data Scroll API fix it?**
+**Short:** OFFSET makes the database read and discard every skipped row; keyset scrolling with ScrollPosition.keyset() seeks past the last returned row via an index instead.
+
+`Page` and `Slice` both translate to `LIMIT n OFFSET k`, and the database cannot jump to row k: it walks and throws away k rows first, so `OFFSET 1000000 LIMIT 20` reads 1,000,020 rows. The Scroll API (Spring Data 3.1+) declares a repository method that takes a `ScrollPosition` and returns `Window<T>`. Starting from `ScrollPosition.keyset()`, Spring Data rewrites the WHERE clause into `(createdAt < :last) OR (createdAt = :last AND id < :lastId)`, appending the primary key as a tiebreaker so the order is total, and fetches one extra row to set `hasNext()`. With an index on the sort columns every page is an index seek plus 20 rows. `WindowIterator` drives a batch loop; for a REST API, return `((KeysetScrollPosition) window.positionAt(last)).getKeys()` as an opaque cursor and rebuild it with `ScrollPosition.forward(keys)`. Constraints: sort columns must be non-nullable, projections must include every sort property, and the client loses "jump to page 37". Use keyset for feeds, exports and batch jobs; keep `Page` for admin tables that show a total.
+
+**Q: What are interface-based projections, and how does Spring implement them?**
 **Short:** Interface-based projections make Spring Data fetch only the columns needed to satisfy the interface's declared getters.
 
 Interface-based projections are interfaces declaring getters for a subset of entity fields. Spring Data generates a JDK dynamic proxy at runtime that implements the interface. When the query executes, Hibernate fetches only the columns needed to populate the declared getters (using a constructor-style result mapping). This reduces data transfer and avoids hydrating full entity objects. Open projections use @Value("#{target.field1 + ' ' + target.field2}") for computed properties using SpEL. The limitation of open projections is that Spring must load the full entity to evaluate SpEL expressions, negating the column-reduction benefit of closed projections.
 
-**Q11: What is a Specification and when should you use it instead of derived query methods?**
+**Q: What is a Specification and when should you use it instead of derived query methods?**
 **Short:** A Specification wraps a JPA Criteria predicate in a composable functional interface for dynamic, testable query conditions.
 
 Specification is a Spring Data abstraction over JPA Criteria API. It encapsulates a single predicate as a functional interface: Specification<T> is (Root<T>, CriteriaQuery<?>, CriteriaBuilder) -> Predicate. Specifications compose with .and(), .or(), .not(). Use Specifications when query predicates are dynamic (optional filters in a search form), when the combination of conditions is not known at compile time, or when you want to unit test individual predicates in isolation. Avoid derived query methods beyond 3-4 conditions — a method like findByStatusAndRegionAndAgeGreaterThanAndEmailLike becomes unmaintainable. Specifications keep that logic readable and composable.
 
-**Q12: What happens if you call save() on an entity with an ID that already exists in the database?**
+**Q: Why does `Specification.where(null).and(...)` break after upgrading to Spring Data JPA 4.x, and what replaces it?**
+**Short:** Since 4.0 `where` rejects null: a literal `where(null)` is an ambiguous call and a null variable throws; start optional filters from `Specification.unrestricted()`.
+
+In 3.x, `Specification.where(null)` returned a no-op spec, so optional search-form filters were built as `Specification.where(null).and(byStatus).and(byDate)`. Spring Data JPA 4.0 (Boot 4.0) made `where(Specification)` reject null and added a `where(PredicateSpecification)` overload, so a literal `where(null)` no longer compiles (the call is ambiguous), and a variable that holds null compiles and then fails with `IllegalArgumentException` on the first request. The replacement is `Specification.unrestricted()`, a null-like spec that is elided from composition: `unrestricted().and(x)` equals `x`, and `allOf()`/`anyOf()` with no arguments return it. 4.0 also split the model by query type: `PredicateSpecification<T>` is `(From, CriteriaBuilder) -> Predicate` with no query parameter, so one filter serves `findAll`, `count`, `exists`, `delete`, and the `where` clause of an `UpdateSpecification`; `Specification<T>` keeps `CriteriaQuery` for SELECT-only work such as `distinct` or fetch joins; `UpdateSpecification` and `DeleteSpecification` drive `repository.update(spec)` and `repository.delete(spec)` as bulk statements that bypass the persistence context. Write new filters as `PredicateSpecification` and grep a 3.x codebase for `where(null)` before the upgrade.
+
+**Q: What happens if you call save() on an entity with an ID that already exists in the database?**
 **Short:** save() on an entity with an existing ID calls merge(), which SELECTs current state and can overwrite unset fields with nulls.
 
 JpaRepository.save() checks if the entity is new using SimpleJpaRepository.isNew(), which by default checks if the ID field is null. If the ID is non-null, save() calls EntityManager.merge() (not persist()). merge() issues a SELECT to load the current state, then merges the passed object's state over it and returns a managed copy. This means two things: (1) you must use the returned entity, not the passed-in argument; (2) if you construct an entity with an ID but do not populate all fields, merge() will overwrite existing fields with nulls. The correct pattern for updates is to load the managed entity, mutate it, and rely on dirty checking.
 
-**Q13: How do you implement soft deletes with Spring Data JPA?**
+**Q: How do you implement soft deletes with Spring Data JPA?**
 **Short:** Hibernate's @SoftDelete annotation rewrites deletes into updates and adds a not-deleted filter to every generated SELECT.
 
 Annotate the entity with Hibernate's `@SoftDelete`, the first-class mechanism for it. Hibernate then rewrites deletes as updates to an indicator column and adds the "not deleted" restriction to every generated SELECT, including the collection loads and to-one joins that a hand-rolled filter misses. Example:
@@ -846,17 +968,17 @@ public class Account { ... }
 
 `SoftDeleteType` offers `DELETED` (true means deleted), `ACTIVE` (true means live, for legacy schemas with an `active` flag) and `TIMESTAMP` (null means live). The manual equivalent is `@SQLDelete` to swap the DELETE statement for an UPDATE plus `@SQLRestriction("deleted_at IS NULL")` to append a predicate to every generated SELECT — reach for it only when the rewrite must do something `@SoftDelete` cannot express. Either way the restriction applies to generated JPQL only, never to native queries, so a native query still sees deleted rows.
 
-**Q14: How does Spring Data JPA auditing work and what is AuditorAware?**
+**Q: How does Spring Data JPA auditing work and what is AuditorAware?**
 **Short:** @EnableJpaAuditing populates @CreatedDate/@LastModifiedDate/@CreatedBy/@LastModifiedBy via entity lifecycle callbacks.
 
 @EnableJpaAuditing activates the AuditingEntityListener. Fields annotated with @CreatedDate, @LastModifiedDate, @CreatedBy, @LastModifiedBy on @MappedSuperclass or the entity itself are populated automatically before insert/update via JPA entity lifecycle callbacks (@PrePersist, @PreUpdate). @CreatedDate and @LastModifiedDate use the clock configured in @EnableJpaAuditing(dateTimeProviderRef=). @CreatedBy and @LastModifiedBy call AuditorAware.getCurrentAuditor(), which you implement to return the current user (typically from SecurityContextHolder). The key constraint is that @CreatedDate and @CreatedBy fields should be @Column(updatable=false) to prevent modification after initial creation.
 
-**Q15: What is the difference between save() and saveAndFlush(), and when does an explicit flush matter?**
+**Q: What is the difference between save() and saveAndFlush(), and when does an explicit flush matter?**
 **Short:** save() just registers the entity; saveAndFlush() forces the pending SQL to hit the database before the transaction commits.
 
 save() only registers the entity with the persistence context; saveAndFlush() additionally forces Hibernate to push the pending SQL to the database immediately. Neither commits — the transaction boundary still decides that, so a flush followed by a rollback writes nothing. Without an explicit flush, Hibernate defers the INSERT/UPDATE until the transaction commits or until a query would be affected by the pending change, which is what lets it batch statements and reorder them by table. You need saveAndFlush() in three situations: when a database-generated value (a trigger, a DEFAULT, a sequence-backed column that is not the id) must be read back inside the same transaction; when a native query in the same transaction has to see the row, since native SQL bypasses the persistence context and Hibernate cannot know to auto-flush for it; and when you want a constraint violation to surface at this line rather than at commit, where the stack trace no longer points at the offending code. The cost is losing JDBC batching for that statement, so do not flush inside a loop.
 
-**Q16: How would you handle a scenario where you need to update only specific fields of an entity?**
+**Q: How would you handle a scenario where you need to update only specific fields of an entity?**
 **Short:** Partial updates are done by loading the managed entity, mutating fields, and letting @DynamicUpdate emit a partial UPDATE.
 
 Option A: Load the managed entity, set only the changed fields, and let dirty checking generate a partial UPDATE (Hibernate with @DynamicUpdate only updates changed columns). Option B: Use @Modifying @Query with explicit SET clause — precise but requires separate queries per update pattern. Option C: Use DTO-based partial updates with a custom repository method using EntityManager.createQuery(). Option D: Use an HQL UPDATE statement with an explicit SET clause. @DynamicUpdate on the entity class makes Hibernate include only dirty columns in the SQL, reducing bandwidth and avoiding overwriting concurrent changes to other fields:
@@ -869,27 +991,32 @@ public class User {
 }
 ```
 
-**Q17: How do you test Spring Data JPA repositories?**
+**Q: What do Spring Data JPA AOT repositories generate, and when are they actually used?**
+**Short:** At build time they generate Java source per query method plus JSON query metadata; the code runs only in AOT mode, such as a native image or spring.aot.enabled=true.
+
+Spring Data JPA 4.0 added AOT repositories, enabled by default through `spring.aot.repositories.enabled`. During Spring AOT processing, Spring Data parses each derived, `@Query`, `@NativeQuery`, named and `@Procedure` method and writes a fragment `<Repository>Impl__AotRepository` containing plain Java that builds and runs the query, plus a JSON file listing every method and its final query string. That removes the `PartTree` parsing and reflective query setup from startup, which matters most for native images and for services with hundreds of query methods. The fragments are used only when the application runs in AOT mode, so a plain `java -jar` of a non-AOT build keeps the reflective path. Methods left on the runtime path are `CrudRepository` base methods, Querydsl, Query by Example, `ScrollPosition` methods, dynamic projections, and reactive repositories, and AOT processing needs Hibernate as the provider. The JSON metadata is also a reviewable list of every SQL statement the service can issue, so a team can diff it between releases.
+
+**Q: How do you test Spring Data JPA repositories?**
 **Short:** @DataJpaTest loads only the JPA slice with a rollback-per-test transaction and an embedded database by default.
 
 Use @DataJpaTest which loads only the JPA slice: entity classes, repositories, Flyway/Liquibase, and an embedded H2 database (unless replaced). It wraps each test in a transaction that rolls back after the test, keeping tests isolated. For testing against the real database engine (recommended for complex queries, JSON columns, window functions), use Testcontainers with @DynamicPropertySource to point spring.datasource.url at the container. Use AssertJ for fluent assertions on Optional and collections. Test projection methods by asserting that the returned DTO/interface only exposes declared fields. Test Specifications by verifying they return correct results for each predicate in isolation.
 
-**Q18: What is the Open Session in View (OSIV) pattern and why is it controversial?**
+**Q: What is the Open Session in View (OSIV) pattern and why is it controversial?**
 **Short:** Open Session in View keeps the EntityManager open through view rendering, which can starve the connection pool under load.
 
 OSIV keeps the EntityManager (Session) open for the entire HTTP request lifecycle, including the view rendering phase. In Spring Boot, spring.jpa.open-in-view=true is the default (a warning is logged). This allows lazy loading in view templates without LazyInitializationException. It is controversial because: (1) database connections are held for the full request duration including slow rendering, starving the connection pool under load; (2) it encourages lazy-loaded queries scattered throughout the view layer, making N+1 problems invisible during development; (3) it mixes infrastructure concerns into the presentation layer. The correct approach is to explicitly fetch all needed data in the service layer (within a transaction), project to DTOs, and return closed/immutable objects to the controller. Disable OSIV in production: spring.jpa.open-in-view=false.
 
-**Q19: Why can `JOIN FETCH` with pagination trigger an in-memory paging warning, and how do you fix it?**
+**Q: Why can `JOIN FETCH` with pagination trigger an in-memory paging warning, and how do you fix it?**
 **Short:** JOIN FETCH with pagination triggers Hibernate to paginate in memory, since a SQL LIMIT would cut a fetched collection mid-row.
 
 Hibernate cannot translate the limit to SQL once a collection fetch is in play, so it silently paginates in memory instead. A join to a one-to-many multiplies rows, and a SQL `LIMIT` would cut off rows mid-collection and return incomplete entities. Hibernate's defense is to fetch *all* matching rows and paginate *in memory* (logging `HHH000104: firstResult/maxResults specified with collection fetch; applying in memory`), which can load an enormous result set and OOM. The fix is to paginate in two steps: first query the *root* ids with the limit (no fetch), then fetch the full graph for those ids with `JOIN FETCH ... WHERE id IN :ids`; or use `@EntityGraph` with a separate count, or batch fetching (`@BatchSize`) instead of a fetch join. Treat the HHH000104 warning as a latent OOM, not noise.
 
-**Q20: What is the difference between `getReferenceById` and `findById`, and when does it bite you?**
+**Q: What is the difference between `getReferenceById` and `findById`, and when does it bite you?**
 **Short:** getReferenceById returns a lazy proxy with no SELECT, deferring EntityNotFoundException until the proxy is first accessed.
 
 `findById` issues a SELECT immediately and returns `Optional<T>` (empty if absent). `getReferenceById` returns a lazy *proxy* without hitting the database, deferring the SELECT until you first access a non-id property; it is used to set an association (`order.setCustomer(repo.getReferenceById(id))`) without loading the customer. The trap: if the id does not exist, you get no error at call time — instead a `EntityNotFoundException` is thrown later, often outside the transaction or during serialization, where it is confusing to diagnose. Also, accessing the proxy after the session closes throws `LazyInitializationException`. Use `getReferenceById` only to wire a foreign key you trust exists; use `findById` when you actually need the data or must validate existence.
 
-**Q21: How does `@Modifying` query execution interact with the persistence context, and what's the common stale-data bug?**
+**Q: How does `@Modifying` query execution interact with the persistence context, and what's the common stale-data bug?**
 **Short:** @Modifying bypasses the persistence context, so stale cached entities require clearAutomatically and flushAutomatically to stay consistent.
 
 It bypasses the persistence context entirely, which is exactly where the stale-data bug comes from. A `@Modifying` `UPDATE`/`DELETE` runs straight against the database, so entities already in the first-level cache are not updated and keep returning stale values for the rest of the transaction. The classic bug: you bulk-update a status with `@Modifying`, then read the same entity via the repository and see the old status because it came from the cache, not the DB. The fix is `@Modifying(clearAutomatically = true, flushAutomatically = true)`: `flushAutomatically` pushes pending changes before the bulk op so they are not lost, and `clearAutomatically` evicts the persistence context afterward so subsequent reads reload fresh from the database. Without these flags, bulk modifications and the persistence context silently diverge.

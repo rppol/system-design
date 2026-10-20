@@ -212,7 +212,7 @@ async def execute_tool(name: str, inp: dict) -> str:
 async def run_subagent(
     task: str,
     *,
-    model: str = "claude-sonnet-4-6",
+    model: str = "claude-sonnet-5-5",
     max_iterations: int = 8,
     token_budget: int = 30_000,
 ) -> dict[str, Any]:
@@ -294,7 +294,7 @@ async def parent_orchestrator(topics: list[str]) -> dict:
     )
     
     synthesis = await client.messages.create(
-        model="claude-opus-4-7",
+        model="claude-opus-5-5",
         max_tokens=4096,
         messages=[{
             "role": "user",
@@ -305,7 +305,7 @@ async def parent_orchestrator(topics: list[str]) -> dict:
         }],
     )
     return {
-        "summary": synthesis.content[0].text,
+        "summary": synthesis.content[-1].text,  # Opus 5.5 always returns a thinking block first
         "subagent_results": subagent_results,
     }
 

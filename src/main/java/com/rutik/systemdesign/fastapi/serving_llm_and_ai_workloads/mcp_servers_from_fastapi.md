@@ -234,7 +234,8 @@ call back into the client is describing a protocol revision that no longer exist
 
 ### 6.1 Mounting an MCP app into FastAPI, and the lifespan trap
 
-The official Python SDK exposes an ASGI app via `mcp.streamable_http_app()`; FastMCP exposes
+The official Python SDK (`mcp` 2.x, whose high-level class is `MCPServer`) exposes an ASGI app via
+`mcp.streamable_http_app()`; FastMCP exposes
 `mcp.http_app(path="/mcp")`. Either mounts into a FastAPI app. The trap is that **Starlette does not
 run a mounted sub-application's lifespan**, so the MCP app's startup never executes and the failure
 arrives later as a confusing runtime error rather than as a startup crash.
@@ -551,6 +552,65 @@ existing SDK usage grandfathered; `-32020` through `-32099` are reserved for the
 itself. One renumbering to be aware of: resource-not-found moved from `-32002` to `-32602`
 (Invalid Params), aligning with JSON-RPC. If you hard-coded `-32002` anywhere, it is now wrong.
 
+### 6.10 Upgrading to `mcp` 2.x and FastMCP 4
+
+`mcp` 2.0.0 (2026-07-28) is a breaking release; 1.x receives only security fixes, so a server that
+stays on it should pin `mcp>=1.28,<2`. The changes that hit almost every server:
+
+| v1 | v2 |
+|---|---|
+| `from mcp.server.fastmcp import FastMCP` | `from mcp.server.mcpserver import MCPServer` (the old import raises `ModuleNotFoundError`) |
+| `ctx.fastmcp` | `ctx.mcp_server` |
+| `FastMCP("x", port=..., json_response=...)` | transport options go to `run()` or `streamable_http_app(...)` |
+| `mcp.types` | the separate `mcp-types` package, imported as `mcp_types` (`mcp.types` stays as an alias) |
+| camelCase model fields (`inputSchema`) | snake_case (`input_schema`) |
+| `McpError` | `MCPError` |
+| `httpx`, `httpx-sse` | `httpx2` |
+| client: transport + `ClientSession` + `initialize()` | one `Client(target)` that negotiates the protocol version |
+
+One `MCPServer` serves `2026-07-28` clients and every 2025-era client over Streamable HTTP and
+stdio with no configuration. OpenTelemetry tracing is on by default. The mounted-lifespan rule in
+§6.1 is unchanged: the host app's lifespan must enter `mcp.session_manager.run()`.
+
+`Resolve(fn)` fills a tool parameter from your own function, the way FastAPI's `Depends` does,
+and the parameter never appears in the tool's input schema:
+
+```python
+from typing import Annotated
+
+from mcp.server.mcpserver import MCPServer, Resolve
+from pydantic import BaseModel
+
+mcp = MCPServer("reporting")
+
+
+class Owner(BaseModel):
+    account_id: str
+    plan: str
+
+
+async def load_owner(report_id: str) -> Owner:      # matched to the tool argument by name
+    return await accounts.owner_of(report_id)
+
+
+@mcp.tool()
+async def archive_report(report_id: str, owner: Annotated[Owner, Resolve(load_owner)]) -> str:
+    """Archive a report the caller owns."""
+    ...
+```
+
+A resolver can also put a question to the user, which the SDK turns into the multi-round-trip
+exchange in §6.6, so one tool body serves both protocol eras.
+
+FastMCP 4.0.0 (2026-08-31) sits on `mcp` 2.x. Most FastMCP 3 servers upgrade without code
+changes; the breaks are server-initiated sampling and roots (removed from the server API,
+because a `2026-07-28` request has no live connection to call back on), `ctx.elicit()` (works
+only on old-protocol connections), background tasks (`@mcp.tool(task=True)` now needs the
+`fastmcp-tasks` package), and snake_case model fields. It adds `Mcp-Method` and `Mcp-Name`
+routing headers so a gateway can route without parsing JSON-RPC, and
+`Depends(get_account, user_id=CallArgument("owner"))` to bind a dependency to a call argument
+while keeping it out of the tool schema.
+
 ---
 
 ## 7. Real-World Examples
@@ -560,7 +620,8 @@ example showing `mcp.streamable_http_app()` mounted into a Starlette application
 reference for the composition in §6.1, and the place to check when an SDK behaviour and a blog post
 disagree.
 
-**FastMCP.** At 3.4.7, FastMCP is the ergonomic layer most teams actually use, and its
+**FastMCP.** At 4.1.1 (4.0.0 GA 2026-08-31, built on `mcp` 2.x and the `2026-07-28` revision),
+FastMCP is the ergonomic layer most teams actually use, and its
 `from_fastapi()` / `from_openapi()` constructors are the auto-generation path in §6.2. Its
 documentation for HTTP deployment is also where the mounted-lifespan requirement is spelled out,
 which is a reasonable indicator of how often people hit it.
@@ -774,8 +835,8 @@ a deletion attributed to "the MCP server" is not an audit trail.
 
 | Tool / Library | Role | Notes |
 |---|---|---|
-| `mcp` (official Python SDK) | protocol implementation, ASGI app | `mcp.streamable_http_app()`; the reference for behaviour |
-| `fastmcp` | ergonomic server framework | 3.4.7; `@mcp.tool`, `http_app(path=...)`, `from_fastapi()`, `from_openapi()` |
+| `mcp` (official Python SDK) | protocol implementation, ASGI app | 2.3.0 (2.0.0 on 2026-07-28 renamed `FastMCP` to `MCPServer` and added a first-class `Client`; 1.x is security-fix only); `Resolve(fn)` dependencies; OpenTelemetry on by default; types in `mcp-types`; serves both protocol eras from one server; `mcp.streamable_http_app()` |
+| `fastmcp` | ergonomic server framework | 4.1.1; `@mcp.tool`, `http_app(path=...)`, `from_fastapi()`, `from_openapi()`; negotiates old and `2026-07-28` protocol per connection; no server-initiated sampling or roots; tasks in `fastmcp-tasks`; `Mcp-Method`/`Mcp-Name` headers; `Depends(..., CallArgument(...))` |
 | `FastMCP.from_fastapi()` | generate tools from a live FastAPI app | use for discovery, not as the shipped surface |
 | `FastMCP.from_openapi()` | generate tools from a spec you do not own | same caveat |
 | FastAPI `Mount` | composing the MCP app beside your routes | chain the sub-app's lifespan or startup never runs |
@@ -832,6 +893,19 @@ Publishing RFC 9728 protected-resource metadata is a MUST, and the authorization
 **Short:** Roots, Sampling and Logging are deprecated, with published migrations to tool parameters, direct provider APIs, and stderr or OpenTelemetry.
 
 The `2026-07-28` revision deprecated all three, and the HTTP+SSE transport was reclassified as Deprecated under the new lifecycle policy — it had been deprecated since `2025-03-26`. The migrations are the specification's own: pass directories or files via tool parameters, resource URIs, or server configuration instead of Roots; integrate directly with an LLM provider's API instead of Sampling; log to `stderr` on stdio or use OpenTelemetry instead of Logging. All remain fully functional during a minimum twelve-month window, which is precisely why teams adopt them by accident — nothing breaks and nothing warns you. Check the deprecated-features registry before adopting a feature, not after.
+
+**Q: How do you migrate an MCP server written against the v1 Python SDK?**
+**Short:** Rename FastMCP to MCPServer and move transport options to run() or streamable_http_app(); keep the host lifespan, then fix snake_case fields, mcp_types imports and httpx2.
+
+Start with the import: `mcp.server.fastmcp.FastMCP` becomes `mcp.server.mcpserver.MCPServer`,
+and the old path raises `ModuleNotFoundError`. Transport options (`port`, `json_response`,
+`stateless_http`) move off the constructor onto `run()` or `streamable_http_app(...)`. A mounted
+server still needs the host app's lifespan to enter `mcp.session_manager.run()`, or every request
+fails with "Task group is not initialized". Then fix what the type checker reports: snake_case
+model fields, types from `mcp_types`, `McpError` renamed `MCPError`, and `httpx2` in place of
+`httpx`. Server-initiated sampling, roots and elicitation cannot reach a `2026-07-28` client, so
+move those flows to `Resolve` or the multi-round-trip result. If you cannot migrate yet, pin
+`mcp>=1.28,<2`: 1.x only receives security fixes.
 
 **Q: Why does the specification say tools/list should return a deterministic order?**
 **Short:** The tool list sits near the top of the prompt, so a varying order invalidates the provider's prompt-prefix cache every turn.

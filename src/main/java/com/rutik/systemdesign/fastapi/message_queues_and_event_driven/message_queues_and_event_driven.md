@@ -15,7 +15,7 @@ Message queues decouple producers from consumers: a sender writes a message to a
 **Event-driven architecture** generalises this: components emit domain events (order.created, payment.failed) rather than calling each other directly. Downstream services subscribe to events they care about, enabling loose coupling across service boundaries.
 
 In Python the two primary async clients are:
-- **aiokafka** — async wrapper over the kafka-python driver; surfaces `AIOKafkaProducer` and `AIOKafkaConsumer`.
+- **aiokafka**: standalone asyncio Kafka client (0.14.0 has no kafka-python dependency); surfaces `AIOKafkaProducer` and `AIOKafkaConsumer`.
 - **aio-pika** — async AMQP 0-9-1 client for RabbitMQ; surfaces `connect_robust`, exchange/queue/binding primitives, and `IncomingMessage.ack()`.
 
 ---
@@ -131,6 +131,43 @@ per group behind it — 10 consumers on the original 12 partitions would already
 ### 4.6 Dead-Letter Queue (DLQ)
 
 Messages that repeatedly fail processing are moved to a dead-letter destination after `N` retries. In Kafka this is a dedicated topic (`orders.DLT`). In RabbitMQ it is a DLX (dead-letter exchange) binding. DLQ contents should trigger alerts, be inspectable, and support replay after the bug is fixed.
+
+### 4.7 Share Groups (Kafka 4.2): Queue Semantics on a Topic
+
+Kafka 4.0 (2025-03-18) runs only in KRaft mode, with ZooKeeper removed, and shipped share groups
+(KIP-932, "Queues for Kafka") as early access. Kafka 4.2.0 (2026-02-17) declared them production
+ready. A share group removes the ceiling from Section 4.5: consumers in a share group do not own
+partitions. The broker hands out individual records under a time-limited lock, and each consumer
+acknowledges each record.
+
+```
+  consumer group, topic with 2 partitions, 6 consumers
+    P0 ---> C1          P1 ---> C2          C3 C4 C5 C6 idle
+    one slow record on P0 blocks every record behind it on P0 (head-of-line)
+
+  share group, same topic, same 6 consumers
+    P0 --+--> C1 C3 C5  each record locked to one consumer for 30 s by default
+    P1 --+--> C2 C4 C6  a slow record holds one lock, the rest keep flowing
+    ACCEPT  -> done     RELEASE -> redeliver now     REJECT -> archived, not redelivered
+    lock expires (crash, hang) -> redelivered; after 5 deliveries the record is archived
+```
+
+*The share group trades the per-partition ordering of a consumer group for per-record
+acknowledgement and parallelism beyond the partition count.*
+
+Broker defaults in Kafka 4.2 (`ShareGroupConfig`): `group.share.record.lock.duration.ms` =
+30,000 (range 1,000-3,600,000), `group.share.delivery.count.limit` = 5 (range 2-10),
+`group.share.partition.max.record.locks` = 2,000 in-flight records per partition, and
+`group.share.max.size` = 200 members per group. Records have no ordering guarantee inside a
+share group, and the delivery count makes them at-least-once, so handlers still need the
+idempotency key from Section 6.5.
+
+FastAPI wiring has one constraint: `aiokafka` (0.14.0) has no share consumer. The Python
+client with one is `confluent-kafka` 2.15.0+, whose `ShareConsumer` is marked **Preview**, is
+synchronous and not thread-safe, and acknowledges with `AcknowledgeType.ACCEPT`, `RELEASE` or
+`REJECT`. Run it in a dedicated worker process, or in one thread started from `lifespan` with
+each blocking `poll()` behind `asyncio.to_thread`, never on the event loop. The broker-side
+mechanics belong to [kafka_deep_dive](../../backend/kafka_deep_dive/kafka_deep_dive.md).
 
 ---
 
@@ -504,7 +541,14 @@ short form you need to follow the `aiokafka` and `aio-pika` wiring in Section 6.
 | Routing | Topic + partition key | Exchange types (flexible) |
 | Replay | Yes — reset consumer offset | No (once acked, gone) |
 | Protocol | Proprietary (binary TCP) | AMQP 0-9-1 / AMQP 1.0 |
-| Ops complexity | High (ZooKeeper/KRaft, partition mgmt) | Medium |
+| Ops complexity | High (KRaft controllers, partition mgmt; Kafka 4.0 removed ZooKeeper) | Medium |
+| Work-queue semantics | Share groups (Kafka 4.2+): per-record ack, consumers beyond the partition count, no ordering | Native: per-message ack, competing consumers, `prefetch_count` |
+
+Share groups narrow the old rule "Kafka for streams, RabbitMQ or SQS for work queues". A team
+that already runs Kafka 4.2 can serve a job-style workload (slow, uneven tasks where one stuck
+record must not block the rest) from a topic without a second broker. RabbitMQ still has the
+richer routing, priorities and per-message TTL, and its Python client is async; the Kafka
+share consumer in Python is a synchronous preview client.
 
 ### 8.3 Outbox vs Saga Choreography
 
@@ -722,57 +766,72 @@ The outbox pattern writes the business record and the outbox event row in a sing
 
 All consumers sharing a `group_id` divide partitions among themselves: each partition is owned by exactly one consumer. When a consumer joins or leaves (including crashes), the group coordinator triggers a rebalance — partitions are redistributed. During rebalance, consumption pauses. Incremental cooperative rebalancing (available since Kafka 2.4) minimises the pause by revoking only the partitions that need to move.
 
-**Q4: When should you use a topic exchange vs a direct exchange in RabbitMQ?**
+**Q4: How does a Kafka share group differ from a consumer group, and when would you use one for a work queue?**
+**Short:** A share group lets any number of consumers take individual records under a lock and acknowledge each one, trading partition ordering for queue-style parallelism.
+
+In a consumer group each partition belongs to exactly one consumer, so parallelism stops at the
+partition count and one slow record blocks the rest of its partition. A share group (KIP-932,
+production ready in Kafka 4.2.0, 2026-02-17) has no partition ownership: the broker locks each
+delivered record to one consumer for `group.share.record.lock.duration.ms` (30 s by default), and
+the consumer answers ACCEPT, RELEASE (redeliver) or REJECT (archive). An expired lock means
+redelivery, and after `group.share.delivery.count.limit` deliveries (5 by default) the record is
+archived. Use it for job-style work with uneven processing times when the team already runs
+Kafka 4.2 and per-key order does not matter. Keep a consumer group for anything that needs order
+per key, such as account events. In Python the only client is `confluent-kafka`'s
+synchronous `ShareConsumer` (preview since 2.15.0), so it runs in a worker thread or process,
+not on the FastAPI event loop.
+
+**Q5: When should you use a topic exchange vs a direct exchange in RabbitMQ?**
 **Short:** Use a direct exchange for 1:1 routing and a topic exchange when queues subscribe by pattern.
 
 Use a direct exchange when routing is 1:1 between routing key and queue — simple task queues. Use a topic exchange when multiple queues need to subscribe based on patterns (e.g., `order.*` for all order events, `*.failed` for all failures). Fanout exchange is appropriate when every bound queue must receive every message regardless of routing key — e.g., cache invalidation broadcast.
 
-**Q5: How do you implement an idempotent consumer?**
+**Q6: How do you implement an idempotent consumer?**
 **Short:** An idempotent consumer uses SET NX EX in Redis to skip messages it has already processed.
 
 Store a unique message ID (Kafka `topic-partition-offset` or a business-level idempotency key) in Redis using `SET NX EX`. Before executing the side-effect, attempt to set the key. If the key already exists the message was already processed — skip and commit the offset. Set TTL to at least the maximum possible retry window (e.g., 24 hours).
 
-**Q6: What is `prefetch_count` in RabbitMQ and why does it matter?**
+**Q7: What is `prefetch_count` in RabbitMQ and why does it matter?**
 **Short:** prefetch_count limits unacknowledged messages pushed to a consumer, preventing memory exhaustion.
 
 `prefetch_count` sets the maximum number of unacknowledged messages RabbitMQ will push to a consumer at once. Without it, RabbitMQ floods the consumer with the entire queue backlog, causing memory exhaustion. A value of 10–100 is typical; higher values improve throughput at the cost of re-queuing more messages if the consumer crashes.
 
-**Q7: What is consumer lag, and how do you alert on it?**
+**Q8: What is consumer lag, and how do you alert on it?**
 **Short:** Consumer lag is the gap between the latest offset and the group's committed offset per partition.
 
 Consumer lag is the difference between the latest available offset (log end offset) and the consumer group's committed offset per partition. It measures how far behind consumers are. Expose it via `kafka-consumer-groups.sh --describe` or the JMX metric `kafka.consumer:type=consumer-fetch-manager-metrics,client-id=*,attribute=records-lag-max`. Alert when lag exceeds the number of messages that would accumulate during your acceptable recovery time (e.g., `> 10_000` for a queue that produces 500 msg/s and must drain within 20 s).
 
-**Q8: How do you handle message ordering in Kafka when you need order per customer?**
+**Q9: How do you handle message ordering in Kafka when you need order per customer?**
 **Short:** Keying messages by customer ID routes them to the same partition, guaranteeing per-customer order.
 
 Produce messages with the customer ID as the partition key (`key=customer_id.encode()`). Kafka hashes the key to a partition deterministically — all messages for the same customer land in the same partition and are consumed in order. Ordering is guaranteed per partition; if you need a total order across all customers you are limited to a single partition, which caps throughput to ~1 Gbps.
 
-**Q9: Describe the dead-letter queue pattern and when you would replay from it.**
+**Q10: Describe the dead-letter queue pattern and when you would replay from it.**
 **Short:** A DLQ captures messages that exhaust retries, and you replay them after fixing the root cause.
 
 A DLQ captures messages that fail processing after `N` retry attempts. In Kafka, configure the consumer to produce to `<topic>.DLT` after retries. In RabbitMQ, bind a DLX exchange and a dead-letter queue on the primary queue declaration. Replay from the DLQ after fixing the bug: for Kafka reset the consumer group offset to the earliest offset in the DLT topic; for RabbitMQ use the management plugin to re-queue DLQ messages back to the main queue.
 
-**Q10: What is `enable_idempotence=True` in the aiokafka producer and what does it guarantee?**
+**Q11: What is `enable_idempotence=True` in the aiokafka producer and what does it guarantee?**
 **Short:** enable_idempotence guarantees exactly-once producer writes via sequence-numbered deduplication.
 
 It enables exactly-once producer semantics: the broker assigns a producer ID and sequence number to each batch. If the producer retries due to a network timeout, the broker deduplicates by sequence number, ensuring the message is written exactly once even with retries. This does not extend to consumer-side semantics; you still need idempotent consumers for end-to-end exactly-once.
 
-**Q11: How does schema evolution work with a schema registry?**
+**Q12: How does schema evolution work with a schema registry?**
 **Short:** A schema registry enforces compatibility modes like BACKWARD and FORWARD across schema versions.
 
 Producers register a schema version before first publish; the registry assigns a schema ID embedded in the message header. Consumers fetch the schema by ID before deserialising. The registry enforces compatibility modes: BACKWARD (new schema can read old messages), FORWARD (old schema can read new messages), FULL (both). Additive changes (new optional field) are BACKWARD compatible. Removing a required field is not. Always test schema changes in a staging registry before promoting to production.
 
-**Q12: What is the `acks="all"` setting and what does it guarantee vs `acks=1`?**
+**Q13: What is the `acks="all"` setting and what does it guarantee vs `acks=1`?**
 **Short:** acks="all" waits for all in-sync replicas before returning, preventing data loss on leader failure.
 
 `acks="all"` (or `acks=-1`) requires all in-sync replicas (ISR) to acknowledge the write before the producer call returns. If the leader fails, a follower in the ISR that received the message can be elected — no data loss. `acks=1` only requires the leader to acknowledge; if the leader fails before replicating, the message is lost. The latency cost of `acks="all"` is roughly the replication latency (typically 1–5 ms on LAN). For financial events or order creation, always use `acks="all"`.
 
-**Q13: How do you safely shut down a Kafka consumer in an asyncio application?**
+**Q14: How do you safely shut down a Kafka consumer in an asyncio application?**
 **Short:** Cancel the consumer task on SIGTERM and call await consumer.stop() to commit and leave the group.
 
 Cancel the consumer asyncio task on `SIGTERM`, catch `CancelledError`, and call `await consumer.stop()` in the finally block. `consumer.stop()` triggers a final offset commit (if using auto-commit) and sends a LeaveGroup request so the broker can rebalance the partition to another consumer immediately rather than waiting for the session timeout (default 10 s). For manual commits, commit before calling `stop()`.
 
-**Q14: Why can Kafka consumers replay historical events while RabbitMQ classic and quorum queues cannot?**
+**Q15: Why can Kafka consumers replay historical events while RabbitMQ classic and quorum queues cannot?**
 **Short:** Kafka retains an append-only log consumers rewind; RabbitMQ classic and quorum queues delete on ack, though its streams do replay.
 
 Kafka retains messages in an append-only log for a configured time or size window regardless of
@@ -784,7 +843,7 @@ log with non-destructive reads, where `x-stream-offset` accepts `first`, `last`,
 absolute offset, a timestamp, or a relative interval. Pick a stream when replay matters and a
 quorum queue when each message is a unit of work exactly one consumer must perform.
 
-**Q15: How does saga choreography compare to saga orchestration for multi-service workflows?**
+**Q16: How does saga choreography compare to saga orchestration for multi-service workflows?**
 **Short:** Choreography reacts to events with no coordinator; orchestration uses a central coordinator to track state.
 
 Choreography has each service publish and react to events with no central coordinator, keeping
@@ -795,7 +854,7 @@ place to see and resume a stuck workflow. Both trade the outbox pattern's strong
 consistency for eventual consistency, so reserve either for workflows spanning multiple services
 that a single outbox transaction cannot cover.
 
-**Q16: How does Kafka detect an ungracefully killed consumer, and what determines how long the resulting rebalance stall lasts?**
+**Q17: How does Kafka detect an ungracefully killed consumer, and what determines how long the resulting rebalance stall lasts?**
 **Short:** A hard-killed consumer is only detected once its heartbeat misses the session.timeout.ms window.
 
 Kafka only learns a consumer is gone when its heartbeats stop arriving within

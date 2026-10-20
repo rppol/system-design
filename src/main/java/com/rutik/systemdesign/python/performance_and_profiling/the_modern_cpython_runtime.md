@@ -24,7 +24,9 @@ The four changes, in the order they shipped:
 3. **The tail-call interpreter [3.14]** — an alternate bytecode dispatch loop enabled by
    `--with-tail-call-interp` at build time, requiring Clang 19 or newer on x86-64 or AArch64.
    CPython's own published number is a geometric mean of **3-5% faster**, measured against a
-   same-compiler build of 3.14 *without* the flag — not against 3.10, not against 3.13.
+   same-compiler build of 3.14 *without* the flag — not against 3.10, not against 3.13. In 3.15,
+   64-bit Windows builds with MSVC 18 (Visual Studio 2026) can use it too, and the official
+   python.org Windows x64 binaries do: 15-20% geomean over the switch-case interpreter.
 4. **The free-threaded build [PEP 779, Final in 3.14]** — `python3.14t`, the GIL genuinely
    removable. This one is not a speedup at all for single-threaded code; the documented cost is
    a **5-10% single-thread performance penalty**, the price paid for making the reference-count
@@ -127,12 +129,18 @@ was written. **There is no official CPython-published speedup percentage for the
 An alternate implementation of the bytecode dispatch loop itself — not a JIT, not
 specialization, just a different way of writing the C `switch`-based interpreter core so that
 each opcode handler tail-calls directly into the next one instead of looping back through a
-central dispatch point. Enabled with `--with-tail-call-interp` at build time; requires Clang 19
-or newer, and currently only works on x86-64 and AArch64. CPython's own published number:
+central dispatch point. Enabled with `--with-tail-call-interp` at build time; in 3.14 it requires
+Clang 19 or newer on x86-64 or AArch64. CPython's own published number:
 **"a geometric mean of 3-5% faster on the standard pyperformance benchmark suite... The
 baseline is Python 3.14 built with Clang 19, without this new interpreter"** — a same-compiler,
 same-version comparison, which is exactly what makes it trustworthy where the earlier
 unofficial 9-15% figure was not (Section 6.6, Q3).
+
+In 3.15 the requirement widens to 64-bit Windows builds with MSVC 18 (Visual Studio 2026). The
+official python.org Windows x64 binaries ship with it, and the 3.15 whatsnew reports a 15-20%
+geomean over the switch-case interpreter on Visual Studio 18.1.1, AMD Ryzen 7 5800X. That
+baseline is the plain switch loop, not the 3.14 Clang flag-off build, so the two numbers do not
+compare.
 
 ### 4.d Free-Threaded Build `[PEP 779, Status: Final]`
 
@@ -173,7 +181,7 @@ flowchart LR
     Compile --> Bytecode("Code Object<br/>bytecode array")
     Bytecode --> Adaptive("Specializing Adaptive<br/>Interpreter [3.11]<br/>always on")
     Adaptive --> TailChoice{"Build flag:<br/>tail-call loop?"}
-    TailChoice -->|"--with-tail-call-interp"| TailCall("Tail-Call<br/>Interpreter [3.14]<br/>Clang 19+ only")
+    TailChoice -->|"--with-tail-call-interp"| TailCall("Tail-Call<br/>Interpreter [3.14]<br/>Clang 19+ or MSVC 18 [3.15]")
     TailChoice -->|"default build"| StdLoop("Standard ceval<br/>dispatch loop")
     TailCall --> JITCheck{"Build flag:<br/>JIT enabled?"}
     StdLoop --> JITCheck
@@ -222,7 +230,7 @@ xychart-beta
     title "Four measurements with four different baselines — not a trend line"
     x-axis ["3.11 vs 3.10", "3.14 tail-call vs base", "3.15 JIT vs std x86-64", "3.15 JIT vs tail-call macOS"]
     y-axis "Geomean speedup, percent" 0 --> 30
-    bar [25, 4, 8.5, 12.5]
+    bar [25, 4, 7.5, 11.5]
 ```
 
 *Read the x-axis labels, not just the bar heights: each bar was measured against a different
@@ -358,13 +366,18 @@ on most platforms" rather than as a decisive win.
 
 ### 6.5 Telling Whether the JIT (or the Tail-Call Loop) Is Actually Enabled
 
-There is a real, current gap here worth naming rather than papering over: **CPython's official
-documentation does not describe a runtime check — no `sys` attribute, no `sysconfig` variable —
-for whether the experimental JIT or the tail-call interpreter is active in the build you are
-running.** Both are purely build-time decisions (`--enable-experimental-jit` /
-`--with-tail-call-interp`, plus the Clang 19+ requirement for the latter), and the reliable way
-to know is to know how the binary in front of you was built: read the release notes for the
-specific distribution (the 3.14 "what's new" build-changes section states Windows and macOS
+**For the JIT, `sys._jit` `[3.14]` answers it at runtime.** `sys._jit.is_available()` returns
+`True` if the executable was built with JIT support (`--enable-experimental-jit`, or
+`--experimental-jit` on Windows); `sys._jit.is_enabled()` returns `True` if it is also switched on
+for this process, which the `PYTHON_JIT=0`/`1` environment variable controls at startup; and
+`sys._jit.is_active()` reports whether the topmost frame is running JIT code, which the docs
+reserve for debugging the JIT itself. The leading underscore matters: `sys._jit` is a CPython
+implementation detail, not guaranteed across implementations or versions.
+
+**The tail-call interpreter has no such check.** It is a build-time decision
+(`--with-tail-call-interp`, plus the compiler requirement above), and the reliable way to know is
+to know how the binary in front of you was built: read the release notes for the specific
+distribution (the 3.14 "what's new" build-changes section states Windows and macOS
 official binary releases carry JIT support; a Linux distro package, a Docker base image, or a
 `uv python install`-managed build may or may not, and that has to be checked against that
 build's own notes rather than assumed from the version number alone). CPython 3.14's own docs
@@ -373,7 +386,7 @@ profile-guided optimization is highly recommended when using the new interpreter
 only configuration that has been tested and validated for improved performance"* — i.e. the
 3-5% figure was itself measured on a PGO build, and skipping PGO is an untested configuration.
 
-Free-threading is the one exception to this gap: it has a documented, public runtime check.
+Free-threading has its own runtime check.
 `sys._is_gil_enabled()` — added in 3.13 — returns `True` if the GIL is active and `False` if it
 is disabled, which is the one reliable way to confirm from inside a running process whether you
 are actually on a `t`-suffixed free-threaded build with the GIL off, versus a normal build that
@@ -510,7 +523,7 @@ compose.
 |---|---|---|---|---|
 | Specializing adaptive interpreter [3.11] | ~25% vs 3.10 (official, cumulative) | None — default in every 3.11+ build | None | Everyone; automatic |
 | Copy-and-patch JIT [PEP 744, Draft] | No official percentage; PEP text says "about as fast as" the specializing interpreter | Opt-in build flag; Windows/macOS official binaries carry it in 3.14 | Low functional risk, uncertain payoff | Teams benchmarking their own hot loops before adopting |
-| Tail-call interpreter [3.14] | 3-5% geomean vs same-compiler, flag-off 3.14 | `--with-tail-call-interp`, Clang 19+, x86-64/AArch64 only, PGO recommended | Portability: unavailable outside that compiler/arch combination | Teams building their own CPython who can pin the toolchain |
+| Tail-call interpreter [3.14] | 3-5% geomean vs same-compiler, flag-off 3.14 | `--with-tail-call-interp`, Clang 19+ on x86-64/AArch64, or MSVC 18 on Windows x64 [3.15], PGO recommended | Portability: unavailable outside those compiler/arch combinations | Teams building their own CPython who can pin the toolchain |
 | Free-threaded build [PEP 779, Final] | -5 to -10% single-thread (a cost, not a gain) | `python3.14t`; every native dependency must opt in | High — one non-opted-in C extension re-enables the GIL globally | CPU-bound, genuinely parallel multi-core workloads after a full dependency audit |
 
 *Reading this table honestly means noticing that only one row is a fact you can bank on for
@@ -527,7 +540,7 @@ any benefit shows up.*
 - Your workload is a genuinely parallel, CPU-bound, multi-core problem, your dependency tree
   has been audited for free-threading support, and you have measured the single-thread penalty
   against the actual concurrency win on your hardware.
-- You control your own build toolchain (able to pin Clang 19+, run PGO) and pyperformance-style
+- You control your own build toolchain (able to pin Clang 19+ or MSVC 18, run PGO) and pyperformance-style
   benchmarks on your actual workload show the tail-call interpreter or JIT genuinely helps it.
 
 **A build flag is the wrong lever entirely when:**
@@ -602,8 +615,8 @@ conflates two different questions.
 # - 3.11 specializing interpreter: ~25% faster than 3.10 (official, cumulative)
 # - 3.14 tail-call interpreter: 3-5% faster than a same-compiler, flag-off 3.14
 # - 3.14 JIT: no official percentage
-# - 3.15 JIT: 8-9% (x86-64 Linux) or 12-13% (AArch64 macOS) faster — against
-#   DIFFERENT baselines from each other, and not yet final
+# - 3.15 JIT: 7-8% (x86-64 Linux) or 11-12% (AArch64 macOS) faster, against
+#   DIFFERENT baselines from each other
 # There is no arithmetic that combines these into "3.14 vs 3.11" or "3.15 vs 3.10."
 ```
 
@@ -692,9 +705,9 @@ The baseline build (flag off) triggered a regression in LLVM 19's tail-duplicati
 CPython publishes exactly one official cumulative pyperformance geomean, 3.11 vs 3.10 at roughly 25%, and no official 3.12-through-3.15 cumulative figure exists that a 3.14-vs-3.11 comparison could even be built from without inventing an unpublished number. The honest answer names each independently-measured change and its own baseline — the 3.11 specializing interpreter's 25% vs 3.10, the 3.14 tail-call interpreter's 3-5% vs a same-compiler flag-off 3.14, and the fact that the 3.14 JIT carries no official percentage at all — and states plainly that CPython has not published the arithmetic to combine them into one 3.14-vs-3.11 number. Reciting a third-party aggregator's headline percentage instead is the wrong move (Section 10, Pitfall 5).
 
 **Q: Why is it a mistake to assume the JIT is active just because you're running Python 3.14?**
-**Short:** The JIT is an opt-in build-time flag, not a language-version feature, so being on 3.14 says nothing about whether it was compiled in.
+**Short:** The JIT is a build-time option that is also toggled per process, so the version says nothing; check `sys._jit.is_available()` and `sys._jit.is_enabled()`.
 
-The experimental JIT (PEP 744) is enabled with a build-time configure flag; official Windows and macOS binary releases carry it starting in 3.14, but a Linux distribution package, a container base image, or a self-built interpreter may not, and the version number alone cannot tell you which. Worse, CPython's documentation does not currently expose a runtime check (no `sys` attribute, no `sysconfig` variable) for whether the JIT or the tail-call interpreter is active — the only reliable source is that specific build's own release notes or configure log, unlike free-threading, which does have a documented runtime check via `sys._is_gil_enabled()` (Section 6.5).
+The experimental JIT (PEP 744) is compiled in with a build-time configure flag; official Windows and macOS binary releases carry it starting in 3.14, but a Linux distribution package, a container base image, or a self-built interpreter may not, and the version number alone cannot tell you which. Even a JIT-capable build can run with it off, because `PYTHON_JIT=0`/`1` decides at startup. Ask the process instead: `sys._jit.is_available()` says whether the build supports the JIT and `sys._jit.is_enabled()` says whether this process turned it on (both `[3.14]`, a CPython implementation detail, Section 6.5). The tail-call interpreter has no runtime check; for it, the build's release notes or configure log are the only source.
 
 **Q: What actually is "specialization" at the bytecode level, as a mechanism rather than a name?**
 **Short:** CPython rewrites a specific bytecode instruction in place to a type-specific variant after it repeatedly observes the same operand types there.

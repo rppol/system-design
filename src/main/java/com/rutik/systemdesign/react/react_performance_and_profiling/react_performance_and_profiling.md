@@ -341,7 +341,7 @@ const Row = memo(function Row({ id }: { id: string }) {
 
 // Every provider value change re-renders EVERY Row, memo notwithstanding.
 // A value built inline changes identity every render, so this is every render.
-<ThemeContext.Provider value={{ fg, bg }}>   {/* new object each time */}
+<ThemeContext value={{ fg, bg }}>   {/* new object each time */}
 ```
 
 The fixes are structural rather than memo-shaped: memoize the provider *value* so its identity is stable, split one wide context into narrow ones so a change reaches fewer consumers, or move to `useSyncExternalStore` with a selector so subscribers re-render only when their slice changes. [Context and Component Communication](../context_and_component_communication/context_and_component_communication.md) owns that argument in full.
@@ -570,7 +570,7 @@ function Parent({ items }: { items: Item[] }) {
 
 **Recording without "why did this render" enabled.** The setting is off by default and cannot be applied retroactively — the reason is captured during the recording or not at all. A session spent guessing at prop identity is a session that should have been 30 seconds of reading `The parent component rendered`.
 
-**Wrapping a provider value inline.** `<Ctx.Provider value={{ user, theme }}>` allocates a new object every render, so every consumer re-renders every time, and no amount of `memo` on the consumers helps. Memoize the value, or split the context.
+**Wrapping a provider value inline.** `<Ctx value={{ user, theme }}>` allocates a new object every render, so every consumer re-renders every time, and no amount of `memo` on the consumers helps. Memoize the value, or split the context.
 
 **Windowing a list without restoring scroll.** Users navigate to a detail page and press back; the list mounts at offset 0 and they have lost their place in 6,400 rows. Persist the offset and restore it after the virtualizer measures, or the performance win reads as a regression.
 
@@ -726,7 +726,7 @@ function OrdersPage({ orders }: { orders: Order[] }) {     // orders.length === 
   // 2. A new context object every render defeats memo on every consumer below.
   // 3. An inline arrow per row: OrderRow is memoized, and the memo never hits.
   return (
-    <SelectionContext.Provider value={{ selected, setSelected }}>
+    <SelectionContext value={{ selected, setSelected }}>
       <input value={filter} onChange={(e) => setFilter(e.target.value)} />
       <ExpensiveChart data={orders} />
       {orders
@@ -734,7 +734,7 @@ function OrdersPage({ orders }: { orders: Order[] }) {     // orders.length === 
         .map((o) => (
           <OrderRow key={o.id} order={o} onSelect={() => setSelected(o.id)} />
         ))}
-    </SelectionContext.Provider>
+    </SelectionContext>
   );
 }
 ```
@@ -752,10 +752,10 @@ function OrdersPage({ orders }: { orders: Order[] }) {
   const selection = useMemo(() => ({ selected, setSelected }), [selected]);
 
   return (
-    <SelectionContext.Provider value={selection}>   {/* stable identity */}
+    <SelectionContext value={selection}>   {/* stable identity */}
       <ExpensiveChart data={orders} />              {/* outside the filter's state */}
       <FilterableOrders orders={orders} />          {/* owns `filter` internally */}
-    </SelectionContext.Provider>
+    </SelectionContext>
   );
 }
 

@@ -338,6 +338,43 @@ No MLP downstream can recover a distinction that was destroyed at aggregation ti
 
 Why `epsilon` exists: with `epsilon = 0` the node's own vector is just one more term in the sum, indistinguishable from having one extra neighbor that happens to look like you. A learnable `epsilon` lets the model scale self versus neighborhood independently, which is what makes the mapping provably injective over multisets rather than merely usually injective.
 
+### Relational Deep Learning, Graph Foundation Models, and GNN + LLM
+
+**Relational deep learning (RDL).** Most business data sits in a relational database, not a graph file. The usual path is a data scientist joining tables and hand-writing aggregate features ("orders in the last 30 days") for a GBDT. RDL (Fey et al., ICML 2024 position paper) skips the feature step: every row of every table becomes a node typed by its table, every primary-key to foreign-key link becomes an edge, and a heterogeneous GNN learns the aggregates. Rows carry timestamps, so sampling is time-aware: when predicting for a customer at seed time `t`, the sampler only visits rows with timestamp at or before `t`, which removes the leakage hand-built joins often introduce.
+
+```mermaid
+flowchart LR
+    subgraph DB[Relational database]
+        C[(customers)]
+        O[(orders)]
+        P[(products)]
+    end
+    C -->|row = node| G[Heterogeneous temporal graph<br/>PK-FK links = edges]
+    O --> G
+    P --> G
+    T[Training table<br/>entity id, seed time, label] --> S[Time-aware sampler<br/>rows with ts <= seed time]
+    G --> S
+    S --> H[Heterogeneous GNN<br/>per-table encoders]
+    H --> Y[Prediction per entity]
+```
+
+**RelBench** (Robinson et al., NeurIPS 2024 Datasets and Benchmarks) is the benchmark for this: real databases (Formula 1, Amazon reviews, Stack Exchange, clinical trials, and others) with entity classification, regression, and recommendation tasks, each defined by a training table of (entity, seed time, label). Its user study found the RDL model matched a data scientist's hand-built LightGBM features with about an order of magnitude less human time and code. RelBench v2 (January 2026) added four databases (SALT, RateBeer, arXiv, MIMIC-IV), 36 tasks, and an autocomplete task type; v3 (August 2026) loads datasets and tasks from Hugging Face and adds a leaderboard with automated submissions.
+
+**Relational foundation models.** KumoRFM (Kumo, May 2025) pretrains a model across many relational databases and predicts on a new database by in-context learning: you write a predictive query in Kumo's PQL, for example `PREDICT COUNT(orders.*, 0, 30, days) > 0 FOR EACH customers.customer_id`, and the model reads sampled labeled examples from the database's own history as context, with no task-specific training. Kumo reports zero-shot results competitive with supervised RDL models on RelBench, and fine-tuning adds more. It is the relational analog of the tabular foundation models in [gradient boosting](../ensemble_methods/gradient_boosting.md), and like them it is a vendor product, so benchmark it on your own tasks.
+
+**Graph foundation models.** Node and edge features differ between graphs, which is why one GNN rarely transfers. Models that transfer do so by learning on structure that is shared. ULTRA (Galkin et al., ICLR 2024) does zero-shot link prediction on unseen knowledge graphs by building a graph of relations and learning how relations interact, so it never needs entity or relation embeddings tied to one graph.
+
+**GNN + LLM.** PyG 2.7 added `torch_geometric.llm`, which collects the patterns that combine the two:
+
+| Pattern | What happens | PyG component |
+|---------|--------------|---------------|
+| Graph retrieval for LLM answers | Retrieve a subgraph relevant to a question (G-Retriever uses prize-collecting Steiner tree), encode it with a GNN, and pass it to the LLM as a soft prompt alongside the text | `GRetriever`, `RAGQueryLoader`, `LargeGraphIndexer` |
+| LLM builds the graph | An LLM extracts (subject, relation, object) triples from documents into a knowledge graph | `TXT2KG` |
+| LLM features for GNN | A language model encodes node text; the GNN propagates it, and GLEM alternates training of the LM and GNN on text-attributed graphs | `GLEM`, `SentenceTransformer` |
+| Evaluate answers | An LLM grades generated answers against references | `LLMJudge` |
+
+Microsoft's GraphRAG (Edge et al., 2024) uses the second pattern at document-corpus scale: LLM-extracted entity graph, Leiden community detection, and LLM-written community summaries that answer corpus-wide questions plain vector retrieval misses. See [Advanced RAG](../../llm/advanced_rag/advanced_rag.md) for the retrieval side.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -819,7 +856,7 @@ The two rows agree to about two decimals, and they converge exactly because `sqr
 - You have graph-level labels (molecule classification)
 
 **Do NOT use GNNs when:**
-- Data is tabular with no meaningful relational structure (most business ML)
+- Data is a single flat table with no meaningful relational structure (a multi-table relational database is the opposite case: see relational deep learning in Section 4)
 - Graph must be constructed artificially (k-NN graph on tabular data) — usually hurts vs. XGBoost
 - You have very few labeled nodes (<50) — Gaussian processes or label propagation may suffice
 - Latency is critical (<5ms) and graph has millions of nodes — precomputation required
@@ -858,12 +895,15 @@ A knowledge graph GNN ignored relation types on edges (is-a, works-for, located-
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| PyTorch Geometric (PyG) | GNN layers, datasets, samplers | Industry standard; 20k+ GitHub stars |
-| DGL (Deep Graph Library) | Alternative to PyG, MXNet/PyTorch | Better for dynamic graphs |
+| PyTorch Geometric (PyG) | GNN layers, datasets, samplers | Industry standard. 2.8 (June 2026) supports PyTorch 2.9-2.12, adds `from_relbench`, and deprecates torch-cluster and torch-spline-conv in favor of pyg-lib 0.6.0+; 2.7 added `torch_geometric.llm` and deprecated `torch_geometric.distributed` |
+| DGL (Deep Graph Library) | Alternative to PyG with its own message-passing API | Last release v2.4.0 (September 2024), built for PyTorch up to 2.4; PyG is the active choice for new work |
 | NetworkX | Graph construction, analysis | CPU-only; preprocessing |
 | OGB (Open Graph Benchmark) | Benchmark datasets (ogbn-arxiv, ogbg-molhiv) | Standard eval protocol |
-| GraphBolt | PyG 2.4+ large-scale data loading | Replaces NeighborLoader for TB-scale |
+| GraphBolt (`dgl.graphbolt`) | DGL 2.0+ data loading and sampling pipeline | Part of DGL, not PyG; PyG's sampler is `NeighborLoader` |
 | Spektral | Keras/TF GNN library | TensorFlow ecosystem |
+| RelBench | Benchmark and loaders for deep learning on relational databases | Training tables with seed times; datasets load from Hugging Face since v3 |
+| `torch_geometric.llm` (PyG 2.7+) | G-Retriever, TXT2KG, GLEM, `RAGQueryLoader`, `LLMJudge` | GNN + LLM building blocks |
+| KumoRFM (Kumo) | Relational foundation model queried with PQL | Commercial service; zero-shot predictions on a new database |
 | Stellargraph | Enterprise GNN library | Built on TF/Keras |
 | ArangoDB / Neo4j | Graph databases for serving | Store edges for real-time GNN inference |
 
@@ -909,9 +949,24 @@ The Weisfeiler-Leman (1-WL) graph isomorphism test iteratively colors nodes base
 **Short:** Heterogeneous graphs are handled with Relational GCN's per-relation-type weight matrices, using basis decomposition to control parameter count when there are many relation types.
 Use Relational GCN (R-GCN): separate weight matrices W_r per relation type r, aggregate as sum_r sum_{u in N_r(v)} (1/|N_r(v)|) W_r h_u. For many relation types, use basis decomposition (W_r = sum_b a_{rb} V_b) to reduce parameters. PyG supports heterogeneous graphs via `HeteroData` and `to_hetero()` wrapper. Knowledge graph link prediction (TransE, RotatE) is a simpler alternative when you only need entity/relation embeddings without neighborhood aggregation.
 
+**Q: Why can relational deep learning beat hand-built features on a multi-table database, and what leakage does it prevent?**
+**Short:** It learns aggregates across PK-FK links instead of hand-joining tables, and its time-aware sampler only visits rows timestamped at or before each prediction's seed time.
+
+Hand-built features need a person to decide which joins and aggregates matter, and each one is a chance to read rows from after the prediction time. RDL turns each row into a typed node and each primary-key to foreign-key link into an edge, so a heterogeneous GNN learns the aggregates over multi-hop paths a person might not write. Each training example carries a seed time, and the sampler only includes rows with timestamp at or before it, so future orders or later status changes cannot leak into the features. RelBench's user study found RDL matched a data scientist's LightGBM pipeline with about an order of magnitude less human effort.
+
+**Q: How does G-Retriever let an LLM answer questions over a graph too large for its context?**
+**Short:** It retrieves a small relevant subgraph with prize-collecting Steiner tree, encodes it with a GNN into a soft prompt, and gives the LLM that plus a text form of the subgraph.
+
+Serializing a large graph into text overflows the context and buries the relevant facts. G-Retriever embeds nodes and edges, scores them against the question, and solves a prize-collecting Steiner tree problem to pick a connected subgraph with high relevance and few nodes. A GNN encodes that subgraph into vectors that are projected into the LLM's embedding space as a soft prompt, alongside a text form of the same subgraph. Retrieval keeps the input small and connected, which reduces hallucinated relations compared with dumping text. PyG 2.7 ships it as `torch_geometric.llm.models.GRetriever` with `RAGQueryLoader` for retrieval.
+
 **Q: What are common approaches for link prediction with GNNs?**
 **Short:** GNN link prediction scores an edge by combining two node embeddings via dot product, an MLP over concatenation, or a Hadamard product, with hard negatives usually beating random ones.
 After computing node embeddings h_u and h_v, score an edge as: (1) dot product h_u^T h_v — fast but limited, (2) MLP([h_u || h_v]) — more expressive, (3) Hadamard product h_u * h_v passed through MLP. Training: positive edges from the graph, negative edges sampled uniformly (random negative sampling) or hard negatives (nodes close in embedding space). Loss: binary cross-entropy or margin-based hinge loss. Key pitfall: negative sampling strategy heavily impacts performance — hard negatives (~5x positive count) typically outperform random negatives.
+
+**Q: Why does a GNN trained on one graph rarely transfer to another, and how do graph foundation models get around it?**
+**Short:** Node features, edge types, and IDs differ per graph, so learned weights do not line up; models like ULTRA learn on relation-to-relation structure that every graph shares.
+
+A GNN's input layer is tied to the feature schema of its training graph, and embeddings for entities or relation types are tied to their IDs, so a new graph with a different schema has nothing to plug in. Transfer needs a representation that every graph has. ULTRA builds a graph whose nodes are relation types, with edges describing how relations share entities (head-to-head, tail-to-head, and so on), and learns relative representations on it, giving zero-shot link prediction on knowledge graphs it never saw. KumoRFM does the analog for relational databases using in-context examples from the target database.
 
 **Q: How does PinSage differ from standard GraphSAGE?**
 **Short:** PinSage samples neighbors by importance via random-walk visit counts instead of GraphSAGE's uniform sampling, focusing computation on the most relevant neighbors at production scale.
@@ -956,6 +1011,7 @@ It breaks when connected nodes tend to have different labels, as in fraud graphs
 - For class imbalance (fraud: 0.1% positive), use focal loss or oversample positive nodes in mini-batches.
 - Use OGB benchmark datasets (ogbn-arxiv, ogbg-molhiv) with standard splits — avoid custom splits that inflate numbers.
 - Always do inductive evaluation for production: train on graph G_train, evaluate on G_test with no shared nodes.
+- For prediction on a relational database, try relational deep learning (RelBench-style training tables with seed times) before hand-writing join features for a GBDT.
 
 ---
 

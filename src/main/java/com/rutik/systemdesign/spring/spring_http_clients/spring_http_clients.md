@@ -448,7 +448,16 @@ Order order = restClient.get()
 
 ### 6.7 Retries and resilience
 
-Neither `RestTemplate` nor `RestClient` retries anything on its own; wrap the call with Resilience4j (see [Spring Cloud Patterns](../spring_cloud_patterns/spring_cloud_patterns.md)) or Spring Retry:
+Neither `RestTemplate` nor `RestClient` retries anything on its own. Spring Framework 7 has built-in retry: `@Retryable` (`org.springframework.resilience.annotation`, switched on by `@EnableResilientMethods`) or the programmatic `RetryTemplate` (`org.springframework.core.retry`). Boot 4 has no dependency management for Spring Retry:
+
+```java
+@Retryable(includes = ResourceAccessException.class, maxRetries = 3, delay = 200, multiplier = 2)
+public PartnerResponse getQuote(String symbol) {
+    return partnerQuoteClient.getQuote(symbol);   // retries on I/O failure: 200 ms, 400 ms, 800 ms
+}
+```
+
+When you also need a circuit breaker, use Resilience4j (see [Spring Cloud Patterns](../spring_cloud_patterns/spring_cloud_patterns.md)):
 
 ```java
 @Retry(name = "partnerQuote", fallbackMethod = "quoteFallback")

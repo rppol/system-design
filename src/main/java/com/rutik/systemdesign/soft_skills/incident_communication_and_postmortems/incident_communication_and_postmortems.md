@@ -195,6 +195,17 @@ stateDiagram-v2
     Mitigated --> Resolved: underlying cause fixed, monitoring window clears
     Resolved --> Reviewed: postmortem published and action items assigned
     Reviewed --> [*]
+
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef accent fill:#c678dd,stroke:#9b59b6,color:#fff
+    class Detected bad
+    class Declared warn
+    class Mitigated info
+    class Resolved good
+    class Reviewed accent
 ```
 
 Mitigated and Resolved are separate states on purpose — the gap between them is exactly
@@ -493,6 +504,75 @@ What they do well: naming the exact failure mode (a specific subsystem, a specif
 capacity-management process) rather than a vague "increased error rates," even when the
 disclosure is commercially uncomfortable.
 
+**Four public postmortems from 2024-2025, read as writing.** Each names the mechanism,
+gives a minute-level timeline, and maps every fix to a named contributing factor.
+
+| Incident | Mechanism, as the postmortem states it | Timeline | Fix tied to the mechanism |
+|----------|----------------------------------------|----------|---------------------------|
+| CrowdStrike Channel File 291, July 19, 2024 (RCA dated August 6, 2024) | a new IPC Template Type defined 21 input fields, the sensor's integration code supplied 20, and the first template instance with a non-wildcard 21st field caused an out-of-bounds read and a Windows crash; a Content Validator logic error let it through | released 04:09 UTC, reverted 05:27 UTC; Microsoft estimated 8.5 million Windows devices affected | runtime bounds checks, field-count validation at sensor compile time, staged deployment of template instances, customer control over content update timing |
+| Google Cloud Service Control, June 12, 2025 | a quota-policy check added May 29 had no error handling and no feature flag; a policy with blank fields replicated globally through Spanner in seconds and hit a null pointer in every region | root cause found within 10 minutes, kill switch rolled out within 40; us-central1 took about 2 h 40 min because restarting tasks overloaded Spanner without randomized exponential backoff | fail open on a failed check, propagate global data incrementally with validation, feature-flag critical paths off by default, audit for backoff |
+| AWS us-east-1 DynamoDB DNS, October 19-20, 2025 | a race between two DNS Enactors: a delayed one applied an old plan, cleanup deleted it, and the regional endpoint `dynamodb.us-east-1.amazonaws.com` was left with an empty DNS record | DynamoDB errors from 11:48 PM PDT October 19 to 2:40 AM October 20; the full event, including EC2 launches and NLB, ended 2:20 PM PDT October 20 | DNS Planner and Enactor automation disabled worldwide until the race is fixed; a velocity control on how much capacity one NLB can remove |
+| Cloudflare, November 18, 2025 | a ClickHouse permissions change made a query return duplicate rows, the Bot Management feature file doubled, and it exceeded the proxy's 200-feature limit (about 60 in use), which panicked | 5xx from 11:20 UTC, core traffic largely restored 14:30, all systems normal 17:06; the team first suspected a DDoS; Matthew Prince published the postmortem the same day | treat internally generated config files like user input, add global kill switches for features, stop error reporting from consuming the resources needed to recover |
+
+The pattern across all four is a configuration or data change, not a code deploy, pushed
+to every region at once into code that trusted its input. That is the sentence a
+contributing-factors section should be able to write about your own incident: the change,
+how far it spread before anything stopped it, and why the consumer did not fail safe.
+
+### 6.8 Regulatory reporting deadlines
+
+A blameless postmortem has no deadline; a regulator does. Several clocks can start on the
+same incident, and the incident commander's timeline is the evidence for when each one
+started, so the scribe's timestamps (§6.1) matter for compliance as well as for learning.
+
+| Rule | Who it binds | Clock starts | Deadlines |
+|------|-------------|--------------|-----------|
+| SEC Form 8-K Item 1.05 (in force December 18, 2023) | US-listed companies, for a cybersecurity incident | when the company determines the incident is material, which it must do without unreasonable delay after discovery | file within four business days of that determination; delay only if the US Attorney General finds a substantial risk to national security or public safety |
+| NIS2, Directive (EU) 2022/2555, Art. 23 | essential and important entities in the EU (cloud, data centres, managed services, DNS, many others) | becoming aware of a significant incident | early warning within 24 hours, incident notification within 72 hours, final report within one month |
+| EU DORA, Regulation (EU) 2022/2554 (applies from January 17, 2025), with Delegated Regulation (EU) 2025/301 | EU financial entities (banks, insurers, payment and crypto firms) | classifying an ICT incident as major | initial notification within 4 hours of classification and no later than 24 hours after becoming aware; intermediate report within 72 hours of the initial one; final report within one month of the latest intermediate report |
+
+```mermaid
+flowchart LR
+    classDef start fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef fast  fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef mid   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef late  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    det(["Incident detected"])
+    subgraph dora["EU DORA (financial)"]
+        d1("Classified major") --> d2("Initial: 4 h<br/>max 24 h from aware") --> d3("Intermediate: 72 h") --> d4("Final: 1 month")
+    end
+    subgraph nis["NIS2"]
+        n1("Early warning: 24 h") --> n2("Notification: 72 h") --> n3("Final: 1 month")
+    end
+    subgraph sec["SEC 8-K Item 1.05"]
+        s1("Materiality decided") --> s2("File: 4 business days")
+    end
+    det --> d1
+    det --> n1
+    det --> s1
+
+    class det start
+    class d2,n1 fast
+    class d1,s1,d3,n2,s2 mid
+    class d4,n3 late
+```
+
+*Three clocks on one incident. The DORA and NIS2 clocks run from detection or
+classification; the SEC clock runs from the materiality decision, which is why that
+decision needs its own timestamp in the incident record.*
+
+What this changes in the incident process:
+
+- **The comms lead owns a "regulatory clocks" line in the channel opener** for any
+  security or availability incident at a regulated entity: which regimes may apply, who
+  in Legal decides classification or materiality, and the deadline once they do.
+- **The regulator's report is not the postmortem.** Early filings are short, factual and
+  written before the cause is known. Do not let the 24-hour filing's guesses become the
+  postmortem's conclusions; the blameless document comes later and may contradict them.
+- **Write the timeline as if a regulator will read it**, because one may: UTC timestamps,
+  who knew what when, and when each decision was made.
+
 ---
 
 ## 7. Real-World Examples
@@ -606,6 +686,14 @@ nothing rather than trigger a process they've watched turn into blame before.
 - Cloudflare — "Details of the Cloudflare outage on July 2, 2019," published by CTO John
   Graham-Cumming.
 - GitLab — "Postmortem of database outage of January 31" (published February 10, 2017).
+- CrowdStrike, "Channel File 291 Incident Root Cause Analysis" (August 6, 2024).
+- Google Cloud, Service Health incident report for the June 12, 2025 Service Control outage.
+- AWS, "Summary of the Amazon DynamoDB Service Disruption in the Northern Virginia
+  (US-EAST-1) Region" (October 2025).
+- Cloudflare, "Cloudflare outage on November 18, 2025", Matthew Prince.
+- SEC press release 2023-139 and Form 8-K Item 1.05; Directive (EU) 2022/2555 (NIS2)
+  Art. 23; Regulation (EU) 2022/2554 (DORA) Art. 19 with Delegated Regulation (EU)
+  2025/301 for the reporting time limits.
 
 ---
 
@@ -737,6 +825,31 @@ loss as a failure across five separate backup mechanisms rather than framing it 
 engineer's mistake. The transparency during the incident, not just the postmortem
 afterward, is the part most companies skip — most orgs only apply the blameless discipline
 after the fact and go dark or defensive while the incident is still live.
+
+**Q: What do the CrowdStrike 2024, Google Cloud June 2025 and Cloudflare November 2025 postmortems have in common?**
+**Short:** Each was a config or data push, not a code deploy, that spread everywhere at once into code that trusted its input; each fix targets that mechanism with validation, fail-safe handling or staged rollout.
+
+CrowdStrike's Channel File 291 supplied 20 inputs to a template expecting 21 and crashed
+Windows hosts (8.5 million by Microsoft's estimate). Google's Service Control read a
+policy with blank fields through an unflagged code path with no error handling, and
+crash-looped in every region. Cloudflare's Bot Management file doubled past a 200-feature
+limit after a ClickHouse permissions change. None was a code deploy, and all three
+postmortems name the exact mechanism and tie each fix to it: bounds checks and staged
+content rollout, fail-open checks and incremental propagation, treating generated config
+like user input. That specificity is the model for your own contributing-factors section.
+
+**Q: A security incident hits a US-listed company with EU operations. Which reporting clocks can start, and from when?**
+**Short:** SEC 8-K Item 1.05: four business days after deciding it is material. NIS2: 24-hour early warning, 72-hour notification. EU DORA for a financial entity: 4 hours after classing it major.
+
+The clocks start at different events. The SEC clock runs from the materiality
+determination, which must be made without unreasonable delay after discovery, so that
+decision needs its own timestamp. NIS2 Art. 23 runs from awareness of a significant
+incident: early warning in 24 hours, notification in 72, final report in one month. EU
+DORA, for banks, insurers and payment firms, requires an initial notification within 4
+hours of classifying the incident as major and no later than 24 hours after awareness,
+an intermediate report within 72 hours, and a final report within one month. The incident
+commander should have Legal named in the channel early, and the regulator's early filing
+should stay factual so it does not pre-empt the postmortem.
 
 **Q: Why should you never let a fast-resolved incident skip a postmortem?**
 **Short:** A short outage caused by a real gap could just as easily have been a long one under different conditions.

@@ -306,6 +306,8 @@ pgbackrest --stanza=mydb restore \
     --target-action=promote
 ```
 
+pgBackRest 2.60.0 (October 18, 2026) checks page checksums during restore. If any restored file has an invalid page checksum, the restore stops with an error and leaves the cluster incomplete, so it must run again. `expire` also refuses to run when the oldest retained backup would contain checksum errors, which blocks WAL expiration in that repository. `checksum-page-error=n` turns both into warnings. A backup with a checksum error is a corrupt page you copied, so fix the source page and take a new full backup rather than switching the check off.
+
 ### Percona XtraBackup (MySQL Hot Backup)
 
 ```bash
@@ -486,6 +488,48 @@ Storage savings stay above two-thirds even at 20% daily churn, which is why incr
 
 **Why the chain length is a reliability question, not just a speed one.** A differential restore needs two artifacts intact; a six-deep incremental chain needs seven, and any single corrupt link makes every backup after it unrestorable. This is the real reason retention policies pin a full-backup cadence rather than running incrementals indefinitely — and the reason the best-practice list warns never to delete old base backups by hand, since a manual deletion can silently orphan every incremental that depends on it.
 
+### PostgreSQL 17 Native Incremental Backup (`summarize_wal`, `pg_combinebackup`)
+
+Before PostgreSQL 17, block-level incrementals needed a third-party tool (pgBackRest, WAL-G delta backups, Barman with rsync). PostgreSQL 17 ships them in core with three pieces:
+
+| Piece | What it does |
+|-------|--------------|
+| `summarize_wal = on` | Starts the `walsummarizer` background process. It reads WAL as it is written and records, per relation fork, which 8KB blocks changed in each LSN range. Summary files live in `pg_wal/summaries/`. Default `off`; the server refuses to start with it on when `wal_level = minimal` |
+| `wal_summary_keep_time` | How long summaries are kept. Default 10 days. An incremental can only be taken against a prior backup whose start LSN is still covered by summaries |
+| `pg_basebackup --incremental=<prior backup_manifest>` | The server reads the prior backup's manifest, finds its start LSN, unions the WAL summaries since then, and sends only the changed blocks. A relation file becomes `INCREMENTAL.<relfilenode>` (changed blocks plus the file's truncation length); non-relation files are sent whole |
+| `pg_combinebackup full incr1 incr2 -o /restore/data` | Rebuilds a synthetic full data directory from a full backup and its chain of incrementals. The output is what you start the server on. `--clone` and `--copy-file-range` use filesystem reflinks; `-k`/`--link` (PostgreSQL 18) hard-links unchanged files |
+
+```bash
+# postgresql.conf on the primary (or a standby; both can summarize)
+summarize_wal = on
+wal_summary_keep_time = '14d'          # must cover the longest gap between backups
+
+# Sunday full, then daily incrementals, each against the previous manifest
+pg_basebackup -D /bk/full_sun -c fast -X stream
+pg_basebackup -D /bk/incr_mon --incremental=/bk/full_sun/backup_manifest -X stream
+pg_basebackup -D /bk/incr_tue --incremental=/bk/incr_mon/backup_manifest -X stream
+
+# Restore: combine the chain, then start (plus restore_command for PITR past incr_tue)
+pg_combinebackup /bk/full_sun /bk/incr_mon /bk/incr_tue -o /pgdata --clone
+```
+
+```
+  file-level incremental (copy any 1GB segment file that changed)
+  orders.1  [x.......................................]  1 block of 131,072 changed -> 1024 MB
+  block-level incremental (PostgreSQL 17 WAL summaries)
+  orders.1  [x.......................................]  1 block changed            ->  8 KB
+```
+
+PostgreSQL splits each relation into 1GB segment files of 131,072 blocks. A file-level tool that sees one changed block re-copies the whole segment; WAL summaries let the server send the single 8KB block. On a 1TB database with 3% daily block churn, the native incremental is about 30GB. A file-level one can approach the full 1TB when updates scatter across every segment.
+
+Three limits shape the RTO tradeoff:
+
+1. **Restore always runs `pg_combinebackup` first.** An incremental directory cannot be started. The combine step reads the full plus every incremental in the chain, so restore cost is the `restore_volume` formula above. With `--clone` on XFS or Btrfs, unchanged blocks are reflinked rather than copied, which removes most of the write cost.
+2. **A gap in summaries breaks the next incremental.** If `summarize_wal` was off for a while, or `wal_summary_keep_time` expired summaries older than the prior backup's start LSN, `pg_basebackup --incremental` fails. The fix is to take a new full.
+3. **It is not PITR on its own.** A combined backup is consistent at its end LSN. Recovery to a later time still needs the archived WAL and `restore_command`, as with any base backup.
+
+pgBackRest (block incremental with `repo1-block=y` and `repo1-bundle=y`, since 2.46) and WAL-G stay useful for what core does not ship: object-storage targets, retention policies, encryption, and parallel delta restore. Core incrementals replace the tool only when the backup target is a filesystem and a team writes its own retention.
+
 ### Backup Encryption
 
 ```bash
@@ -578,6 +622,8 @@ Backup-method selection as a decision chain: small databases or selective-restor
 
 **Long PITR replay during RTO window**: A 5TB database with 30 minutes of WAL to replay. Base backup restore takes 45 minutes; WAL replay takes another 90 minutes. Total RTO = 2.25 hours, exceeding the 1-hour SLA. Fix: use streaming replication as primary HA (15-30s RTO); WAL archiving as backup (high-RPO recovery scenario). Or: take base backups more frequently (every 4 hours) to reduce WAL replay window.
 
+**Weak pgBackRest subkey survives the upgrade**: pgBackRest before 2.59.3 did not check for an error when it generated random data for encryption, so a repository can hold a weak subkey (six or more zero bytes, per the October 4, 2026 security notice). A weak subkey in `archive.info` exposes all WAL in the repository; one in `backup.info` exposes every backup. The team upgrades to 2.59.3 and assumes it is fixed, but the upgrade does not replace an existing subkey, and diff and incr backups keep using their full backup's subkey. Fix: run the notice's check script against each encrypted repository; if a subkey is weak, create the stanza in a new repository, take a new full backup there, and keep the old repository only until its backups age out of retention.
+
 **Put simply.** "The SLA is a budget, the recovery steps are line items, and this team overspent before they finished the first two lines."
 
 | Symbol | What it is |
@@ -611,6 +657,7 @@ The diagnosis follows directly from which line item is larger. Restore is 45 min
 | pgBackRest        | PostgreSQL   | Enterprise backup with PITR, encryption|
 | pg_dump           | PostgreSQL   | Logical backup (SQL/custom format)   |
 | pg_basebackup     | PostgreSQL   | Physical base backup                 |
+| pg_combinebackup  | PostgreSQL 17+ | Rebuilds a full from a native incremental chain |
 | Percona XtraBackup| MySQL/Percona| Hot physical backup with PITR        |
 | mydumper          | MySQL        | Fast parallel logical dump           |
 | AWS RDS Automated | RDS/Aurora   | Managed PITR, 35-day retention       |
@@ -655,12 +702,22 @@ Automated restore testing: (1) Daily: verify that WAL segments are being success
 **Q: What is pgBackRest's advantage over WAL-G?**
 **Short:** pgBackRest's delta restores and built-in parallel restore make it faster than WAL-G for very large databases.
 
-Both WAL-G and pgBackRest provide PITR-capable PostgreSQL backup to object storage. Key differences: (1) pgBackRest supports delta restores — it can restore only the blocks that changed since a previous backup, much faster for large databases. (2) pgBackRest has built-in parallel restore with configurable worker count. (3) pgBackRest supports standby backup — taking the backup from a replica to avoid primary I/O impact. (4) WAL-G is simpler to configure (environment variables) and has broader cloud storage support out of the box. For most use cases, either is appropriate. pgBackRest's delta restore is a significant advantage for databases > 1TB where full restore time would otherwise exceed the RTO.
+Both WAL-G and pgBackRest provide PITR-capable PostgreSQL backup to object storage. Key differences: (1) pgBackRest supports delta restores: it can restore only the blocks that changed since a previous backup, much faster for large databases. (2) pgBackRest has built-in parallel restore with configurable worker count. (3) pgBackRest supports standby backup, taking the backup from a replica to avoid primary I/O impact. (4) WAL-G is simpler to configure (environment variables) and has broader cloud storage support out of the box. For most use cases, either is appropriate. pgBackRest's delta restore is a significant advantage for databases > 1TB where full restore time would otherwise exceed the RTO. Also weigh maintainer bus factor: pgBackRest's author announced on April 27, 2026 that it was no longer maintained, and work resumed on May 18, 2026 only after AWS, Supabase, pgEdge, Tiger Data, Percona, and Eon.io agreed to fund it. Check who funds and reviews a backup tool before you bet the restore path on it.
 
 **Q: How do you handle backup retention and storage costs?**
 **Short:** Tiered retention moves aging backups to cheaper cold storage while WAL retention must cover the oldest kept full backup.
 
 Tiered retention strategy: (1) Keep full backups for 7 days in standard S3 (high access, moderate cost). (2) After 7 days, transition to S3 Infrequent Access or Glacier Instant Retrieval (lower cost, slightly higher retrieval latency). (3) After 30 days, transition to Glacier Deep Archive (lowest cost, 12-hour retrieval — for compliance only). WAL segments: retain at least as long as the oldest full backup you want to use for PITR. If you keep full backups for 7 days, keep WAL for 8 days. pgBackRest `repo1-retention-full=4` keeps 4 full backups and automatically removes older backups and associated WAL. Regularly audit backup storage costs against your RTO/RPO requirements.
+
+**Q: Can you start PostgreSQL directly on a PostgreSQL 17 incremental backup directory?**
+**Short:** No; an incremental holds only changed blocks, so you first run pg_combinebackup over the full and every incremental to build a startable data directory.
+
+No. A `pg_basebackup --incremental` directory holds `INCREMENTAL.*` files that carry only the blocks changed since the prior backup, so it is not a valid data directory. Restore runs `pg_combinebackup full incr1 ... incrN -o /pgdata`, which reads the whole chain and writes a synthetic full, and only then do you start the server (with `restore_command` if you need PITR past the last incremental's end LSN). The combine step is part of the RTO: on a 1TB database it reads the full plus every incremental, so a long chain adds minutes. Use `--clone` on XFS or Btrfs (reflinks, no data copy) or `-k`/`--link` on PostgreSQL 18 to cut the write cost, and rehearse the combine in restore drills because a missing link in the chain fails it outright.
+
+**Q: Why would `pg_basebackup --incremental` fail even though the prior backup exists?**
+**Short:** The server needs WAL summaries covering everything since the prior backup's start LSN; if summarize_wal was off or wal_summary_keep_time expired them, it refuses.
+
+PostgreSQL 17 builds an incremental by unioning WAL summaries from the prior backup's start LSN to now, and those summaries exist only while `summarize_wal = on` and only for `wal_summary_keep_time` (default 10 days). If the summarizer was disabled for an hour, or the last full is 12 days old, the block map has a hole and the server cannot prove which blocks changed, so it errors rather than produce a silently incomplete backup. The same happens after a failover to a standby that was not summarizing. The fix is a new full backup. Set `wal_summary_keep_time` above the longest interval between a full and its last incremental, enable `summarize_wal` on every node that can become primary, and alert on the summarizer falling behind (`pg_get_wal_summarizer_state()`).
 
 **Q: What is a DR runbook and what should it contain?**
 **Short:** A DR runbook is a pre-written, regularly tested, offline-accessible step-by-step service recovery procedure.
@@ -688,9 +745,9 @@ Use logical replication for zero-downtime major version upgrades: (1) Set up a n
 Ransomware that steals production database credentials can reach and destroy backups stored in the same account, so backup isolation must be a first-class security control, not an afterthought. Store backups in a separate cloud account or subscription from production, with IAM policies that prevent the production service account from deleting or overwriting historical backups (S3 Object Lock in compliance mode, or a write-only IAM role for the backup uploader). Enable versioning and MFA-delete on the backup bucket so even a compromised write credential cannot purge existing objects. Combine this with air-gapped or offline copies for the most critical data, and test the restore path from the isolated account quarterly as part of the DR runbook. Treat the backup account's credentials as more sensitive than production's, since it is the last line of defense when production itself is compromised.
 
 **Q: How do you encrypt backups and where should encryption keys be stored?**
-**Short:** Backups must be encrypted with keys held outside the backup path, in a dedicated secrets system, never alongside the data.
+**Short:** Encrypt with AES-256 and keep keys in a secrets system outside the backup path; pgBackRest repositories made before 2.59.3 may need a new repo.
 
-Backup encryption uses AES-256 (WAL-G via libsodium, pgBackRest via aes-256-cbc) applied before or during upload to object storage, with the encryption key managed entirely outside the backup path. Storing the key in the same directory or bucket as the backup is a common mistake: ransomware or an attacker that reaches the backup also gets the key, making the encryption pointless. Keep keys in a dedicated secrets system (HashiCorp Vault, AWS KMS, AWS Secrets Manager) that the backup and restore jobs authenticate to separately from the storage layer, and enable automatic key rotation on a schedule independent of the backup cycle. Layer storage-level encryption (S3 SSE-KMS, GCS CMEK) on top of application-level encryption for defense in depth. Always verify that a restore using only the KMS-stored key succeeds end-to-end during routine restore drills.
+Backup encryption uses AES-256 (WAL-G via libsodium, pgBackRest via aes-256-cbc) applied before or during upload to object storage, with the encryption key managed entirely outside the backup path. Storing the key in the same directory or bucket as the backup is a common mistake: ransomware or an attacker that reaches the backup also gets the key, making the encryption pointless. Keep keys in a dedicated secrets system (HashiCorp Vault, AWS KMS, AWS Secrets Manager) that the backup and restore jobs authenticate to separately from the storage layer, and enable automatic key rotation on a schedule independent of the backup cycle. Layer storage-level encryption (S3 SSE-KMS, GCS CMEK) on top of application-level encryption for defense in depth. Always verify that a restore using only the KMS-stored key succeeds end-to-end during routine restore drills. The tool's own key generation matters too: pgBackRest before 2.59.3 could write weak repository subkeys and salts, and upgrading does not replace them. Treat a subkey with six or more zero bytes as weak, then create the stanza in a new repository with a new full backup, because diff and incr backups reuse their full backup's subkey (pgBackRest security notice, October 4, 2026).
 
 **Q: What went wrong in GitLab's January 2017 data loss incident and what fix did it drive?**
 **Short:** GitLab's 2017 outage showed that untested backups are not real backups, since a deletion met silently failed WAL archiving.

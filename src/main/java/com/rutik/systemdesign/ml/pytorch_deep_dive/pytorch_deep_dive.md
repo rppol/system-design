@@ -13,12 +13,12 @@ the silicon can do. This page is about the layer in between — what the framewo
 Python between `loss.backward()` and the kernel launch, and why that layer is the reason your
 job is slow, non-deterministic, or out of memory.
 
-**This module targets PyTorch 2.13.0**, released 2026-07-08. Every default, error string,
-signature and dtype policy quoted below was read out of an installed 2.13.0 package
-(CPython 3.13, macOS arm64, CPU/MPS build), not from documentation. Claims that require a CUDA
+**This module targets PyTorch 2.14.1**, released 2026-09-30 (2.14.0 went GA on 2026-09-02). Every default, error string,
+signature and dtype policy quoted below was read out of an installed 2.14.1 package
+(CPython 3.12, macOS arm64, CPU/MPS build), not from documentation. Claims that require a CUDA
 device — allocator internals, NCCL, CUDA graphs — are marked as such and are sourced from the
 API surface plus the mechanisms described here, not from a run on this machine. Where a
-behaviour changed at a known version the tag is inline: `[2.13]`, `[2.6+]`.
+behaviour changed at a known version the tag is inline: `[2.14]`, `[2.6+]`.
 
 The thesis of this page, and the sentence to carry into an interview:
 
@@ -41,9 +41,9 @@ The stack, from your `for batch in loader:` down to the metal:
 
 The compiler stack — `torch.compile`, TorchDynamo, AOTAutograd, Inductor, `torch.export` — is
 a second path that replaces the middle of that table with a captured graph. It is no longer
-experimental; it is the default answer to "make this faster", and as of 2.13 it is also the
+experimental; it is the default answer to "make this faster", and as of 2.14 it is also the
 official replacement for TorchScript, whose `torch.jit.script` and `torch.jit.trace` now emit
-a deprecation warning on every call.
+a visible `FutureWarning` on every call.
 
 **Where this module sits.** LR schedules, warmup, clipping and augmentation belong to
 [Training Deep Networks](../training_deep_networks/training_deep_networks.md). The taxonomy of
@@ -167,16 +167,16 @@ architectures, and you should stop trying.
 
 ### The four ways to leave PyTorch
 
-| Path | Produces | Status in 2.13 | Use when |
+| Path | Produces | Status in 2.14 | Use when |
 |---|---|---|---|
 | `torch.export` + AOTInductor | A `.pt2` archive with precompiled kernels, no Python | **The current path.** `strict=False` is the default | You need a C++/Triton-runnable artifact with no warm-up cliff |
-| `torch.onnx.export` | ONNX graph. **`dynamo=True` is the default** `[2.13]` | Current, and now built on `torch.export` | The consumer is ONNX Runtime, TensorRT, OpenVINO, CoreML |
+| `torch.onnx.export` | ONNX graph. **`dynamo=True` is the default** `[2.9+]` | Current, and now built on `torch.export` | The consumer is ONNX Runtime, TensorRT, OpenVINO, CoreML |
 | `torch.jit.script` / `trace` | TorchScript | **Deprecated** — every call warns "switch to `torch.compile` or `torch.export`" | Only to keep an existing artifact loading |
 | `state_dict` + code | A tensor dict | Eternal | The consumer is another PyTorch process you control |
 
 **Say the TorchScript sentence out loud in an interview**, because a lot of material is stale on
-it: TorchScript is not "the way to deploy PyTorch" any more. In 2.13 both entry points emit a
-`UserWarning` with the exact text ``` `torch.jit.script` is deprecated. Please switch to
+it: TorchScript is not "the way to deploy PyTorch" any more. In 2.14 both entry points emit a
+`FutureWarning` with the exact text ``` `torch.jit.script` is deprecated. Please switch to
 `torch.compile` or `torch.export`.``` TorchScript modules still load and still run — Triton's
 PyTorch backend still accepts them — but nothing new should be written against it.
 
@@ -284,8 +284,8 @@ the existing bytes. Above, reading `u` in row-major order needs the step sequenc
 `+4, +4, -7, +4, +4, -7, ...`, which no `(size, stride)` pair encodes — so `.view(2,12)` raises
 `RuntimeError: view size is not compatible with input tensor's size and stride (at least one
 dimension spans across two contiguous subspaces). Use .reshape(...) instead.` (verified string,
-2.13.0). `.reshape()` tries `view` first and silently falls back to `contiguous().view()`,
-which allocates and copies. Confirmed on 2.13: `t.transpose(1,2).reshape(2,12)` returns a tensor
+2.14.1). `.reshape()` tries `view` first and silently falls back to `contiguous().view()`,
+which allocates and copies. Confirmed on 2.14: `t.transpose(1,2).reshape(2,12)` returns a tensor
 whose storage pointer differs from `t`'s.
 
 **The autograd tape: forward builds it, backward consumes and frees it**
@@ -415,7 +415,7 @@ flowchart LR
 
 The three failure modes in one picture: a **graph break** shrinks the region you optimized, a
 **recompile** pays compilation cost repeatedly, and hitting the **recompile limit** silently
-gives up. The limit is `torch._dynamo.config.recompile_limit`, verified `= 8` in 2.13, with
+gives up. The limit is `torch._dynamo.config.recompile_limit`, verified `= 8` in 2.14, with
 `accumulated_recompile_limit = 256` across all specializations of a frame.
 
 **Where a training step's memory actually goes (7B model, bf16 autocast, AdamW, per GPU)**
@@ -482,7 +482,7 @@ also why `x.is_contiguous()` returning `False` in a CNN is normal rather than a 
 path.
 
 **`expand` versus `repeat` is the memory question you will be asked.** `expand` sets stride 0 on
-the broadcast dimension, which means "when this index advances, do not move". Verified on 2.13:
+the broadcast dimension, which means "when this index advances, do not move". Verified on 2.14:
 `torch.arange(3).unsqueeze(1).expand(3, 4)` has strides `(1, 0)` and its storage is **24 bytes**
 — three int64 values backing twelve logical elements. `repeat(1, 4)` materializes all twelve.
 Broadcasting in `a + b` is exactly this trick applied implicitly, which is why broadcasting is
@@ -539,7 +539,7 @@ inplace operation: [torch.FloatTensor [2, 2]], which is output 0 of Sigmoid, is 
 expected version 0 instead.
 ```
 
-Verified on 2.13 from `s = v.sigmoid(); s.add_(1.0); s.sum().backward()`. Sigmoid saves its
+Verified on 2.14 from `s = v.sigmoid(); s.add_(1.0); s.sum().backward()`. Sigmoid saves its
 *output* for backward (because `d/dx sigmoid = y(1-y)`), so mutating the output corrupts it. The
 lesson generalizes: `relu_`, `+=` on an activation, and `nn.ReLU(inplace=True)` are safe when
 the op saves its *input*, unsafe when it saves its *output*. When you cannot tell, run once with
@@ -577,7 +577,7 @@ at exactly `0.0` rather than `None`.
 
 ### `no_grad` vs `inference_mode` vs `detach` — the genuine differences
 
-All three stop gradient tracking. They are not interchangeable, and 2.13 enforces the
+All three stop gradient tracking. They are not interchangeable, and 2.14 enforces the
 differences with hard errors.
 
 | | `torch.no_grad()` | `torch.inference_mode()` | `.detach()` |
@@ -593,8 +593,8 @@ differences with hard errors.
 
 `inference_mode` is faster because it skips version-counter bumps and view-tracking metadata
 entirely — work `no_grad` still does in case you later want to record. The price is that the
-resulting tensors are permanently marked, and 2.13 will not let you smuggle them back into
-training. All four error strings below are verbatim from 2.13.0:
+resulting tensors are permanently marked, and 2.14 will not let you smuggle them back into
+training. All four error strings below are verbatim from 2.14.1:
 
 ```python
 with torch.inference_mode():
@@ -654,7 +654,7 @@ class Square(torch.autograd.Function):
         return 2 * x * grad_out
 
 a = torch.randn(4, dtype=torch.double, requires_grad=True)
-torch.autograd.gradcheck(Square.apply, (a,))    # True (verified on 2.13)
+torch.autograd.gradcheck(Square.apply, (a,))    # True (verified on 2.14)
 ```
 
 Three rules that are not optional. **Use `ctx.save_for_backward` for tensors, never
@@ -695,7 +695,7 @@ forward-plus-backward step, since backward is about twice a forward). Checkpoint
 sqrt(N)-th layer stores O(sqrt(N)) and recomputes O(sqrt(N)) — the classic sublinear-memory
 point, and usually the right one.
 
-**`use_reentrant` is not optional in practice.** In 2.13 omitting it produces:
+**`use_reentrant` is not optional in practice.** In 2.14 omitting it produces:
 
 ```
 UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly.
@@ -703,7 +703,7 @@ Starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise an 
 use_reentrant=False is recommended...
 ```
 
-Note that the warning text says 2.9 will raise; on 2.13.0 it still warns and still runs, so the
+Note that the warning text says 2.9 will raise; on 2.14.1 it still warns and still runs, so the
 message is stale in PyTorch itself. Pass `use_reentrant=False` anyway — the reentrant
 implementation cannot handle a checkpointed region with no `requires_grad` inputs, breaks with
 `torch.autograd.grad` (as opposed to `backward`), and does not compose with `torch.compile`.
@@ -1007,7 +1007,7 @@ model = torch.compile(model, mode="reduce-overhead")  # adds CUDA graphs
 model = torch.compile(model, fullgraph=True)       # RAISE on any graph break, do not fall back
 ```
 
-Verified available modes in 2.13: `default`, `lite`, `reduce-overhead`,
+Verified available modes in 2.14: `default`, `lite`, `reduce-overhead`,
 `max-autotune-no-cudagraphs`, `max-autotune`. Verified backends: `inductor` (default),
 `cudagraphs`, `openxla`, `tvm`.
 
@@ -1021,10 +1021,10 @@ Every compiled artifact is guarded on the properties Dynamo specialized against:
 device, rank, whether it requires grad, contiguity, the *values* of Python scalars and strings
 it baked in, module and function identities, and the shapes it decided to treat as static. When
 a guard fails, Dynamo compiles a new specialization. When a frame accumulates
-`recompile_limit` (verified `= 8` in 2.13) specializations, **it stops trying and runs eager
+`recompile_limit` (verified `= 8` in 2.14) specializations, **it stops trying and runs eager
 forever**, with a warning most people never see.
 
-Measured on 2.13.0 with `torch._dynamo.testing.CompileCounter`, which counts backend
+Measured on 2.14.1 with `torch._dynamo.testing.CompileCounter`, which counts backend
 invocations:
 
 | What varies across calls | Distinct values | Compilations |
@@ -1086,7 +1086,7 @@ this bit in Python, and start a new graph after". It is not an error and nothing
 default. The cost is real: two graphs of half the size fuse less well than one, and each
 boundary is a return to the Python interpreter with the tensors materialized.
 
-Measured on 2.13 with `dynamo.explain` over a function containing both a data-dependent branch
+Measured on 2.14 with `dynamo.explain` over a function containing both a data-dependent branch
 and a `print`:
 
 ```
@@ -1094,7 +1094,7 @@ graph_count 2   graph_break_count 1   op_count 2
 break reason: generic_jump TensorVariable()
 ```
 
-Note what is *not* in that result: `print()` did **not** cause a break in 2.13. Dynamo now
+Note what is *not* in that result: `print()` did **not** cause a break in 2.14. Dynamo now
 handles common Python side effects by replaying them at the graph boundary. Advice telling you
 to remove every `print` from a compiled model is out of date; advice telling you to remove
 data-dependent branches is not.
@@ -1139,8 +1139,8 @@ into a forward graph and a backward graph. Two consequences worth knowing:
 **Inductor** then takes the ATen graph and does the work that produces the speedup: it
 decomposes into a small IR, **fuses** adjacent elementwise and reduction operations into as few
 kernels as possible, plans buffer reuse and inplace-ing, picks layouts, and generates code —
-**Triton** for GPU, C++ with OpenMP for CPU. In 2.13 Inductor gained a second GPU code path via
-a CuTeDSL backend for some operations, alongside Triton. Generated kernels are compiled and
+**Triton** for GPU, C++ with OpenMP for CPU. Inductor has a second GPU code path via
+a CuTeDSL backend for some operations `[2.13]`, and 2.14 added NVGEMM, CuTeDSL-generated CUTLASS GEMMs with epilogue fusion autotuned alongside Triton and ATen. Generated kernels are compiled and
 cached on disk (`/tmp/torchinductor_$USER` by default, relocatable with `TORCHINDUCTOR_CACHE_DIR`
 and shareable in CI via the remote FX graph cache) so subsequent runs skip most of the work.
 
@@ -1179,7 +1179,7 @@ runner = torch._inductor.aoti_load_package(path)
 out = runner(torch.randn(8, 3, 224, 224))
 ```
 
-Three currency points, all verified against 2.13.0. **`strict` defaults to `False`** — the
+Three currency points, all verified against 2.14.1. **`strict` defaults to `False`** — the
 non-strict path uses `__torch_function__`-based tracing and accepts far more real-world code
 than the original Dynamo-strict export; opt into `strict=True` when you want the stronger
 soundness guarantees. **`Dim.AUTO` and `Dim.DYNAMIC` exist**, so you can ask export to infer
@@ -1188,12 +1188,23 @@ which dimensions are dynamic instead of naming ranges by hand. And **AOTInductor
 [NVIDIA Triton Inference
 Server](../../technologies/nvidia_triton_inference_server/nvidia_triton_inference_server.md).
 
+**`ShapesSpec` and `@dynamic_spec` `[2.14]`, API unstable.** `torch.fx.experimental.dynamic_spec`
+lets you name a dimension once (`ShapeVar("batch", min=2, max=128)`), reuse it across inputs,
+derive dims such as `batch * 2`, and attach assumptions such as `batch % 2 == 0`.
+`torch.compile`, `torch.export.export` (strict or non-strict) and `make_fx(tracing_mode="fake")`
+all take the spec through the same `dynamic_shapes=` keyword, and the `@dynamic_spec` decorator
+attaches it to a function or a module's `forward` so nothing is passed at the call site. The
+declared dims become unbacked symbols: the compiler cannot specialize on the batch size it traced,
+so a branch on that shape raises a data-dependent error instead of adding a guard and recompiling.
+A decorator combined with a call-site `dynamic_shapes=` raises, as does a spec combined with
+`prefer_deferred_runtime_asserts_over_guards=True` (PyTorch 2.14 release blog).
+
 Export is stricter than `torch.compile` by design: there are no graph breaks, so anything Dynamo
 cannot capture is an error rather than a fallback. Data-dependent shapes are the usual blocker,
 and the usual remedies are `torch.cond`, `torch._check()` assertions that tell export a bound it
 cannot infer, and `Dim` ranges.
 
-**ONNX changed too.** `torch.onnx.export` in 2.13 has **`dynamo=True` as its default**
+**ONNX changed too.** `torch.onnx.export` has had **`dynamo=True` as its default** since 2.9
 (verified from the signature) — the exporter is now built on `torch.export` rather than on the
 old TorchScript tracer. If you have a script passing `dynamo=True` explicitly, it is now
 redundant; if you have one relying on the legacy tracer's quirks, it needs `dynamo=False` and a
@@ -1203,7 +1214,7 @@ migration plan.
 
 `autocast` does not cast your model. It intercepts operators at the dispatcher and casts their
 *inputs* according to a per-operator policy, which is the whole reason mixed precision is
-numerically safe. Verified live on 2.13.0 under `torch.autocast("cpu", dtype=torch.bfloat16)`:
+numerically safe. Verified live on 2.14.1 under `torch.autocast("cpu", dtype=torch.bfloat16)`:
 
 | Operator | Output dtype under autocast | Why |
 |---|---|---|
@@ -1240,7 +1251,7 @@ tape; wrapping it changes nothing and wrapping `step()` risks casting an optimiz
 
 ### `GradScaler` — why fp16 needs it and bf16 does not
 
-The dynamic ranges, verified from `torch.finfo` on 2.13.0:
+The dynamic ranges, verified from `torch.finfo` on 2.14.1:
 
 | dtype | max | min normal | eps | mantissa bits |
 |---|---|---|---|---|
@@ -1294,7 +1305,7 @@ Volta and Turing, which have no bf16 tensor cores.
 fp8 is genuinely in production on Hopper and Blackwell, and it is genuinely not a drop-in. Two
 formats: **e4m3** (4 exponent bits, 3 mantissa, max 448) for forward activations and weights,
 **e5m2** (max 57344) for gradients, because backward needs range more than precision. Both
-verified present as `torch.float8_e4m3fn` and `torch.float8_e5m2` in 2.13.
+verified present as `torch.float8_e4m3fn` and `torch.float8_e5m2` in 2.14.
 
 What makes it hard is that a dynamic range of 448 requires **per-tensor scaling factors**
 maintained across steps — an amax history per tensor, with a delayed or just-in-time scaling
@@ -1373,7 +1384,7 @@ versions; seed explicitly in `worker_init_fn` if your augmentation is not torch-
 and 100 rather than sitting high means the GPU is starving. Replace the loader with a single
 pre-loaded batch in a loop — if step time collapses, the loader is the bottleneck. Or profile
 with `torch.profiler` and look at the gap between the last kernel of step N and the first of
-step N+1. `DataLoader` also gained `in_order=False` `[2.6+]` (verified in the 2.13 signature),
+step N+1. `DataLoader` also gained `in_order=False` `[2.6+]` (verified in the 2.14 signature),
 which lets a fast worker's batch overtake a slow worker's — useful when sample cost is highly
 variable and you do not need deterministic ordering.
 
@@ -1396,7 +1407,7 @@ class M(nn.Module):
         self.ml    = nn.ModuleList([nn.Linear(2, 2)])  # -> _modules
 ```
 
-Verified output on 2.13:
+Verified output on 2.14:
 
 ```
 params:            ['p', 'lin.weight', 'lin.bias', 'ml.0.weight', 'ml.0.bias']
@@ -1520,7 +1531,7 @@ the time backward finishes only the final bucket's communication remains.
 
 ```python
 model = DDP(model, device_ids=[local_rank])
-# verified defaults on 2.13:
+# verified defaults on 2.14:
 #   bucket_cap_mb=None  -> _DEFAULT_BUCKET_CAP_MB = 25 (MiB)
 #   the FIRST bucket is smaller (dist._DEFAULT_FIRST_BUCKET_BYTES) to start comms sooner
 #   find_unused_parameters=False
@@ -1531,7 +1542,7 @@ model = DDP(model, device_ids=[local_rank])
 
 Bucket size is a real tuning knob: too small and you pay per-collective latency many times, too
 large and you delay the first `allreduce` and lose overlap. 25 MiB is a reasonable default;
-`bucket_cap_mb=50` sometimes helps on fast interconnects, and 2.13 also accepts a
+`bucket_cap_mb=50` sometimes helps on fast interconnects, and 2.14 also accepts a
 `bucket_cap_mb_list` for per-bucket sizes.
 
 **`gradient_as_bucket_view=True` is close to free memory.** It makes `p.grad` a view into the
@@ -1550,9 +1561,17 @@ Prefer restructuring: make all branches run, or split into separate DDP models, 
 discover it once, and additionally enables an optimization where activation checkpointing works
 without the flag).
 
-**The collective renames in 2.13.** `all_gather_into_tensor` is now `all_gather_single` and
-`reduce_scatter_tensor` is now `reduce_scatter_single`. Both old names still resolve (verified),
+**The collective renames `[2.13]`.** `all_gather_into_tensor` is now `all_gather_single` and
+`reduce_scatter_tensor` is now `reduce_scatter_single`. Both old names still resolve (verified) as thin wrappers that emit a `FutureWarning`,
 but new code should use the new ones.
+
+**`nccl2` and `set_timeout` `[2.14]`.** 2.14 ships `nccl2`, a rewritten NCCL c10d backend ported
+from torchcomms, as an eager-only preview and drop-in replacement for `nccl`, with nonblocking
+communicators, fault tolerance and one-sided RMA windows; the release blog says it becomes the
+default from 2.15. A `nccl-lazy` wrapper keeps the old build-communicators-on-first-use behaviour.
+`torch.distributed.set_timeout` changes a process group's collective timeout after
+initialization, so you can extend it around a slow checkpoint load or shorten it so a wedged rank
+fails fast instead of hanging for the full default window.
 
 ### FSDP: sharding units and state_dict modes
 
@@ -1570,10 +1589,10 @@ for block in model.layers:
 fully_shard(model)
 ```
 
-`fully_shard` is **FSDP2**, verified present in 2.13 alongside the original
+`fully_shard` is **FSDP2**, verified present in 2.14 alongside the original
 `FullyShardedDataParallel` class. FSDP2's model is per-parameter sharding via `DTensor` rather
 than the flat-parameter approach of FSDP1, which composes much better with `torch.compile`,
-tensor parallelism and per-parameter optimizer settings. 2.13 also added opt-in overlap of
+tensor parallelism and per-parameter optimizer settings. 2.13 added opt-in overlap of
 reduce-scatter and all-gather over a dedicated process group.
 
 **The state_dict modes are where FSDP checkpoints go wrong.** A sharded model's `state_dict()`
@@ -1647,7 +1666,7 @@ genuinely need it, not for every training run.
 
 Note that TF32 is a separate axis and a common surprise: on Ampere and later, `torch.backends.
 cuda.matmul.allow_tf32` and `torch.get_float32_matmul_precision()` control whether an "fp32"
-matmul actually runs with 10-bit mantissas on tensor cores. Verified defaults on 2.13.0:
+matmul actually runs with 10-bit mantissas on tensor cores. Verified defaults on 2.14.1:
 `allow_tf32` is `False` and `float32_matmul_precision` is `"highest"`. Setting
 `torch.set_float32_matmul_precision("high")` is a large free speedup on Ampere+ and a change in
 your numerics — decide it deliberately rather than discovering it.
@@ -1880,15 +1899,15 @@ buffer the DMA has not filled. This is intermittent — it works when the GPU ha
 
 ## 11. Technologies & Tools
 
-- **PyTorch** — the framework. Version 2.13.0, released 2026-07-08, BSD-3-Clause, governed by the PyTorch Foundation under the Linux Foundation.
+- **PyTorch** — the framework. Version 2.14.1, released 2026-09-30, BSD-3-Clause, governed by the PyTorch Foundation under the Linux Foundation.
 - **torch.compile** — the JIT entry point. Modes `default`, `lite`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`.
 - **TorchDynamo** — the CPython frame-evaluation hook that captures an FX graph plus guards from bytecode. Where graph breaks and recompiles come from.
 - **AOTAutograd** — traces forward and backward ahead of time into a joint ATen graph and partitions it, deciding what to save versus recompute.
 - **TorchInductor** — the default backend: fuses, plans buffers, and emits Triton for GPU and C++/OpenMP for CPU.
 - **Triton** — the GPU kernel DSL Inductor generates into. Not to be confused with NVIDIA Triton Inference Server.
-- **torch.export** — ahead-of-time whole-graph capture producing an `ExportedProgram`. `strict=False` is the default in 2.13.
+- **torch.export** — ahead-of-time whole-graph capture producing an `ExportedProgram`. `strict=False` is the default in 2.14.
 - **AOTInductor** — compiles an `ExportedProgram` into a self-contained `.pt2` archive with precompiled kernels and no Python runtime dependency.
-- **TorchScript** — **deprecated in 2.13**: `torch.jit.script` and `torch.jit.trace` both emit a warning directing you to `torch.compile` or `torch.export`. Existing artifacts still load.
+- **TorchScript** — **deprecated**: in 2.14 `torch.jit.script` and `torch.jit.trace` both emit a `FutureWarning` directing you to `torch.compile` or `torch.export`. Existing artifacts still load.
 - **torch.amp** — `autocast` and `GradScaler`. Defaults `init_scale=65536.0`, `growth_factor=2.0`, `backoff_factor=0.5`, `growth_interval=2000`.
 - **torch.utils.checkpoint** — activation checkpointing. Always pass `use_reentrant=False`.
 - **torch.profiler** — the stream-aware profiler; activities `CPU`, `CUDA`, `XPU`, `MTIA`, `HPU`. Exports Chrome traces and TensorBoard data.
@@ -1899,7 +1918,7 @@ buffer the DMA has not filled. This is intermittent — it works when the GPU ha
 - **DistributedDataParallel** — gradient bucketing overlapped with backward. Default bucket 25 MiB, smaller first bucket.
 - **FSDP2** — per-parameter `DTensor` sharding through `torch.distributed.fsdp.fully_shard`, composing with `torch.compile` and tensor parallelism.
 - **torch.distributed.checkpoint** — sharded, parallel, reshardable checkpointing. The right way to save an FSDP model.
-- **NCCL** — the GPU collective library underneath `torch.distributed` on NVIDIA hardware.
+- **NCCL** — the GPU collective library underneath `torch.distributed` on NVIDIA hardware. 2.14 adds the `nccl2` c10d backend as a preview.
 - **torch.nn.attention** — `sdpa_kernel` backend selection (`FLASH_ATTENTION`, `EFFICIENT_ATTENTION`, `CUDNN_ATTENTION`, `MATH`) and **FlexAttention** for custom masks and score modifications.
 - **torch.func** — composable transforms: `grad`, `vmap`, `jacrev`, `jacfwd`, `hessian`, `functional_call`, `stack_module_state`.
 - **torch.ao.quantization** — the quantization surface; **torchao** is where the modern fp8 and low-bit recipes live.
@@ -1926,7 +1945,7 @@ A view must be describable as a `(sizes, strides, offset)` triple over the *exis
 **Q: What is the difference between `torch.no_grad()` and `torch.inference_mode()`?**
 **Short:** `inference_mode` additionally skips version-counter and view tracking, so its outputs are permanently marked and raise if used in autograd later.
 
-Both disable gradient recording. `inference_mode` goes further: it turns off the version counter and view metadata that `no_grad` still maintains in case you later want to record, which makes it measurably faster. The price is that its outputs are marked `is_inference() == True` forever, and 2.13 enforces that with hard errors — `Inference tensors cannot be saved for backward`, `Inplace update to inference tensor outside InferenceMode is not allowed`, and `Setting requires_grad=True on inference tensor outside InferenceMode is not allowed`. The escape hatch is `.clone()`, which produces a normal tensor. Use `inference_mode` in a serving process; use `no_grad` in a validation loop inside a training script, where an output might legitimately flow into an EMA update, a distillation target or a metric that calls backward.
+Both disable gradient recording. `inference_mode` goes further: it turns off the version counter and view metadata that `no_grad` still maintains in case you later want to record, which makes it measurably faster. The price is that its outputs are marked `is_inference() == True` forever, and 2.14 enforces that with hard errors — `Inference tensors cannot be saved for backward`, `Inplace update to inference tensor outside InferenceMode is not allowed`, and `Setting requires_grad=True on inference tensor outside InferenceMode is not allowed`. The escape hatch is `.clone()`, which produces a normal tensor. Use `inference_mode` in a serving process; use `no_grad` in a validation loop inside a training script, where an output might legitimately flow into an EMA update, a distillation target or a metric that calls backward.
 
 **Q: Your training OOMs at step 900 after running fine. What is the most likely cause?**
 **Short:** Something is holding tensors that still carry a `grad_fn`, so every retained loss pins that step's entire activation graph.
@@ -1961,27 +1980,27 @@ Verified from `torch.finfo`: fp16's max is 65504 and its smallest normal is 6.10
 **Q: What does `torch.autocast` actually cast?**
 **Short:** Not the model — it casts individual operators' inputs by an allowlist, so GEMMs run in low precision while reductions, norms and losses stay fp32.
 
-Autocast is a dispatcher layer, not a model transformation. Verified live on 2.13: under `autocast(dtype=torch.bfloat16)`, `matmul`, `conv2d` and `nn.Linear` produce bf16, while `softmax`, `log_softmax`, `layer_norm`, `sum`, `pow`, `mse_loss` and `cross_entropy` all produce fp32, and an elementwise op on mixed inputs promotes to the widest. The three categories are cast-down (the tensor-core GEMM family), keep-in-fp32 (reductions, normalizations, transcendentals, losses) and promote-to-widest (elementwise). That policy is why mixed precision is numerically safe and why `model.half()` is not — casting the whole model runs variance, exponentials and the loss in half precision and stores master weights in half. Wrap only the forward and the loss; never `backward()` or `step()`.
+Autocast is a dispatcher layer, not a model transformation. Verified live on 2.14: under `autocast(dtype=torch.bfloat16)`, `matmul`, `conv2d` and `nn.Linear` produce bf16, while `softmax`, `log_softmax`, `layer_norm`, `sum`, `pow`, `mse_loss` and `cross_entropy` all produce fp32, and an elementwise op on mixed inputs promotes to the widest. The three categories are cast-down (the tensor-core GEMM family), keep-in-fp32 (reductions, normalizations, transcendentals, losses) and promote-to-widest (elementwise). That policy is why mixed precision is numerically safe and why `model.half()` is not — casting the whole model runs variance, exponentials and the loss in half precision and stores master weights in half. Wrap only the forward and the loss; never `backward()` or `step()`.
 
 **Q: What is a graph break in `torch.compile` and how do you find one?**
 **Short:** It is Dynamo ending a graph at bytecode it cannot trace, running that part in Python and starting a new graph — silent, and it costs you fusion.
 
-Dynamo symbolically executes bytecode; when it hits something untraceable it emits the graph so far, falls back to the interpreter for that region, and resumes capture afterwards. Nothing warns. The cost is that two half-size graphs fuse worse than one, and each boundary materializes tensors and returns to Python. Find them with `TORCH_LOGS="graph_breaks"` or `torch._dynamo.explain(fn)(*args)`, which reports `graph_count`, `graph_break_count` and the reason string. Develop with `fullgraph=True`, which turns the silent break into an error naming the bytecode. Note that in 2.13 a plain `print()` no longer breaks the graph — Dynamo replays common side effects — so that piece of older advice is stale. Data-dependent branches on tensor values still break, and `torch.cond` is the fix.
+Dynamo symbolically executes bytecode; when it hits something untraceable it emits the graph so far, falls back to the interpreter for that region, and resumes capture afterwards. Nothing warns. The cost is that two half-size graphs fuse worse than one, and each boundary materializes tensors and returns to Python. Find them with `TORCH_LOGS="graph_breaks"` or `torch._dynamo.explain(fn)(*args)`, which reports `graph_count`, `graph_break_count` and the reason string. Develop with `fullgraph=True`, which turns the silent break into an error naming the bytecode. Note that in 2.14 a plain `print()` no longer breaks the graph — Dynamo replays common side effects — so that piece of older advice is stale. Data-dependent branches on tensor values still break, and `torch.cond` is the fix.
 
 **Q: What actually causes `torch.compile` to recompile, and what does not any more?**
 **Short:** Guard failures on dtype, device, layout, and Python string or object values; varying tensor shapes and Python numbers are now handled by automatic dynamic shapes.
 
-Every compiled artifact carries guards on the properties it specialized against. Measured on 2.13 with `CompileCounter`: ten distinct tensor shapes cost **2** compilations, twelve distinct Python ints cost **2**, and ten distinct floats cost **2** — because `automatic_dynamic_shapes` is `True` by default, so the second distinct value promotes the dimension or scalar to symbolic and everything after reuses it. What still storms is anything Dynamo cannot make symbolic: six distinct `str` arguments cost **6** compilations, and four dtypes cost **4**. Sizes 0 and 1 also specialize separately, because 1 broadcasts and 0 is empty. So the modern recompile storm is a mode string or a dtype threaded through forward, not `batch_size=37`. Diagnose with `TORCH_LOGS="recompiles"`, which prints the exact failing guard.
+Every compiled artifact carries guards on the properties it specialized against. Measured on 2.14 with `CompileCounter`: ten distinct tensor shapes cost **2** compilations, twelve distinct Python ints cost **2**, and ten distinct floats cost **2** — because `automatic_dynamic_shapes` is `True` by default, so the second distinct value promotes the dimension or scalar to symbolic and everything after reuses it. What still storms is anything Dynamo cannot make symbolic: six distinct `str` arguments cost **6** compilations, and four dtypes cost **4**. Sizes 0 and 1 also specialize separately, because 1 broadcasts and 0 is empty. So the modern recompile storm is a mode string or a dtype threaded through forward, not `batch_size=37`. Diagnose with `TORCH_LOGS="recompiles"`, which prints the exact failing guard.
 
 **Q: What happens when `torch.compile` hits its recompile limit?**
 **Short:** It stops compiling that frame and runs eager permanently, so you pay guard-checking overhead on top of eager and end up slower than not compiling.
 
-The limit is `torch._dynamo.config.recompile_limit`, verified `= 8` in 2.13, with `accumulated_recompile_limit = 256` across all specializations. On the ninth guard failure for a frame, Dynamo logs `torch._dynamo hit config.recompile_limit (8)` and permanently disables compilation for it. Verified: ten distinct string arguments produce exactly eight compilations and then stop. This is the worst outcome because it is invisible — the model still produces correct results, the process still looks compiled, and throughput is *below* eager because you are still paying guard evaluation. Catch it in CI by asserting that `torch._dynamo.utils.compile_times()` stops growing after warm-up, and fix the cause rather than raising the limit.
+The limit is `torch._dynamo.config.recompile_limit`, verified `= 8` in 2.14, with `accumulated_recompile_limit = 256` across all specializations. On the ninth guard failure for a frame, Dynamo logs `torch._dynamo hit config.recompile_limit (8)` and permanently disables compilation for it. Verified: ten distinct string arguments produce exactly eight compilations and then stop. This is the worst outcome because it is invisible — the model still produces correct results, the process still looks compiled, and throughput is *below* eager because you are still paying guard evaluation. Catch it in CI by asserting that `torch._dynamo.utils.compile_times()` stops growing after warm-up, and fix the cause rather than raising the limit.
 
 **Q: Is TorchScript still the way to deploy a PyTorch model?**
-**Short:** No. `torch.jit.script` and `torch.jit.trace` are deprecated in 2.13 and both warn on every call, pointing you to `torch.compile` or `torch.export`.
+**Short:** No. `torch.jit.script` and `torch.jit.trace` are deprecated, and in 2.14 both emit a `FutureWarning` on every call, pointing you to `torch.compile` or `torch.export`.
 
-The verified 2.13 warning text is ``` `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.``` The current path is `torch.export.export(...)` to an `ExportedProgram`, then `torch._inductor.aoti_compile_and_package(...)` to a `.pt2` archive containing precompiled kernels and no Python dependency — which is what Triton Inference Server's `platform: "torch_aoti"` backend consumes. TorchScript modules still load and still run, so existing artifacts are not broken, but nothing new should be written against it. The related currency point: `torch.onnx.export` now defaults to `dynamo=True` and is built on `torch.export` rather than the old TorchScript tracer.
+The verified 2.14 warning text is ``` `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.``` The current path is `torch.export.export(...)` to an `ExportedProgram`, then `torch._inductor.aoti_compile_and_package(...)` to a `.pt2` archive containing precompiled kernels and no Python dependency — which is what Triton Inference Server's `platform: "torch_aoti"` backend consumes. TorchScript modules still load and still run, so existing artifacts are not broken, but nothing new should be written against it. The related currency point: `torch.onnx.export` now defaults to `dynamo=True` and is built on `torch.export` rather than the old TorchScript tracer.
 
 **Q: What is the difference between a parameter and a buffer, and how does registration happen?**
 **Short:** Parameters are updated by the optimizer, buffers are saved and moved but not optimized, and both are registered by `nn.Module.__setattr__` or `register_buffer`.
@@ -2046,7 +2065,7 @@ Backward frees each node's saved tensors as it walks past them, which is why a s
 **Q: How does activation checkpointing trade memory for compute, and what does it break?**
 **Short:** It saves only a segment's inputs and re-runs the forward during backward, costing roughly one extra forward pass and breaking anything with unrestored side effects.
 
-`torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)` runs `fn` under `no_grad`, keeps only its inputs, and re-executes it with grad enabled during backward. Checkpointing every layer gives O(1) activation memory for about 33% more compute; checkpointing every sqrt(N)-th layer gives the O(sqrt(N)) sublinear point and is usually the right choice. Three things it breaks. Dropout must produce the same mask on recompute — PyTorch stashes and restores RNG state by default, and disabling that silently corrupts your gradient. BatchNorm running statistics get updated twice per step, because the forward runs twice. And the reentrant implementation does not compose with `torch.compile` or with `torch.autograd.grad`, which is why `use_reentrant=False` is the recommendation and why 2.13 warns when you omit the argument.
+`torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)` runs `fn` under `no_grad`, keeps only its inputs, and re-executes it with grad enabled during backward. Checkpointing every layer gives O(1) activation memory for about 33% more compute; checkpointing every sqrt(N)-th layer gives the O(sqrt(N)) sublinear point and is usually the right choice. Three things it breaks. Dropout must produce the same mask on recompute — PyTorch stashes and restores RNG state by default, and disabling that silently corrupts your gradient. BatchNorm running statistics get updated twice per step, because the forward runs twice. And the reentrant implementation does not compose with `torch.compile` or with `torch.autograd.grad`, which is why `use_reentrant=False` is the recommendation and why 2.14 warns when you omit the argument.
 
 **Q: What does AOTAutograd do that Dynamo does not?**
 **Short:** Dynamo captures only the forward from bytecode; AOTAutograd traces forward and backward together into ATen ops and decides what to save versus recompute.
@@ -2056,7 +2075,12 @@ Dynamo's output is an FX graph of the forward plus guards. AOTAutograd then re-t
 **Q: What is `torch.export` and how does it differ from `torch.compile`?**
 **Short:** `torch.compile` is a JIT that needs Python and can fall back on graph breaks; `torch.export` is an ahead-of-time whole-graph capture that errors instead.
 
-`torch.compile` installs a frame hook, compiles on first call, caches per guard set, and silently falls back to eager on anything it cannot trace. `torch.export` produces a serializable `ExportedProgram` with no graph breaks permitted, which you can then feed to `torch._inductor.aoti_compile_and_package` to get a `.pt2` archive with precompiled kernels and no Python runtime dependency. Two 2.13 specifics: `strict` now defaults to **`False`**, using a `__torch_function__`-based tracer that accepts much more real code than the original Dynamo-strict path, and `Dim.AUTO` / `Dim.DYNAMIC` let export infer dynamic dimensions instead of you naming ranges. The practical order is to get the model correct and fast under `torch.compile` first, because export's errors are harder to diagnose, then export for deployment.
+`torch.compile` installs a frame hook, compiles on first call, caches per guard set, and silently falls back to eager on anything it cannot trace. `torch.export` produces a serializable `ExportedProgram` with no graph breaks permitted, which you can then feed to `torch._inductor.aoti_compile_and_package` to get a `.pt2` archive with precompiled kernels and no Python runtime dependency. Two 2.14 specifics: `strict` now defaults to **`False`**, using a `__torch_function__`-based tracer that accepts much more real code than the original Dynamo-strict path, and `Dim.AUTO` / `Dim.DYNAMIC` let export infer dynamic dimensions instead of you naming ranges. The practical order is to get the model correct and fast under `torch.compile` first, because export's errors are harder to diagnose, then export for deployment.
+
+**Q: When would you declare dynamic dims with `@dynamic_spec` instead of an export `dynamic_shapes` dict?**
+**Short:** When one declaration should serve compile, export and make_fx from the model itself; its dims are unbacked, so shape branches fail instead of recompiling.
+
+A `dynamic_shapes` dict sits at one call site and works for one entry point, while `torch.compile` has its own coarse `dynamic=` flag and `make_fx` a global tracing mode. 2.14's `ShapesSpec` (`torch.fx.experimental.dynamic_spec`) names each dimension once as a `ShapeVar` with bounds, supports derived dims and assumptions such as divisibility, and is accepted by all three through `dynamic_shapes=`; `@dynamic_spec` puts it on the function or `forward`, next to the code it describes. The catch is semantic, not syntactic: the dims are unbacked symbols, so `if x.shape[0] > 32:` no longer guards and recompiles, it raises a data-dependent error you must rewrite with `torch.cond` or `torch._check`. The API is marked unstable in 2.14, `make_fx` support is limited to `tracing_mode="fake"`, and passing both a decorator and a call-site `dynamic_shapes=` raises. Keep the dict for existing export scripts; reach for the spec when the same model is compiled, exported and traced.
 
 **Q: How does broadcasting work at the stride level, and what does it cost?**
 **Short:** A broadcast dimension gets stride 0, meaning "advancing this index does not move", so the input costs nothing and only the materialized output costs memory.
@@ -2086,7 +2110,7 @@ In-place ops overwrite a buffer and bump the storage's version counter. Backward
 **Q: What is FSDP2 and why did `fully_shard` replace the wrapper class?**
 **Short:** FSDP2 shards per parameter using DTensor instead of one flat buffer per unit, which composes with `torch.compile`, tensor parallelism and per-parameter optimizer settings.
 
-The original `FullyShardedDataParallel` flattened all parameters in a wrapping unit into one contiguous buffer and sharded that. It worked, but the flat parameter is opaque: you cannot address an individual weight, which makes per-parameter learning rates, frozen subsets, tensor-parallel composition and `torch.compile` all awkward. `fully_shard` (verified present in 2.13 alongside the old class) shards each parameter individually as a `DTensor` carrying its own placement, so the model still looks like a normal module tree with normally addressable parameters. The sharding *unit* — what you call `fully_shard` on — remains the key decision, and one transformer block per unit is the standard answer: too coarse and you all-gather more than you need at once, too fine and you pay collective latency per unit.
+The original `FullyShardedDataParallel` flattened all parameters in a wrapping unit into one contiguous buffer and sharded that. It worked, but the flat parameter is opaque: you cannot address an individual weight, which makes per-parameter learning rates, frozen subsets, tensor-parallel composition and `torch.compile` all awkward. `fully_shard` (verified present in 2.14 alongside the old class) shards each parameter individually as a `DTensor` carrying its own placement, so the model still looks like a normal module tree with normally addressable parameters. The sharding *unit* — what you call `fully_shard` on — remains the key decision, and one transformer block per unit is the standard answer: too coarse and you all-gather more than you need at once, too fine and you pay collective latency per unit.
 
 **Q: When do CUDA graphs help, and what do they forbid?**
 **Short:** They help when kernels are small enough that launch overhead dominates, and they forbid dynamic shapes, changing memory addresses, and any synchronization inside the capture.
@@ -2172,7 +2196,7 @@ seed, data version and config, and log them (see
 Reserve `use_deterministic_algorithms(True)` for debugging a specific divergence.
 
 **Decide TF32 deliberately.** `torch.set_float32_matmul_precision("high")` is a large free
-speedup on Ampere and later and a real change to your numerics. Verified 2.13 defaults are
+speedup on Ampere and later and a real change to your numerics. Verified 2.14 defaults are
 `allow_tf32=False` and `"highest"`, so you will not get it by accident — but you also will not
 get the speedup until you ask.
 

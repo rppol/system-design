@@ -101,7 +101,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     TASK["Input: Task"]
-    PLAN["Phase 1 — Planner\nfrontier model (e.g. GPT-5.6 Sol / Claude Opus 5)\nstrategic planning\n→ Step 1…Step N"]
+    PLAN["Phase 1 — Planner\nfrontier model (e.g. GPT-5.6 Sol / Claude Opus 5.5)\nstrategic planning\n→ Step 1…Step N"]
     EXEC["Phase 2 — Executor\ncheap model per step (e.g. GPT-5.6 Luna)\nexecute with tools available"]
     VAL{"Validate step output\nShould replan?"}
     REPLAN["Replan\n(revise remaining steps)"]
@@ -642,7 +642,7 @@ A: Steps marked as independent (no data dependency between them) can execute sim
 
 **Q: How do you choose the right model for planner vs executor roles?**
 **Short:** Use the strongest model for planning and route routine executor steps to a cheaper model to cut total cost.
-A: The planner requires strong strategic reasoning — assign the highest-quality model available (GPT-5.6 Sol, Claude Opus 5). Planning quality directly determines overall task success; the additional cost is worth it. The executor handles focused, scoped sub-tasks — a smaller, cheaper model (GPT-5.6 Luna, Claude Haiku 4.5) is often sufficient. Cost impact: if you have a 15-step plan with an expensive planner ($0.05) and cheap executors ($0.002/step = $0.03 total), total cost is $0.08 vs. using a large model for everything ($0.05 × 15 = $0.75). The quality trade-off: executor model quality matters most for complex tool use and reasoning-heavy steps; routing critical steps to the large model is a valid optimization.
+A: The planner requires strong strategic reasoning — assign the highest-quality model available (GPT-5.6 Sol, Claude Opus 5.5). Planning quality directly determines overall task success; the additional cost is worth it. The executor handles focused, scoped sub-tasks — a smaller, cheaper model (GPT-5.6 Luna, Claude Haiku 4.5) is often sufficient. Cost impact: if you have a 15-step plan with an expensive planner ($0.05) and cheap executors ($0.002/step = $0.03 total), total cost is $0.08 vs. using a large model for everything ($0.05 × 15 = $0.75). The quality trade-off: executor model quality matters most for complex tool use and reasoning-heavy steps; routing critical steps to the large model is a valid optimization.
 
 **Q: What is the maximum number of steps before Plan-and-Execute breaks down?**
 **Short:** Context accumulation caps reliable Plan-and-Execute at 10-20 steps unless you summarize or nest hierarchical plans.
@@ -682,7 +682,7 @@ A: On tasks of 15+ steps, Plan-and-Execute beats ReAct on goal adherence, comple
 
 **Q: What is the cost of the planning step itself and when is it not worth paying?**
 **Short:** Skip the planning call for simple 3-5-step tasks or when ReAct already succeeds above 90 percent of the time.
-A: A planning call uses a large model (GPT-5.6 Sol, Claude Opus 5) and generates 300-800 tokens of plan text at ~1,500-2,500 input tokens of context. At GPT-5.6 Sol pricing ($5/1M input, $30/1M output): planning costs roughly $0.017-$0.037 per task. This overhead is not worth paying when: (a) the task is always 3-5 steps with obvious structure — "answer this question by searching and summarizing" needs no formal plan; (b) task success rate with pure ReAct is already above 90% — the planning overhead buys no quality improvement; (c) latency matters — the planning call adds 2-4 seconds of wall time before the first executor call begins. The overhead is worthwhile when: task quality with ReAct is below 80%, tasks frequently have parallel opportunities that ReAct cannot exploit, or the task has human approval gates where an explicit plan is required for the approval workflow. Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself in execution efficiency.
+A: A planning call uses a large model (GPT-5.6 Sol, Claude Opus 5.5) and generates 300-800 tokens of plan text at ~1,500-2,500 input tokens of context. At GPT-5.6 Sol pricing ($5/1M input, $30/1M output): planning costs roughly $0.017-$0.037 per task. This overhead is not worth paying when: (a) the task is always 3-5 steps with obvious structure — "answer this question by searching and summarizing" needs no formal plan; (b) task success rate with pure ReAct is already above 90% — the planning overhead buys no quality improvement; (c) latency matters — the planning call adds 2-4 seconds of wall time before the first executor call begins. The overhead is worthwhile when: task quality with ReAct is below 80%, tasks frequently have parallel opportunities that ReAct cannot exploit, or the task has human approval gates where an explicit plan is required for the approval workflow. Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself in execution efficiency.
 
 ---
 
@@ -734,7 +734,7 @@ Task: "Migrate module payments/core.py from Python 2 to Python 3"
       |
       v
 ┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 1: PLANNER (Claude Opus 5)                               │
+│  PHASE 1: PLANNER (Claude Opus 5.5)                             │
 │                                                                 │
 │  Step 1: Read payments/core.py — Expected: file contents        │
 │  Step 2: Identify Python 2 patterns — Expected: pattern list    │
@@ -777,7 +777,7 @@ Migration committed to git with report attached
 
 3. Parallel pattern lookup: Python 2 modules typically have 4-8 distinct deprecated patterns. Looking them up sequentially wastes time; they are independent and run in parallel (step 3 is marked [PARALLEL]). This reduces pattern lookup from ~8s sequential to ~2s parallel.
 
-4. Executor model routing: steps 1-2 (read + identify patterns) use a cheap model such as GPT-5.6 Luna (low complexity). Step 4 (apply transforms with correctness requirements) uses a mid-tier model such as GPT-5.6 Terra (higher quality for code modification). Step 5 (test diagnosis) uses a frontier model such as Claude Opus 5 (best reasoning for understanding why tests fail in financial code).
+4. Executor model routing: steps 1-2 (read + identify patterns) use a cheap model such as GPT-5.6 Luna (low complexity). Step 4 (apply transforms with correctness requirements) uses a mid-tier model such as GPT-5.6 Terra (higher quality for code modification). Step 5 (test diagnosis) uses a frontier model such as Claude Opus 5.5 (best reasoning for understanding why tests fail in financial code).
 
 5. Planner tool list constraint: the planner prompt includes the exact tool list: `read_file, write_file, run_tests, git_commit, git_rollback, apply_2to3, lookup_migration, generate_report`. The planner cannot hallucinate a `deploy_to_production` step because that tool does not exist.
 

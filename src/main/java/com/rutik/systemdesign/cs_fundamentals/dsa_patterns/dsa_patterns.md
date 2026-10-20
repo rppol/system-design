@@ -437,7 +437,7 @@ flowchart TD
 | Linked list | O(n) | O(n) | O(1) at head | O(1) at ptr | O(n) | Cache-unfriendly; pointer chasing |
 | Stack (array) | O(1) top | — | O(1) amort. | O(1) | O(n) | LIFO |
 | Queue (deque) | O(1) front | — | O(1) amort. | O(1) | O(n) | FIFO; `collections.deque` in Python |
-| Binary heap | O(1) min | O(n) | O(log n) | O(log n) | O(n) | `heapq` in Python (min-heap); negate for max-heap |
+| Binary heap | O(1) min | O(n) | O(log n) | O(log n) | O(n) | `heapq` in Python (min-heap); max-heap via `heappush_max` on 3.14+, or negate on 3.13 and earlier |
 | BST (balanced) | O(log n) | O(log n) | O(log n) | O(log n) | O(n) | Python `sortedcontainers.SortedList` |
 | Trie | — | O(L) | O(L) | O(L) | O(A*L*n) | L = word length, A = alphabet size |
 | Union-Find | — | O(α(n)) | O(α(n)) | — | O(n) | Effectively O(1); α = inverse Ackermann |
@@ -506,6 +506,7 @@ One row per pattern file. Click the pattern name to open the playbook. Each play
 | 23 | [Greedy](greedy.md) | Interval scheduling / jump game / locally optimal = globally optimal | [greedy_and_divide_and_conquer](../greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) | [Jump Game II (LC 45)](https://leetcode.com/problems/jump-game-ii/) |
 | 24 | [Bit Manipulation](bit_manipulation.md) | Single number / XOR tricks / bitmask enumeration / counting bits | [number_systems_and_bit_manipulation](../number_systems_and_bit_manipulation/number_systems_and_bit_manipulation.md) | [Single Number (LC 136)](https://leetcode.com/problems/single-number/) |
 | 25 | [Matrix Traversal & Manipulation](matrix_traversal.md) | Spiral / rotate / diagonal / set-zeroes / in-place grid transform | [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) | [Spiral Matrix (LC 54)](https://leetcode.com/problems/spiral-matrix/) |
+| 26 | [Sweep Line](sweep_line.md) | Max concurrent / active at time t / range update then read | [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) | [Divide Intervals Into Minimum Number of Groups (LC 2406)](https://leetcode.com/problems/divide-intervals-into-minimum-number-of-groups/) |
 
 ---
 

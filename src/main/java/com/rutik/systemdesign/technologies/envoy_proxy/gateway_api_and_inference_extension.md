@@ -1,14 +1,19 @@
 # Gateway API and the Inference Extension
 
-> **Version anchor (2026-08-26).** Kubernetes **Gateway API 1.6.1** (2026-07-16; 1.6.0 GA'd
-> `UDPRoute` and promoted `TCPRoute` to v1). **Gateway API Inference Extension v1.6.0**
-> (released 2026-08-17, `kubernetes-sigs/gateway-api-inference-extension`) — the release that
+> **Version anchor (2026-10-19).** Kubernetes **Gateway API 1.6.3** (2026-10-06; 1.6.0 GA'd
+> `UDPRoute` and promoted `TCPRoute` to v1). **Gateway API Inference Extension v1.6.2**
+> (2026-09-17, `kubernetes-sigs/gateway-api-inference-extension`), a patch on v1.6.0
+> (released 2026-08-17), the release that
 > removed the full Endpoint Picker reference implementation, `InferenceObjective`,
 > `InferenceModelRewrite` and `EndpointPickerConfig` from this repository and migrated them to
 > the **llm-d** project (CNCF Sandbox since 2026-03-24); the in-tree API surface is now
-> `InferencePool` alone. **Envoy AI Gateway v1.1.0** (2026-08-21). **Envoy Gateway 1.8.3**
-> (2026-07-22, bundling Gateway API CRDs v1.5.1 — one minor behind the 1.6.1 core, a version
-> gap that matters, §10). Version-gated behavior is tagged inline.
+> `InferencePool` alone. **Agent Router v1.2.0** (2026-10-07), the release that renamed
+> Envoy AI Gateway and made it an Agentic AI Foundation project; the `aigateway.envoyproxy.io`
+> API group, CRDs, Helm charts, images and `aigw` CLI kept their names, and it builds on Envoy
+> Gateway v1.9.2, Gateway API v1.6 and Inference Extension v1.6. **Envoy Gateway 1.9.2**
+> (2026-09-28); the 1.9 line reconciles `TCPRoute`/`UDPRoute` through the `v1` API and
+> requires Gateway API v1.6 CRDs, and without them TCP and UDP routes are silently skipped.
+> Version-gated behavior is tagged inline.
 
 This page extends [the Envoy module](envoy_proxy.md), which you should read first — at least
 its §1 (listeners/filter-chains/routes/clusters), §4.7-4.8, §6's `ext_proc` mechanics, and its
@@ -41,7 +46,7 @@ are not, at this version anchor.
 **Gateway API's release process has two channels**, and confusing them is the single most
 common way to ship a manifest that a given cluster's CRDs reject:
 
-| Channel | What's in it | Current status at 1.6.1 |
+| Channel | What's in it | Status at 1.6.3 |
 |---|---|---|
 | **Standard** | Resources with an API considered stable enough not to break | `GatewayClass`, `Gateway`, `HTTPRoute` (all `v1`), `GRPCRoute` (`v1`, graduated in 1.1), `ReferenceGrant` (`v1beta1`), `BackendTLSPolicy` (`v1alpha3`\*, standard channel since 1.4), `TLSRoute` (`v1alpha2`\*, standard), `TCPRoute` and `UDPRoute` (both graduated to `v1` in 1.6.0) |
 | **Experimental** | Everything in Standard plus resources still moving | `Backend`, `XBackend`, and a provisional Telemetry API (GEP-4768), all new at 1.6 |
@@ -55,9 +60,9 @@ undercounts what is actually safe to build on.
 `inference.networking.k8s.io/v1`, GA since GIE v1.0.0.** Everything that used to sit beside it
 — the reference **Endpoint Picker (EPP)** server, the `InferenceObjective` and
 `InferenceModelRewrite` CRDs (both of which lived at the **experimental**
-`inference.networking.x-k8s.io/v1alpha2`, never `v1` — REPLACE, DO NOT ANNOTATE: they were
-never GA to begin with), and the `EndpointPickerConfig` plugin-wiring type — moved out to
-**llm-d** in the v1.6.0 release, three weeks before this anchor date. §4.3 and §10 cover what
+`inference.networking.x-k8s.io/v1alpha2`, never `v1`; they were
+never GA), and the `EndpointPickerConfig` plugin-wiring type — moved out to
+**llm-d** in the v1.6.0 release (2026-08-17). §4.3 and §10 cover what
 that means for a manifest you copy from an older tutorial.
 
 ---
@@ -163,12 +168,12 @@ intentionally pinned to the pre-split world or already stale.
 | Traefik | its own Go proxy | No | Not GIE-conformant at this anchor |
 | NGINX Gateway Fabric | NGINX | No | Not GIE-conformant at this anchor |
 
-### 4.5 Envoy AI Gateway's two ways to attach an InferencePool
+### 4.5 Agent Router's two ways to attach an InferencePool
 
 | Route type | Adds over plain `HTTPRoute` | When to use |
 |---|---|---|
 | `HTTPRoute` + `InferencePool` backendRef | Nothing — standard Gateway API, portable to any conformant implementation | You only need inference-aware routing, no multi-provider LLM gateway features |
-| `AIGatewayRoute` + `InferencePool` backendRef | Token accounting (`llmRequestCosts`), model-name header/body routing, cross-provider failover | You are also running Envoy AI Gateway as the client-facing LLM front door (§6.6) |
+| `AIGatewayRoute` + `InferencePool` backendRef | Token accounting (`llmRequestCosts`), model-name header/body routing, cross-provider failover | You are also running Agent Router as the client-facing LLM front door (§6.6) |
 
 ---
 
@@ -325,7 +330,7 @@ forking anything.
 ### 6.5 Scoring signals and flow control
 
 A production EPP (llm-d's reference build) scores every ready Pod in the pool with a small
-pipeline of plugins — the actual names shipped in Envoy AI Gateway's own reference deployment
+pipeline of plugins — the actual names shipped in Agent Router's own reference deployment
 are `queue-scorer`, `kv-cache-utilization-scorer` and `prefix-cache-scorer`, plus a LoRA-aware
 path (the project ships a dedicated multi-LoRA deployment example) that prefers a replica that
 already has the requested adapter loaded over one that would have to load it cold:
@@ -348,7 +353,7 @@ request is served before a lower one regardless of arrival order — and an **in
 fairness** policy among requests at the same priority. `queueDepthThreshold` (the per-backend
 pending-queue ceiling the detector reacts to) defaults to **5**.
 
-### 6.6 Envoy AI Gateway: token accounting and model routing on top of the same pool
+### 6.6 Agent Router: token accounting and model routing on top of the same pool
 
 `AIGatewayRoute` adds two things `HTTPRoute` cannot express, both verified against the
 project's own maintained example manifest:
@@ -396,20 +401,22 @@ spec:
 `io.envoy.ai_gateway` namespace — the same dynamic-metadata mechanism §6.4 uses for endpoint
 selection — where it becomes available to Envoy's ordinary rate-limit filter (the parent
 module's rate-limiting mechanics apply unchanged; this is a metadata source, not a new
-enforcement path). Model routing here matches an explicit header, but Envoy AI Gateway can
+enforcement path). Model routing here matches an explicit header, but Agent Router can
 also extract the model name from the request body, reusing the buffered-body `ext_proc`
 processing mode the parent module's §6 already covers — the model name is inside the JSON
 payload for an OpenAI-shaped request, not a header, on most real clients.
 
 ### 6.7 A skewed-version manifest, in the wild, today
 
-Envoy AI Gateway's own maintained example under `examples/inference-pool/` — the one most
-new adopters copy first — deploys the EPP from `registry.k8s.io/gateway-api-inference-extension/epp:v1.0.1`
-and creates an `InferenceObjective` at `apiVersion: inference.networking.x-k8s.io/v1alpha2`.
-Both of those are exactly the pre-v1.6.0 world §4.3 describes as moved out from under this
-project nine days before this anchor date. That is not a mistake in the example; downstream
-projects update on their own cadence, and an example dated before the split is not wrong for
-the version it targets — it is a live instance of the version-skew trap covered in §10.
+Agent Router's example directory `examples/inference-pool/` at v1.2.0 holds both worlds.
+`base.yaml`, the one most adopters copy first, deploys the EPP from
+`ghcr.io/llm-d/llm-d-router-endpoint-picker:main` and creates no `InferenceObjective`. Its
+sibling `with-annotations.yaml` still deploys `registry.k8s.io/gateway-api-inference-extension/epp:v0.5.1`,
+creates an `InferenceObjective` at `apiVersion: inference.networking.x-k8s.io/v1alpha2` and
+configures the EPP with an `EndpointPickerConfig` at `v1alpha1`. Those are the pre-v1.6.0
+resources §4.3 describes as moved to llm-d. Downstream projects update their examples file by
+file, so two manifests in one directory can target different sides of the split; that is the
+version-skew trap covered in §10.
 
 ---
 
@@ -425,8 +432,8 @@ the version it targets — it is a live instance of the version-skew trap covere
 - **Istio.** Gateway API Inference Extension support shipped starting **Istio 1.27**, letting
   an Istio-managed Gateway — or an ambient-mode waypoint — front an `InferencePool` with no
   additional CRD beyond what Istio already manages.
-- **Bloomberg, Tetrate and Nutanix**, via the **Envoy AI Gateway** coalition that produced the
-  v1.0 GA release: the client-facing half of the same "Envoy for LLM traffic" story this page
+- **Bloomberg, Tetrate and Nutanix**, via the coalition that produced the v1.0 GA release of
+  Envoy AI Gateway, renamed **Agent Router** in v1.2.0: the client-facing half of the same "Envoy for LLM traffic" story this page
   and [the parent module](envoy_proxy.md) both cover, from the opposite end.
 - **Model-server coverage.** The reference EPP configuration ships defaults for **vLLM**
   (the default), **SGLang**, **Triton with the TensorRT-LLM backend**, and TensorRT-LLM's own
@@ -444,9 +451,9 @@ the version it targets — it is a live instance of the version-skew trap covere
 | `InferencePool` + EPP | Cache-aware and queue-aware routing; priority-based shedding under load | A new synchronous hop on every request; a new process that becomes a single point of decision (mitigated, not eliminated, by `failureMode`) |
 | Standard-channel-only manifests | Never breaks on a CRD upgrade; what most implementations install by default | Cannot use `Backend`/`XBackend`/Telemetry API fields, all experimental at 1.6 |
 | Flow control enabled | Predictable, priority-respecting behavior under saturation instead of thundering-herd 429s | Buffered requests hold memory in the EPP; a stuck EPP now holds in-flight state, not just routing decisions |
-| `AIGatewayRoute` over plain `HTTPRoute` | Token accounting, model-name routing, multi-provider failover | Ties the route to Envoy AI Gateway specifically — no longer portable to a non-Envoy Gateway API implementation |
+| `AIGatewayRoute` over plain `HTTPRoute` | Token accounting, model-name routing, multi-provider failover | Ties the route to Agent Router specifically — no longer portable to a non-Envoy Gateway API implementation |
 
-[The parent module's §8](envoy_proxy.md) already tables Envoy AI Gateway against the
+[The parent module's §8](envoy_proxy.md) already tables Agent Router against the
 Inference Extension as two products solving different halves of "LLM traffic on Envoy" — that
 comparison is not repeated here; this table is about the narrower decision of whether to adopt
 `InferencePool` routing at all, and at which channel/policy layer.
@@ -503,13 +510,24 @@ burst timescales, not assuming zero staleness.
 
 **CRD version skew between the Inference Extension and the Gateway API core it depends on.**
 GIE v1.6.0's own dependency manifest pins `sigs.k8s.io/gateway-api` at **1.5.1** for its
-conformance suite, one minor behind the 1.6.1 core release this page's version anchor names.
-A cluster running Gateway API 1.6.1 core CRDs alongside a GIE build validated against 1.5.1 is
+conformance suite, one minor behind the 1.6.3 core release this page's version anchor names.
+A cluster running Gateway API 1.6.3 core CRDs alongside a GIE build validated against 1.5.1 is
 a real, sourced-in-the-open combination, not a hypothetical — check both projects' pinned
 dependency versions before assuming "latest of each" composes cleanly.
 
-**Copying an example predates a project split.** §6.7 is not a hypothetical: Envoy AI
-Gateway's own maintained example deploys the pre-split EPP image and an `InferenceObjective`
+**Envoy Gateway 1.9 upgraded before the Gateway API CRDs.** Envoy Gateway 1.9.0 (2026-08-15)
+requires Gateway API v1.6 CRDs; on older CRDs it starts cleanly and silently skips every
+`TCPRoute` and `UDPRoute`, so non-HTTP listeners go dark with no error. Upgrade the CRDs first,
+and drop `sessionPersistence.idleTimeout` from HTTPRoutes before you do, because v1.6 removed it.
+The same release turns Lua `EnvoyExtensionPolicy` off by default (re-enable with `enableLua`
+under `extensionApis`), so a gateway that relied on a Lua header shim stops applying it. It
+also adds `ListenerSet` as a `targetRef` kind for client, security, backend and extension
+policies, and out-of-band ORCA load reporting through
+`loadBalancer.backendUtilization.outOfBand` in `BackendTrafficPolicy` for backends that
+implement `OpenRcaService`.
+
+**Copying an example predates a project split.** §6.7 is not a hypothetical: one of Agent
+Router's own maintained examples deploys the pre-split EPP image and an `InferenceObjective`
 at an alpha API that no longer ships from the project that used to own it. The fix is
 mechanical once you know to look — confirm which repository currently owns each CRD in a
 manifest before applying it, not just which `apiVersion` string it uses.
@@ -522,7 +540,7 @@ manifest before applying it, not just which `apiVersion` string it uses.
 
 | Tool | What it does |
 |---|---|
-| Kubernetes Gateway API | The standard CRD set for Kubernetes L4/L7 routing — GatewayClass, Gateway, HTTPRoute, GRPCRoute. |
+| Gateway API | The standard CRD set for Kubernetes L4/L7 routing: GatewayClass, Gateway, HTTPRoute, GRPCRoute. |
 | GAMMA | The Gateway API initiative letting HTTPRoute attach to a Service for mesh-internal routing. |
 | Ingress2Gateway | CLI that converts Ingress and vendor annotations into equivalent Gateway API objects. |
 
@@ -552,7 +570,7 @@ manifest before applying it, not just which `apiVersion` string it uses.
 
 | Tool | What it does |
 |---|---|
-| Envoy AI Gateway | Client-facing OpenAI-compatible API layer adding token accounting and model routing over InferencePool. |
+| Agent Router | Client-facing OpenAI-compatible API layer adding token accounting and model routing over InferencePool. |
 | vLLM | Open-source LLM inference server; the default model-server type in EPP reference configuration. |
 | SGLang | Open-source LLM inference server supported as an EPP model-server type. |
 
@@ -583,7 +601,7 @@ It will not, unless the cluster separately installs llm-d's CRDs. `InferenceObje
 
 **Q: Should a new HTTPRoute standard-channel field like GRPCRoute be safe to depend on in production?**
 **Short:** Yes for GRPCRoute — it graduated to the standard channel at Gateway API 1.1 and is v1.
-GRPCRoute graduated out of experimental into the standard channel in Gateway API 1.1 and is at `v1` as of this anchor's 1.6.1 — it is exactly as safe to depend on as `HTTPRoute` or `Gateway` themselves. The distinction that still matters is standard-channel membership versus the resource's own type version: `BackendTLSPolicy` and `TLSRoute` are both standard-channel (installed by default, considered stable enough to build on) while sitting at `v1alpha3` and `v1alpha2` respectively — reading only the version string undercounts what a cluster operator already treats as safe.
+GRPCRoute graduated out of experimental into the standard channel in Gateway API 1.1 and is at `v1` as of this anchor's 1.6.3 — it is exactly as safe to depend on as `HTTPRoute` or `Gateway` themselves. The distinction that still matters is standard-channel membership versus the resource's own type version: `BackendTLSPolicy` and `TLSRoute` are both standard-channel (installed by default, considered stable enough to build on) while sitting at `v1alpha3` and `v1alpha2` respectively — reading only the version string undercounts what a cluster operator already treats as safe.
 
 **Q: Why does least-request load balancing route an LLM request to the "least loaded" replica that is actually the most loaded one?**
 **Short:** Least-request counts open connections, not GPU KV-cache state or queue depth, which is where an inference server's real load lives.
@@ -629,9 +647,9 @@ Usually not. The Endpoint Picker's value comes from routing on state a proxy can
 **Short:** Google named GKE Gateway, Cilium and Envoy Gateway as conformant Gateway API implementations, alongside the Ingress2Gateway tool.
 Google's own transition post named **GKE Gateway**, **Cilium**, and **Envoy Gateway** as conformant Gateway API implementations, alongside pointing teams at **Ingress2Gateway**, the CLI that converts Ingress objects and vendor annotations into equivalent Gateway API resources. It stopped short of recommending one implementation over another, instead emphasizing conformance with the current Gateway API release as the bar to check — the same conformance property that makes the Inference Extension itself implementation-agnostic.
 
-**Q: What is the practical difference between adopting Envoy AI Gateway and adopting the Gateway API Inference Extension — do you need both?**
-**Short:** AI Gateway owns the client-facing multi-provider contract; the Inference Extension owns which self-hosted replica serves a request — they compose.
-They solve different halves and often compose (see [the parent module's §12](envoy_proxy.md) for the fuller comparison). Envoy AI Gateway owns the **client-facing contract** — an OpenAI-compatible API across multiple providers, token-aware rate limiting, credential handling. The Inference Extension owns **backend selection** for models you host yourself. A platform running its own vLLM fleet behind a multi-provider front door genuinely needs both: `AIGatewayRoute` for the client contract, `InferencePool` as the backend it ultimately routes self-hosted traffic to (§6.6).
+**Q: What is the practical difference between adopting Agent Router (formerly Envoy AI Gateway) and adopting the Gateway API Inference Extension, and do you need both?**
+**Short:** Agent Router owns the client-facing multi-provider contract; the Inference Extension owns which self-hosted replica serves a request, and the two compose.
+They solve different halves and often compose (see [the parent module's §12](envoy_proxy.md) for the fuller comparison). Agent Router owns the **client-facing contract** — an OpenAI-compatible API across multiple providers, token-aware rate limiting, credential handling. The Inference Extension owns **backend selection** for models you host yourself. A platform running its own vLLM fleet behind a multi-provider front door genuinely needs both: `AIGatewayRoute` for the client contract, `InferencePool` as the backend it ultimately routes self-hosted traffic to (§6.6).
 
 **Q: A teammate says GIE v1.6.0 "deprecated" InferenceObjective. Is that the right word?**
 **Short:** No — it was removed from this project's CRDs and migrated elsewhere, not deprecated-but-present.

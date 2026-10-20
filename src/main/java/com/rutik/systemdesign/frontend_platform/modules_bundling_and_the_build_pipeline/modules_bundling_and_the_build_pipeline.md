@@ -106,16 +106,18 @@ flowchart LR
     classDef dev fill:#2c313a,stroke:#98c379,color:#abb2bf
     classDef chk fill:#2c313a,stroke:#c678dd,color:#abb2bf
     SRC(["source<br/>TS, TSX, CSS"])
-    SWC(["swc or esbuild<br/>transform only<br/>strip types, JSX, decorators"])
+    SWC(["Oxc in Vite 8, swc elsewhere<br/>transform only<br/>strip types, JSX"])
     ROL(["Rolldown<br/>Rust bundler<br/>default in Vite 8"])
     TPK(["Turbopack<br/>Rust bundler plus<br/>dev server, Next.js 16"])
+    RSP(["Rspack 2<br/>Rust bundler<br/>webpack plugin API"])
     TSC(["tsc --noEmit<br/>types only<br/>emits nothing"])
     OUT(["chunks, maps,<br/>asset manifest"])
     SRC --> SWC --> ROL --> OUT
     SRC --> TPK --> OUT
+    SRC --> RSP --> OUT
     SRC --> TSC
     class SWC xform
-    class ROL bund
+    class ROL,RSP bund
     class TPK dev
     class TSC chk
     class SRC,OUT dev
@@ -123,6 +125,8 @@ flowchart LR
 
 Read the graph as two lanes that never merge. The lower lane is the type checker, and it
 produces no output your users receive — which is exactly why forgetting to run it is silent.
+In Vite 8 the transform box is Oxc, which also minifies the JS, and Lightning CSS minifies the
+CSS. esbuild is an optional peer dependency that Vite 8 calls only when a config opts back in.
 
 ---
 
@@ -341,13 +345,20 @@ direct dependencies and weekly merges, one patch bump rewrites the hash of a 420
 every returning user re-downloads all of it. Split by **change rate** instead:
 
 ```js
-// Rollup/Rolldown output config, as consumed by Vite's build.rollupOptions
-manualChunks(id) {
-  if (!id.includes("node_modules")) return;
-  if (id.includes("react") || id.includes("scheduler")) return "vendor-react";
-  if (id.includes("chart") || id.includes("d3-")) return "vendor-charts";
-  return "vendor";                    // everything small and boring, together
-}
+// vite.config.js, Vite 8: Rolldown's codeSplitting under build.rolldownOptions
+build: {
+  rolldownOptions: {
+    output: {
+      codeSplitting: {
+        groups: [   // higher priority claims a module first
+          { name: "vendor-react", test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/, priority: 3 },
+          { name: "vendor-charts", test: /node_modules[\\/](d3-|chart)/, priority: 2 },
+          { name: "vendor", test: /node_modules[\\/]/, priority: 1 },  // the small, boring rest
+        ],
+      },
+    },
+  },
+},
 ```
 
 Chunks of 132 KB, 186 KB and 98 KB beat one of 416 KB the moment any single dependency moves,
@@ -363,14 +374,17 @@ compression context than it saves. The other limit is the **`import()` waterfall
 | **Rolldown** | Rust bundler, Rollup-compatible plugin API | Vite 8's default bundler, dev and build |
 | **Vite 8** | dev server plus build orchestration on Rolldown | the whole pipeline |
 | **Turbopack** | Rust bundler and dev server, incremental cache | default in Next.js 16 |
-| **esbuild 0.28.2** | Go transformer and bundler | transforms, dependency pre-bundling, tests |
-| **swc 1.16.1** | Rust transformer, Babel-compatible plugins | type stripping, JSX, decorators, minify |
+| **Rspack 2.2.9** | Rust bundler that implements webpack 5's config, loader and plugin API | webpack estates migrated in place; Rsbuild, Rslib, Rstest |
+| **Oxc** | Rust parser, transformer and minifier | Vite 8's JS transforms and JS minification |
+| **Lightning CSS 1.33.0** | Rust CSS parser, transformer and minifier | Vite 8's default CSS minifier |
+| **esbuild 0.28.2** | Go transformer and bundler | standalone scripts and tests; Vite 8 only on opt-in `build.minify: 'esbuild'` |
+| **swc 1.16.18** | Rust transformer, Babel-compatible plugins | type stripping, JSX, decorators, minify; Next.js |
 
 The structural change in Vite 8 is that dev and build now use **one** bundler. Earlier versions
 transformed with esbuild in dev and bundled with Rollup for production, so the two halves of
-diagram 5.3 could disagree about interop and shaking; Rolldown collapses that seam. esbuild is
-not displaced as a transformer, and swc is not displaced at all — its role is transform, not
-bundle.
+diagram 5.3 could disagree about interop and shaking; Rolldown collapses that seam. Vite 8 also
+moved JS transforms and minification from esbuild to Oxc and CSS minification to Lightning CSS,
+which made esbuild an optional peer dependency. swc is untouched: its role is transform, not bundle.
 
 **Why Rust and Go.** A JavaScript bundler compiles JavaScript inside the same single-threaded
 VM it targets, paying JIT warmup and GC on every build; a native binary parses across all cores
@@ -379,6 +393,41 @@ only motivation, and the cost is being paid down in public: a decade of plugins 
 Node APIs, plus correctness edge cases in `export *` resolution, decorators and CJS interop.
 Rolldown keeping Rollup's plugin API is exactly why it could become Vite's default without
 stranding that ecosystem — pin your bundler and read the changelog before a major bump.
+
+**Rspack is the same move for webpack.** A large webpack 5 estate has years of custom loaders,
+`DefinePlugin`, Module Federation and hand-written plugins; moving to Vite means rewriting all
+of it against Rollup's plugin API. Rspack keeps webpack's configuration shape and plugin hooks,
+so the migration is a dependency swap plus a short list of replacements:
+
+```js
+// rspack.config.mjs, from webpack.config.js
+import { rspack } from "@rspack/core";
+
+export default {
+  module: {
+    rules: [
+      // was babel-loader or ts-loader: swc runs in Rust, inside the bundler process
+      { test: /\.[jt]sx?$/, loader: "builtin:swc-loader", options: { /* swc options */ } },
+    ],
+  },
+  plugins: [
+    new rspack.DefinePlugin({ __APP_VERSION__: JSON.stringify("4.2.0") }),  // same name and options
+    new rspack.CssExtractRspackPlugin(),     // replaces mini-css-extract-plugin
+    new rspack.CopyRspackPlugin({ patterns: [{ from: "public" }] }),  // replaces copy-webpack-plugin
+  ],
+  cache: { type: "persistent" },             // webpack's type: "filesystem"
+};
+```
+
+The scripts change from `webpack build` and `webpack serve` to `rspack build` and `rspack dev`.
+Rspack 2.0 (2026-04-22) is a pure ESM package that needs Node.js 20.19 or 22.12 and later, drops
+`@rspack/dev-server` from `@rspack/cli`'s dependencies (install it for `rspack dev`), and builds
+CSS handling in: `experiments.css` is gone, and a rule with `type: "css/auto"` turns it on. On
+the Rspack team's `rspack-react-10k-benchmark`, 2.0 builds for production in 3.1 s cold and 1.4 s with the
+persistent cache, with 118 ms HMR. What does not carry over: plugins that reach into webpack
+internals rather than public hooks, and the faster path for `html-webpack-plugin` users is
+`html-rspack-plugin` or the built-in `rspack.HtmlRspackPlugin`. Next.js can run on it through
+`next-rspack`.
 
 ### 6.5 Dev server versus production build, and HMR
 
@@ -463,7 +512,7 @@ the browser. Upload mechanics live in
 
 ### 6.7 Transpile-only is not type-checked
 
-esbuild, swc, Rolldown and Turbopack all handle TypeScript by **deleting the annotations**.
+Oxc, esbuild, swc, Rolldown and Turbopack all handle TypeScript by **deleting the annotations**.
 None builds a type graph, resolves a generic, or compares two interfaces. A file with 40 type
 errors transpiles cleanly and ships.
 
@@ -556,6 +605,13 @@ permanent fix was running the real build in CI, not a lint rule.
 | Compression ratio | better, more shared context | worse below roughly 20 KB per chunk |
 | Waterfall risk | low | high if chunks import chunks |
 
+| Moving off webpack 5 | Rspack 2 | Vite 8 on Rolldown |
+|----------------------|----------|--------------------|
+| Config and custom plugins | mostly kept; same hooks and plugin names | rewritten against the Rollup plugin API |
+| Loaders | most run as-is; `builtin:swc-loader` replaces Babel | replaced by Vite plugins |
+| Module Federation | built in | through the `@module-federation/vite` plugin |
+| Dev server model | bundles in dev, like webpack | serves source modules unbundled in dev |
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -627,8 +683,12 @@ code does not keep.**
 | Rollup | Bundler | The plugin API and output config Rolldown implements |
 | Turbopack | Bundler | Rust, default in Next.js 16 |
 | webpack | Bundler | Still the incumbent in large legacy front ends |
-| esbuild | Transformer | Go, transforms and dependency pre-bundling |
-| swc | Transformer | Rust, type stripping, JSX, decorators |
+| Rspack | Bundler | Rust, webpack-compatible config, loaders and plugins; 2.2.9 |
+| Rsbuild | Build tool | Batteries-included layer over Rspack, the Vite-style entry point |
+| Oxc | Transformer, minifier | Rust, Vite 8's JS transforms and minification |
+| Lightning CSS | CSS minifier | Rust, Vite 8's default CSS minifier |
+| esbuild | Transformer | Go, standalone transforms; an opt-in fallback in Vite 8 |
+| swc | Transformer | Rust, type stripping, JSX, decorators; Next.js |
 | TypeScript | Type checker | `tsc --noEmit`, native Go binary in 7.0 |
 | rollup-plugin-visualizer | Analyser | Treemap of module contribution from build metadata |
 | source-map-explorer | Analyser | Attributes a built chunk's bytes using its map |
@@ -650,7 +710,7 @@ explicit initialisation call.
 **Q: My bundler handles TypeScript, so does the build fail on a type error?**
 **Short:** Type stripping deletes annotations without verifying them, so a file with forty type errors transpiles cleanly and ships to production.
 
-esbuild, swc, Rolldown and Turbopack all remove types syntactically; none builds a type graph.
+Oxc, esbuild, swc, Rolldown and Turbopack all remove types syntactically; none builds a type graph.
 `items.reduce((s, i) => s + i.prise, 0)` bundles fine and renders `NaN` at runtime. The fix is
 `tsc --noEmit` as its own required CI job. TypeScript 7.0's native Go binary makes that cheap
 enough to run per commit, but it does not merge the two concerns.
@@ -700,8 +760,8 @@ Suspense — see [React Performance and Profiling](../../react/react_performance
 **Short:** One vendor chunk turns any single dependency bump into a full re-download for every returning user, which is the opposite of the caching win it was supposed to buy.
 
 It made sense with eight yearly-changing dependencies. With 60 direct dependencies and weekly
-merges, a patch bump rewrites the hash of a 420 KB chunk. Split by change rate via
-`manualChunks` — a stable framework chunk, one per large volatile library, a catch-all. One
+merges, a patch bump rewrites the hash of a 420 KB chunk. Split by change rate with Rolldown's
+`codeSplitting.groups`: a stable framework chunk, one per large volatile library, a catch-all. One
 measurement: a 512 KB vendor chunk went from a 4% cross-release cache hit rate to 71%.
 
 **Q: What is an `import()` waterfall and how do you detect one?**
@@ -763,6 +823,16 @@ was the only motivation, and the cost is being paid down in public: a decade of 
 against Node APIs, plus correctness edge cases in `export *`, decorators and CJS interop.
 Rolldown kept Rollup's plugin API precisely so it could become Vite 8's default without
 stranding that ecosystem. Pin your bundler and read the changelog before a major bump.
+
+**Q: What is the migration path for a large webpack 5 front end that cannot afford a rewrite?**
+**Short:** Rspack 2, a Rust bundler that implements webpack 5's config, loader and plugin API, so most config moves over unchanged while Vite would need every custom plugin rewritten.
+
+Install `@rspack/core` and `@rspack/cli`, rename the config, swap `babel-loader` or `ts-loader`
+for `builtin:swc-loader`, `mini-css-extract-plugin` for `rspack.CssExtractRspackPlugin`, and
+`cache: { type: "filesystem" }` for `type: "persistent"`; `DefinePlugin` and most built-ins keep
+their names. Rspack 2 is ESM-only and needs Node.js 20.19 or 22.12 and later. The work that remains is any
+plugin reaching into webpack internals instead of public hooks. Choose Vite when you also want
+unbundled dev serving and can afford the plugin rewrite.
 
 **Q: What does "first load JS" actually count?**
 **Short:** First load counts every byte fetched, parsed and executed before the route is interactive — the entry chunk, everything it statically imports, the framework runtime and render-blocking CSS.
@@ -830,7 +900,7 @@ const messages = await import(`./locales/${navigator.language}.json`);  // globs
 import { RevenueChart } from "./widgets/RevenueChart";
 
 // BROKEN 3 — every dependency in one chunk. Any patch bump re-downloads 512 KB.
-manualChunks: (id) => (id.includes("node_modules") ? "vendor" : undefined)
+codeSplitting: { groups: [{ name: "vendor", test: /node_modules[\\/]/ }] }
 ```
 
 ```ts
@@ -856,11 +926,12 @@ new IntersectionObserver(async ([e], obs) => {
   RevenueChart.mount(chartSlot);
 }).observe(chartSlot);
 
-manualChunks(id: string) {                     // vite.config.ts, three hash rates
-  if (!id.includes("node_modules")) return;
-  if (/[\\/](react|scheduler)[\\/]/.test(id)) return "vendor-react";
-  if (/[\\/](d3-|chart)/.test(id)) return "vendor-charts";
-  return "vendor";
+codeSplitting: {                               // vite.config.ts, three hash rates
+  groups: [
+    { name: "vendor-react", test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/, priority: 3 },
+    { name: "vendor-charts", test: /node_modules[\\/](d3-|chart)/, priority: 2 },
+    { name: "vendor", test: /node_modules[\\/]/, priority: 1 },
+  ],
 }
 ```
 

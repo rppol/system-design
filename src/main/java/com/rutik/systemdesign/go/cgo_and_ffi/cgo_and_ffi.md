@@ -463,7 +463,7 @@ anywhere is a product feature.
 |----------|-----------------|-----------------|
 | Cross-compile | `GOOS`/`GOARCH` alone, ~40 target pairs from one laptop | Needs a C cross-toolchain per target |
 | Static linking | Always static | Hard; glibc NSS makes fully static glibc unsafe |
-| Container base | `scratch` or distroless static, ~2 MB + binary | `debian:bookworm-slim` ~74 MB, or Alpine + musl |
+| Container base | `scratch` or distroless static, ~2 MB + binary | `debian:trixie-slim` ~78 MB, or Alpine + musl |
 | Typical image | ~12–20 MB total | ~90–400 MB depending on the C dependency tree |
 | Cold build of a mid-size service | 2–6 s | 30–120 s if a large C library is compiled |
 | `-race` | Unavailable (the race detector itself requires cgo) | Available, but blind to races inside C |
@@ -507,7 +507,8 @@ subprocess or `wazero` gives you an error value.
 ### Use cgo when
 
 - **The library is the product's correctness boundary and has no Go equivalent** — SQLite,
-  OpenSSL where FIPS validation is required, a codec whose bit-exactness is contractual.
+  a codec whose bit-exactness is contractual. FIPS 140-3 is not such a case: the native Go
+  Cryptographic Module v1.0.0 (CMVP certificate #5247) ships in Go 1.24+ and needs no OpenSSL.
 - **The OS API is a C ABI and nothing else exists** — OpenGL, Vulkan, SDL, CoreAudio, a
   vendor hardware SDK, CUDA driver APIs.
 - **The performance gap is order-of-magnitude and measured** — libvips against a pure-Go
@@ -860,13 +861,15 @@ and the build fails with undefined `C.` symbols that give no hint of the real ca
 **Q: When is cgo genuinely the right decision rather than a shortcut?**
 **Short:** When the C library is the correctness boundary of your product, has no Go equivalent, and you already ship a fat image.
 
-The clearest cases are a mature library whose behaviour is contractual — SQLite, a
-bit-exact codec, a FIPS-validated crypto module — an operating-system API that exists only
-as a C ABI such as OpenGL or CoreAudio, a vendor hardware SDK where nothing else is
-published, or an order-of-magnitude measured performance gap like libvips against a pure-Go
-image decoder. Those cases share a shape: reimplementing is not merely expensive, it is a
-correctness risk. If your deployment target is also singular and you already ship a
-Debian-based image, the incremental cost is close to zero and the decision is easy. If any
+The clearest cases are a mature library whose behaviour is contractual (SQLite, a
+bit-exact codec), an operating-system API that exists only as a C ABI such as OpenGL or
+CoreAudio, a vendor hardware SDK where nothing else is published, or an order-of-magnitude
+measured performance gap like libvips against a pure-Go image decoder. Those cases share a
+shape: reimplementing is not merely expensive, it is a correctness risk. FIPS 140-3 is not one
+of them: the Go Cryptographic Module v1.0.0 holds CMVP certificate #5247 and is linked with
+`GOFIPS140=v1.0.0` at build time, with no cgo. If your deployment target is also singular
+and you already ship a Debian-based image, the incremental cost is close to zero and the
+decision is easy. If any
 of those conditions is missing, go back up the ladder.
 
 **Q: How do you design the boundary so it is reviewable rather than scattered?**

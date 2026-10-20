@@ -8,7 +8,7 @@ React is a library for describing a user interface as a function of state. You w
 
 Three nouns get confused constantly, and every later module depends on keeping them apart. A **component** is your function. An **element** is the plain immutable JavaScript object that function returns — `{ type, key, props }`, roughly 80 bytes, allocated fresh on every render and thrown away immediately. An **instance** is what React keeps behind the scenes: a fiber node holding your state, your DOM node and the traversal pointers. `<Greeting name="Ada" />` is not a call to `Greeting`; it is an object saying "React, when you get here, call `Greeting` with these props".
 
-React 19.2 (released 2025-10-01; there is no React 20, and current patches are 19.2.8 / 19.1.9 / 19.0.8 as of 2026-07-21) changed almost nothing about this core model, which is the point — the element/render/reconcile loop has been stable since 2013. What has changed underneath it is who runs the work and when: automatic batching since 18, concurrent lanes, Server Components, and React Compiler 1.0 placing memoization for you. The mental model in this module is what all of those are built on.
+React 19.3 (released 2026-09-09; there is no React 20, and the patches as of 2026-10-14 are 19.3.1 / 19.2.9 / 19.1.10 / 19.0.9) changed almost nothing about this core model, which is the point: the element/render/reconcile loop has been stable since 2013. What has changed underneath it is who runs the work and when: automatic batching since 18, concurrent lanes, Server Components, and React Compiler 1.0 placing memoization for you. The mental model in this module is what all of those are built on.
 
 **Governance:** since 2026-02-24 React, React Native and JSX have been stewarded by the **React Foundation** under the Linux Foundation, rather than by Meta directly — the answer to every "what happens if Meta walks away" question in an architecture review.
 
@@ -562,7 +562,7 @@ React never warns here, because a unique-but-wrong key is indistinguishable from
 
 | Tool | Purpose |
 |------|---------|
-| React | The library itself — 19.2 is the current line, with 19.2.8 the latest patch |
+| React | The library itself. 19.3 is the current line, with 19.3.1 the latest patch (2026-10-14) |
 | Vite | Dev server and build for a client React app; the automatic JSX runtime is the default |
 | Babel | `@babel/preset-react` with `runtime: "automatic"` — the reference JSX transform |
 | SWC | Rust JSX transform used by Next.js and Vite plugins, roughly 20x faster than Babel |

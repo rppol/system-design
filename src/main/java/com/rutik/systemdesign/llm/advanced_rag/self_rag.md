@@ -356,7 +356,7 @@ def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
 - Team lacks ML engineering capacity for fine-tuning
 
 ### Use Self-RAG Concepts Without Full Fine-Tuning:
-- Prompt a current frontier LLM (e.g. GPT-5.4, Claude Opus 5) to perform retrieval-need assessment and support checking
+- Prompt a current frontier LLM (e.g. GPT-6 Astra, Claude Opus 5.5) to perform retrieval-need assessment and support checking
 - Use RAGAS faithfulness metric as a post-generation filter to catch unsupported statements
 - These approximations capture some Self-RAG benefits without fine-tuning overhead
 
@@ -452,7 +452,7 @@ A: Standard RAG calls the retriever for 100% of queries. Self-RAG's [Retrieve] /
 
 **Q: Can you achieve Self-RAG-like behavior through prompting without fine-tuning?**
 **Short:** A capable LLM can be prompted to judge retrieval necessity and check faithfulness, but the checks are less consistent than a fine-tuned model's reflection tokens.
-A: Partially. A capable current LLM (e.g. GPT-5.4, Claude Opus 5) can be prompted to assess retrieval necessity ("Should you search for external information to answer this query?") and perform faithfulness checking ("Does each statement in your response align with the provided context?"). This approximates Self-RAG's adaptive retrieval and support checking. However, the approximation is less reliable than fine-tuned behavior: the prompted checks may be inconsistent, the model may still generate unsupported claims and then rationalize them as supported. For production systems where faithfulness is critical, using RAGAS as a post-generation faithfulness filter is a more reliable alternative.
+A: Partially. A capable current LLM (e.g. GPT-6 Astra, Claude Opus 5.5) can be prompted to assess retrieval necessity ("Should you search for external information to answer this query?") and perform faithfulness checking ("Does each statement in your response align with the provided context?"). This approximates Self-RAG's adaptive retrieval and support checking. However, the approximation is less reliable than fine-tuned behavior: the prompted checks may be inconsistent, the model may still generate unsupported claims and then rationalize them as supported. For production systems where faithfulness is critical, using RAGAS as a post-generation faithfulness filter is a more reliable alternative.
 
 **Q: What happens when all retrieved passages are marked [Irrelevant] in Self-RAG?**
 **Short:** The model falls back to generating from parametric knowledge alone with reduced confidence, since relevance filtering cannot rescue a genuinely poor retrieval.
@@ -492,7 +492,7 @@ A: Reflection token generation adds overhead at each decision point. [Retrieve] 
 
 **Q: How do you adapt Self-RAG for production systems that cannot afford full fine-tuning?**
 **Short:** Approximate it with a prompted retrieval-necessity check, a post-generation faithfulness scorer, and confidence-based retrieval triggering using no-context logprobs.
-A: Several production-viable adaptations capture Self-RAG benefits without fine-tuning. (1) Prompted adaptive retrieval: add a pre-retrieval step where a strong current LLM (e.g. GPT-5.4 or Claude Opus 5) decides "Does this query require external knowledge?" with a structured JSON output; route accordingly. This captures ~70% of Self-RAG's retrieval efficiency benefit. (2) Post-generation support checking: after standard RAG generation, run each sentence through RAGAS faithfulness or a cross-encoder to score support against the retrieved context; flag or remove low-support statements. This captures ~80% of Self-RAG's faithfulness benefit. (3) Retrieve-then-score: always retrieve, then score passage relevance with a cross-encoder before passing to the LLM — this is CRAG's approach and approximates Self-RAG's [Relevant] evaluation. (4) Confidence-based retrieval triggering: use the LLM's logprob on its initial (no-context) answer as a proxy for certainty — if the LLM is confident, skip retrieval; if uncertain (low logprob on key tokens), retrieve. This requires logprob access (not available on all APIs).
+A: Several production-viable adaptations capture Self-RAG benefits without fine-tuning. (1) Prompted adaptive retrieval: add a pre-retrieval step where a strong current LLM (e.g. GPT-6 Astra or Claude Opus 5.5) decides "Does this query require external knowledge?" with a structured JSON output; route accordingly. This captures ~70% of Self-RAG's retrieval efficiency benefit. (2) Post-generation support checking: after standard RAG generation, run each sentence through RAGAS faithfulness or a cross-encoder to score support against the retrieved context; flag or remove low-support statements. This captures ~80% of Self-RAG's faithfulness benefit. (3) Retrieve-then-score: always retrieve, then score passage relevance with a cross-encoder before passing to the LLM — this is CRAG's approach and approximates Self-RAG's [Relevant] evaluation. (4) Confidence-based retrieval triggering: use the LLM's logprob on its initial (no-context) answer as a proxy for certainty — if the LLM is confident, skip retrieval; if uncertain (low logprob on key tokens), retrieve. This requires logprob access (not available on all APIs).
 
 ---
 

@@ -21,7 +21,7 @@ Interpretability is the degree to which a human can understand *why* a model mad
 
 The distinction matters because production ML increasingly runs into three walls that raw accuracy cannot clear:
 
-1. **Regulatory** — the US Equal Credit Opportunity Act (ECOA / Regulation B, 12 CFR 1002.9) requires an *adverse-action notice* stating the specific principal reasons a loan was denied; GDPR Article 22 gives the right not to be subject to a decision based *solely* on automated processing that produces legal or similarly significant effects, plus safeguards (human intervention, expressing a view, contesting the decision) — the phrase "right to explanation" appears only in the non-binding Recital 71, while Articles 13–15 mandate "meaningful information about the logic involved"; the EU AI Act classifies creditworthiness evaluation (Annex III, 5(b), excluding fraud detection) and employment/recruitment (Annex III, 4) as high-risk, and Article 86 does grant affected persons a right to "clear and meaningful explanations" of Annex III decisions.
+1. **Regulatory** — the US Equal Credit Opportunity Act (ECOA / Regulation B, 12 CFR 1002.9) requires an *adverse-action notice* stating the specific principal reasons a loan was denied; GDPR Article 22 gives the right not to be subject to a decision based *solely* on automated processing that produces legal or similarly significant effects, plus safeguards (human intervention, expressing a view, contesting the decision) — the phrase "right to explanation" appears only in the non-binding Recital 71, while Articles 13–15 mandate "meaningful information about the logic involved"; the EU AI Act classifies creditworthiness evaluation (Annex III, 5(b), excluding fraud detection) and employment/recruitment (Annex III, 4) as high-risk, and Article 86 does grant affected persons a right to "clear and meaningful explanations" of Annex III decisions. The Digital Omnibus on AI (adopted by Parliament on 2026-06-16 and by the Council on 2026-06-29) moved the application date of Annex III high-risk obligations from 2026-08-02 to 2027-12-02, so these duties are not yet enforceable for credit-scoring or hiring models; build the explanation pipeline now, but do not cite the AI Act as a live obligation before that date.
 2. **Debugging** — a model with 0.92 AUC that keys on a leaked timestamp column is worthless in production; explanations surface leakage, spurious correlations, and shortcut learning that metrics hide.
 3. **Trust** — a radiologist will not act on a "malignant, p=0.87" score without seeing *where* the model looked; a Grad-CAM heatmap over the actual lesion (not the scanner watermark) earns adoption.
 
@@ -739,7 +739,7 @@ bg = shap.kmeans(X_tr, 50)                            # 50 weighted centroids
 expl = shap.KernelExplainer(lr.predict_proba, bg)
 ```
 
-KernelSHAP marginalizes absent features over the background distribution; a tiny or unrepresentative background biases every attribution. Use `shap.kmeans` or ~100 sampled rows.
+KernelSHAP marginalizes absent features over the background distribution; a tiny or unrepresentative background biases every attribution. Use `shap.kmeans` or ~100 sampled rows. Since shap 0.53.0, `KernelExplainer` aligns DataFrame columns to the background by name and raises on duplicated column names, so a frame built with `pd.concat(axis=1)` that repeats a column name fails where it used to run.
 
 ### Pitfall 6: Explaining probabilities when the model reasons in log-odds
 
@@ -751,10 +751,10 @@ TreeSHAP defaults to `model_output="raw"`, which for XGBoost / LightGBM / CatBoo
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| shap | 0.52 (May 2026) | TreeSHAP (XGB/LGB/CatBoost/sklearn), KernelSHAP, DeepSHAP, plots (beeswarm, force, waterfall, dependence). Since 0.45 multi-output `shap_values` returns an ndarray, not a list |
+| shap | 0.54.1 (2026-10-16) | TreeSHAP (XGB/LGB/CatBoost/sklearn), KernelSHAP, DeepSHAP, plots (beeswarm, force, waterfall, dependence). Since 0.45 multi-output `shap_values` returns an ndarray, not a list. Since 0.53.0 KernelSHAP matches DataFrame columns to the background by name, and duplicated column names raise; numba and llvmlite are no longer required dependencies, which enables free-threaded Python. In 0.54.1, GPU support (`shap.GPUTreeExplainer`) lives in the separate `shap-cuda` package |
 | lime | 0.2.0.1 | Tabular, text, image (super-pixels); unstable — aggregate runs. **No release since June 2020** — effectively unmaintained |
 | captum | 0.9 (Apr 2026) | PyTorch: Integrated Gradients, DeepLIFT, GradientSHAP, Occlusion, LayerGradCam |
-| pytorch-grad-cam (`grad-cam`) | 1.5.5 | Grad-CAM, Grad-CAM++, Score-CAM, Ablation-CAM for CNNs and ViTs |
+| pytorch-grad-cam (`grad-cam`) | 1.5.7 (2026-08-21) | Grad-CAM, Grad-CAM++, Score-CAM, Ablation-CAM for CNNs and ViTs |
 | dice-ml | 0.12 | Diverse counterfactual explanations (random, genetic, gradient methods) |
 | interpret (InterpretML) | 0.7.x | EBM glass-box GAM; unified explain API; dashboard |
 | sklearn.inspection | 1.9 | permutation_importance, PartialDependenceDisplay (PDP + ICE) |

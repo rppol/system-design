@@ -95,7 +95,7 @@ module github.com/acme/payments
 
 go 1.27
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
     github.com/jackc/pgx/v5 v5.7.2
@@ -528,6 +528,67 @@ will act on rather than mute.
 `go doc`'s versioned form `[1.27]` is the quiet convenience: you can read the docs for
 the version MVS actually selected instead of whatever is currently on the website.
 
+### `golangci-lint` v2 configuration
+
+`golangci-lint` v2.0.0 (2025-03-24) changed the config file format. The v2 binary refuses any
+config file that does not declare `version: "2"`, failing with `unsupported version of the
+configuration: ""` and a pointer to the migration guide, so a CI job that bumps the binary
+without the file goes red on its first run.
+
+The shape that replaced v1's, as a starting point for a service:
+
+```yaml
+# .golangci.yml
+version: "2"
+
+linters:
+  default: standard        # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - noctx
+    - revive
+    - sloglint
+  settings:
+    govet:
+      enable: [shadow]
+    errcheck:
+      exclude-functions:
+        - io.Copy(*bytes.Buffer)
+  exclusions:
+    generated: strict      # only files with the standard "Code generated ... DO NOT EDIT." line
+    presets: [std-error-handling]
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck]
+
+formatters:
+  enable: [gofumpt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/acme/payments]
+```
+
+| v1 key | v2 equivalent |
+|--------|---------------|
+| `linters.disable-all: true` / `enable-all: true` | `linters.default: none` / `all` (also `standard`, `fast`) |
+| `gofmt`, `gofumpt`, `goimports`, `gci` under `linters.enable` | `formatters.enable`; applied with `golangci-lint fmt` |
+| `gosimple`, `stylecheck`, `staticcheck` | One linter, `staticcheck` |
+| `linters-settings:` | `linters.settings:` and `formatters.settings:` |
+| `issues.exclude-rules`, `issues.exclude` | `linters.exclusions.rules` |
+| `issues.exclude-use-default: true` | `linters.exclusions.presets` (`comments`, `common-false-positives`, `legacy`, `std-error-handling`) |
+| `issues.exclude-dirs`, `exclude-files` | `linters.exclusions.paths` and `formatters.exclusions.paths` |
+| `run.timeout` (v1 default `1m`) | Still exists, but defaults to `0` (disabled); `migrate` drops the old value |
+| `--fast`, `--out-format`, `-p/--presets` | `--fast-only`, `--output.<format>.path`, explicit `enable` lists |
+
+`golangci-lint migrate` rewrites a v1 file in place and keeps a `.bck` copy. It drops comments
+and any option deprecated in v1, and it pins `linters.exclusions.generated: lax` because v1
+defaulted to `lax` and v2 defaults to `strict`. Install the binary at a pinned version
+(`golangci/golangci-lint-action@v9` with `version: v2.15`, or the release tarball): the project
+does not guarantee `go install` or `go tool` builds, because they compile with your local Go
+version and module resolution can pull its dependencies to versions it was never tested with.
+
 ---
 
 ## 7. Real-World Examples
@@ -736,6 +797,44 @@ and the standard library itself removed its own `src/pkg/` directory in Go 1.4. 
 public packages at the module root, where their import path reads
 `github.com/acme/payments/client` rather than `github.com/acme/payments/pkg/client`.
 
+### Pitfall 8: a floating `golangci-lint` version meeting a v1 config
+
+A CI job installed `golangci-lint` with `version: latest`. The morning v2 became latest, every
+pull request in 14 repositories failed with `unsupported version of the configuration`, and
+the quick fix people reached for was deleting the lint step. The first attempted repair added
+`version: "2"` by hand and left `linters-settings` and `issues.exclude-rules` in place; v2
+ignored those as unknown keys, so the test-file exclusions silently stopped applying, and with
+`exclusions.generated` now defaulting to `strict`, 300 `errcheck` findings in generated code
+came back.
+
+```yaml
+# BROKEN: v1 keys under a v2 header; the exclusions no longer apply
+version: "2"
+linters-settings:
+  govet: {enable: [shadow]}
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters: [errcheck]
+```
+
+```yaml
+# FIX: produced by `golangci-lint migrate`, then pinned
+version: "2"
+linters:
+  settings:
+    govet: {enable: [shadow]}
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters: [errcheck]
+```
+
+Run `golangci-lint migrate` rather than editing by hand, add `golangci-lint config verify`
+to CI (it checks the file against the v2 JSON schema, which the loader does not), pin the
+binary to a minor version, and bump it in its own pull request.
+
 ---
 
 ## 11. Technologies & Tools
@@ -746,7 +845,7 @@ public packages at the module root, where their import path reads
 | `goimports` | `gofmt` plus automatic import add/remove and grouping |
 | `go vet` | Correctness analyzers shipped with the toolchain; a subset also runs under `go test` |
 | `staticcheck` | Deeper analysis than vet — unused code, dubious conversions, API misuse |
-| `golangci-lint` | Runs vet, staticcheck, errcheck, revive and roughly 100 more from one config |
+| `golangci-lint` v2 | Runs vet, staticcheck, errcheck, revive and roughly 100 more from one `version: "2"` config; `fmt` applies the formatters, `migrate` converts a v1 file |
 | `govulncheck` | Reports only vulnerabilities whose affected functions your code can reach |
 | `go fix` `[1.26]` | Modernizers plus `//go:fix inline` source-level inlining |
 | `go tool` `[1.24]` | Builds and runs module-local tools recorded by `tool` directives |
@@ -798,6 +897,19 @@ by comparing the cached copy against the upstream repository at that tag and ask
 maintainer. The one thing never to do is delete `go.sum` and run `go mod tidy` — that
 re-records whatever bytes were just served, laundering exactly the change you were being
 warned about.
+
+**Q: Why does a v1 .golangci.yml fail on golangci-lint v2, and how do you migrate it?**
+**Short:** v2 requires `version: "2"` and moved keys such as linters-settings and issues.exclude-rules; `golangci-lint migrate` rewrites the file and keeps a backup.
+
+The v2 loader rejects any config file whose `version` is not `"2"`, failing with
+`unsupported version of the configuration`. Adding the line by hand is the trap: v1 keys like
+`linters-settings`, `issues.exclude-rules` and `issues.exclude-dirs` are then ignored, so
+exclusions stop applying without an error. `golangci-lint migrate` maps them to
+`linters.settings`, `linters.exclusions.rules` and `linters.exclusions.paths`, converts
+`disable-all`/`enable-all` to `linters.default: none`/`all`, merges `gosimple` and
+`stylecheck` into `staticcheck`, writes `<name>.bck.<ext>` first, and pins
+`exclusions.generated: lax` because the default moved from `lax` to `strict`. It drops
+comments and options already deprecated in v1, so review the diff and pin the binary version.
 
 **Q: What exactly does the `internal/` directory forbid?**
 **Short:** A package under an `internal` element may be imported only by code rooted at that `internal` directory's parent.
@@ -1003,6 +1115,19 @@ packages at the module root so the import path reads
 `github.com/acme/payments/client` rather than `.../pkg/client`, and reach for `internal/`
 whenever the question is really "should anyone outside import this?"
 
+**Q: In golangci-lint v2, what runs with no linters configured, and where did gofmt and goimports go?**
+**Short:** `linters.default: standard` runs errcheck, govet, ineffassign, staticcheck and unused; gofmt, gofumpt, goimports and gci moved to a separate formatters section.
+
+v2 splits checkers that report problems from tools that rewrite layout. `formatters.enable`
+lists `gofmt`, `gofumpt`, `goimports`, `gci` or `golines`; `golangci-lint run` reports files
+they would change and `golangci-lint fmt` rewrites them, which gives editors and pre-commit
+hooks one formatter entry point. `linters.default` picks the base set: `standard` (the five
+above), `all`, `none` or `fast`, with `enable` and `disable` adjusting it. Exclusions moved
+under `linters.exclusions` with named presets (`comments`, `common-false-positives`,
+`legacy`, `std-error-handling`) instead of v1's numbered `EXC0001`-style defaults, and
+`exclusions.generated: strict` only skips files carrying the standard
+`// Code generated ... DO NOT EDIT.` header.
+
 ---
 
 ## 13. Best Practices
@@ -1021,7 +1146,8 @@ whenever the question is really "should anyone outside import this?"
 - **Set `GOTOOLCHAIN=local` in CI** and pin the toolchain in the image, so no build
   silently downloads a compiler.
 - **Run `go vet`, `staticcheck` and `govulncheck` on every pull request**, and let
-  `golangci-lint` be the single entry point so the config lives in one file.
+  `golangci-lint` be the single entry point so the config lives in one file. Pin its
+  binary to a minor version (it is the one tool not to install with `go get -tool`).
 - **Use `go get -tool` for every generator**, and commit the generated output.
 - **Run `go fix ./...` `[1.26]` before a major refactor**, so the modernizers land in
   their own reviewable commit instead of mixed into the change you actually care about.

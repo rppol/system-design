@@ -27,7 +27,7 @@ sequence, a random 128-bit UUID, and a time-ordered UUID are all "meaningless", 
 completely differently in a B-tree, in the WAL, in the buffer pool, and in a URL.
 
 **Current versions this file is written against**: PostgreSQL 18 (18.4 is the current minor as of
-July 2026; PostgreSQL 19 is in beta), MySQL 9.7 LTS (released 21 April 2026), and RFC 9562 (May
+July 2026; PostgreSQL 19 reached RC1 on 15 October 2026, with GA planned for 19 November 2026), MySQL 9.7 LTS (released 21 April 2026), and RFC 9562 (May
 2024), which obsoletes RFC 4122 and is where UUIDv6, UUIDv7 and UUIDv8 are defined.
 
 ---

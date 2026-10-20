@@ -706,7 +706,7 @@ Training pipeline uses `.fillna(0)` for missing purchase features. Serving pipel
 | Polars | DataFrame library | Rust-based, multi-threaded; faster than pandas for single-node feature prep |
 | DuckDB | Embedded query engine | In-process OLAP engine; reads Iceberg and Parquet directly, no cluster needed under ~50 GB |
 | Feast | Feature store | Offline + online feature serving, point-in-time joins |
-| Tecton | Feature store (managed) | Enterprise managed feature platform |
+| Databricks-Tecton | Feature store (managed) | Managed real-time feature platform; Databricks acquired Tecton in 2025 |
 | Apache Airflow | Orchestration | DAG scheduling, dependency management |
 | Prefect | Orchestration | Python-native flows; dropped the explicit-DAG constraint in Prefect 2, so tasks can be created dynamically at runtime |
 | AWS EMR | Managed Spark | Spot instance Spark clusters |
@@ -751,7 +751,7 @@ Common causes: (1) cartesian product joins (missing join condition — use .join
 
 **Q: What is a feature store and what problems does it solve?**
 **Short:** A feature store centralizes feature computation across an offline store for training and an online store for low-latency serving, eliminating duplicated logic and training/serving skew.
-A feature store is a centralized system for storing, versioning, and serving ML features. It solves: (1) feature duplication — multiple teams compute the same feature independently with subtle differences; (2) training/serving skew — offline store (Parquet/Delta) for training, online store (Redis/Cassandra) for low-latency serving, both populated by the same computation logic; (3) point-in-time correctness for training dataset generation; (4) feature discoverability — catalog of available features with owners and statistics. Feast (open-source), Tecton (managed), and SageMaker Feature Store are common options.
+A feature store is a centralized system for storing, versioning, and serving ML features. It solves: (1) feature duplication: multiple teams compute the same feature independently with subtle differences; (2) training/serving skew: offline store (Parquet/Delta) for training, online store (Redis/Cassandra) for low-latency serving, both populated by the same computation logic; (3) point-in-time correctness for training dataset generation; (4) feature discoverability: catalog of available features with owners and statistics. Feast (open-source), Databricks-Tecton (managed), and SageMaker Feature Store are common options.
 
 **Q: How do you validate data quality before training a model?**
 **Short:** Data quality validation layers schema checks, statistical checks like PSI and null rate, business rule assertions, and referential integrity, halting the pipeline on any failure.

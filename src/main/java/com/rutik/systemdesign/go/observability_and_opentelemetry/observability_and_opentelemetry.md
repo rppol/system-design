@@ -24,9 +24,9 @@ and [Observability and Monitoring](../../backend/observability_and_monitoring/ob
 Read those for what to build. Read this for what to import.
 
 Versions this page is written against: Go **1.27** (released 2026-08-19),
-`go.opentelemetry.io/otel` and its trace/metric SDKs at **v1.46.0**, `otelgrpc` at **v0.71.0**,
-`otelslog` at **v0.20.1**, and the logs SDK (`go.opentelemetry.io/otel/sdk/log`) at **v0.22.0**,
-which is still pre-1.0 and the one piece of this stack whose API may still move.
+`go.opentelemetry.io/otel` and its trace, metric and logs SDKs at **v1.47.0** (2026-10-02, the
+first release with a stable logs API and SDK; it needs Go 1.26 or later), `otelhttp` and
+`otelgrpc` at **v0.72.0**, and `otelslog` at **v0.21.0** (contrib 1.47.0, 2026-10-03).
 
 ---
 
@@ -124,6 +124,18 @@ Head-based sampling in the SDK decides before the request runs, so it cannot pre
 keep errors. Tail sampling can, but requires the whole trace to reach one collector instance.
 The standard production shape is `ParentBased(TraceIDRatioBased(0.05))` in the SDK feeding a
 tail-sampling collector.
+
+### Instrumentation strategies
+
+| Strategy | How it attaches | Covers | Cost |
+|----------|----------------|--------|------|
+| Manual SDK wiring | You import `otelhttp`, `otelgrpc` and friends and wrap each boundary in code | Exactly what you wrap | Code at every boundary; a missed wrapper is a missing span |
+| Compile-time injection, `otelc` v1 | `otelc go build` in place of `go build`; hooks the compiler through `-toolexec` | `net/http`, `database/sql`, gRPC, Redis and runtime metrics, in your code, its dependencies and the standard library | Needs a rebuild; the injected code is not in your source tree |
+| eBPF, OpenTelemetry eBPF Instrumentation (OBI) | A separate agent attaches eBPF probes to an unmodified binary | Network boundaries (HTTP, gRPC, database calls) and RED metrics, seen from outside the process, in any language | Linux 5.8+ with BTF and root or equivalent capabilities; no rebuild |
+
+The OpenTelemetry decision guide for Go states it is not a ranking: it points to `otelc` when
+you own the build pipeline or need in-process spans, to OBI for a mixed-language fleet or a
+binary you cannot rebuild, and allows running both together.
 
 ### Histogram aggregations
 
@@ -571,12 +583,9 @@ request that triggered the shutdown, which are the only spans anyone wanted.
 ### Instrumenting the boundaries
 
 ```go
-// Inbound HTTP: one wrapper around the whole mux.
-handler := otelhttp.NewHandler(mux, "orders-api",
-    otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
-        return r.Method + " " + r.Pattern      // [1.22] the ROUTE, never the URL
-    }),
-)
+// Inbound HTTP: one wrapper around the whole mux. The default span name is
+// "{method} {route}" from r.Pattern, e.g. "GET /users/{id}", never the URL.
+handler := otelhttp.NewHandler(mux, "orders-api")
 
 // Outbound HTTP: one wrapper around the transport.
 client := &http.Client{
@@ -584,8 +593,7 @@ client := &http.Client{
     Timeout:   3 * time.Second,
 }
 
-// gRPC, both directions. Stats handlers, not interceptors: they see payload sizes
-// and per-message stream events that an interceptor cannot.
+// gRPC, both directions. otelgrpc ships only stats handlers; the interceptors are gone.
 srv := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 cc, err := grpc.NewClient(target,
     grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
@@ -738,6 +746,17 @@ Now add one label:
 At a conservative **2 KB of resident memory per active series** in a Prometheus-class
 backend, 3.1 billion series is **6.2 TB of RAM**. The backend does not degrade gracefully; it
 OOMs, and it takes with it your ability to see anything at all.
+
+The Go metric SDK puts a ceiling on this inside each process. Since
+`go.opentelemetry.io/otel/sdk/metric` v1.44.0 a `MeterProvider` collects at most **2000
+attribute sets per instrument per collect cycle** by default. Measurements for any further
+set are folded into one series carrying `otel.metric.overflow=true`, so totals stay correct
+but per-label detail is gone. `metric.WithCardinalityLimit(n)` changes the cap (zero or
+negative means unlimited), and `metric.WithCardinalityLimitSelector` on a reader sets it per
+instrument kind. The cap bounds each process, not the fleet: 300 pods each emitting 2000
+distinct `user_id` sets on a 13-series histogram still send 7.8 million series to the
+backend. And the visible failure moves from an OOM to quietly merged data, which is harder to
+notice (see the overflow pitfall in section 10).
 
 ```go
 // BROKEN: unbounded label. Every distinct user creates a permanent new series.
@@ -1008,6 +1027,24 @@ The permanent guard is a `View` with an `AttributeFilter` that allowlists attrib
 instrument, so an unapproved label is dropped in-process before it can ever reach the
 exporter. The cultural guard is stating a label's cardinality as a number in code review.
 
+### Dashboards went flat at 2000 series and nobody got paged
+
+A service on `go.opentelemetry.io/otel/sdk/metric` v1.44.0 or later labels a counter with
+`route` and `customer_id`. Below 2000 combinations every series is correct. The day the
+2001st combination appears, the SDK folds every new combination into a single series tagged
+`otel.metric.overflow=true`. Totals still add up, so the request-rate panel looks normal, but
+per-customer panels stop showing new customers and a per-route SLO query can miss a route
+that started failing after the cap was hit. Nothing errors and nothing OOMs.
+
+```promql
+# Alert when any instrument starts overflowing.
+sum by (job, __name__) ({otel_metric_overflow="true"}) > 0
+```
+
+The fix is the same bounded-label rule: drop `customer_id` from the metric and keep it on
+spans. Raise `metric.WithCardinalityLimit` only for an instrument whose cardinality you can
+state as a number, and alert on the overflow series so the cap is never hit silently.
+
 ### The wrapper handler was silently bypassed by every `With` call
 
 A service added a `ContextHandler` to inject trace ids, verified it on a test endpoint, and
@@ -1081,12 +1118,13 @@ point at which you give up is the one that tells you that you are giving up.
 | Tool | What it is for |
 |------|---------------|
 | **`log/slog`** `[1.21]` | Standard-library structured logging: `Logger`, `Handler`, `Record`, `Attr`, `LogValuer`, `LevelVar`, `NewMultiHandler` `[1.26]`. |
-| **`go.opentelemetry.io/otel`** | The OTel API: global providers, `Tracer`, `Meter`, propagators. What libraries import. v1.46.0. |
+| **`go.opentelemetry.io/otel`** | The OTel API: global providers, `Tracer`, `Meter`, propagators. What libraries import. v1.47.0. |
 | **`go.opentelemetry.io/otel/sdk`** | The implementation: `TracerProvider`, `MeterProvider`, samplers, batch processors, resources. What `main` imports. |
 | **`otlptracegrpc` / `otlpmetricgrpc`** | OTLP exporters over gRPC; HTTP variants exist for environments that block gRPC. |
 | **`otelhttp`** | `NewHandler` and `NewTransport` — inbound and outbound `net/http` instrumentation in two lines. |
-| **`otelgrpc`** v0.71.0 | `NewServerHandler` / `NewClientHandler`, wired with `grpc.StatsHandler`. |
-| **`otelslog`** v0.20.1 | Bridges `slog` records into the OTel logs pipeline via `NewHandler(name, WithLoggerProvider(lp))`. |
+| **`otelgrpc`** v0.72.0 | `NewServerHandler` / `NewClientHandler`, wired with `grpc.StatsHandler`. |
+| **`otelc`** v1 | Compile-time instrumentation: `otelc go build` injects OTel spans and runtime metrics into app code, dependencies and the standard library through `-toolexec`, with no runtime agent. |
+| **`otelslog`** v0.21.0 | Bridges `slog` records into the OTel logs pipeline via `NewHandler(name, WithLoggerProvider(lp))`. |
 | **`runtime/metrics`** | The stable, self-describing runtime metric interface, with histograms and no stop-the-world. |
 | **`runtime/pprof`** | Profiles plus `pprof.Do`/`pprof.Labels` for attributing CPU. Labels appear in tracebacks `[1.27]`. |
 | **`expvar`** | `/debug/vars`: a JSON dump of published variables and `memstats`, for near-zero effort. |
@@ -1110,7 +1148,11 @@ Prometheus-class backend that is 6.2 TB of RAM, and the backend OOMs rather than
 The rule that prevents every instance: state a label's cardinality as a number before adding
 it, and if you cannot bound it, it is not a label. High-cardinality identifiers go on span
 attributes and log attributes, both of which are sampled or storage-bound rather than
-multiplicative. A `View` with an `AttributeFilter` is the in-process backstop.
+multiplicative. A `View` with an `AttributeFilter` is the in-process backstop. Since
+`otel/sdk/metric` v1.44.0 the Go SDK also caps each instrument at 2000 attribute sets by
+default and folds the rest into an `otel.metric.overflow=true` series, so in one process the
+symptom is merged, wrong-looking data rather than an OOM; across 300 pods the backend still
+receives up to 2000 sets per pod.
 
 **Q: slog has no built-in context attributes, so how do you get a trace id onto every log line?**
 **Short:** Write a Handler whose Handle pulls the SpanContext out of ctx and adds trace_id and span_id to the Record before delegating.
@@ -1336,16 +1378,32 @@ of setup.
 **Q: How do you instrument an net/http server and a gRPC client with OTel in Go?**
 **Short:** Wrap the mux with otelhttp.NewHandler, the client transport with otelhttp.NewTransport, and pass otelgrpc handlers via grpc.StatsHandler.
 
-Server: `otelhttp.NewHandler(mux, "orders-api")`, and supply a
-`WithSpanNameFormatter` returning `r.Method + " " + r.Pattern` `[1.22]` so the span name is the
-**route pattern**, not the URL with ids in it — a span name is effectively a label in every
-backend UI. Outbound HTTP: `&http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}`.
+Server: `otelhttp.NewHandler(mux, "orders-api")`. Since contrib 1.44.0 the default span name is
+`{method} {route}` built from `r.Pattern` `[1.22]`, for example `GET /users/{id}`, so the span
+name is the **route pattern**, not the URL with ids in it; a span name is effectively a label in
+every backend UI. Outbound HTTP: `&http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}`.
 gRPC: `grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))` and
-`grpc.WithStatsHandler(otelgrpc.NewClientHandler())`. `otelgrpc` uses stats handlers rather
-than interceptors because they see payload sizes and per-message stream events an interceptor
-cannot. All four rely on the global propagator being set, and all four require the request's
+`grpc.WithStatsHandler(otelgrpc.NewClientHandler())`. Stats handlers are the only `otelgrpc` API:
+the unary and stream interceptors were removed in contrib 1.36.0 to 1.38.0 (2025). Since contrib
+1.42.0 (2026-03-06) `otelgrpc` no longer records message-size metrics or `rpc.message` span
+events, even with `WithMessageEvents`. All four rely on the global propagator being set, and all four require the request's
 `ctx` to be threaded through — a downstream call made with `context.Background()` produces an
 orphan trace no matter how the client is wrapped.
+
+**Q: When would you use otelc compile-time instrumentation instead of wiring otelhttp and otelgrpc by hand?**
+**Short:** When coverage matters more than visibility: `otelc go build` instruments every supported library with no code, but the spans come from code you cannot read in your repo.
+
+`otelc` v1 wraps the Go toolchain: `otelc go build` uses `-toolexec` to inject instrumentation
+into your code, its dependencies and the standard library as they compile, covering
+`net/http`, `database/sql`, gRPC, Redis and runtime metrics. That closes the gap that hand
+wiring leaves, where one client built without `otelhttp.NewTransport` breaks the trace. The
+costs are on the build side. Every build that must emit telemetry has to go through `otelc`,
+so CI, `go test` and local builds can disagree about what is instrumented. Span names and
+attributes come from injected code that is not in your source tree, so a reviewer cannot see
+them in a diff. A span around your own business function needs either the manual API or a
+hand-written `*.otelc.yml` function-hook rule. A common split is `otelc` for the library
+boundaries plus manual spans for domain work. Use OBI (eBPF) instead when you cannot rebuild
+the binary at all.
 
 **Q: Is a log line ever a substitute for a metric?**
 **Short:** No. Logs are unbounded and expensive per event while metrics are bounded and cheap, so counting by grepping logs breaks exactly when volume spikes.

@@ -86,11 +86,12 @@ Reactive variants (`Mono`/`Flux` signatures) come from `reactor-grpc` (Salesforc
 
 | Strategy | How | When |
 |----------|-----|------|
-| `@GrpcExceptionHandler` (`@GrpcAdvice`, net.devh only) | Central class maps exception → `Status` | Clean, controller-advice-like; not available on the Boot 4.1 native path |
-| `onError(StatusRuntimeException)` per call | Manual `responseObserver.onError(...)` | Fine-grained, per-method control; the portable choice under Boot 4.1 native |
+| `@GrpcAdvice` class with `@GrpcExceptionHandler` methods | Central class maps exception → `Status` | Controller-advice style; Boot 4.1 native (`org.springframework.grpc.server.advice`) and net.devh (`net.devh.boot.grpc.server.advice`) |
+| `GrpcExceptionHandler` beans (Boot 4.1 native) | Each bean returns a `StatusException`, or `null` for a type it does not handle | Programmatic; `SecurityGrpcExceptionHandler` is the auto-configured one for Spring Security failures |
+| `onError(StatusRuntimeException)` per call | Manual `responseObserver.onError(...)` | Fine-grained, per-method control |
 | Rich error model | `StatusProto.toStatusRuntimeException` with `google.rpc.ErrorInfo` / `BadRequest` details | Machine-readable structured errors |
 
-Boot 4.1's native gRPC support has no documented `@GrpcAdvice`-style central exception mapper — its own error-mapping story is `SecurityGrpcExceptionHandler` for security-specific failures and manual `Status` mapping (per call, or inside a shared `ServerInterceptor`) for everything else. A project moving off net.devh's `@GrpcAdvice` should consolidate its exception→`Status` mapping into one `ServerInterceptor` rather than looking for a like-for-like annotation.
+Boot 4.1 (Spring gRPC 1.1) runs every `GrpcExceptionHandler` bean, in `@Order`, through one `GrpcExceptionHandlerInterceptor`, and each `@GrpcAdvice` class becomes one more handler in that chain. A handler that returns `null` passes the exception on; if none matches, the call closes with `Status.fromThrowable`, which is `UNKNOWN` for a plain exception. A project moving off net.devh keeps its `@GrpcAdvice` classes and changes the imports to `org.springframework.grpc.server.advice`.
 
 ---
 
@@ -392,9 +393,19 @@ grpc:
 ```java
 import io.grpc.*;
 import org.springframework.core.annotation.Order;
+import org.springframework.grpc.server.GlobalServerInterceptor;
 
-@Order(100)                                 // runs after tracing (order 0), before logging (200)
-@net.devh.boot.grpc.server.interceptor.GrpcGlobalServerInterceptor
+@Configuration(proxyBeanMethods = false)
+class GrpcInterceptorConfig {
+
+    @Bean
+    @Order(100)                             // runs after tracing (order 0), before logging (200)
+    @GlobalServerInterceptor                // without this the bean is never added to any service
+    AuthServerInterceptor authServerInterceptor(JwtDecoder jwtDecoder) {
+        return new AuthServerInterceptor(jwtDecoder);
+    }
+}
+
 public class AuthServerInterceptor implements ServerInterceptor {
 
     static final Metadata.Key<String> AUTH =
@@ -426,7 +437,61 @@ public class AuthServerInterceptor implements ServerInterceptor {
 }
 ```
 
+On the native path a `ServerInterceptor` bean is global only when it carries
+`@GlobalServerInterceptor`; global interceptors sort by `@Order` and run before each
+service's own interceptors (`@GrpcService(interceptors = ...)`), which run in the order
+they are listed. `@GrpcService(blendWithGlobalInterceptors = true)` merges both lists into one
+`@Order` sort, and a `ServerInterceptorFilter` bean can exclude a global interceptor from
+specific services. The net.devh equivalent is `@GrpcGlobalServerInterceptor` on the class.
+
 The gRPC `Context` (not servlet `SecurityContextHolder`) carries identity, because a gRPC call is not servlet-scoped. net.devh's security module bridges this into `SecurityContextHolder` for `@Secured`/`@PreAuthorize` support; with the official starter you read the context key yourself or install the bridge interceptor.
+
+### Health service: `HealthStatusManager` and Kubernetes gRPC probes
+
+Spring gRPC auto-configures the standard `grpc.health.v1.Health` service, but only when
+`io.grpc:grpc-services` is on the classpath; Spring marks it optional, so add it yourself.
+Health is on by default once the app defines at least one `BindableService`, and otherwise
+needs `spring.grpc.server.health.enabled=true`. The empty service name `""` is the
+server-wide status that a probe with no `service` reads.
+
+Boot 4.1 drives the `HealthStatusManager` bean from Actuator health whenever a
+`HealthContributorRegistry` exists. Every 5 s (`spring.grpc.server.health.schedule.period`,
+after a 5 s initial delay) it writes the aggregated application health to `""` and each
+configured service's health to that service name; `UP` maps to `SERVING` by default
+(`spring.grpc.server.health.status.mapping`). The bean is registered with
+`enterTerminalState()` as its destroy method, so shutdown flips every service to
+`NOT_SERVING` without extra code:
+
+```yaml
+spring:
+  grpc:
+    server:
+      health:
+        schedule:
+          period: 5s                       # default
+        service:
+          "[acme.user.v1.UserService]":
+            include: db,redis              # health indicator IDs behind this service's status
+```
+
+A hand-written `health.setStatus("", ...)` is overwritten by the next scheduled update, so
+set statuses yourself only when there is no health registry or
+`spring.grpc.server.health.schedule.enabled=false`.
+
+```yaml
+# Kubernetes 1.27+ native gRPC probe: kubelet calls Health/Check on the gRPC port
+readinessProbe:
+  grpc:
+    port: 9090            # the gRPC port, not the actuator HTTP port
+    service: ""           # "" = server-wide status; or a fully qualified service name
+  periodSeconds: 5
+```
+
+The probe fails on any status other than `SERVING`, including `SERVICE_UNKNOWN` for a
+service name that was never set. Without `grpc-services` the server returns `UNIMPLEMENTED`
+for `Health/Check`, so a gRPC probe fails from the first check and the pod never becomes
+ready. A pod that serves only gRPC and no HTTP has no actuator port to point an
+`httpGet` probe at, which is why the gRPC health service matters there.
 
 ### Client interceptor — inject a token on every outbound call
 
@@ -453,8 +518,8 @@ public class TokenClientInterceptor implements ClientInterceptor {
 ### Error handling with @GrpcAdvice / @GrpcExceptionHandler
 
 ```java
-import net.devh.boot.grpc.server.advice.GrpcAdvice;
-import net.devh.boot.grpc.server.advice.GrpcExceptionHandler;
+import org.springframework.grpc.server.advice.GrpcAdvice;          // net.devh: net.devh.boot.grpc.server.advice.*
+import org.springframework.grpc.server.advice.GrpcExceptionHandler;
 
 @GrpcAdvice                                 // like @ControllerAdvice, but for gRPC
 public class GrpcExceptionAdvice {
@@ -845,16 +910,16 @@ The server side has no dedicated Boot property for this — override it with a c
 // BROKEN: metrics interceptor at order 0 (outermost) and observation at 300.
 // The trace span now starts AFTER metrics/auth/logging, so those inner costs
 // are invisible in the trace, and unauthenticated calls still get timed.
-@Bean @Order(0)   MetricsInterceptor metrics() { ... }
-@Bean @Order(300) ObservationGrpcServerInterceptor obs(ObservationRegistry r) { ... }
+@Bean @Order(0)   @GlobalServerInterceptor MetricsInterceptor metrics() { ... }
+@Bean @Order(300) @GlobalServerInterceptor ObservationGrpcServerInterceptor obs(ObservationRegistry r) { ... }
 ```
 
 ```java
 // FIXED: observation outermost (0) so the span wraps everything; auth next;
 // metrics innermost so it times only the handler.
-@Bean @Order(0)   ObservationGrpcServerInterceptor obs(ObservationRegistry r) { ... }
-@Bean @Order(100) AuthServerInterceptor auth(JwtDecoder d) { ... }
-@Bean @Order(300) MetricsInterceptor metrics() { ... }
+@Bean @Order(0)   @GlobalServerInterceptor ObservationGrpcServerInterceptor obs(ObservationRegistry r) { ... }
+@Bean @Order(100) @GlobalServerInterceptor AuthServerInterceptor auth(JwtDecoder d) { ... }
+@Bean @Order(300) @GlobalServerInterceptor MetricsInterceptor metrics() { ... }
 ```
 
 ---
@@ -876,11 +941,21 @@ The server side has no dedicated Boot property for this — override it with a c
 | `micrometer-tracing-bridge-otel` | Trace bridge to OTLP | Exports to Tempo/Jaeger |
 | Envoy gRPC-Web filter | Browser to gRPC translation | For SPA clients |
 | `grpcurl` | CLI to call gRPC by reflection | The `curl` of gRPC; needs reflection service |
+| `io.grpc:grpc-services` | Standard `grpc.health.v1.Health` service | Optional dependency; add it or no health service is registered |
+| `HealthStatusManager` | Holds per-service `ServingStatus` | Boot 4.1 updates it from Actuator health every 5 s; `enterTerminalState()` runs on shutdown |
 | gRPC server reflection | Runtime service/method discovery | `spring.grpc.server.reflection.enabled=false` to disable in prod if sensitive |
 
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: You declare a `ServerInterceptor` as a `@Bean` with `@Order(100)` under Boot 4.1 native gRPC and it never runs. Why?**
+**Short:** A plain interceptor bean is not applied to any service; it must be annotated @GlobalServerInterceptor or listed in @GrpcService(interceptors = ...).
+Spring gRPC applies a `ServerInterceptor` bean to every service only when the bean or its factory method carries `@GlobalServerInterceptor`; a bare `@Bean` is just an object in the context. Per-service interceptors go in `@GrpcService(interceptors = ...)`. Ordering then has two levels: global interceptors sorted by `@Order` run first, then the service's own interceptors in the order the attribute lists them, so a per-service interceptor annotated `@Order(0)` still runs inside a global one at order 300. Set `blendWithGlobalInterceptors = true` on `@GrpcService` to sort both lists together, and use a `ServerInterceptorFilter` bean to keep a global interceptor off specific services (for example, auth off the health service). net.devh code uses `@GrpcGlobalServerInterceptor` instead, so the annotation is the usual thing lost in a migration.
+
+**Q: How do you wire Kubernetes readiness for a gRPC-only Spring service?**
+**Short:** Add io.grpc:grpc-services so Spring gRPC registers the Health service, let Boot feed it from Actuator health, and point a native grpc probe at the gRPC port.
+Spring gRPC auto-configures the standard `grpc.health.v1.Health` service and a `HealthStatusManager` bean, but only when the optional `io.grpc:grpc-services` dependency is present; without it `Health/Check` returns `UNIMPLEMENTED` and every probe fails. Health is enabled by default when at least one `BindableService` exists (otherwise set `spring.grpc.server.health.enabled=true`). With Actuator present, Boot 4.1 copies the aggregated application health into the server-wide `""` status every 5 s (`spring.grpc.server.health.schedule.period`), maps configured services from their `spring.grpc.server.health.service.<name>.include` indicators, and calls `enterTerminalState()` on shutdown, so every service turns `NOT_SERVING` while in-flight calls drain; a manual `setStatus("")` is overwritten by the next update. In the pod spec use a native `grpc:` probe (Kubernetes 1.27+) on the gRPC port with `service: ""` for server-wide status or a fully qualified service name for one service; anything but `SERVING`, including `SERVICE_UNKNOWN`, fails the probe.
 
 **Q: Why does a gRPC client call hang forever, and how do you prevent it?**
 **Short:** A blocking stub with no deadline waits indefinitely for a peer that never replies.
@@ -899,8 +974,8 @@ A deadline is an absolute wall-clock instant that propagates through the entire 
 Read the token from `Metadata` in a `ServerInterceptor`, build an `Authentication`, and bind it into the gRPC `Context` with `Contexts.interceptCall`. Because gRPC calls are not servlet-scoped, the servlet `SecurityContextHolder` is not populated automatically; the interceptor either stores identity in the gRPC `Context` (read directly downstream) or, with net.devh's security bridge, copies it into `SecurityContextHolder` so `@Secured`/`@PreAuthorize` work as in MVC. Do this in one global interceptor, not per method.
 
 **Q: Why does an unhandled server exception reach the client as UNKNOWN, and how do you fix it?**
-**Short:** gRPC strips stack traces and maps unmapped exceptions to Status.UNKNOWN with no description.
-Because gRPC strips stack traces for security and maps any unmapped exception to `Status.UNKNOWN` with no description, so the caller cannot distinguish a bug from "not found" from bad input. Fix it with a central `@GrpcAdvice` class whose `@GrpcExceptionHandler` methods map each domain exception to a canonical `Status` (`EntityNotFoundException` → `NOT_FOUND`, `IllegalArgumentException` → `INVALID_ARGUMENT`), and always include a catch-all so nothing silently degrades to `INTERNAL`.
+**Short:** gRPC closes the call with Status.UNKNOWN and no description; map exceptions centrally with @GrpcAdvice or GrpcExceptionHandler beans plus a catch-all.
+Because gRPC strips stack traces for security and closes the call with `Status.fromThrowable`, which is `Status.UNKNOWN` with no description for any exception that is not a `StatusException`, so the caller cannot distinguish a bug from "not found" from bad input. Fix it centrally. On Boot 4.1 native, either declare `GrpcExceptionHandler` beans (each returns a `StatusException`, or `null` to pass the exception to the next handler) or write a `@GrpcAdvice` class whose `@GrpcExceptionHandler` methods map each domain exception to a canonical `Status` (`EntityNotFoundException` → `NOT_FOUND`, `IllegalArgumentException` → `INVALID_ARGUMENT`); net.devh supports the same `@GrpcAdvice` style under its own package. Always include a catch-all that returns `INTERNAL` with a safe description so nothing silently degrades to `UNKNOWN`.
 
 **Q: What happens if a server-side handler calls onNext but forgets onCompleted?**
 **Short:** The response stream never closes, so the client blocks until its deadline fires and times out.
@@ -980,7 +1055,7 @@ Choose gRPC for internal service-to-service traffic where a strict typed contrac
 
 1. Set `withDeadlineAfter` on every client call and a channel-level `deadline` backstop; an unbounded internal RPC is never acceptable.
 2. Terminate every `StreamObserver` exactly once — `onCompleted()` on success, `onError()` on failure — or the peer hangs until its deadline.
-3. Centralize error mapping in one place and always include a catch-all so nothing degrades to `UNKNOWN` — a `@GrpcAdvice`/`@GrpcExceptionHandler` class on net.devh, or a shared `ServerInterceptor` on Boot 4.1 native, which has no advice-style equivalent.
+3. Centralize error mapping in one place and always include a catch-all so nothing degrades to `UNKNOWN`: a `@GrpcAdvice` class with `@GrpcExceptionHandler` methods (Boot 4.1 native or net.devh), or `GrpcExceptionHandler` beans on Boot 4.1 native.
 4. Put cross-cutting concerns in global interceptors, not method bodies: observation at order 0, auth at 100, authorization at 150, logging at 200, metrics innermost.
 5. Carry identity, trace, and tenant in `Metadata` and the gRPC `Context`; never smuggle them into the Protobuf message.
 6. Authenticate in an interceptor, authorize with `@Secured`/`@PreAuthorize` — keep the "who" and "may you" checks separate, mapping to `UNAUTHENTICATED` and `PERMISSION_DENIED`.
@@ -1053,10 +1128,15 @@ public class PricingGrpcService extends PricingServiceGrpc.PricingServiceImplBas
     }
 }
 
+@Configuration
+@ImportGrpcClients(target = "pricing-service", types = PricingServiceGrpc.PricingServiceBlockingStub.class)
+class PricingClientConfig { }
+
 @Service
 public class OrderService {
-    @GrpcClient("pricing-service")
-    private PricingServiceGrpc.PricingServiceBlockingStub pricing;
+    private final PricingServiceGrpc.PricingServiceBlockingStub pricing;
+
+    public OrderService(PricingServiceGrpc.PricingServiceBlockingStub pricing) { this.pricing = pricing; }
 
     public Quote getQuote(String sku, int qty) {
         try {

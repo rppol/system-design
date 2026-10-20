@@ -57,8 +57,8 @@ Client Requests
      |
      v
 [Model Serving Tier]
-  ├── GPT-4o (complex queries)
-  ├── GPT-4o-mini (simple queries)
+  ├── gpt-6-sol (complex queries)
+  ├── gpt-6-luna (simple queries)
   ├── Self-hosted 7B (high-volume, low-stakes)
   └── Specialized models (code, embedding, etc.)
 ```
@@ -71,17 +71,17 @@ Route queries to the appropriate model based on complexity (full treatment: [LLM
 def route_request(query: str, user_tier: str) -> str:
     # Cost-aware routing
     if user_tier == "free":
-        return "gpt-4o-mini"  # Cheap model for free tier
+        return "gpt-6-luna"   # Cheap model for free tier
 
     # Complexity estimation
     complexity = estimate_complexity(query)
 
     if complexity < 0.3:
-        return "gpt-4o-mini"   # Simple Q&A
+        return "gpt-6-luna"    # Simple Q&A
     elif complexity < 0.7:
-        return "gpt-4o"        # Medium complexity
+        return "gpt-6-sol"     # Medium complexity
     else:
-        return "gpt-5.6-sol"   # Complex reasoning (frontier tier)
+        return "gpt-6-astra"   # Complex reasoning (frontier tier)
 
 def estimate_complexity(query: str) -> float:
     # Options:
@@ -128,7 +128,7 @@ Prompts are the most frequently changed component in an LLM system. A git-like w
 Prompt Registry Schema:
   prompt_id:       "customer_support_v1"
   version:         "2.3.1"          (semantic versioning)
-  model:           "gpt-4o"
+  model:           "gpt-6-sol"
   temperature:     0.7
   max_tokens:      1024
   author:          "alice@company.com"
@@ -287,10 +287,10 @@ Cost per token estimation:
   Cost: $3/hr / (1000 tokens/sec × 3600 sec) = $0.00000083 per token
   = $0.00083 per 1000 tokens
 
-  Compare to OpenAI gpt-4o-mini: $0.15/1M input, $0.60/1M output
-  Self-hosted 7B: ~$0.83 per 1M tokens = 38% MORE expensive than
-                  gpt-4o-mini's output price, and 5.5x its input price
-  And gpt-4o-mini is much higher quality than a 7B
+  Compare to OpenAI gpt-6-luna: $0.10/1M input, $0.50/1M output
+  Self-hosted 7B: ~$0.83 per 1M tokens = 66% MORE expensive than
+                  gpt-6-luna's output price, and 8.3x its input price
+  And gpt-6-luna is much higher quality than a 7B
 
   Sweet spot: use self-hosted models where quality is sufficient,
               API models where quality is critical
@@ -307,7 +307,7 @@ That framing matters because the numerator (rent) is fixed the moment you provis
 | `3600` | Seconds in an hour. The unit bridge between "$/hr" and "$/token" |
 | `$0.00000083` | Cost of one token. Too small to reason about — always restate per 1M |
 | `$/1M tok` | The comparable unit. Every API provider quotes this, so convert to it |
-| `$0.15/1M` | gpt-4o-mini input price, the API side of the comparison |
+| `$0.10/1M` | gpt-6-luna input price, the API side of the comparison |
 
 **Walk one example.** The H100 numbers from the block above, carried all the way to the comparable unit:
 
@@ -320,13 +320,13 @@ That framing matters because the numerator (rent) is fixed the moment you provis
   cost per 1K tokens      = $0.00000083 x 1,000      = $0.00083
   cost per 1M tokens      = $0.00000083 x 1,000,000  = $0.83
 
-  vs gpt-4o-mini output   = $0.60 per 1M tokens      <- API is CHEAPER here
-  vs gpt-4o-mini input    = $0.15 per 1M tokens      <- API is 5.5x cheaper here
+  vs gpt-6-luna output    = $0.50 per 1M tokens      <- API is CHEAPER here
+  vs gpt-6-luna input     = $0.10 per 1M tokens      <- API is 8.3x cheaper here
 ```
 
-The arithmetic says self-hosting a 7B at $0.83/1M loses to gpt-4o-mini's $0.60/1M output price outright — and loses badly on input. Self-hosting only wins once throughput climbs (bigger batches, FP8/INT4, better engine) or the GPU is bought on spot, both of which move one of the two numbers above.
+The arithmetic says self-hosting a 7B at $0.83/1M loses to gpt-6-luna's $0.50/1M output price outright — and loses badly on input. Self-hosting only wins once throughput climbs (bigger batches, FP8/INT4, better engine) or the GPU is bought on spot, both of which move one of the two numbers above.
 
-**Why the "per hour" framing is the trap.** The formula silently assumes the GPU is saturated for the full hour. At 30% utilization your real denominator is 1,080,000 tokens, not 3,600,000, and the true cost per 1M tokens is `$0.83 / 0.30 = $2.77` — over 4x the API price. This is the single most common self-hosting cost miscalculation: the quoted number is a *peak-throughput* number, and idle GPU time is billed at exactly the same rate as busy GPU time.
+**Why the "per hour" framing is the trap.** The formula silently assumes the GPU is saturated for the full hour. At 30% utilization your real denominator is 1,080,000 tokens, not 3,600,000, and the true cost per 1M tokens is `$0.83 / 0.30 = $2.77`, over 5x the $0.50/1M API output price. This is the single most common self-hosting cost miscalculation: the quoted number is a *peak-throughput* number, and idle GPU time is billed at exactly the same rate as busy GPU time.
 
 ### Monitoring LLM Quality
 
@@ -532,9 +532,9 @@ Metrics (Prometheus + Grafana):
   cache_hit_rate
 
 Logs (structured JSON):
-  { "trace_id": "...", "model": "gpt-4o", "user_id": "...",
+  { "trace_id": "...", "model": "gpt-6-sol", "user_id": "...",
     "input_tokens": 500, "output_tokens": 150, "latency_ms": 1200,
-    "cost_usd": 0.0015, "cache_hit": false, "safety_flag": false }
+    "cost_usd": 0.0025, "cache_hit": false, "safety_flag": false }
 
 Quality dashboard:
   Daily: helpfulness score (LLM-as-judge), refusal rate, error rate
@@ -770,8 +770,8 @@ Request tagging:
 
   Gateway enriches with cost data:
     { ...metadata,
-      "model": "gpt-4o", "input_tokens": 1200, "output_tokens": 450,
-      "cost_usd": 0.0075, "cache_hit": false,
+      "model": "gpt-6-sol", "input_tokens": 1200, "output_tokens": 450,
+      "cost_usd": 0.0069, "cache_hit": false,
       "timestamp": "2025-03-15T14:30:00Z" }
 
 Cost aggregation pipeline:
@@ -810,10 +810,11 @@ class CostTracker:
     """Per-request cost tracking at the gateway layer."""
 
     MODEL_PRICING = {
-        "gpt-4o":          {"input": 2.50, "output": 10.00},   # per 1M tokens
-        "gpt-4o-mini":     {"input": 0.15, "output": 0.60},
-        "claude-sonnet-5": {"input": 3.00, "output": 15.00},
-        "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
+        "gpt-6-sol":         {"input": 2.00, "output": 10.00},   # per 1M tokens
+        "gpt-6-luna":        {"input": 0.10, "output": 0.50},
+        "claude-sonnet-5-5": {"input": 2.00, "output": 10.00},
+        # Haiku 5.5 bills $0.50/$2.50 once a prompt exceeds 100K tokens.
+        "claude-haiku-5-5":  {"input": 0.10, "output": 0.50},
     }
 
     def track(self, request: LLMRequest, response: LLMResponse):
@@ -845,25 +846,25 @@ plausible.
 | `input_tokens` | Prompt plus system prompt plus retrieved context. Usually the larger count |
 | `output_tokens` | Generated tokens. Usually 4-10x more expensive per token |
 | `1_000_000` | Unit bridge. Converts raw counts into the "per 1M tokens" price unit |
-| `pricing["input"]` | Dollars per 1M input tokens. gpt-4o: 2.50 |
-| `pricing["output"]` | Dollars per 1M output tokens. gpt-4o: 10.00 |
+| `pricing["input"]` | Dollars per 1M input tokens. gpt-6-sol: 2.00 |
+| `pricing["output"]` | Dollars per 1M output tokens. gpt-6-sol: 10.00 |
 
-**Walk one example.** The gpt-4o request logged in the tagging block above (1,200 in, 450 out):
+**Walk one example.** The gpt-6-sol request logged in the tagging block above (1,200 in, 450 out):
 
 ```
-  input  = (1,200 / 1,000,000) x $2.50   = 0.0012 x 2.50   = $0.00300
+  input  = (1,200 / 1,000,000) x $2.00   = 0.0012 x 2.00   = $0.00240
   output = (  450 / 1,000,000) x $10.00  = 0.00045 x 10.00 = $0.00450
                                                              ---------
-  total cost                                               = $0.00750
+  total cost                                               = $0.00690
 
-  same request on gpt-4o-mini:
-  input  = 0.0012  x $0.15 = $0.00018
-  output = 0.00045 x $0.60 = $0.00027   -> total $0.00045   = 16.7x cheaper
+  same request on gpt-6-luna:
+  input  = 0.0012  x $0.10 = $0.000120
+  output = 0.00045 x $0.50 = $0.000225  -> total $0.000345  = 20x cheaper
 ```
 
-Note the shape: output is only 27% of the token count but 60% of the cost, because output is
-priced 4x higher. This is why `max_tokens` ceilings are a cost control and truncating the
-prompt usually is not — and why routing a query to gpt-4o-mini saves 16.7x while trimming
+Note the shape: output is only 27% of the token count but 65% of the cost, because output is
+priced 5x higher. This is why `max_tokens` ceilings are a cost control and truncating the
+prompt usually is not, and why routing a query to gpt-6-luna saves 20x while trimming
 context saves single-digit percentages.
 
 ---
@@ -883,7 +884,8 @@ context saves single-digit percentages.
 - Published model lifecycle: models move Active -> Legacy -> Deprecated -> Retired, with at
   least 60 days' notice before retirement and a named replacement model for each deprecation
 - Published deprecation table gives every model a tentative retirement date, so callers can
-  plan migrations (e.g. `claude-opus-4-1-20250805` retires 2026-08-05, replaced by `claude-opus-4-8`)
+  plan migrations (e.g. `claude-sonnet-4-5-20250929`, deprecated 2026-09-30, retires 2026-11-30
+  with `claude-sonnet-5-5` as the named replacement)
 - API parameters are versioned the same way: `temperature`/`top_p`/`top_k` return 400 on
   Claude Opus 4.7 and later, so an unsupported sampling parameter fails loudly at the call site
 - Rollout mechanics and internal safety-monitoring thresholds are not published
@@ -912,7 +914,7 @@ context saves single-digit percentages.
 
 | Decision | Self-Hosted | Managed API |
 |----------|------------|-------------|
-| Cost at scale | Low (amortized GPU) | Per-token ($0.0006/1K out on a small model like gpt-4o-mini up to $0.03/1K out on a frontier model) |
+| Cost at scale | Low (amortized GPU) | Per-token ($0.0005/1K out on a small model like gpt-6-luna up to $0.05/1K out on a frontier model like gpt-6-astra) |
 | Setup complexity | High | None |
 | Latency | Low (no external calls) | Variable (network + queuing) |
 | Model quality | Limited to open models | Best models available |
@@ -1052,7 +1054,7 @@ Semantic caching stores LLM responses keyed by the semantic meaning of the query
 
 **Q: How do you design a model routing system for multi-model deployments?**
 **Short:** A routing classifier sends most simple queries to a cheap model and the rest to an expensive one, saving 50-70% cost for only 2-5% quality loss.
-Model routing directs each query to the optimal model based on complexity, cost budget, and quality requirements. Architecture: (1) a lightweight classifier (fine-tuned BERT or rule-based) analyzes the incoming query; (2) routes to cheap model (GPT-4o-mini, LLaMA 8B) for simple queries or expensive model (GPT-4o, Claude Sonnet 5) for complex ones. Routing signals: query length, topic classification, required reasoning depth (presence of "compare," "analyze," "why"), user tier (premium vs free). Implementation pattern: route 70-80% of traffic to the cheap model, 20-30% to the expensive model. Quality control: run a random 5% of cheap-model responses through the expensive model to verify quality isn't degrading. Cost impact: routing saves 50-70% vs sending everything to the expensive model, with only 2-5% quality degradation on average. Not Diamond, OpenRouter, and Unify offer managed routing; for custom routing, train a classifier on (query, best_model) pairs collected from A/B testing.
+Model routing directs each query to the optimal model based on complexity, cost budget, and quality requirements. Architecture: (1) a lightweight classifier (fine-tuned BERT or rule-based) analyzes the incoming query; (2) routes to cheap model (gpt-6-luna, LLaMA 8B) for simple queries or expensive model (gpt-6-sol, Claude Sonnet 5.5) for complex ones. Routing signals: query length, topic classification, required reasoning depth (presence of "compare," "analyze," "why"), user tier (premium vs free). Implementation pattern: route 70-80% of traffic to the cheap model, 20-30% to the expensive model. Quality control: run a random 5% of cheap-model responses through the expensive model to verify quality isn't degrading. Cost impact: routing saves 50-70% vs sending everything to the expensive model, with only 2-5% quality degradation on average. Not Diamond, OpenRouter, and Unify offer managed routing; for custom routing, train a classifier on (query, best_model) pairs collected from A/B testing.
 
 **Q: How do you estimate and optimize GPU cost for LLM serving?**
 **Short:** GPU serving cost is estimated from tokens-per-second throughput per dollar, with self-hosting beating API pricing only above a break-even volume.
@@ -1075,8 +1077,8 @@ Meter at the LLM gateway — the single choke point every request already passes
 LLM observability requires tracking both traditional service metrics and LLM-specific quality signals. Traditional: latency (TTFT, TPOT, end-to-end), throughput, error rates, availability. LLM-specific: (1) output quality — run LLM-as-judge scoring on a sample of responses (5-10%) using a stronger model; (2) hallucination detection — compare generated facts against retrieved context (faithfulness scoring); (3) token usage — track input/output tokens per request for cost monitoring; (4) drift detection — monitor embedding distribution of queries and responses over time; (5) user feedback — thumbs up/down, regeneration rate (users clicking "try again" indicates poor quality). Tools: LangSmith, Langfuse, or Arize Phoenix for LLM tracing; Prometheus + Grafana for service metrics. Critical alerts: response latency P99 > SLO, hallucination rate > threshold, cost per query spike, model error rate increase. Store full request/response pairs (with PII redaction) for debugging — LLM failures are often content-dependent and impossible to reproduce without the exact input.
 
 **Q: How do you implement graceful degradation when an LLM provider has an outage?**
-**Short:** Graceful degradation chains primary, secondary, and self-hosted fallback models behind a circuit breaker that trips after consecutive failures.
-Graceful degradation requires a fallback chain and circuit breaker pattern. Implementation: (1) primary model (e.g., GPT-4o) → (2) secondary model (e.g., Claude Sonnet 5) → (3) tertiary fallback (e.g., self-hosted LLaMA 70B) → (4) cached responses or static fallback. Circuit breaker: after N consecutive failures or error rate > threshold within a time window, stop sending requests to the failing provider and switch to the next in the chain. Practical considerations: (1) prompt compatibility — different models may need prompt adjustments (maintain provider-specific prompt templates); (2) quality monitoring — track quality metrics per provider to detect degradation before full outage; (3) cost implications — fallback models may be more expensive; (4) latency — secondary providers may have different latency profiles. Use LiteLLM or a custom gateway that abstracts provider-specific APIs behind a unified interface. Test failover regularly — run chaos engineering exercises that simulate provider outages monthly.
+**Short:** Chain primary, secondary, and self-hosted fallback models behind a circuit breaker that trips on overload errors and timeouts, while 429 rate-limit errors get backoff, not failover.
+Graceful degradation requires a fallback chain and circuit breaker pattern. Implementation: (1) primary model (e.g., gpt-6-sol) → (2) secondary model (e.g., Claude Sonnet 5.5) → (3) tertiary fallback (e.g., self-hosted LLaMA 70B) → (4) cached responses or static fallback. Circuit breaker: after N consecutive failures or error rate > threshold within a time window, stop sending requests to the failing provider and switch to the next in the chain. Classify errors before they reach the breaker. OpenAI (changelog, 2026-09-02) returns `429` with code `slow_down` when your own traffic ramps too fast and `503` with code `server_is_overloaded` when the model is overloaded; both may carry `Retry-After`. A `slow_down` 429 says the provider is healthy and your client is the problem, so wait at least `Retry-After` (exponential backoff if absent), smooth the ramp, and do not count it toward the trip threshold; failing over would move the same burst onto the secondary. A `server_is_overloaded` 503, 5xx and timeouts count, and a sustained run of them trips the breaker to the next provider. Practical considerations: (1) prompt compatibility: different models may need prompt adjustments (maintain provider-specific prompt templates); (2) quality monitoring: track quality metrics per provider to detect degradation before full outage; (3) cost implications: fallback models may be more expensive; (4) latency: secondary providers may have different latency profiles. Use LiteLLM or a custom gateway that abstracts provider-specific APIs behind a unified interface. Test failover regularly: run chaos engineering exercises that simulate provider outages monthly.
 
 ---
 

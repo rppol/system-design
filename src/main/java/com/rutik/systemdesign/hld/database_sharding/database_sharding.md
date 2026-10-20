@@ -1180,7 +1180,7 @@ Shard proxies sit between the application and the database shards, abstracting t
 - Coordinator node routes queries to worker shards
 - Worker nodes each hold a subset of data
 - Supports distributed joins and aggregations natively
-- Used by Microsoft Azure (managed offering: Azure Cosmos DB for PostgreSQL)
+- Managed on Azure as elastic clusters in Azure Database for PostgreSQL
 
 ---
 

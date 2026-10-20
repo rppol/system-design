@@ -193,13 +193,23 @@ Deep:       [ name="Enemy" | health=100 | config ──────────>
 
 ---
 
-## 12. When to Use
+## 12. When to Use / When NOT to Use
+
+### When to Use
 
 - **Object creation is expensive**: Loading from DB, disk, network; complex computation; large initialization graphs.
 - **Many similar objects needed**: Game units, document templates, UI component configurations — where objects share most state but vary in a few fields.
 - **Client should be decoupled from concrete types**: The client only knows the `Prototype` interface; a registry provides the actual objects.
 - **Dynamic type configuration at runtime**: New object "variants" are added by registering new prototypes — no new classes needed.
 - **Copying state at a point in time**: Snapshot patterns — capture the current state of an object and clone it for undo/redo or comparison.
+
+### When NOT to Use
+
+- **Construction is cheap**: if `new` plus a few setters costs microseconds, a clone saves nothing and adds a copy method that must track every field the class gains. Use a constructor or a Builder.
+- **The object is immutable**: a Java `record` or an object with only `final` immutable fields can be shared as-is. Copying it wastes memory; derive variants with a `with`-style method or `toBuilder()` instead.
+- **The object graph holds external resources**: a clone of an object that owns a socket, file handle, JDBC `Connection`, or thread cannot duplicate that resource. Two copies end up sharing or double-closing it. Rebuild those objects from configuration.
+- **Identity matters**: entities keyed by a database id or a UUID must not be copied with the same identity. If every clone must reset the id, version, and audit fields, a factory that builds a fresh entity is clearer.
+- **The graph is deep and cyclic and changes often**: every new mutable field is a new place to forget a deep copy. If the class changes every sprint, the copy method rots faster than the construction cost it saves.
 
 ---
 

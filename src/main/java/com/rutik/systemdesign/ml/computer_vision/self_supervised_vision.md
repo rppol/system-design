@@ -103,6 +103,28 @@ Entropy is the collapse detector: sharpening alone drives it toward 0 (one dimen
 
 DINO emergent behavior: attention maps from the last layer reliably segment foreground objects without any segmentation training. DINOv2 scales this up with a curated dataset, adding iBOT (masked token prediction) objective and register tokens.
 
+### Scaled Self-Distillation: DINOv3 and Gram Anchoring
+
+DINOv3 (Siméoni et al., Meta, August 2025) scales the DINOv2 recipe to a 7B-parameter ViT teacher trained on LVD-1689M, a curated set of about 1.7B web images, and then distills it into ViT-S, ViT-B, ViT-L, ViT-H+ and ConvNeXt students that most teams actually deploy. A satellite variant is trained on 493M satellite images.
+
+Scaling exposed a problem: with long training, global metrics such as ImageNet linear-probe accuracy kept rising, but dense features got worse. Patch embeddings became noisy and less local, which hurts segmentation and depth. **Gram anchoring** fixes this. For an image with `P` patches, stack the L2-normalized patch features into a `P x d` matrix `X`; its Gram matrix `X X^T` holds every pairwise patch similarity. A Gram teacher, an earlier checkpoint whose dense features were still clean, supplies a target Gram matrix, and the loss
+
+```
+L_gram = || X_student X_student^T  -  X_gram X_gram^T ||_F^2
+```
+
+pulls the student's patch-to-patch similarity structure back to the teacher's while leaving the features free to change in other ways. The global objectives keep improving and the dense features stop degrading. DINOv3 ships under the custom DINOv3 License, not Apache 2.0, so check it before replacing a DINOv2 backbone in a commercial product.
+
+### Joint-Embedding Predictive Architectures: I-JEPA and V-JEPA 2
+
+JEPA models predict *representations* of hidden regions, not pixels. **I-JEPA** (Assran et al., CVPR 2023) takes one large context block of an image, encodes it, and uses a narrow predictor to output the embeddings of several masked target blocks. The targets come from an EMA target encoder, as in BYOL and DINO. Two differences from MAE matter. The loss lives in embedding space, so the model does not spend capacity on texture and pixel detail it cannot predict. And there are no hand-made augmentations such as color jitter, so the features do not inherit those invariances. I-JEPA trained a ViT-H/14 on ImageNet in under 72 hours on 16 A100s.
+
+**V-JEPA 2** (Meta, June 2025) applies the same idea to video at about 1B parameters, pretrained on over 1M hours of video. A second stage, V-JEPA 2-AC, adds an action-conditioned predictor trained on under 62 hours of unlabeled robot video from the DROID dataset and plans zero-shot pick-and-place on Franka arms in new labs by searching for actions whose predicted future embedding matches a goal image.
+
+### Language-Free Scaling: Web-SSL
+
+CLIP-style models were long assumed to beat pure visual SSL on vision-language tasks because they see captions. Web-SSL (Fan et al., Meta, April 2025) tested this by training DINO-style (Web-DINO) and MAE-style (Web-MAE) ViTs from 1B to 7B parameters on MC-2B, 2B web images from the MetaCLIP data with the captions discarded. Visual SSL kept improving with model size and data, and at the larger sizes matched CLIP on VQA benchmarks, including OCR and chart questions when the training images were filtered toward text-rich ones. The lesson for a design review: when an encoder underperforms on a task, the data distribution and scale are the first suspects, not the absence of language supervision.
+
 ### Masked Autoencoder: MAE
 
 MAE applies to ViT exclusively:
@@ -772,6 +794,8 @@ def linear_probe_eval(backbone: nn.Module,
 | DINO | No (centering) | No (1024) | Medium | 77.0% (ViT-S/16) | Medium |
 | MAE | No | No (1024) | Low (encoder only) | 73.5% (ViT-B fine-tune 83.1%) | Fast |
 | DINOv2 | No | No | High (14M dataset curation) | 86.5% (ViT-g/14) | Very fast downstream |
+| DINOv3 | No | No | Very high (7B teacher, then distillation) | Distilled students for deployment; best dense features of the family | Very fast downstream |
+| I-JEPA | No | No | Medium (no pixel decoder) | Linear probe above MAE at the same size | Fast (16 A100s, under 72 h for ViT-H/14) |
 
 | Evaluation Protocol | When to Use | Typical Gap vs Full Fine-Tune |
 |---------------------|-------------|-------------------------------|
@@ -793,6 +817,10 @@ def linear_probe_eval(backbone: nn.Module,
 **Use SimCLR/MoCo when**: you have a large GPU cluster (8-64 GPUs) and want well-understood contrastive representations. MoCo is preferable on compute budget since it does not need large batches.
 
 **Use DINO/DINOv2 when**: you want the best transfer features without labels. Use the pretrained DINOv2 checkpoints directly — reproducing DINO training is expensive (8× A100, 2–5 days).
+
+**Use DINOv3 when**: the task is dense (segmentation, depth, correspondence) and the DINOv3 License fits; start with a distilled ViT-L/16 student, not the 7B teacher.
+
+**Use a JEPA model when**: you want features without augmentation-induced invariances (for example, color matters to the task), or for video and world-model planning (V-JEPA 2).
 
 **Use MAE when**: your backbone is ViT and you want efficient pretraining (encoder only sees 25% of patches, so training is ~3× faster than full-image methods at the same parameter count). Fine-tuning outperforms linear probing significantly for MAE.
 
@@ -828,7 +856,9 @@ A team compared a supervised ResNet-50 (76.1% top-1) vs a BYOL-pretrained ResNet
 |------|-----------------|-------|
 | Lightly AI | SimCLR, MoCo, BYOL, DINO, MAE | Best all-in-one SSL library |
 | solo-learn | 20+ SSL methods | Research-oriented, PyTorch Lightning |
-| VISSL (Meta) | SimCLR, MoCo, BYOL, DINO, BarlowTwins | Meta's production SSL library |
+| DINOv3 (Meta) | DINOv3 ViT and distilled ConvNeXt checkpoints, training code | Official repo; weights load via `torch.hub.load` |
+| I-JEPA / V-JEPA 2 (Meta) | JEPA pretraining code and checkpoints | facebookresearch/ijepa and facebookresearch/vjepa2 |
+| Web-SSL (Meta) | Web-DINO and Web-MAE checkpoints, 1B to 7B parameters | facebookresearch/webssl |
 | timm | DINOv2, CLIP, MAE checkpoints | Best for loading pretrained SSL models |
 | transformers (HF) | MAE, DINO, BEiT | HF API for masked autoencoders |
 | open_clip | CLIP, SigLIP | Best variety of CLIP-style models |
@@ -916,6 +946,21 @@ Dimensional collapse is when embeddings span only a low-dimensional subspace rat
 **Short:** MAE's heavy encoder only processes the 25% visible patches while a lightweight discarded decoder reconstructs the rest, cutting pretraining compute roughly 3x.
 MAE's encoder processes only the 25% of visible patches while a lightweight decoder reconstructs the rest, cutting pretraining compute roughly 3× and pushing semantic understanding into the encoder. Because the heavy encoder never wastes compute on mask tokens, MAE can pretrain large ViTs on the same budget as much smaller full-image models. The decoder is deliberately shallow and narrow — it only needs to solve the pixel-reconstruction task and is thrown away downstream, so representation quality is concentrated in the encoder rather than split across both halves. This asymmetry is the key efficiency trick that distinguishes MAE from BERT-style masked modeling where the whole sequence is encoded.
 
+**Q: Why did DINOv3 need Gram anchoring, and what does the loss constrain?**
+**Short:** Long training at 7B scale kept improving global accuracy while dense patch features degraded; Gram anchoring matches the student's patch-similarity matrix to an earlier, cleaner checkpoint.
+
+At DINOv3's scale, ImageNet linear-probe accuracy kept rising during long schedules while segmentation and depth probes got worse, because patch features lost locality and became noisy. Gram anchoring takes the L2-normalized patch features `X` of an image and computes the Gram matrix `X X^T`, the full set of patch-to-patch similarities. It penalizes the Frobenius distance between the student's Gram matrix and that of a Gram teacher, an earlier checkpoint with clean dense features. It constrains only the similarity structure, so the features can keep improving on the global objectives without losing the spatial structure dense tasks rely on.
+
+**Q: How does I-JEPA differ from MAE when both mask parts of an image?**
+**Short:** MAE reconstructs masked pixels with a decoder; I-JEPA predicts the embeddings of masked blocks from an EMA target encoder, so it skips pixel detail and needs no hand-made augmentations.
+
+MAE reconstructs the pixel values of 75% random masked patches, so part of its capacity goes into texture and low-level detail, and its linear-probe accuracy is weak until fine-tuning. I-JEPA encodes one context block and uses a predictor to output the representations of several large target blocks, with targets from an EMA target encoder. Predicting in embedding space lets the model ignore unpredictable pixel detail and gives stronger linear-probe features than MAE at the same size. Unlike contrastive methods, it uses no color jitter or other augmentations, so the features keep information those augmentations would have made the model ignore.
+
+**Q: Does pure visual SSL need language supervision to match CLIP on VQA?**
+**Short:** Not at scale: Web-SSL trained DINO- and MAE-style ViTs up to 7B parameters on 2B uncaptioned web images and matched CLIP on VQA benchmarks.
+
+Web-SSL (Meta, 2025) trained Web-DINO and Web-MAE models from 1B to 7B parameters on MC-2B, the MetaCLIP image set with captions removed, so data distribution matched CLIP's. Visual SSL kept improving with model size and data, and the larger models matched CLIP on VQA evaluations; filtering toward text-rich images closed the OCR and chart gap too. Earlier gaps came largely from training SSL on ImageNet-scale data, not from the missing language signal. CLIP is still the right choice when you need zero-shot classification or text-image retrieval, since those need a text tower.
+
 **Q: What are register tokens in DINOv2 and what problem do they solve?**
 **Short:** Register tokens are extra learnable input tokens that absorb high-norm scratch activations, cleaning up attention maps that vanilla ViTs otherwise hijack from background patches.
 Register tokens are extra learnable tokens added to the ViT input sequence that absorb high-norm artifact activations, cleaning up attention maps and feature quality. Researchers found that vanilla ViTs (including DINO) repurpose a few low-information background patches as scratch storage, producing high-norm outlier tokens that create noisy, distracting artifacts in attention visualizations and hurt dense downstream tasks. Adding 4–8 dedicated register tokens gives the model a place to write that global scratch information without hijacking patch tokens. The result is smoother attention maps and small but consistent gains on segmentation and depth probing. DINOv2 adopted register tokens alongside the DINO + iBOT objectives.
@@ -924,7 +969,7 @@ Register tokens are extra learnable tokens added to the ViT input sequence that 
 
 ## 13. Best Practices
 
-1. Use existing pretrained SSL checkpoints (DINOv2, CLIP, OpenCLIP) before training SSL from scratch. Reproducing DINO or MAE training requires 8× A100 and 2–5 days; the checkpoints are publicly available.
+1. Use existing pretrained SSL checkpoints (DINOv3 distilled students, DINOv2, CLIP, OpenCLIP) before training SSL from scratch. Reproducing DINO or MAE training requires 8x A100 and 2-5 days; the checkpoints are publicly available.
 2. For contrastive methods, use large batch sizes (4096+) or MoCo's queue to ensure sufficient in-batch diversity. The number of effective negatives determines representation quality.
 3. RandomResizedCrop with scale=(0.08, 1.0) is the single most important augmentation for contrastive SSL. Do not replace it with fixed crops or center crops.
 4. Monitor representation collapse during training: check if the standard deviation of embeddings across the batch approaches zero (all embeddings similar) or if kNN accuracy on a small validation set stagnates early.

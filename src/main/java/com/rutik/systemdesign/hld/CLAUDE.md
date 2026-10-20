@@ -43,12 +43,12 @@ HLD is the architectural overview layer. The `backend/` section contains product
 ## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 25 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (14 modules) and **Principal** (11). They are
+plus two curated tiers: **Senior** (19 modules) and **Principal** (15). They are
 different cuts, not nested depths — senior is the craft, principal is the judgment
 (which approach at what cost, what failure domains, what you tell a team *not* to do),
 so principal is usually the smaller list and much of it is material senior never sees.
-Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that
-module's own page (`<module>.md`) naming the files each tier takes; listing a tier joins it, omitting
+Membership is declared ONCE per section, in the `<!-- study-paths -->` block in this
+section's `README.md`, naming the files each tier takes; listing a tier joins it, omitting
 the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it
 comes from `STUDY_ORDER.hld` in `game/app.js`, so a tier is an ordered subset by
 construction. **There is no path array in `app.js` to edit**: `extract.py` walks the
@@ -56,8 +56,8 @@ markers and emits the gitignored `questions/paths.json`, which the game fetches 
 The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` markers and
 are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
 hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
-are tiered the same way from a block in `case_studies/case_studies.md` (14 senior / 7
-principal of the 23), driving the Level filter on the game's Case Studies tab. The README
+are tiered in the same README block under `case_studies` (21 senior / 10 principal of
+the 30), driving the Level filter on the game's Case Studies tab. The README
 also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
@@ -77,7 +77,7 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 | `microservices/` | `../backend/microservices_fundamentals/`, `../backend/api_gateway_patterns/`, `../backend/service_mesh_and_service_discovery/` | — |
 | `message_queues/` | `../backend/kafka_deep_dive/`, `../backend/event_driven_fundamentals/`, `../backend/messaging_patterns/` | — |
 | `caching/` | `../backend/caching_strategies_deep_dive/` | `../database/database_caching_patterns/`, `../database/key_value_stores/` |
-| `database_design/` | `../backend/database_internals_and_indexing/`, `../backend/query_optimization/` | `../database/README.md` (all 33 modules) |
+| `database_design/` | `../backend/database_internals_and_indexing/`, `../backend/query_optimization/` | `../database/README.md` (all 34 modules) |
 | `database_sharding/` | — | `../database/sharding_and_partitioning/` |
 | `cap_theorem/` | — | `../database/consistency_models_and_consensus/`, `../database/database_fundamentals/` |
 | `rate_limiting/` | `../backend/rate_limiting_in_depth/` | — |

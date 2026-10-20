@@ -569,6 +569,43 @@ def dijkstra(adj: WeightedAdj, n: int, source: int) -> List[float]:
     return dist
 ```
 
+### Dijkstra Lower Bound: the Sorting Barrier
+
+Dijkstra pops vertices in non-decreasing distance order, so its output contains a sorted list of the
+n distances. On a star graph with arbitrary edge weights, sorting those distances is the whole
+problem, which costs Omega(n log n) comparisons. That lower bound on *producing the order* is the
+**sorting barrier**, and for decades `O(m + n log n)` (Dijkstra with a Fibonacci heap) was the best
+known bound for directed graphs with real non-negative weights.
+
+Two results settle what "optimal" means here:
+
+| Result | Claim | Scope |
+|--------|-------|-------|
+| Haeupler, Hladik, Rozhon, Tarjan, Tetek, "Universal Optimality of Dijkstra via Beyond-Worst-Case Heaps" (FOCS 2024) | Dijkstra with a heap that has a *working-set bound* (deleting an item costs log of the number of items inserted after it, not log of the heap size) is optimal on **every** graph, for a worst-case choice of weights | The *distance order* problem: output the vertices sorted by distance |
+| Duan, Mao, Mao, Shu, Yin, "Breaking the Sorting Barrier for Directed Single-Source Shortest Paths" (arXiv 2504.17033, STOC 2025) | Deterministic `O(m log^(2/3) n)` SSSP | Directed graphs, real non-negative weights, comparison-addition model; outputs distances only |
+
+The two do not conflict. If the caller needs vertices in distance order, Dijkstra cannot be beaten.
+If the caller only needs `dist[]`, the order is wasted work, and Duan et al. avoid computing it.
+
+**How the new algorithm skips the sort.** It divides the distance range recursively. At each level,
+instead of keeping every frontier vertex in a heap, it runs about `k = log^(1/3) n` rounds of
+Bellman-Ford-style relaxation from the frontier. A frontier vertex whose shortest-path subtree
+reaches at least k vertices becomes a *pivot*; the rest are finished by those k rounds. Only pivots
+go into the recursive call, so the frontier shrinks to about `|frontier| / k`, and the data
+structure never has to fully sort the vertices it handles.
+
+**When the bound is actually smaller.** Compare `m log^(2/3) n` with `m + n log n`:
+
+| n | log2 n | log^(2/3) n | log^(1/3) n | Duan wins when average degree m/n is below about |
+|---|--------|-------------|-------------|------------------------------------------------|
+| 10^6 | 19.9 | 7.4 | 2.7 | 2.7 |
+| 10^9 | 29.9 | 9.6 | 3.1 | 3.1 |
+
+The asymptotic gain is real only for very sparse graphs (`m = o(n log^(1/3) n)`), and the
+recursion carries constant factors that a binary-heap Dijkstra does not. Library routines
+(NetworkX, Boost Graph Library) remain heap-based Dijkstra. In an interview, the precise answer to
+"is Dijkstra optimal?" is: optimal for distance order, not optimal for distances alone.
+
 ### Bellman-Ford — Handles Negative Weights
 
 ```python
@@ -1125,6 +1162,14 @@ For a 2D text (T × R matrix) and 2D pattern (t × r matrix): compute rolling ha
 **Q18: Explain why A* is faster than Dijkstra for grid pathfinding and what makes a heuristic admissible.**
 **Short:** A* orders exploration by dist[v]+h(v) instead of dist[v] alone; an admissible heuristic never overestimates, so the shortest path is still found.
 A* extends Dijkstra by adding a heuristic h(v) that estimates the remaining distance from v to the target. The priority key becomes f(v) = dist[v] + h(v) instead of dist[v]. A* explores nodes in order of estimated total path cost — nodes that are closer to the target on the heuristic get explored first, pruning large regions of the graph. Admissibility: h(v) ≤ true remaining distance. If h ever overestimates, A* may miss the shortest path. Consistency (monotone): h(u) ≤ cost(u,v) + h(v) for all edges (u,v) — ensures each node is finalised at most once (same as Dijkstra's invariant, extended with the heuristic). Manhattan distance on a grid is admissible and consistent.
+
+**Q19: Is Dijkstra's algorithm optimal for single-source shortest paths?**
+**Short:** Only when the output must list vertices in distance order; for distances alone, Duan et al. (2025) beat it with deterministic O(m log^(2/3) n) on directed graphs.
+It depends on what the output must contain. Haeupler, Hladik, Rozhon, Tarjan and Tetek (FOCS 2024) proved that Dijkstra with a working-set heap is universally optimal for the distance-order problem: on every graph, for a worst-case choice of weights, no algorithm sorts the vertices by distance with asymptotically fewer comparisons. Duan, Mao, Mao, Shu and Yin (arXiv 2504.17033, STOC 2025) then gave a deterministic `O(m log^(2/3) n)` algorithm for directed graphs with real non-negative weights that returns distances without the order, which breaks the `O(m + n log n)` Fibonacci-heap bound on sparse graphs. The gain needs average degree below about `log^(1/3) n` (about 2.7 at n = 10^6), so production code still uses binary-heap Dijkstra; say "optimal for distance order, not for distances alone".
+
+**Q20: What is the "sorting barrier" for shortest paths, and how does the 2025 directed SSSP algorithm get around it?**
+**Short:** Emitting vertices in distance order means sorting n numbers, Omega(n log n); the 2025 algorithm shrinks the frontier with k-round relaxation and never fully orders it.
+Any algorithm that settles vertices one at a time in distance order, as Dijkstra does, also sorts the n distances, and on a star graph that sort is the entire cost: Omega(n log n) comparisons. Duan et al. split the distance range recursively. At each level they run about `k = log^(1/3) n` Bellman-Ford-style relaxation rounds from the frontier; vertices whose shortest-path subtree has at least k vertices become pivots, and only pivots recurse, so the frontier shrinks by a factor of about k per level. Distances come out correct, but no step ever produces the full sorted order, which is why the sorting lower bound does not apply.
 
 ---
 

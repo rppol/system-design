@@ -32,11 +32,11 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 |--------|-------|------|--------------|
 | `document_databases/` | Advanced | 17 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
 | `key_value_stores/` | Expert | 17 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock — the CATEGORY; Redis product internals belong in `redis_internals/` |
-| `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the eight eviction policies + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, vector sets (`VADD`/`VSIM`, HNSW + filtered ANN), Redis 8 vs Valkey 9 |
+| `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the ten eviction policies (`allkeys-lrm`/`volatile-lrm` from 8.6) + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, vector sets (`VADD`/`VSIM`, HNSW + filtered ANN), Redis 8 vs Valkey 9 |
 | `wide_column_databases/` | Advanced | 22 | Cassandra ring, partition key, compaction (STCS/LCS/TWCS/UCS), consistency levels, tombstones, SAI vs legacy 2i, `VECTOR` + ANN, trie memtables/BTI, Accord `[6.0-alpha]`, HBase/Bigtable lineage, ScyllaDB shard-per-core |
 | `search_engines/` | Advanced | 16 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | `elasticsearch_internals/` | Expert | 38 | Lucene segments and file extensions, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 norms, per-shard IDF, PIT + `search_after`, routing factor and `_split`, seq-no/primary-term checkpoints, voting configuration, `doc_count_error_upper_bound`, logsdb/TSDS, frozen tier, `dense_vector` BBQ — the PRODUCT internals; the category lives in `search_engines/` |
-| `graph_databases/` | Intermediate | 18 | Property graph, Neo4j index-free adjacency, Cypher 25, GQL (ISO/IEC 39075:2024), PostgreSQL 19 SQL/PGQ, fraud detection |
+| `graph_databases/` | Intermediate | 18 | Property graph, Neo4j index-free adjacency, Cypher 25, GQL (ISO/IEC 39075:2024), SQL/PGQ (Oracle AI Database 26ai; reverted from PostgreSQL 19 before release), fraud detection |
 | `time_series_databases/` | Intermediate | 21 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 | `analytical_databases_and_olap/` | Advanced | 18 | Columnar storage, vectorized execution, late materialization, MergeTree parts and the part-count cliff, sparse index granules, sort key vs index, ClickHouse/Druid/Pinot vs warehouses vs DuckDB, HTAP and zero-ETL |
 
@@ -46,7 +46,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 |--------|-------|------|--------------|
 | `vector_databases/` | Advanced | 17 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | `newsql_and_distributed_sql/` | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
-| `in_memory_databases/` | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| `in_memory_databases/` | Intermediate | 16 | Redis vs Memcached, Volt Active Data, Ignite, eviction, durability modes |
 | `embedded_and_edge_databases/` | Advanced | 17 | SQLite (WAL, single-writer, `busy_timeout`), DuckDB in-process OLAP, RocksDB/LMDB as libraries, litestream/LiteFS replication, local-first sync and CRDT reconciliation, edge read replicas |
 | `lakehouse_and_table_formats/` | Expert | 16 | Metadata-pointer CAS commit, snapshot isolation, time travel and retention cost, column-ID schema evolution, hidden partitioning, CoW vs MoR, deletion vectors, small-file economics, Iceberg vs Delta vs Hudi, the catalog tier |
 
@@ -143,17 +143,20 @@ and a 6-week Study Plan (prose; no path impact).
 
 | Database | Version |
 |----------|---------|
-| PostgreSQL | 18 (2025) — 19 in beta (beta 1 June 2026, feature-frozen July 2026, GA expected Sept/Oct 2026) |
+| PostgreSQL | 18 (2025) — 19 RC1 on 15 Oct 2026, GA planned 19 Nov 2026; SQL/PGQ was reverted from 19 on 7 Sept 2026 |
 | MySQL | 9.7 LTS (2026) — the last sequential version; Innovation moved to `YY.M` calendar versioning at 26.7 (July 2026). Oracle says future LTS lines will use CalVer too, but none has shipped — treat that half as forward-looking |
-| MongoDB | 8.3 (2026) |
+| MongoDB | 9.0 (9.0.0 on 28 Sept 2026, 9.0.4 on 13 Oct 2026); 8.1/8.2/8.3 were Rapid Releases |
 | Redis | 8.10 (2026) |
 | Valkey | 9.1 (2026) |
 | Cassandra | 5.0 (Sept 2024 GA); 6.0 is alpha only — Accord, not production-ready |
 | ScyllaDB | separate C++ shard-per-core codebase, Cassandra wire-compatible — not a Cassandra version |
-| Neo4j | 2026.07 (calendar versioning since 2025.01); Cypher 25 is the shipped default from 2026.02 |
+| Neo4j | 2026.09 (21 Sept 2026; calendar versioning since 2025.01); Cypher 25 is the shipped default from 2026.02 |
 | GQL | ISO/IEC 39075:2024 (April 2024) — the ISO standard graph query language |
-| Elasticsearch | 9.5 (2026), Lucene 10.5 — OpenSearch 3.7.0 (9 June 2026), forked at 7.10.2 |
-| ClickHouse | 26.x (2026) — latest stable 26.7.5.10 (21 Aug 2026); newest LTS 26.8.2.7 (1 Sept 2026) |
+| Elasticsearch | 9.5 (9.5.0 on 4 Aug 2026, latest patch 9.5.5), Lucene 10.5 — OpenSearch 3.9.0 (29 Sept 2026), forked at 7.10.2 |
+| ClickHouse | 26.x (2026) — latest stable 26.9.21.9 (17 Oct 2026); newest LTS 26.8.30.8 (17 Oct 2026) |
+| Apache Druid | 38.0.0 (1 Oct 2026); Java 17 no longer supported |
+| DuckDB | 1.5.6 (28 Sept 2026); 2.0 is feature-frozen and unreleased |
+| Apache Arrow | 26.0.0 (9 Oct 2026) |
 
 ---
 

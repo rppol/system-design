@@ -41,7 +41,7 @@ The models differ along four independent axes, and a deployment decision is a ch
 |------|----------|---------------|------------------|
 | Managed API | `text-embedding-3-small/large`, Cohere `embed-v4.0`, Gemini Embedding, Voyage | No GPU to operate; long context; multilingual out of the box | Per-token cost that dominates at volume; text leaves your perimeter; model can change under you |
 | Self-hosted open weights | BGE family, E5, Qwen3-Embedding, nomic-embed | Free per token, pinned weights, data stays in-house, fine-tunable | GPU capacity and serving to run; you own the upgrades |
-| On-device / edge | `embeddinggemma-300m` | Runs with no network at all | Smallest quality budget of the three |
+| On-device / edge | `embeddinggemma-300m`, `embeddinggemma-2` | Runs with no network at all | Smallest quality budget of the three |
 
 Quality does not track hosting: on MTEB Retrieval the self-hosted BGE models sit above
 `text-embedding-3-small`, whose appeal is the managed endpoint and the 8k context window
@@ -139,7 +139,7 @@ Truncated to 512d:   [d1, d2, d3, ..., d512]   → works well (MRL training)
 Truncated to 256d:   [d1, d2, d3, ..., d256]   → still reasonable
 Truncated to 64d:    [d1, d2, d3, ..., d64]    → lower quality but fast
 
-MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-001,
+MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-001/2,
             Cohere embed-v4.0, voyage-4-large, EmbeddingGemma, nomic-embed-text):
   Trained so first N dimensions are meaningful at any N
   Enables adaptive dimensionality: use 512d for fast retrieval,
@@ -309,10 +309,12 @@ Model                       Dim (MRL)          Context  MTEB v2 En  Use Case
 Qwen3-Embedding-8B          32-4096              32768  75.22       Open weights; board leader
 Qwen3-Embedding-4B          32-2560              32768  74.60       Open weights; mid-size
 Qwen3-Embedding-0.6B        32-1024              32768  70.70       Open weights; cheap to serve
-gemini-embedding-001        128-3072              8192  -           Managed; text/image/audio/PDF
+gemini-embedding-2          128-3072              8192  -           Managed; multimodal, video, PDF
+gemini-embedding-001        128-3072              2048  -           Managed; text only
 Cohere embed-v4.0           256/512/1024/1536   128000  -           Managed; multimodal, 128k ctx
 voyage-4-large              256/512/1024/2048    32000  -           Managed; retrieval-tuned
 google/embeddinggemma-300m  128-768               2048  -           On-device / edge, 300M params
+google/embeddinggemma-2     128-768               8192  -           On-device; multimodal, 740M
 nomic-embed-text-v2-moe     256-768                512  -           Open weights MoE; multilingual
 ```
 
@@ -699,11 +701,12 @@ Fix: Never call the bare `.encode()` on both queries and documents for an asymme
 | **sentence-transformers** | Self-hosted embedding | Standard library; supports all major models |
 | **OpenAI Embeddings API** | Managed embedding | text-embedding-3-small/large; best managed option |
 | **Cohere Embed API** | Managed embedding | `embed-v4.0`; multimodal, 128k context, MRL dims |
-| **Gemini Embedding API** | Managed embedding | `gemini-embedding-001`; text, image, audio and PDF in one space; tops MTEB Multilingual |
+| **Gemini Embedding API** | Managed embedding | `gemini-embedding-2`: text, image, video, audio and PDF in one space, 8,192-token input, no `task_type`, renormalizes truncated dimensions itself. `gemini-embedding-001` is text-only (2,048 tokens) and tops MTEB Multilingual. The two spaces are incompatible, so switching models means re-embedding the corpus |
 | **Voyage AI** | Managed embedding | `voyage-4-large` plus code/finance/law domain models |
 | **Qwen3-Embedding** | Open source models | 0.6B/4B/8B, 32k context, MRL; current MTEB leader |
 | **HuggingFace Inference API** | Managed + open source | Host any HuggingFace model via API |
 | **MTEB Leaderboard** | Model comparison | huggingface.co/spaces/mteb/leaderboard; filter by Retrieval |
+| **EmbeddingGemma** | On-device open weights | `google/embeddinggemma-300m` (text, 2,048 tokens) and `google/embeddinggemma-2` (2026-10-06, Apache 2.0): 740M total, a 270M text backbone plus 170M vision and 300M audio encoders, 8,192-token input, 768 dims truncatable to 512/256/128, 100+ languages. Same `task: search result \| query:` prefixes. Moving from 300m to 2 means re-embedding the corpus |
 | **BAAI/bge** | Open source models | Best open-source English embedding family |
 | **nomic-embed-text** | Open source, long context | 8192-token context; fully open weights |
 | **Jina Embeddings** | Open source | Long context; multilingual variants |

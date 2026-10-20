@@ -440,6 +440,56 @@ Cross-site WebSocket hijacking is the reason Origin validation matters here spec
 
 Per-user destinations resolve through `UserDestinationMessageHandler` (visible in the Section 5 pipeline diagram): a `SEND` to `/user/{username}/queue/x` or a call to `convertAndSendToUser(username, "/queue/x", payload)` is rewritten, before it ever reaches the broker, into a physical destination unique to each of that user's currently-open sessions. This is why `/user/**` works correctly even when the same logged-in user has three browser tabs open — each tab's session gets its own physical queue, and Spring's registry ensures a single `convertAndSendToUser` call reaches all of them.
 
+**Destination authorization with `@EnableWebSocketSecurity`.** Authenticating CONNECT
+proves who the session belongs to; it does not stop that user from sending to
+`/app/admin/**` or subscribing to `/topic/orders.*` for another tenant. Spring Security
+authorizes each inbound frame through an `AuthorizationManager<Message<?>>` bean, built from
+the injected `MessageMatcherDelegatingAuthorizationManager.Builder`.
+`AbstractSecurityWebSocketMessageBrokerConfigurer` and `MessageSecurityMetadataSourceRegistry`
+were removed in Spring Security 7, so this bean is the only Java-config form:
+
+```java
+@Configuration
+@EnableWebSocketSecurity
+class WebSocketSecurityConfig {
+
+    @Bean
+    AuthorizationManager<Message<?>> messageAuthorizationManager(
+            MessageMatcherDelegatingAuthorizationManager.Builder messages) {
+        return messages
+            .nullDestMatcher().authenticated()                      // CONNECT, DISCONNECT, heartbeats
+            .simpSubscribeDestMatchers("/user/queue/errors").permitAll()
+            .simpDestMatchers("/app/admin/**").hasRole("ADMIN")      // SEND to admin handlers
+            .simpDestMatchers("/app/**").hasRole("USER")             // SEND to @MessageMapping
+            .simpSubscribeDestMatchers("/user/**", "/topic/auction.*").hasRole("USER")
+            .simpTypeMatchers(SimpMessageType.MESSAGE, SimpMessageType.SUBSCRIBE).denyAll()
+            .anyMessage().denyAll()                                 // everything unmatched
+            .build();
+    }
+}
+```
+
+```
+  inbound frame -> clientInboundChannel interceptors (in order)
+     1. your token ChannelInterceptor (sets Principal on CONNECT)   must run first
+     2. Spring Security: SecurityContext + CSRF check on CONNECT + AuthorizationManager
+     3. @MessageMapping / broker
+  frame denied -> AccessDeniedException -> ERROR frame, session closed
+```
+
+Matchers are evaluated top to bottom and the first match wins, so specific patterns go
+before broad ones and `anyMessage().denyAll()` goes last. `simpDestMatchers` covers both
+SEND and SUBSCRIBE, while `simpSubscribeDestMatchers` covers SUBSCRIBE only, which is how a
+client can be allowed to listen on `/topic/x` without being allowed to publish to it.
+Outbound broadcasts are not checked, so a matcher on `/topic/**` restricts who subscribes,
+not what the server sends. Two interactions bite in practice. A token-auth
+`ChannelInterceptor` must be ordered ahead of Spring Security's interceptors, for example
+`@Order(Ordered.HIGHEST_PRECEDENCE + 99)` on the `WebSocketMessageBrokerConfigurer` that
+registers it, or the authorization manager sees an anonymous user. And
+`@EnableWebSocketSecurity` always requires a CSRF token on CONNECT with no switch to turn it
+off; a non-browser client with no CSRF token needs the security channel interceptors
+registered by hand without the CSRF one.
+
 ### 6.6 Heartbeats and transport limits, concretely
 
 | Setting | Layer | Default / typical value | What happens if exceeded |
@@ -699,6 +749,7 @@ public ErrorPayload handleBadBid(IllegalBidException ex) {
 | ActiveMQ Artemis | Alternative external STOMP broker | STOMP support built in, no plugin required |
 | SockJS client (`sockjs-client`) | Browser-side transport negotiation | Pairs with `.withSockJS()` on the server |
 | `@stomp/stompjs` | Modern browser STOMP client library | Successor to the older `stomp-websocket` package |
+| `spring-security-messaging` | `@EnableWebSocketSecurity`, `AuthorizationManager<Message<?>>`, `simpDestMatchers` | Per-destination authorization of SEND and SUBSCRIBE frames |
 | `wscat` | Command-line raw WebSocket client | Good for poking a low-level handler directly |
 | Browser devtools (Network > WS frames) | Inspect live STOMP frames | Frames appear as plain text - easy to read without extra tooling |
 | Micrometer | `simp.*` metrics for channels and sessions | Wire into [Observability & Tracing](../observability_and_tracing/observability_and_tracing.md) |
@@ -757,6 +808,14 @@ An inbound STOMP frame lands on `clientInboundChannel` and is routed to a matchi
 **Short:** The relay replaces the JVM-local registry with TCP connections to an external broker that owns subscription state.
 
 It replaces the JVM-local subscription registry with two TCP connections per instance to a real STOMP-speaking broker. One is a "system" connection for frames not tied to any client session, and the other is a relay connection per active client session that forwards that client's own frames. The broker itself — not any application instance — now owns the authoritative subscription state, which is what makes broadcasts correct across any number of instances. The tradeoff is an extra network hop per message and a broker cluster to operate.
+
+**Q: With `@EnableWebSocketSecurity` and JWT auth on CONNECT, every SUBSCRIBE is denied even for valid users. What is wrong?**
+**Short:** The token ChannelInterceptor runs after Spring Security's interceptors, so authorization sees no Principal; order it first, e.g. @Order(HIGHEST_PRECEDENCE + 99).
+`@EnableWebSocketSecurity` adds its own interceptors to `clientInboundChannel`: one that loads the session's `Authentication` into the `SecurityContext`, a CSRF check on CONNECT, and one that calls the `AuthorizationManager<Message<?>>`. A custom `ChannelInterceptor` that validates the JWT on CONNECT and calls `accessor.setUser(...)` must run before them, otherwise the authorization manager evaluates an anonymous user and rules like `simpSubscribeDestMatchers("/topic/**").hasRole("USER")` deny the frame. Put `@Order(Ordered.HIGHEST_PRECEDENCE + 99)` on the `WebSocketMessageBrokerConfigurer` that registers the interceptor. A second cause is the CSRF requirement: `@EnableWebSocketSecurity` always demands a CSRF token on CONNECT, so a native or mobile STOMP client without one fails at CONNECT, and the fix is wiring the security interceptors by hand without the CSRF one.
+
+**Q: How do you stop an authenticated STOMP user from subscribing to or sending to destinations they should not reach?**
+**Short:** Publish an AuthorizationManager<Message<?>> bean under @EnableWebSocketSecurity with simpDestMatchers and simpSubscribeDestMatchers rules, ending in anyMessage().denyAll().
+Authenticating CONNECT only identifies the session. Per-destination rules come from `@EnableWebSocketSecurity` plus an `AuthorizationManager<Message<?>>` bean built from `MessageMatcherDelegatingAuthorizationManager.Builder`: `nullDestMatcher().authenticated()` for frames with no destination (CONNECT, DISCONNECT), `simpDestMatchers("/app/admin/**").hasRole("ADMIN")` for SEND and SUBSCRIBE, `simpSubscribeDestMatchers("/topic/auction.*").hasRole("USER")` for SUBSCRIBE only, `simpTypeMatchers(MESSAGE, SUBSCRIBE).denyAll()` for any other routed frame, and `anyMessage().denyAll()` last. Rules match top to bottom with first match winning. Spring Security 7 removed `AbstractSecurityWebSocketMessageBrokerConfigurer`, so this bean is the only Java configuration. For tenant-scoped topics, a custom `AuthorizationManager` can compare a destination variable with the user's tenant claim, because role matchers alone cannot express "only your own tenant".
 
 **Q: How does Spring Security protect the STOMP CONNECT frame, and why isn't ordinary CSRF protection enough?**
 **Short:** Origin validation guards the raw handshake, while a CSRF token on CONNECT specifically protects SockJS's HTTP fallback.

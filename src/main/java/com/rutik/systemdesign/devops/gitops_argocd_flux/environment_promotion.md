@@ -1,6 +1,6 @@
 # Environment Promotion in GitOps
 
-> **Version anchor (2026-09-04).** **Kargo** reached **1.0 GA on 2024-10-22** and is on the 1.x line; its CRD kinds are `Project`, `Warehouse`, `Freight`, `Stage` and `Promotion`. **Argo CD 3.5.x** is current (v3.5.2, 2026-08-27), and **ApplicationSet is GA and bundled** into Argo CD, with the `git`, `cluster`, `matrix`, `merge`, `pull request`, `SCM provider` and `plugin` generators. **GitOps Promoter** is a real project but lives under **`argoproj-labs`**, not core Argo CD. **Flux v2.9.5** (2026-08-31) is current and its `ImageUpdateAutomation` / image-reflector controllers are current, not superseded; Flux **graduated from the CNCF in 2022**. **Argo Rollouts 1.10.x** (v1.10.0, 2026-08-27) routes Gateway API traffic through the `argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi` plugin.
+> **Version anchor (2026-10-19).** **Kargo** reached **1.0 GA on 2024-10-22** and is on the 1.x line; its CRD kinds are `Project`, `Warehouse`, `Freight`, `Stage` and `Promotion`. **Argo CD 3.5.x** is current (v3.5.5, 2026-10-12; 3.5.4 and later fix CVE-2026-55797), and **ApplicationSet is GA and bundled** into Argo CD, with the `git`, `cluster`, `matrix`, `merge`, `pull request`, `SCM provider` and `plugin` generators. **GitOps Promoter** is a real project but lives under **`argoproj-labs`**, not core Argo CD. **Flux v2.9.6** (2026-10-01) is current and its `ImageUpdateAutomation` / image-reflector controllers are current, not superseded; Flux **graduated from the CNCF in 2022**. **Argo Rollouts 1.10.x** (v1.10.1, 2026-10-12) routes Gateway API traffic through the `argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi` plugin.
 
 ---
 
@@ -73,7 +73,7 @@ Freight is the piece worth dwelling on. It is a **set**, not a single image — 
 ### Where the other tools fit
 
 - **Argo CD ApplicationSet** (GA, bundled) generates Applications from generators — `git`, `cluster`, `matrix`, `merge`, `pull request`, `SCM provider`, `plugin`. It is how you get one Application per environment or per cluster without writing them out, but it generates *structure*, not *sequence*: it will happily create dev, stage and prod Applications that all sync immediately.
-- **Flux `ImageUpdateAutomation`** plus the image reflector and policy controllers watch a registry and commit updates back to Git. Current and actively developed in the 2.7 line — not superseded. Excellent for dev; wire it to production and you have removed the decision, not automated it.
+- **Flux `ImageUpdateAutomation`** plus the image reflector and policy controllers watch a registry and commit updates back to Git. Current and actively developed in the 2.9 line, not superseded. Excellent for dev; wire it to production and you have removed the decision, not automated it.
 - **Argo Rollouts** owns the *within*-environment question: once the artifact has arrived, how does traffic move to it? Canary and blue-green, with Gateway API routing via the `argoproj-labs` traffic-router plugin. Promotion gets the manifest there; Rollouts decides who sees it.
 - **GitOps Promoter** is a genuine Argo-ecosystem project for exactly this problem, but it is in **`argoproj-labs`** — say that plainly rather than "Argo CD has promotion built in", which it does not.
 
@@ -343,7 +343,7 @@ If your rollback is `kubectl rollout undo`, you have a second mechanism that byp
 
 - **Kargo** is the reference implementation of this pattern, GA since **2024-10-22**, built by Akuity (the Argo CD maintainers' company) specifically because promotion is the gap Argo CD leaves. Its `Warehouse`/`Freight`/`Stage`/`Promotion` vocabulary is worth knowing by name in an interview.
 - **GitOps Promoter** solves the same problem from a different angle, using PRs between environment branches with commit-status gates. It is real and actively versioned, and it is an **`argoproj-labs`** project — not a core Argo CD feature.
-- **Flux's image automation** (`ImageUpdateAutomation` plus the reflector and policy controllers) is the mature auto-promotion path, still current in the 2.7 line and still gaining features. The common production pattern is auto for dev, marker-scoped policies for stage, and no automation at all for prod.
+- **Flux's image automation** (`ImageUpdateAutomation` plus the reflector and policy controllers) is the mature auto-promotion path, still current in the 2.9 line and still gaining features. The common production pattern is auto for dev, marker-scoped policies for stage, and no automation at all for prod.
 - **Argo CD ApplicationSet** with the `matrix` generator crossed against a cluster generator is how large fleets express "this app, in these environments, on these clusters" without writing hundreds of Applications — and it is also where teams discover that generating structure is not the same as ordering deploys.
 - **Argo Rollouts** with the Gateway API traffic-router plugin covers the within-environment half: the plugin gained header-based routing parity with the native Istio integration in 2026 and works with any conformant Gateway API implementation.
 
@@ -417,10 +417,10 @@ If your rollback is `kubectl rollout undo`, you have a second mechanism that byp
 |---|---|
 | Kargo | purpose-built promotion controller: `Project`, `Warehouse`, `Freight`, `Stage`, `Promotion` |
 | GitOps Promoter (`argoproj-labs`) | PR-based promotion between environment branches with commit-status gates |
-| Argo CD | the sync engine promotion writes for; 3.5.x current |
+| Argo CD | the sync engine promotion writes for; 3.5.x current, 3.5.4 or later for the CVE-2026-55797 fix |
 | Argo CD ApplicationSet | generates per-environment/per-cluster Applications (`git`, `cluster`, `matrix`, `merge`, `pull request`, `SCM provider`, `plugin`) |
 | Argo CD Image Updater | writes new image references back to Git |
-| Flux `ImageUpdateAutomation` + image reflector/policy | Flux's registry-watching auto-promotion, current in 2.7 |
+| Flux `ImageUpdateAutomation` + image reflector/policy | Flux's registry-watching auto-promotion, current in 2.9 |
 | Argo Rollouts | within-environment progressive delivery; Gateway API via the `argoproj-labs` traffic-router plugin |
 | `AnalysisTemplate` (Argo Rollouts) | the measured gate; reused by Kargo for Stage verification |
 | Kustomize / Helm | the per-environment configuration layer promotion writes into |

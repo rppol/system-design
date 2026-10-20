@@ -36,19 +36,23 @@ Voice agents have stricter latency budgets than text agents (sub-800ms first aud
 
 ### 4.1 Pipeline (STT → LLM → TTS)
 
-Three modules: Whisper / Deepgram / Speechmatics → Claude / GPT / Gemini → ElevenLabs / OpenAI TTS / Cartesia. Easy to swap components; total latency 800-1500ms even with streaming. Best for: cost-sensitive, multilingual, custom voice cloning.
+Three modules: OpenAI gpt-live-transcribe / Deepgram Flux / Speechmatics → Claude / GPT / Gemini → ElevenLabs / OpenAI gpt-realtime-2.1-mini / Cartesia. Easy to swap components; total latency 800-1500ms even with streaming. Best for: cost-sensitive, multilingual, custom voice cloning.
 
 ### 4.2 End-to-End Audio Model
 
-OpenAI Realtime API (`gpt-realtime-2.1`), Gemini Live, Mistral Voxtral. Single model: audio in → audio out. Latency 200-800ms. Captures prosody, emotion, laughter. Best for: premium UX, low latency required.
+OpenAI Realtime API (`gpt-realtime-2.1`, `gpt-realtime-2.1-mini`), Gemini Live (`gemini-3.8-live`, or `gemini-3.8-live-extended-thinking` when the turn needs more background reasoning), Mistral Voxtral. Single model: audio in → audio out. Latency 200-800ms. Captures prosody, emotion, laughter. Best for: premium UX, low latency required.
 
 ### 4.3 Hybrid Cascade
 
-Pipeline with optimizations: streaming STT (Deepgram Nova-2 sends partial transcripts at <50ms), LLM starts processing on partial transcripts, TTS streams in chunks (ElevenLabs Flash at ~75ms latency). Achievable: 500-900ms total.
+Pipeline with optimizations: streaming STT (Deepgram Flux streams transcripts with model-integrated end-of-turn detection at about 260 ms), LLM starts processing on partial transcripts, TTS streams in chunks (ElevenLabs Flash at ~75ms latency). Achievable: 500-900ms total.
 
 ### 4.4 Telephony Integration
 
 Twilio, Vonage, LiveKit Cloud, Pipecat for routing phone calls through voice agents. Handle: SIP/PSTN connectivity, recording compliance, DTMF (touch-tone) detection.
+
+### 4.5 Full-Duplex Talker plus Backend Agent
+
+OpenAI `gpt-live-1` (GA 2026-09-10, endpoint `v1/live/sessions`) splits the voice agent into two models. The talker listens and speaks at the same time, so it can backchannel and take an interruption without a turn boundary. It does not run the task itself: it delegates reasoning and tool use to a backend agent and voices the result. Two delegation modes, fixed at session creation: Responses delegation, where OpenAI runs a Responses model as the backend, and client delegation, where your application connects any model or agent harness. In both modes your application runs its own function tools, permission checks and confirmations. The talker prompt covers conversation style and when to delegate; business rules live in the backend. Backend work can keep running after the caller interrupts, so your application decides whether to finish or cancel it. Transport is WebRTC (recommended), WebSocket or SIP. Billing is $0.05 per minute of session time, billed per second, plus the backend model's tokens and tool calls.
 
 ---
 
@@ -206,24 +210,30 @@ async def voice_agent_session():
     """Connect to OpenAI Realtime API (GA); bidirectional audio."""
     
     url = "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1"
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "OpenAI-Beta": "realtime=v1"}
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     
-    async with websockets.connect(url, extra_headers=headers) as ws:
-        # Configure session
+    async with websockets.connect(url, additional_headers=headers) as ws:
         await ws.send(json.dumps({
             "type": "session.update",
             "session": {
-                "modalities": ["text", "audio"],
-                "voice": "alloy",
+                "type": "realtime",
+                "output_modalities": ["audio"],
                 "instructions": "You are a helpful customer support agent. Speak naturally.",
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "gpt-4o-transcribe"},
-                "turn_detection": {
-                    "type": "server_vad",  # Server-side VAD
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700,
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": {"model": "gpt-transcribe"},
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 700,
+                        },
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "voice": "marin",
+                    },
                 },
                 "tools": [
                     {
@@ -256,7 +266,7 @@ async def voice_agent_session():
             async for msg in ws:
                 event = json.loads(msg)
                 
-                if event["type"] == "response.audio.delta":
+                if event["type"] == "response.output_audio.delta":
                     audio_chunk = base64.b64decode(event["delta"])
                     playback_stream.write(audio_chunk)
                 
@@ -295,7 +305,7 @@ asyncio.run(voice_agent_session())
 from pipecat.frames.frames import LLMMessagesFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask
-from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketTransport
@@ -303,7 +313,7 @@ from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketTranspo
 async def run_voice_agent():
     transport = FastAPIWebsocketTransport(...)
     
-    stt = DeepgramSTTService(api_key=DEEPGRAM_API_KEY, model="nova-2-conversationalai")
+    stt = DeepgramFluxSTTService(api_key=DEEPGRAM_API_KEY)
     llm = OpenAILLMService(api_key=OPENAI_API_KEY, model="gpt-4o-mini")
     tts = ElevenLabsTTSService(
         api_key=ELEVENLABS_API_KEY,
@@ -348,7 +358,8 @@ async def run_voice_agent():
 | Pipeline (STT→LLM→TTS) | 800-1500ms | Flat, synthetic | $0.05-$0.15/min | Full per-stage | Cost-sensitive, custom voice cloning |
 | Hybrid (streaming pipeline) | 500-900ms | Improved (good TTS) | $0.10-$0.20/min | High | Production telephony |
 | End-to-end (`gpt-realtime-2.1`) | 200-800ms | Natural (model native) | ~$0.10+/min | Less per-stage | Premium UX, conversational |
-| End-to-end (Gemini Live) | 300-700ms | Natural | varies | Less | Google Cloud stacks |
+| End-to-end (`gemini-3.8-live`) | 300-700ms | Natural | varies | Less | Google Cloud stacks |
+| Full-duplex talker + backend (`gpt-live-1`) | Talker answers while backend works | Natural, listens while speaking | $0.05/min of session time, billed per second, plus backend tokens | Business logic in your backend | Long calls with heavy tool use |
 
 ---
 
@@ -409,6 +420,10 @@ if silence_duration > 800:
 
 **War story**: A drive-through voice agent kept cutting customers off mid-order because 500ms silence was treated as end-of-turn. Customers added "uhh" pauses while reading the menu. After increasing threshold to 1000ms + prosody-aware end-detection, order completion rate jumped from 68% to 91%.
 
+### Pitfall 3: Building on a model with a shutdown date
+
+OpenAI shuts down `gpt-realtime`, `gpt-realtime-mini` and `gpt-4o-realtime` on 2027-01-20 (replacements `gpt-realtime-2.1` and `gpt-realtime-2.1-mini`), `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` on 2027-01-06 (replacement `gpt-realtime-2.1-mini`), and `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and `gpt-4o-transcribe-diarize` on 2027-02-26 (replacements `gpt-live-transcribe` and `gpt-transcribe`). A model ID pinned in `session.update` or an STT config does not fail until the shutdown day, and then every call fails at once. The replacements also change behaviour: a new transcriber shifts word error rate and end-of-turn timing, so re-run the turn-detection and transcript eval set before switching, and keep the model ID in config rather than code.
+
 ---
 
 ## 11. Technologies & Tools
@@ -416,12 +431,16 @@ if silence_duration > 800:
 | Tool | Category | Notes |
 |---|---|---|
 | OpenAI Realtime API | End-to-end audio | `gpt-realtime-2.1`; lowest latency |
-| Gemini Live | End-to-end audio | Google; multimodal |
-| Whisper (OpenAI) | STT | High accuracy; not real-time |
-| Deepgram Nova-2 | STT | Streaming, low latency |
+| OpenAI `gpt-live-1` | Full-duplex talker | `v1/live/sessions`; delegates reasoning and tools to a backend agent; $0.05/min billed per second |
+| Gemini Live (`gemini-3.8-live`, `gemini-3.8-live-extended-thinking`) | End-to-end audio | Google; the extended-thinking variant trades latency for background reasoning during the call |
+| Google `gemini-3.5-transcribe`, `gemini-3.5-transcribe-live` | STT | Utterance-level language detection across 85+ languages; speaker diarization and word-level timestamps on the file model only, not on `-live` |
+| Google `gemini-3.8-flash-tts` | TTS | Expressive speech and regional dialects |
+| OpenAI `gpt-live-transcribe` / `gpt-transcribe` | STT | `gpt-live-transcribe` streams deltas as speech arrives; `gpt-transcribe` transcribes each committed turn |
+| Deepgram Flux (`flux-general-en`, `flux-general-multi`) | STT | Built for voice agents; model-integrated end-of-turn detection |
+| Deepgram Nova-3 | STT | General streaming and batch ASR; endpointing and utterance-end events, but no model-level end-of-turn events |
 | ElevenLabs (Flash, Turbo) | TTS | High quality voices |
 | Cartesia Sonic | TTS | Sub-100ms streaming |
-| OpenAI TTS | TTS | Standard quality |
+| OpenAI `gpt-realtime-2.1-mini` | End-to-end audio and TTS | Distilled realtime model on `v1/realtime`, $10/$20 per 1M audio tokens; OpenAI's named replacement for `gpt-realtime-mini` and for `tts-1` and `gpt-4o-mini-tts` |
 | Silero VAD | VAD | Open-source, 2MB |
 | WebRTC VAD | VAD | Lightweight, classic |
 | Pipecat | Framework | Pipeline orchestration |
@@ -461,6 +480,10 @@ Combine signals: (1) silence threshold (800-1000ms typical), (2) prosodic featur
 **Short:** An end-to-end model like `gpt-realtime-2.1` costs roughly $0.10/minute blended versus $0.05-0.17/minute for a pipeline, still pricier for meaningfully better conversational UX.
 `gpt-realtime-2.1`: $32/1M audio input tokens + $64/1M audio output tokens, which at ~600 input / ~1200 output tokens per minute of speech works out to roughly $0.02/min audio input + $0.08/min audio output = ~$0.10/min blended (less with prompt caching). Pipeline approach: $0.01/min STT + $0.02-$0.10/min LLM + $0.02-$0.05/min TTS = $0.05-$0.17/min. End-to-end is pricier but UX is significantly better.
 
+**Q: When would you use a full-duplex `gpt-live-1` session instead of a `gpt-realtime-2.1` speech-to-speech session?**
+**Short:** Use `gpt-live-1` when the agent must keep talking while a backend runs slow reasoning or tools; use `gpt-realtime-2.1` when one model can answer and call tools inside the turn.
+`gpt-realtime-2.1` is one model that hears the turn, reasons, calls tools and speaks, billed per audio token ($32/$64 per 1M, about $0.10 per minute of speech). While it waits on a slow tool, the caller hears silence or filler. `gpt-live-1` listens and speaks at the same time and hands reasoning and tool use to a backend agent (a Responses model, or your own harness under client delegation), so the talker can acknowledge, answer small questions and accept an interruption while the backend works. It bills $0.05 per minute of session time, per second, plus the backend's tokens, so cost follows call length rather than speech volume: a 10-minute call is $0.50 before backend usage, silence included. Pick it for long calls with multi-step tool work and business rules you want in one backend; pick Realtime for short turns where one model is enough, since it avoids paying for a second backend model on every turn.
+
 **Q: How do you handle multi-turn conversations with state?**
 **Short:** Multi-turn voice state is handled automatically by the session for end-to-end APIs via a session ID, while a pipeline must maintain and inject conversation history itself.
 Maintain conversation history; send it on each turn for context. For end-to-end (Realtime API): the session persists state automatically; reconnect with session_id. For pipeline: maintain history yourself and inject into each LLM call.
@@ -483,7 +506,7 @@ Record audio with timestamps + transcripts + LLM text + tool calls all keyed to 
 
 **Q: How do you handle multilingual voice agents?**
 **Short:** Multilingual pipelines combine multilingual STT and LLM with per-language TTS voices, while end-to-end models like `gpt-realtime-2.1` auto-detect language at varying quality.
-Pipeline: use multilingual STT (Whisper, Deepgram Nova-2 supports 30+ languages) + multilingual LLM + voice cloning per language for TTS. End-to-end: `gpt-realtime-2.1` auto-detects language; quality varies. For deployment: prompt the LLM with target language at session start; configure TTS voice per language.
+Pipeline: use multilingual STT (Deepgram `flux-general-multi` covers 10 languages including English, Spanish, Hindi and Japanese; Nova-3, or Nova-2 for languages Nova-3 lacks) + multilingual LLM + voice cloning per language for TTS. End-to-end: `gpt-realtime-2.1` auto-detects language; quality varies. For deployment: prompt the LLM with target language at session start; configure TTS voice per language.
 
 **Q: What are the privacy concerns specific to voice agents?**
 **Short:** Voice audio counts as biometric data under GDPR and CCPA requiring explicit consent and encryption, and payment card numbers should use DTMF rather than recorded audio.
@@ -529,7 +552,7 @@ flowchart TD
 
     CALLER([Caller — PSTN]) --> TWILIO[["Twilio (PSTN/SIP termination)\nIncoming call → webhook\nBidirectional audio stream (mulaw 8kHz over WebSocket)"]]
     TWILIO -->|"raw audio stream"| PIPECAT["Pipecat (Python orchestration layer)\nAudio framing and buffering\nVAD: Silero (90ms response) — detects barge-in\nBarge-in handler: interrupts TTS when user speaks\nTurn detection: 900ms silence + semantic check"]
-    PIPECAT --> STT[["Deepgram Nova-2\nSTT streaming\nsub-50ms partials"]]
+    PIPECAT --> STT[["Deepgram Nova-3\nSTT streaming\nsub-50ms partials"]]
     PIPECAT --> TTS[["ElevenLabs Flash\nTTS streaming (75ms first chunk)\nVoice cloned: Alex (company brand voice)"]]
     STT -->|"transcript"| LLM["LLM Layer — Claude Sonnet 5 (streaming)\nSystem prompt: insurance agent persona + policy rules\nTools: lookup_claim(), check_billing(), escalate_human()\nContext window: full call transcript + customer profile"]
     LLM -->|"text chunks"| TTS
@@ -574,7 +597,7 @@ Twilio can deliver audio. Each arrow in the architecture diagram is an addition 
 **Walk one example.** Add the five stages, then see what a single regression costs:
 
 ```
-  STT streaming partial (Deepgram Nova-2)      50 ms
+  STT streaming partial (Deepgram Nova-3)      50 ms
   LLM first token (Sonnet 4.6 streaming)      180 ms
   TTS first chunk (ElevenLabs Flash)           75 ms
   Pipecat framing + buffering overhead         80 ms

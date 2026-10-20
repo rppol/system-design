@@ -1,6 +1,6 @@
 # OpenTelemetry — Deep Dive
 
-> **Version anchor (2026-08-05).** **Specification v1.59.0** (2026-07-10), **OTLP/protobuf v1.11.0** (2026-07-21), **Semantic Conventions v1.44.0** (2026-08-04), **Collector v0.158.0** (2026-08-04), **Java auto-instrumentation v2.30.0** (2026-07-22), **OpenTelemetry eBPF Instrumentation (OBI) v0.10.0** (2026-06-30). OpenTelemetry became a **CNCF graduated project** on **2026-05-11** (TOC vote), announced 2026-05-21 at the Observability Summit — it is the second-highest-velocity project in the CNCF after Kubernetes. Signal maturity is **not uniform** and is the single most common factual error on this topic; the table in §1 is the authority for this page and every claim below is tagged against it.
+> **Version anchor (2026-10-19).** **Specification v1.61.0** (2026-09-14), **OTLP/protobuf v1.11.1** (2026-09-29), **Semantic Conventions v1.44.0** (2026-08-04), **Collector v0.163.1** (2026-10-16, a release-packaging patch over v0.163.0 components), **Java auto-instrumentation v2.32.0** (2026-10-03), **OpenTelemetry eBPF Instrumentation (OBI) v0.15.2** (2026-10-16, with v1.0.0-rc.2 as a prerelease). OpenTelemetry became a **CNCF graduated project** on **2026-05-11** (TOC vote), announced 2026-05-21 at the Observability Summit — it is the second-highest-velocity project in the CNCF after Kubernetes. Signal maturity is **not uniform** and is the single most common factual error on this topic; the table in §1 is the authority for this page and every claim below is tagged against it.
 
 This page is the **project-level** deep dive that sits under [observability_tracing_and_otel](observability_tracing_and_otel.md). The parent owns the *concept* — what a trace is, why you sample, how a Collector fits a platform. This page owns the *mechanism*: the three-layer split people conflate, each signal's data model field by field, the exact bytes of context propagation, the sampling arithmetic, OTLP's wire behaviour under load, the Collector as a real system with its own failure modes, and the cost economics that decide what you can afford to keep. Application-framework wiring lives elsewhere and is deliberately not repeated here: Micrometer and MDC in [backend/observability_and_monitoring](../../backend/observability_and_monitoring/observability_and_monitoring.md), the Observation API in [spring/observability_and_tracing](../../spring/observability_and_tracing/observability_and_tracing.md), ASGI instrumentation in [fastapi/observability_and_monitoring](../../fastapi/observability_and_monitoring/observability_and_monitoring.md), and GenAI spans in [llm/llm_observability_and_monitoring](../../llm/llm_observability_and_monitoring/llm_observability_and_monitoring.md).
 
@@ -14,11 +14,11 @@ This page is the **project-level** deep dive that sits under [observability_trac
 
 | Layer | Artifact | Who chooses it | Cadence | Breaks how |
 |---|---|---|---|---|
-| **Specification** | prose + protobuf + YAML semantic conventions | nobody, you consume it | spec monthly-ish (v1.59.0), semconv monthly (v1.44.0) | attribute renames, new signal maturity levels |
+| **Specification** | prose + protobuf + YAML semantic conventions | nobody, you consume it | spec monthly-ish (v1.61.0), semconv monthly (v1.44.0) | attribute renames, new signal maturity levels |
 | **API + SDK** | a per-language pair of artifacts | the *library author* takes the API, the *application owner* takes the SDK | per language, independently | an SDK upgrade changes defaults, samplers, resource detection |
-| **Collector** | one Go binary, configured in YAML | the platform team | every ~2 weeks (v0.158.0) | a component's config schema changes at alpha/beta stability |
+| **Collector** | one Go binary, configured in YAML | the platform team | every ~2 weeks (v0.163.1) | a component's config schema changes at alpha/beta stability |
 
-The mistakes that follow from blurring them are concrete. Teams pin "OpenTelemetry 1.59" and cannot find a Collector with that version, because the Collector's module line is `v0.x` for components and `v1.x` for the stable core and neither tracks the spec. Teams treat the whole project as "stable" because tracing is, then build a product on the profiles signal, which is in **public alpha**. And teams put the SDK dependency into a shared library, which forces a vendor and a version onto every consumer — the exact outcome the API/SDK split exists to prevent.
+The mistakes that follow from blurring them are concrete. Teams pin "OpenTelemetry 1.61" and cannot find a Collector with that version, because the Collector's module line is `v0.x` for components and `v1.x` for the stable core and neither tracks the spec. Teams treat the whole project as "stable" because tracing is, then build a product on the profiles signal, which is in **public alpha**. And teams put the SDK dependency into a shared library, which forces a vendor and a version onto every consumer — the exact outcome the API/SDK split exists to prevent.
 
 ### What OpenTelemetry actually gives you
 
@@ -55,7 +55,7 @@ OpenTracing (2016, an API with no SDK) and OpenCensus (2017, a Google-originated
 - **The OTel API** — the no-op-by-default interfaces a library depends on. Different artifact, different guarantee.
 - **The OTel Collector** — the Go binary. Two distributions (core, contrib) plus whatever you build with the OpenTelemetry Collector Builder.
 - **The OTel Operator** — a Kubernetes operator that manages Collectors *and* injects auto-instrumentation. Separate repo, `v1alpha1`/`v1beta1` CRDs.
-- **OpenTelemetry eBPF Instrumentation (OBI)** — Grafana's Beyla, donated in 2025, now an OTel project at v0.10.0. Zero-code instrumentation with no SDK at all.
+- **OpenTelemetry eBPF Instrumentation (OBI)** — Grafana's Beyla, donated in 2025, now an OTel project at v0.15.2, with v1.0.0 in release candidates. Zero-code instrumentation with no SDK at all.
 
 ### Licence and governance
 
@@ -169,9 +169,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph L1["Layer 1 - specification, owned by nobody"]
-        Spec(["spec v1.59.0<br/>data model + semantics"])
+        Spec(["spec v1.61.0<br/>data model + semantics"])
         Semconv(["semconv v1.44.0<br/>attribute registry"])
-        Proto(["OTLP proto v1.11.0<br/>the wire schema"])
+        Proto(["OTLP proto v1.11.1<br/>the wire schema"])
     end
 
     subgraph L2["Layer 2 - in your process"]
@@ -531,9 +531,11 @@ export OTEL_RESOURCE_ATTRIBUTES="service.namespace=shop,service.version=4.2.0,de
 
 **Resource detectors** fill the rest automatically: container id, `k8s.pod.name`, `host.name`, `cloud.region`, `telemetry.sdk.*`. On Kubernetes prefer the Collector's `k8sattributes` processor over in-process detection — it queries the API server once per Collector rather than once per pod, and it works for eBPF-produced telemetry that has no SDK to run a detector in.
 
+**Entities.** Spec v1.60.0 (2026-08-07) added an Entity data model and Entity support in the Resource SDK, both at **Development** status. An entity is a typed component (`service`, `host`, `k8s.node`, `container`) with two attribute sets: identifying attributes, which never change for the entity's life and must be the minimal set that names it uniquely (a process is `process.pid` plus `process.start_time`), and descriptive attributes, which may change. One Resource can carry several entities that reference its shared attribute pool, so an envelope says "this container, in this pod, on this node" as separate objects instead of one flat bag of keys. Two observers of the same entity, say the SDK and a node-local Collector, must emit identical identifying attributes or not use that entity type. Development status carries no stability promise, so production pipelines still key on flat resource attributes.
+
 ### 6.7 Instrumentation scope
 
-Every span, metric and log record carries the **name and version of the instrumentation that produced it** — `io.opentelemetry.okhttp-3.0` at `2.30.0-alpha`, not your service. This is the field that lets you answer "which of my 40 instrumentation libraries is producing this garbage span" and "did that duplicate span appear when I upgraded the agent". Pass a stable, package-like name and a real version to `getTracer()`; the common failure is passing `__name__` or the class name, which makes scope as high-cardinality as the code itself and useless as a filter.
+Every span, metric and log record carries the **name and version of the instrumentation that produced it** — `io.opentelemetry.okhttp-3.0` at `2.32.0-alpha`, not your service. This is the field that lets you answer "which of my 40 instrumentation libraries is producing this garbage span" and "did that duplicate span appear when I upgraded the agent". Pass a stable, package-like name and a real version to `getTracer()`; the common failure is passing `__name__` or the class name, which makes scope as high-cardinality as the code itself and useless as a filter.
 
 ### 6.8 The metrics API — seven instruments, three axes
 
@@ -1161,7 +1163,7 @@ Metrics cardinality is harsher because it is permanent: one time series per dist
 
 ### 6.31 Auto-instrumentation — the JVM agent
 
-`-javaagent:opentelemetry-javaagent.jar` (v2.30.0) attaches before `main`, installs a `ClassFileTransformer` via `java.lang.instrument`, and rewrites bytecode as classes load. Under the hood it uses Byte Buddy: for each of the ~140 supported libraries there is an *instrumentation module* declaring a type matcher (which classes) and advice (bytecode spliced into method entry and exit). When `okhttp3.RealCall` loads, the matcher fires and the advice that starts a CLIENT span is woven in.
+`-javaagent:opentelemetry-javaagent.jar` (v2.32.0) attaches before `main`, installs a `ClassFileTransformer` via `java.lang.instrument`, and rewrites bytecode as classes load. Under the hood it uses Byte Buddy: for each of the ~140 supported libraries there is an *instrumentation module* declaring a type matcher (which classes) and advice (bytecode spliced into method entry and exit). When `okhttp3.RealCall` loads, the matcher fires and the advice that starts a CLIENT span is woven in.
 
 Consequences worth knowing:
 
@@ -1183,7 +1185,7 @@ Node: `--require @opentelemetry/auto-instrumentations-node/register` hooks Commo
 
 ### 6.33 eBPF instrumentation — OBI
 
-OpenTelemetry eBPF Instrumentation (v0.10.0), formerly Grafana Beyla, attaches eBPF programs to kernel and userspace probe points to produce spans and RED metrics **without touching the process at all** — no restart, no agent, no language support matrix in the usual sense. It covers HTTP/1.1, HTTP/2 and gRPC, several database and messaging protocols, and emits runtime metrics for Go and the JVM. It runs standalone, as a Kubernetes DaemonSet, or as a Collector receiver.
+OpenTelemetry eBPF Instrumentation (v0.15.2), formerly Grafana Beyla, attaches eBPF programs to kernel and userspace probe points to produce spans and RED metrics **without touching the process at all** — no restart, no agent, no language support matrix in the usual sense. It covers HTTP/1.1, HTTP/2 and gRPC, several database and messaging protocols, and emits runtime metrics for Go and the JVM. It runs standalone, as a Kubernetes DaemonSet, or as a Collector receiver.
 
 What it genuinely gives you: coverage of binaries you cannot rebuild, third-party images, and languages whose SDK is immature — plus a service map on day one.
 
@@ -1241,23 +1243,23 @@ dist:
   name: otelcol-shop
   description: Shop platform collector
   output_path: ./_build
-  otelcol_version: 0.158.0
+  otelcol_version: 0.163.0
 
 receivers:
-  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.158.0
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.163.0
 processors:
-  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.158.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sattributesprocessor v0.158.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/tailsamplingprocessor v0.158.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.158.0
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.163.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sattributesprocessor v1.2.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/tailsamplingprocessor v0.163.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.163.0
 exporters:
-  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.158.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/loadbalancingexporter v0.158.0
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.163.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/loadbalancingexporter v0.163.0
 connectors:
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/connector/spanmetricsconnector v0.158.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/connector/spanmetricsconnector v0.163.0
 extensions:
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage v0.158.0
-  - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.158.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage v0.163.0
+  - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.163.0
 ```
 
 ```bash
@@ -1315,6 +1317,8 @@ Two directions, and they behave differently.
 - **Delta needs conversion.** Prometheus is cumulative; its embedded delta-to-cumulative path is experimental and behind the `otlp-deltatocumulative` feature flag. The alternative is the Collector's `deltatocumulative` processor.
 
 Prometheus 3.x offers translation strategies to control this: `UnderscoreEscapingWithSuffixes` (the default, full classic-compatible escaping plus suffixes), `UnderscoreEscapingWithoutSuffixes`, `NoUTF8EscapingWithSuffixes` and `NoTranslation` — the last two requiring UTF-8 metric name support, and the two suffix-less ones carrying a documented collision risk, because the suffixes are part of what makes the names unique.
+
+For route 1 on the SDK side, spec v1.61.0 (2026-09-14) made two parts of the Prometheus exporter stable. **Content negotiation**: the exporter picks the exposition format and escaping scheme from the scraper's `Accept` header, falling back to text format 0.0.4 with underscore escaping when there is none; it applies `translation_strategy` first and the requested escaping second, so `foo.bar` with unit `By` under `NoUTF8EscapingWithSuffixes` is served as `foo.bar_bytes_total` to a UTF-8-capable scraper and `foo_bar_bytes_total` to one without. **`resource_constant_labels`**: copies chosen resource attributes onto every series as labels, which removes the `target_info` join for those attributes, while still keeping them on `target_info`. The same release maps OTel exponential histograms to Prometheus native histograms on the standard exponential schemas (-4 to 8): the OTel scale becomes the schema, a scale above 8 is downscaled to 8, and a data point below -4 is dropped.
 
 The practical guidance: **pick one naming regime and apply it to the whole estate.** A mixed fleet where half the metrics arrived by scrape and half by OTLP, with different suffix rules, produces two names for the same measurement and dashboards that are right for half your services.
 
@@ -1591,13 +1595,13 @@ quadrantChart
 
 ### 11.1 The project itself
 
-- **OpenTelemetry Specification** — the normative document set (v1.59.0): data model, API semantics, SDK requirements, OTLP.
+- **OpenTelemetry Specification** — the normative document set (v1.61.0): data model, API semantics, SDK requirements, OTLP.
 - **OpenTelemetry SDK/API** — the per-language pair. The API is the no-op-by-default surface libraries depend on; the SDK is the implementation an application installs exactly once.
-- **OTLP** — the wire protocol (proto v1.11.0): protobuf over gRPC on 4317, or over HTTP on 4318 as protobuf or JSON.
-- **OpenTelemetry Collector** — the Go binary (v0.158.0) in `core`, `contrib` and `k8s` distributions.
+- **OTLP** — the wire protocol (proto v1.11.1): protobuf over gRPC on 4317, or over HTTP on 4318 as protobuf or JSON.
+- **OpenTelemetry Collector** — the Go binary (v0.163.1) in `core`, `contrib` and `k8s` distributions.
 - **OpenTelemetry Collector Builder (`ocb`)** — generates and compiles a distribution containing only the components your config names.
 - **OpenTelemetry Operator** — Kubernetes operator managing `OpenTelemetryCollector` and `Instrumentation` resources, and injecting auto-instrumentation via a mutating webhook.
-- **OpenTelemetry eBPF Instrumentation (OBI)** — v0.10.0, formerly Grafana Beyla; zero-code eBPF instrumentation, standalone or as a Collector receiver.
+- **OpenTelemetry eBPF Instrumentation (OBI)** — v0.15.2, formerly Grafana Beyla; zero-code eBPF instrumentation, standalone or as a Collector receiver.
 - **OpenTelemetry Weaver** — the toolchain that generates code and documentation from semantic-convention YAML and checks a telemetry schema for policy violations in CI.
 - **Semantic Conventions** — v1.44.0; the attribute registry, versioned independently of the spec.
 

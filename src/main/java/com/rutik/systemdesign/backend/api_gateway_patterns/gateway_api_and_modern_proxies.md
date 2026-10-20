@@ -36,8 +36,9 @@ Ingress is one shared whiteboard: every team writes routing rules on it in whate
 - `TLSRoute`, `TCPRoute`, `UDPRoute` — non-HTTP routing by SNI or by protocol/port alone; all three reached Standard channel by Gateway API v1.6 (`TLSRoute` in v1.5, `TCPRoute`/`UDPRoute` in v1.6).
 - `ReferenceGrant` — the cross-namespace allow-list; Standard channel since v1.5.
 - `ListenerSet` — lets a `Gateway`'s listeners be defined and attached independently of the `Gateway` resource itself; Standard channel since v1.5.
+- `BackendTLSPolicy`: TLS from the gateway to backend pods (`hostname` plus `caCertificateRefs` or `wellKnownCACertificates`); Standard channel since v1.4.
 
-**Experimental channel** (shape may still change): `BackendTLSPolicy` (TLS from gateway to backend), a `Mesh` resource for GAMMA service-mesh configuration, and newer proposals now grouped under the separate `gateway.networking.x-k8s.io` API group so the experimental/stable boundary is visible at the group level, not just the version suffix.
+**Experimental channel** (shape may still change): the `Mesh` resource for GAMMA service-mesh configuration (named `XMesh` while experimental), and newer proposals now grouped under the separate `gateway.networking.x-k8s.io` API group so the experimental/stable boundary is visible at the group level, not just the version suffix.
 
 **The modern proxy field** (implementations of the same Gateway API spec):
 - **Envoy Gateway** — a CNCF project built specifically as a Gateway API control plane over Envoy's xDS; see [`technologies/envoy_proxy`](../../technologies/envoy_proxy/envoy_proxy.md) for what it compiles `HTTPRoute` down to.
@@ -355,7 +356,7 @@ This is the piece [`technologies/envoy_proxy`](../../technologies/envoy_proxy/en
 | Traffic splitting / canary | Controller-specific annotation, or no support at all | Core-spec `weight` field on `backendRefs` |
 | Cross-namespace backend reference | Implicit — whatever the controller lets you configure | Deny-by-default, requires `ReferenceGrant` from the target namespace |
 | Non-HTTP protocols | Not modeled at all | `GRPCRoute`, `TLSRoute`, `TCPRoute`, `UDPRoute` as first-class kinds |
-| Maturity / ecosystem breadth | Every controller ever written implements it | Standard channel is GA; some fields (`BackendTLSPolicy`, `Mesh`) still Experimental |
+| Maturity / ecosystem breadth | Every controller ever written implements it | Standard channel is GA; some resources (`Mesh`) still Experimental |
 | Migration cost from existing YAML | None — already running | `ingress2gateway` automates the common cases, not every annotation |
 
 ---
@@ -380,7 +381,7 @@ This is the piece [`technologies/envoy_proxy`](../../technologies/envoy_proxy/en
 
 **An `HTTPRoute` referencing a `Gateway` in the wrong namespace, or a `Gateway` whose `allowedRoutes` excludes the route's namespace, produces the same silent-looking failure as a missing `ReferenceGrant`.** Both are visible only in `status` — a `HTTPRoute` that "did nothing" almost always has an explanatory condition sitting in its status block that a `kubectl apply` success message will never surface.
 
-**Assuming every Gateway API field is GA because the API itself reached GA in 2023.** Channel matters per field, not per API: `GatewayClass`, `Gateway`, `HTTPRoute`, `GRPCRoute`, `ReferenceGrant`, `TLSRoute`, `TCPRoute`, and `UDPRoute` are Standard/GA as of Gateway API v1.6, but `BackendTLSPolicy` and the `Mesh` resource remain Experimental — building production automation against an Experimental-channel field's exact shape is a bet on it not changing before it graduates.
+**Assuming every Gateway API field is GA because the API itself reached GA in 2023.** Channel matters per field, not per API: `GatewayClass`, `Gateway`, `HTTPRoute`, `GRPCRoute`, `ReferenceGrant`, `TLSRoute`, `TCPRoute`, `UDPRoute`, and `BackendTLSPolicy` are Standard/GA as of Gateway API v1.6, but the `Mesh` resource is Experimental. Building production automation against an Experimental-channel field's exact shape is a bet on it not changing before it graduates.
 
 **Pointing `HTTPRoute` at a plain `Service` for a model server and expecting cache-aware routing.** Without an `InferencePool` and an Endpoint Picker in the path, a gateway load-balances model-server replicas the same way it load-balances any other backend — evenly by connection count or round-robin — which is exactly the mismatch §12 explains; the fix is the `InferencePool` backend kind from §6.4, not a tuning flag on the plain `Service` path.
 

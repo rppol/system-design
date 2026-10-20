@@ -425,6 +425,7 @@ build, and setting it at all switches off the default "include every `@types` pa
 | Add a required property to an options interface | none | **major** | same, at every construction site |
 | Rename an exported type | none | **major** | `ts(2724)` at every import |
 | Fix a return that was wrongly `any` | none | **major** in practice | code that compiled against `any` now errors |
+| Raise the oldest TypeScript the `.d.ts` supports | none | **major** | consumers below the floor fail to parse or resolve it |
 
 Ship `RetryOptions.backoff` narrowed from `string` to `"fixed" | "exponential"` in a patch and
 every consumer passing a computed string fails on `npm ci`, with no line of their code and no
@@ -487,6 +488,56 @@ createClient({ baseUrl: "https://x.test", retries: "3" });
 rather than `src` is what makes it a *publishing* test instead of another source test.
 `../testing_typed_code/testing_typed_code.md` owns `expectTypeOf`, `tsd` and
 `@ts-expect-error` in full.
+
+### 6.9 A support window for consumer TypeScript versions
+
+Your `.d.ts` is parsed and checked by the **consumer's** compiler. Declaration emit writes
+whatever the building compiler supports, so the oldest TypeScript a consumer can use is set by
+the newest construct in `dist/*.d.ts`, not by the `typescript` in your devDependencies. A
+`const` type parameter `[5.0]` is a compile error before 5.0. A `NoInfer<T>` `[5.4]` does not
+resolve on 5.3, and under the consumer's `skipLibCheck` it degrades to `any` with no error.
+
+**Pick a window and write it down.** DefinitelyTyped's policy is the common reference: it tests
+`@types` packages only on TypeScript versions less than 2 years old, and publishes a `tsX.Y`
+dist-tag per version so an older compiler can install the last release that supported it. On
+2026-10-19, `@types/node`'s `ts5.6` through `ts7.1` tags point at 26.6.5 while `ts5.5` is
+frozen at 25.9.3. For your own package, declare the floor where package managers see it, and
+test every version inside it with a type-test version matrix
+(`../testing_typed_code/testing_typed_code.md`):
+
+```json
+{ "peerDependencies": { "typescript": ">=5.6" },
+  "peerDependenciesMeta": { "typescript": { "optional": true } } }
+```
+
+The `optional` flag keeps JavaScript consumers from installing a compiler they do not use.
+Raising the floor breaks every consumer below it with no runtime change, so it ships as a major.
+
+**Serving older compilers a second copy.** Two redirects exist, and which one a consumer reads
+depends on its `moduleResolution`. Measured with `tsc` 6.0.3 on a package carrying both:
+
+| Mechanism | Example | Read by |
+|-----------|---------|---------|
+| `types@<range>` condition inside `exports` | `"types@<5.4": "./dist/ts5.3/index.d.ts"` above `"types"` | `node16`, `nodenext`, `bundler` |
+| `typesVersions` field | `"typesVersions": { "<5.4": { "*": ["dist/ts5.3/*"] } }` | `node10`, or any package without `exports` |
+
+Once `exports` exists, `node16`, `nodenext` and `bundler` ignore `typesVersions` entirely. A
+package that wants to reach both resolver families carries both. Ranges are npm semver ranges,
+and in both mechanisms the first matching key wins, so list the narrowest range first.
+
+```json
+{ "exports": { ".": {
+      "types@<5.4": "./dist/ts5.3/index.d.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js" } },
+  "typesVersions": { "<5.4": { "*": ["dist/ts5.3/*"] } } }
+```
+
+The second copy has to come from somewhere. `downlevel-dts` rewrites newer declaration syntax
+for older compilers, but its last release is 0.11.0 from 2022-10-19, so it does not know any
+5.x construct. In practice the older copy is a hand-kept file for the few signatures that
+differ. Every such copy is a second surface to keep in step and to type-test, which is why most
+packages state a floor and raise it in a major instead.
 
 ---
 
@@ -640,6 +691,7 @@ the dangling reference; `tsc` never will, because from inside your repo the file
 | API Extractor | Rolls up one `.d.ts` plus a reviewable API report | Fails CI when the surface changes |
 | dts-bundle-generator | Lighter declaration rollup | Single-file `.d.ts` without the report |
 | tsd | Type assertions from a test file | Runs against `dist` in the publish job |
+| TSTyche | Type test runner across TypeScript versions | Tests every version in the support window |
 | Vitest | Test runner with `expectTypeOf` | Type-level assertions beside unit tests |
 | DefinitelyTyped | The `@types/*` registry | Types for packages authored in JavaScript |
 
@@ -743,6 +795,24 @@ broken condition hides: the root entry keeps working through the fallback while 
 silently resolves to `any`. Verify with `attw` on the tarball; ordering rules belong to
 `../modules_resolution_and_package_exports/modules_resolution_and_package_exports.md`.
 
+**Q: You added `typesVersions` to send TypeScript 5.3 consumers an older `.d.ts`, but they still load the new one. Why?**
+**Short:** Once a package has exports, node16, nodenext and bundler resolution ignore typesVersions; they select by a types@<5.4 condition inside exports instead.
+
+`typesVersions` is read by `node10` resolution and by packages with no `exports` map. A
+consumer on `nodenext` or `bundler` resolves through `exports`, so the redirect never runs and
+the 5.3 compiler meets syntax it cannot read. Put `"types@<5.4": "./dist/ts5.3/index.d.ts"`
+above `"types"` in the condition object, keep `typesVersions` too if `node10` consumers
+matter, and verify both with `attw` on the packed tarball.
+
+**Q: How do you decide which TypeScript versions your published declarations support, and enforce it?**
+**Short:** Adopt a written window such as DefinitelyTyped's 2 years, declare its floor in an optional typescript peer dependency, and type-test every version inside it.
+
+The floor is set by the newest construct in the emitted `.d.ts`, such as `NoInfer` `[5.4]`,
+not by your devDependency. Declare it as `"peerDependencies": { "typescript": ">=5.6" }` with
+`peerDependenciesMeta` marking it optional, and run the type suite across the window, for
+example with TSTyche's `"target": ">=5.6"`. Raising the floor breaks consumers below it with no
+runtime change, so it ships as a major.
+
 **Q: Bundled declarations or a `@types` package on DefinitelyTyped?**
 **Short:** Shipping declarations inside the package keeps them versioned with the code, while DefinitelyTyped types are maintained separately and lag by design.
 
@@ -809,6 +879,8 @@ sources together or neither — a dangling map is a broken jump, and only `publi
 8. **Verify the tarball, not the repo:** `npm pack`, then `publint` and `attw`, in CI.
 9. **Assert the public surface with type tests against `dist`**, including `not.toBeAny()` on
    anything crossing the declaration emit.
+10. **Publish a consumer TypeScript window** as an optional `typescript` peer dependency, test
+    every version in it, and raise the floor only in a major.
 
 ---
 

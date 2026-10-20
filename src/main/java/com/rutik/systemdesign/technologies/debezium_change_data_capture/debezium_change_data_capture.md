@@ -1,6 +1,6 @@
 # Debezium — Change Data Capture from the Database Log
 
-> **Version anchor (2026-08-04).** **Debezium 3.6.0.Final** (released 2026-07-01), Apache 2.0, community-governed with Red Hat as the corporate sponsor — it is **not** a CNCF project and has no foundation. Built and tested against **Apache Kafka 4.3.0**. The preceding releases on the current line are **3.5.2.Final** (2026-06-02) and **3.4.3.Final** (2026-03-30); **3.7.0.Alpha1** shipped 2026-07-30 as the current preview. Building Debezium from source requires **Java 21**; the connector runtime baseline is **Java 17**, while Debezium Server, the Debezium Operator and the Quarkus Outbox extension each require **21**. Support floors moved recently: **PostgreSQL 13 was dropped `[3.4.0.Alpha1]`** (DBZ-9376) and **MySQL 5.7 `[2.5.0.Alpha2]`** (DBZ-6874). Version-gated behaviour is tagged inline as `[3.6]`, `[3.4]`, `[3.0]`, `[2.6]`, `[Kafka 3.3]`, `[MySQL 8.4]`, and wherever a property or a value was *removed* this page names the release that removed it — a removal is what silently breaks a config copied from a two-year-old blog post.
+> **Version anchor (2026-10-19).** **Debezium 3.7.0.Final** (released 2026-09-29), Apache 2.0, community-governed with Red Hat as the corporate sponsor — it is **not** a CNCF project and has no foundation. Built against **Apache Kafka 4.3.1** (upgraded `[3.7.0.Beta1]`). The preceding lines end at **3.6.3.Final** (2026-09-18) and **3.5.2.Final** (2026-06-02). The 3.7 line removed the **Cassandra 3 connector** and **continuous mining for Oracle 12** `[3.7.0.Alpha2]`, and renamed the `ByLogicalTableRouter` SMT to `ToLogicalTopicRouter` `[3.7.0.Alpha1]`. Building Debezium from source requires **Java 21**; the connector runtime baseline is **Java 17**, while Debezium Server, the Debezium Operator and the Quarkus Outbox extension each require **21**. Support floors moved recently: **PostgreSQL 13 was dropped `[3.4.0.Alpha1]`** (DBZ-9376) and **MySQL 5.7 `[2.5.0.Alpha2]`** (DBZ-6874). Version-gated behaviour is tagged inline as `[3.7]`, `[3.6]`, `[3.4]`, `[3.0]`, `[2.6]`, `[Kafka 3.3]`, `[MySQL 8.4]`, and wherever a property or a value was *removed* this page names the release that removed it — a removal is what silently breaks a config copied from a two-year-old blog post.
 
 Debezium turns a database's own replication log into a stream of row-level change events. It does not poll, it does not add triggers, and it does not ask your application to publish anything: it connects to PostgreSQL as a logical replication client, to MySQL as a replica, to Oracle through LogMiner, to MongoDB through a change stream, and re-emits what the database already wrote down for its own durability. Everything else on this page — snapshots, offsets, replication slots, schema history, heartbeats — exists to answer two questions and only two: **where do I start reading**, and **can I keep reading**.
 
@@ -39,7 +39,7 @@ Every operational problem is a violated clause of that sentence. Out-of-order do
 
 | Name | What it is | Relationship to this page |
 |---|---|---|
-| **Debezium** (upstream) | The Apache 2.0 community project at `debezium.io` and `github.com/debezium`, released as `3.6.0.Final`. | **This page.** |
+| **Debezium** (upstream) | The Apache 2.0 community project at `debezium.io` and `github.com/debezium`, released as `3.7.0.Final`. | **This page.** |
 | **Red Hat build of Debezium** | A downstream, separately versioned product shipped inside **Streams for Apache Kafka**, with its own release cadence, its own supported-connector subset and its own lifecycle dates. | A *distribution* of the upstream code. Its version numbers do not line up with upstream's, and a feature present upstream may sit outside the supported set. |
 | **Debezium Server** | A standalone **Quarkus** application that runs one connector through the embedded engine and writes to a non-Kafka sink — Kinesis, Google Pub/Sub, Pulsar, Redis Streams, NATS, HTTP and others. Requires Java 21. | A *runtime*, §4.1. No Kafka Connect and no Kafka involved. |
 | **Debezium Platform** | The web UI and control layer — a **Conductor** backend plus a **Stage** front end — that replaced the archived `debezium-ui` project. | Manages **Debezium Server** pipelines, **not** Kafka Connect. The `debezium-ui` repository was **archived on 2025-09-17**; there is no maintained UI for a Connect-hosted Debezium there. |
@@ -75,7 +75,7 @@ That matters in two practical places. First, the roadmap is heavily influenced b
 | 2022 | **Debezium Server** matures as a Kafka-free runtime, and the outbox `EventRouter` SMT becomes the default answer to dual writes |
 | 2024 | The 2.x line consolidates: `wal2json` gone, MongoDB oplog capture gone, and `ts_ms` corrected to commit time `[2.6.0.CR1]` |
 | 2025 | Docker Hub publishing **stops** `[3.0.1.Final]` (DBZ-8327) and images move to `quay.io/debezium/*`; the `debezium-ui` repo is **archived (2025-09-17)** in favour of Debezium Platform |
-| 2026 | **3.6.0.Final** (2026-07-01) against Kafka 4.3.0. `AsyncEmbeddedEngine` is the only engine implementation `[3.2.0.Alpha1]`; PostgreSQL 13 support dropped `[3.4]`; Oracle's `redo_log_catalog` strategy deprecated `[3.6.0.Beta1]` for removal in 3.7 |
+| 2026 | **3.6.0.Final** (2026-07-01) against Kafka 4.3.0, then **3.7.0.Final** (2026-09-29) against Kafka 4.3.1, which drops the Cassandra 3 connector and Oracle 12 continuous mining. `AsyncEmbeddedEngine` is the only engine implementation `[3.2.0.Alpha1]`; PostgreSQL 13 support dropped `[3.4]`; Oracle's `redo_log_catalog` strategy deprecated `[3.6.0.Beta1]` and still present in 3.7 |
 
 ### Where Debezium sits, and what it displaces
 
@@ -185,7 +185,7 @@ The connector families differ because the databases differ, and the differences 
 | **Log mining** | Oracle | `database.connection.adapter` selects **`LogMiner`** (default), `LogMiner_Unbuffered`, `XStream` or `OLR` (OpenLogReplicator) | LogMiner is CPU- and I/O-expensive on the source; XStream requires a **GoldenGate licence** |
 | **Vendor change tables** | SQL Server | Reads the change tables SQL Server's own capture job writes. The default switched to **direct query mode `[3.4.0.Alpha2]`** (DBZ-9394) | You now depend on the SQL Server Agent capture and cleanup jobs as well as on Debezium |
 
-**Oracle's `log.mining.strategy`** deserves its own row because it changes what the connector needs from the database: `online_catalog` (fast, but cannot decode DDL that happened before the current dictionary), `hybrid`, `dictionary_from_file`, and `redo_log_catalog` — the last of which is **deprecated `[3.6.0.Beta1]` with removal scheduled for 3.7**. If a runbook you inherited names `redo_log_catalog`, it has an expiry date.
+**Oracle's `log.mining.strategy`** deserves its own row because it changes what the connector needs from the database: `online_catalog` (fast, but cannot decode DDL that happened before the current dictionary), `hybrid`, `dictionary_from_file`, and `redo_log_catalog`, the last of which is **deprecated `[3.6.0.Beta1]`**; the 3.7 docs still ship it and schedule removal for an unnamed future release, pointing at `hybrid` as the replacement. If a runbook you inherited names `redo_log_catalog`, it has an expiry date.
 
 ### 4.3 Snapshot strategies — the modes, and the two that were removed
 
@@ -258,7 +258,7 @@ Single Message Transforms run inside the connector's task, per record, before th
 | Group | SMTs | What they are for |
 |---|---|---|
 | **Shape** | `ExtractNewRecordState`, `ExtractNewDocumentState` (MongoDB) | Flatten the envelope down to just the `after` image, for sinks that cannot parse a nested envelope (§6.15) |
-| **Route** | `EventRouter` (outbox), `ByLogicalTableRouter`, `PartitionRouting` | Decide the topic and the partition a record lands on (§6.16, §6.14) |
+| **Route** | `EventRouter` (outbox), `ToLogicalTopicRouter`, `PartitionRouting` | Decide the topic and the partition a record lands on (§6.16, §6.14) |
 | **Filter / select** | `Filter`, `ContentBasedRouter` | Drop or redirect records using a scripting expression. Both require a scripting engine on the classpath |
 | **Enrich / redact** | `HeaderToValue`, `TimezoneConverter`, `SchemaChangeEventFilter`, field-level masking and truncation | Add provenance to the value, normalise time zones, mask a column, cap a string's length |
 
@@ -913,7 +913,7 @@ Debezium reads the log in strict commit order and emits in that order. Everythin
 **Three fixes, in increasing cost:**
 
 1. **Single partition for the tables that need table-wide order.** Correct, trivially. Caps throughput at one consumer, which is fine for an outbox at a few hundred events per second and hopeless at fifty thousand.
-2. **Route related tables onto one topic with a shared key.** The `ByLogicalTableRouter` SMT rewrites the topic, and setting the message key to the *aggregate root's* id — the `order_id` on both `orders` and `order_lines` — puts every change to one aggregate on one partition in commit order. This is the outbox pattern's real ordering argument: one outbox row per aggregate change, keyed by `aggregateid`, gives you exactly this without any routing tricks.
+2. **Route related tables onto one topic with a shared key.** The `ToLogicalTopicRouter` SMT rewrites the topic, and setting the message key to the *aggregate root's* id — the `order_id` on both `orders` and `order_lines` — puts every change to one aggregate on one partition in commit order. This is the outbox pattern's real ordering argument: one outbox row per aggregate change, keyed by `aggregateid`, gives you exactly this without any routing tricks.
 3. **Transaction metadata.** Set `provide.transaction.metadata: true` and Debezium emits `BEGIN` and `END` markers on a `<prefix>.transaction` topic, and stamps every event with `transaction.id`, `transaction.total_order` and `transaction.data_collection_order`. A consumer can buffer until it has seen `END` with a matching total count and then apply the transaction atomically. It works, and it is a substantial amount of consumer machinery for a guarantee most pipelines discover they did not need.
 
 **The practical answer for almost everyone is (2) plus idempotent, commutative writes downstream.** If your sink is an upsert keyed on the primary key with a version check on `source.ts_ms`, cross-table ordering stops mattering, because the final state is the same regardless of arrival order.
@@ -926,7 +926,7 @@ Three routing surfaces, each for a different shape:
 
 | SMT | Rewrites | Typical use |
 |---|---|---|
-| `ByLogicalTableRouter` | The topic name, by regex | Collapse `shop.public.orders_2024`, `_2025`, `_2026` shards onto one `shop.orders` topic, optionally injecting the original table into the key so the shard is not lost |
+| `ToLogicalTopicRouter` (named `ByLogicalTableRouter` before `[3.7.0.Alpha1]`) | The topic name, by regex | Collapse `shop.public.orders_2024`, `_2025`, `_2026` shards onto one `shop.orders` topic, optionally injecting the original table into the key so the shard is not lost |
 | `EventRouter` | Topic **and** key, from column values | The outbox (§6.16) |
 | `PartitionRouting` | The partition, from a field | Force a non-default partitioning, for example by tenant id rather than primary key |
 
@@ -1642,7 +1642,7 @@ The split is worth internalising because it predicts the triage path. A "where d
 
 **Cause.** **Docker Hub publishing stopped `[3.0.1.Final]`** (DBZ-8327). Images from 2.7.x onward are published only to **`quay.io/debezium/*`**. The Docker Hub repository still exists and the old tags still resolve, so `docker pull debezium/connect:latest` succeeds and returns a stale image. Nothing fails, nothing warns; the pull works and the artifact is old.
 
-**Fix.** Pin the registry and the version everywhere: `quay.io/debezium/connect:3.6.0.Final`. Never `latest`, in any registry. Add a startup assertion on the connector's reported `source.version`, and fail the deploy if it does not match the expected release.
+**Fix.** Pin the registry and the version everywhere: `quay.io/debezium/connect:3.7.0.Final`. Never `latest`, in any registry. Add a startup assertion on the connector's reported `source.version`, and fail the deploy if it does not match the expected release.
 
 **The alert.** A CI check that no Dockerfile, Helm chart, Compose file or Kubernetes manifest in the repository references `debezium/` without the `quay.io/` prefix. Grep-level, cheap, and it catches the whole class.
 
@@ -1652,7 +1652,7 @@ The split is worth internalising because it predicts the triage path. A "where d
 
 ### 11.1 Debezium itself
 
-- **Core:** **Debezium**, **Debezium MongoDB connector** — the Apache 2.0 connector family at 3.6.0.Final, built against Apache Kafka 4.3.0, with the MongoDB connector called out separately because change streams behave unlike a write-ahead log in almost every operational respect.
+- **Core:** **Debezium**, **Debezium MongoDB connector** — the Apache 2.0 connector family at 3.7.0.Final, built against Apache Kafka 4.3.1, with the MongoDB connector called out separately because change streams behave unlike a write-ahead log in almost every operational respect.
 - **Runtimes:** **Debezium Server**, **Debezium Engine**, **Debezium Operator** — a standalone Quarkus process for non-Kafka sinks, the embedded library for in-process capture, and the Kubernetes operator reconciling a `DebeziumServer` custom resource. All three require Java 21, and all three default to an offset store far less durable than Kafka Connect's.
 - **Debezium Platform** — the Conductor backend and Stage front end that replaced the archived `debezium-ui` project on 2025-09-17. It manages Debezium Server pipelines rather than Kafka Connect, which is the single most common expectation mismatch in this ecosystem; `[3.6]` added a monitoring dashboard over Conductor's metrics API, JDBC-sink pipelines and pre-flight connection validators (§4.1a).
 - **Debezium JDBC sink connector** — the project's own sink, consuming Debezium's envelope and applying upserts and deletes to a relational target, so a source-to-relational-sink pipeline needs no third-party connector.
@@ -1661,6 +1661,7 @@ The split is worth internalising because it predicts the triage path. A "where d
 ### 11.2 The source databases and their capture mechanisms
 
 - **Log-based sources:** **PostgreSQL**, **MySQL**, **MongoDB**, **Oracle Database**, **SQL Server**, **Cassandra**, **Vitess** — logical decoding through a replication slot, the row binlog, a resumable change stream, LogMiner against redo logs, vendor change tables, commit-log capture and a sharded MySQL topology respectively. Each one's log-retention policy is the real limit on how long a connector may be down.
+- **Connector changes in the 3.7 line:** **CockroachDB** is no longer incubating `[3.7]`; **TiDB**, **Milvus** and **SQLite** arrive as incubating connectors, Milvus and SQLite with their first official release in 3.7.0.Beta2; the **Ingres** connector reads Ingres's CDC API, which needs Ingres 12.1 or later. 3.7.0.Beta2 also shipped the first official release of the **Debezium CLI**.
 - **OpenLogReplicator** — an open-source C++ Oracle redo-log reader that Debezium can drive as the `OLR` adapter, and the way out of LogMiner's CPU cost without buying a licence.
 - **Oracle GoldenGate** — Oracle's own replication product, whose XStream API the Debezium Oracle connector can use instead of LogMiner. Note the commercial consequence: XStream requires a GoldenGate licence, which frequently decides the adapter choice on cost rather than on technical merit.
 - **PostgreSQL high availability:** **Patroni** — worth naming here because a failover moves the primary and a replication slot does not follow it by default. On PostgreSQL 17 arrange it with a failover slot (`slot.failover=true` plus `sync_replication_slots` on the standby, §6.3); below that, the slot is lost on promotion and the connector points at a server that is no longer the source of truth.
@@ -1740,7 +1741,7 @@ The property defaults to `tombstone` and takes five values: `drop` removes the e
 
 **Q: Why might docker pull debezium/connect give you a two-year-old image with no warning?**
 **Short:** Docker Hub publishing stopped at `[3.0.1.Final]` (DBZ-8327); images live only at `quay.io/debezium/*` now, but the old Docker Hub tags still resolve.
-Nothing fails. The pull succeeds, the container starts, and the only symptom is that properties documented in the current release are rejected as unknown while the tag looks current. Pin both the registry and the version everywhere — `quay.io/debezium/connect:3.6.0.Final`, never `latest` in any registry — and assert the connector's reported `source.version` at startup so a wrong artifact fails the deploy rather than the debugging session. A grep-level CI check that no manifest references `debezium/` without the `quay.io/` prefix catches the entire class.
+Nothing fails. The pull succeeds, the container starts, and the only symptom is that properties documented in the current release are rejected as unknown while the tag looks current. Pin both the registry and the version everywhere — `quay.io/debezium/connect:3.7.0.Final`, never `latest` in any registry — and assert the connector's reported `source.version` at startup so a wrong artifact fails the deploy rather than the debugging session. A grep-level CI check that no manifest references `debezium/` without the `quay.io/` prefix catches the entire class.
 
 **Q: What ordering guarantees does Debezium actually give you?**
 **Short:** Per primary key, yes. Per table, only with a single partition. Across tables and within a transaction, none unless you rebuild it.
@@ -1816,7 +1817,7 @@ Four to eight threads routinely cuts a multi-table snapshot to a quarter of its 
 
 **Q: Someone says "we run Debezium" — what four things could they mean?**
 **Short:** Upstream Debezium, the separately versioned Red Hat build, Debezium Server the standalone runtime, or Debezium Platform the management UI.
-Upstream is the Apache 2.0 project at `debezium.io`, currently 3.6.0.Final. The **Red Hat build of Debezium** is a downstream product inside Streams for Apache Kafka with its own version numbers, its own supported-connector subset and its own lifecycle dates, so "we are on Debezium 2.7" from a Red Hat customer does not mean the upstream 2.7. **Debezium Server** is a standalone Quarkus process for non-Kafka sinks. **Debezium Platform** — Conductor plus Stage — is the UI that replaced the archived `debezium-ui` repository on 2025-09-17, and it manages **Debezium Server pipelines, not Kafka Connect**, which is the mismatch that catches teams looking for a UI over their Connect cluster.
+Upstream is the Apache 2.0 project at `debezium.io`, at 3.7.0.Final (2026-09-29). The **Red Hat build of Debezium** is a downstream product inside Streams for Apache Kafka with its own version numbers, its own supported-connector subset and its own lifecycle dates, so "we are on Debezium 2.7" from a Red Hat customer does not mean the upstream 2.7. **Debezium Server** is a standalone Quarkus process for non-Kafka sinks. **Debezium Platform** — Conductor plus Stage — is the UI that replaced the archived `debezium-ui` repository on 2025-09-17, and it manages **Debezium Server pipelines, not Kafka Connect**, which is the mismatch that catches teams looking for a UI over their Connect cluster.
 
 **Q: What changed for MongoDB CDC, and what does capture.mode control?**
 **Short:** Oplog capture was removed `[2.0.0.Alpha2]`; the connector uses change streams, and `capture.mode` defaults to `change_streams_update_full`.
@@ -1824,7 +1825,7 @@ A change stream is MongoDB's server-side, resumable feed built on the oplog, and
 
 **Q: What are the Oracle capture options, and which one has a licensing consequence?**
 **Short:** `database.connection.adapter` offers LogMiner, LogMiner_Unbuffered, XStream and OLR — and XStream requires an Oracle GoldenGate licence.
-LogMiner is the default and needs no extra licence, but it is genuinely expensive in CPU and I/O on the source, which is often the reason an Oracle CDC project stalls. XStream is faster and pushes changes rather than being mined, and it is only legal with a GoldenGate licence, so the choice is frequently made on cost rather than merit. `OLR` drives **OpenLogReplicator**, an open-source C++ redo reader, which is the way out of both. Also check `log.mining.strategy`: `online_catalog` is fast but cannot decode DDL older than the current dictionary, `hybrid` and `dictionary_from_file` trade differently, and **`redo_log_catalog` is deprecated `[3.6.0.Beta1]` with removal in 3.7** — a runbook naming it has an expiry date.
+LogMiner is the default and needs no extra licence, but it is genuinely expensive in CPU and I/O on the source, which is often the reason an Oracle CDC project stalls. XStream is faster and pushes changes rather than being mined, and it is only legal with a GoldenGate licence, so the choice is frequently made on cost rather than merit. `OLR` drives **OpenLogReplicator**, an open-source C++ redo reader, which is the way out of both. Also check `log.mining.strategy`: `online_catalog` is fast but cannot decode DDL older than the current dictionary, `hybrid` and `dictionary_from_file` trade differently, and **`redo_log_catalog` is deprecated `[3.6.0.Beta1]`**, still present in 3.7 with removal planned for a later release and `hybrid` named as the replacement, so a runbook naming it has an expiry date.
 
 **Q: Kafka is down for two hours. What happens to Debezium and to your database?**
 **Short:** The connector cannot produce, so it stops committing offsets, so the replication slot stops advancing and WAL accumulates on your primary.
@@ -1855,7 +1856,7 @@ That it does not exist for their runtime. The **Debezium Management Platform** �
 - **Set `max_slot_wal_keep_size`.** Choose a ceiling smaller than your free space and larger than the longest outage you intend to survive without re-snapshotting. It converts a database outage into a pipeline re-snapshot, which is always the better trade.
 - **Set `plugin.name: pgoutput` explicitly.** The default `decoderbufs` exists on no managed PostgreSQL, and its failure reads like a permissions problem.
 - **Create the schema-history topic by hand** where the connector uses one: 1 partition, RF 3, `cleanup.policy=delete`, `retention.ms=-1`. Never let it be auto-created into a broker default.
-- **Pin the registry and the version.** `quay.io/debezium/connect:3.6.0.Final`. Docker Hub publishing stopped `[3.0.1.Final]` and the stale tags still resolve.
+- **Pin the registry and the version.** `quay.io/debezium/connect:3.7.0.Final`. Docker Hub publishing stopped `[3.0.1.Final]` and the stale tags still resolve.
 
 ### Configuration
 

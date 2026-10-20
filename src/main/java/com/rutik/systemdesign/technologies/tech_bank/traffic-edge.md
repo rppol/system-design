@@ -2,12 +2,24 @@
 
 <!-- tech-bank tier: traffic-edge -->
 
-The 99 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 100 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Traffic & resilience** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
 
 Record format and the full rules: [tech_bank.md](tech_bank.md).
+
+### Agent Router
+**Short:** Envoy Gateway extension, formerly Envoy AI Gateway, giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/api-gateway @1, llm-apps/llm-gateway-and-routing @1, llm-apps/tool-use-and-mcp @2
+
+It exists because model traffic breaks the assumptions ordinary gateways are built on: one request can cost two hundred tokens and the next two hundred thousand, so request-per-second limits are meaningless, and the routing signal often sits inside a streaming body rather than in a header. It solves both with external processing on the request path, and exposes the result as a small set of resources covering routes, backends, provider credentials and gateway configuration, plus routing for Model Context Protocol servers.
+
+Reach for it when you already run Envoy Gateway and want one front door across several model providers with usage accounting, failover and per-tenant token budgets, rather than each application holding its own provider keys. It reached 1.0 in June 2026 with backing from Bloomberg, Tetrate and Nutanix, and it is additive, so adopting it does not change the data plane you are already running.
+
+Release v1.2.0 (2026-10-07) renamed the project from Envoy AI Gateway to Agent Router, an Agentic AI Foundation project, and moved the repository to `theagentrouter/agent-router`. The `aigateway.envoyproxy.io` API group, the CRDs, the Helm charts, the container images and the `aigw` CLI kept their names.
 
 ### Amazon VPC Lattice
 **Short:** AWS managed application networking that connects and authorizes services across VPCs and accounts without sidecars.
@@ -303,18 +315,6 @@ Its configuration is dynamic: listeners, routes, clusters and endpoints are push
 
 It terminates and originates mTLS, speaks HTTP/1.1, HTTP/2, HTTP/3 and gRPC natively, translates gRPC-Web for browsers, and emits detailed per-cluster statistics and spans - the observability is a large part of why meshes standardized on it. Rate limiting is deliberately delegated to an external service over gRPC using descriptors, so the quota is shared across every proxy. The costs are real: a sidecar per pod adds a network hop and memory, and hand-written Envoy config is dense enough that most teams only ever touch it through a control plane.
 
-### Envoy AI Gateway
-**Short:** Envoy Gateway extension giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/api-gateway @1, llm-apps/llm-gateway-and-routing @1, llm-apps/tool-use-and-mcp @2
-
-It exists because model traffic breaks the assumptions ordinary gateways are built on: one request can cost two hundred tokens and the next two hundred thousand, so request-per-second limits are meaningless, and the routing signal often sits inside a streaming body rather than in a header. It solves both with external processing on the request path, and exposes the result as a small set of resources covering routes, backends, provider credentials and gateway configuration, plus routing for Model Context Protocol servers.
-
-Reach for it when you already run Envoy Gateway and want one front door across several model providers with usage accounting, failover and per-tenant token budgets, rather than each application holding its own provider keys. It reached 1.0 in June 2026 with backing from Bloomberg, Tetrate and Nutanix, and it is additive, so adopting it does not change the data plane you are already running.
-
-Release v1.2.0 (2026-10-07) renamed the project Agent Router, an Agentic AI Foundation project, and moved the repository to `theagentrouter/agent-router`. The `aigateway.envoyproxy.io` API group, the CRDs, the Helm charts, the container images and the `aigw` CLI kept their names.
-
 ### Envoy dynamic modules
 **Short:** Envoy extension mechanism loading a native shared object, with an official Rust SDK, instead of a sandboxed Wasm module.
 **Kind:** api
@@ -333,7 +333,7 @@ It arrived experimental in Envoy 1.34 as an HTTP filter mechanism and expanded s
 
 It exists so that every vendor stops rewriting the same layer: it watches `GatewayClass`, `Gateway` and route objects, provisions Envoy deployments to serve them, and streams the compiled xDS. Beyond the portable Gateway API it adds policy resources of its own for the behaviour the specification does not model, covering retries, circuit breaking, passive health checking, rate limits and authentication, plus a patch policy that drops through to raw Envoy configuration when the abstraction runs out.
 
-Reach for it as the mainstream successor to a retired ingress-nginx when you need ingress rather than a mesh, since it keeps the mesh decision open at no future cost: the data plane is already Envoy, so adopting Istio later is a control-plane change. Release 1.8.3 bundles Gateway API CRDs v1.5.1 and adds backend reference weights, HTTP/2 keepalive and dynamic module support.
+Reach for it as the mainstream successor to a retired ingress-nginx when you need ingress rather than a mesh, since it keeps the mesh decision open at no future cost: the data plane is already Envoy, so adopting Istio later is a control-plane change. The 1.9 line (1.9.2, 2026-09-28) requires Gateway API v1.6 CRDs and reconciles `TCPRoute` and `UDPRoute` through the `v1` API; without the v1.6 CRDs installed, TCP and UDP routes are silently skipped.
 
 ### Envoy Mobile
 **Short:** Envoy's C++ core compiled into an iOS and Android client library, giving mobile apps the same retries, mTLS and stats.
@@ -478,6 +478,12 @@ HAProxy is an event-driven proxy whose config splits into `frontend`, `backend` 
 **Kind:** api
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, traffic-edge/proxy-and-load-balancer @2
+
+### InferencePool
+**Short:** Gateway API Inference Extension CRD that stands in for a Service as a route backend, picking model-server pods through an endpoint picker.
+**Kind:** api
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, inference/model-server @2
 
 ### Istio
 **Short:** Kubernetes service mesh: sidecar traffic routing, canary weighting, retries/circuit breaking, mTLS, all config-driven.

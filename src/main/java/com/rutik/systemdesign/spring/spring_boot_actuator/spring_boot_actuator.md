@@ -30,7 +30,7 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 
 ### Built-in Endpoints
 
-`health` is the **only** endpoint exposed over HTTP by default — `management.endpoints.web.exposure.include` defaults to `health`. Everything else needs explicit exposure, and `shutdown` additionally needs `management.endpoint.shutdown.access=unrestricted`.
+`health` is the **only** endpoint exposed over HTTP by default: `management.endpoints.web.exposure.include` defaults to `health`. Everything else needs explicit exposure, and `shutdown` and `heapdump` additionally need an access grant, because both default to `access=none` (`heapdump` since Boot 3.5).
 
 | Endpoint | Default | Description |
 |----------|---------|-------------|
@@ -42,11 +42,30 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 | `/actuator/conditions` | Not exposed | Auto-configuration condition evaluation report |
 | `/actuator/loggers` | Not exposed | View and change log levels at runtime |
 | `/actuator/threaddump` | Not exposed | Thread dump (stack traces of all threads) |
-| `/actuator/heapdump` | Not exposed | Heap dump as HPROF file |
+| `/actuator/heapdump` | Not exposed, `access=none` | Heap dump as HPROF file |
 | `/actuator/httpexchanges` | Not exposed | Last 100 HTTP exchanges (needs an `HttpExchangeRepository` bean) |
 | `/actuator/shutdown` | `access=none` | Gracefully shut down application |
 | `/actuator/startup` | Not exposed | ApplicationContext startup steps with timing |
 | `/actuator/scheduledtasks` | Not exposed | Scheduled tasks details |
+| `/actuator/sbom` | Not exposed | Software Bill of Materials: `/actuator/sbom` lists ids, `/actuator/sbom/application` returns the CycloneDX/SPDX/Syft document (Boot 3.3+) |
+
+### Exposure vs Access
+
+Two independent switches decide whether a caller can run an endpoint operation. **Exposure**
+(`management.endpoints.web.exposure.include`) decides whether an HTTP route exists at all.
+**Access** (Boot 3.4+, replacing the old `enabled` flags) decides which operations the endpoint
+permits: `none`, `read-only` (only `@ReadOperation`, so GET), or `unrestricted` (adds POST and
+DELETE operations).
+
+| Property | Default | Effect |
+|---|---|---|
+| `management.endpoint.<id>.access` | `unrestricted`, except `shutdown` and `heapdump` = `none` | Per-endpoint level |
+| `management.endpoints.access.default` | `unrestricted` for endpoints without their own setting | Set to `none` for opt-in access |
+| `management.endpoints.access.max-permitted` | `unrestricted` | Hard cap applied over every endpoint and the default; a platform team sets it to `read-only` |
+
+With `max-permitted=read-only`, an exposed `loggers` endpoint still answers
+`GET /actuator/loggers` but rejects `POST /actuator/loggers/com.example` that would change a
+level, whatever the application team set for `management.endpoint.loggers.access`.
 
 ### Health Check Components
 
@@ -58,6 +77,7 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 | Disk space | `DiskSpaceHealthIndicator` | Free disk space threshold |
 | Liveness | `LivenessStateHealthIndicator` | Application is not in broken state |
 | Readiness | `ReadinessStateHealthIndicator` | Application is ready to serve traffic |
+| SSL bundles | `SslHealthIndicator` (`ssl`) | Every certificate chain in a configured SSL bundle; an invalid or expired certificate sets `OUT_OF_SERVICE` (Boot 3.4+) |
 
 Spring Boot ships no Kafka health indicator — for a Kafka dependency you write your own `HealthIndicator` over `AdminClient.describeCluster()`.
 
@@ -147,6 +167,17 @@ management.server.port=8081
 
 # Permit the shutdown endpoint (access is none by default)
 management.endpoint.shutdown.access=unrestricted
+
+# Unmask /env and /configprops values only for callers with the role (default: never)
+management.endpoint.env.show-values=when-authorized
+management.endpoint.env.roles=ACTUATOR_ADMIN
+management.endpoint.configprops.show-values=when-authorized
+
+# Platform cap: no endpoint may run a write or delete operation
+management.endpoints.access.max-permitted=read-only
+
+# Certificate expiry lead time for the ssl health indicator (default 14d)
+management.health.ssl.certificate-validity-warning-threshold=30d
 
 # Health group for Kubernetes readiness (all must be UP)
 management.endpoint.health.group.readiness.include=readinessState,db,redis
@@ -318,6 +349,61 @@ public class SecurityConfig {
 }
 ```
 
+### Value Sanitization (`show-values`)
+
+Since Boot 3.0, `/actuator/env`, `/actuator/configprops` and `/actuator/quartz` return every
+property value as `******` by default. The older key-name heuristic (mask keys containing
+`password`, `secret`, `key`, `token`) is gone, because it leaked values whose keys did not
+match, such as `spring.datasource.url=jdbc:postgresql://db?user=app&password=hunter2`.
+
+| `show-values` | Who sees real values |
+|---|---|
+| `never` (default) | Nobody; keys are still listed |
+| `when-authorized` | Authenticated callers holding a role in `management.endpoint.<id>.roles` (any authenticated user if no roles are set) |
+| `always` | Every caller who can reach the endpoint |
+
+`SanitizingFunction` beans run only when `show-values` already lets the caller see real values,
+and they can mask selected entries again; they cannot unmask anything. Each receives a
+`SanitizableData` with the key, the value and the source `PropertySource`, so one function can
+mask everything that came from a Vault or Kubernetes Secret property source and leave the
+rest readable:
+
+```java
+@Bean
+SanitizingFunction maskSecretSources() {
+    return data -> data.getPropertySource() != null
+            && data.getPropertySource().getName().startsWith("vault:")
+        ? data.withSanitizedValue()
+        : data;
+}
+```
+
+Sanitization covers the JSON these endpoints return. It does nothing for `/actuator/heapdump`,
+which contains the decrypted values as `String` objects in the heap.
+
+### SBOM and Certificate Expiry
+
+**`/actuator/sbom` (Boot 3.3+).** The `spring-boot-starter-parent` POM pre-configures the
+`cyclonedx-maven-plugin` (Gradle: `org.cyclonedx.bom`), which writes
+`META-INF/sbom/application.cdx.json` into the jar. The endpoint auto-detects that file and
+serves it at `/actuator/sbom/application`. When a CVE such as a new `logback-core` advisory
+lands, a fleet scanner can query every running instance for its exact dependency list instead
+of trusting what the repository says was deployed. `management.endpoint.sbom.application.location`
+points at a non-default file, and `management.endpoint.sbom.additional.<id>.location` adds
+more, for example the base image's SPDX SBOM under the id `system`.
+
+**SSL bundle certificate health.** The `ssl` health indicator checks every certificate chain in
+the configured SSL bundles. An expired or not-yet-valid certificate sets the indicator to
+`OUT_OF_SERVICE`. A certificate that expires within
+`management.health.ssl.certificate-validity-warning-threshold` (default `14d`) stays `VALID` and
+is listed under `details.expiringChains` (Boot 4.0; Boot 3.x reported `WILL_EXPIRE_SOON`). The
+health status does not change before expiry, so alert on the `ssl.chain.expiry` gauge (seconds
+until expiry, Boot 3.5+) rather than on health status.
+
+Do not put the `ssl` indicator in the liveness group: an expired certificate then restarts
+every pod in a loop and does not renew anything. Keep it out of both probe groups, or in
+readiness only when an expired client certificate truly makes the pod useless.
+
 ---
 
 ## 7. Real-World Examples
@@ -390,7 +476,7 @@ Liveness failing → Kubernetes restarts the pod. Readiness failing → Kubernet
 management.endpoints.web.exposure.include=*
 
 # /actuator/heapdump -> anyone can download heap and extract passwords from memory
-# /actuator/env -> anyone can see SPRING_DATASOURCE_PASSWORD (even masked, value visible in heap)
+# /actuator/env -> values are ****** by default, but show-values=always unmasks them for every caller
 # /actuator/shutdown -> anyone can kill the application
 
 # FIXED: explicit whitelist + secure with Spring Security
@@ -464,6 +550,8 @@ Timer.builder("http.requests")
 | `HealthIndicator` | Interface for custom health checks |
 | `InfoContributor` | Interface for custom `/info` contributions |
 | `@Endpoint` | Annotation to define custom actuator endpoints |
+| `cyclonedx-maven-plugin` / `org.cyclonedx.bom` | Build-time CycloneDX SBOM served by `/actuator/sbom` |
+| `SanitizingFunction` | Bean that decides which `/env` and `/configprops` values are masked |
 
 ---
 
@@ -488,6 +576,16 @@ Micrometer is a metrics instrumentation library that provides a vendor-neutral A
 **Short:** Whitelist safe endpoints, require authentication for `/actuator/**`, and run management endpoints on a separate, unexposed port.
 
 Configure Spring Security to require authentication for `/actuator/**`, expose only safe endpoints, and use a separate management port. Set `management.endpoints.web.exposure.include=health,info,metrics` as a whitelist. Require `ACTUATOR_ADMIN` role for sensitive operations like `/actuator/loggers` and `/actuator/beans`. Use a separate management port (`management.server.port=8081`) not exposed by the load balancer. Never expose `/actuator/heapdump`, `/actuator/env`, or `/actuator/shutdown` without strong authentication and audit logging.
+
+**Q: Why does `/actuator/env` show `******` for every value, and how do you let operators see real values safely?**
+**Short:** Since Boot 3.0 show-values defaults to never, masking all values; set it to when-authorized with a role, and use a SanitizingFunction for secret sources.
+
+Spring Boot 3.0 replaced key-name masking with full sanitization: `management.endpoint.env.show-values` and `management.endpoint.configprops.show-values` default to `never`, so every value in `/env`, `/configprops` and `/quartz` is `******`. The old heuristic masked only keys containing words such as `password` or `secret`, and leaked a password embedded in `spring.datasource.url`. To let operators read values, set `show-values=when-authorized` and `management.endpoint.env.roles=ACTUATOR_ADMIN`; unauthenticated callers and users without the role still get `******`. `always` unmasks for anyone who can reach the endpoint and is a misconfiguration outside local development. For finer control, a `SanitizingFunction` bean sees each key, value and source `PropertySource` and can keep everything from a Vault or Kubernetes Secret source masked even for admins. Sanitization does not protect `/actuator/heapdump`, which holds the decrypted strings, so heapdump keeps its own `access=none` default.
+
+**Q: What is the difference between exposing an Actuator endpoint and granting access to it?**
+**Short:** Exposure decides whether the HTTP route exists; access (none, read-only, unrestricted) decides which operations it allows, and max-permitted caps both.
+
+Exposure (`management.endpoints.web.exposure.include`) controls whether an endpoint is mapped over HTTP or JMX at all; by default only `health` is exposed. Access, the Boot 3.4 model that replaced the `enabled` flags, controls which operations run: `none`, `read-only` (only `@ReadOperation`, so GET) or `unrestricted` (adds `@WriteOperation` and `@DeleteOperation`). Every endpoint defaults to `unrestricted` except `shutdown` and, since Boot 3.5, `heapdump`, which default to `none`, so exposing `heapdump` alone returns nothing until `management.endpoint.heapdump.access` is also set. `management.endpoints.access.default=none` makes access opt-in per endpoint, and `management.endpoints.access.max-permitted=read-only` is a cap no endpoint setting can exceed. A platform team puts the cap in a shared config so an exposed `loggers` endpoint can be read but cannot change log levels in production without a deliberate override.
 
 **Q: What is the CompositeHealth structure in Actuator?**
 **Short:** `CompositeHealth` reports the worst status among all `HealthIndicator` beans, ranked by a configurable severity order.
@@ -538,6 +636,16 @@ Micrometer Tracing is a vendor-neutral tracing facade over concrete implementati
 **Short:** `HealthIndicator` is a leaf health check, while `CompositeHealthContributor` groups several related indicators under one named entry.
 
 `HealthIndicator` is the simple interface: implement `health()` returning a `Health` object with status and optional details. Spring auto-discovers all `HealthIndicator` beans and aggregates them. `HealthContributor` is a marker interface for both `HealthIndicator` (leaf contributor, returns a health result directly) and `CompositeHealthContributor` (named group of sub-contributors). Use `CompositeHealthContributor` when you want to group multiple related checks under a named hierarchy: e.g., a `DatabaseHealthContributor` composed of separate `ReadReplicaHealthIndicator` and `PrimaryHealthIndicator`. Each sub-contributor gets its own named entry under `components` in the health response, giving fine-grained visibility into which specific component is unhealthy.
+
+**Q: How does Actuator report an expiring TLS certificate, and why should you not alert on the health status for it?**
+**Short:** The ssl indicator turns OUT_OF_SERVICE only after a certificate is invalid; before that it stays VALID and lists the chain under expiringChains.
+
+The `ssl` health indicator (Boot 3.4+) inspects every certificate chain in the configured SSL bundles. An expired or not-yet-valid certificate sets the indicator to `OUT_OF_SERVICE`. A certificate inside `management.health.ssl.certificate-validity-warning-threshold` (default `14d`) does not change the status: since Boot 4.0 it stays `VALID` and its chain appears under `details.expiringChains` (3.x used a `WILL_EXPIRE_SOON` status). An alert on health status therefore fires only after the outage has started. Alert instead on the `ssl.chain.expiry` gauge, which Boot 3.5+ publishes as seconds until expiry, with a threshold longer than your renewal lead time. Keep the indicator out of the liveness group, because an expired certificate would restart pods in a loop without fixing anything.
+
+**Q: What does the `/actuator/sbom` endpoint serve and where does the data come from?**
+**Short:** It serves a build-time SBOM, by default META-INF/sbom/application.cdx.json written by the CycloneDX plugin, at /actuator/sbom/application.
+
+Boot 3.3 added the `sbom` endpoint. The `spring-boot-starter-parent` POM pre-configures `cyclonedx-maven-plugin` (Gradle uses `org.cyclonedx.bom`), which generates a CycloneDX JSON document of every resolved dependency and packs it into the jar under `META-INF/sbom/`. `GET /actuator/sbom` lists the available ids, and `GET /actuator/sbom/application` returns the document with its detected media type (CycloneDX, SPDX and Syft are recognised). `management.endpoint.sbom.additional.<id>.location` adds others, such as the container base image's SPDX file. The value is answering "which running instances have the vulnerable version" from the deployed artifact itself during a CVE response. Like every endpoint except `health`, it must be exposed explicitly, and it reveals the full dependency tree, so keep it behind the management port and authentication.
 
 **Q: How do you configure a management server on a different port and why is this the recommended production pattern?**
 **Short:** Set `management.server.port=8081` so sensitive actuator endpoints stay unreachable from outside the cluster's trust boundary.

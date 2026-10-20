@@ -14,6 +14,7 @@ General-purpose design principles that apply across all layers of software — n
 | Law of Demeter | LoD | Only talk to your immediate friends | [LawOfDemeter.md](LawOfDemeter.md) |
 | Composition over Inheritance | CoI | Prefer has-a relationships over is-a for code reuse | [Composition_over_Inheritance.md](Composition_over_Inheritance.md) |
 | Program to Interface | PtI | Depend on abstractions, not concretions | [ProgramToInterface.md](ProgramToInterface.md) |
+| General Responsibility Assignment Software Patterns, plus connascence | GRASP | Give each responsibility to the class that has the information, and keep coupling weak and local | [GRASP.md](GRASP.md) |
 
 ---
 

@@ -2,6 +2,8 @@
 
 > Phase 1 — Foundations · Difficulty: Beginner
 
+> **Version anchor (2026-10-19).** **Git 2.56.0** (tagged 2026-09-28) is the current release. SSH commit signing exists since Git 2.34. The **reftable** ref backend is opt-in since 2.45 (`git init --ref-format=reftable`; `git refs migrate` converts an existing repository since 2.46), and the **SHA-256** object format is opt-in since 2.29 with no SHA-1 interoperability. `Documentation/BreakingChanges.adoc` lists both as the defaults for new repositories in Git 3.0, conditional on JGit, libgit2, Gitoxide and the forges supporting them. **gitsign v0.17.1** (2026-08-05) is the Sigstore keyless signer.
+
 Git is the source of truth for code, infrastructure (IaC), and — under GitOps — the desired state of production itself. A DevOps engineer must understand Git's internal model well enough to recover from a botched rebase, design a branching strategy that supports continuous delivery, and reason about why "the commit is the deployable unit."
 
 ---
@@ -139,6 +141,43 @@ git cat-file -p a1b2c3    # the tree: blob SHAs + filenames + modes
 
 The deployable artifact is built from a specific SHA, so a deploy is fully reproducible: same SHA → same build → same image.
 
+### Signing commits: GPG, SSH and gitsign
+
+A commit's `author` line is whatever the client's `user.email` says, so anyone can push a commit that shows your name. A signature binds the commit object to a key. Git supports three formats:
+
+| Signer | Key | Verified on GitHub | Operational cost |
+|---|---|---|---|
+| GPG (`gpg.format=openpgp`) | Long-lived OpenPGP key | Yes, after uploading the public key | Key management, expiry, agent setup |
+| SSH (`gpg.format=ssh`, Git 2.34+) | Existing SSH key, ideally a hardware-backed `ed25519-sk` | Yes, after adding it as a *signing* key | Lowest; reuses the key developers already have |
+| gitsign (`gpg.format=x509`, Sigstore) | None stored; a 10-minute Fulcio certificate bound to your OIDC identity, logged in Rekor | No, GitHub does not trust Fulcio, so commits show "Unverified" | Verify in CI with `gitsign verify --certificate-identity ... --certificate-oidc-issuer ...` |
+
+```bash
+# SSH signing for every commit and tag
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+# Local verification needs an allowed-signers file mapping emails to keys
+git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+git log --show-signature -1
+```
+
+On the server side, a branch protection rule or ruleset with **Require signed commits** rejects any push containing an unsigned or unverifiable commit, including from bots. GitHub signs commits it creates itself (web edits, merges and squash merges made in the UI) with its own key, so those pass. **Vigilant mode** is the per-user half: once enabled, unsigned commits that name you as author show **Unverified**, so a forged commit with your email stands out. GitHub stores a verification record when it first verifies a signature, so a commit stays **Verified** after the key later expires or is rotated.
+
+### Repository formats: SHA-256 objects and the reftable backend
+
+Two storage changes are opt-in today and planned as Git 3.0 defaults.
+
+- **reftable** replaces the loose-file-per-ref plus `packed-refs` layout with a binary, prefix-compressed table. Deleting a ref writes a tombstone instead of rewriting the whole `packed-refs` file, which can be tens of MB in a monorepo with hundreds of thousands of branches and tags; multi-ref updates become atomic; refs that differ only in case no longer collide on macOS and Windows. Create with `git init --ref-format=reftable` or set `init.defaultRefFormat=reftable`; convert with `git refs migrate --ref-format=reftable`, which refuses repositories with worktrees and does not block concurrent writers, so run it with the repository quiesced.
+- **SHA-256** (`git init --object-format=sha256`) replaces SHA-1 object IDs, which SHAttered (2017) and Shambles (2020) showed are collision-attackable. A SHA-256 repository cannot exchange objects with a SHA-1 repository, and converting means rewriting every commit ID, so every tool that parses or stores commit IDs (CI, GitOps controllers, code review, `go mod` pseudo-versions) must support it before you switch.
+
+```bash
+git rev-parse --show-object-format          # sha1 or sha256
+git rev-parse --show-ref-format             # files or reftable
+```
+
+The DevOps check before adopting either is the client matrix, not Git itself: JGit (used by Gerrit, Jenkins plugins and some IDEs), libgit2 (used by many language bindings), Gitoxide and the forge must all read the format, or the repository works on laptops and breaks in CI.
+
 ### merge vs rebase vs squash
 
 ```bash
@@ -244,6 +283,8 @@ git tag -a v1.4.0 -m "release 1.4.0" && git push origin v1.4.0
 | Repo layout | Monorepo (atomic, shared tooling) | Polyrepo (isolation, simple CI) | Cross-service coupling + tooling maturity |
 | History rewriting | Allowed on local branches | Forbidden on shared/main | Collaboration safety |
 | Long-lived branches | Release branches (support old versions) | None (always-forward) | Do you support multiple versions in prod? |
+| Commit signing | SSH or GPG keys (forge-verified) | gitsign keyless (transparency log, CI-verified) | Green "Verified" badge and branch rules vs no long-lived keys to manage |
+| Ref storage | `files` (universal tool support) | `reftable` (fast ref writes and deletes at scale) | Ref count and whether JGit/libgit2 consumers support it |
 
 ---
 
@@ -335,87 +376,102 @@ Purging history alone loops right back to `Compromised` — the secret is still 
 | GitHub / GitLab / Bitbucket | Hosting, PRs, protected branches, CODEOWNERS |
 | Bazel / Nx / Turborepo | Monorepo affected-target builds |
 | `git-lfs` | Large binary file storage |
+| SSH / GPG signing, `gpg.ssh.allowedSignersFile` | Sign and verify commits and tags |
+| gitsign (Sigstore) | Keyless commit signing with OIDC identity and a Rekor log entry |
+| `git refs migrate` | Convert a repository between `files` and `reftable` ref storage |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is a Git commit, internally?**
+**Q: Branch protection requires signed commits, yet commits signed with gitsign are rejected. Why?**
+**Short:** GitHub only accepts signatures it can verify, and it does not trust Sigstore's Fulcio CA, so gitsign commits show "Unverified" and fail the rule; use SSH or GPG keys, or verify gitsign in CI instead.
+"Require signed commits" means signed and verified by GitHub. GitHub verifies GPG keys and SSH signing keys uploaded to the committer's account and S/MIME certificates from its trust store. gitsign signs with a short-lived certificate from Sigstore's Fulcio, tied to an OIDC identity and logged in Rekor; that chain is not in GitHub's trust root, which the gitsign README states directly. Teams pick one model: SSH signing (Git 2.34+, `gpg.format=ssh`, key added as a signing key) to satisfy the forge rule, or gitsign with a CI job running `gitsign verify` against the expected identity and issuer, without the forge rule.
+
+**Q: What does GitHub vigilant mode add on top of signing your own commits?**
+**Short:** It marks every unsigned commit that names you as author as "Unverified", so a forged commit using your email stands out instead of looking like yours.
+Git takes the author and committer from local config, so anyone can create a commit with your name and email, and without vigilant mode GitHub shows it with no status at all, indistinguishable from your unsigned work. With vigilant mode on, unsigned commits attributed to you show **Unverified**, and a commit you signed but another person committed shows **Partially verified**. It only works if you sign everything, so pair it with `commit.gpgsign=true`. A branch rule requiring signed commits stops the commit from landing; vigilant mode makes impersonation visible everywhere else.
+
+**Q: What are the reftable backend and SHA-256 object format, and what must you check before adopting them?**
+**Short:** Opt-in formats planned as Git 3.0 defaults: reftable stores refs in compressed tables for fast atomic updates, SHA-256 replaces SHA-1 IDs; check every Git client and forge supports them first.
+reftable (Git 2.45+) stores refs in a binary, prefix-compressed table with tombstones for deletes, so a repository with hundreds of thousands of refs no longer rewrites a large `packed-refs` file on each delete, and multi-ref updates are atomic. `git refs migrate --ref-format=reftable` converts in place but not with worktrees or concurrent writers. SHA-256 (`--object-format=sha256`, since 2.29) removes the SHA-1 collision risk but cannot interoperate with SHA-1 repositories, and conversion rewrites every commit ID. The blocker is the ecosystem: JGit, libgit2, Gitoxide, the forge, GitOps controllers and anything that stores commit IDs must handle the format, so test the CI path before migrating.
+
+**Q: What is a Git commit, internally?**
 **Short:** A commit is an immutable, content-hashed object pointing to a tree snapshot and its parent commits, with branches as movable pointers and HEAD pointing to the current branch.
 
 A commit is an immutable object containing a pointer to a tree (the directory snapshot), pointer(s) to parent commit(s), author/committer metadata, and a message — all hashed to produce its SHA. Branches are just movable pointers to commits, and `HEAD` points to the current branch. Changing any content changes the hash, which is why history is content-addressed and tamper-evident.
 
-**Q2: merge vs rebase — when each, and the golden rule?**
+**Q: merge vs rebase — when each, and the golden rule?**
 **Short:** Merge preserves true history with a merge commit; rebase replays commits onto a new base for linear history but rewrites SHAs — never rebase a branch others built on.
 
 Merge preserves true history and creates a merge commit (non-linear graph), good for integrating shared branches. Rebase replays commits onto a new base for linear history but rewrites SHAs. The golden rule: rebase only your *own* unpushed/private branches; never rebase or force-push branches others have based work on, or you erase their reachable history.
 
-**Q3: Why is trunk-based development preferred for CD?**
+**Q: Why is trunk-based development preferred for CD?**
 **Short:** Trunk-based development merges short-lived branches to main continuously, keeping main always-deployable and minimizing GitFlow's long-lived-branch merge debt.
 
 Short-lived branches merge to `main` continuously, minimizing divergence and merge debt, and keeping `main` always-deployable. Unfinished work hides behind feature flags rather than long-lived branches. This enables frequent, low-risk releases — the essence of continuous delivery — whereas GitFlow's long-lived `develop`/`release` branches batch and delay integration.
 
-**Q4: How do you recover commits after a bad rebase/reset?**
+**Q: How do you recover commits after a bad rebase/reset?**
 **Short:** `git reflog` records every movement of HEAD and branch tips with old SHAs, so resetting to the pre-mistake SHA recovers commits until garbage collection runs.
 
 `git reflog` records every movement of `HEAD` (and branch tips) with the old SHAs, even for "rewritten" history, until garbage collection. Find the pre-mistake SHA and `git reset --hard <sha>` (or `git cherry-pick` the lost commits). This is why almost no work is truly lost — Git's objects persist until GC.
 
-**Q5: A secret was committed and pushed. What do you do?**
+**Q: A secret was committed and pushed. What do you do?**
 **Short:** Rotate the leaked secret immediately since it's compromised the moment it hits a remote, then purge it from history and force-push — scrubbing without rotating is false security.
 
 First, **rotate the secret** — assume it's compromised the moment it hit a remote, because clones and history retain it. Then purge it from history with `git filter-repo` (or BFG) and force-push, coordinating with the team since this rewrites history. Add `gitleaks`/`detect-secrets` as a pre-commit and CI gate to prevent recurrence. Scrubbing without rotating is a false sense of security.
 
-**Q6: Monorepo vs polyrepo tradeoffs?**
+**Q: Monorepo vs polyrepo tradeoffs?**
 **Short:** A monorepo enables atomic cross-service changes but needs affected-target CI; a polyrepo gives per-service isolation but requires coordinating multiple PRs for cross-service changes.
 
 Monorepo enables atomic cross-service changes in one commit/PR and shared tooling, but needs affected-target CI (Bazel/Nx) to avoid building everything, and access control is coarser. Polyrepo gives per-service isolation, granular permissions, and naturally scoped CI, but cross-service changes require coordinating multiple PRs/repos. Choose based on coupling and tooling investment.
 
-**Q7: What is `git bisect` and when is it invaluable?**
+**Q: What is `git bisect` and when is it invaluable?**
 **Short:** `git bisect` binary-searches between a known-good and known-bad commit to find the one that introduced a regression in O(log n) steps, automatable with `bisect run`.
 
 `git bisect` binary-searches the commit range between a known-good and known-bad commit to find the one that introduced a regression in O(log n) steps. With `git bisect run <script>` it's fully automated — the script's exit code marks each tested commit good/bad. It's the fastest way to localize "it worked last week, broke somewhere since".
 
-**Q8: How does Git underpin GitOps?**
+**Q: How does Git underpin GitOps?**
 **Short:** Under GitOps the Git repo holds the desired system state and an in-cluster agent reconciles to match main, so a merge is the deploy and a `git revert` is the rollback.
 
 Under GitOps the Git repo holds the *desired state* of the system (manifests/Helm/Terraform); an in-cluster agent (ArgoCD/Flux) continuously reconciles the cluster to match `main`. A merge is the deploy, a `git revert` is the rollback, and the commit history is a complete, signed audit log of every production change — no out-of-band `kubectl apply`.
 
-**Q9: Why are small, atomic commits valuable operationally?**
+**Q: Why are small, atomic commits valuable operationally?**
 **Short:** Small, atomic commits are easier to review, cleanly revert, bisect at fine granularity, and cherry-pick, unlike a giant commit mixing many changes that can't be partially undone.
 
 They are easier to review, revert (`git revert <sha>` cleanly undoes one change), bisect (finer granularity localizes regressions faster), and cherry-pick (port a fix to a release branch). A giant commit mixing ten changes can't be partially reverted and obscures which change caused a regression.
 
-**Q10: What's the difference between `--force` and `--force-with-lease`?**
+**Q: What's the difference between `--force` and `--force-with-lease`?**
 **Short:** `--force` overwrites the remote branch unconditionally; `--force-with-lease` only overwrites if the remote is still at the SHA you last saw, protecting others' pushes.
 
 `--force` overwrites the remote branch unconditionally, potentially erasing commits someone else pushed after your last fetch. `--force-with-lease` only overwrites if the remote is still at the SHA you last saw, aborting if someone else pushed in between — so it protects against clobbering others' work. Even so, reserve force-pushing for your own branches.
 
-**Q11: How do you recover a branch that was deleted with `git branch -D`, after the reflog for that branch name is gone?**
+**Q: How do you recover a branch that was deleted with `git branch -D`, after the reflog for that branch name is gone?**
 **Short:** `git reflog show HEAD` still lists the commit HEAD pointed to right before the delete, letting you recreate the branch from that SHA until garbage collection prunes it.
 
 Deleting a branch removes its own reflog, but the commits stay reachable through HEAD's reflog or a full object-database scan until garbage collection runs. `git reflog show HEAD` lists every commit HEAD pointed to, including the tip of the deleted branch right before the delete, so `git switch -c recovered <that-sha>` restores it; if that's not enough, `git fsck --unreachable --no-reflog` surfaces dangling commits directly from the object database. This window isn't infinite — unreachable objects referenced only by expired reflog entries are pruned by `git gc`, with entries for unreachable commits expiring after 30 days by default and reachable ones after 90. If you delete the wrong branch, stop making new commits and run the recovery immediately, since every subsequent `git gc` shrinks the window.
 
-**Q12: Under what concrete conditions would you deliberately choose GitFlow over trunk-based development?**
+**Q: Under what concrete conditions would you deliberately choose GitFlow over trunk-based development?**
 **Short:** Choose GitFlow when you must maintain several released versions in production simultaneously, not for a single continuously-deployed SaaS environment.
 
 GitFlow fits when you ship versioned software to customers and must maintain several released versions in production simultaneously. A desktop app or on-prem product supporting v2.x and v3.x concurrently needs long-lived release and hotfix branches to patch an old version without dragging in unreleased work, something trunk-based's single always-deployable main can't cleanly express; regulatory environments requiring a formal, auditable release sign-off before code reaches customers are the other common trigger. Teams sometimes default to GitFlow out of habit for a SaaS product with one continuously-deployed environment, where it only adds merge debt with none of its versioning benefits. Ask whether you support multiple released versions at once — if no, trunk-based almost always wins; if yes, GitFlow's structure earns its overhead.
 
-**Q13: How does `--force-with-lease` actually detect a stale remote, and when can it still be unsafe?**
+**Q: How does `--force-with-lease` actually detect a stale remote, and when can it still be unsafe?**
 **Short:** It compares the remote against your local tracking ref and fails if they differ, but a background fetch that refreshes that ref before you push makes the lease pass and clobber anyway.
 
 It compares the remote branch's current value against your local remote-tracking ref (`refs/remotes/origin/<branch>`) and refuses the push if they differ; given with no arguments it applies that check to every remote ref the push would update. The unsafe case is the opposite of what people assume: a *stale* remote-tracking ref makes the lease correctly fail, and the real hole is anything that refreshes `origin/<branch>` without you integrating the new commits — a `git fetch` in another terminal, an IDE's background fetch, a wrapper script that fetches before pushing — because once the tracking ref matches the remote, the lease passes and you clobber the teammate's commit anyway. That is why "fetch right before force-pushing" is exactly the wrong habit. Add `--force-if-includes`, which additionally requires the remote-tracking tip to be reachable from your branch's reflog (proof you really integrated it), or enable it permanently with `git config --global push.useForceIfIncludes true`; it is a no-op alongside the explicit `--force-with-lease=<branch>:<expected-sha>` form, which is what you pin by hand in automation where you already know the SHA you expect.
 
-**Q14: How do partial clone and sparse checkout make working in a huge monorepo practical?**
+**Q: How do partial clone and sparse checkout make working in a huge monorepo practical?**
 **Short:** Partial clone fetches blob content on demand instead of upfront, while sparse checkout limits the working directory to a chosen path subset, together making huge monorepos practical.
 
 Partial clone skips downloading file contents up front, fetching blobs on demand as you check them out, while sparse checkout limits your working directory to a chosen subset of paths. A Google- or Meta-scale monorepo with millions of files would take hours to fully clone and gigabytes of local disk if cloned normally; `git clone --filter=blob:none` gets history and trees immediately and lazily fetches blob content only for files you actually touch, and `git sparse-checkout set services/payments/` then materializes only that directory in the working tree instead of the entire repo. Commands that need full history or content, like a repo-wide grep across unfetched paths, trigger extra network fetches the first time, so sparse-checkout scope should roughly match what you actually work on. Combine both for monorepos beyond a few gigabytes — partial clone for history and objects, sparse checkout for the working tree — rather than cloning and checking out everything.
 
-**Q15: What problem does Git LFS solve, and how does it avoid bloating the repo with binaries?**
+**Q: What problem does Git LFS solve, and how does it avoid bloating the repo with binaries?**
 **Short:** Git LFS replaces a tracked large binary with a small pointer in commit history while the real content lives in separate LFS storage, trading repo bloat for a storage quota.
 
 Git LFS keeps large binary files, like models, videos, and design assets, out of the actual Git object history by storing only a small text pointer in their place. A tracked file configured via `.gitattributes` is replaced in commits by a pointer file containing the object's hash and size, while the real binary content lives in separate LFS storage and is fetched on checkout through smudge and clean filters, keeping clone and fetch fast because history stays small even as binary assets change many times. Every distinct version of a tracked binary still consumes separate LFS storage and bandwidth quota, so LFS trades repo bloat for a quota to manage instead. Track only genuinely large, frequently-changing binaries with LFS — for small or rarely-changing binaries, a normal blob is simpler and avoids the extra infrastructure.
 
-**Q16: Squash-merging every PR gives clean single-commit history — what do you give up operationally?**
+**Q: Squash-merging every PR gives clean single-commit history — what do you give up operationally?**
 **Short:** Squash-merging collapses a PR's commits into one, so `git bisect` can only localize a regression to the whole PR, and `git revert` reverts the entire change as one unit.
 
 You lose the intermediate commits' granularity, so `git bisect` can only localize a regression to the whole squashed PR, not to a specific commit within it. If a PR had eight commits and introduced a regression in the fifth, a squash-merged history hands bisect only one commit to test, "the whole PR," forcing manual inspection of a larger diff instead of Git narrowing it further; `git revert` likewise reverts the entire PR's change as one unit, which is fine for a self-contained feature but loses the ability to revert just part of a large PR. Teams that squash everything also tend to lose meaningful intermediate commit messages, since only the PR's final squash message survives in main's history. Squash-merge small, single-purpose PRs where the trade is harmless, but consider a real merge commit or per-commit review for large PRs where bisect granularity within the change actually matters.
@@ -431,6 +487,8 @@ You lose the intermediate commits' granularity, so `git bisect` can only localiz
 - Scan for secrets in pre-commit and CI; rotate immediately if one leaks.
 - Tag releases with semantic versions; build artifacts from the tag's SHA for reproducible provenance.
 - Use CODEOWNERS + protected branches to enforce review on infra/IaC paths.
+- Sign commits and tags (SSH signing is the lowest-cost option), turn on vigilant mode, and require signed commits on `main` of infra and GitOps repositories.
+- Move very large monorepos to the `reftable` backend only after confirming every Git client in CI (JGit, libgit2) reads it; hold SHA-256 until the forge and tooling support it.
 - For monorepos, invest in affected-target CI so you don't rebuild the world on every change.
 
 ---

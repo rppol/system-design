@@ -47,7 +47,8 @@ Key insight: the pretext task is a proxy. What matters is not solving the pretex
 | Predictive (masked) | Mask + predict | BERT (MLM), MAE, BEiT | No |
 | Autoregressive | Predict next token/patch | GPT, VideoGPT | No |
 | Contrastive | Pull positives, push negatives | SimCLR, MoCo, CPC | Yes |
-| Non-contrastive | Asymmetric networks or constraints | BYOL, DINO, Barlow Twins | No |
+| Non-contrastive | Asymmetric networks or constraints | BYOL, DINO, DINOv3, Barlow Twins | No |
+| Latent prediction (JEPA) | Predict the target encoder's embeddings of masked regions from visible context | I-JEPA, V-JEPA, V-JEPA 2 | No |
 | Generative | Reconstruct input | VAE, diffusion pretraining | No |
 | Graph-specific | Graph augmentations | DGI, GraphCL, GRACE | Depends |
 | Tabular-specific | Feature corruption/subset | SCARF, SubTab, VIME | Depends |
@@ -125,6 +126,28 @@ The anchor and its positive never moved — `sim = 0.90` in both runs — yet th
 
 - SCARF: randomly corrupt a fraction (20–40%) of features by sampling from their marginal distributions. Predict which features were corrupted. Learns feature correlations.
 - SubTab: split features into two subsets (views). Learn representations that reconstruct the other subset from each view.
+
+**Latent-prediction SSL (JEPA family):**
+
+A Joint-Embedding Predictive Architecture predicts the *representation* of a hidden region, not its pixels and not an augmented view. A context encoder sees a visible block; a target encoder (an EMA copy of the context encoder, no gradient) embeds the hidden blocks; a narrow predictor, given the context embedding plus positional tokens for each hidden block, regresses the target embeddings with an L2 loss. Two consequences:
+
+- **No hand-crafted augmentations.** Invariance comes from masking alone, so the model is not taught to ignore colour or crop the way SimCLR and DINO are.
+- **No pixel reconstruction.** MAE spends capacity on texture and high-frequency detail it must redraw; the JEPA target encoder can drop unpredictable detail, so the loss rewards semantic prediction.
+
+**I-JEPA** (Assran et al., Meta, 2023): from one image, sample 4 target blocks (each 15-20% of the image, aspect ratio 0.75 to 1.5) and one context block (85-100% of the image) with the target regions removed from it. A ViT-H/14 trained on ImageNet in under 72 hours on 16 A100 GPUs. Collapse is prevented the BYOL way: EMA target plus a predictor.
+**V-JEPA 2** (Meta, June 2025): the same objective on video, pretrained on over 1 million hours of internet video and images. It reports 77.3 top-1 on Something-Something v2 (motion understanding) and 39.7 recall@5 on Epic-Kitchens-100 action anticipation. V-JEPA 2-AC adds an action-conditioned predictor post-trained on under 62 hours of unlabeled robot video from the DROID dataset and plans pick-and-place on Franka arms in two labs zero-shot, by searching for actions whose predicted embedding matches a goal image's embedding.
+
+**DINOv3 and Gram anchoring:**
+
+DINOv3 (Meta, August 2025) scales DINO-style self-distillation to a 7B-parameter ViT (patch size 16) trained on LVD-1689M, 1,689 million curated images drawn from a pool of about 17 billion. At that scale the global features keep improving with training length, but the **dense** (per-patch) features degrade: patch similarity maps get noisy and segmentation quality drops. **Gram anchoring** fixes this. The Gram matrix of L2-normalized patch features (every patch's cosine similarity with every other patch) is regularized toward the Gram matrix produced by an earlier checkpoint, the Gram teacher:
+
+```
+L_gram = || X_s X_s^T  -  X_g X_g^T ||_F^2
+X_s : student patch features (n_patches x d), L2-normalized
+X_g : Gram-teacher patch features, same image, same normalization
+```
+
+The loss constrains only the *pairwise similarity structure* of patches, not the features themselves, so the features can keep moving while their local consistency is held. It is switched on after 1M iterations, the Gram teacher is refreshed every 10k iterations, and checkpoints from 100k to 200k iterations work as teachers while a 1M-iteration teacher hurts. A high-resolution variant feeds the Gram teacher 2x-resolution images and downsamples its feature map, adding about 2 mIoU on ADE20k. The 7B teacher is distilled into ViT-S, ViT-B, ViT-L, ViT-H+ and ConvNeXt students for deployment. Frozen-backbone results include 55.9 mIoU on ADE20k with a linear head. Vision-specific SSL background (DINO, iBOT, MAE) is in [Self-Supervised Vision](../computer_vision/self_supervised_vision.md).
 
 ---
 
@@ -314,6 +337,35 @@ at graph level"]
 ```
 
 GraphCL builds two augmented views of one graph and applies SimCLR's contrastive loss on graph-level embeddings. Augmentation choice is domain-critical: subgraph sampling and attribute masking preserve molecular chemistry, while edge dropout suits social graphs.
+
+### I-JEPA: Predict Embeddings of Hidden Blocks
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img(["Image patches"]) --> ctx_mask["Context block<br/>85-100% of image<br/>targets removed"]
+    img --> tgt_all["Full image"]
+    ctx_mask --> ctx_enc["Context encoder<br/>ViT, trained"]
+    tgt_all --> tgt_enc["Target encoder<br/>EMA copy, no grad"]
+    tgt_enc --> pick["Select 4 target<br/>blocks' embeddings"]
+    ctx_enc --> pred["Predictor<br/>+ target position tokens"]
+    pred --> loss["L2 loss<br/>in embedding space"]
+    pick --> loss
+
+    class img,tgt_all io
+    class ctx_mask base
+    class ctx_enc,pred train
+    class tgt_enc,pick frozen
+    class loss lossN
+```
+
+The target encoder sees the whole image and its outputs are cut to the target blocks afterwards, so each target embedding has full-image context. The loss lives in embedding space: no pixels are reconstructed and no augmentation pair is built.
 
 ---
 
@@ -742,6 +794,51 @@ The line `return 2 - 2 * (q * z.detach()).sum(dim=1).mean()` looks arbitrary unt
 
 That `250 -> 10000` ramp is a deliberate stabilization schedule: early in training the online network changes fast and a short-memory target keeps up, while late in training a `10000`-step memory freezes the target into an almost-constant teacher so the representations settle. Set `m` too low and target and online move as one — the asymmetry vanishes and so does the protection against collapse; set it near `1.0` from step zero and the target never learns anything worth predicting.
 
+### I-JEPA training step and the Gram anchoring loss
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+def ijepa_step(
+    context_encoder: nn.Module,
+    target_encoder: nn.Module,
+    predictor: nn.Module,
+    patches: torch.Tensor,          # (B, N, d_in) patch embeddings with positions
+    context_idx: torch.Tensor,      # (B, n_ctx) visible patch indices, targets removed
+    target_idx: list[torch.Tensor], # 4 tensors, each (B, n_tgt) patch indices
+) -> torch.Tensor:
+    with torch.no_grad():
+        full = target_encoder(patches)                      # (B, N, d) whole-image context
+        full = F.layer_norm(full, full.shape[-1:])
+    ctx = context_encoder(torch.gather(patches, 1, _expand(context_idx, patches)))
+    loss = patches.new_zeros(())
+    for idx in target_idx:
+        target = torch.gather(full, 1, _expand(idx, full))  # (B, n_tgt, d)
+        pred = predictor(ctx, context_idx, idx)             # positions tell it where to predict
+        loss = loss + F.mse_loss(pred, target)
+    return loss / len(target_idx)
+
+
+def _expand(idx: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    return idx.unsqueeze(-1).expand(-1, -1, x.size(-1))
+
+
+def gram_anchoring_loss(student_patches: torch.Tensor, gram_teacher_patches: torch.Tensor) -> torch.Tensor:
+    """DINOv3: match patch-to-patch cosine similarity structure, not the features themselves."""
+    xs = F.normalize(student_patches, dim=-1)               # (B, n_patches, d)
+    xg = F.normalize(gram_teacher_patches, dim=-1)
+    gs = xs @ xs.transpose(1, 2)                            # (B, n_patches, n_patches)
+    gg = xg @ xg.transpose(1, 2)
+    return (gs - gg).pow(2).sum(dim=(1, 2)).mean()
+```
+
+After each optimizer step the target encoder is updated by EMA exactly as in BYOL (previous subsection). The predictor is a deliberately narrower ViT than the encoder, so the encoder has to do the representation work.
+
+**Decoding the Gram matrix size.** At 224 x 224 input with patch size 16 there are `14 x 14 = 196` patches, so each Gram matrix is `196 x 196 = 38,416` entries per image, computed from `d`-dimensional features with one batched matmul. The loss touches only these similarities: rotate every patch feature by the same orthogonal matrix and `L_gram` is unchanged, which is why the global DINO and iBOT objectives can keep moving the features while patch-level consistency stays anchored.
+
 ---
 
 ## 7. Real-World Examples
@@ -756,6 +853,10 @@ That `250 -> 10000` ramp is a deliberate stabilization schedule: early in traini
 
 **GraphCL — molecule property prediction:** Pretrained on 2M unlabeled molecules from ZINC database. Downstream: HIV antiviral activity (1.5K labeled). GraphCL + fine-tuning improved ROC-AUC from 0.74 (supervised only) to 0.80. Subgraph augmentation was most effective for molecular graphs — preserves local chemistry.
 
+**V-JEPA 2 (Meta, 2025), latent prediction to robot planning:** Pretrained with the JEPA objective on over 1 million hours of internet video and images, it reports 77.3 top-1 on Something-Something v2 and 39.7 recall@5 on Epic-Kitchens-100 action anticipation; aligned with an LLM it reaches 84.0 on PerceptionTest at 8B scale. The action-conditioned V-JEPA 2-AC, post-trained on under 62 hours of DROID robot video, ran zero-shot pick-and-place on Franka arms in two labs with no data from those labs and no task reward.
+
+**DINOv3 (Meta, 2025), frozen backbone for dense tasks:** A 7B ViT trained on 1,689M curated images with Gram anchoring; frozen-backbone results include 66.1 mAP COCO detection and 63.0 mIoU ADE20k segmentation with task heads on top, and 55.9 mIoU ADE20k with a linear head. Distilled ViT-S (21M) to ViT-H+ (0.8B) and ConvNeXt students make the same features deployable on smaller budgets.
+
 ---
 
 ## 8. Tradeoffs
@@ -769,6 +870,8 @@ That `250 -> 10000` ramp is a deliberate stabilization schedule: early in traini
 | Barlow Twins | No | Medium | Low (redundancy) | Medium | High |
 | BERT MLM | No | Medium | N/A (generative) | High | Very High (NLP) |
 | ELECTRA | No | Medium | N/A | Medium | Higher than BERT/compute |
+| I-JEPA / V-JEPA 2 | No | Medium | Medium (EMA target + predictor) | Lower than pixel MAE per epoch; no augmentation pipeline | High for semantic and motion tasks |
+| DINOv3 | No | Large | Low (centering + Gram anchoring) | Very high (7B teacher, 1.7B images) | Very High, strongest on frozen dense features |
 
 **Representation collapse:** contrastive methods collapse without negatives because the trivially optimal solution (all embeddings identical) minimizes positive distances. BYOL avoids this via the predictor asymmetry + EMA target — the online network must predict a moving target, creating a non-trivial optimization landscape. Barlow Twins avoids collapse via cross-correlation matrix regularization (penalize redundancy between dimensions).
 
@@ -788,6 +891,14 @@ That `250 -> 10000` ramp is a deliberate stabilization schedule: early in traini
 - Data augmentations cannot be designed without destroying task-relevant signal (e.g., tabular data with all features equally important)
 - Latency budget prohibits large pretrained encoders
 - Task is simple enough for a shallow model (logistic regression on well-engineered features)
+
+**Use JEPA-style latent prediction when:**
+- Augmentation invariances would erase signal you need (colour in medical or satellite imagery, motion direction in video)
+- You need a predictive world model whose embeddings can be rolled forward for planning (V-JEPA 2-AC)
+
+**Use a DINOv3 backbone (frozen) when:**
+- The downstream task is dense (segmentation, depth, correspondence) and labels are scarce; train only a light head
+- Do NOT pretrain a DINOv3-scale model yourself: the recipe needs a 7B teacher and over a billion curated images. Use a distilled checkpoint and check the DINOv3 License terms for your use
 
 **NLP-specific:** always use a pretrained LLM rather than training SSL from scratch. Pretraining cost is prohibitive. Fine-tuning is the standard.
 
@@ -810,6 +921,9 @@ The [MASK] token appears only during pretraining (not fine-tuning), creating a t
 **Pitfall 5 — Ignoring the linear evaluation protocol:**
 A team evaluated SSL quality by fine-tuning the full model and comparing to supervised baselines. Fine-tuning can mask poor representations — the additional supervised signal can compensate. They reported excellent results, deployed, and found the pretrained features were not actually generalized. Fix: always report linear evaluation alongside fine-tuning results to diagnose representation quality independently.
 
+**Pitfall 6 - Training longer and losing the dense features:**
+A team extended a DINO-style ViT pretraining run to triple the schedule because ImageNet linear-probe accuracy was still rising. Segmentation with a frozen backbone got worse over the same stretch, and patch-similarity maps turned noisy, with background patches matching the object. The DINOv3 paper documents this exact pattern at scale: global metrics keep improving while patch-level feature quality degrades over long schedules. Fix: track a dense metric (linear-probe mIoU, or patch correspondence) next to the global one throughout training, and add Gram anchoring against an early checkpoint (DINOv3 found 100k to 200k iteration teachers work and a 1M-iteration teacher hurts).
+
 ---
 
 ## 11. Technologies & Tools
@@ -817,13 +931,16 @@ A team evaluated SSL quality by fine-tuning the full model and comparing to supe
 | Tool | Purpose | Notes |
 |---|---|---|
 | HuggingFace Transformers | BERT, GPT, ELECTRA pretraining/fine-tuning | Industry standard |
-| VISSL (Facebook) | Vision SSL: SimCLR, MoCo, BYOL, DINO | PyTorch-based, production-ready |
+| solo-learn | Vision SSL: SimCLR, MoCo, BYOL, DINO, Barlow Twins and more | PyTorch Lightning-based research library |
 | Lightly AI | SSL for computer vision, active learning | Commercial + open-source |
 | PyTorch Lightning | SSL training boilerplate | Simplifies distributed training |
 | PyTorch Geometric | Graph SSL: DGI, GraphCL | GNN-specific |
 | sentence-transformers | Contrastive learning for text embeddings | SimCSE, NLI supervision |
 | SimCSE | Contrastive sentence embeddings | Dropout as augmentation, strong baseline |
 | FAISS | ANN search for evaluating embedding quality | Used in retrieval benchmarks |
+| `facebookresearch/ijepa` | I-JEPA reference code and checkpoints | CC BY-NC 4.0 |
+| `facebookresearch/vjepa2` | V-JEPA 2 and V-JEPA 2-AC code and checkpoints | MIT license on the repository |
+| `facebookresearch/dinov3` | DINOv3 backbones (ViT and ConvNeXt), distilled sizes | DINOv3 License, read terms before commercial use |
 
 ---
 
@@ -904,6 +1021,11 @@ Because images are spatially redundant, even with 75% of patches hidden the visi
 
 Generative SSL reconstructs or predicts raw data (masked or next tokens), while contrastive SSL learns by pulling augmented views together and pushing others apart in embedding space. Generative methods (BERT MLM, GPT, MAE) need no negatives and directly model the data distribution, which suits language and dense reconstruction; contrastive methods (SimCLR, MoCo) optimize an instance-discrimination objective and depend heavily on augmentation design and negatives. Non-contrastive methods (BYOL, DINO, SimSiam) sit in between — no negatives and no reconstruction, relying on architectural asymmetry to avoid collapse.
 
+**Q: How does a JEPA such as I-JEPA differ from MAE and from contrastive SSL?**
+**Short:** JEPA predicts the target encoder's embeddings of hidden blocks from a visible context, so it needs no pixel reconstruction (MAE) and no augmented view pairs (contrastive).
+
+MAE reconstructs masked pixels, which spends capacity on texture and high-frequency detail; contrastive and DINO-style methods match two augmented views, which bakes in whatever invariances the augmentations impose. I-JEPA takes one image, encodes a large context block (85-100% of the image, target regions removed), and asks a narrow predictor, given position tokens, to regress the embeddings an EMA target encoder produced for 4 target blocks. The L2 loss in embedding space lets the target drop unpredictable detail, so the objective rewards semantic prediction. Collapse is avoided the BYOL way, with the EMA target and the predictor asymmetry. I-JEPA trained a ViT-H/14 on ImageNet in under 72 hours on 16 A100s; use the family when augmentation invariances would erase signal, as with colour in medical imaging or motion in video.
+
 **Q: How does DINO avoid representation collapse without negative pairs?**
 **Short:** DINO prevents collapse by centering and sharpening a momentum teacher's output distribution during self-distillation.
 
@@ -914,6 +1036,17 @@ DINO uses self-distillation with centering and sharpening on the teacher outputs
 
 Dimensional collapse is when embeddings span only a low-dimensional subspace, wasting model capacity even though the vectors are not all identical. Unlike full collapse to a constant, the embeddings still vary but become redundant across dimensions. Barlow Twins pushes the cross-correlation matrix of the two views toward the identity — diagonal ones enforce invariance and off-diagonal zeros enforce decorrelation — so dimensions carry non-redundant information. VICReg makes this explicit with three terms: variance (keep each dimension's std above a floor), invariance (match views), and covariance (decorrelate dimensions). Neither method needs negatives or a momentum encoder.
 
+
+
+**Q: Why did DINOv3 need Gram anchoring, and what does the loss constrain?**
+**Short:** On long schedules a 7B DINO-style model's patch features degrade while global metrics improve; Gram anchoring holds patch-to-patch similarities near an early checkpoint's.
+
+Training DINOv3's 7B ViT for longer kept improving global benchmarks but made dense features noisy: patch similarity maps blurred and segmentation dropped. Gram anchoring adds `||X_s X_s^T - X_g X_g^T||_F^2` over L2-normalized patch features, where `X_g` comes from an earlier Gram-teacher checkpoint. It constrains only the pairwise cosine-similarity structure, so the global objective can keep moving the features as long as their local consistency holds. DINOv3 switched it on after 1M iterations, refreshed the Gram teacher every 10k iterations, and found 100k to 200k iteration teachers helpful and a 1M-iteration teacher harmful; feeding the teacher 2x-resolution images added about 2 mIoU on ADE20k. The practical lesson for any long SSL run: monitor a dense metric, not only the linear probe.
+
+**Q: How does V-JEPA 2-AC plan robot actions from a self-supervised video model?**
+**Short:** It adds an action-conditioned predictor on frozen V-JEPA 2 features and searches for actions whose predicted future embedding is closest to a goal image's embedding.
+
+V-JEPA 2 is pretrained on over 1 million hours of video with latent prediction, so its predictor already forecasts future embeddings. V-JEPA 2-AC post-trains an action-conditioned predictor on under 62 hours of unlabeled DROID robot video: given the current embedding and a candidate action, it predicts the next embedding. At run time the robot encodes the goal image, samples action sequences, rolls them through the predictor, and executes the first action of the sequence whose final embedding is nearest the goal, then replans (model-predictive control). Meta deployed it zero-shot for pick-and-place on Franka arms in two labs with no data from those labs and no task reward. Planning happens in embedding space, so the model never has to render pixels of the future.
 
 ---
 

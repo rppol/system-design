@@ -457,6 +457,38 @@ flowchart LR
 ```
 Distributed SQL earns its 2-5x cost premium only when write scale or multi-region active-active consistency genuinely exceeds what vertical PostgreSQL scaling (and Vitess/Citus sharding) can provide.
 
+### PostgreSQL for Everything: Where It Holds and Where It Breaks
+
+"Just use Postgres" is a consolidation argument: one engine, one backup and HA story, one set of skills, transactions across what would otherwise be five systems. Extensions make most of the specialized stores optional at small and medium scale:
+
+| Workload | In PostgreSQL | Holds until roughly | Then move to |
+|----------|---------------|---------------------|--------------|
+| Job queue | `SELECT ... FOR UPDATE SKIP LOCKED` | Low thousands of jobs/s; dead-tuple churn and vacuum become the limit | Kafka, SQS, a dedicated broker |
+| Full-text search | `tsvector` + GIN | Basic keyword search; no BM25 relevance tuning, weak facets | Elasticsearch / OpenSearch |
+| Vector search | `pgvector` (HNSW, IVFFlat) | Tens of millions of vectors when the index fits in RAM | Dedicated vector database or sharded pgvector |
+| Documents | `JSONB` + GIN | Shapes that fit one primary; no native sharding | MongoDB, or Citus for scale-out |
+| Time series | TimescaleDB hypertables and compression | Billions of rows on one node | ClickHouse for wide analytical scans |
+| Cache | `UNLOGGED` tables, materialized views | Thousands of reads/s; every read is still a SQL query and a connection | Redis / Valkey |
+| Analytics | Read replica, `pg_duckdb`, columnar extensions | Moderate ad hoc queries | ClickHouse, a warehouse, a lakehouse |
+
+The shared limit is the single primary: every extension competes for one node's write throughput, `shared_buffers`, vacuum capacity and `max_connections`. The pattern that works is to start consolidated, measure each workload, and split one out when it starts hurting the others (the queue's dead tuples bloating the OLTP tables, the vector index evicting hot pages), not on day one.
+
+### Managed-PostgreSQL Vendor Risk
+
+Consolidating on Postgres moves the risk from the engine to the vendor that runs it. In 2025 two independent managed-Postgres companies were bought by data-platform vendors:
+
+| Date | Event |
+|------|-------|
+| 2025-05-14 | Databricks announced an agreement to acquire Neon, the serverless Postgres provider (separated compute and storage, branching) |
+| 2025-06-02 | Snowflake announced the acquisition of Crunchy Data and a Snowflake Postgres offering |
+
+The engine stays open source after such a deal; what can change is the service around it: roadmap, pricing model, regions, support terms, or the product's existence as a standalone offering. Earlier examples show the same shape for features: MongoDB ended Atlas Device Sync on 30 September 2025, and Fly.io states it cannot provide support for LiteFS. Score a managed provider on how cheaply you can leave:
+
+1. **Wire and extension portability.** Use only extensions that exist on at least one other provider and self-managed. Proprietary APIs (branching endpoints, a custom serverless driver, a vendor-only extension) are the lock-in.
+2. **A tested exit path.** Logical replication out to another provider (publication plus subscription, or `pg_dump` for small databases), rehearsed once a year with a measured cutover time.
+3. **Data in your account.** Backups or a continuous replica in object storage you own, so an outage or account dispute does not hold the data.
+4. **Contract terms.** Change-of-control notice, minimum notice before end of life, and a data-export commitment.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -587,6 +619,16 @@ HFT requires: P99 latency < 1ms for trade execution reads/writes; strict ACID fo
 **Short:** Self-hosting only wins once the managed price premium on your fleet exceeds a loaded DBA's salary, which rarely holds at small scale.
 
 Managed database (RDS, Cloud SQL, Atlas, PlanetScale): lower operational burden (no OS patching, automatic backups, managed HA failover), faster time-to-value, higher cost at scale. Choose managed when: team lacks DBA expertise, time-to-production matters, operational cost savings justify higher hosting cost, or compliance requires managed service with specific certifications (SOC 2, HIPAA — managed services have these). Self-hosted: lower infrastructure cost — at us-east-1 list prices an RDS PostgreSQL Multi-AZ db.r6g.xlarge is roughly 2x the EC2-plus-EBS cost of running the same HA pair yourself — plus full control over configuration and extensions (managed services restrict some extensions), and it is sometimes required for compliance (data sovereignty, no third-party access). Calculate the breakeven rather than assuming one: the ops FTE is a roughly fixed cost while the managed premium scales with compute, so self-hosting only wins once the premium on your fleet exceeds a loaded DBA salary. For a single 4 vCPU pair that is not close — the premium is about $6K/year against $62.5K of engineer time — so run the arithmetic on your own fleet size and your own loaded cost.
+
+**Q: When does "just use PostgreSQL for everything" stop being the right call?**
+**Short:** When one workload's load on the single primary (write rate, vacuum, memory, connections) starts degrading the others, or when it needs a capability an extension only approximates, such as BM25 search relevance.
+
+Consolidating queues (`SKIP LOCKED`), search (`tsvector`), vectors (`pgvector`), documents (`JSONB`) and time series (TimescaleDB) into one PostgreSQL buys one backup, HA and skills story plus transactions across all of them. Every one of those workloads shares one primary's write throughput, `shared_buffers`, autovacuum workers and `max_connections`. The signals to split are measurable: queue churn creating dead tuples faster than vacuum clears them and bloating OLTP tables, an HNSW index too large for RAM evicting hot pages, search needing relevance tuning and facets that GIN cannot give, or write volume past what vertical scaling and a replica buy. Start consolidated, watch each workload's share of WAL, buffer hits and vacuum time, and move out the one that hurts the rest, not every workload on day one.
+
+**Q: How do you assess vendor risk when choosing a managed PostgreSQL provider?**
+**Short:** Score how cheaply you can leave: portable extensions only, a rehearsed logical-replication exit, backups in your own account, and change-of-control terms, since providers like Neon and Crunchy Data were acquired in 2025.
+
+In 2025 Databricks agreed to acquire Neon (announced 2025-05-14) and Snowflake acquired Crunchy Data (2025-06-02), so an independent provider can become part of a larger platform with a different roadmap, pricing model or product line. The PostgreSQL engine stays portable; the lock-in is in the service features you adopt: branching APIs, a proprietary serverless driver, vendor-only extensions, or backups you cannot export. Assess four things: whether every extension you use exists elsewhere, whether you have rehearsed a cutover by logical replication to another provider and timed it, whether backups or a replica land in object storage you own, and whether the contract gives change-of-control notice and an end-of-life notice period. A provider that scores well on these is cheap to keep because it is cheap to leave.
 
 **Q: When would you add vector search to an existing system?**
 **Short:** Vector search is worth adding once semantic similarity, recommendations, or deduplication are needed, starting with pgvector first.

@@ -1027,7 +1027,7 @@ class FenwickFixed:
 | `java.util.ArrayDeque` | Efficient stack/queue for iterative DFS/BFS in Java |
 | `java.util.TreeMap` | Red-black tree; range queries, floor/ceiling/subMap in O(log n) |
 | Neo4j / Amazon Neptune | Native graph databases; Cypher/Gremlin query languages |
-| Redis Bloom filter | `BF.ADD`, `BF.EXISTS` — Bloom filter as a Redis module (RedisBloom) |
+| Redis Bloom filter | `BF.ADD`, `BF.EXISTS`: built into Redis Open Source 8.0+; the RedisBloom module on 7.x and earlier |
 | Apache Spark GraphX | Distributed graph processing; Pregel model for iterative algorithms |
 | Guava BloomFilter | Production-grade Bloom filter in Java with configurable FPR |
 

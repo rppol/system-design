@@ -761,7 +761,7 @@ jobs:
 
 **Vendor release evaluation**: Frontier labs publish a system card or model card with each release covering capability benchmarks (MMLU, HumanEval, MT-Bench — see [Evaluation & Benchmarks](../evaluation_and_benchmarks/evaluation_and_benchmarks.md)) alongside safety evaluations. The pattern worth copying is the two-sided safety metric: refusal rate on known-harmful prompts *and* over-refusal rate on legitimate requests, since optimizing either alone is trivial and useless. The details of any lab's internal judge configuration are not published, so do not assume a particular judge model is used.
 
-**OpenAI Evals Framework** (`openai/evals`): Open-source framework for running standardized evaluations. It documents two template families: *basic* evals (programmatic scoring — `Match`, `Includes`, `FuzzyMatch`, `JsonMatch`) and *model-graded* evals (LLM as judge, specified entirely in YAML); anything outside those requires custom eval logic. Each eval is a JSONL dataset plus an eval template or grading class. Contributions to the public registry are accepted, but the repository states it is "currently not accepting evals with custom code" — only model-graded YAML evals. Results are written to local JSONL log files, with optional logging to a Snowflake database for comparison across model versions. Note that OpenAI now also exposes a hosted Evals product in its dashboard, separate from this repository.
+**OpenAI Evals Framework** (`openai/evals`): Open-source framework for running standardized evaluations. It documents two template families: *basic* evals (programmatic scoring: `Match`, `Includes`, `FuzzyMatch`, `JsonMatch`) and *model-graded* evals (LLM as judge, specified entirely in YAML); anything outside those requires custom eval logic. Each eval is a JSONL dataset plus an eval template or grading class. Contributions to the public registry are accepted, but the repository states it is "currently not accepting evals with custom code", only model-graded YAML evals. Results are written to local JSONL log files, with optional logging to a Snowflake database for comparison across model versions. OpenAI's hosted Evals product (dashboard and API) is a separate thing from this repository: existing hosted evals turn read-only on 2026-10-31 and the product shuts down on 2026-11-30.
 
 **HoneyHive and Braintrust**: Commercial evaluation platforms that integrate with LangChain through callback handlers (`HoneyHiveLangChainTracer`, `BraintrustCallbackHandler`). HoneyHive specializes in structured evaluation pipelines with multi-dimensional rubrics and annotation queues. Braintrust provides dataset versioning, A/B experiment tracking, and prompt playground with built-in evaluation. Both support LLM-as-judge with configurable rubrics and provide dashboards for quality trends.
 
@@ -774,14 +774,14 @@ jobs:
 | Evaluation Method | Cost | Speed | Accuracy vs Human | Scalability |
 |------------------|------|-------|------------------|-------------|
 | Human evaluation | High (annotator-minutes per example) | Slow (days) | Ground truth | Limited |
-| LLM-as-judge | Medium (~$0.003-0.015/example) | Fast (seconds) | over 80% agreement (MT-Bench) | Unlimited |
+| LLM-as-judge | Low-Medium (~$0.0003-0.012/example) | Fast (seconds) | over 80% agreement (MT-Bench) | Unlimited |
 | Automated metrics (BLEU, ROUGE) | Very low | Instant | Low (for open-ended) | Unlimited |
 | Heuristic checks (format, length) | ~$0 | Instant | Medium (for constrained) | Unlimited |
 | pytest with mocked LLM | ~$0 | Instant | Low (verifies structure) | Unlimited |
 
 The LLM-as-judge cost band is derived from published list pricing on a ~2,000-input/200-output-token
-judgement: $0.003 with Claude Haiku 4.5 ($1/$5 per MTok) up to $0.015 with Claude Opus 5 ($5/$25 per
-MTok). See Section 11 for the full derivation. Human-evaluation cost depends entirely on your
+judgement: $0.0003 with Claude Haiku 5.5 ($0.10/$0.50 per MTok) up to $0.012 with Claude Opus 5.5
+($4/$20 per MTok). See Section 11 for the full derivation. Human-evaluation cost depends entirely on your
 annotator rate and is not a published figure.
 
 | Approach | Advantages | Disadvantages |
@@ -848,25 +848,26 @@ A team generated evaluation examples with one model and used that same model as 
 | `Promptfoo` | CLI eval tool | Multi-model comparison, YAML test cases, regex + LLM graders |
 | `LangSmith` | Tracing + eval | Datasets, evaluators, regression tracking, production sampling |
 | `OpenAI Evals` | Eval framework | Open-source; basic (programmatic) + model-graded eval templates; JSONL format |
+| OpenAI hosted Evals (dashboard and API) | Hosted eval runs | Read-only from 2026-10-31, shut down 2026-11-30; OpenAI points users to a Promptfoo migration guide. Separate from the open-source `openai/evals` repository |
 | `HoneyHive` | Eval platform | Multi-dimensional rubrics, annotation queues, drift detection |
 | `pytest` | Test runner | Parametrize with golden dataset; fixtures for chain setup; `--timeout` needs the `pytest-timeout` plugin |
 | `vcrpy` | HTTP recording | Record/replay API calls for deterministic integration tests |
 | `pytest-asyncio` | Async testing | Required for async LangChain/LangGraph chains in pytest |
 
 **Concrete evaluation cost reference — judge calls only, with a cheap current judge**
-(worked at Claude Haiku 4.5 list pricing, $1/$5 per MTok, and ~2,000 input + 200 output tokens per
-judgement: `2000 x $1/1M + 200 x $5/1M = $0.003`):
-- LLM-as-judge for one example: ~$0.002-0.010 (context length is the driver)
-- 200-example regression eval: ~$0.50-2.00
-- 1000-example full eval: ~$3-10
+(worked at Claude Haiku 5.5 list pricing on 2026-10-19, $0.10/$0.50 per MTok for prompts up to 100K
+tokens, and ~2,000 input + 200 output tokens per judgement: `2000 x $0.10/1M + 200 x $0.50/1M = $0.0003`):
+- LLM-as-judge for one example: ~$0.0002-0.001 (context length is the driver)
+- 200-example regression eval: ~$0.04-0.20
+- 1000-example full eval: ~$0.20-1.00
 
 These cover the *grading* only. Running the system under test — retrieval, generation, any agent
 loop — is billed on top and usually dominates, which is why the case study in Section 14 budgets
-~$2/PR all-in against $0.80 of judge calls. Re-derive both after any repricing.
+~$2/PR all-in against ~$0.08 of judge calls. Re-derive both after any repricing.
 
 **One all-in rate, used for every cost annotation in this module.** The diagrams in Sections 5
-and 14 all price an E2E run at **~$0.01 per example** for the Section 14 RAG scenario: ~$0.003
-of judge calls plus ~$0.007 to actually run retrieval and generation on that example. Every
+and 14 all price an E2E run at **~$0.01 per example** for the Section 14 RAG scenario. Judge calls are
+~$0.0003 of that, so nearly all of it is the cost of running retrieval and generation on that example. Every
 figure in this module is that rate times a run count, so they stay consistent: a 200-example
 regression eval is `200 x $0.01 = ~$2`; the nightly suite is 1 000 examples *plus* 5x flakiness
 reruns on a ~250-example subset, so ~2 250 model runs, `~2 250 x $0.01 = ~$20`. This is an
@@ -1041,7 +1042,7 @@ named deployment; only the cost lines are derived from published list pricing.
 - Regressions caught before production: 7 in 6 months (3 prompt changes, 2 model upgrades, 2 knowledge base updates)
 - Average time to detect regression: 8 minutes (PR evaluation step)
 - Average time to detect regression without CI eval: ~3 days (user complaints)
-- Judge cost per PR: ~$0.80 (200 examples × ~$0.004/example of grading)
+- Judge cost per PR: ~$0.08 (200 examples × ~$0.0004/example of grading)
 - All-in cost per PR: ~$2 (judge calls plus running the RAG chain itself for all 200 examples)
 - Monthly evaluation cost: ~$130 (60 PRs/month × ~$2 = $120, plus 4 weekly full evals × ~$2 = $8; both are the same 200 examples at the ~$0.01/example all-in rate derived in Section 11)
 
@@ -1149,6 +1150,6 @@ def refresh_golden_dataset(prod_logs: list[ConversationLog],
     return current_dataset + filtered   # append, never replace
 ```
 
-**How do you implement LLM-as-judge for automated evaluation at scale?** Match judge capability to rubric difficulty — a cheap small model is adequate for narrow, mechanical criteria, while open-ended quality judgements need a model at least as capable as the one under test: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation — randomize the order of A/B responses when doing pairwise comparison, or score both orders and average; (3) calibrate against human labels on a fixed calibration set before trusting any score, using the MT-Bench result (a strong judge reaching over 80% human agreement, the same as human-human agreement) as the realistic ceiling rather than a 95%+ target; (4) run the judge on a different model family from the one being evaluated — never self-evaluate. Cost: roughly $0.003 per judgement with a cheap current model such as Claude Haiku 4.5 at $1/$5 per MTok on a ~2,000-token rubric.
+**How do you implement LLM-as-judge for automated evaluation at scale?** Match judge capability to rubric difficulty: a cheap small model is adequate for narrow, mechanical criteria, while open-ended quality judgements need a model at least as capable as the one under test: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation: randomize the order of A/B responses when doing pairwise comparison, or score both orders and average; (3) calibrate against human labels on a fixed calibration set before trusting any score, using the MT-Bench result (a strong judge reaching over 80% human agreement, the same as human-human agreement) as the realistic ceiling rather than a 95%+ target; (4) run the judge on a different model family from the one being evaluated; never self-evaluate. Cost: roughly $0.0003 per judgement with a cheap current model such as Claude Haiku 5.5 at $0.10/$0.50 per MTok on a ~2,000-token rubric.
 
 **What is flakiness in LLM tests and how do you detect and fix it?** A flaky test passes sometimes and fails sometimes on the same model and prompt — caused by stochastic sampling. Detection: run each test case 5× and flag tests where pass rate is 2/5 to 4/5 (not deterministically passing or failing). Note that no current frontier model is fully deterministic even at temperature 0, and the newest ones do not expose the parameter at all (Claude Opus 4.7 and later return HTTP 400 for any non-default `temperature`, `top_p` or `top_k`), so "just set temperature=0" is no longer a general fix. Fix: (1) where the knob still exists, request greedy decoding for factual tasks; (2) for creative tasks that require non-zero temperature, switch from exact-match assertions to LLM-as-judge assertions that are robust to paraphrasing; (3) use `n=3` completions and require 2/3 to pass (majority vote) before marking the test as failed — reduces false failures from lucky/unlucky samples.

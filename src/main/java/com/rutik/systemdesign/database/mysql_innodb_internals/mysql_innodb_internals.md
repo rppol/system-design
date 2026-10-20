@@ -43,8 +43,8 @@ flowchart TD
 
     subgraph MEM["InnoDB Memory - RAM"]
         BP("Buffer Pool<br/>~75% of RAM")
-        RLB("Redo Log Buffer<br/>16MB default")
-        CB("Change Buffer<br/>non-unique secondary<br/>index DML")
+        RLB("Redo Log Buffer<br/>64MB default")
+        CB("Change Buffer<br/>off by default since 8.4")
     end
 
     subgraph DISK["InnoDB Disk"]
@@ -132,7 +132,7 @@ Both `=1` is slowest but safest. Common tradeoff: set both to 0 or 2 for higher 
 
 ### Change Buffer
 
-InnoDB defers writes to non-unique secondary index pages that are not in the buffer pool. Instead of loading the page from disk, it records the change in the change buffer. The change buffer is merged to disk lazily (during buffer pool eviction or idle time). This reduces random I/O for write-heavy workloads.
+When enabled, InnoDB defers writes to non-unique secondary index pages that are not in the buffer pool. Instead of loading the page from disk, it records the change in the change buffer. The change buffer is merged to disk lazily (during buffer pool eviction or idle time). This reduces random I/O for write-heavy workloads on spinning disks. Since MySQL 8.4, `innodb_change_buffering` defaults to `none` (it was `all` in 8.0), so a default install does not buffer changes; set it to `all` or `inserts` to turn the feature on. On SSD-backed servers the random read it saves is cheap, which is why the default changed.
 
 Risk: large change buffer outstanding on crash → long recovery time.
 
@@ -372,7 +372,7 @@ SHOW REPLICA STATUS\G
 
 - **UUID PK performance**: A startup switched from INT AUTO_INCREMENT to UUID v4 as primary key (for distributed ID generation). Write throughput dropped 60%, buffer pool hit rate dropped from 99% to 75%. Root cause: random UUID inserts scattered across the entire clustered index. Fix: switched to ULIDv2 (time-ordered UUID) — first 48 bits are timestamp, so inserts are sequential. Performance recovered.
 - **redo log too small**: a server left at the engine default `innodb_redo_log_capacity = 100MB` under a 40MB/s write rate wrapped its redo log every 2.5 seconds, firing sharp checkpoints continuously. Fix: `SET GLOBAL innodb_redo_log_capacity = 4294967296;` (4GB), which takes effect online with no restart, or start with `--innodb-dedicated-server` so capacity is sized automatically at `(logical processors / 2) GB` up to 16GB. Note the neighbouring knob that catches people out: a single mini-transaction larger than `innodb_log_buffer_size` (64MB by default) fails with "InnoDB: mtr_commit(): Log buffer size too small" — that is the *buffer*, not the capacity, and raising capacity will not fix it.
-- **Change buffer causing slow startup**: After a power failure, a server had 8GB of pending change buffer entries. MySQL startup took 45 minutes as it merged the change buffer before accepting connections. Fix: `innodb_change_buffer_max_size = 10` (10% of buffer pool, down from 25%) to limit change buffer growth.
+- **Change buffer causing slow startup**: After a power failure, a MySQL 8.0 server running with `innodb_change_buffering=all` (the 8.0 default) had 8GB of pending change buffer entries. MySQL startup took 45 minutes as it merged the change buffer before accepting connections. Fix: `innodb_change_buffer_max_size = 10` (10% of buffer pool, down from 25%) to limit change buffer growth, or `innodb_change_buffering=none`, which is the default from 8.4.
 
 ---
 
@@ -509,9 +509,9 @@ Binary log: MySQL server-level log, records all data changes (INSERT/UPDATE/DELE
 gh-ost (GitHub's Online Schema Change) works by: (1) Creating a new shadow table with the desired schema. (2) Setting up a binary log listener to capture changes to the original table. (3) Copying rows from original to shadow in batches (low-priority). (4) Applying binlog events (new INSERTs/UPDATEs/DELETEs) to the shadow table in real-time. (5) When shadow table catches up to original (within a few seconds), performing an atomic table swap: `RENAME TABLE original TO original_del, shadow TO original`. The swap requires a brief metadata lock (milliseconds), not a full table lock. Unlike `pt-online-schema-change` which uses triggers (risky for high-write tables), gh-ost uses binlog tailing — safer and lower overhead.
 
 **Q: What is the purpose of the InnoDB change buffer?**
-**Short:** InnoDB's change buffer defers secondary index updates for pages not in memory, cutting random I/O for write-heavy workloads on non-unique indexes.
+**Short:** The change buffer defers non-unique secondary index updates for pages not in memory, cutting random I/O; since MySQL 8.4 it is off by default (innodb_change_buffering=none).
 
-The change buffer is an area in the buffer pool that caches changes to non-unique secondary index pages that are not currently in memory. Without the change buffer, every secondary index update would require reading the index page from disk (random I/O), updating it, and writing it back. With the change buffer, the update is recorded in memory and the actual index page update is deferred until the page is next read into the buffer pool (merge on read). This reduces random I/O for write-heavy workloads. Limitation: only non-unique indexes (InnoDB cannot determine if a unique constraint is violated without reading the index page). If the buffer pool is large enough to contain all frequently accessed index pages, the change buffer provides minimal benefit.
+The change buffer is an area in the buffer pool that caches changes to non-unique secondary index pages that are not currently in memory. Without the change buffer, every secondary index update would require reading the index page from disk (random I/O), updating it, and writing it back. With the change buffer, the update is recorded in memory and the actual index page update is deferred until the page is next read into the buffer pool (merge on read). This reduces random I/O for write-heavy workloads. Limitation: only non-unique indexes (InnoDB cannot determine if a unique constraint is violated without reading the index page). If the buffer pool is large enough to contain all frequently accessed index pages, the change buffer provides minimal benefit. MySQL 8.4 changed the `innodb_change_buffering` default from `all` to `none`, so the feature runs only when you turn it on; on SSDs the saved random read rarely pays for the merge work and the slow crash recovery a large backlog causes.
 
 **Q: What is GTID replication and why is it preferred over binlog file/position replication?**
 **Short:** GTID replication tags every transaction with a unique ID, letting a replica auto-position itself and simplifying failover over binlog file and position.
@@ -536,7 +536,7 @@ The default `innodb_autoinc_lock_mode=2` (interleaved): AUTO_INCREMENT values ar
 **Q: What is the InnoDB buffer pool instance and why use multiple instances?**
 **Short:** Splitting the buffer pool into multiple instances gives each its own mutex, reducing lock contention on the global buffer pool at high concurrency.
 
-`innodb_buffer_pool_instances` (default 8 for buffer pool >= 1GB): splits the buffer pool into N separate instances, each with its own LRU list, mutex, and flush threads. Benefit: reduces lock contention on the global buffer pool mutex at high concurrency. Each access to the buffer pool takes a mutex on the corresponding instance (keyed by page address). With 1 instance, all threads contend for one mutex — bottleneck at >16 concurrent connections. With 8 instances, contention is 8x lower. Recommendation: 1 instance per 1GB of buffer pool, up to the number of CPU cores.
+`innodb_buffer_pool_instances` splits the buffer pool into N separate instances, each with its own LRU list, mutex, and flush threads. Benefit: reduces lock contention on the global buffer pool mutex at high concurrency. Each access to the buffer pool takes a mutex on the corresponding instance (keyed by page address). With 1 instance, all threads contend for one mutex, a bottleneck above 16 concurrent connections. With 8 instances, contention is 8x lower. Default since MySQL 8.4: 1 instance when the buffer pool is 1 GiB or less; above that, the smaller of two hints, clamped to 1-64: half of (`innodb_buffer_pool_size` / `innodb_buffer_pool_chunk_size`), and a quarter of the logical processors. MySQL 8.0 defaulted to 8. Recommendation: 1 instance per 1GB of buffer pool, up to the number of CPU cores.
 
 **Q: Explain InnoDB's doublewrite buffer and when you can disable it.**
 **Short:** InnoDB's doublewrite buffer prevents torn pages on crash and can be safely disabled only on storage with power-loss-protected write caching.

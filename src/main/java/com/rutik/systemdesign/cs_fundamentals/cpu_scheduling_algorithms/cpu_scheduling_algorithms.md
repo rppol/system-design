@@ -73,6 +73,84 @@ The practical consequences:
 - **Weights are unchanged.** nice → weight still comes from the same fixed `sched_prio_to_weight` table (nice 0 = 1024; each nice step is ~25%, i.e. a factor of 1.25). Everything in the vruntime arithmetic below still holds.
 - **"CFS bandwidth control" keeps its name.** The cgroup quota mechanism (`cpu.max` on cgroup v2, `cpu.cfs_quota_us`/`cpu.cfs_period_us` on v1) is still called CFS bandwidth control in the kernel, and still works exactly as before. Do not "correct" that string to EEVDF.
 
+
+### Multi-core: per-CPU runqueues and load balancing
+
+Everything above describes one CPU. Linux does not share one global queue across cores: each CPU has its own runqueue (`struct rq`) with its own EEVDF tree and lock, so picking the next thread never contends with other cores. The cost is that the queues drift out of balance, and the kernel corrects that in three places:
+- **Wakeup placement.** When a thread wakes, `select_task_rq_fair()` chooses its CPU, preferring an idle CPU that shares a last-level cache (LLC) with the CPU it last ran on or with the waker.
+- **Idle balancing.** A CPU about to go idle first tries to pull a runnable thread from a busier CPU.
+- **Periodic balancing.** From the scheduler tick, each CPU walks its scheduling domains and pulls threads when it carries less than its share of the load.
+
+Scheduling domains mirror the hardware, bottom up: SMT siblings (shared L1/L2), cores sharing one LLC, then the package and NUMA node. Balancing runs often and cheaply at the bottom and rarely at the top, because a move across an LLC boundary leaves the thread's working set behind in the old L3, and a move across NUMA nodes also makes its memory remote. That matters on chips with several LLCs per socket: an AMD EPYC built from 8-core CCDs has one 32 MB L3 per CCD, so two threads that share data run faster on the same CCD even while cores on other CCDs sit idle. Linux 7.2 (August 2026) adds cache-aware scheduling for that case: it tracks which LLC a process's threads mostly run on and steers the process's threads toward that LLC at wakeup and during load balancing, instead of spreading them across LLCs by load alone.
+
+### sched_ext: schedulers written in BPF (Linux 6.12+)
+
+Linux 6.12 merged **sched_ext** (`CONFIG_SCHED_CLASS_EXT`), a scheduling class whose policy is a BPF
+program loaded at runtime. Changing the scheduling algorithm no longer means patching and rebooting
+the kernel: load a scheduler, and `SCHED_NORMAL`, `SCHED_BATCH`, `SCHED_IDLE` and `SCHED_EXT` tasks
+move to it; unload it, and they return to EEVDF. With the `SCX_OPS_SWITCH_PARTIAL` flag, only
+tasks that set the `SCHED_EXT` policy move.
+
+The BPF program fills in callbacks of `struct sched_ext_ops` and places tasks on **dispatch queues
+(DSQs)**:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    wake(["Task wakes"]) --> sel(["ops.select_cpu<br/>CPU hint"])
+    sel --> enq(["ops.enqueue<br/>pick a DSQ"])
+    enq --> custom(["Custom DSQ<br/>scx_bpf_create_dsq"])
+    enq --> glob(["SCX_DSQ_GLOBAL<br/>FIFO"])
+    enq --> loc(["SCX_DSQ_LOCAL<br/>one per CPU"])
+    custom -->|"ops.dispatch<br/>when local is empty"| loc
+    glob --> loc
+    loc --> cpu(["CPU runs the<br/>next local task"])
+    err(["BPF error, stalled task,<br/>or SysRq-S"]) --> fair(["All tasks back<br/>on EEVDF"])
+    class wake io
+    class sel,enq mathOp
+    class custom,glob,loc req
+    class cpu train
+    class err,fair lossN
+```
+
+A CPU only ever runs tasks from its own local DSQ, so the BPF code decides *which* task reaches each
+local queue and *when*. The safety net is what makes it deployable: the BPF verifier rejects unsafe
+programs at load time, and the kernel unloads the scheduler and restores EEVDF when the program
+reports an error, when a runnable task stalls past the watchdog timeout, or when an operator presses
+SysRq-S. `/sys/kernel/sched_ext/state` shows whether a BPF scheduler is active.
+
+Schedulers in the `sched-ext/scx` repository show the range of policies this enables: `scx_lavd`
+(latency-criticality aware, written by Igalia for gaming on the Steam Deck), `scx_rusty` (a
+load balancer with its policy in user space), and `scx_layered` (Meta, groups tasks into layers
+with separate CPU and slice budgets). Use sched_ext when a workload has a pattern EEVDF cannot see,
+such as a game's frame thread or a service's request threads; keep EEVDF as the default.
+
+### Kernel preemption models
+
+Preemption *inside the kernel* is a build or boot choice, separate from the scheduling policy.
+It decides how long a task that is executing a system call can hold the CPU after a higher-priority
+task becomes runnable.
+
+| Model | When a task in kernel mode gives up the CPU | Typical use |
+|-------|---------------------------------------------|-------------|
+| `PREEMPT_NONE` | Only at return to user space or an explicit `schedule()` / `cond_resched()` | Throughput servers (limited to architectures with no preemption support since Linux 7.0) |
+| `PREEMPT_VOLUNTARY` | Also at `might_sleep()` points scattered through the kernel | Desktops (limited to architectures without lazy preemption since Linux 7.0) |
+| `PREEMPT` (full) | Anywhere outside spinlocks and `preempt_disable()` sections | Low-latency desktops and embedded |
+| `PREEMPT_LAZY` (Linux 6.13+) | Fair-class wakeups set a *lazy* resched flag, honored at the next tick or return to user space; RT (FIFO, RR) and DEADLINE wakeups preempt immediately, as in full | Default on architectures that support it |
+| `PREEMPT_RT` (mainline since Linux 6.12) | Nearly everywhere: spinlocks become sleeping locks, interrupt handlers run as threads | Hard real-time: audio, industrial control |
+
+Lazy preemption exists to remove the trade-off between the first two rows and full preemption.
+Full preemption interrupts a `SCHED_NORMAL` task holding a sleeping lock and makes every waiter on
+that lock wait for the preempted holder; voluntary preemption avoids that by depending on hundreds of
+hand-placed `cond_resched()` calls. Lazy keeps the full-preemption machinery but delays fair-class
+preemption to the tick boundary. Since Linux 7.0, x86, arm64, powerpc, riscv, s390 and loongarch
+offer only `PREEMPT` and `PREEMPT_LAZY`. With `CONFIG_PREEMPT_DYNAMIC`, the `preempt=` boot parameter
+selects the model without a rebuild.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -478,6 +556,8 @@ The UI thread's priority is a two-state lifecycle keyed on touch activity: boost
 
 **Database server process priorities**: PostgreSQL autovacuum runs at `nice +10` by default — lower priority than query-serving processes. This prevents maintenance operations from starving user queries, at the cost of autovacuum potentially falling behind during high-load periods.
 
+**Cache-aware scheduling on multi-LLC servers**: Linux 7.2 (released 2026-08-16) ships cache-aware scheduling for CPUs with several last-level-cache domains, such as AMD EPYC parts built from 8-core CCDs that each own an L3. A multi-threaded service whose threads share hot data (a database buffer pool, an in-process cache) used to be spread across CCDs by the load balancer, paying cross-CCD cache misses on every shared line; the scheduler now keeps a process's threads on its preferred LLC while that LLC is not overloaded. Before 7.2 the usual workaround was manual: `taskset` or a cpuset per CCD.
+
 **Real-time scheduling in Linux**: `SCHED_FIFO` and `SCHED_RR` are real-time policies that preempt every `SCHED_NORMAL` thread. Used for latency-sensitive tasks (audio processing, industrial control). `SCHED_DEADLINE` (EDF — Earliest Deadline First) is the theoretical-optimal real-time scheduler, available since Linux 3.14.
 
 ---
@@ -714,6 +794,8 @@ FIX: Use priority queue (health checks get higher priority) or
 | cgroup v2 `cpu.weight` | Weighted CPU allocation between cgroups (1–10000, default 100) | v1 name is `cpu.shares`; Docker `--cpu-shares` |
 | cgroup v2 `cpu.max` | Hard CPU limit — `"<quota_us> <period_us>"` | v1 names are `cpu.cfs_quota_us`/`cpu.cfs_period_us`; Docker `--cpus=0.5`. Still called CFS bandwidth control |
 | `schedtool` | Inspect/set scheduling policy per thread | Linux; `schedtool -I <pid>` for idle scheduling |
+| sched_ext (`CONFIG_SCHED_CLASS_EXT`) | Load a BPF scheduling policy at runtime (Linux 6.12+) | Schedulers in `sched-ext/scx` (`scx_lavd`, `scx_rusty`, `scx_layered`); `/sys/kernel/sched_ext/state` shows status; SysRq-S reverts to EEVDF |
+| `preempt=` boot parameter | Pick the kernel preemption model (`full`, `lazy`, and on older architectures `none`/`voluntary`) | Needs `CONFIG_PREEMPT_DYNAMIC` |
 
 ---
 
@@ -771,13 +853,25 @@ CPU affinity (taskset, pthread_setaffinity_np) pins a thread to specific CPU cor
 **Short:** An idle CPU steals tasks from the back of another CPU's deque while the owner works from the front, achieving near-optimal load balancing with rare synchronization, as in Java's ForkJoinPool.
 Work stealing: each CPU has a local deque of tasks. A CPU that runs out of work steals tasks from the back (LIFO) of another CPU's deque. The owning CPU takes tasks from the front (LIFO for locality). Work stealing achieves near-optimal load balancing with minimal synchronisation — steals are rare (only when idle). Used in: Java's ForkJoinPool, Go's goroutine scheduler, Cilk (MIT), and Intel TBB. It is why `ForkJoinPool.commonPool()` used by Java's parallel streams is efficient for divide-and-conquer workloads.
 
-**Q14: What is the difference between preemptive and non-preemptive scheduling and why does it matter for latency?**
-**Short:** Preemptive scheduling bounds latency by letting the OS forcibly reclaim the CPU, while non-preemptive scheduling can be delayed arbitrarily by a thread that never yields.
-Preemptive: the OS can forcibly take the CPU from a running thread (on timer interrupt or higher-priority thread wake-up). Non-preemptive: a thread runs until it voluntarily yields. Preemptive scheduling guarantees bounded scheduling latency: a high-priority thread waiting for CPU will get it within one time quantum (4–10 ms). Non-preemptive scheduling can delay arbitrarily — a compute-bound thread that never yields blocks everyone. Modern OS schedulers are fully preemptive. The Linux real-time preemption patch (PREEMPT_RT) makes even kernel code fully preemptible, achieving sub-100 µs scheduling latency for SCHED_FIFO tasks.
+**Q14: How does Linux keep per-CPU runqueues balanced, and why does the last-level cache matter?**
+**Short:** Each CPU has its own runqueue; Linux places waking threads on idle CPUs sharing a cache and pulls work at idle and on the tick, balancing inside one LLC before crossing to another LLC or NUMA node.
+Linux keeps one runqueue per CPU, each with its own EEVDF tree and lock, so the pick path never contends across cores, and it pays for that with load balancing. A waking thread is placed by `select_task_rq_fair()`, which prefers an idle CPU in the same last-level-cache domain as its previous CPU or its waker; a CPU going idle pulls work from a busier one; and the scheduler tick runs periodic balancing up a hierarchy of scheduling domains (SMT siblings, cores sharing an LLC, package, NUMA node). The hierarchy exists because migration is not free: moving a thread to another LLC leaves its working set in the old L3, and moving it to another NUMA node also makes its memory remote, so the kernel balances freely at the bottom and reluctantly at the top. On multi-LLC chips such as AMD EPYC with one L3 per 8-core CCD, pure load-based spreading puts threads that share data on different CCDs; Linux 7.2 (August 2026) added cache-aware scheduling, which steers a process's threads toward the LLC they mostly run on. When a service shows high cross-CCD cache-miss rates on an older kernel, pin it with a cpuset per CCD.
 
-**Q15: How does CPU scheduling interact with cache performance?**
+**Q15: What is the difference between preemptive and non-preemptive scheduling and why does it matter for latency?**
+**Short:** Preemptive scheduling bounds latency by letting the OS forcibly reclaim the CPU, while non-preemptive scheduling can be delayed arbitrarily by a thread that never yields.
+Preemptive: the OS can forcibly take the CPU from a running thread (on timer interrupt or higher-priority thread wake-up). Non-preemptive: a thread runs until it voluntarily yields. Preemptive scheduling guarantees bounded scheduling latency: a high-priority thread waiting for CPU will get it within one time quantum (4–10 ms). Non-preemptive scheduling can delay arbitrarily — a compute-bound thread that never yields blocks everyone. Modern OS schedulers are fully preemptive. `PREEMPT_RT`, in mainline since Linux 6.12, makes even kernel code fully preemptible, achieving sub-100 µs scheduling latency for SCHED_FIFO tasks.
+
+**Q16: How does CPU scheduling interact with cache performance?**
 **Short:** Every context switch flushes the evicted process's cache footprint, so running more threads than fit their combined working sets in shared L3 causes extra cache misses regardless of scheduler tuning.
 Every context switch has a "cache footprint" cost: the evicted process's working set is flushed from L1/L2 caches (often 128 KB–1 MB); the incoming process starts with cold caches. On a 4-core machine with 6 MB shared L3: if 10 threads each have 1 MB working sets, only 6 can be "warm" at once — the other 4 incur L3 misses (~40 ns each) or even DRAM reads (~100 ns). For latency-sensitive services, limiting the number of runnable threads to fit their combined working sets in L3 improves performance more than scheduler tuning.
+
+**Q17: What is sched_ext, and what stops a buggy BPF scheduler from hanging the machine?**
+**Short:** sched_ext (Linux 6.12+) runs a BPF program as the scheduling policy; on a BPF error, a stalled runnable task, or SysRq-S, the kernel unloads it and puts every task back on EEVDF.
+sched_ext is a scheduling class whose policy lives in a BPF program implementing `struct sched_ext_ops` callbacks: `ops.select_cpu()` gives a CPU hint at wakeup, `ops.enqueue()` places the task on a dispatch queue, and `ops.dispatch()` refills a CPU's local queue when it runs dry. A CPU only runs tasks from its local DSQ (`SCX_DSQ_LOCAL`), with `SCX_DSQ_GLOBAL` and BPF-created queues feeding it. Safety comes in two layers: the BPF verifier rejects unsafe code at load time, and at run time the kernel aborts the scheduler on an error, on a runnable task that stalls past the watchdog timeout, or on SysRq-S, restoring the fair class with no reboot. That fallback is why teams can test a scheduling policy on production hosts; examples are `scx_lavd` for gaming latency and `scx_layered` at Meta.
+
+**Q18: What is lazy preemption (PREEMPT_LAZY), and why does the kernel prefer it to PREEMPT_VOLUNTARY?**
+**Short:** It is full preemption that delays fair-class preemption to the next tick or return to user space, keeping RT latency while avoiding hand-placed cond_resched() calls.
+Under `PREEMPT_LAZY` (Linux 6.13+), a wakeup that would preempt a `SCHED_NORMAL` task sets a lazy flag instead of rescheduling at once; the switch happens at the next timer tick or when the task returns to user space. RT (FIFO, RR) and DEADLINE wakeups still preempt immediately, as under full `PREEMPT`. This gives voluntary preemption's throughput benefit, fewer preemptions of a lock holder, without its cost: voluntary preemption depends on hundreds of hand-placed `cond_resched()` calls, and any long kernel loop that misses one becomes a latency spike. Since Linux 7.0, mainstream architectures (x86, arm64, powerpc, riscv, s390, loongarch) offer only full and lazy, with lazy as the Kconfig default. When a latency benchmark regresses after a kernel upgrade, check `preempt=` on the command line and the configured model before blaming EEVDF.
 
 ---
 

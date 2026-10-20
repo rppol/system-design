@@ -596,7 +596,7 @@ Running this against the same database engine and major version as production �
 | Primary authoring format | Plain SQL (Java migrations possible) | XML, YAML, JSON, or formatted SQL |
 | Change model | Imperative — you write the exact DDL | Declarative — describe the change, it generates DDL |
 | History table | `flyway_schema_history` | `DATABASECHANGELOG` + `DATABASECHANGELOGLOCK` |
-| Rollback | Community: none; Teams: undo migrations | Built into OSS: auto for simple changes, explicit for the rest |
+| Rollback | Community: none; Teams: undo migrations | Built into Community: auto for simple changes, explicit for the rest |
 | Preconditions | None built-in (hand-write SQL guards) | First-class `<preConditions>` |
 | Cross-database portability | Low — SQL is dialect-specific | High — one changelog can target multiple vendors |
 | Contexts / labels | None built-in | Yes |
@@ -697,9 +697,9 @@ A team upgraded from Spring Boot 3.5 to 4.0 by bumping the parent version and le
 
 | Tool | Role |
 |---|---|
-| Flyway Community 12.x | SQL-first migrations, `flyway_schema_history`, callbacks; the paid Teams and Enterprise tiers add undo migrations, drift detection and dry-run scripting |
-| Liquibase OSS 5.x | Declarative changesets, built-in rollback, preconditions |
-| Liquibase Pro | Quality/policy checks, structured drift reporting |
+| Flyway Community 12.x / 13.x | SQL-first migrations, `flyway_schema_history`, callbacks; the paid Teams and Enterprise tiers add undo migrations, drift detection and dry-run scripting. Boot 4.1.1 manages 12.4.0; the upstream line is 13.x (13.0.0 on 2026-07-20, 13.10.3 on 2026-10-15) |
+| Liquibase Community 5.x | Declarative changesets, built-in rollback, preconditions; Functional Source License (FSL-1.1-ALv2: each release converts to Apache 2.0 two years after it ships); the CLI ships without extensions or drivers, installed with `liquibase lpm`; Boot 4.1.1 manages 5.0.3 |
+| Liquibase Secure | Commercial edition: quality/policy checks, structured drift reporting |
 | Spring Boot `spring-boot-starter-flyway` / `spring-boot-starter-liquibase` | Required on the classpath since Boot 4.0 — a bare `flyway-core`/`liquibase-core` dependency no longer triggers autoconfiguration (Section 10, Pitfall 7) |
 | Spring Boot `spring-boot-starter-data-jpa` | Auto-wires `EntityManagerFactory` as `@DependsOn` the migration bean |
 | Testcontainers 2.0.x | Real Postgres/MySQL in CI for migration-apply tests |
@@ -708,6 +708,15 @@ A team upgraded from Spring Boot 3.5 to 4.0 by bumping the parent version and le
 | Atlas (Ariga) | Schema-as-code alternative with diff-based migration generation |
 | DBeaver / DataGrip | Manual review of generated SQL/changelog diffs before merge |
 | Spring Boot Actuator | `/actuator/flyway` and `/actuator/liquibase` expose applied-migration history at runtime |
+
+Overriding `flyway.version` to 13.x moves you off the Boot-tested version, and three releases
+change what your build sees. 13.0 adds a Flyway MCP server that exposes development-time Flyway
+commands to an AI agent. 13.2 writes JSON report timestamps with a UTC offset (API callers of
+`getTimestamp`/`setTimestamp` switch to `OffsetDateTime`), stops recognising the no-op
+`publishResult` and `checkDriftOnMigrate` parameters in OSS, and moves CockroachDB into its own
+database module, so a CockroachDB project must add that module. 13.5 makes `jackson-databind`
+an optional dependency of `flyway-core` and moves JSON support to the `flyway-core-utilities`
+module, so code that got Jackson 2 through Flyway must declare it.
 
 ### Key Spring Boot Properties
 
@@ -742,9 +751,9 @@ spring:
 ## 12. Interview Questions with Answers
 
 **Q: What's the practical difference between Flyway and Liquibase, and how do you choose between them?**
-**Short:** Flyway is SQL-first for one engine; Liquibase is declarative, database-agnostic, with free rollback and preconditions.
+**Short:** Flyway is SQL-first for one engine; Liquibase is declarative, database-agnostic, with rollback and preconditions in its no-cost Community edition.
 
-Flyway is SQL-first: each migration is a plain SQL file applied in version order and tracked in `flyway_schema_history`. Liquibase is declarative and database-agnostic: changesets describe an intent (XML, YAML, JSON, or formatted SQL) that Liquibase translates into dialect-correct DDL, tracked in `DATABASECHANGELOG`, and it ships built-in rollback and preconditions in its free tier — Flyway Community has neither (undo migrations are Teams-only; preconditions must be hand-written as SQL guards). Choose Flyway when the team is SQL-comfortable and targets one or two database engines; choose Liquibase when one changelog must run against multiple database vendors, or you want rollback/precondition support without a paid license.
+Flyway is SQL-first: each migration is a plain SQL file applied in version order and tracked in `flyway_schema_history`. Liquibase is declarative and database-agnostic: changesets describe an intent (XML, YAML, JSON, or formatted SQL) that Liquibase translates into dialect-correct DDL, tracked in `DATABASECHANGELOG`, and it ships built-in rollback and preconditions in its no-cost Community edition (FSL-licensed since 5.0, not an OSI open-source license); Flyway Community has neither (undo migrations are Teams-only; preconditions must be hand-written as SQL guards). Choose Flyway when the team is SQL-comfortable and targets one or two database engines; choose Liquibase when one changelog must run against multiple database vendors, or you want rollback/precondition support without a paid license.
 
 **Q: What causes a Flyway "checksum mismatch" error, and how do you fix it correctly?**
 **Short:** A checksum mismatch means an applied migration file was edited afterward; fix it with a new migration, not a hand edit.

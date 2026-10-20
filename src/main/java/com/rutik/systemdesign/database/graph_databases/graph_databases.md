@@ -1,13 +1,15 @@
 # Graph Databases
 
-> **Version anchor — August 2026.** Neo4j **2026.07** (calendar versioning since 2025.01;
+> **Version anchor (October 2026).** Neo4j **2026.09** (21 September 2026; calendar versioning since 2025.01;
 > 5.26 is the last of the old LTS line, and a new LTS lands every 18–24 months with a
 > three-year support window). Neo4j's default query language is **Cypher 25** —
 > `db.query.default_language=CYPHER_25` is set in the shipped `neo4j.conf` from 2026.02
 > onward, so a new database gets it unless you say otherwise. The query language *standard*
-> is **GQL — ISO/IEC 39075:2024**, published April 2024. PostgreSQL **19** (beta 2 July 2026,
-> GA expected Sept/Oct 2026) adds **SQL/PGQ** (ISO SQL:2023 Part 16) for property-graph
-> pattern matching over ordinary relational tables. Behaviour that depends on a version is
+> is **GQL (ISO/IEC 39075:2024)**, published April 2024. **SQL/PGQ** (ISO SQL:2023 Part 16),
+> property-graph pattern matching over ordinary relational tables, ships in Oracle AI
+> Database 26ai. PostgreSQL committed it for 19 and reverted it from both `REL_19_STABLE`
+> (commit `2b9e1af`) and master (commit `b1f106c`) on 7 September 2026, so no PostgreSQL
+> release carries it and 20 is the earliest that could. Behaviour that depends on a version is
 > tagged inline like `[Cypher 25]`.
 
 ## 1. Concept Overview
@@ -132,10 +134,15 @@ removes the `log n` factor; it does **not** remove the exponential frontier grow
 Section 10's supernode problem and the `[:KNOWS*1..6]` depth caps in Best Practices exist — an
 unbounded traversal on a well-connected graph is expensive in *any* engine.
 
-### Neo4j Record Files
+### Neo4j Record Files (aligned format)
+
+Neo4j ships two live store formats. **Block** is the default for new Enterprise databases
+since 5.22; **aligned** is the Community Edition default and the Enterprise default before
+5.22. The fixed-width record layout below is the aligned format, and it is the clearest way
+to see why adjacency is `O(1)` per hop.
 
 ```
-Neo4j storage (physical layout):
+Neo4j aligned format (physical layout):
   neostore.nodestore.db:    Fixed 15-byte records per node
   neostore.relationshipstore.db:  Fixed 34-byte records per relationship
   neostore.propertystore.db:  Variable-length property records
@@ -204,6 +211,18 @@ arithmetic, but a traversal that *filters on properties* pays an extra random re
 This is precisely why Section 10's advice is to pre-filter before hitting a high-degree node, and why
 the `WHERE` clause placement in a Cypher query changes its cost so dramatically.
 
+**Block format removes that extra read.** Each node gets a fixed 128-byte block in
+`block.x1.db`: one 64-byte record for the node's labels and properties, one 64-byte record for
+its relationships. That typically holds about 10 labels, 6-7 properties or 5 relationships, so
+a property filter on a small node reads the same page the traversal already loaded. Larger
+nodes spill into overflow stores (`block.node.xd.db`, `block.relationship.xd.db`), values over
+about 31 bytes go to `block.big_values.db`, and high-degree nodes keep their relationships in
+`block.relationship.dense.db`, a tree sorted by type and direction. Block also lifts the
+aligned limits: 2^48 nodes against 2^35, and no cap on relationships or properties. The
+standard and `high_limit` formats are deprecated since 5.23; the next LTS (planned November
+2026) is the last release that includes them, so migrate those stores with
+`neo4j-admin database migrate --to-format=block`.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -255,7 +274,7 @@ Where each engine stands:
 | Neo4j | Cypher 25 (default from 2026.02) | Supports the majority of mandatory GQL features and a substantial share of the optional ones; Neo4j documents the remaining gaps as a conformance appendix and is closing them |
 | openCypher | Cypher dialect, multi-vendor | Its stated mission is now to help implementors converge on GQL rather than to be a rival standard |
 | Amazon Neptune, TigerGraph, Oracle | openCypher / GSQL / PGQL | Conformance work under way; treat GQL support as directional, not guaranteed |
-| PostgreSQL 19 | **SQL/PGQ** — a *different* standard (ISO SQL:2023 Part 16) | Not GQL. Property graphs are declared as views over existing tables and matched with `GRAPH_TABLE`, read-only, fixed-depth traversal in the first release |
+| Oracle AI Database 26ai | **SQL/PGQ**, a *different* standard (ISO SQL:2023 Part 16) | Not GQL. Property graphs are declared as views over existing tables and matched read-only with `GRAPH_TABLE`. PostgreSQL committed SQL/PGQ for 19 and reverted it before release (commit `2b9e1af`, 7 September 2026) |
 
 The two standards are complementary, not competing, and the distinction is the one that
 gets asked in interviews. **GQL is a standalone language for a native graph database.**
@@ -263,7 +282,7 @@ gets asked in interviews. **GQL is a standalone language for a native graph data
 questions over tables it already stores — no new engine, no ETL, no second copy of the data:
 
 ```sql
--- PostgreSQL 19 SQL/PGQ: declare a property graph over ordinary tables
+-- SQL/PGQ (Oracle AI Database 26ai): declare a property graph over ordinary tables
 CREATE PROPERTY GRAPH social_graph
   VERTEX TABLES (
     users        KEY (id) LABEL person PROPERTIES (id, name),
@@ -403,6 +422,90 @@ g.V().has('Product', 'id', 42)        // Start at product 42
   .order(local).by(values, desc)     // Sort by frequency
   .limit(local, 10)                   // Top 10
 ```
+
+### Full-Text Search in Cypher: the SEARCH Clause `[2026.09]`
+
+A full-text index is a Lucene index over analyzed terms in `STRING` properties, and each hit
+carries a relevance score. Before 2026.09 the only way to query one was a procedure call
+(`db.index.fulltext.queryNodes()` / `queryRelationships()`). Neo4j 2026.09 adds the
+Cypher 25 `SEARCH` clause, which binds a `MATCH` variable to the index hits:
+
+```cypher
+CREATE FULLTEXT INDEX namesAndTeams FOR (n:Employee|Manager) ON EACH [n.name, n.team];
+
+CYPHER 25
+MATCH (node)
+SEARCH node IN (FULLTEXT INDEX namesAndTeams FOR "nils" LIMIT 5) SCORE AS score
+RETURN node.name, score
+```
+
+`SEARCH` works on simple node and relationship patterns only. The score is relative to one
+index, so when you merge full-text hits with vector hits, rank each list on its own instead
+of comparing raw scores.
+
+### Vector Indexes and GraphRAG
+
+**The vector index.** Neo4j stores an embedding as a node or relationship property and indexes it
+with an HNSW graph inside Lucene. Vector indexes reached GA in 5.13.
+
+```cypher
+CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+FOR (c:Chunk) ON c.embedding
+WITH [c.docType, c.publishedAt]                  // filter properties stored in the index
+OPTIONS { indexConfig: {
+  `vector.dimensions`: 1024,
+  `vector.similarity_function`: 'cosine',
+  `vector.quantization.type`: 'binary',          // 'none' | 'scalar' | 'binary'
+  `vector.hnsw.m`: 16,
+  `vector.hnsw.ef_construction`: 100
+}};
+
+CYPHER 25
+MATCH (c:Chunk)
+SEARCH c IN (VECTOR INDEX chunkEmbedding FOR $queryVector
+             WHERE c.docType = 'policy' AND c.publishedAt > date('2025-01-01')
+             LIMIT 10) SCORE AS sim
+RETURN c.text, sim
+```
+
+| Setting | Value | Effect |
+|---------|-------|--------|
+| `vector.dimensions` | 1 to 4096 | Must match the embedding model; set it so a wrong-length vector is rejected on write |
+| `vector.similarity_function` | `cosine` (default) or `euclidean` | Use what the embedding model was trained for |
+| `vector.quantization.type` | `binary` (default from 2026.08), `scalar`, `none` | Binary keeps 1 bit per dimension (a 1024-dim float32 vector drops from 4 KB to 128 bytes in the index); scalar keeps 1 byte |
+| `vector.default_search_expansion_factor` | 1.0 none, 1.5 scalar, 3.0 binary | Fetches that multiple of `LIMIT` candidates from the quantized index, then re-scores them with the full vectors to recover recall |
+| `vector.hnsw.m`, `ef_construction` | 16, 100 | Graph degree and build effort: higher raises recall, memory and build time |
+
+Filtering happens inside the index (`SEARCH ... WHERE`, Cypher 25, from 2026.01) only on the
+properties listed in `WITH`, joined only with `AND` (plus `IN` from 2026.06), with no `<>`,
+`NOT` or `OR`. A filter outside `SEARCH` runs after the top `LIMIT` hits come back, so a
+selective filter can return fewer rows than asked for. A vector index stores one vector property per node or relationship.
+
+**GraphRAG.** Plain vector RAG retrieves the `k` chunks nearest the question and fails on
+questions whose answer is spread across many chunks ("what are the main themes across these
+5,000 incident reports?") or needs a chain of facts ("which suppliers of our top customer were
+named in sanctions filings?"). GraphRAG (Microsoft Research, Edge et al., 2024) adds a graph:
+
+```
+  indexing (offline, LLM-heavy)
+    chunks --LLM extract--> entities + relationships --> knowledge graph
+    knowledge graph --Leiden community detection--> communities at several levels
+    each community --LLM--> summary text
+
+  query
+    local search : question --vector index--> entry entities --Cypher k-hop--> neighbours,
+                   their chunks and relationships --> LLM answer
+    global search: question --> map over community summaries --> reduce --> LLM answer
+```
+
+In Neo4j both halves live in one store: the vector index finds the entry nodes, and a
+traversal such as `MATCH (e)-[:SUPPLIES|NAMED_IN*1..2]-(x)` pulls the connected facts that no
+embedding similarity would surface. The cost is indexing: every chunk passes through an LLM
+for extraction, and every community through another for its summary, so indexing a corpus costs
+many times more than embedding it. Microsoft's LazyGraphRAG (November 2024) defers the
+summaries to query time and reports indexing cost equal to vector RAG and about 0.1% of full
+GraphRAG. Use GraphRAG when questions are multi-hop or corpus-wide and the corpus changes
+slowly; keep plain vector search for single-fact lookups.
 
 ### Access Control Graph
 
@@ -606,9 +709,12 @@ Neo4j without indexes on node properties is equivalent to a full graph scan for 
 | Memgraph | In-memory graph database |
 | ArangoDB | Multi-model (graph + document + KV) |
 | Apache AGE | PostgreSQL extension for graph queries |
-| PostgreSQL 19 SQL/PGQ | In-core property-graph pattern matching over existing tables — no extension. In beta as of Sept 2026; PostgreSQL 19 GA expected Sept/Oct 2026 |
+| Oracle AI Database 26ai SQL/PGQ | In-core property-graph pattern matching over existing tables with `CREATE PROPERTY GRAPH` and `GRAPH_TABLE`, no extension. Not in PostgreSQL 19: the feature was reverted from `REL_19_STABLE` on 7 September 2026 |
 | APOC | Neo4j procedures library (utility functions) |
+| Neo4j vector index | Approximate nearest-neighbour search over embedding properties. The index setting `vector.quantization.type` defaults to `binary` (one bit per dimension) from 2026.08; with `vector.default_search_expansion_factor` above 1.0 the candidates are re-scored with the unquantized vectors. 2026.09 cut the latency of re-scored binary search about 5x and raised its throughput about 5x. Re-create indexes built before 2026.08 that are not updated often, or they do not get the speed-up |
 | GQL (ISO/IEC 39075:2024) | The ISO standard graph query language every engine is converging on |
+| Microsoft GraphRAG / LazyGraphRAG | LLM entity extraction, Leiden communities and summaries for retrieval over a knowledge graph |
+| Neo4j GraphRAG Python package | Retrievers that combine vector search with Cypher traversal |
 
 ---
 
@@ -657,6 +763,11 @@ MERGE is a combination of MATCH and CREATE: it matches the pattern if it exists 
 
 GDS provides in-memory graph projections and algorithm implementations: (1) Project the graph: `CALL gds.graph.project('my-graph', 'User', 'FOLLOWS')` — loads nodes and relationships into an optimized in-memory format. (2) Run algorithms: PageRank (node importance), Louvain community detection (cluster discovery), Dijkstra shortest path (weighted path), betweenness centrality (bridge nodes). (3) Write results back: stream results to application or write as node properties. GDS uses parallel execution (multi-threaded traversals) for large graphs. Use cases: recommendation systems (community detection → recommend within community), content ranking (PageRank for important documents), fraud detection (betweenness centrality to find money mule nodes in transaction networks).
 
+**Q: Why can a Neo4j vector search followed by a `WHERE` filter return fewer rows than its `LIMIT`?**
+**Short:** A filter written after the vector search runs on the top LIMIT hits already returned, so selective filters discard most of them; filter inside SEARCH on properties stored in the index instead.
+
+The index returns the `LIMIT` nearest vectors first, and a `WHERE` placed after the `SEARCH` or procedure call then removes the ones that fail the predicate; with `LIMIT 10` and a filter that matches 5% of nodes, you typically get zero to two rows. Since 2026.01 Cypher 25 lets you add filter properties to the index (`CREATE VECTOR INDEX ... WITH [c.docType, c.publishedAt]`) and put the predicate inside `SEARCH c IN (VECTOR INDEX idx FOR $q WHERE c.docType = 'policy' LIMIT 10)`, so the HNSW search itself skips non-matching nodes. The in-index filter has limits: only listed properties, only `AND` (plus `IN` from 2026.06), no `<>`, `NOT` or `OR`. For anything else, over-fetch (a larger `LIMIT`) and filter afterwards, accepting the cost.
+
 **Q: What is the supernode problem and how do you mitigate it?**
 **Short:** A supernode's huge relationship count forces any traversal through it to examine millions of edges, so queries must filter or cap before reaching it.
 
@@ -675,7 +786,7 @@ Neo4j provides full ACID compliance at the graph level. Write transactions: all 
 **Q: What are the index types in Neo4j and how do you choose?**
 **Short:** Neo4j offers range, text, point, and composite indexes, chosen by whether the property needs equality/range, full-text, spatial, or compound matching.
 
-Neo4j index types: (1) Range index (B+tree based): supports equality, range, prefix, and ordering. Use for: numeric properties (age, price), dates, string prefixes. Default index type. (2) Text index (Lucene-based): full-text search on string properties. Use for: free-text search within graph queries (`MATCH (u:User) WHERE u.bio CONTAINS "database expert"`). (3) Point index: for spatial properties (latitude, longitude). Use for geospatial queries (within distance, bounding box). (4) Composite index: multiple properties in one index for compound queries. (5) Full-text index: Lucene-based search across multiple node labels and properties. Create: `CREATE INDEX idx_user_email FOR (u:User) ON (u.email)`. Always create indexes on properties used in MERGE conditions, MATCH patterns, and WHERE clauses on high-cardinality properties.
+Neo4j index types: (1) Range index (B+tree based): supports equality, range, prefix, and ordering. Use for: numeric properties (age, price), dates, string prefixes. Default index type. (2) Text index (Lucene-based): full-text search on string properties. Use for: free-text search within graph queries (`MATCH (u:User) WHERE u.bio CONTAINS "database expert"`). (3) Point index: for spatial properties (latitude, longitude). Use for geospatial queries (within distance, bounding box). (4) Composite index: multiple properties in one index for compound queries. (5) Full-text index: Lucene-based search across multiple node labels and properties, queried in Cypher 25 with the `SEARCH` clause `[2026.09]`. Create: `CREATE INDEX idx_user_email FOR (u:User) ON (u.email)`. Always create indexes on properties used in MERGE conditions, MATCH patterns, and WHERE clauses on high-cardinality properties.
 
 **Q: How do you model a hierarchical permission system in a graph database?**
 **Short:** Modeling RBAC as nested group and role nodes lets inherited-permission queries run as a single variable-depth Cypher traversal instead of nested SQL joins.
@@ -718,15 +829,25 @@ A causal cluster elects one leader that accepts all writes and replicates them v
 
 Apache AGE adds a graph query layer (openCypher support) on top of a regular PostgreSQL table, letting graph and relational data live in the same database and be queried in the same transaction. This is the right choice when the graph portion of the workload is modest in scale and connectivity — org charts, small permission graphs, lightweight recommendation joins — and the operational cost of running a second database (Neo4j) outweighs the traversal performance it would provide. AGE inherits PostgreSQL's ACID guarantees, backup tooling, and connection pooling for free, which is a meaningful operational win over standing up a separate Neo4j cluster with its own HA, backup, and monitoring stack. The tradeoff is traversal performance: AGE does not have Neo4j's index-free adjacency, so multi-hop traversals on large or highly connected graphs are meaningfully slower than on a native graph engine. Reach for AGE when the team wants some graph query ergonomics without adding a new database to operate, and migrate to standalone Neo4j once traversal-heavy queries against a large graph become the dominant workload.
 
+**Q: What does GraphRAG add over plain vector RAG, and what does it cost?**
+**Short:** GraphRAG extracts entities and relationships into a knowledge graph with summarized communities, answering multi-hop and corpus-wide questions by traversal, at the price of LLM calls per chunk at indexing.
+
+Vector RAG retrieves the chunks nearest the question, which works for single-fact lookups but misses answers spread across many documents or reached through a chain of relationships. GraphRAG (Microsoft Research, 2024) runs an LLM over each chunk to extract entities and relationships, builds a graph, groups it with Leiden community detection, and has an LLM summarize each community. Local search uses a vector index to find entry entities and then traverses their neighbourhood (in Neo4j, a Cypher k-hop `MATCH`); global search maps the question over community summaries and reduces the partial answers. Indexing is the cost: two LLM passes over the corpus can cost far more than embedding it, and the graph must be re-extracted as documents change. LazyGraphRAG defers summarization to query time and reports indexing cost on par with vector RAG. Use GraphRAG for multi-hop or thematic questions over a slowly changing corpus.
+
+**Q: What do binary quantization and the search expansion factor trade in a Neo4j vector index?**
+**Short:** Binary quantization stores one bit per dimension, cutting index memory 32x and speeding search; the expansion factor fetches extra candidates and re-scores them with full vectors to win back the recall the bits lose.
+
+A 1024-dimension float32 embedding is 4 KB; binary quantization (`vector.quantization.type = 'binary'`, the default from 2026.08) keeps 128 bytes of it in the HNSW graph, so far more of the index fits in memory and distance computations become bit operations. Distances between bit vectors are coarse, so the nearest neighbours by Hamming distance are not exactly the nearest by cosine. `vector.default_search_expansion_factor` (3.0 for binary, 1.5 for scalar, 1.0 for none) makes the search fetch that multiple of `LIMIT` candidates and re-rank them with the stored full-precision vectors. Raise the factor when recall measured against an exact search falls short, accepting more latency; choose `scalar` or `none` for small indexes where memory is not the constraint.
+
 **Q: What is GQL and why does an ISO standard for graph queries matter?**
 **Short:** GQL is ISO/IEC 39075:2024, the first new ISO query-language standard since SQL in 1987, and it ends the vendor-lock-in argument against graph databases.
 
 GQL is the ISO standard graph query language, published as ISO/IEC 39075:2024 in April 2024 — the first entirely new ISO database query language since SQL was standardized in 1987. It matters because "which query language" was for a decade the strongest argument *against* adopting a graph database: Cypher was Neo4j's, Gremlin was TinkerPop's, SPARQL was the RDF world's, GSQL was TigerGraph's, and picking one was picking a vendor. GQL collapses that into the situation SQL created for relational: a standard core that every engine targets, with dialect differences at the edges rather than at the centre. Practically, Neo4j's Cypher already implements the majority of GQL's mandatory features and a substantial share of the optional ones, and publishes a conformance appendix listing what is still missing; openCypher's stated mission has shifted from being a rival specification to helping implementors converge on GQL; and Neptune, TigerGraph and Oracle have conformance work in flight. The guidance for a new project is to write GQL-conformant Cypher — avoid the vendor-specific procedures where a standard construct exists — so the query layer is portable even if the engine is not.
 
-**Q: PostgreSQL 19 adds SQL/PGQ. Does that mean you no longer need a graph database?**
-**Short:** SQL/PGQ removes the case for a second database when graph patterns are shallow and read-only over tables you already have, but not when you need variable-length traversal or graph algorithms.
+**Q: SQL/PGQ lets a relational database match graph patterns. Does that mean you no longer need a graph database?**
+**Short:** SQL/PGQ removes the case for a second database when graph patterns are shallow and read-only over tables you already have, but not when you need deep traversal or graph algorithms.
 
-Sometimes, and the boundary is sharp. SQL/PGQ (ISO SQL:2023 Part 16) lands in PostgreSQL 19, which is in beta as of September 2026 with GA expected Sept/Oct 2026 — so this is a plan-for-it answer, not a use-it-today one. It lets you declare a property graph as a *view* over existing relational tables with `CREATE PROPERTY GRAPH`, then pattern-match it from ordinary SQL through `GRAPH_TABLE`. There is no new storage engine, no extension, no ETL and no second copy of the data — which eliminates the single biggest real cost of adopting a graph database, namely keeping two systems in sync. For shallow, fixed-depth patterns over data that already lives in Postgres — a permission graph, an org chart, "customers who bought this also bought", a two-hop fraud check — that is the whole answer, and adding Neo4j would be pure operational overhead. The first release is deliberately limited: read-only, fixed-depth traversals, and no in-memory graph-algorithm library. So the moment the workload needs variable-length paths (`[:KNOWS*1..6]`), shortest path, PageRank, community detection, or traversals deep enough that index-free adjacency's O(1)-per-hop actually beats a join per hop, you still need a native engine. Note also that SQL/PGQ is *not* GQL — they are two different ISO standards addressing the same shape of problem from opposite directions, one as a clause inside SQL and one as a standalone language.
+Sometimes, and the boundary is sharp. SQL/PGQ (ISO SQL:2023 Part 16) lets you declare a property graph as a *view* over existing relational tables with `CREATE PROPERTY GRAPH`, then pattern-match it from ordinary SQL through `GRAPH_TABLE`. Oracle AI Database 26ai ships it. PostgreSQL does not: the SQL/PGQ patch set (47 commits) was committed for 19 and reverted from both `REL_19_STABLE` (commit `2b9e1af`) and master on 7 September 2026, so no Postgres release has it, 20 is the earliest that could, and the in-Postgres options are recursive CTEs or the Apache AGE extension. Where SQL/PGQ is available there is no new storage engine, no ETL and no second copy of the data, which eliminates the biggest real cost of adopting a graph database, namely keeping two systems in sync. For shallow, bounded patterns over data that already lives in the relational store (a permission graph, an org chart, "customers who bought this also bought", a two-hop fraud check) that is the whole answer, and adding Neo4j would be pure operational overhead. The limits come from the design: `GRAPH_TABLE` is read-only, each hop runs as a relational join, and the standard carries no graph-algorithm library. So the moment the workload needs PageRank, community detection, or traversals deep enough that index-free adjacency's O(1)-per-hop beats a join per hop, you still need a native engine. Note also that SQL/PGQ is *not* GQL: they are two different ISO standards addressing the same shape of problem from opposite directions, one as a clause inside SQL and one as a standalone language.
 
 ---
 

@@ -1,11 +1,13 @@
 # Document Databases
 
-> **Version anchor — August 2026.** **MongoDB 8.3** (released 7 May 2026) is the current
-> release and this page's baseline. The 8.x line ships quarterly **Rapid Releases** —
-> 8.1 (June 2025), 8.2 (September 2025), 8.3 (May 2026) — which were Atlas-only until
-> 8.2 and are now downloadable for self-managed Community and Enterprise as well, so
-> "MongoDB 8" alone no longer pins a feature set the way a major version used to.
-> Behaviour that depends on a version is tagged inline like `[8.3]`.
+> **Version anchor (October 2026).** **MongoDB 9.0** (9.0.0 on 28 September 2026, latest
+> patch 9.0.4 on 13 October 2026) is the current release and this page's baseline. It caps
+> each query operation at 1 GB or 20% of server memory (whichever is greater), caps open
+> multi-document transactions at `maxConcurrentMultiDocumentTransactions` (default 10000),
+> and re-enables server-side JavaScript on a WASM engine. The 8.x line before it shipped
+> **Rapid Releases** (8.1 June 2025, 8.2 September 2025, 8.3 May 2026), downloadable for
+> self-managed Community and Enterprise from 8.2, so "MongoDB 8" alone does not pin a
+> feature set. Behaviour that depends on a version is tagged inline like `[9.0]`.
 
 ## 1. Concept Overview
 
@@ -261,6 +263,33 @@ flowchart LR
 ```
 *Shard key choice drives scalability: range and hash sharding route documents differently, but low-cardinality or monotonically increasing keys create write hotspots on one shard, while a high-cardinality key like `user_id` or a compound `(region, user_id)` spreads writes evenly. Jumbo chunks — ranges that outgrow the 128MB default range size and cannot be split further — monitor with `sh.status()` and fix via `clearJumboFlag` or a shard-key change.*
 
+### Resharding and Moving Collections
+
+A shard key can be changed online. These admin commands change where a collection lives without dumping and reloading it:
+
+| Command | Since | What it does |
+|---------|-------|--------------|
+| `reshardCollection` | 5.0 | Rewrites a sharded collection under a new shard key. Recipients clone the data, tail the oplog to catch up, then commit |
+| `reshardCollection` with `forceRedistribution: true` | 8.0 | Reshards onto the same key to spread data over newly added shards in one pass instead of waiting for the balancer |
+| `moveCollection` | 8.0 | Moves an unsharded collection to another shard |
+| `unshardCollection` | 8.0 | Turns a sharded collection back into an unsharded one on a chosen shard |
+
+```javascript
+db.adminCommand({
+  reshardCollection: "shop.orders",
+  key: { customer_id: "hashed" },      // was { created_at: 1 }, a monotonic hotspot
+  numInitialChunks: 4000
+})
+```
+
+All three copy commands share the same cost model. Writes to the collection block for up to 2 seconds at commit, so the application sees one latency spike. The destination needs free space of about twice the collection plus its indexes, and MongoDB's guidance is to start with I/O below 50% and CPU below 80%, because the copy and the oplog catch-up compete with production traffic. `moveCollection` cannot run on Queryable Encryption collections, index builds during a move may silently fail, and search indexes must be rebuilt after it. Run these in a low-traffic window and watch `currentOp` for the `remainingOperationTimeEstimatedSecs` of the resharding operation.
+
+### MongoDB Search and Vector Search (`mongot`)
+
+Full-text search with Lucene relevance, and approximate nearest-neighbour vector search (`$vectorSearch`), run in a separate process, `mongot`, next to each replica set or shard. `mongod` streams changes to `mongot`, which builds Lucene indexes, and forwards `$search` and `$vectorSearch` stages to it over a long-lived gRPC connection. Indexes are therefore eventually consistent: a document is searchable about a second after it commits, not inside the same transaction.
+
+The same `mongot` runs in Atlas and self-managed. For Community Edition it ships as a Linux tarball or container (x86_64 and ARM64, no Windows or macOS binaries) and pairs with MongoDB Server 8.3 or later; Enterprise Advanced runs it under the MongoDB Controllers for Kubernetes Operator. Each shard needs its own `mongot` group, and more than one `mongot` per replica set needs an L7 load balancer because an L4 balancer cannot spread gRPC streams. Size `mongot` memory for the Lucene index and the vector graph; it is a second stateful tier to operate, not a feature flag.
+
 ### Change Streams
 
 MongoDB change streams provide real-time notifications of data changes:
@@ -445,6 +474,27 @@ Note the asymmetry with `linearizable`: it is the only level that also rules out
 read from a *deposed* primary, which is why it is restricted to the primary and needs a
 timeout — it must confirm it is still the primary before answering.
 
+### Queryable Encryption
+
+Client-side field-level encryption (CSFLE, 4.2+) encrypts fields in the driver so the server never sees plaintext, but deterministic encryption is the only way to query those fields, and it leaks equality patterns. Queryable Encryption (7.0+, replica set or sharded cluster, not standalone) encrypts each value randomly and keeps encrypted metadata collections (`enxcol_.<coll>.esc` and `.ecoc`) that let the server match encrypted query tokens without decrypting anything.
+
+| Query type | Status |
+|------------|--------|
+| Equality | GA since 7.0 |
+| Range (`$lt`, `$gt` on numbers and dates) | GA since 8.0 |
+| Prefix, suffix, substring on strings | Public preview in 8.2, GA in 9.0 `[9.0]` |
+
+```javascript
+// encryptedFieldsMap for automatic encryption: the driver encrypts before send
+encryptedFields: { fields: [
+  { path: "ssn",    bsonType: "string", keyId: dek1, queries: { queryType: "equality" } },
+  { path: "salary", bsonType: "int",    keyId: dek2,
+    queries: { queryType: "range", min: 0, max: 10000000, sparsity: 2 } }
+]}
+```
+
+Costs to plan for: each encrypted insert also writes metadata documents, so write volume and storage grow (range fields more than equality fields); compaction of the metadata collections is a periodic operation; diagnostic commands and the slow-query log redact encrypted fields, which makes performance work harder. Automatic encryption needs the Atlas or Enterprise query analysis component (`crypt_shared`); Community Edition supports explicit encryption only. Keys live in a key vault collection wrapped by a customer master key in AWS KMS, Azure Key Vault, GCP KMS or KMIP, so a stolen database dump and a stolen DBA account both see ciphertext.
+
 ### MongoDB vs Relational Transaction Overhead
 
 ```mermaid
@@ -455,6 +505,23 @@ xychart-beta
     bar [0.55, 2.55, 9, 5.5]
 ```
 *Illustrative bands, not benchmark figures. Single-document MongoDB writes (about 0.1 to 1ms) are comparable to single-row PostgreSQL updates (about 0.1 to 5ms). A multi-document MongoDB transaction is not a small percentage on top of that: it pays snapshot setup, per-transaction state tracking, one grouped oplog entry written at commit, and a majority commit round trip — so it lands roughly an order of magnitude higher (the 3 to 15ms bar) against PostgreSQL's roughly 1 to 10ms for a simple multi-row transaction. Recommendation: reserve multi-document transactions for genuine cross-document atomicity and default to single-document operations with embedding otherwise.*
+
+### Per-Operation Memory Limit and Open-Transaction Cap `[9.0]`
+
+MongoDB 9.0 adds two server-wide ceilings that earlier versions did not have:
+
+| Limit | Default | Parameter | Error when exceeded |
+|---|---|---|---|
+| Memory for one query operation (sum of all memory-tracked stages) | greater of 1 GB or 20% of server memory | `internalQueryMaxMemoryUsageBytesPerOperation` (startup, runtime, or query settings) | `QueryExceededMemoryLimitNoDiskUseAllowed` (292) when a spillable stage hits it with `allowDiskUse: false`; `ExceededMemoryLimit` (146) otherwise |
+| Memory for one expression evaluation | 100 MB | `internalQueryMaxSingleExpressionMemoryUsageBytes` | `ExceededMemoryLimit` |
+| Open multi-document transactions | 10000 | `maxConcurrentMultiDocumentTransactions` | `TooManyOpenTransactions` on the next `startTransaction` |
+
+Tracked memory covers blocking stages (`$group`, `$sort`), expression evaluation, and stages that buffer records
+(geo proximity search, index-backed counts, updates). The 100 MB per-stage limit and per-stage spilling are
+unchanged; the new limit sits on top of them, so a pipeline whose stages each stayed under 100 MB can still
+fail if their sum passes 1 GB. On an 8 GB host the default is 1.6 GB; on a 64 GB host it is 12.8 GB.
+Watch `serverStatus` fields `metrics.query.peakMemoryUsageOperation` and
+`metrics.query.operationsFailedDueToMemoryLimit` before raising the parameter.
 
 ---
 
@@ -479,6 +546,17 @@ xychart-beta
 | Full-text search | Basic (text index) | Good (tsvector + GIN) |
 | Mature ecosystem | Yes | Yes |
 | JSON support | Native (BSON) | JSONB (also excellent) |
+
+**MongoDB against the other document stores.** "MongoDB-compatible" means the wire protocol and most of the query language, not the same engine, so test transactions, aggregation stages and change streams on the target before migrating.
+
+| Option | Engine underneath | Strength | Watch out for |
+|--------|-------------------|----------|---------------|
+| MongoDB (Atlas or self-managed) | WiredTiger | Full feature set: transactions, aggregation, change streams, resharding, Search and Vector Search, Queryable Encryption | SSPL licence for self-managed; Atlas pricing at scale |
+| Azure Cosmos DB | Microsoft's own multi-model engine; MongoDB API is a compatibility layer | Multi-region writes, five tunable consistency levels, SLA-backed latency | Request-unit pricing punishes scans; not every MongoDB operator or stage is supported |
+| Couchbase | Memory-first KV engine with SQL++ queries | Built-in cache tier, sub-millisecond key reads, XDCR cross-datacenter replication, mobile sync | Different query language; operational model differs from MongoDB |
+| Google Firestore | Google's managed document store on Spanner infrastructure | Serverless, offline-first mobile and web SDKs, real-time listeners; also offers a MongoDB-compatible API | Per-document write-rate guidance (about 1 sustained write/s per document); limited aggregation |
+| Amazon DocumentDB | Aurora-style shared storage, not MongoDB code | Managed on AWS, storage scales to 128 TiB, fast replicas | Implements a subset of the MongoDB API; feature gaps lag MongoDB releases |
+| DocumentDB (open source, Linux Foundation) + FerretDB | PostgreSQL extension storing BSON; FerretDB 2.x translates the MongoDB wire protocol onto it | MIT/Apache licence, runs on any PostgreSQL, SQL access to the same data | Younger; performance and operator coverage below MongoDB's |
 
 ---
 
@@ -517,13 +595,16 @@ xychart-beta
 A sharded collection's shard key must be indexed (required). Additionally, all queries in a sharded cluster that don't include the shard key result in scatter-gather: the query fan-out goes to ALL shards. For a 10-shard cluster, a non-shard-key query hits 10 shards × the query cost = 10x overhead. Always include the shard key in hot query predicates.
 
 **Pitfall 3: Using $where or JavaScript in queries**
-`db.users.find({$where: "this.age > 18"})` executes JavaScript per document — no index, full collection scan, single-threaded JavaScript engine. Always use native MongoDB query operators instead.
+`db.users.find({$where: "this.age > 18"})` executes JavaScript per document: no index, full collection scan, and a call into the WASM-sandboxed JavaScript engine for every document `[9.0]` (server-side JavaScript is not available on `ppc64le`). Always use native MongoDB query operators instead.
 
 **Pitfall 4: Downgrading write concern to w:1 for throughput**
 The implicit default is `w: "majority"`, which also implies journaling because `writeConcernMajorityJournalDefault` is true — so a fresh deployment is durable out of the box. Teams then override it to `w: 1` chasing write latency, and `w: 1` acknowledges as soon as the primary has the write in memory, not once it is journaled or replicated. If the primary crashes immediately after the ack, that write is rolled back on failover. Keep `w: "majority"` for anything financial; the one replica-set shape where MongoDB itself falls back to `w: 1` is a set with arbiters where the data-bearing voting members do not form a majority.
 
 **Pitfall 5: Not monitoring oplog size and replication lag**
 The oplog is a capped collection. If a secondary falls too far behind (e.g., slow network, heavy write burst), it may fall off the oplog — it can no longer replicate. Fix: monitor replication lag (`rs.printReplicationInfo()`). Set `oplogSizeMB` large enough to cover at least 24 hours of operations. Alert when lag > 30 seconds.
+
+**Pitfall 6: An 8.x aggregation fails after the 9.0 upgrade**
+On 8.x only blocking stages had a memory limit (100 MB each), so a report pipeline whose `$lookup` pulls large joined arrays and whose `$project` builds per-document arrays could use several GB without an error. On 9.0 on a 4 GB host the per-operation limit is 1 GB, and the same pipeline fails with `ExceededMemoryLimit`. `allowDiskUse: true` does not fix this, because it only lets spillable stages such as `$group` and `$sort` write to disk; it helps only when the error is `QueryExceededMemoryLimitNoDiskUseAllowed`. Fix: filter with `$match` before `$lookup`, narrow the joined fields with a `$lookup` sub-pipeline, and run the pipeline on a 9.0 staging node while watching `metrics.query.operationsFailedDueToMemoryLimit` before the production upgrade `[9.0]`.
 
 ---
 
@@ -537,7 +618,10 @@ The oplog is a capped collection. If a secondary falls too far behind (e.g., slo
 | `mongotop` | Top collection activity (reads/writes per collection) |
 | `mongostat` | Server-wide stats (ops/s, connections, memory) |
 | `mongodump/mongorestore` | Logical backup/restore |
-| MongoDB Atlas | Managed MongoDB (AWS/Azure/GCP), auto-sharding, Atlas Search |
+| MongoDB Atlas | Managed MongoDB (AWS/Azure/GCP), auto-sharding, MongoDB Search |
+| `mongot` | Search and Vector Search process for Atlas and self-managed (Community 8.3+, Enterprise via Kubernetes Operator) |
+| Queryable Encryption | Server-side queries on client-encrypted fields (equality, range, and prefix, suffix and substring from 9.0) |
+| FerretDB | MongoDB wire protocol on PostgreSQL with the DocumentDB extension |
 | Mongoose (Node.js) | ODM for MongoDB with schema validation |
 | Spring Data MongoDB | Java ODM for MongoDB |
 | Debezium MongoDB connector | CDC from MongoDB change streams |
@@ -587,7 +671,7 @@ A TTL (Time-To-Live) index on a BSON date field causes MongoDB to automatically 
 The oplog (operations log) is a capped collection in the `local` database that records all write operations in a replication set. Secondaries tail the oplog to apply changes. Capped collection: has a fixed size in bytes; old entries are overwritten when full. Why size matters: if a secondary falls behind (network partition, slow network, heavy write burst) and the oplog wraps around before the secondary reads those entries, the secondary can no longer catch up — it needs a full resync. Recommended oplog size: able to hold at least 24-72 hours of write operations. Default: 5% of free disk space, floored at 990MB and capped at 50GB (that cap is often too small for high-write deployments). Set with `mongod --oplogSizeMB`, the `replication.oplogSizeMB` YAML key, or resize a running node with `db.adminCommand({replSetResizeOplog: 1, size: <MB>})`.
 
 **Q: How does MongoDB schema validation work?**
-**Short:** MongoDB's $jsonSchema validator enforces required fields and types server-side on every insert and update in strict mode.
+**Short:** A $jsonSchema validator checks inserts and updates server-side; strict lets old invalid documents stay, while 9.0's constraint level rejects any invalid document.
 
 MongoDB 3.6+ supports JSON Schema validation on collections. Define a schema with required fields, types, and constraints:
 ```javascript
@@ -604,20 +688,37 @@ db.createCollection("users", {
                                // "moderate" = inserts, plus updates to documents that
                                //              ALREADY satisfy the rules; updates to
                                //              pre-existing invalid documents are exempt
+                               // "constraint" [9.0] = like strict, and every document
+                               //              in the collection must pass
   validationAction: "error"    // "error" = reject invalid; "warn" = allow with warning
 });
 ```
-Validation runs on INSERT and UPDATE and is enforced server-side by `mongod` — the shell cannot bypass it, and neither can a driver. `moderate` exists specifically so you can add a schema to a collection full of legacy documents without breaking writes to the non-conforming ones; it is not "new documents only". Use it as a safety net for required fields and basic type constraints.
+Validation runs on INSERT and UPDATE and is enforced server-side by `mongod`. Under `strict` and `moderate`, a user with the `bypassDocumentValidation` privilege can skip it per command, and documents that were invalid before the validator was added stay in the collection. `moderate` exists so you can add a schema to a collection full of legacy documents without breaking writes to the non-conforming ones; it is not "new documents only". `constraint` `[9.0]` is the level for a schema the reader can trust: setting it with `collMod` (from `strict`, after a `prepareConstraintValidationLevel: true` step) scans every existing document and fails if one violates the validator, it blocks `bypassDocumentValidation`, it needs `validationAction` `error` or `errorAndLog`, and the validator cannot change while it is on (drop to `strict`, edit, set `constraint` again). The scan reads the whole collection, so run it off-peak on large collections.
 
 **Q: Explain MongoDB's aggregation pipeline performance optimization.**
 **Short:** Aggregation pipelines run fastest when $match and $project run early and $limit is placed right after $sort.
 
 The pipeline processes documents stage by stage. Optimization rules: (1) Put `$match` as early as possible — it reduces the number of documents flowing to later stages. If the match uses an indexed field, it avoids a collection scan. (2) Put `$project` early to remove fields not needed downstream — reduces document size in memory. (3) Put `$limit` immediately AFTER `$sort` when you only need top-N — the optimizer coalesces the pair into a single sort that keeps only n items in memory. Putting `$limit` first would truncate an arbitrary set of documents and then sort those, which is a different query. (4) `$lookup` is expensive (cross-collection join) — filter before it to minimize the joined set. (5) The per-stage memory limit is 100MB; since MongoDB 6.0 the `allowDiskUseByDefault` parameter decides whether an over-limit stage spills to temporary files or raises an error, and `{ allowDiskUse: false }` / `{ allowDiskUse: true }` overrides it for one command. (6) Use `$facet` for multiple aggregations in one pipeline pass instead of separate queries. Check performance with `.explain("executionStats")` on the aggregate call.
 
-**Q: What is MongoDB Atlas Search and when should you use it instead of a text index?**
-**Short:** Atlas Search adds Lucene-based relevance scoring, fuzzy matching, and facets that MongoDB's native text index cannot provide.
+**Q: Which memory and transaction limits did MongoDB 9.0 add, and what fails when you hit them?**
+**Short:** 9.0 caps one query operation at 1 GB or 20% of RAM (ExceededMemoryLimit) and open transactions at 10000 (TooManyOpenTransactions).
 
-MongoDB Atlas Search (built on Lucene) provides full-text search with relevance scoring, fuzzy matching, phrase matching, facets, and autocomplete — features missing from MongoDB's native text indexes. Native text index limitations: all fields weighted equally (unless specified), no fuzzy matching, no autocomplete, no custom analyzers, limited relevance scoring, no facets. It does handle exact phrases, via escaped double quotes (`$search: "\"ssl certificate\""`), so phrase matching is not the reason to leave it. Atlas Search: Lucene-based, full BM25 scoring, facets, fuzzy matching (`fuzziness` parameter), autocomplete, search-as-you-type, synonym groups, custom analyzers. Trade-off: Atlas Search requires Atlas (managed MongoDB) and is eventually consistent (replication delay of ~1-2 seconds for indexed changes). Use Atlas Search when: advanced relevance ranking needed, user-facing search with autocomplete, faceted navigation. Use native text index for: simple keyword matching, self-hosted MongoDB, cases where search is not a primary use case.
+Before 9.0, only each blocking stage had a 100 MB limit, and an operation could use unbounded memory in total. 9.0 adds `internalQueryMaxMemoryUsageBytesPerOperation`, default the greater of 1 GB or 20% of the memory available to `mongod`, applied to the sum of all memory-tracked stages: `$group`, `$sort`, expression evaluation, and buffering stages such as geo proximity search and updates. A spillable stage that hits it with `allowDiskUse: false` fails with `QueryExceededMemoryLimitNoDiskUseAllowed`; anything else fails with `ExceededMemoryLimit`, and the server logs code 12932700. It also adds `maxConcurrentMultiDocumentTransactions` (default 10000): the next `startTransaction` past it gets `TooManyOpenTransactions`, which usually means a client leaks sessions or holds transactions open across network calls. The fix for both is to reduce work per operation (`$match` early, index-backed sorts, short transactions) before raising either parameter. Source: MongoDB 9.0 release notes, September 2026.
+
+**Q: What is MongoDB Search and when should you use it instead of a text index?**
+**Short:** MongoDB Search runs Lucene in a separate mongot process, adding relevance scoring, fuzzy matching, autocomplete and facets that the native text index lacks, on Atlas or self-managed.
+
+MongoDB Search (built on Lucene) provides full-text search with relevance scoring, fuzzy matching, phrase matching, facets, and autocomplete, features missing from MongoDB's native text indexes. Native text index limitations: all fields weighted equally (unless specified), no fuzzy matching, no autocomplete, no custom analyzers, limited relevance scoring, no facets. It does handle exact phrases, via escaped double quotes (`$search: "\"ssl certificate\""`), so phrase matching is not the reason to leave it. MongoDB Search: Lucene-based, BM25 scoring, facets, fuzzy matching (`fuzziness` parameter), autocomplete, synonym groups, custom analyzers, and the same `mongot` serves `$vectorSearch`. It runs in Atlas and self-managed (Community Edition on MongoDB Server 8.3+ as a tarball or container, Enterprise under the Kubernetes Operator), with one `mongot` group per replica set or shard. Trade-off: indexes are fed by change streams, so they are eventually consistent (about a second behind commits), and `mongot` is a second stateful tier to size and run. Use it for ranked user-facing search, autocomplete and faceted navigation; keep the native text index for simple keyword matching where running another process is not worth it.
+
+**Q: Can you change a MongoDB collection's shard key after it is in production?**
+**Short:** Yes; reshardCollection (5.0+) rewrites the collection under a new key online, blocking writes for up to 2 seconds at commit and needing about twice the collection's size in free space.
+
+`reshardCollection` clones the collection to recipient shards under the new key, tails the oplog to apply writes made during the copy, then commits, blocking writes to that collection for up to 2 seconds. Since 8.0 the same family also includes `forceRedistribution: true` (reshard onto the same key to spread data over new shards), `moveCollection` (move an unsharded collection to another shard) and `unshardCollection`. The costs are real: the destination needs free space of about `(collection + indexes) x 2`, MongoDB advises starting with I/O under 50% and CPU under 80%, index builds during the operation can fail silently, and search indexes must be rebuilt afterwards. So a bad shard key is now a planned, hours-long maintenance job rather than a dump-and-reload, but still worth avoiding by choosing a high-cardinality, non-monotonic key up front.
+
+**Q: How does Queryable Encryption differ from client-side field-level encryption in MongoDB?**
+**Short:** Both encrypt fields in the driver, but Queryable Encryption uses randomized encryption plus server-side encrypted metadata, so equality and range queries work without leaking equal values, unlike deterministic CSFLE.
+
+With CSFLE (4.2+) the only queryable mode is deterministic encryption, where equal plaintexts give equal ciphertexts, so the server can match them but an attacker with the data can count frequencies. Queryable Encryption (7.0+) encrypts each value randomly and stores encrypted tokens in metadata collections (`enxcol_.<coll>.esc` and `.ecoc`) that let the server answer equality queries (GA 7.0) and range queries (GA 8.0) on ciphertext, plus prefix, suffix and substring queries on strings (preview in 8.2, GA in 9.0). Neither the database server, its backups nor a DBA ever sees plaintext, because keys are wrapped by a customer master key in a KMS. The costs are extra metadata writes per insert, larger storage, periodic metadata compaction, redacted fields in diagnostics, no `moveCollection`, and automatic encryption only on Atlas or Enterprise (Community gets explicit encryption). Use it for regulated fields (SSN, salary, card data) that must stay searchable.
 
 **Q: When would you use MongoDB's $lookup instead of embedding and what are the limitations?**
 **Short:** $lookup performs a left outer join across collections but cannot use sharding to colocate data, making it expensive on sharded sources.
@@ -647,7 +748,7 @@ Read preference chooses which replica set member serves a read, trading stalenes
 **Q: Why should you avoid `$where` and JavaScript expressions in MongoDB queries?**
 **Short:** $where forces a full collection scan by running JavaScript per document instead of letting the query planner use an index.
 
-`$where` executes a JavaScript expression against every document using a single-threaded JavaScript engine, so it cannot use an index and forces a full collection scan. A query like `db.users.find({$where: "this.age > 18"})` runs interpreted JavaScript per document instead of the native comparison MongoDB's query planner can optimize with a B-tree index, and on a large collection this is dramatically slower while also blocking other JavaScript-engine work since it's single-threaded. There is effectively no query `$where` can express that a native operator can't, so the performance cost buys nothing in return. Use native query operators, such as `{age: {$gt: 18}}`, which the planner can satisfy with an index in logarithmic time instead of a linear scan.
+`$where` executes a JavaScript expression against every document, so it cannot use an index and forces a full collection scan. A query like `db.users.find({$where: "this.age > 18"})` runs JavaScript per document instead of the native comparison MongoDB's query planner can optimize with a B-tree index, and on a large collection this is dramatically slower. MongoDB 9.0 runs `$where`, `$function` and `$accumulator` on a WASM-based JavaScript engine with stronger sandboxing (they are no longer deprecated, and not available on `ppc64le`), which changes the isolation story but not the cost: the per-document interpreter call and the full scan remain. There is effectively no query `$where` can express that a native operator can't, so the performance cost buys nothing in return. Use native query operators, such as `{age: {$gt: 18}}`, which the planner can satisfy with an index in logarithmic time instead of a linear scan.
 
 ---
 
@@ -661,7 +762,7 @@ Read preference chooses which replica set member serves a read, trading stalenes
 6. Monitor oplog size: ensure it can hold 48+ hours of write operations.
 7. Use change streams for CDC instead of periodic polling.
 8. Avoid multi-document transactions when single-document atomicity can be designed in.
-9. Use Atlas Search for user-facing search; native text index for basic keyword matching.
+9. Use MongoDB Search (Atlas or self-managed `mongot`) for user-facing search; native text index for basic keyword matching.
 10. Run `db.collection.explain("executionStats")` on all query patterns during development.
 
 ---

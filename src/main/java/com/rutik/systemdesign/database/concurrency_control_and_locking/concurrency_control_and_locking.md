@@ -408,6 +408,50 @@ Row-level locks consume memory. If a statement acquires too many row locks (SQL 
 
 PostgreSQL and Oracle do NOT escalate locks at all. PostgreSQL keeps no per-row lock state in shared memory — `SELECT FOR UPDATE` marks the tuple itself (`xmax` plus infomask bits), so there is no limit on the number of rows locked and no row count that could trigger escalation. Its table-level `ROW SHARE` / `ROW EXCLUSIVE` modes play the intent-lock role, announcing "somewhere below me rows are locked/modified" so that DDL and `LOCK TABLE` can conflict without scanning rows.
 
+The table-level and object locks that do live in shared memory sit in a lock table sized from `max_locks_per_transaction` x (`max_connections` + `max_prepared_transactions`). A transaction that touches many partitions or drops many tables can exhaust it and fail with `out of shared memory` and a hint to raise `max_locks_per_transaction`. PostgreSQL 19 changes the default from 64 to 128 and also changes how lock space is allocated, so a value carried over from postgresql.conf on 18 must be doubled to keep the same capacity `[19]`.
+
+### Fast-Path Locks and `LWLock:LockManager` Contention
+
+Every query takes a relation lock on each table and each index the planner might touch: a plain `SELECT` takes `AccessShareLock` on the table and on every one of its indexes, and on a partitioned table on every partition left after plan-time pruning, plus their indexes. These locks never conflict with each other, so PostgreSQL avoids the shared lock table for them. A weak lock (`AccessShareLock`, `RowShareLock`, `RowExclusiveLock`) on a non-shared relation, with no strong lock pending on it, is recorded in a **fast-path slot** inside the backend's own `PGPROC`, guarded by that backend's private lock. No other backend touches it.
+
+The number of slots is the limit. Once a transaction holds more weak locks than it has slots, the rest go to the shared lock table: a hash table split into 16 partitions, each guarded by one LWLock that shows up as the wait event `LWLock:LockManager`. Backends running the same query lock the same relation OIDs, which hash to the same partitions, so at high QPS they queue on a handful of LWLocks even though no lock ever conflicts.
+
+```
+  one SELECT on orders: parent + 12 monthly partitions (no pruning) + 4 indexes each
+
+  locks taken   = 1 parent + 4 parent indexes + 12 partitions + 48 partition indexes = 65
+
+  PostgreSQL 17 and older   16 fast-path slots per backend
+    fast path   [################]                                      16
+    lock table  [#################################################]     49  -> LockManager LWLocks
+
+  PostgreSQL 18, max_locks_per_transaction = 64 (default) -> 64 slots
+    fast path   [################################################################] 64
+    lock table  [#]                                                                1
+
+  PostgreSQL 18, max_locks_per_transaction = 128 -> 128 slots: all 65 on the fast path
+```
+
+Before PostgreSQL 18 the slot count was a compile-time 16. PostgreSQL 18 sizes it from `max_locks_per_transaction`: slots come in groups of 16, the group count is the next power of two of `max_locks_per_transaction` divided by 16, capped at 1,024 groups (16,384 slots). The default of 64 gives 4 groups, 64 slots. The cost is a little shared memory per backend; the setting needs a restart.
+
+Finding it and fixing it:
+
+```sql
+-- Who is waiting on the lock-manager LWLocks right now
+SELECT count(*) FROM pg_stat_activity
+WHERE wait_event_type = 'LWLock' AND wait_event = 'LockManager';
+
+-- How many relation locks each backend holds off the fast path
+SELECT pid, count(*) FILTER (WHERE NOT fastpath) AS slow, count(*) AS total
+FROM pg_locks WHERE locktype = 'relation'
+GROUP BY pid ORDER BY slow DESC LIMIT 10;
+```
+
+1. **Prune at plan time.** A literal partition key (`WHERE created_at >= '2026-10-01'`) lets the planner drop partitions before locking them. A generic prepared plan with `$1` locks every partition before run-time pruning, so set `plan_cache_mode = force_custom_plan` for those statements.
+2. **Drop unused indexes.** Each index is one more lock per query; `pg_stat_user_indexes.idx_scan = 0` finds candidates.
+3. **On PostgreSQL 18, raise `max_locks_per_transaction`** to cover the widest common query (128 or 256), so its locks stay on the fast path.
+4. **Keep partition counts modest.** Thousands of partitions touched per query defeat any slot count.
+
 ### MVCC in PostgreSQL: Transaction Snapshot
 
 ```sql
@@ -597,6 +641,9 @@ Hibernate/JPA batched updates in arbitrary entity ordering. Two transactions upd
 | `lock_timeout` | Fail fast if lock not acquired in N ms |
 | `deadlock_timeout` | How long PostgreSQL waits before deadlock check (1s default) |
 | `pg_blocking_pids()` | Find which PID is blocking a given PID |
+| `pg_locks.fastpath` | Whether a relation lock sits in the backend's fast-path slots or in the shared lock table |
+| `log_lock_waits` | Log any lock wait longer than `deadlock_timeout`, with the holder and waiter PIDs; on by default `[19]`, off before 19 |
+| `pg_stat_lock` | Cumulative per-lock-type statistics, read through `pg_stat_get_lock()` `[19]` |
 | `SELECT pg_cancel_backend(pid)` | Cancel a query (gentle) |
 | `SELECT pg_terminate_backend(pid)` | Terminate a connection (forceful) |
 | MySQL `SHOW ENGINE INNODB STATUS` | View lock waits and deadlock history |
@@ -665,7 +712,7 @@ Row-level locks: finest granularity, maximum concurrency. Lock only the specific
 **Q: How do you find and kill blocking queries in PostgreSQL?**
 **Short:** pg_blocking_pids() identifies the blocking session, then pg_cancel_backend stops just its statement without dropping the connection.
 
-Use `pg_blocking_pids()` against `pg_stat_activity` to identify the blocker, then `pg_cancel_backend(pid)` to cancel it gracefully or `pg_terminate_backend(pid)` to kill the connection outright. Cancel first: it aborts only the running statement and lets the client see the error, while terminate drops the whole session.
+Use `pg_blocking_pids()` against `pg_stat_activity` to identify the blocker, then `pg_cancel_backend(pid)` to cancel it gracefully or `pg_terminate_backend(pid)` to kill the connection outright. Cancel first: it aborts only the running statement and lets the client see the error, while terminate drops the whole session. Those queries show only what is blocked now. For a wait that ended before anyone looked, read the server log: `log_lock_waits` writes a message for every lock wait longer than `deadlock_timeout` (1s), naming the waiting and holding PIDs. It is on by default from PostgreSQL 19 `[19]`; on earlier versions set it in postgresql.conf.
 
 ```sql
 -- Find blocking and blocked queries:
@@ -691,6 +738,16 @@ SELECT pg_cancel_backend(blocking_pid);
 -- If that doesn't work (not in a cancellable state):
 SELECT pg_terminate_backend(blocking_pid);
 ```
+
+**Q: Why can simple SELECTs on a partitioned table pile up on the `LWLock:LockManager` wait event when no lock ever conflicts?**
+**Short:** Each query locks every table, partition and index it may touch; past the backend's fast-path slots those locks go to a shared lock table guarded by 16 LWLocks, and identical queries queue on them.
+
+PostgreSQL records weak relation locks (`AccessShareLock`, `RowShareLock`, `RowExclusiveLock`) in per-backend fast-path slots that no other backend touches. Through PostgreSQL 17 there were only 16 slots. A `SELECT` on a table with 12 unpruned partitions and 4 indexes each takes about 65 relation locks, so 49 spill into the shared lock table, a hash split into 16 partitions each guarded by a `LockManager` LWLock. Thousands of backends running that query hash the same OIDs to the same partitions and wait on the LWLock, not on any lock conflict, so `pg_locks` shows nothing blocked while `pg_stat_activity` shows `LWLock:LockManager` everywhere. Count `pg_locks` rows with `fastpath = false` per backend to confirm it, then cut the lock count: prune partitions at plan time (`plan_cache_mode = force_custom_plan` for generic plans), drop unused indexes, and on PostgreSQL 18 raise `max_locks_per_transaction`.
+
+**Q: How does PostgreSQL 18 change the number of fast-path lock slots per backend?**
+**Short:** PostgreSQL 18 sizes fast-path slots from max_locks_per_transaction in groups of 16 (64 slots at the default of 64, up to 16,384) instead of the fixed 16 slots of earlier versions.
+
+Before 18, `FP_LOCK_SLOTS_PER_BACKEND` was a compile-time 16. PostgreSQL 18 computes the group count at startup as the next power of two of `max_locks_per_transaction` divided by 16, at least 1 and at most 1,024 groups, and each group holds 16 slots. The default `max_locks_per_transaction = 64` therefore gives 64 slots, four times the old limit, and 256 gives 256 slots, at the price of a little shared memory per backend and a restart. That moves the spill point from 16 relations to a number you choose, so set `max_locks_per_transaction` above the lock count of your widest hot query (tables plus partitions plus indexes) and verify with `pg_locks.fastpath`. It does not help a query that touches thousands of partitions; fix pruning first.
 
 **Q: What is two-phase locking (2PL) and how does it guarantee serializability?**
 **Short:** Two-phase locking guarantees serializability by never acquiring a new lock once a transaction has released any lock.

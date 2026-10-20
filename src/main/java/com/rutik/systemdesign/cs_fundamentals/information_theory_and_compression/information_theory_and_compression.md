@@ -122,6 +122,7 @@ Compression techniques fall into five families, usually composed rather than use
 - **LZ78 / LZW**: builds an explicit dictionary of substrings seen so far and emits dictionary indices; no window, so matches can be arbitrarily far back, at the cost of unbounded dictionary growth (bounded in practice by a reset or eviction policy).
 - **LZMA**: LZ77 with a large window (up to gigabytes), a range coder, and a context model over recent bytes — the core of 7-Zip and `xz`.
 - **Brotli's static dictionary**: ships a 120 KB dictionary of common web strings (HTML tags, JS keywords, English words) baked into the codec itself, so a small HTTP response can reference a common phrase it never actually transmitted.
+- **Negotiated shared dictionaries (RFC 9842, Compression Dictionary Transport)**: the dictionary is a resource the client already holds, usually the previous version of the same file, so a new deploy of a JS bundle ships as a delta of a few hundred bytes (§6.11).
 
 **3. Transform coding** — reorder or restructure data so a simpler coder does better on the result:
 - **Burrows-Wheeler Transform (BWT) + Move-To-Front (MTF)**: BWT permutes a block so that characters preceding similar contexts cluster together; MTF then turns those clusters into runs of small numbers, which run-length and entropy coding compress well. Used by bzip2.
@@ -131,6 +132,7 @@ Compression techniques fall into five families, usually composed rather than use
 **4. Lossy coding** — accept a bounded reconstruction error in exchange for a much lower rate:
 - **Quantization**: map a continuous or high-precision value to one of a smaller set of representable levels; the coarser the quantization, the smaller the output and the larger the error.
 - **Transform + quantization (JPEG)**: the Discrete Cosine Transform (DCT) concentrates an image block's energy into a few low-frequency coefficients, which are then quantized aggressively (high frequencies get coarser buckets, since the eye is less sensitive to them) before entropy coding.
+- **Lossless recompression of a lossy file (JPEG XL)**: once a JPEG is quantized, the lossy step is done, but JPEG's last stage is still baseline Huffman with fixed tables. JPEG XL keeps the exact quantized DCT coefficients and re-codes them with context modeling and ANS, about 20% smaller on average, and stores enough reconstruction data to rebuild the original JPEG file bit for bit. The saving is entirely a better probability model over the same symbols, the point of §3.
 - **Psychoacoustic masking (MP3/AAC)**: discard or coarsely quantize frequency components a human ear would not perceive next to a louder nearby frequency — the model is of the *listener*, not the signal.
 - **Rate-distortion function** `R(D)`: the lossy analogue of the entropy floor. For a maximum tolerable distortion `D`, `R(D)` is the minimum achievable bitrate — exactly as `H(X)` is the minimum bitrate for zero distortion (`D = 0`). Every lossy codec is trying to sit on or near its source's rate-distortion curve.
 
@@ -597,6 +599,73 @@ print(recovered_d2 == d2)   # -> True
 
 **Measured: both single-block losses reconstruct exactly**, because XOR is its own inverse — `p = d1 XOR d2` means `d1 = p XOR d2` and `d2 = p XOR d1` fall straight out of XOR's algebra, no matrix inversion needed at `k=2`. This *is* the `(n=3, k=2)` case of §4's `(n, k)` framing, at `1.5x` storage overhead for tolerating 1 loss — scale `k` up past 2 and plain XOR parity stops working (which single surviving block would you XOR against which, when 2 are missing?), which is exactly the gap Reed-Solomon's Galois-field arithmetic exists to close: it generalizes this same "any `k` of `n` reconstructs" guarantee to `k > 2` and to multiple simultaneous losses, at the cost of needing field multiplication instead of a bare XOR.
 
+### 6.11 Shared dictionaries over HTTP: RFC 9842
+
+Brotli's built-in dictionary is fixed at 120 KB of generic web text. A site's own previous release
+is a far better dictionary for its next release, because almost every byte of `app.v2.js` already
+appears in `app.v1.js`. Python's stdlib `zlib` accepts a preset dictionary (`zdict`), which is enough
+to measure the effect:
+
+```python
+from __future__ import annotations
+import hashlib
+import zlib
+
+
+def bundle(version: str) -> bytes:
+    """A stand-in for a JS bundle: 200 functions with distinct names and constants."""
+    lines = [f"/* app.js build {version} */"]
+    for i in range(200):
+        tag = hashlib.sha256(str(i).encode()).hexdigest()[:12]
+        lines.append(f"export const f_{tag} = (x) => x * {i * 7919 % 1000} + '{tag[::-1]}';")
+    return "\n".join(lines).encode()
+
+
+v1 = bundle("2026.10.01")
+v2 = bundle("2026.10.08").replace(b"x * 0 +", b"x * 1 +")   # next deploy: a small diff
+
+plain = zlib.compress(v2, 9)
+c = zlib.compressobj(9, zdict=v1)            # the browser already caches v1
+delta = c.compress(v2) + c.flush()
+
+d = zlib.decompressobj(zdict=v1)
+assert d.decompress(delta) + d.flush() == v2
+print(f"v2 raw {len(v2):,} B | compressed alone {len(plain):,} B | v1 as dictionary {len(delta):,} B")
+# v2 raw 12,603 B | compressed alone 4,129 B | v1 as dictionary 125 B
+```
+
+**Measured: 4,129 B down to 125 B, 33x smaller than compressing alone.** Compressed alone the file
+still costs 2.6 bits per character, because its hash-derived names never repeat; with v1 as the
+dictionary, each line becomes a back-reference. DEFLATE's 32 KB window caps a `zdict` at 32 KB, so
+RFC 9842 uses Brotli (16 MB window) or Zstandard (up to 128 MB) instead.
+
+RFC 9842 (Standards Track, September 2025) standardizes how a browser and server agree on the
+dictionary:
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as Server
+    B->>S: GET /js/app.v1.js
+    S-->>B: 200, body br-compressed<br/>Use-As-Dictionary: match="/js/app.*.js"
+    Note over B: cache body as a dictionary<br/>keyed by its SHA-256
+    B->>S: GET /js/app.v2.js<br/>Accept-Encoding: gzip, br, zstd, dcb, dcz<br/>Available-Dictionary: SHA-256 of v1
+    S-->>B: 200, Content-Encoding: dcz<br/>Vary: accept-encoding, available-dictionary
+    Note over B: check the hash in the frame header,<br/>decompress v2 with v1 as dictionary
+```
+
+| Content coding | Header on the compressed body | Window the client must accept |
+|----------------|-------------------------------|-------------------------------|
+| `dcb` (Brotli with dictionary) | 36 bytes: magic `0xff 0x44 0x43 0x42` + 32-byte SHA-256 of the dictionary | Up to 16 MB |
+| `dcz` (Zstandard with dictionary) | 40 bytes: 8-byte magic (a Zstandard skippable frame) + 32-byte SHA-256 | At least 8 MB or 1.25x the dictionary size, up to 128 MB |
+
+Three rules matter in practice. The server must send `Vary: accept-encoding, available-dictionary`,
+or a shared cache serves a delta to a client that does not hold the dictionary. The feature works only
+over HTTPS, and the dictionary and response must be same-origin or CORS-readable: if they were not,
+a page could compress a secret cross-origin response against an attacker-chosen dictionary and learn
+the secret from the compressed size, the CRIME/BREACH attack class from §12. And the `match` pattern is
+a URL pattern restricted to the dictionary's own origin.
+
 ---
 
 ## 7. Real-World Examples
@@ -612,7 +681,9 @@ print(recovered_d2 == d2)   # -> True
 - **Apache Kafka broker-side compression** — producers can set `compression.type` to `gzip`, `lz4`, `zstd`, or `snappy` per topic; the broker stores and forwards the compressed batch as-is rather than decompressing and recompressing, so the codec choice directly trades producer/consumer CPU against network and disk bytes on every hop. `zstd` and `lz4` are the common modern defaults precisely because a message broker's hot path is throughput-bound, not ratio-bound — the same reasoning as Snappy inside RocksDB.
 - **ClickHouse and other column stores** — support per-column codec selection (`LZ4`, `ZSTD`, `Delta`, `DoubleDelta`, `Gorilla` for floating-point time series, `T64`), and allow *stacking* a value-aware codec with a general-purpose one (e.g., `CODEC(Delta, ZSTD)`), directly mirroring the Parquet/ORC principle above: transform first to expose structure, then let a general entropy/dictionary coder clean up what's left.
 - **PNG** — DEFLATE (the same LZ77 + Huffman core as gzip) applied after a per-scanline predictive filter (each pixel byte is predicted from its left/above/upper-left neighbor and only the residual is compressed), which is a transform-coding step in the sense of §4: predicting pixel values first turns smooth image gradients into small, entropy-friendly residuals before DEFLATE ever runs.
+- **JPEG XL in Chrome 155 (October 2026)**: Chrome decodes `.jxl` images with `jxl-rs`, a Rust decoder, so the parser of untrusted image bytes in the renderer is memory-safe. The Chrome team cites 30-50% better compression than JPEG and lists lossless JPEG transcoding. With transcoding, a CDN can store one JPEG XL file and still hand the exact original JPEG to clients without JPEG XL support, because the transcode keeps JPEG's quantized DCT coefficients and replaces only the entropy-coding stage.
 - **HTTP/2 and HTTP/3's HPACK/QPACK header compression** — HTTP headers repeat almost entirely across requests on the same connection (`user-agent`, `accept-encoding`, cookies), so instead of running a general-purpose byte compressor per request, HPACK maintains a shared dynamic dictionary of previously seen header fields on both ends of the connection and transmits a short index instead of the literal bytes when a header repeats — a connection-scoped, purpose-built version of the same "replace repetition with a back-reference" idea behind LZ77 (§4), and a direct example of a value-aware model (§7's Parquet/ClickHouse point) beating a generic compressor on structured, highly repetitive data.
+- **Meta OpenZL (open-sourced October 6, 2025)**: format-aware compression: the user describes the data's structure (a preset, or the Simple Data Description Language, SDDL, for fields, columns and records), an offline trainer searches for a *plan* of reversible transforms (split columns, delta, tokenize) followed by entropy coding, and each compressed frame embeds the resolved transform graph. One universal decoder runs any frame with no side information, so changing the plan never requires shipping a new decoder. On the Silesia corpus's `sao` file (M1 CPU), Meta reports 3,516,649 B (2.06x) at 340 MB/s compression and 1,200 MB/s decompression, against `zstd -3` at 5,531,935 B (1.31x) and `xz -9` at 4,414,351 B (1.64x, 3.5 MB/s). On unstructured text it falls back to zstd. It is the Parquet/ClickHouse idea above, transform first and then entropy-code, made generic.
 - **Git's packfile delta compression** — when Git packs loose objects into a `.pack` file for storage or transfer, it finds similar objects (usually successive versions of the same file) and stores most of them as a *delta* against a chosen base object rather than storing each version's full content, then runs zlib/DEFLATE over the result — the same two-stage principle as §5's pipeline (find redundancy across objects first, then entropy-code what's left), and the concrete reason a repository's `.git` directory is dramatically smaller than the sum of every historical version of every file it tracks.
 
 ---
@@ -659,7 +730,7 @@ Two things this table makes concrete that the qualitative row above only gesture
 - **The payload is tiny.** A compressor's header and any per-block framing can exceed the payload itself; a 20-byte message rarely benefits.
 - **The path is latency-critical and CPU-bound.** If a hot loop's bottleneck is CPU, not bandwidth, adding a compression stage moves the bottleneck the wrong direction — this is why LZ4/Snappy exist as almost-free options for exactly these paths, and why `xz`-grade ratio is never the right choice there.
 - **The data will be encrypted afterward AND the plaintext contains a secret alongside attacker-influenced content.** Compress-then-encrypt is fine when the plaintext is uniformly sensitive. It becomes a genuine vulnerability — the **CRIME** and **BREACH** attack class — when an attacker can inject content into the same compressed stream as a secret (e.g., a CSRF token reflected next to attacker-controlled request data): compression makes the output length depend on how much the injected content *matches* the secret, and an attacker who can observe ciphertext length (even encrypted, length usually is not hidden) can recover the secret byte-by-byte by trying values and watching the compressed size shrink when a guess matches. The fix is not "don't compress" universally — it is: never compress secrets alongside attacker-influenced data in the same compression context, which is why TLS disabled compression by default after CRIME and HTTP frameworks now recommend disabling response compression for pages that reflect both a secret and user input.
-- **The data is already lossy-compressed and will only be viewed, not re-encoded.** Running a general-purpose lossless compressor over a finished JPEG or MP3 file for "extra savings" wastes CPU for the same reason as recompressing gzip output (§10): a well-encoded lossy file's entropy coding stage already spent most of the exploitable redundancy, and what remains looks close to random to a second, unrelated compressor.
+- **The data is already lossy-compressed and will only be viewed, not re-encoded.** Running a general-purpose lossless compressor over a finished JPEG or MP3 file for "extra savings" wastes CPU for the same reason as recompressing gzip output (§10): a well-encoded lossy file's entropy coding stage already spent most of the exploitable redundancy, and what remains looks close to random to a second, unrelated compressor. A format-aware recoder is the exception: JPEG XL's lossless JPEG transcoding re-models the decoded DCT coefficients rather than the compressed bytes, and saves about 20%.
 
 ---
 
@@ -733,6 +804,8 @@ print(len(sorted_raw_gz), len(sorted_delta_gz))         # -> 3503  2739  (delta 
 | `parquet-tools` / `orc-tools` | Inspect per-column encoding and compression choices actually used in a Parquet/ORC file |
 | `7z` / `p7zip` | Archiving CLI wrapping LZMA/LZMA2, PPMd, and BWT-family filters behind one interface |
 | `numpy` | Used here for the DCT/quantization worked example (§6.9); linear-algebra backbone for most transform-coding math |
+| `Use-As-Dictionary` / `Available-Dictionary` headers, `dcb` / `dcz` codings | HTTP shared-dictionary compression (RFC 9842); a server returns a delta against a resource the client already cached |
+| OpenZL (Meta) | Format-aware compressor: trained transform plans described with SDDL, one universal decoder for every plan |
 
 ---
 
@@ -778,6 +851,10 @@ Entropy coding (Huffman, arithmetic, ANS) only sees a symbol's marginal probabil
 **Short:** ANS gets arithmetic-coding-level compression via table-lookup decoding instead of sequential bit arithmetic, which is why it's fast enough to have replaced Huffman in modern codecs.
 Classic arithmetic coding narrows an interval symbol by symbol and needs sequential, precision-sensitive arithmetic to encode and decode, which historically made it noticeably slower than Huffman's simple bit-shift table lookups. Asymmetric Numeral Systems (in its tANS/rANS table-driven forms) achieves the same near-entropy compression ratio as arithmetic coding — spending a genuine fraction of a bit per symbol — while both encoding and decoding reduce to integer state updates and table lookups, competitive with or faster than Huffman decoding. Zstandard's FSE (Finite State Entropy) module is a tANS implementation, and it is the concrete reason "arithmetic coding is too slow for production" stopped being a valid objection once ANS shipped in mainstream compressors: you no longer trade decode speed for ratio the way Huffman-vs-arithmetic used to force you to.
 
+**Q: A JPEG is already compressed, so how can JPEG XL make it about 20% smaller without losing a single bit?**
+**Short:** It decodes JPEG's Huffman layer back to the quantized DCT coefficients and re-codes those same symbols with context modeling and ANS, keeping reconstruction data to rebuild the exact original file.
+Because a JPEG's size is set by two separate decisions, and only the first one is lossy. Quantization of the DCT coefficients decides *what* is kept; the entropy-coding stage that follows decides *how many bits* it takes, and baseline JPEG uses Huffman coding with fixed or per-image tables and almost no context. JPEG XL's lossless transcoding undoes only the Huffman layer, keeps the quantized coefficients exactly, and re-encodes them with context modeling and ANS, so each coefficient is coded against a sharper probability estimate and the bits shrink toward its conditional entropy. Average savings are about 20%, and the file carries reconstruction data so a decoder can emit the original JPEG byte for byte. This is why "never compress compressed data" is a rule about unrelated byte-level compressors: gzip over a JPEG sees near-random bytes, but a recoder that parses the format works on the symbols, where redundancy is still left. Chrome 155 ships JPEG XL decoding, so a server can store the `.jxl` once and serve either format.
+
 **Q: What does mutual information measure, and how does it relate to conditional entropy?**
 **Short:** Mutual information I(X;Y) = H(X) - H(X|Y) is how many bits of uncertainty about X are resolved by observing Y, and it's zero exactly when X and Y are independent.
 Conditional entropy `H(X|Y)` is the uncertainty remaining in `X` once `Y` is known, and mutual information `I(X;Y) = H(X) - H(X|Y)` is how much that uncertainty *shrank* — the bits of `X` that `Y` actually predicts. It is symmetric, `I(X;Y) = I(Y;X)`, even though `H(X|Y)` and `H(Y|X)` generally differ, because both equal `H(X) + H(Y) - H(X,Y)` by the chain rule. `I(X;Y) = 0` exactly when `X` and `Y` are independent, since then knowing `Y` reveals nothing about `X`. This is the formal version of an intuition engineers reach for informally all the time — a good hash function should have near-zero mutual information between an input's structure and its output bucket, and feature-selection heuristics in ML pipelines often rank candidate features by mutual information with the label for exactly this reason.
@@ -801,6 +878,14 @@ Erasure coding splits data into `k` fragments and encodes them into `n > k` tota
 **Q: What does the Burrows-Wheeler Transform actually do, and why pair it with Move-To-Front instead of feeding it straight to an entropy coder?**
 **Short:** BWT permutes data so bytes preceding similar contexts cluster together, and MTF turns those clusters into small numbers that run-length and entropy coding compress well.
 BWT does not itself compress anything — it is a reversible permutation that reorders a block's bytes so that bytes which tend to precede the same following context end up adjacent, without removing any information (the transform is invertible given one extra index). That reordering does nothing useful to a plain entropy coder by itself, because it changes *arrangement*, not *frequency skew*. Move-To-Front is what exploits the new arrangement: it recodes each byte as its current position in a recency-ordered list and moves it to the front, so a run of the same byte (which BWT's clustering produces in bulk) turns into a run of `0`s — and *that* is what a downstream run-length and entropy coder compresses well. This is why bzip2's pipeline is BWT, then MTF, then RLE, then Huffman, rather than any single stage alone: each stage turns one kind of structure into the kind of structure the next stage is good at removing, the same composition principle behind every real compression pipeline in §5's diagram.
+
+**Q: How does RFC 9842 shared-dictionary compression make a new JS bundle download tiny, and what breaks if the server forgets `Vary`?**
+**Short:** The client advertises a SHA-256 of a cached earlier version, the server sends a dcb/dcz delta against it, and without Vary a shared cache serves that delta to clients lacking the dictionary.
+A response marked `Use-As-Dictionary: match="/js/app.*.js"` is kept by the browser as a dictionary. A later request for a URL matching that pattern carries `Available-Dictionary` (the SHA-256 of the cached body) and advertises `dcb` (Brotli) or `dcz` (Zstandard) in `Accept-Encoding`. The server compresses the new version with the old one as the dictionary, so unchanged code becomes back-references; the compressed body starts with the dictionary hash, letting the client detect a mismatch. In §6.11 a 12.6 KB bundle drops from 4,129 B compressed alone to 125 B. Because the response now depends on a request header, the server must send `Vary: accept-encoding, available-dictionary`; without it a CDN can hand the delta to a client that never cached v1, which cannot decode it. RFC 9842 also requires HTTPS and same-origin or CORS-readable resources, so the dictionary cannot be used to probe a secret cross-origin response by size.
+
+**Q: What is format-aware compression (Meta's OpenZL), and how can one decoder handle files compressed with different transform plans?**
+**Short:** OpenZL applies data-specific reversible transforms (column splits, deltas, tokenizing) before entropy coding, and writes the transform graph into each frame so one universal decoder replays it.
+A generic LZ compressor must discover structure from bytes. OpenZL takes the structure as input: a preset or an SDDL description says which bytes are which fields, an offline trainer searches for a plan of transforms that expose redundancy for that format, and at encode time the plan resolves into a concrete graph of transforms. The graph is serialized into the frame, so the single decoder binary needs no out-of-band configuration, and a new plan for a new format never requires a decoder rollout. On structured data the gain is large (Meta reports 2.06x versus `zstd -3`'s 1.31x on Silesia's `sao` file, at higher speed); on unstructured text it falls back to zstd. It is the columnar-format principle, transform to expose structure before entropy coding, generalized into a configurable compressor.
 
 ---
 

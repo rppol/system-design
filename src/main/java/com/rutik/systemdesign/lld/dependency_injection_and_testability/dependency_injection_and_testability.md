@@ -345,6 +345,63 @@ public class CheckoutPresenter {
 
 A constructor with two or three parameters is normal. A constructor with eight is not a DI problem — it is [Single Responsibility](../solid_principles/solid_principles.md) telling you the class has eight reasons to change. DI does not cause this smell; it makes it *visible*, because every hidden dependency a Service Locator or a static call would have swallowed now has to appear in the signature. Treating the long constructor as the problem and reaching for a Service Locator to shorten it hides the smell instead of fixing it — see §10 for the pitfall version of this same mistake.
 
+### 6.6 Functional core, imperative shell
+
+DI makes I/O replaceable. **Functional core, imperative shell** (Gary Bernhardt, "Boundaries" talk and Destroy All Software screencast, 2012) removes I/O from the logic instead, so most tests need no double at all. The shell reads everything the decision needs, calls a pure function, then performs the effects that function returned. The core takes values and returns values: no clock, no repository, no gateway, no mutable shared state. Mark Seemann calls the same shape the "impureim sandwich": impure read, pure decision, impure write.
+
+```mermaid
+flowchart LR
+    classDef io fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef core fill:#98c379,stroke:#27ae60,color:#1a1a1a,font-weight:bold
+    classDef data fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R(["Shell: read<br/>repo, clock, gateway"]) --> V(["Values<br/>Order, Instant, Balance"])
+    V --> C(["Core: decide()<br/>pure function"])
+    C --> D(["Decision<br/>Charge / Reject / Retry"])
+    D --> W(["Shell: act<br/>charge, save, publish"])
+
+    class R,W io
+    class C core
+    class V,D data
+```
+
+*Only the two blue boxes touch I/O; the green core is tested with plain values in, plain values out.*
+
+```java
+// Core: no interfaces, no doubles needed to test it
+public sealed interface CheckoutDecision {
+    record Charge(long amountCents) implements CheckoutDecision {}
+    record Reject(String reason) implements CheckoutDecision {}
+}
+
+public final class CheckoutRules {
+    public static CheckoutDecision decide(Order order, long balanceCents, Instant now) {
+        if (order.expiresAt().isBefore(now)) return new CheckoutDecision.Reject("expired");
+        if (order.totalCents() > balanceCents) return new CheckoutDecision.Reject("insufficient funds");
+        return new CheckoutDecision.Charge(order.totalCents());
+    }
+}
+
+// Shell: thin, all I/O, covered by a few integration tests
+public final class CheckoutHandler {
+    private final OrderRepository orders; private final PaymentGateway gateway; private final Clock clock;
+    // constructor omitted
+
+    public void handle(String orderId) {
+        Order order = orders.find(orderId);
+        long balance = gateway.balance(order.customerId());
+        switch (CheckoutRules.decide(order, balance, clock.instant())) {
+            case CheckoutDecision.Charge c -> gateway.charge(orderId, c.amountCents());
+            case CheckoutDecision.Reject r -> orders.markRejected(orderId, r.reason());
+        }
+    }
+}
+```
+
+The test count shifts, not the coverage. `CheckoutRules` gets the many edge-case tests (expiry boundary, exact balance, zero total) as one-line value assertions that run in microseconds and survive any refactor of the shell. `CheckoutHandler` gets two or three integration tests against an in-memory fake or a Testcontainers database, because it has no branches beyond the `switch` the compiler already checks for exhaustiveness. Compare §12's question on mock-heavy suites: a test that asserts `verify(gateway).charge(...)` breaks when the call order changes; a test that asserts `decide(...)` returns `Charge(4200)` does not.
+
+The limit: the shell must know up front what data the core needs. When the decision itself determines what to read next (read A, and only if A says so read B), the pattern either reads B eagerly, splits the core into two steps with the shell in between, or falls back to injecting a port. Humble Object (§6.4) and this pattern share the goal of a logic-free boundary; Humble Object stops at "logic out of the framework class", while functional core also takes the I/O out of the logic.
+
 ---
 
 ## 7. Real-World Examples
@@ -369,7 +426,7 @@ None of these tools change what makes a class testable — that decision was alr
 |---|---|---|
 | Mandatory dependency | ✓ enforced — cannot construct without it | ✗ object can exist half-configured |
 | Immutability (`final` fields) | ✓ | ✗ |
-| Circular dependency support | ✗ cannot express (see §12 Q18) | ✓ can break the cycle |
+| Circular dependency support | ✗ cannot express (see §12 Q20) | ✓ can break the cycle |
 | Readable "what does this need" | ✓ one signature | ✗ scattered across setter calls |
 
 **Container vs. manual wiring**
@@ -381,6 +438,15 @@ None of these tools change what makes a class testable — that decision was alr
 | Learning curve / magic | Higher — annotations, scopes, proxying | Lower — it is just constructors calling constructors |
 | Startup cost | Reflection-based scanning has real cost at scale | None — no scanning |
 | Good default for a small service or a library | Often unnecessary | ✓ |
+
+**Inject a port vs. functional core, imperative shell**
+
+| | Injected port + test double | Functional core, imperative shell |
+|---|---|---|
+| Test style | Interaction or state checks through a double | Values in, values out, no double |
+| Refactor survival | `verify()` checks break when call order changes | Core tests survive any shell change |
+| Fits | Logic that interleaves reads and decisions | Read all inputs, decide once, then act |
+| Cost | One interface per collaborator, double setup per test | A decision type (sealed interface or record) to carry effects out of the core |
 
 **Interface-for-everything vs. interface-where-variation-is-real** — the tradeoff candidates get wrong most often. An interface exists to let something vary — a different implementation in production vs. test, or multiple production implementations. A class with exactly one implementation that will only ever have one implementation (a `Money` value object, a pure calculation with no I/O) does not need an interface just because "DI wants interfaces" — that is speculative abstraction, not testability. The correct rule is narrower than "interface everything": interface the collaborators that cross an I/O boundary or that a test needs to replace (gateways, repositories, clocks, external services); leave plain classes plain where nothing ever varies. See §9.
 
@@ -398,6 +464,7 @@ The give-away that a candidate has memorized "always program to an interface" ra
 
 **Skip it for:**
 - **Value objects** (`Money`, `Email`, `OrderId`) — pure data with no behavior worth substituting; wrapping one in an interface and injecting it is pure ceremony
+- **Business rules that can take their inputs as values**: pass the `Instant`, the balance and the order into a pure function (§6.6) instead of injecting a `Clock`, a gateway and a repository into the class that decides
 - **Pure functions / stateless calculations** with no I/O and no nondeterminism — a tax calculator that only does arithmetic needs no seam, because there is nothing to replace; test it by calling it directly
 - **Framework-mandated final classes** the container cannot subclass anyway (rare, but worth checking before adding an interface purely for a mocking library that cannot mock a `final` class without the inline mock maker — see §12 Q8)
 - **A class with a single, permanent, non-I/O collaborator** where the "interface" would have exactly one implementation forever — YAGNI applies to seams the same way it applies to any other abstraction
@@ -453,7 +520,7 @@ controller.submit("order-1");
 - **Google Guice** — standalone reflection-based injector; binding DSL via `Module`/`AbstractModule`.
 - **Dagger** — compile-time annotation-processed injector; dominant on Android.
 - **Mockito** — the default JVM mocking library; its inline mock maker (default mock maker since Mockito 5) mocks final classes, final methods, static methods, and constructors without a separate opt-in. API depth: [`java/testing_junit_mockito/testing_junit_mockito.md`](../../java/testing_junit_mockito/testing_junit_mockito.md).
-- **JUnit 5** — test runner; supports constructor/parameter injection of its own extensions, a mechanism distinct from but often confused with application DI.
+- **JUnit 6** — test runner; supports constructor/parameter injection of its own extensions, a mechanism distinct from but often confused with application DI.
 - **`java.util.ServiceLoader`** — JDK-native provider lookup; see §7.
 - **ArchUnit** — can assert architectural rules at build time, e.g. "no class outside the composition root package calls `new` on a class in package `gateways.impl`," turning the composition-root discipline from a convention into an enforced rule.
 
@@ -517,6 +584,14 @@ Michael Feathers defines a seam as any point where you can change what runs with
 **Short:** Shrink an untestable framework boundary to one line and move all logic beside it.
 Some code — an Android `Activity`, a servlet's lifecycle callback — is dictated by a platform that instantiates it directly, leaving no composition root to inject through. The Humble Object pattern keeps that boundary deliberately trivial (a one-line delegate call with no logic worth testing) and moves every actual decision into a plain, constructor-injected class next to it that the framework boundary merely calls into — so 95% of the logic gets ordinary unit tests and only a thin, self-evidently-correct sliver is left untested.
 
+**Q: What is "functional core, imperative shell", and how does it reduce the number of mocks a test suite needs?**
+**Short:** The shell does all I/O and passes plain values to a pure core that returns a decision, so the core's many tests need no test doubles at all.
+Gary Bernhardt named it in 2012: business decisions live in pure functions that take values (the order, the balance, the current `Instant`) and return a value describing what to do, such as a sealed `Charge` or `Reject`. A thin shell reads the inputs from repositories and clocks, calls the core, and executes the returned decision. Edge-case tests target the core with plain assertions, run in microseconds and never break when the I/O code is reorganized; the shell has almost no branches, so two or three integration tests against a fake or a real database cover it. Use it where the logic can read everything first and decide once; when each decision determines the next read, keep an injected port for that step.
+
+**Q: Functional core, imperative shell versus Humble Object: which problem does each one solve?**
+**Short:** Humble Object moves logic out of a framework class you cannot construct; functional core moves I/O out of the logic itself so it needs no collaborators.
+Humble Object answers "the platform instantiates this class, so I cannot inject into it": keep the platform class to one-line delegations and put decisions in a constructor-injected presenter, which is still tested with doubles for its collaborators. Functional core answers "this logic is hard to test because it calls I/O": make the decision a pure function of values, so it has no collaborators to inject. They combine cleanly: the Humble Object delegates to a shell, the shell calls the core. Reach for Humble Object at framework boundaries and for a functional core wherever a test currently stubs a clock, a repository and a gateway only to check one `if`.
+
 **Q: When would you actually choose setter injection over constructor injection?**
 **Short:** Only for a genuinely optional collaborator that has a safe default without it.
 If a class is fully usable without the dependency — a `MetricsSink` that defaults to a no-op implementation, logging that can be silently skipped — a setter communicates "this is optional" honestly, whereas cramming it into the constructor implies it is required. If the object is *not* usable without the dependency, setter injection is the wrong tool regardless of convenience, because it permits constructing an object in a broken, half-configured state that a constructor parameter would have made impossible.
@@ -540,6 +615,7 @@ Constructor injection cannot express a cycle — to build `A` you need a finishe
 - **Default to constructor injection.** Reach for setter injection only for provably optional collaborators with a safe default, and method injection only when the value varies per call rather than per instance.
 - **Depend on interfaces at the seams that matter** — I/O boundaries, nondeterministic sources, anything a test needs to substitute — and leave plain value objects and pure functions un-interfaced. Interfacing everything is speculative abstraction, not testability.
 - **Confine construction to a composition root.** One layer knows concrete types; everything else only ever sees abstractions. Consider an architecture test (ArchUnit) to enforce this mechanically rather than by convention.
+- **Pull decisions into pure functions where the inputs can be read up front.** A rule that takes values and returns a decision needs no test double; keep injected ports for the I/O shell around it.
 - **Prefer the cheapest test double that proves the point.** Stub or fake for state-based assertions; reserve mocks and `verify()` for cases where the interaction genuinely is the requirement.
 - **Mock types you own, not vendor types.** Wrap third-party SDKs in a role interface shaped around what your code needs, and mock that.
 - **Treat a bloated constructor as an SRP signal, not a DI inconvenience.** Split the class; do not hide the dependency count behind a Service Locator.

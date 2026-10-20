@@ -142,10 +142,14 @@ host    all      all        0.0.0.0/0     reject
 
 # Authentication methods (in order of security):
 #   trust       — No password (NEVER use in production)
-#   md5         — MD5 hash (weak, susceptible to rainbow tables; avoid)
+#   md5         - MD5 hash (weak, susceptible to rainbow tables; avoid). MD5 password
+#                 hashes are deprecated since PostgreSQL 18; 19 logs a warning on every
+#                 successful MD5 login (md5_password_warnings) [19]
 #   scram-sha-256 — Strong, salted challenge-response; the default password method
 #   cert        — Client certificate authentication (strongest)
+#   oauth       - Bearer token from an OIDC identity provider, checked by a validator module [18]
 #   ident/peer  — OS user mapping (local connections only)
+#   radius      - removed in PostgreSQL 19 (UDP-only, cannot be secured) [19]
 ```
 
 ```sql
@@ -166,6 +170,31 @@ GRANT SELECT ON products TO app_user;
 -- NOT: GRANT ALL, CREATE, DROP, TRUNCATE
 -- NOT: GRANT ON pg_catalog, information_schema tables
 ```
+
+### OAuth / OIDC Authentication (PostgreSQL 18)
+
+PostgreSQL 18 adds an `oauth` method to `pg_hba.conf`. The client presents a bearer token from an identity provider (Okta, Entra ID, Keycloak); the server never sees a password, so database access follows SSO, MFA and offboarding in the IdP instead of a separate password list.
+
+```
+# pg_hba.conf
+hostssl all all 10.0.0.0/8 oauth issuer="https://login.example.com" scope="openid postgres" map=okta
+
+# postgresql.conf: the validator module that checks tokens (none ships with PostgreSQL)
+oauth_validator_libraries = 'idp_validator'
+
+# pg_ident.conf: token identity -> database role
+okta   /^(.*)@example\.com$   \1
+```
+
+| Piece | Role |
+|-------|------|
+| `issuer` (required) | The IdP's issuer URL; the server hands it to the client, which fetches `/.well-known/openid-configuration` |
+| `scope` (required) | Scopes the token must carry |
+| `oauth_validator_libraries` + `validator` | A loadable C module that verifies the token (signature, audience, expiry, or an introspection call) and returns the authenticated identity. PostgreSQL ships no production validator, so you install one from your IdP vendor or write it |
+| `map` or `delegate_ident_mapping=1` | Map the token identity to a role through `pg_ident.conf`, or let the validator decide which roles the user may assume |
+| libpq `oauth_issuer`, `oauth_client_id` | Client side. With libpq built `--with-libcurl`, `psql` runs the OAuth device authorization flow (open a URL, enter a code); applications can supply a token they already hold |
+
+Use it for human access (DBAs, analysts) where per-person identity and instant revocation matter. Services keep `scram-sha-256` with Vault-issued credentials or `cert`, because a token has to be refreshed and every pooler between client and server must pass OAuth through. Always pair it with `hostssl`: a bearer token sent over plaintext is a reusable credential.
 
 ### Row-Level Security (RLS)
 
@@ -242,6 +271,15 @@ aws rds create-db-instance \
 # MySQL Enterprise Transparent Data Encryption (TDE):
 # Encrypts tablespace files on disk; keys managed via keyring plugin
 ```
+
+**PCI DSS v4.0.1 Requirement 3.5.1.2.** Volume encryption (LUKS, EBS, a cloud provider's default storage encryption) is disk-level or partition-level encryption. Since 31 March 2025, when the requirement stopped being a best practice and became mandatory, PCI DSS allows disk-level or partition-level encryption to be the control that renders PAN unreadable only on removable media. On non-removable media, which every database server disk is, PAN must also be made unreadable by another Requirement 3.5.1 method: a keyed cryptographic hash of the whole PAN, truncation, index tokens, or strong cryptography at the file, column or field level. The reason is that volume encryption decrypts transparently for anyone logged in to the running system, so it stops a stolen disk and nothing else.
+
+| Control | Protects against | Counts for PAN under 3.5.1.2 on a server disk |
+|---------|------------------|-----------------------------------------------|
+| EBS / LUKS volume encryption | Stolen or discarded disk | No, not on its own |
+| TDE (tablespace or file level) | Stolen disk, copied data files, backups | QSA's call; many accept it as file-level, but it decrypts for any session with `SELECT` |
+| Column or field encryption (`pgcrypto`, application-side, MongoDB Queryable Encryption) | Disk theft, file copies, DBA and SQL-injection reads without the key | Yes |
+| Tokenization (PAN in a vault, token in the app database) | Takes the app database out of PAN scope | Yes, and it shrinks the scope |
 
 ### SQL Injection Prevention
 
@@ -566,9 +604,9 @@ A parameterized query sends the SQL template and the parameter values as separat
 Options in increasing security: (1) Kubernetes Secrets (base64-encoded, not encrypted by default) + RBAC to restrict access — minimum viable approach. (2) Kubernetes Secrets with etcd encryption at rest + RBAC — moderate improvement. (3) External Secrets Operator + AWS Secrets Manager or Vault: Secrets Manager stores credentials, Operator syncs to Kubernetes Secrets, credentials rotated automatically without redeployment. (4) HashiCorp Vault Agent Injector: injects credentials directly into the pod as files via init container; credentials have short TTL (1 hour); no Kubernetes Secret object created. (5) AWS RDS IAM authentication: no password at all — application exchanges its IAM role identity for a temporary DB token. Each approach has a different tradeoff between complexity and security.
 
 **Q: What is TDE (Transparent Data Encryption) and how does it compare to volume encryption?**
-**Short:** TDE encrypts data files at the database engine level for fine-grained control, while volume encryption protects the entire disk more simply.
+**Short:** TDE encrypts data files inside the database engine, so copied files and backups stay encrypted; volume encryption encrypts the whole disk at block level and only protects against a stolen or discarded disk.
 
-TDE encrypts database data files at the database engine level, before they are written to disk. The database manages encryption keys internally (often via a keyring plugin). Data is decrypted in memory when read by the database. Provides fine-grained control (can encrypt specific tablespaces or columns). Volume encryption (LUKS, AWS EBS encryption) encrypts the entire storage volume at the block level. The operating system and database see unencrypted data in memory; disk writes are encrypted transparently. Volume encryption is simpler to configure and covers all files (including WAL, temp files, log files). Both protect against physical media theft. Volume encryption is sufficient for most use cases; TDE provides additional protection if OS-level access is a concern.
+TDE encrypts database data files at the database engine level, before they are written to disk. The database manages encryption keys internally (often via a keyring plugin). Data is decrypted in memory when read by the database. Provides fine-grained control (can encrypt specific tablespaces). Volume encryption (LUKS, AWS EBS encryption) encrypts the entire storage volume at the block level. The operating system and database see unencrypted data in memory; disk writes are encrypted transparently. Volume encryption is simpler to configure and covers all files (including WAL, temp files, log files). Both protect against physical media theft, and TDE also protects data files copied off a running host and the backups made from them. Neither protects against a user who can run `SELECT`, because both decrypt transparently for any authenticated session. Volume encryption is enough as a baseline, but under PCI DSS v4.0.1 Requirement 3.5.1.2 it cannot be the only control for card numbers on a server disk; that needs column or field encryption, tokenization, or a keyed hash on top.
 
 **Q: How does pgAudit differ from PostgreSQL standard logging?**
 **Short:** pgAudit parses every statement into a structured, SIEM-friendly audit record, unlike standard logging's raw query text.
@@ -581,9 +619,14 @@ Standard PostgreSQL logging (`log_statement = 'all'`) logs queries as submitted 
 Detection: (1) WAF (Web Application Firewall) with SQL injection rules — blocks known patterns at the HTTP layer. (2) Database audit logs — unusual queries with SQL metacharacters (`'`, `--`, `UNION`, `OR 1=1`) in parameter positions. (3) Anomaly detection — queries from application service accounts that include DDL commands are suspicious (application role should not have DDL privileges). (4) Error monitoring — a sudden spike in `pg_stat_activity.query` containing error patterns. Response: (1) Block the source IP at the WAF or application layer immediately. (2) Audit logs to determine what data was accessed or modified. (3) If data was exfiltrated, initiate breach notification procedures per GDPR/CCPA. (4) Apply parameterized query fixes before re-enabling access.
 
 **Q: What are the compliance database requirements for PCI DSS?**
-**Short:** PCI DSS requires encrypting cardholder data, least-privilege access, 12-month audit logs, network segmentation, and tokenizing card numbers.
+**Short:** PCI DSS v4.0.1 requires PAN unreadable by column-level encryption, tokenization or keyed hashing (volume encryption alone no longer counts on server disks), least privilege, 12 months of audit logs, and segmentation.
 
-PCI DSS (Payment Card Industry Data Security Standard) for databases: (1) Encryption: cardholder data must be encrypted at rest (AES-256) and in transit (TLS 1.2+). (2) Access control: least privilege; no generic shared accounts; individual user accounts with audit trails. (3) Audit logging: log all access to cardholder data, failed authentication, privilege escalation, DDL operations. Logs retained for 12 months. (4) Network segmentation: PCI-scoped databases isolated in separate VPC/subnet, accessible only from in-scope application servers. (5) Vulnerability management: database software patched within 30 days for critical CVEs. (6) Key management: encryption keys stored separately from encrypted data, with key rotation annually. (7) No direct access to cardholder data fields by application code — use tokenization (replace card number with opaque token).
+PCI DSS (Payment Card Industry Data Security Standard) v4.0.1 for databases: (1) Rendering PAN unreadable (Requirement 3.5.1): keyed cryptographic hash, truncation, index tokens, or strong cryptography. Since 31 March 2025, Requirement 3.5.1.2 allows disk-level or partition-level encryption (EBS, LUKS) as that control only on removable media; on a server disk the PAN must also be protected by file-, column- or field-level encryption, tokenization or a keyed hash, because volume encryption decrypts for anyone on the running system. Data in transit uses TLS 1.2+. (2) Access control: least privilege; no generic shared accounts; individual user accounts with audit trails. (3) Audit logging: log all access to cardholder data, failed authentication, privilege escalation, DDL operations. Logs retained for 12 months, with the last 3 months immediately available. (4) Network segmentation: PCI-scoped databases isolated in separate VPC/subnet, accessible only from in-scope application servers. (5) Vulnerability management: critical database patches applied within one month of release. (6) Key management: encryption keys stored separately from encrypted data, with documented rotation. (7) Prefer tokenization: replace the card number with an opaque token so the application database leaves PAN scope entirely.
+
+**Q: How does PostgreSQL 18's `oauth` authentication method work, and what must you supply yourself?**
+**Short:** The client presents an OIDC bearer token from your identity provider and a validator module named in oauth_validator_libraries verifies it; PostgreSQL ships no production validator, so you install or write one.
+
+A `pg_hba.conf` line such as `hostssl all all 10.0.0.0/8 oauth issuer="https://login.example.com" scope="openid postgres" map=okta` tells the server to accept a bearer token instead of a password. The server sends the client the issuer and scopes; libpq (built `--with-libcurl`) can run the device authorization flow for `psql`, or an application passes a token it already holds via `oauth_issuer` and `oauth_client_id`. The server then calls the validator module loaded through `oauth_validator_libraries`, which checks signature, audience and expiry (or calls the IdP's introspection endpoint) and returns the identity, which `pg_ident.conf` maps to a role, or the validator authorizes roles itself with `delegate_ident_mapping=1`. You supply the validator, `hostssl` so the token is never sent in clear, and poolers that pass OAuth through. Use it for human access so database logins follow SSO, MFA and offboarding; keep `scram-sha-256` or `cert` for services.
 
 **Q: How do you implement column-level permissions for sensitive data?**
 **Short:** Column-level GRANT restricts a role to specific columns directly in PostgreSQL, though views or masking are often preferred at scale.
@@ -626,6 +669,7 @@ A DSAR requires an organization to provide a data subject with a copy of all per
 
 - **Enable TLS with `sslmode=verify-full`** — accept no connections without certificate validation.
 - **Use scram-sha-256** — never md5, whose unsalted-by-username hash falls to offline cracking, and never trust (except for local Unix socket admin).
+- **Move MD5 password hashes to SCRAM before PostgreSQL 19.** Set `password_encryption = 'scram-sha-256'`, list the remaining roles with `SELECT rolname FROM pg_authid WHERE rolpassword LIKE 'md5%'`, and reset each password. 19 warns on every MD5 login, and pg_hba.conf lines using `radius` stop the server from loading the file.
 - **Create a dedicated migration role** with DDL privileges for schema changes; the application role has only DML.
 - **Enable RLS for all multi-tenant tables** — database-enforced isolation is defense against application bugs.
 - **Store credentials in Vault or Secrets Manager** — rotate automatically; never in environment variables committed to repos.

@@ -116,10 +116,10 @@ sequenceDiagram
     Note over B: sees its own IP matches
     B-->>A: ARP Reply (unicast)<br/>10.0.0.2 is at AA:BB:CC:DD:EE:FF
     Note over A: caches the MAC,<br/>sends IP packet using B's MAC
-    Note over A,B: ARP cache entry: 10.0.0.2 to AA:BB:CC:DD:EE:FF<br/>TTL about 20 min by default
+    Note over A,B: ARP cache entry: 10.0.0.2 to AA:BB:CC:DD:EE:FF<br/>Linux: REACHABLE 15-45 s, then STALE (BSD/macOS: 20 min)
 ```
 
-Host A broadcasts the ARP request to the whole subnet, but only Host B — the owner of 10.0.0.2 — replies with a unicast ARP reply; Host A then caches the mapping for about 20 minutes before repeating the broadcast.
+Host A broadcasts the ARP request to the whole subnet, but only Host B, the owner of 10.0.0.2, replies with a unicast ARP reply. Host A then caches the mapping. On Linux the entry stays REACHABLE for a random 15-45 s around `base_reachable_time_ms=30000`, then goes STALE: the next packet to B triggers a unicast re-check instead of a new broadcast, and an unused STALE entry becomes eligible for garbage collection after `gc_stale_time=60` s. BSD and macOS keep an ARP entry for 20 minutes.
 
 ### NAT Traversal
 

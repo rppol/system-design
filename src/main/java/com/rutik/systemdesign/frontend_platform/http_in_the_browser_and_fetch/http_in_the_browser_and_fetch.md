@@ -239,6 +239,23 @@ flowchart LR
 `visibilitychange` to `hidden` is the only event guaranteed to run before a page is
 discarded.
 
+### Shared-dictionary compression across a deploy
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as Server
+    B->>S: GET /assets/app-v1.js
+    S-->>B: 154 KB br, Use-As-Dictionary match /assets/app-*.js
+    Note over B: stores v1 bytes as a dictionary, keyed by SHA-256
+    B->>S: GET /assets/app-v2.js, Available-Dictionary hash of v1, Accept-Encoding dcb
+    S-->>B: 565 B, Content-Encoding dcb, Vary accept-encoding, available-dictionary
+    Note over B: decodes v2 with v1 as the dictionary
+```
+
+The second response is a delta against bytes the browser already holds. The numbers are this
+repository's own 584 KB `game/app.js` across one commit, measured in §6.9.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -285,17 +302,15 @@ response, that is the wrong shape entirely:
 const res = await fetch("/api/chat", { method: "POST", body: prompt });
 if (!res.ok || !res.body) throw new Error(`stream failed: ${res.status}`);
 
-const reader = res.body
-  .pipeThrough(new TextDecoderStream())
-  .getReader();
-
 let buffer = "";
-for (;;) {
-  const { done, value } = await reader.read();   // value is a string, not bytes
-  if (done) break;
-  render((buffer += value));                     // paint each chunk as it lands
+for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+  render((buffer += chunk));                     // chunk is a string, not bytes
 }
 ```
+
+`ReadableStream` is async-iterable in Chromium, Firefox and Safari 27.0. A `break`, `return` or
+thrown error inside the loop cancels the stream, which closes the connection, so stopping early
+needs no separate `reader.cancel()`.
 
 `TextDecoderStream` matters more than it looks: a UTF-8 character can split across two
 network chunks, and decoding each `Uint8Array` independently produces a replacement
@@ -487,6 +502,68 @@ header, a method other than `POST`, or a response you want. It shares the same r
 rejects with a `TypeError`. Batch and trim before sending — a full store dump will not fit,
 and the failure is quiet enough that teams find it in a missing-data audit months later.
 
+### 6.9 Compression: gzip, Brotli, zstd and shared dictionaries
+
+Compression is negotiated, never chosen by page code. The browser sends `Accept-Encoding`
+(Chrome over HTTPS: `gzip, deflate, br, zstd`, plus `dcb, dcz` when it holds a matching
+dictionary), the server picks one and names it in `Content-Encoding`, and any cacheable
+response must carry `Vary: Accept-Encoding` so a shared cache never serves Brotli bytes to a
+client that did not ask for them. `Accept-Encoding` is a forbidden request header: setting it
+in `fetch` is silently ignored. Decoding is transparent, so `res.body` yields decoded bytes.
+
+Measured on this repository's `game/app.js` (584,202 bytes) with the gzip, brotli 1.2.0 and
+zstd 1.5.7 command-line tools on an Apple-silicon laptop:
+
+| Encoding | Level | Bytes on the wire | vs gzip -9 | Compress time |
+|----------|-------|-------------------|------------|---------------|
+| gzip | 9 | 187,773 | baseline | 26 ms |
+| Brotli | 5 | 174,003 | -7% | 18 ms |
+| Brotli | 11 | 153,572 | -18% | 590 ms |
+| zstd | 3 | 189,326 | +1% | 10 ms |
+| zstd | 19 | 159,991 | -15% | 78 ms |
+| Brotli, previous commit as dictionary | 11 | 565 | -99.7% | |
+| zstd, previous commit as dictionary | 19 | 606 | -99.7% | |
+
+Three rules fall out of that table. **Precompress static assets at Brotli 11** at build time,
+since the 590 ms is paid once per deploy and the 18% is paid back on every download. **For
+dynamic responses use zstd or Brotli 4-5**, because compressing per request at level 11 adds
+more latency than it saves. **Do not compress JPEG, AVIF, WebP or WOFF2 again**; they are
+already entropy-coded and gain nothing. Support: Brotli since Chrome 50, Firefox 44 and Safari
+11; zstd since Chrome 123, Firefox 126 and Safari 26.3. RFC 9659 caps the zstd content-coding
+window at 8 MB so a server cannot force a large decoder allocation on the client.
+
+**Compression Dictionary Transport** (RFC 9842, September 2025; Chrome 130) reuses bytes the
+browser already has. A response that sends `Use-As-Dictionary: match="/assets/app-*.js"` is
+stored as a dictionary. A later request whose URL matches that pattern carries
+`Available-Dictionary` with the dictionary's SHA-256, and the server may answer with
+`Content-Encoding: dcb` (Brotli) or `dcz` (zstd) holding only the difference, plus
+`Vary: accept-encoding, available-dictionary`. On the measurement above, a deploy that changed
+14 lines shipped 565 bytes instead of 153,572; against a build seven weeks older, with 48 changed
+lines, it was 1,748. The server has to keep the previous build's bytes to compute the delta,
+which is a CDN or build-pipeline feature rather than something page code configures. Firefox
+has it only in preview and Safari not at all, so every client still needs the plain `br` path.
+
+The client-side trap is size accounting. `Content-Length` counts encoded bytes and the stream
+yields decoded ones:
+
+```js
+// BROKEN: progress passes 100%, since total is the 154 KB compressed length
+const total = Number(res.headers.get("Content-Length"));
+let seen = 0;
+for await (const chunk of res.body) report((seen += chunk.byteLength) / total);
+
+// FIX: trust Content-Length only when no Content-Encoding was applied
+const encoded = res.headers.has("Content-Encoding");
+const totalBytes = encoded ? NaN : Number(res.headers.get("Content-Length"));
+```
+
+On a cross-origin response `Content-Length` is CORS-safelisted but `Content-Encoding` is not, so
+`has("Content-Encoding")` reads false and the overshoot returns unless the server lists it in
+`Access-Control-Expose-Headers`. An indeterminate progress bar is the safe default. For
+upload size, `CompressionStream("gzip")` compresses a request body in the browser; set
+`Content-Encoding: gzip` yourself and confirm the server decodes request bodies, which most do
+not by default.
+
 ---
 
 ## 7. Real-World Examples
@@ -518,6 +595,9 @@ sessions and reversed a roadmap conclusion.
 | `no-cache` | always correct, cheap when unchanged | one round trip per use | documents that must be current |
 | `max-age` plus `immutable` | zero network on repeat visits | wrong bytes forever if not hashed | content-hashed assets only |
 | `sendBeacon` | delivery survives unload | no headers, no response, about 64 KiB | analytics, session teardown |
+| Brotli 11, precompressed | 18% smaller than gzip -9 on JavaScript | about 0.6 s per 584 KB file at build time | hashed static assets |
+| zstd 3 or Brotli 5, on the fly | gzip-sized or 7% smaller output at 10-18 ms per response | 13-23% larger than Brotli 11 | dynamic HTML and API responses |
+| Shared dictionary (`dcb`, `dcz`) | a deploy ships a delta of hundreds of bytes | server keeps old builds; Chromium only | large bundles that change often |
 
 ---
 
@@ -614,8 +694,12 @@ requests it, because the two requests do not match in the cache. Always set `as`
 |------|---------------|-------------------|
 | Fetch API | The request client this module is about | `fetch(url, init)` |
 | AbortController | Cancellation and deadlines | `AbortSignal.timeout(ms)` |
-| Streams API | Incremental response reading | `res.body.getReader()` |
+| Streams API | Incremental response reading | `for await (const chunk of res.body)` |
 | sendBeacon | Delivery that survives unload | `navigator.sendBeacon(url, body)` |
+| Brotli | Static and dynamic response compression | `Content-Encoding: br`, `brotli -q 11` at build |
+| Zstandard | Fast dynamic response compression | `Content-Encoding: zstd` |
+| Compression Dictionary Transport | Delta delivery against a stored dictionary | `Use-As-Dictionary`, `dcb`, `dcz` |
+| CompressionStream | Compressing a body inside the browser | `body.pipeThrough(new CompressionStream("gzip"))` |
 
 Server-side protocol depth is
 [`../../backend/http_protocols/http_protocols.md`](../../backend/http_protocols/http_protocols.md);
@@ -669,6 +753,16 @@ off LCP at p75 for collapsing to a single origin.
 throws `TypeError: Failed to execute 'json' on 'Response': body stream already read`. The
 fix is `res.clone()` **before** the first read — cloning afterwards throws the same error.
 Cloning buffers until both branches drain, so avoid it on very large downloads.
+
+**Q: Why does a download progress bar built on `Content-Length` pass 100%?**
+**Short:** Content-Length counts the compressed bytes on the wire, while res.body yields decompressed bytes, so received divided by total overshoots on any gzip, Brotli or zstd response.
+
+A 584 KB bundle served as Brotli has a `Content-Length` near 154 KB, so the counter reaches
+380%. The browser decodes transparently and page code cannot see the encoded stream, so the
+denominator is wrong rather than the counter. Use `Content-Length` only when the response has no
+`Content-Encoding`. Cross-origin, `Content-Length` is safelisted but `Content-Encoding` is hidden
+unless listed in `Access-Control-Expose-Headers`, so the check passes wrongly; there, show an
+indeterminate bar.
 
 **Q: How do you put a timeout on a `fetch`?**
 **Short:** No timeout exists in the API, so you must pass an AbortSignal, and AbortSignal.timeout is the one-line form.
@@ -765,13 +859,32 @@ an abortable mutation still needs an idempotency key or a read-back before the U
 nothing occurred.
 
 **Q: How do you consume a streaming response, and why bother?**
-**Short:** Reading the body through a reader renders each chunk as it lands, turning a 3,000 ms wait into first content at around 250 ms.
+**Short:** Iterating the body with for await renders each chunk as it lands, turning a 3,000 ms wait into first content at around 250 ms.
 
-`res.body.pipeThrough(new TextDecoderStream()).getReader()` yields decoded string chunks in
-a loop until `done`. `TextDecoderStream` rather than a per-chunk `TextDecoder` is
-load-bearing: a UTF-8 character can straddle two network chunks, and decoding each chunk
-alone leaves a replacement character at the seam. For a 20 KB JSON response `res.json()` is
-simpler and as fast.
+`for await (const chunk of res.body.pipeThrough(new TextDecoderStream()))` yields decoded
+string chunks; a `break` or `return` cancels the stream. `TextDecoderStream` rather than a
+per-chunk `TextDecoder` is load-bearing: a UTF-8 character can straddle two network chunks, and
+decoding each chunk alone leaves a replacement character at the seam. For a 20 KB JSON response
+`res.json()` is simpler and as fast.
+
+**Q: Which content encoding should the server send the browser: gzip, Brotli or zstd?**
+**Short:** Brotli 11 precompressed for static assets, zstd or Brotli 4-5 for per-request responses, and gzip only as the fallback, chosen from Accept-Encoding with Vary: Accept-Encoding set.
+
+On a 584 KB JavaScript file Brotli 11 is 18% smaller than gzip -9 but takes about 590 ms to
+compress, so it belongs in the build, where the cost is paid once. zstd 19 is 15% smaller at
+78 ms and zstd 3 matches gzip at 10 ms, which suits responses compressed per request. The browser
+advertises `br` and `zstd` only over HTTPS, page code cannot set `Accept-Encoding`, and a missing
+`Vary` lets a CDN hand Brotli bytes to a client that cannot decode them.
+
+**Q: What does Compression Dictionary Transport save after a deploy?**
+**Short:** The browser offers the previous build as a dictionary, so the server sends only a delta: one 584 KB bundle fell from 153,572 bytes to 565 when a deploy changed 14 lines.
+
+The old response declares `Use-As-Dictionary` with a URL pattern; the next request for a matching
+URL sends `Available-Dictionary` with its SHA-256 and `dcb` or `dcz` in `Accept-Encoding`, and
+the server replies with a dictionary-compressed body and `Vary: accept-encoding,
+available-dictionary`. It is RFC 9842 and ships in Chrome 130, with Firefox in preview and
+Safari absent, so the plain Brotli path stays. It removes most of the cost content hashing adds
+to repeat visits, but only if the server or CDN keeps the previous build to diff against.
 
 **Q: What did HTTP/3 change for the browser client?**
 **Short:** QUIC moves loss recovery per stream, so a dropped packet stalls only the stream it belonged to instead of every multiplexed response behind it.
@@ -783,6 +896,7 @@ merges the transport and TLS handshakes into one round trip, so the client sees 
 behaviour on lossy mobile networks and connection migration across a Wi-Fi to cellular
 switch. Details in [`../../backend/http_protocols/http_protocols.md`](../../backend/http_protocols/http_protocols.md).
 
+---
 
 ## 13. Best Practices
 
@@ -796,9 +910,11 @@ switch. Details in [`../../backend/http_protocols/http_protocols.md`](../../back
    the retry loop, never per attempt.
 5. **`immutable` for hashed assets, `no-cache` for documents, `no-store` only for secrets.**
 6. **Stream anything over about 1 MB**, decoding with `TextDecoderStream`.
-7. **One origin.** No sharding; `preconnect` to at most two or three third-party origins.
-8. **`fetchpriority="high"` on exactly one element** — the LCP image.
-9. **Analytics leave on `visibilitychange` via `sendBeacon`**, well under 64 KiB.
+7. **Precompress hashed assets at Brotli 11**, compress dynamic responses with zstd or
+   Brotli 4-5, and always send `Vary: Accept-Encoding`.
+8. **One origin.** No sharding; `preconnect` to at most two or three third-party origins.
+9. **`fetchpriority="high"` on exactly one element**: the LCP image.
+10. **Analytics leave on `visibilitychange` via `sendBeacon`**, well under 64 KiB.
 
 ---
 

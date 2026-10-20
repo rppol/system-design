@@ -71,6 +71,34 @@ Run `ANALYZE` on the table after any bulk load — the planner's statistics are 
 
 ---
 
+### 4.4 PostgreSQL 18 Changes That Move Plans and Measurements
+
+PostgreSQL 18 (released 2025-09-25) changes three things a query tuner relies on. The measurements in this module were taken on 16.9; the plan shapes still hold, but read these first when your server is 18 or later.
+
+| Change | Before 18 | From 18 | What to do differently |
+|---|---|---|---|
+| B-tree skip scan | A multicolumn index helps only when the query constrains the leading column | The scan can generate an internal equality for each distinct leading value and search the index once per value | Before adding `(b)` next to an existing `(a, b)`, check whether skip scan already serves `WHERE b = ?` |
+| `EXPLAIN ANALYZE` | Buffer counts only with `BUFFERS` | `BUFFERS` included by default; index nodes report `Index Searches: N` | Read `shared hit` / `read` on every plan; use `Index Searches` to see skip scan at work |
+| Asynchronous I/O | Synchronous reads, plus `posix_fadvise` hints | `io_method` = `worker` (default, 3 `io_workers`), `io_uring`, or `sync`; used by sequential scans, bitmap heap scans, and vacuum | Re-measure seq-scan cost before assuming an index plan wins on cold data |
+
+**Skip scan.** With an index on `(status, created_at)` and a query on `created_at` alone, 16.x can use the index only as a full scan of every leaf page. On 18, when `status` has few distinct values (say 5), the planner can run one index search per `status` value with `created_at` as the condition:
+
+```
+  index (status, created_at), status has 5 distinct values
+  query: WHERE created_at >= now() - interval '1 day'
+
+  16.x : Index Cond on created_at, but every leaf page is read, or Seq Scan
+  18   : search 1: status = 'cancelled' AND created_at >= ...
+         search 2: status = 'new'       AND created_at >= ...
+         ...                                  (one per value)
+         search 5: status = 'shipped'   AND created_at >= ...
+         EXPLAIN shows  Index Searches: 5
+```
+
+The PostgreSQL docs limit it: the planner chooses it only when the leading column has so few distinct values that most leaf pages can be skipped. With thousands of distinct leading values the scan approaches a full index read and a Seq Scan wins. So the rule is now "the leading column must be constrained, unless it has low cardinality", not "or the index is useless". Column-order design is in [Database Internals and Indexing](../database_internals_and_indexing/database_internals_and_indexing.md).
+
+**Asynchronous I/O.** A backend can now queue several reads and keep working, instead of waiting on each `read()`. `io_combine_limit` (128 kB by default) merges adjacent blocks into one request, and `effective_io_concurrency` and `maintenance_io_concurrency` now default to 16 (previously 1 and 10). The effect is largest on cold sequential scans and `VACUUM` on network storage such as EBS, where each synchronous read paid a full device round trip. `io_uring` needs a build with `--with-liburing`, and `io_method` takes effect only at server start. The view `pg_aios` lists in-flight asynchronous I/O. Writes and WAL are still synchronous in 18.
+
 ## 5. Architecture Diagrams
 
 ### EXPLAIN ANALYZE Output Anatomy
@@ -617,6 +645,8 @@ List<Order> orders = namedJdbcTemplate.query(
 
 **Sort without index causes sort spill to disk**: `ORDER BY last_name, first_name` on a 10M row table without an index on those columns does an in-memory sort (up to `work_mem` bytes). If the sort exceeds work_mem, PostgreSQL spills to disk — dramatically slower. EXPLAIN output shows "Sort Method: external merge Disk: 45678kB". Fix: add index on the sorted columns, or increase work_mem for specific queries (`SET LOCAL work_mem = '256MB'` inside a transaction).
 
+**Adding `(b)` next to `(a, b)` because "the query does not filter on the leading column"**: On PostgreSQL 18 a B-tree skip scan can serve `WHERE b = ?` from an `(a, b)` index when `a` has few distinct values, so a second index on `(b)` adds write and storage cost for no read gain. The reverse mistake is relying on skip scan when `a` has thousands of distinct values: the planner falls back to a Seq Scan and `(b)` really is needed. Check `EXPLAIN ANALYZE` for `Index Searches: N` before changing indexes.
+
 **Type mismatch on an indexed column — but know which engine does what**: The pitfall is real and the two major engines fail in opposite directions, so the generic advice "a quoted number breaks the index" is wrong for PostgreSQL. In **PostgreSQL** a bare literal is untyped at parse time, so `WHERE user_id = '123'` on a `bigint` column resolves the literal to `bigint` and uses the index normally (verified: `Index Cond: (user_id = '123'::bigint)`); if the value instead arrives with an explicit text type — a JDBC `setString` on an integer column, since pgJDBC's default `stringtype=varchar` — PostgreSQL does not silently cast per row, it raises `ERROR: operator does not exist: bigint = character varying`. What *does* silently cost you the index in PostgreSQL is a function or cast applied to the **column**: `WHERE created_at::date = DATE '2023-06-01'` gets a Parallel Seq Scan, while the sargable range form `created_at >= '2023-06-01' AND created_at < '2023-06-02'` uses the index. In **MySQL** the classic trap is the reverse: comparing an indexed *string* column to a *number* (`WHERE str_col = 1`) compares both as floats, and the manual states outright that "MySQL cannot use an index on the column to look up the value quickly". Always bind with the column's own type, and never wrap the indexed column in a function.
 
 ---
@@ -625,7 +655,8 @@ List<Order> orders = namedJdbcTemplate.query(
 
 | Tool | Purpose |
 |------|---------|
-| `EXPLAIN (ANALYZE, BUFFERS)` | Query plan with actual timing and buffer usage |
+| `EXPLAIN (ANALYZE, BUFFERS)` | Query plan with actual timing and buffer usage; from PostgreSQL 18 `BUFFERS` is on by default and index nodes report `Index Searches` |
+| `pg_aios` (PostgreSQL 18) | In-flight asynchronous I/O requests, for checking `io_method` behaviour |
 | `pg_stat_statements` | Top queries by total time and execution count |
 | `auto_explain` | Auto-log slow query plans to PostgreSQL logs |
 | `pgBadger` | Parse PostgreSQL logs, generate slow query reports |
@@ -644,6 +675,11 @@ List<Order> orders = namedJdbcTemplate.query(
 **Short:** Read EXPLAIN ANALYZE from the innermost node outward, comparing estimated versus actual rows to spot stale statistics.
 
 Each line is a plan node (operation). Read from the innermost (deepest indentation) outward — inner nodes execute first. Key fields: cost=X..Y (estimated startup..total cost), rows=N (estimated), actual time=A..B ms (measured startup..total), actual rows=M. Large gap between rows=N (estimated) and actual rows=M indicates outdated statistics. The widest actual time lines are bottlenecks — note that `actual time` is per loop, so multiply by `loops` before comparing nodes. Look for Sort or Aggregate nodes reporting Disk usage (they exceeded work_mem), Hash nodes with `Batches > 1`, and Seq Scans on large tables — but a Seq Scan is only a defect if an index plan would genuinely be cheaper, so confirm by creating the index and re-running EXPLAIN rather than assuming.
+
+**Q: On PostgreSQL 18, can an index on (status, created_at) serve a query that filters only on created_at?**
+**Short:** Yes when status has few distinct values: 18's B-tree skip scan searches the index once per status value, shown as Index Searches in EXPLAIN ANALYZE.
+
+Before 18, a condition on a non-leading column of a multicolumn B-tree was checked inside the index but did not narrow the scan, so `WHERE created_at >= ...` on `(status, created_at)` meant reading every leaf page or a Seq Scan. PostgreSQL 18 adds skip scan: the executor generates an equality for each distinct `status` value and runs one index search per value with the `created_at` condition applied, and `EXPLAIN ANALYZE` reports the count as `Index Searches: N`. The docs say the planner picks it only when the leading column has so few distinct values that most leaf pages can be skipped; with thousands of distinct `status` values a Seq Scan still wins. The rule becomes "constrain the leading column, unless it has low cardinality", so check `Index Searches` before adding a second index on `created_at` alone.
 
 **Q: What is the N+1 problem and how do you detect it in a Spring application?**
 **Short:** N+1 means one query for entities plus one query per related collection, detectable by counting SQL statements per request.
@@ -726,6 +762,11 @@ Changing to EAGER stops the exception but converts an occasional N+1 into a perm
 **Short:** An indexed column loses its index only when a function, cast, or mismatched bind type is applied to the column, not the literal.
 
 In PostgreSQL that exact query does not fail — the quoted literal is untyped at parse time and resolves to the column's type, so the index is used. Verified on PostgreSQL 16.9 against a `bigint` column with a b-tree index, the plan is a Bitmap Index Scan with `Index Cond: (user_id = '123'::bigint)`. The failure mode people are reaching for is a *bind parameter* whose type is already fixed to text before the planner sees it — a JDBC `setString` on an integer column, since pgJDBC sends `varchar` by default — but PostgreSQL does not silently cast per row in that case either; it refuses outright with `ERROR: operator does not exist: bigint = character varying`. So the honest answer has three parts. In PostgreSQL, what actually costs you the index is a function or cast applied to the **column** rather than the literal: `WHERE created_at::date = DATE '2023-06-01'` plans as a Parallel Seq Scan, while the sargable rewrite `created_at >= '2023-06-01' AND created_at < '2023-06-02'` uses the index. In MySQL, the trap runs the other way — an indexed *string* column compared to a *number* forces a float comparison and the manual states the index cannot be used. And in either engine the fix is the same: bind with the column's own type (`setLong`, not `setString`; JPA infers this from the entity field) and never wrap the indexed column in a function or a cast.
+
+**Q: What does PostgreSQL 18 asynchronous I/O change for query tuning?**
+**Short:** Sequential scans, bitmap heap scans, and vacuum queue reads ahead through io_method (worker by default), so cold seq scans get cheaper and old timings need re-measuring.
+
+PostgreSQL 18 adds an AIO subsystem: a backend queues several block reads and keeps working instead of blocking on each one. `io_method` selects `worker` (the default, with `io_workers = 3` background processes), `io_uring` (Linux, needs a `--with-liburing` build), or `sync`, and it is fixed at server start. `io_combine_limit` (128 kB) merges adjacent blocks, and `effective_io_concurrency` and `maintenance_io_concurrency` now default to 16. Gains are largest on cold sequential scans and `VACUUM` on high-latency network volumes, so a seq-scan-versus-index comparison measured on 16 can flip on 18. Writes and WAL stay synchronous. Inspect in-flight requests with `pg_aios`, and remember that `EXPLAIN ANALYZE` now includes `BUFFERS` by default, so `shared read` counts appear on every plan.
 
 ---
 

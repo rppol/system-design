@@ -258,10 +258,10 @@ CPython does not publish a single cumulative pyperformance-vs-3.10 geomean cover
 | 3.11 specializing adaptive interpreter | ~25% faster (range 10-60%; hot int loops 2-3x) | Python 3.10, official CPython pyperformance figure |
 | 3.14 tail-call interpreter (`--with-tail-call-interp`) | ~3-5% geomean faster | a Clang-19 build of 3.14 *without* the flag — not vs 3.10 |
 | 3.14 copy-and-patch JIT (PEP 744) | No official percentage published | often slower than the plain interpreter, depending on the build compiler |
-| 3.15 JIT (not yet final) | ~8-9% geomean faster | the standard 3.15 interpreter, x86-64 Linux |
-| 3.15 JIT (not yet final) | ~12-13% geomean faster | the 3.15 *tail-calling* interpreter, AArch64 macOS — not vs the standard interpreter |
+| 3.15 JIT | ~7-8% geomean faster | the standard 3.15 interpreter with all optimizations, x86-64 Linux |
+| 3.15 JIT | ~11-12% geomean faster | the 3.15 *tail-calling* interpreter with all optimizations, AArch64 macOS, not vs the standard interpreter |
 
-Individual 3.15 JIT benchmarks range from roughly 15% slower to over 100% faster depending on the workload; the 3.15 whatsnew document marks all of these JIT numbers as not yet final.
+Individual 3.15 JIT benchmarks range from roughly 15% slower to over 100% faster than a no-JIT build, depending on the workload (3.15 whatsnew, excluding the `unpack_sequence` microbenchmark).
 
 Hot numeric loops comparing ints can be 2-3x faster in 3.11 vs 3.10 because `BINARY_OP_ADD_INT` inlines the C-level integer addition and skips the generic `PyObject_Add` dispatch.
 
@@ -577,6 +577,86 @@ When profiling points at Python-level overhead that a pure-Python fix cannot clo
 - On a free-threaded build, an extension must opt in explicitly: declaring `Py_mod_gil = Py_MOD_GIL_NOT_USED` in the module definition tells the free-threaded interpreter the extension is safe without the GIL. An extension that does **not** declare this re-enables the GIL for the *entire process* the moment it is imported (with a `RuntimeWarning`) — one unaudited native dependency silently cancels the entire benefit of a free-threaded build (see `../the_gil_and_free_threading/the_gil_and_free_threading.md`).
 - **PEP 803** defines `abi3t`, a Stable ABI variant for free-threaded builds (`PyObject` becomes opaque under it), with the wheel tag convention `abi3.abi3t` for a single wheel that supports both the normal and free-threaded Stable ABI.
 
+### 6.11 Native profilers: `perf`, eBPF, and frame pointers `[3.15]`
+
+`py-spy` and Tachyon show Python frames. When the time is inside a C extension, a native library,
+or the interpreter itself, you need a system profiler (`perf` on Linux, `samply`, eBPF tools such
+as `bpftrace` or Parca) that unwinds the native stack. Those tools unwind fastest and most reliably
+by following frame pointers, and distro builds of CPython were usually compiled without them.
+
+PEP 831 makes CPython 3.15 build with `-fno-omit-frame-pointer` and `-mno-omit-leaf-frame-pointer`
+by default. The flags are exported through `sysconfig`, so extensions built by tools that read
+Python's build configuration inherit them. A native library built separately (a Rust crate, a
+vendored C++ library) must enable equivalent flags itself, because one component without frame
+pointers breaks the unwind chain for every stack that passes through it.
+
+Frame pointers give the native stack. To see Python function names in the same stack, turn on
+the perf trampoline (3.12+, Linux; `samply` on macOS from 3.15):
+
+```bash
+# 3.15 build: native frames unwind cleanly; -X perf adds Python function names
+perf record -F 999 -g -o perf.data python -X perf -m uvicorn app.main:app
+perf report -g -i perf.data
+
+# Same switch from the environment, for a process you launch through a supervisor
+PYTHONPERFSUPPORT=1 perf record -F 999 -g -o perf.data python worker.py
+```
+
+`python -m sysconfig | grep HAVE_PERF_TRAMPOLINE` shows whether the build supports `-X perf`.
+
+**How the trampoline works.** Without it, every Python function shows up in `perf` as the same
+C frame, `_PyEval_EvalFrameDefault`, because `perf` sees only machine code and every Python call
+runs through that one interpreter function. With `-X perf`, CPython compiles a small trampoline
+at a unique address for each code object before it runs, and the trampoline calls the evaluator.
+It appends one line per trampoline to `/tmp/perf-<PID>.map` (`address size py::func:/path/file.py`).
+`perf report` resolves an address it cannot find in any ELF file by looking it up in that map, so
+the native stack now carries one named frame per Python call.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Call(["Python call<br/>handle_request()"]) --> Tramp("trampoline<br/>unique address")
+    Tramp --> Eval("_PyEval_EvalFrameDefault<br/>runs the bytecode")
+    Tramp -.->|"one line per code object"| Map("/tmp/perf-PID.map<br/>addr size py::name")
+    Perf(["perf report"]) -->|"unknown address"| Map
+
+    class Call,Perf io
+    class Tramp mathOp
+    class Eval base
+    class Map req
+```
+
+The trampoline can also be switched on for one region of code from inside the process. The
+`sys` call takes precedence over `-X perf`, which takes precedence over `PYTHONPERFSUPPORT`:
+
+```python
+import sys
+
+sys.activate_stack_trampoline("perf")  # 3.12+, Linux
+try:
+    rebuild_index()
+finally:
+    sys.deactivate_stack_trampoline()
+```
+
+`-X perf` relies on frame pointers to walk from the trampoline back to its caller. On a build or
+extension without them, `-X perf_jit` or `PYTHON_PERF_JIT_SUPPORT=1` (both 3.13+) writes DWARF
+unwind data to `/tmp/perf-<PID>.dump` instead. That mode needs `perf` 6.8 or later (or 6.7.2),
+costs more at runtime because CPython emits unwind data for every function, and adds a merge step:
+
+```bash
+perf record -F 9999 -g -k 1 --call-graph dwarf -o perf.data python -X perf_jit worker.py
+perf inject -i perf.data --jit --output perf.jit.data
+perf report -g -i perf.jit.data
+```
+
+The default DWARF stack copy is 8192 bytes per sample; deep stacks come out truncated unless you
+raise it with `--call-graph dwarf,16384`, at the cost of fewer samples per second.
+
 **The honest senior point:** most "rewrite it in Rust/Cython" wins people report are mostly algorithmic — a linear scan replacing a quadratic one, or a single allocation replacing thousands, ported at the same time as the language change gets credited to the language change. Profile first, confirm the bottleneck really is per-object Python bytecode overhead rather than an avoidable algorithmic cost, and only then decide the native-extension boundary is worth its build-chain, packaging, and ABI complexity.
 
 ---
@@ -798,6 +878,7 @@ The lesson generalizes past this one flag: when a benchmark compares two builds 
 | `tracemalloc`     | Allocation site  | 2-3x       | Careful         | No           | Snapshot diff / top allocs|
 | `VizTracer`       | Function + args  | 1-2x       | No              | Yes (JSON)   | Chrome trace viewer       |
 | `scalene`         | Line (CPU/GPU/mem) | Low     | Careful         | Yes (HTML)   | CPU-vs-native time split + memory |
+| `perf` + `-X perf` | Native + Python stack | Low (sampling) | Yes, Linux | Via `perf script` | Mixed native/Python call graph; frame pointers on by default in 3.15 builds |
 
 **What it means.** "The Overhead column is a multiplier on wall-clock time, not a percentage added to
 it — `3x` means a request that took 100 ms now takes 300 ms while the profiler is attached." Read as
@@ -956,6 +1037,31 @@ CPython's JIT (PEP 744, experimental in 3.13, shipping binary releases in 3.14) 
 **Q19: What went wrong with the original 9-15% benchmark for CPython 3.14's tail-call interpreter, and what is the real number?**
 **Short:** The 9-15% figure mostly measured an unrelated LLVM 19 compiler regression instead of the tail-call interpreter itself; the real gain is 1-5%.
 The widely-quoted 9-15% figure compared a build with `--with-tail-call-interp` against a baseline build without it, but the baseline happened to trigger a code-generation regression in LLVM 19's tail-duplication limits that the tail-call build incidentally avoided — so most of the measured gap was the compiler regression, not the interpreter change under test. Nelson Elhage traced this down; against a baseline that controls for the regression, the real gain is 1-5%, which lines up with CPython's own published geomean of 3-5% versus a same-compiler baseline. The general lesson: a benchmark comparing two builds is only valid if the builds differ by exactly the one variable you intend to measure.
+
+**Q: How do you profile a service whose time goes into C extensions, not Python code?**
+**Short:** Use a native sampling profiler such as Linux perf with python -X perf, which on 3.15 builds unwinds cleanly because CPython ships with frame pointers enabled.
+
+Python-level profilers stop at the boundary: `cProfile` charges all the time to the extension call,
+and `py-spy` shows the Python frame that made it. To see inside, sample the native stack with
+`perf record -g` (or `samply`, or an eBPF profiler). Native unwinding needs frame pointers, and
+PEP 831 makes CPython 3.15 build with `-fno-omit-frame-pointer` and
+`-mno-omit-leaf-frame-pointer` by default, exported through `sysconfig` so extensions built
+against it inherit them. Add `-X perf` or `PYTHONPERFSUPPORT=1` (3.12+) so Python function names
+appear in the same stack instead of anonymous interpreter frames. Two gaps remain: a separately
+built native library without frame pointers breaks the chain at that library, and on such code
+`-X perf_jit` falls back to slower DWARF unwinding.
+
+**Q: A `perf` flame graph of a Python service shows one huge `_PyEval_EvalFrameDefault` tower and no function names. What is missing?**
+**Short:** The perf trampoline: run with -X perf or PYTHONPERFSUPPORT=1 (3.12+) so CPython writes /tmp/perf-PID.map entries that perf uses to name each Python frame.
+
+`perf` sees machine code only, and every Python function runs through the same C evaluator, so
+every Python frame symbolizes as `_PyEval_EvalFrameDefault`. With `-X perf`, CPython gives each
+code object its own small trampoline at a unique address and writes `address size py::name:file`
+for it into `/tmp/perf-<PID>.map`; `perf report` looks up addresses it cannot find in an ELF file
+in that map. Three checks when names still do not appear: `python -m sysconfig | grep
+HAVE_PERF_TRAMPOLINE` (the build must support it), frame pointers in the interpreter (otherwise
+use `-X perf_jit` plus `perf inject --jit`, which needs `perf` 6.8+), and that the map file is
+readable from where `perf report` runs, since it lives in the profiled process's `/tmp`.
 
 **Q20: When is dropping down to a native extension (Rust, Cython, a hand-written C extension) the wrong answer to a performance problem?**
 **Short:** It is wrong before profiling confirms the bottleneck is genuine per-object Python overhead rather than an algorithmic or I/O cost a native rewrite cannot fix.

@@ -8,7 +8,7 @@ Haystack is an open-source LLM framework from deepset (now Haystack.ai) built ar
 
 Haystack 2.0 (released early 2024) was a complete rewrite from Haystack 1.x, introducing: a cleaner component protocol, typed pipeline connections, native async support, and a more Pythonic API. Haystack 3.0 built on that foundation rather than rewriting it again: a leaner core (many optional-dependency components, including the Sentence Transformers embedders/rankers and Azure OCR, moved into separate `haystack-core-integrations` packages), an Agent that owns tool execution end-to-end (the standalone `ToolInvoker` was removed), and the retirement of the legacy text-completion Generators (`OpenAIGenerator`, `AzureOpenAIGenerator`) in favor of Chat Generators, which now also accept a plain string as input. It is the most production-grade pipeline framework for RAG, with strong support for document processing, hybrid retrieval, and custom component development.
 
-**Current version**: haystack-ai 3.1.1 (released 2026-09-03)
+**Current version**: haystack-ai 3.4.0 (released 2026-10-15)
 **Production adoption signal**: Used by Airbus, Accenture, BMW, Deutsche Telekom for production NLP and RAG systems. deepset's commercial product (deepset Cloud) is built on Haystack.
 
 ---
@@ -481,7 +481,7 @@ Default `top_k=1` or `top_k=3` in retrievers is insufficient for diverse corpora
 - Haystack 1.x: legacy, `Pipeline.add_node()`, `EmbeddingRetriever`, `Generator`
 - Haystack 2.0 (Jan 2024): complete rewrite, `@component` protocol, `Pipeline.add_component()`, typed connections
 - Haystack 3.0 (2026): leaner core — Sentence Transformers embedders/rankers and Azure OCR moved to separate `haystack-core-integrations` packages; legacy text-completion Generators removed in favor of Chat Generators (which now also accept a plain `str`); `ToolInvoker` folded into the Agent
-- `haystack-ai` package (current: 3.1.1, 2026-09-03; the name has covered every 2.x/3.x release since the 1.x-era `farm-haystack` package)
+- `haystack-ai` package (current: 3.4.0, 2026-10-15; the name has covered every 2.x/3.x release since the 1.x-era `farm-haystack` package)
 
 ---
 

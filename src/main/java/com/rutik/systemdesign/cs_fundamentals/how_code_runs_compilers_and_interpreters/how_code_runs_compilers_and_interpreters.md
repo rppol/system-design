@@ -1128,6 +1128,8 @@ Every row does the same ~50 ms of payments validation. Reading the raw latencies
 
 ## See Also
 
+- [WebAssembly and Portable Bytecode Targets](wasm_and_portable_bytecode.md) - deep dive: Wasm 3.0, WASI 0.2/0.3, the Component Model, and compiling to a portable bytecode target
+- [ABIs, Linking, and the Wasm Model](abis_linking_and_wasm.md) - deep dive: calling conventions, struct layout, static vs dynamic linking, PIC/GOT/PLT, symbol versioning, and the Wasm ABI with `wasm-ld` and the component model
 - [computer_architecture_and_memory_hierarchy](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — the CPU pipeline and cache hierarchy that a back end's generated machine code actually runs on
 - [processes_threads_and_context_switching](../processes_threads_and_context_switching/processes_threads_and_context_switching.md) — what the loader hands off to: process address space, fork/exec, ELF memory layout in full
 - [memory_management_and_virtual_memory](../memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) — paging and virtual memory that the loader's segment-mapping step relies on

@@ -68,6 +68,7 @@ This section covers:
 | 37 | [database_migrations](database_migrations/database_migrations.md) | 5 — Data & Transactions | Intermediate | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
 | 38 | [spring_websocket_stomp](spring_websocket_stomp/spring_websocket_stomp.md) | 7 — Cloud & Messaging | Advanced | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling |
 | 39 | [spring_http_clients](spring_http_clients/spring_http_clients.md) | 4 — Spring Web | Intermediate | RestClient vs WebClient vs @HttpExchange, `@ImportHttpServices` groups, connection pooling, timeouts, error handling, MockRestServiceServer |
+| 40 | [spring_boot_4_migration](spring_boot_4_migration/spring_boot_4_migration.md) | 8 — Testing & Production | Advanced | Boot 3.5 to 4.x: modular starters, package relocations to `org.springframework.boot.<technology>`, Jackson 3, JSpecify null-safety, `@MockitoBean`, OpenRewrite recipes, Spring Cloud compatibility |
 
 **Deep-dive sub-files — 4 total** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_aop/pointcut_designators.md](spring_aop/pointcut_designators.md) — every pointcut designator, `javap`-backed proxy analysis, benchmarked matching cost; [spring_cloud_patterns/gateway_server_webmvc.md](spring_cloud_patterns/gateway_server_webmvc.md) — the servlet Gateway flavour's route DSL, filter signature and threading model; [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
 
@@ -140,6 +141,7 @@ Phase 8: Testing & Production
 | spring_performance               |
 | observability_and_tracing        |
 | spring_native_graalvm            |
+| spring_boot_4_migration          |
 +----------------------------------+
 
 Phase 4 additions:
@@ -277,9 +279,9 @@ spring_boot_4_migration
 -->
 ## Learning Paths
 
-39 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+40 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **three ways through it**; the browser learning game's **Study** view surfaces them as a **Full / Senior / Principal** toggle (Full is the default).
 
-### Full Path (39 modules)
+### Full Path (40 modules)
 
 The complete curriculum in the order above — see [8-Phase Learning Path](#3-8-phase-learning-path). Use it for genuine breadth: Modulith, GraphQL, gRPC, HATEOAS, Batch, Integration (EIP), Spring AI, Session, Cloud Config, native/GraalVM, and the full observability stack. Nothing is dropped.
 

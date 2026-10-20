@@ -154,9 +154,9 @@ Task
  |       +── A.1 (score: 8) ── A.1.1 → ANSWER 1
  |       +── A.2 (score: 4) [PRUNED]
  |
- +── Thought B (score: 9) ★ best
+ +── Thought B (score: 9) [BEST]
  |       |
- |       +── B.1 (score: 9) ── B.1.1 → ANSWER 2 ★ selected
+ |       +── B.1 (score: 9) ── B.1.1 → ANSWER 2 [SELECTED]
  |       +── B.2 (score: 7)
  |
  +── Thought C (score: 3) [PRUNED]
@@ -434,7 +434,7 @@ Format:
 # For Anthropic's native thinking: turn on adaptive thinking and control how
 # much the model thinks with output_config.effort.
 response = client.messages.create(
-    model="claude-sonnet-5",
+    model="claude-sonnet-5-5",
     max_tokens=16000,
     thinking={"type": "adaptive"},
     output_config={"effort": "high"},   # "high" is the API default
@@ -453,7 +453,7 @@ back verbatim alongside the `tool_use` block when you return the `tool_result`:
 
 ```python
 response = client.messages.create(
-    model="claude-opus-5", max_tokens=16000,
+    model="claude-opus-5-5", max_tokens=16000,
     thinking={"type": "adaptive"}, tools=[weather_tool],
     messages=[{"role": "user", "content": "What's the weather in Paris?"}],
 )
@@ -653,7 +653,7 @@ A: Repetition in a ReAct loop occurs when the model's Thought field fails to upd
 
 **Q: How do you reduce ReAct latency for latency-sensitive applications?**
 **Short:** Cut ReAct latency by trimming Thought verbosity, using a cheaper model per step, and parallelizing independent calls.
-A: ReAct's latency is N_steps × LLM_call_latency, where each step adds 1-3 seconds for a frontier model. Reduction strategies: (1) Thought verbosity control — add to the system prompt "Keep your Thought concise — 1-2 sentences maximum. Do not explain your reasoning at length."; verbose Thoughts use more output tokens and slow generation by 30-50%; (2) Smaller model for executor — if the ReAct loop uses a frontier model for every step, switch to a smaller model (gpt-5.4-nano, Claude Haiku 4.5) for standard tool calls; reserve the frontier model only for the final synthesis step; (3) Parallel tool calls — emit multiple independent tool calls in one response to eliminate one full LLM round-trip per parallel call; (4) Early termination — after each step check if the accumulated information already suffices to answer; inject a "can you answer now without more tool calls?" gate to short-circuit loops. A well-optimized ReAct agent can achieve 40-60% latency reduction vs. naive implementation while maintaining most quality.
+A: ReAct's latency is N_steps × LLM_call_latency, where each step adds 1-3 seconds for a frontier model. Reduction strategies: (1) Thought verbosity control — add to the system prompt "Keep your Thought concise — 1-2 sentences maximum. Do not explain your reasoning at length."; verbose Thoughts use more output tokens and slow generation by 30-50%; (2) Smaller model for executor — if the ReAct loop uses a frontier model for every step, switch to a smaller model (gpt-5.4-nano, Claude Haiku 5.5) for standard tool calls; reserve the frontier model only for the final synthesis step; (3) Parallel tool calls — emit multiple independent tool calls in one response to eliminate one full LLM round-trip per parallel call; (4) Early termination — after each step check if the accumulated information already suffices to answer; inject a "can you answer now without more tool calls?" gate to short-circuit loops. A well-optimized ReAct agent can achieve 40-60% latency reduction vs. naive implementation while maintaining most quality.
 
 **Q: How do you use ReAct with structured tool outputs to improve observation parsing?**
 **Short:** Structured JSON observations let the model reference exact fields instead of parsing ambiguous prose.

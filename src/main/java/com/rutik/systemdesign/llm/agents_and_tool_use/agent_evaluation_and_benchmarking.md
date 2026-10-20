@@ -68,8 +68,9 @@ policy through a conversation, or refuse a harmful request.
 |--------|--------------------------|-------------|-----------|--------------------------|
 | Coding agents | SWE-bench (2023) — Full 2,294 / Verified 500 / Lite 300 / Multimodal 517 | Real Python repos; Multimodal is JavaScript | Repository test suite after applying a patch | Codebase comprehension, not code generation. Verified is now contaminated and retired by OpenAI |
 | Coding agents | SWE-bench Pro (2025) — 731 public / 276 private | Copyleft OSS plus private company repos; multi-file patches | Same test-suite gate, on hours-to-days tasks | Contamination resistance and long-horizon change scope |
-| Computer & OS use | Terminal-Bench 2.x (2025) — 89 tasks | Containerised terminal driven through a tmux session | A per-task verification script the agent must satisfy | Whether the agent can drive a real shell to a checkable end state |
-| Computer & OS use | OSWorld (2024) — 369 tasks; OSWorld 2.0 (2026) — 108 | Real Ubuntu / Windows / macOS VMs with GUI apps | Execution-based post-condition script over files and app state | GUI grounding; 2.0 adds hour-scale, hundreds-of-steps workflows |
+| Computer & OS use | Terminal-Bench (2025): 2.x has 89 tasks; 4.0 (2026) is the version 2026 frontier launches report | Containerised terminal driven through a tmux session | A per-task verification script the agent must satisfy | Whether the agent can drive a real shell to a checkable end state |
+| Computer & OS use | Terminal-Bench-Science 0.1 (2026) | Containerised terminal, scientific workloads | A per-task verification script | Science terminal work; GPT-6 Astra (64.6%) leads Claude Opus 5.5 (58.7%) here although Opus 5.5 leads on Terminal-Bench 4.0 |
+| Computer & OS use | OSWorld (2024): 369 tasks; OSWorld 2.0 (2026): 108; OSWorld 2.1 (2026) | Real Ubuntu / Windows / macOS VMs with GUI apps | Execution-based post-condition script over files and app state | GUI grounding; 2.0 adds hour-scale, hundreds-of-steps workflows; launches report 2.1 as a partial-credit score |
 | Web research | BrowseComp (2025) — 1,266 questions | The live open web | Short answer matched against a reference answer | Search *persistence* — answers hard to find, easy to verify |
 | Web research | GAIA (2023) — 466; Gaia2 (2025) — 800 | Web plus files; Gaia2 runs in Meta's ARE mobile simulator | Exact match (GAIA); per-capability judge plus exact match (Gaia2) | General assistant tool use; Gaia2 adds async time, noise, ambiguity, agent-to-agent |
 | Web research | WebArena (2023) — 812 tasks | Five self-hosted functional websites | Backend state matches the annotated goal state | Realistic multi-step web navigation. Historically important, now largely superseded |
@@ -415,6 +416,13 @@ Terminus 2 harness, e2b sandbox, pass@1 averaged over 3 repeats per task — and
 Sol (xhigh) at 89.5% and Claude Opus 5 (max effort) at 89.1% as of 2026-07-29. The two rankings
 are not interchangeable: one measures the best system anyone submitted, the other measures
 models under a fixed harness. Both are legitimate; quoting either without saying which is not.
+
+Frontier launches have moved past 2.x. The Claude Opus 5.5 launch (2026-09-22) reports
+Terminal-Bench 4.0 at 66.4% (xhigh effort) against GPT-6 Astra at 57.9% (OpenAI's figure, high
+effort), Terminal-Bench-Science 0.1 at 58.7% against Astra's 64.6%, and OSWorld 2.1 (partial) at
+81.8%. The same launch reports no SWE-bench score of any split. Two lessons follow: a lead on one
+terminal suite does not carry over to its science variant, and each vendor's number comes from
+its own harness and effort setting, so the comparison is between systems, not models.
 
 ### OSWorld
 
@@ -841,7 +849,7 @@ Output format:
 }}"""
 
 async def evaluate_with_llm_judge(trajectory: AgentTrajectory,
-                                   judge_model: str = "claude-opus-5") -> dict:
+                                   judge_model: str = "claude-opus-5-5") -> dict:
     trajectory_text = format_trajectory(trajectory)
     response = await llm.ainvoke([
         SystemMessage("You are an expert AI evaluator."),
@@ -1143,7 +1151,8 @@ A large enterprise deploys a research agent:
 |-----------|-----------|--------------------------|------------------------|-------------|------------|
 | SWE-bench Verified | Code repair | None — retired as contaminated | Severe: tasks and gold patches public since 2024 | Low | Full |
 | SWE-bench Pro | Long-horizon code change | Large | Low by design: copyleft public set, private set never published | High — hours-scale tasks | Full |
-| Terminal-Bench 2.x | Terminal / sysadmin | Moderate — top entries near 90% | Moderate: tasks public, but environments rebuild per run | Moderate — container per task | Full |
+| Terminal-Bench 2.x | Terminal / sysadmin | Little: top entries near 90% | Moderate: tasks public, but environments rebuild per run | Moderate, container per task | Full |
+| Terminal-Bench 4.0 | Terminal / sysadmin | Large: best launch-reported score 66.4% (Claude Opus 5.5, 2026-09-22) | Low, newly published | Moderate, container per task | Full |
 | OSWorld-Verified | GUI computer use | Little — top entries clustered in the mid-80s | Moderate | High — VM per task | Full |
 | OSWorld 2.0 | Hour-scale GUI workflows | Very large — best reported near 20% | Low, newly published | Very high — ~318 steps per task | Full |
 | BrowseComp | Web research | Large | Split: live web cannot leak, the 1,266 Q-A pairs can | Moderate, plus live-web flakiness | Full (reference match) |
@@ -1187,7 +1196,7 @@ judge = LLMJudge(model="gpt-5.4", rubric=RUBRIC)
 
 # FIXED: cross-family judge, gated on human agreement before it is trusted at scale
 agent = Agent(model="gpt-5.4")
-judge = LLMJudge(model="claude-opus-5", rubric=RUBRIC)
+judge = LLMJudge(model="claude-opus-5-5", rubric=RUBRIC)
 assert spearman(judge.scores(calibration_set), human_scores) > 0.8
 ```
 
@@ -1418,7 +1427,7 @@ class CustomerServiceEvalSuite:
     def __init__(self):
         self.eval_dataset = load_dataset("prod_eval_200.jsonl")
         self.adversarial_set = load_dataset("adversarial_50.jsonl")
-        self.judge = LLMJudge(model="claude-opus-5", rubric=CS_RUBRIC)
+        self.judge = LLMJudge(model="claude-opus-5-5", rubric=CS_RUBRIC)
 
     async def nightly_regression(self) -> EvalReport:
         # Run agent on 200 fixed tasks

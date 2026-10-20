@@ -678,7 +678,7 @@ A single element off the alignment boundary (`K=4095` above) is enough to trigge
 
 ### 6.10 Why accumulation precision and dimension alignment both gate Tensor Core engagement
 
-Two conditions govern a cuBLAS/cuDNN call, and they fail differently. The **dtype** is the hard gate: an FP32 or FP64 operand has no Tensor Core path at all outside TF32/FP64-TC, so the call runs on CUDA cores. The **alignment** is a soft gate: since cuBLAS 11.0 there is no dimension restriction on Tensor Core use for FP16/BF16/TF32/INT8, but reaching peak needs operands and leading dimensions aligned to 16 bytes (a multiple of 8 elements at 2 bytes each), and a misaligned call is served by a slower Tensor Core kernel that cannot vectorize its loads. Neither failure raises an error, and the only symptom of either is a profile that doesn't match the GPU's advertised peak — which is why the two are so often confused for each other. This is covered further in §10's BROKEN→FIX pair.
+Two conditions govern a cuBLAS/cuDNN call, and they fail differently. The **dtype** is the hard gate: by default an FP32 or FP64 operand has no Tensor Core path outside TF32/FP64-TC, so the call runs on CUDA cores. cuBLAS floating-point emulation is the opt-in exception. BF16x9 runs FP32 GEMMs on BF16 Tensor Cores (CUDA 12.9+, CC 10.0 and 10.3), and the Ozaki-based fixed-point scheme runs FP64 GEMMs on integer Tensor Cores (CUDA 13.0 Update 2+, CC 8.x through 12.x). Turn it on with the `CUBLAS_FP32_EMULATED_BF16X9_MATH` or `CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH` math mode, or with no code change through `CUBLAS_EMULATE_SINGLE_PRECISION=1` or `CUBLAS_EMULATE_DOUBLE_PRECISION=1`; `cublasSetEmulationStrategy` (or `CUBLAS_EMULATION_STRATEGY`) then picks `performant`, the default, which emulates only when it is faster, or `eager`. The **alignment** is a soft gate: since cuBLAS 11.0 there is no dimension restriction on Tensor Core use for FP16/BF16/TF32/INT8, but reaching peak needs operands and leading dimensions aligned to 16 bytes (a multiple of 8 elements at 2 bytes each), and a misaligned call is served by a slower Tensor Core kernel that cannot vectorize its loads. Neither failure raises an error, and the only symptom of either is a profile that doesn't match the GPU's advertised peak, which is why the two are so often confused for each other. This is covered further in §10's BROKEN→FIX pair.
 
 ```mermaid
 flowchart LR
@@ -691,18 +691,20 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     start(["GEMM /<br/>conv call"]) --> precQ{"Precision in<br/>FP16/BF16/TF32/<br/>FP8/INT8?"}
-    precQ -- "no (FP32/FP64)" --> cudaCore["CUDA-core path<br/>(silent fallback)"]
+    precQ -- "no (FP32/FP64)" --> emuQ{"cuBLAS emulation<br/>enabled?"}
+    emuQ -- "no" --> cudaCore["CUDA-core path<br/>(silent fallback)"]
+    emuQ -- "yes" --> emuTC(["Tensor Cores via<br/>BF16x9 or Ozaki"])
     precQ -- "yes" --> dimQ{"Dims and leading<br/>dims 16-byte aligned?<br/>(mult of 8 at fp16)"}
     dimQ -- "no" --> slowTC["Tensor Cores, but a<br/>non-vectorized edge<br/>kernel (silent cliff)"]
     dimQ -- "yes" --> tcPath(["Tensor Core<br/>path at full speed"])
 
     class start io
-    class precQ,dimQ mathOp
+    class precQ,dimQ,emuQ mathOp
     class cudaCore,slowTC lossN
-    class tcPath train
+    class tcPath,emuTC train
 ```
 
-Both gates are silent — nothing raises a warning on either branch — but they are not the same failure. A wrong dtype leaves the Tensor Cores entirely (left red box); a wrong alignment keeps them and throws away most of their throughput (middle red box). Either way, "did it compile and run" is never sufficient evidence that the full-speed path (green) was taken.
+Both gates are silent (nothing raises a warning on either branch), but they are not the same failure. A wrong dtype leaves the Tensor Cores entirely unless cuBLAS emulation is on (left red box); a wrong alignment keeps them and throws away most of their throughput (middle red box). Either way, "did it compile and run" is never sufficient evidence that the full-speed path (green) was taken.
 
 ### 6.11 Where the accumulator lives, and how you actually select a modern MMA
 
@@ -995,7 +997,7 @@ nvcc -arch=sm_90a flash_gemm.cu -o flash_gemm
 
 **Q: Why isn't my matmul getting the Tensor Core speedup I expected?**
 **Short:** Usually a non-16-byte-aligned dimension forces an unvectorized edge kernel rather than dropping Tensor Cores entirely; the real dropout cause is an unsupported dtype like FP32 or FP64.
-The most common cause is a dimension or leading dimension that is not 16-byte aligned — a multiple of 8 elements at FP16/BF16's two bytes each. Since cuBLAS 11.0 that no longer kicks you off Tensor Cores entirely, but it does force the library to pick a kernel that cannot issue 128-bit vector loads and must handle a ragged edge tile, so throughput lands far below the GPU's advertised peak with no error raised. Check the actual M/N/K of the failing call, not just the "obvious" batch dimension. Padding the offending dimension to a multiple of 16 (64 by convention) with zeros is the standard fix. The other cause, and the one that really does leave Tensor Cores idle, is a dtype with no Tensor Core path at all: plain FP32 with TF32 disabled, or FP64.
+The most common cause is a dimension or leading dimension that is not 16-byte aligned (a multiple of 8 elements at FP16/BF16's two bytes each). Since cuBLAS 11.0 that no longer kicks you off Tensor Cores entirely, but it does force the library to pick a kernel that cannot issue 128-bit vector loads and must handle a ragged edge tile, so throughput lands far below the GPU's advertised peak with no error raised. Check the actual M/N/K of the failing call, not just the "obvious" batch dimension. Padding the offending dimension to a multiple of 16 (64 by convention) with zeros is the standard fix. The other cause, and the one that really does leave Tensor Cores idle, is a dtype with no Tensor Core path: plain FP32 with TF32 disabled, or FP64, unless cuBLAS floating-point emulation (BF16x9 for FP32, the Ozaki fixed-point scheme for FP64) is enabled.
 
 **Q: Why did my FP32 unit test start failing after I upgraded to an Ampere GPU?**
 **Short:** TF32 truncates FP32 to about FP16 precision and is on by default for convolutions and cuBLAS GEMMs on Ampere+, though `torch.matmul` leaves it off unless enabled explicitly.
@@ -1039,7 +1041,7 @@ E4M3 (4 exponent bits, 3 mantissa bits) has a smaller maximum magnitude (~448) b
 
 **Q: How does cuBLAS decide whether to route a GEMM onto Tensor Cores?**
 **Short:** Since cuBLAS 11.0 it uses Tensor Cores for any supported dtype with no dimension requirement outside FP8; alignment only decides which Tensor Core kernel, not whether one runs.
-From cuBLAS 11.0 onward it uses Tensor Cores wherever it judges them faster for a supported dtype — FP16, BF16, TF32, INT8 — with no hard dimension or alignment requirement outside FP8, which still carries one. What alignment governs is *which* Tensor Core kernel gets picked: 16-byte-aligned operands and leading dimensions unlock the vectorized variants, and anything else falls to an edge-case kernel at a fraction of the throughput. An unsupported dtype (FP32 with TF32 off, or FP64) is the only thing that puts the work back on CUDA cores outright. Because none of these choices raises a warning, profiling achieved TFLOP/s against the GPU's peak — or asking `cublasLtMatmulAlgoGetHeuristic` which kernel it would pick — is the only reliable confirmation.
+From cuBLAS 11.0 onward it uses Tensor Cores wherever it judges them faster for a supported dtype (FP16, BF16, TF32, INT8), with no hard dimension or alignment requirement outside FP8, which still carries one. What alignment governs is *which* Tensor Core kernel gets picked: 16-byte-aligned operands and leading dimensions unlock the vectorized variants, and anything else falls to an edge-case kernel at a fraction of the throughput. An unsupported dtype (FP32 with TF32 off, or FP64) is the only thing that puts the work back on CUDA cores outright, unless the opt-in floating-point emulation modes route it to BF16 or integer Tensor Cores. Because none of these choices raises a warning, profiling achieved TFLOP/s against the GPU's peak, or asking `cublasLtMatmulAlgoGetHeuristic` which kernel it would pick, is the only reliable confirmation.
 
 **Q: What is CUTLASS and when would you reach for it instead of cuBLAS?**
 **Short:** NVIDIA's open-source template library implementing the full tiling hierarchy that cuBLAS itself is built from; reach for it when you need a fusion cuBLAS's epilogues don't offer.

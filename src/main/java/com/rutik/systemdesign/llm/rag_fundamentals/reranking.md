@@ -466,7 +466,8 @@ Note which metric moved most. Recall@5 gained 17 points and precision@5 gained 3
 |-------|-------------------|---------|------|-------|
 | Bi-encoder (no reranker) | 0ms (already done) | Moderate | Free | Baseline |
 | BGE-reranker-base | ~30ms GPU | Good | Self-hosted | Compact model |
-| BGE-reranker-large | ~80ms GPU | Very good | Self-hosted | Best open source |
+| BGE-reranker-large | ~80ms GPU | Very good | Self-hosted | Small, well-known baseline; 512-token limit |
+| Qwen3-Reranker (0.6B/4B/8B) | No published latency; measure on your GPU | Excellent | Self-hosted | Apache 2.0; 32K context; 0.6B scores 65.80 MTEB-R vs 57.03 for BGE-reranker-v2-m3 at the same size |
 | ColBERT | ~10x below a cross-encoder; no portable figure | Good | Self-hosted | Best latency |
 | Cohere Rerank (v4.0-fast) | ~100ms observed round trip (no published SLO) | Best | $2/1K searches | Best multilingual |
 | A small general LLM as reranker | ~500ms API | Excellent | Expensive | Not recommended for this purpose |
@@ -573,7 +574,8 @@ Fix: Chunk documents to fit the reranker's context limit at index time (preferre
 
 | Tool | Type | Notes |
 |------|------|-------|
-| **BGE-reranker-large** | Open source cross-encoder | Best open-source; BAAI; 512 token limit |
+| **Qwen3-Reranker** | Open source cross-encoder | 0.6B/4B/8B, released 2025-06-05, Apache 2.0, 32K context; the 0.6B beats BGE-reranker-v2-m3 (same size) on MTEB-R, MMTEB-R, MLDR and MTEB-Code |
+| **BGE-reranker-large** | Open source cross-encoder | BAAI; small self-hosted baseline; 512 token limit |
 | **BGE-reranker-v2-m3** | Open source cross-encoder | Multilingual; longer context than v1 |
 | **Cohere Rerank** | Managed API | Best multilingual; current IDs `rerank-v4.0-fast` / `rerank-v4.0-pro`; v3.x has a 4,096-token per-document limit; $2.00-$2.50 per 1K searches |
 | **ColBERT v2** | Late interaction | Best latency; good quality; large index size |

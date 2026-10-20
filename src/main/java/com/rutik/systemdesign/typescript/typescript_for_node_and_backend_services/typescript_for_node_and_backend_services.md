@@ -118,7 +118,7 @@ if the codebase already is Express and the migration buys nothing.
 | Public API surface | no | yes |
 | Coupling | client imports server *types* | client imports a document |
 
-tRPC **11.18.0** accepts any Standard Schema validator (`@standard-schema/spec` **1.1.0**)
+tRPC **11.19.0** accepts any Standard Schema validator (`@standard-schema/spec` **1.1.0**)
 natively, so `.input(zodSchema)` needs no adapter. Its whole benefit — and its whole
 constraint — is that the client does `import type { AppRouter }` from the server package.
 That is a monorepo coupling. **It is not a public API surface**: you cannot hand `AppRouter` to
@@ -270,7 +270,7 @@ owned by
 Here is only its application to a handler, with all four inputs treated the same way:
 
 ```ts
-import { z } from "zod";                      // zod 4.5.4
+import { z } from "zod";                      // zod 4.6.7
 
 const Body = z.object({ sku: z.string().min(1), qty: z.int().min(1).max(999) });
 const Params = z.object({ tenant: z.string().uuid() });
@@ -314,7 +314,7 @@ to be written and therefore no place for it to drift.
 
 ```ts
 // server/router.ts
-import { initTRPC } from "@trpc/server";        // 11.18.0
+import { initTRPC } from "@trpc/server";        // 11.19.0
 import { z } from "zod";
 
 const t = initTRPC.context<{ userId: string }>().create();
@@ -651,14 +651,14 @@ worse than generated code that is not committed at all: it looks reviewed.
 | Express | HTTP framework, 5.x | Generics on the request; body stays `any` without a parse |
 | Hono | HTTP framework, 4.x | Typed route chain, one codebase on Node and edge |
 | NestJS | Opinionated framework, 11.x | DI and decorators; pins `experimentalDecorators` |
-| tRPC | End-to-end typed RPC, 11.18.0 | Client infers procedures; Standard Schema input |
-| Zod | Schema validator, 4.5.4 | Boundary parsing and typed configuration |
+| tRPC | End-to-end typed RPC, 11.19.0 | Client infers procedures; Standard Schema input |
+| Zod | Schema validator, 4.6.7 | Boundary parsing and typed configuration |
 | Standard Schema | Validator interface spec, 1.1.0 | Lets tRPC accept any conforming validator |
 | Kysely | Typed SQL query builder | Result types inferred from the query written |
 | Prisma | Schema-first ORM | Generated client; regenerate in the migration job |
 | Drizzle ORM | Schema-in-TypeScript ORM | Types from the same file that defines the schema |
 | pgtyped | SQL-to-TypeScript generator | Types produced by running queries on a live database |
-| typescript-eslint | Type-aware linting, 8.69.0 | `no-floating-promises`, `no-misused-promises` |
+| typescript-eslint | Type-aware linting, 8.71.2 | `no-floating-promises`, `no-misused-promises` |
 | OpenTelemetry | Tracing and metrics SDK | Request context alongside `AsyncLocalStorage` |
 | Pino | Structured logger | Child logger per request from the async store |
 

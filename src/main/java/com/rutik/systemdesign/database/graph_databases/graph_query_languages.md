@@ -2,7 +2,7 @@
 
 > Deep-dive sub-file of [Graph Databases](graph_databases.md). That module owns the Cypher
 > primer, the GQL standard (ISO/IEC 39075:2024), the GDS algorithm library, and a short
-> TinkerPop mention — see `graph_databases.md` L211-296 and L393-406. This file is the
+> TinkerPop mention; see `graph_databases.md` L230-315 and L412-425. This file is the
 > language-FAMILY comparison: one schema, five query surfaces, and the paradigm differences
 > the parent only gestures at. Version anchors verified against primary sources August 2026:
 > Apache TinkerPop **3.8.1** (April 2026); SPARQL 1.1 is a W3C **Recommendation** (21 March
@@ -88,7 +88,7 @@ CREATE TABLE purchases(person_id TEXT, product_id TEXT, amount NUMERIC, purchase
 
 The RDF version costs **3 extra triples** (`ex:order1 ex:product/amount/date`) to represent
 one purchase that the property graph represents as a single edge with two properties — the
-reification cost the parent module names at `graph_databases.md` L57, now counted concretely.
+reification cost the parent module names at `graph_databases.md` L59, now counted concretely.
 
 ### The translation table
 
@@ -126,7 +126,7 @@ own.
 
 ### Family 1 — Declarative pattern matching (Cypher, openCypher, GQL)
 
-Already covered for syntax in `graph_databases.md` L211-296; shown here only as the baseline
+Already covered for syntax in `graph_databases.md` L230-315; shown here only as the baseline
 against which the other four families are compared.
 
 ```cypher
@@ -206,7 +206,7 @@ the shape of computation PageRank or connected-components needs, not the shape a
 `.has(prop, val)` to a traversal object in a loop is safe string-free composition, whereas
 building a Cypher `MATCH` by concatenating strings invites both bugs and injection. It loses
 on readability — the fraud-ring pattern that is one line of Cypher (`graph_databases.md`
-L233-235) takes a `repeat().until()` chain in Gremlin, and nothing about the traversal's
+L252-254) takes a `repeat().until()` chain in Gremlin, and nothing about the traversal's
 *shape* is visible without mentally executing it step by step.
 
 ### Family 3 — RDF / triple-pattern (SPARQL)
@@ -269,8 +269,8 @@ RDF today.
 
 ### Family 4 — SQL-embedded (SQL/PGQ, Oracle PGQL)
 
-`graph_databases.md` L243-296 already covers `CREATE PROPERTY GRAPH` and `GRAPH_TABLE` in
-full, including the PostgreSQL 19 example — this section stays short by design.
+`graph_databases.md` L262-315 already covers `CREATE PROPERTY GRAPH` and `GRAPH_TABLE` in
+full, including the Oracle AI Database 26ai example, so this section stays short by design.
 
 ```sql
 -- Q1 and Q3 only, as SQL/PGQ (ISO SQL:2023 Part 16) — the rest follow the
@@ -280,20 +280,23 @@ SELECT * FROM GRAPH_TABLE (social_graph
   COLUMNS (p.name AS product_name, p.category)
 );
 
-SELECT * FROM GRAPH_TABLE (social_graph
+-- aggregation happens in ordinary SQL AFTER GRAPH_TABLE, not inside it
+SELECT category, sum(amount) AS total
+FROM GRAPH_TABLE (social_graph
   MATCH (:person) -[o IS purchased]-> (p IS product)
-  COLUMNS (p.category, o.amount)
-) GROUP BY category
-  -- aggregation happens in ordinary SQL AFTER GRAPH_TABLE, not inside it
+  COLUMNS (p.category AS category, o.amount AS amount)
+)
+GROUP BY category;
 ```
 
 **Oracle PGQL** is the vendor predecessor SQL/PGQ generalized: a SQL-like pattern-matching
 language for Oracle's own property-graph feature, whose PGX engine (release 25.4) supports
 PGQL 2.1. Oracle's own documentation is explicit about the direction of travel: PGQL
 continues to be supported for existing code, but new development targets **SQL/PGQ** (the
-ISO SQL:2023 standard, shipping in Oracle AI Database 26ai and PostgreSQL 19 — see
-[PostgreSQL Internals](../postgresql_internals/postgresql_internals.md) for the engine that
-hosts it) rather than PGQL's own dialect. That is the same convergence-onto-a-standard story
+ISO SQL:2023 standard, shipping in Oracle AI Database 26ai; PostgreSQL reverted its
+implementation from 19 before release, see
+[PostgreSQL Internals](../postgresql_internals/postgresql_internals.md)) rather than PGQL's
+own dialect. That is the same convergence-onto-a-standard story
 GQL tells for Cypher, one layer down in the stack.
 
 ### Family 5 — Vendor/legacy surfaces still worth naming
@@ -509,7 +512,7 @@ reach for it because the data model is triples.
 
 **Choose SQL/PGQ or Oracle PGQL** when the graph is a *view* over data that already lives in a
 relational database and the traversals are shallow and fixed-depth — it removes the entire
-argument for a second database (parent module, `graph_databases.md` L290-296). Move to a
+argument for a second database (parent module, `graph_databases.md` L309-315). Move to a
 native engine and a declarative graph language once queries need variable-length traversal,
 shortest path, or a graph-algorithm library the SQL/PGQ view cannot express.
 
@@ -593,14 +596,15 @@ Because Gremlin has no planner to reorder steps for you, "filter early" is not a
 preference the way it sometimes is in SQL or Cypher — it is the entire performance budget,
 and the fix is always the same: move `has()` as far left as the data dependency allows.
 
-**Pitfall 4: SQL/PGQ's fixed-depth `GRAPH_TABLE` silently returns a partial answer**
+**Pitfall 4: a fixed-hop `GRAPH_TABLE` chain silently returns a partial answer**
 
-The first SQL/PGQ release is deliberately read-only and fixed-depth (parent module,
-`graph_databases.md` L291-296). A pattern like `(a)-[IS follows]->(b)-[IS follows]->(c)`
-answers "exactly 2 hops," and there is no `*1..3` equivalent to ask "1 to 3 hops" in one
-query — teams migrating a bounded-hop Cypher query to SQL/PGQ sometimes drop the variable
-length silently, producing a query that compiles and runs but answers a narrower question
-than the one they started with. Verify the hop count is genuinely fixed in the business
+A SQL/PGQ pattern written as a chain of explicit edges answers exactly that many hops
+(parent module, `graph_databases.md` L309-315). A pattern like
+`(a)-[IS follows]->(b)-[IS follows]->(c)` answers "exactly 2 hops"; "1 to 3 hops" needs a
+bounded quantifier on the edge (`-[IS follows]->{1,3}`) where the engine supports one. Teams
+hand-translating a bounded-hop Cypher query to SQL/PGQ often write the fixed chain instead,
+producing a query that compiles and runs but answers a narrower question than the one they
+started with. Verify the hop count is genuinely fixed in the business
 requirement before treating SQL/PGQ as a drop-in replacement for a variable-length Cypher
 `MATCH`.
 
@@ -669,7 +673,7 @@ A SPARQL `WHERE` block's ordinary triple patterns form a basic graph pattern eva
 
 **Q: Why does representing a relationship's properties in RDF require an extra reified resource, and what does that cost?**
 **Short:** RDF triples have no slot for edge properties, so a relationship's attributes must become a separate resource linked by additional triples.
-A bare triple is only ever `subject predicate object` — there is nowhere on a `ex:alice ex:purchased ex:sku42` triple to attach an `amount` or a `date`. The standard fix is reification: replace the direct triple with an intermediate resource (`ex:order1`) that the subject links to, and attach the properties to that resource instead — turning one logical fact into three or four physical triples. A property graph represents the identical fact as a single edge record carrying both properties directly, which is both fewer records to store and a shorter, simpler query to write and read back. This is the concrete cost behind the parent module's statement that RDF triple stores "reduce everything to bare subject-predicate-object atoms" (`graph_databases.md` L31) — not an abstract inconvenience but a measurable multiplication of storage records per fact.
+A bare triple is only ever `subject predicate object`; there is nowhere on a `ex:alice ex:purchased ex:sku42` triple to attach an `amount` or a `date`. The standard fix is reification: replace the direct triple with an intermediate resource (`ex:order1`) that the subject links to, and attach the properties to that resource instead, turning one logical fact into three or four physical triples. A property graph represents the identical fact as a single edge record carrying both properties directly, which is both fewer records to store and a shorter, simpler query to write and read back. This is the concrete cost behind the parent module's statement that RDF triple stores "reduce everything to bare subject-predicate-object atoms" (`graph_databases.md` L33): not an abstract inconvenience but a measurable multiplication of storage records per fact.
 
 **Q: How does TigerGraph support openCypher without abandoning its native GSQL execution engine?**
 **Short:** TigerGraph translates incoming openCypher queries into GSQL before execution, so Cypher-shaped queries run on the same native, performance-tuned engine.
@@ -681,7 +685,7 @@ NebulaGraph's own documentation describes nGQL as combining a native surface wit
 
 **Q: When does a machine-generated (programmatically constructed) graph query favor Gremlin over Cypher or GQL, independent of raw readability?**
 **Short:** Gremlin traversal objects compose safely by appending steps in code, while building an equivalent declarative query means concatenating strings.
-When a query is assembled by application logic — conditionally adding a filter, a hop, or a projection based on runtime branches — a Gremlin traversal is built by calling methods on a traversal object (`.has(...)`, `.out(...)`), which is ordinary, type-checked, injection-safe code composition. Building the equivalent Cypher or GQL query programmatically usually means concatenating query-string fragments, which is both more error-prone and reopens the same injection surface that parameterized SQL exists to close. This is the concrete version of the parent module's portability-vs-readability tradeoff (`graph_databases.md` L699): portability matters for cross-vendor deployment, but compositionality is the reason a query-building library or an internal DSL is more often built on Gremlin than on string-templated Cypher.
+When a query is assembled by application logic (conditionally adding a filter, a hop, or a projection based on runtime branches), a Gremlin traversal is built by calling methods on a traversal object (`.has(...)`, `.out(...)`), which is ordinary, type-checked, injection-safe code composition. Building the equivalent Cypher or GQL query programmatically usually means concatenating query-string fragments, which is both more error-prone and reopens the same injection surface that parameterized SQL exists to close. This is the concrete version of the parent module's portability-vs-readability tradeoff (`graph_databases.md` L810): portability matters for cross-vendor deployment, but compositionality is the reason a query-building library or an internal DSL is more often built on Gremlin than on string-templated Cypher.
 
 **Q: Why can't a Cypher query with rich edge properties always be translated 1:1 into equivalent SPARQL?**
 **Short:** The data models mismatch — RDF triples have no native edge-property slot, so any edge property must be reified as an extra resource with no single canonical translation.
@@ -689,7 +693,7 @@ A Cypher `(a)-[:PURCHASED {amount: 549, date: "2026-01-15"}]->(b)` relationship 
 
 **Q: Given that GQL and openCypher conformance is still partial across vendors, what is the risk of standardizing all new graph query development on GQL today?**
 **Short:** Partial conformance means a GQL query written against one engine's supported subset can fail unmodified on another engine still closing its own conformance gaps.
-GQL is the ISO standard, but conformance is a moving target across vendors: Neo4j documents its own outstanding mandatory-feature gaps in a public conformance appendix, and Neptune, TigerGraph, and Oracle are all described as having conformance work "in flight" rather than complete (`graph_databases.md` L251-257). A query written against the subset of GQL one engine already supports is not guaranteed to run unmodified on a different engine still catching up on that same feature, which undercuts the "write once, run anywhere" case for standardizing early. The pragmatic mitigation is to write GQL-conformant Cypher today — sticking to the mandatory feature set every major engine already implements — while treating full cross-vendor portability as a target the ecosystem is converging toward rather than a guarantee available right now.
+GQL is the ISO standard, but conformance is a moving target across vendors: Neo4j documents its own outstanding mandatory-feature gaps in a public conformance appendix, and Neptune, TigerGraph, and Oracle are all described as having conformance work "in flight" rather than complete (`graph_databases.md` L270-276). A query written against the subset of GQL one engine already supports is not guaranteed to run unmodified on a different engine still catching up on that same feature, which undercuts the "write once, run anywhere" case for standardizing early. The pragmatic mitigation is to write GQL-conformant Cypher, sticking to the mandatory feature set every major engine already implements, while treating full cross-vendor portability as a target the ecosystem is converging toward rather than a guarantee available right now.
 
 ---
 

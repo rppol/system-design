@@ -2,9 +2,11 @@
 
 ## 1. Concept Overview
 
-> **Version anchor (2026-08-04).** **Redis Open Source 8.10.0** (29 Jul 2026) is current; the
-> maintained lines are **8.8.1**, **8.6.5**, **8.4.5**, **8.2.8**, **7.4.10**, **7.2.15** and
-> **6.2.23**. **Valkey 9.1.1** (21 Jul 2026) is the Linux Foundation fork's current release.
+> **Version anchor (2026-10-19).** **Redis Open Source 8.10.2** (17 Sep 2026) is current; the
+> 17 September patch set also shipped **8.8.3**, **8.6.7**, **8.4.7** and **8.2.10**, and the
+> older lines last shipped on 17 August 2026 as **7.4.11**, **7.2.16** and **6.2.24**, in the
+> same patch set as the 8.6.6 security release. **Valkey 9.1.2** (1 Sep 2026, with 9.0.6) is the Linux
+> Foundation fork's current release, and **9.2.0-rc1** followed on 16 Sep 2026.
 > Redis 8 is **tri-licensed RSALv2 / SSPLv1 / AGPLv3**; Valkey is **BSD-3-Clause**. Behaviour that
 > arrived in a specific release is tagged inline as `[8.0]`, `[8.8]`, `[8.10]`, `[7.0]`,
 > `[Valkey 9.0]` — nothing here is called "current" without naming the release it landed in.
@@ -805,7 +807,7 @@ The list of things that produce a multi-millisecond command: `KEYS`, `SMEMBERS`/
 on a multi-GB value, `SORT`, `SINTERSTORE` on large sets, a Lua script with a loop, and `MONITOR`
 (which duplicates every command to a client and is a throughput cliff, not a spike).
 
-### 6.3 Eviction — the eight policies and the two algorithms
+### 6.3 Eviction policies and the LRU/LFU algorithms
 
 **The policies, spelled exactly as `maxmemory-policy` accepts them:**
 
@@ -819,6 +821,11 @@ on a multi-GB value, `SORT`, `SINTERSTORE` on large sets, a Lua script with a lo
 | `volatile-lfu` | keys with a TTL | approximated LFU |
 | `volatile-random` | keys with a TTL | random |
 | `volatile-ttl` | keys with a TTL | shortest remaining TTL |
+| `allkeys-lrm` | every key | least recently modified `[8.6]` |
+| `volatile-lrm` | keys with a TTL | least recently modified `[8.6]` |
+
+The two `lrm` policies arrived in Redis 8.6.0 (February 2026). They rank keys by last *write*
+rather than last access, so a key that is read constantly but never updated still ages out.
 
 Three facts about this list that cost people incidents:
 
@@ -1533,7 +1540,8 @@ scheduling floor because of a noisy neighbour or a power-management setting, no 
 help and you have your answer in 100 seconds.
 
 Round it out with `redis-cli --bigkeys` (samples the keyspace for the largest key per type),
-`--memkeys`, `--hotkeys` (requires an `lfu` policy), and `MEMORY DOCTOR`.
+`--memkeys`, `--hotkeys` (requires an `lfu` policy), and `MEMORY DOCTOR`. From 8.6.0 the
+server also has a `HOTKEYS` command that detects and reports hot keys.
 
 ### 6.16 Operations
 
@@ -1789,10 +1797,10 @@ every 100 ms surrendered to reclamation, for eleven minutes. p99 tripled on a sc
 
 ### 11.1 The servers
 
-- **Redis** — the server itself, 8.10.0 current, tri-licensed RSALv2/SSPLv1/AGPLv3, with the query
+- **Redis**: the server itself, 8.10.2 current, tri-licensed RSALv2/SSPLv1/AGPLv3, with the query
   engine, JSON, time-series and probabilistic types folded into core since `[8.0]`, plus the native
   HNSW-backed **vector set** type (`VADD`/`VSIM`) added in the same release.
-- **Valkey** — the BSD-3-Clause Linux Foundation fork from 7.2.4, 9.1.1 current, wire-compatible and
+- **Valkey**: the BSD-3-Clause Linux Foundation fork from 7.2.4, 9.1.2 current, wire-compatible and
   the default engine on AWS ElastiCache and MemoryDB, with multi-DB cluster mode and atomic slot
   migration that Redis has no equivalent of.
 - **Redis Sentinel** — the HA supervisor for an unsharded primary-replica set: quorum failure

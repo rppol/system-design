@@ -495,7 +495,7 @@ The restrictions that *do* apply: `use()` must still be called during render, ne
 
 ### 6.10 The linter in 2026
 
-`eslint-plugin-react-hooks` used to ship two rules. Since 6.0 (2025-10-07, alongside React Compiler 1.0) it also ships the compiler's **Rules of React** checks, so one plugin covers both:
+`eslint-plugin-react-hooks` used to ship two rules. Since 6.1.1 (2025-10-03) it also ships the compiler's **Rules of React** checks, and 7.0 (2025-10-08, the day after React Compiler 1.0) turns them on by default, so one plugin covers both:
 
 | Rule | Catches |
 |------|---------|
@@ -506,7 +506,7 @@ The restrictions that *do* apply: `use()` must still be called during render, ne
 | `react-hooks/refs` | Reading or writing `ref.current` during render, which breaks purity |
 | `react-hooks/purity` | A render body calling `Date.now()`, `Math.random()` or mutating a prop |
 
-The `recommended-latest` preset turns the whole set on. These are static checks over the same analysis the compiler runs, so a file that passes them is a file the compiler can memoize; a file that fails often gets a compiler bailout instead of an error, which is worse because it is silent. `useMemo` and `useCallback` still exist as escape hatches — [The React Compiler](../the_react_compiler/the_react_compiler.md) owns when to keep them.
+Since 7.0 the `recommended` preset turns the whole set on, and `recommended-latest` adds the experimental compiler rules on top. These are static checks over the same analysis the compiler runs, so a file that passes them is a file the compiler can memoize; a file that fails often gets a compiler bailout instead of an error, which is worse because it is silent. `useMemo` and `useCallback` still exist as escape hatches; [The React Compiler](../the_react_compiler/the_react_compiler.md) owns when to keep them.
 
 ---
 
@@ -699,7 +699,7 @@ The functional update is the first choice because it captures nothing — `setCo
 **Q: What did eslint-plugin-react-hooks gain alongside React Compiler 1.0?**
 **Short:** It absorbed the compiler's Rules of React checks, adding set-state-in-render, set-state-in-effect, refs and purity to the original two rules.
 
-Version 6.0 shipped on 2025-10-07 with the compiler's static analysis behind new rules, and the `recommended-latest` preset enables the whole set. `set-state-in-render` catches the infinite-loop generator; `set-state-in-effect` catches an effect that only copies props into state; `refs` catches reading or writing `ref.current` during render. These matter beyond hygiene: a file that fails them is a file the compiler will bail out of rather than error on, so the memoization silently does not happen.
+Version 6.1.1 (2025-10-03) added rules backed by the compiler's static analysis, and since 7.0.0 (2025-10-08) the `recommended` preset enables the whole set. `set-state-in-render` catches the infinite-loop generator; `set-state-in-effect` catches an effect that only copies props into state; `refs` catches reading or writing `ref.current` during render. These matter beyond hygiene: a file that fails them is a file the compiler will bail out of rather than error on, so the memoization silently does not happen.
 
 **Q: What makes a custom hook's returned API stable enough to depend on?**
 **Short:** Return a tuple for up to three values and an object beyond that, and keep every returned callback referentially stable across renders.

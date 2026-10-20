@@ -8,7 +8,7 @@ LangGraph is a graph-based framework for building stateful, multi-step LLM appli
 
 Released by LangChain, Inc. in January 2024, LangGraph became the recommended way to build production agents. It replaces `AgentExecutor` (LangChain's old agent runner) for any workflow requiring: loops, human-in-the-loop approvals, multi-agent coordination, or persistent state across sessions. LangGraph reached 1.0 general availability on 2025-10-22 alongside LangChain 1.0; LangChain's `create_agent` — the current recommended way to build a standard tool-calling agent — is a batteries-included factory that itself runs on the LangGraph runtime, so `create_agent` and hand-built `StateGraph`s are two abstraction levels of the same engine, not competing frameworks.
 
-**Current version**: langgraph 1.x (1.2.11, released 2026-08-11)
+**Current version**: langgraph 1.x (1.2.16, released 2026-10-16)
 **Production adoption signal**: Used by LinkedIn, Elastic, Replit, Uber, Klarna, and thousands of enterprise deployments via LangSmith Deployment (the managed hosting product, renamed from LangGraph Platform/LangGraph Cloud in October 2025). The de facto standard for production LLM agents.
 
 ---
@@ -735,7 +735,7 @@ often.
 - langgraph 0.0.x (Jan 2024): initial release, basic StateGraph
 - langgraph 0.1.x-0.6.x (2024-2025): Send API (parallel), subgraphs, dynamic `interrupt()`, durable execution
 - langgraph 1.0 (2025-10-22): general availability alongside LangChain 1.0; no breaking changes committed until 2.0
-- langgraph 1.2.11 (2026-08-11): current release
+- langgraph 1.2.16 (2026-10-16): current release
 - Requires: `langchain-core >= 0.2`, Python 3.10+
 
 ---

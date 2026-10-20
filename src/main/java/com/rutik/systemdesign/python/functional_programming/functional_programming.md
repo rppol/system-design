@@ -69,7 +69,7 @@ Chain `map`, `filter`, and `itertools` operations without materializing intermed
 
 ### 4.5 Immutable Data Modeling
 
-Use `collections.namedtuple` or `dataclasses.dataclass(frozen=True)` to model records that must not change after creation. Use `tuple` for ad-hoc immutable sequences and `frozenset` for immutable sets.
+Use `collections.namedtuple` or `dataclasses.dataclass(frozen=True)` to model records that must not change after creation. Use `tuple` for ad-hoc immutable sequences and `frozenset` for immutable sets. For an immutable, hashable mapping use `frozendict` `[3.15]`; see [Collections and Data Structures](../collections_and_data_structures/collections_and_data_structures.md).
 
 ### 4.6 Single Dispatch
 

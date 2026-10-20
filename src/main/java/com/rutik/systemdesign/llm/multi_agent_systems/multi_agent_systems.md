@@ -315,6 +315,24 @@ This is the same result that makes distributed systems hard, arriving in agent f
 
 The star is 2.5x cheaper at five agents and 5x cheaper at ten, before any summarization. That is the concrete reason orchestrator-worker is the default production pattern and peer-to-peer meshes stay confined to small-`n` debate (2-5 agents) where the quadratic has not yet bitten. Blackboard (4.4) is the third answer to the same problem: it replaces channels entirely with one shared surface, trading `n(n-1)/2` conversations for `n` readers of a single state — at the price of needing concurrency control on that state.
 
+### 4.6 Provider-Hosted Orchestration
+
+Patterns 4.1 to 4.5 describe the shape of the team. A separate choice is where the loop runs. With a
+framework (LangGraph, OpenAI Agents SDK, CrewAI) your process owns the loop, the state and the tool
+execution. With a provider-hosted runtime the vendor runs the loop and the sandbox, and your code
+sends events to a session:
+
+| Runtime | Provider | Status (2026-10-19) | What the provider runs |
+|---------|----------|---------------------|------------------------|
+| Responses API multi-agent orchestration | OpenAI | Beta since 2026-07-09 | Multi-agent turns inside one Responses call |
+| Agents API | OpenAI | Public beta since 2026-09-10; computer use added 2026-09-29 | A managed Codex harness |
+| Claude Managed Agents | Anthropic | Beta, `managed-agents-2026-04-01` header | Agent loop, tool execution, cloud or self-hosted sandbox, server-side session history |
+
+The orchestration pattern does not change: a hosted runtime still runs an orchestrator-worker or
+handoff topology. What moves is the control surface. Retries, context compaction and the trace live
+inside the vendor, and the session state is stored server-side, which is why Claude Managed Agents is
+not eligible for Zero Data Retention or HIPAA BAA coverage. Section 8 lists the tradeoff.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -487,6 +505,14 @@ Cascading failure prevention:
 | Hierarchical | Medium | High | High | Long-horizon planning |
 | Handoff/routing | Medium | High | Low | Routing, specialization |
 
+| Concern | Self-run orchestration (framework in your process) | Provider-hosted runtime (Agents API, Claude Managed Agents) |
+|---------|----------------------------------------------------|-------------------------------------------------------------|
+| Lock-in | Model calls swap behind an adapter | Session, event and tool formats are vendor-specific; switching vendor means a rewrite |
+| Observability | Every span is yours to export over OpenTelemetry | You see the events the vendor emits; internal retries and compaction are opaque |
+| Cost control | You cap turns, tokens and fan-out in code | Caps are whatever the runtime exposes; the harness decides how many turns and tool calls a task takes |
+| Data residency | Your infrastructure | Session history is stored by the vendor; Claude Managed Agents is not ZDR or HIPAA BAA eligible |
+| Build cost | You build the loop, sandbox and resume logic | Sandbox, resume and compaction come built in |
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -523,11 +549,13 @@ Cascading failure prevention:
 |------|---------|-------|
 | **LangGraph** | Multi-agent orchestration | Best for production; stateful graphs |
 | **CrewAI** | Role-based multi-agent | Easy to set up; good for teams |
-| **AutoGen** | Conversation-based agents | Microsoft; code execution focus |
+| **Microsoft Agent Framework** | Conversation-based and workflow agents | Microsoft; successor to AutoGen and Semantic Kernel; 1.0 GA April 2026; .NET and Python, Go in public preview |
 | **OpenAI Agents SDK** | Production handoffs | `Agent`/`Runner`/`handoff`; guardrails, sessions, built-in tracing |
+| **OpenAI Agents API** | Hosted agent runtime | Public beta (2026-09-10); managed Codex harness; computer use since 2026-09-29 |
+| **OpenAI Responses multi-agent** | Hosted orchestration | Beta (2026-07-09); multi-agent turns inside the Responses API |
+| **[Claude Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview)** | Hosted agent runtime | Beta, `managed-agents-2026-04-01` header; cloud or self-hosted sandbox; not ZDR eligible |
 | **MetaGPT** | Software development | Structured multi-role SOP |
 | **ChatDev** | Software company sim | Research-oriented; open source |
-| **Microsoft Semantic Kernel** | Enterprise multi-agent | C#, Python, Java |
 | **Agentverse (Fetch.ai)** | Distributed agents | Blockchain-based agent marketplace |
 | **AgentBench** | Agent evaluation | Benchmarks LLMs *as agents* across environments — single-agent, not a multi-agent-coordination benchmark |
 

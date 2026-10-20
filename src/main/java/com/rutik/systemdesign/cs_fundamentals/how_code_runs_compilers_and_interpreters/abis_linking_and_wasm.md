@@ -518,7 +518,7 @@ That last row is the honest trade: `extern "C"` is free and unchecked, the canon
 - **Go statically links by default** and produces a single self-contained binary (a hello-world is roughly 1.5 MB), which is most of why `FROM scratch` containers became normal. The moment `cgo` is enabled the binary picks up a `libc` dependency and the hermetic property quietly disappears — the classic "works locally, `no such file or directory` in the Alpine container" where the missing file is the dynamic linker itself.
 - **Rust has no stable ABI** for its own types and does not pretend otherwise: crates are statically linked, and any cross-language boundary uses `extern "C"` with `#[repr(C)]` to opt into the platform ABI explicitly. This is a deliberate refusal to make the C++ promise.
 - **Swift did make the promise**, and shipped a stable ABI in Swift 5 (2019) with *resilient* layout: unless a type is marked `@frozen`, callers go through accessors and the library may add or reorder stored properties across versions. It is §6.2's opaque-handle discipline enforced by the language.
-- **Python's `abi3`** (`Py_LIMITED_API`) freezes a subset of the C API and an opaque `PyObject`, so one compiled wheel serves many interpreter versions. It is the same trade as always: give up direct field access, gain the freedom to change layout.
+- **Python's `abi3`** (`Py_LIMITED_API`) freezes a subset of the C API and an opaque `PyObject`, so one compiled wheel serves many interpreter versions. It is the same trade as always: give up direct field access, gain the freedom to change layout. CPython 3.15 (2026-10-09) adds `abi3t` (PEP 803), the stable ABI for free-threaded builds, selected with `Py_TARGET_ABI3T`.
 - **Android's NDK** made every app bundle `libc++_shared.so` after the platform's own STL turned out to be a lasting ABI hazard — the mobile restatement of "never put a standard-library type in a public signature."
 - **WASI Preview 1 to 0.2** is a live, ongoing ABI migration: `wasi_snapshot_preview1` is legacy and still overwhelmingly what toolchains emit, while 0.2 and 0.3 are WIT-defined on the component model. Rust's target triple churn tracks it — `wasm32-wasi` became `wasm32-wasip1` in 1.78 and the old name was removed in 1.84.
 
@@ -736,6 +736,7 @@ With `RTLD_LAZY` a plugin missing a symbol loads successfully and the failure su
 - **Use `RTLD_NOW` in any plugin host** so a broken plugin fails at load, not mid-request.
 - **Know which dtag you emitted.** `readelf -d` tells you whether you have `DT_RPATH` or `DT_RUNPATH`, and therefore whether `LD_LIBRARY_PATH` can override you.
 - **Measure startup before optimising it** — `LD_DEBUG=statistics` reports relocation time and count directly, and the answer is often that the DSO count, not the code, is the problem.
+- **Ship Python extensions as `abi3`, plus `abi3t` for free-threaded CPython 3.15+**; fall back to a version-specific free-threaded wheel (`cp315t`) only for an extension that cannot drop direct `PyObject` struct access.
 - **For Wasm, pin one target triple and one feature set per artifact**, and keep any raw `wasm32` FFI boundary to integers, floats and explicit pointer/length pairs. Go up to WIT the moment the boundary carries structured data.
 
 ---
@@ -778,7 +779,7 @@ $ ldd build/tokenizer_ext.cpython-312-x86_64-linux-gnu.so
 [tool.maturin]
 features = ["pyo3/abi3-py310"]
 ```
-The wheel's tag changes from `cp312-cp312` to `cp310-abi3`, and one file now serves 3.10 through 3.14. The cost is real and worth stating: the limited API omits some fast paths, and `abi3` does **not** cover the free-threaded builds — a `3.14t` interpreter still needs its own artifact, because `Py_GIL_DISABLED` changes object layout in ways the current stable ABI does not model. PEP 803's `abi3t` addresses exactly that and lands in CPython 3.15, which is at release candidate as of August 2026; until then, free-threaded users get a version-specific wheel.
+The wheel's tag changes from `cp312-cp312` to `cp310-abi3`, and one file now serves 3.10 through 3.15. The cost is real and worth stating: the limited API omits some fast paths, and `abi3` does **not** cover the free-threaded builds, because `Py_GIL_DISABLED` changes object layout in ways `abi3` does not model. CPython 3.15 (released 2026-10-09) adds PEP 803's `abi3t`, a stable ABI for free-threaded builds; meson-python, scikit-build-core, and Maturin can target it. Porting to it needs PEP 697 type data (negative `basicsize`, `PyObject_GetTypeData()`) and the `PyModExport_*` hook in place of `PyInit_*`. An extension that cannot port ships two artifacts: `abi3` for GIL builds plus a version-specific `cp315t` wheel for free-threaded 3.15.
 
 **FIX, part two — bound the glibc floor and bundle the rest.** Build inside a `manylinux_2_28` image so the highest symbol version required is `GLIBC_2.28`, then let `auditwheel` find every external `.so`, copy it into the wheel, and rewrite the extension's RUNPATH to `$ORIGIN/.libs` so `ld.so` finds the bundled copy:
 

@@ -26,7 +26,7 @@ Zero-downtime migration is the hardest part: deploying a schema change while old
 - **Checksum integrity**: Flyway checksums each migration file. Modifying an applied migration causes Flyway to refuse to run and alert.
 - **Idempotent repeatable migrations**: Views, stored procedures, and functions that must always reflect the latest version use repeatable migrations (prefixed R__, re-run when checksum changes).
 - **Backward compatibility**: During rolling deployments, old code and new code run simultaneously. Schema changes must not break old code.
-- **Offline DDL vs online DDL**: Some ALTER TABLE operations take an exclusive lock (lock the table, block all reads/writes). Use online DDL tools (pt-online-schema-change, gh-ost, native online DDL) for large tables.
+- **Offline DDL vs online DDL**: Some ALTER TABLE operations take an exclusive lock (lock the table, block all reads/writes). On MySQL, use online DDL tools (pt-online-schema-change, gh-ost, native online DDL) for large tables. On PostgreSQL, most additive DDL is already metadata-only or has a non-blocking form (`CONCURRENTLY`, `NOT VALID`), so the hard part is serving two app versions during a breaking change, which versioned-view tools such as pgroll automate (§6.4).
 
 ---
 
@@ -41,8 +41,8 @@ Zero-downtime migration is the hardest part: deploying a schema change while old
 | Changesets | Versioned migrations (V1__, V2__) | Named changesets with IDs |
 | Checksum | Per-file checksum | Per-changeset checksum |
 | Schema history table | flyway_schema_history | databasechangelog |
-| Enterprise features | Flyway Teams: undo, versioned schema, drift detection | Liquibase Pro: quality checks |
-| Spring Boot integration | Auto-configured | Auto-configured |
+| Enterprise features | Flyway Teams: undo, versioned schema, drift detection | Liquibase Secure: quality checks (Community is FSL-licensed since 5.0, September 2025) |
+| Spring Boot integration | Auto-configured; Boot 4 needs `spring-boot-starter-flyway`, `flyway-core` alone does not trigger it | Auto-configured; Boot 4 needs `spring-boot-starter-liquibase` |
 | Community | Large | Large |
 | Best for | Greenfield, SQL-focused | Enterprise, XML-pref teams |
 
@@ -51,6 +51,7 @@ Zero-downtime migration is the hardest part: deploying a schema change while old
 | Strategy | Description | Risk | Use When |
 |----------|-------------|------|---------|
 | Expand-Contract | Add new, keep old, migrate, remove old | Low | Column rename, type change |
+| Versioned views (pgroll, Reshape) | Tool-run expand-contract on PostgreSQL: old and new schema served as views, triggers sync both column versions | Low | PostgreSQL breaking change while two app versions are live |
 | Ghost table (pt-osc, gh-ost) | Copy-as-you-go with triggers | Medium | Large table ALTER |
 | Blue-Green DB | Two databases, cutover | High | Major restructuring |
 | Feature flag | Code supports both schemas behind flag | Low | Complex data migration |
@@ -66,7 +67,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Start(["schema change<br/>needed"]) --> Q1{"column rename or<br/>type change?"}
-    Q1 -->|"yes"| S1("Expand-Contract<br/>risk: low")
+    Q1 -->|"yes"| S1("Expand-Contract<br/>by hand, or pgroll on PostgreSQL<br/>risk: low")
     Q1 -->|"no"| Q2{"large table ALTER<br/>on MySQL?"}
     Q2 -->|"yes"| S2("ghost table<br/>pt-osc / gh-ost<br/>risk: medium")
     Q2 -->|"no"| Q3{"complex multi-step<br/>data migration?"}
@@ -190,13 +191,23 @@ ALTER TABLE orders ADD COLUMN processed BOOLEAN NOT NULL DEFAULT FALSE;
 --   -- flyway:executeInTransaction=false
 CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status);
 
--- SAFE: Adding a NOT NULL constraint via check constraint + validate
--- (Immediate constraint is table lock; this approach is non-blocking)
--- Step 1: Add as NOT VALID (no table scan, no lock, metadata only)
+-- SAFE (PostgreSQL 18+): NOT NULL on an existing column as a NOT VALID constraint
+-- Step 1: brief ACCESS EXCLUSIVE lock, no scan; new writes are checked from here on.
+-- lock_timeout makes it fail fast instead of queueing every query behind a long transaction.
+SET lock_timeout = '2s';
+ALTER TABLE orders ADD CONSTRAINT orders_user_id_nn NOT NULL user_id NOT VALID;
+-- Step 2: scan existing rows under SHARE UPDATE EXCLUSIVE (reads and writes continue)
+ALTER TABLE orders VALIDATE CONSTRAINT orders_user_id_nn;
+-- Never finish with ALTER COLUMN ... SET NOT NULL instead: on a column with an invalid
+-- not-null constraint, SET NOT NULL validates it while holding ACCESS EXCLUSIVE.
+
+-- SAFE (PostgreSQL 12 to 17): NOT VALID is not allowed on NOT NULL, so prove it with a CHECK
 ALTER TABLE orders ADD CONSTRAINT orders_user_id_not_null
   CHECK (user_id IS NOT NULL) NOT VALID;
--- Step 2: Validate existing rows (ShareUpdateExclusiveLock — allows reads/writes)
 ALTER TABLE orders VALIDATE CONSTRAINT orders_user_id_not_null;
+-- SET NOT NULL sees the validated CHECK and skips the scan, so its ACCESS EXCLUSIVE lock is brief
+ALTER TABLE orders ALTER COLUMN user_id SET NOT NULL;
+ALTER TABLE orders DROP CONSTRAINT orders_user_id_not_null;
 
 -- SAFE: Adding a foreign key constraint (same NOT VALID pattern)
 ALTER TABLE orders ADD CONSTRAINT fk_orders_users
@@ -310,7 +321,63 @@ Note that `--critical-load` is categorically different from `--max-load` despite
 name: one pauses and resumes automatically, the other aborts the migration and leaves you to
 restart it. Setting them to the same value gives you a migration that dies instead of waiting.
 
-### 6.4 Testing Migrations in CI
+### 6.4 PostgreSQL Online Schema Tools: pgroll, Reshape, and Atlas
+
+MySQL needed gh-ost because many MySQL `ALTER TABLE` forms copy the table. PostgreSQL does most additive DDL without a rewrite (metadata-only `ADD COLUMN`, `CREATE INDEX CONCURRENTLY`, `NOT VALID` constraints), so the hard part on PostgreSQL is different: during a breaking change (rename, type change, a new NOT NULL), the old and new application versions run at the same time against one schema. Two tool families address it.
+
+**Versioned-view tools (pgroll, Reshape)** run expand-contract for you. pgroll (Xata, Apache-2.0, release v0.16.3) reads a JSON migration file:
+
+```json
+{
+  "name": "02_user_email_not_null",
+  "operations": [
+    {
+      "alter_column": {
+        "table": "users",
+        "column": "email",
+        "nullable": false,
+        "up": "SELECT CASE WHEN email IS NULL THEN 'unknown@example.com' ELSE email END",
+        "down": "email"
+      }
+    }
+  ]
+}
+```
+
+```bash
+pgroll init                                    # create pgroll's state schema once
+pgroll start 02_user_email_not_null.json       # expand: new column, views, triggers, backfill
+#   --backfill-batch-size / --backfill-batch-delay throttle the backfill
+#   --lock-timeout (default 500 ms) bounds every DDL lock wait
+pgroll complete                                # contract: drop old schema, triggers, old column
+pgroll rollback                                # or: drop the new version, old one untouched
+```
+
+```
+  app v1: search_path=public_01_init       app v2: search_path=public_02_user_email_not_null
+             |                                           |
+             v                                           v
+  +--------------------------+               +--------------------------+
+  | view users               |               | view users               |
+  |   email -> old column    |               |   email -> new column    |
+  +--------------------------+               +--------------------------+
+               \                                       /
+                v                                     v
+         +--------------------------------------------------+
+         | physical table users                             |
+         |   old email (nullable)   new email (NOT NULL)    |
+         |   trigger: v1 writes run "up", v2 writes "down"  |
+         +--------------------------------------------------+
+   pgroll complete: drop the v1 schema and triggers, rename the new column to email
+```
+
+*Each app version reads and writes through its own schema of views, and triggers keep both physical columns in step until `complete` removes the old side.*
+
+`pgroll start` adds the new column, creates a schema named after the migration that holds one view per table, installs triggers that apply `up` to writes from old clients and `down` to writes from new clients, and backfills existing rows in batches. Old pods keep their `search_path`; new pods connect with `SET search_path TO 'public_02_user_email_not_null'` (in HikariCP, `connectionInitSql`). Rollback before `complete` is a schema drop with no data loss. Reshape uses the same design (`reshape migration start`, `complete`, `abort`, with the schema picked through `search_path`). The costs: every connection must set the right `search_path`, triggers add write cost on the affected tables until `complete`, and the tool owns the migration history, so it replaces Flyway for that schema rather than running beside it.
+
+**Declarative tools (Atlas)** start from the desired schema instead of a list of steps. `atlas schema apply` diffs an HCL or SQL schema file against the live database and plans the DDL; `atlas migrate diff` writes the same plan out as versioned SQL files for a Flyway-style flow. `atlas migrate lint` checks those files in CI for destructive changes, backward-incompatible changes, data-dependent changes, and table locks or rewrites, with `--atlas:nolint` to suppress checks on one statement or a whole file; since v0.38 lint is not in the free Starter plan, so it needs Atlas Pro or the Apache-2.0 community build. Atlas plans the DDL but does not keep two app versions working, so it pairs with expand-contract rather than replacing it.
+
+### 6.5 Testing Migrations in CI
 
 ```java
 // Spring Boot test: run migrations against in-memory H2 or Testcontainers PostgreSQL
@@ -326,14 +393,16 @@ class MigrationTest {
     }
 }
 
-// Testcontainers for real PostgreSQL behavior:
+// Testcontainers 2.x (testcontainers-postgresql) for real PostgreSQL behavior:
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
 @TestConfiguration
 public class TestDatabaseConfig {
 
     @Bean
     @Primary
     public DataSource testDataSource() {
-        PostgreSQLContainer<?> container = new PostgreSQLContainer<>("postgres:15")
+        PostgreSQLContainer container = new PostgreSQLContainer("postgres:17")
             .withDatabaseName("testdb")
             .withUsername("test")
             .withPassword("test");
@@ -375,6 +444,7 @@ void v15MigrationAddsPhoneNumberColumn() {
 |----------|---------|------------|------|---------|
 | Simple ALTER TABLE | Seconds to minutes (lock) | Low | Medium | Small tables (<1M rows) |
 | Expand-contract | Zero | High | Low | Any size, production |
+| pgroll / Reshape (versioned views) | Zero | Medium | Low | PostgreSQL breaking change with two app versions live |
 | gh-ost / pt-osc | Zero | Medium | Medium | Large MySQL tables |
 | Blue-green DB | Minutes (cutover) | Very high | High | Major restructuring |
 
@@ -407,6 +477,8 @@ void v15MigrationAddsPhoneNumberColumn() {
 
 **Long-running migration holding a transaction**: Running a migration that updates millions of rows in a single transaction (`UPDATE users SET ... WHERE TRUE`) holds a transaction open for minutes, blocking other operations. Break large data migrations into batches with committed transactions between batches.
 
+**Finishing a PostgreSQL 18 NOT VALID NOT NULL with SET NOT NULL**: On PostgreSQL 18, a team added `ADD CONSTRAINT nn NOT NULL user_id NOT VALID` to a 400M-row table, then copied the PG 12 to 17 recipe and ran `ALTER COLUMN user_id SET NOT NULL` as the last step. On a column with an invalid not-null constraint, `SET NOT NULL` validates it, and it does so while holding ACCESS EXCLUSIVE, so every read and write on the table queued for the length of the scan. Fix: finish with `VALIDATE CONSTRAINT nn`, which scans under SHARE UPDATE EXCLUSIVE and lets traffic continue; use the CHECK-then-`SET NOT NULL` sequence only on PostgreSQL 12 to 17.
+
 **Running migrations from multiple application instances simultaneously**: When deploying to a cluster, multiple instances may attempt to run Flyway simultaneously. Flyway uses an advisory lock (or lock table row) to prevent concurrent migration runs. However, if the lock mechanism fails or is bypassed (e.g., two separate schema-creation scripts), migrations can be duplicated or corrupted. Ensure only one instance runs Flyway on startup (e.g., run migrations in the Kubernetes init container, not in all pod startups).
 
 ---
@@ -420,11 +492,14 @@ void v15MigrationAddsPhoneNumberColumn() {
 | gh-ost | GitHub's online MySQL schema tool |
 | pt-online-schema-change | Percona's MySQL online schema change |
 | `pg_repack` | PostgreSQL online table/index defragmentation |
+| pgroll | PostgreSQL expand-contract through versioned view schemas, sync triggers, and batched backfill (Xata, Apache-2.0) |
+| Reshape | PostgreSQL zero-downtime migrations with the same views-per-migration and `search_path` design |
+| Atlas | Declarative schema-as-code (`atlas schema apply`), versioned diff generation, and `atlas migrate lint` CI checks |
 | `flyway migrate` | CLI or Maven/Gradle plugin |
 | `liquibase update` | CLI or build plugin |
 | Testcontainers | Real DB for migration testing in CI |
 | `pg_dump --schema-only` | Export schema for review |
-| `ALTER TABLE ... NOT VALID` | PostgreSQL constraint without full table scan |
+| `ALTER TABLE ... NOT VALID` | PostgreSQL FOREIGN KEY, CHECK, and (PostgreSQL 18+) NOT NULL constraint without a full scan at creation |
 
 ---
 
@@ -456,9 +531,14 @@ Flyway maintains a `flyway_schema_history` table in the target database. Each ro
 Versioned migrations (V1__, V2__) are applied once, in order, and never re-applied. Repeatable migrations (R__views.sql) are re-applied whenever their checksum changes. Use repeatable for database objects that should always reflect their latest definition: views, stored procedures, functions, and seed data. Every time R__views.sql changes, Flyway re-runs it, replacing the previous version of the views.
 
 **Q: How do you safely add a NOT NULL column to a large table?**
-**Short:** Add the column nullable, backfill in batches, then add the NOT NULL constraint as NOT VALID before validating it separately.
+**Short:** Add it nullable and backfill in batches; then on PostgreSQL 18 add NOT NULL ... NOT VALID and VALIDATE it, or on 12 to 17 validate a CHECK before SET NOT NULL.
 
-Direct ALTER TABLE ADD COLUMN NOT NULL DEFAULT X requires rewriting the entire table in older databases. PostgreSQL 11+ makes this metadata-only if there is a DEFAULT. For other databases or NULL-with-backfill scenarios: (1) Add the column as nullable: `ALTER TABLE t ADD COLUMN new_col TYPE`. (2) Backfill in batches: `UPDATE t SET new_col = default_val WHERE new_col IS NULL LIMIT 10000` (repeat until done). (3) Add NOT NULL constraint as NOT VALID (no lock): `ALTER TABLE t ADD CONSTRAINT chk_not_null CHECK (new_col IS NOT NULL) NOT VALID`. (4) Validate: `ALTER TABLE t VALIDATE CONSTRAINT chk_not_null` (ShareUpdateExclusiveLock, allows reads/writes).
+If one constant default fits every existing row, PostgreSQL 11+ makes `ALTER TABLE t ADD COLUMN new_col TYPE NOT NULL DEFAULT x` metadata-only, with no rewrite. Otherwise: (1) Add the column as nullable: `ALTER TABLE t ADD COLUMN new_col TYPE`. (2) Backfill in batches keyed on the primary key, because PostgreSQL `UPDATE` has no `LIMIT`: `UPDATE t SET new_col = default_val WHERE id IN (SELECT id FROM t WHERE new_col IS NULL LIMIT 10000)` (repeat until 0 rows). (3) On PostgreSQL 18+, add the constraint as NOT VALID, which takes a brief ACCESS EXCLUSIVE lock and no scan: `ALTER TABLE t ADD CONSTRAINT nn NOT NULL new_col NOT VALID`, with `SET lock_timeout = '2s'` first so it cannot queue traffic behind a long transaction. (4) Validate it: `ALTER TABLE t VALIDATE CONSTRAINT nn` scans under SHARE UPDATE EXCLUSIVE, so reads and writes continue. On PostgreSQL 12 to 17, NOT VALID is not allowed on NOT NULL, so steps 3 and 4 use `CHECK (new_col IS NOT NULL) NOT VALID` and `VALIDATE CONSTRAINT`, then `ALTER COLUMN new_col SET NOT NULL`, which sees the validated CHECK and skips the scan, then drop the CHECK.
+
+**Q: On PostgreSQL 18, why must a NOT VALID NOT NULL constraint be finished with VALIDATE CONSTRAINT rather than SET NOT NULL?**
+**Short:** SET NOT NULL validates an invalid not-null constraint while holding ACCESS EXCLUSIVE, blocking all traffic during the scan; VALIDATE CONSTRAINT scans under SHARE UPDATE EXCLUSIVE.
+
+PostgreSQL 18 stores not-null constraints in `pg_constraint` and lets `ADD CONSTRAINT nn NOT NULL col NOT VALID` skip the initial scan. The PostgreSQL 18 `ALTER TABLE` docs say that if a column has an invalid not-null constraint, `SET NOT NULL` validates it, and `ALTER COLUMN ... SET NOT NULL` holds an ACCESS EXCLUSIVE lock, so the full-table scan runs with every read and write on the table blocked. On a 400M-row table that can be minutes of total outage. `VALIDATE CONSTRAINT nn` does the same scan under SHARE UPDATE EXCLUSIVE, which conflicts only with VACUUM, ANALYZE, `CREATE INDEX CONCURRENTLY`, and other DDL, because concurrent transactions already enforce the constraint on rows they write. The trap comes from the PostgreSQL 12 to 17 recipe, where `SET NOT NULL` is the correct last step because the validated CHECK lets it skip the scan. On 18, end with `VALIDATE CONSTRAINT` and drop the `SET NOT NULL` step.
 
 **Q: How would you rename a column with zero downtime?**
 **Short:** Rename via expand-contract: add the new column, dual-write, backfill, cut reads over, then drop the old column.
@@ -469,6 +549,16 @@ Use expand-contract: (1) Add the new column name. (2) Update application code to
 **Short:** gh-ost copies rows into a ghost table while replaying the binlog to sync it, then atomically swaps table names.
 
 gh-ost creates a "ghost" table with the desired new schema, copies rows from the original table to the ghost table, and simultaneously applies changes from MySQL's binary log (binlog) to keep the ghost table in sync. When the copy and sync are complete, gh-ost atomically swaps the original and ghost table names. Unlike triggers (used by pt-osc), gh-ost reads the binlog independently — no write amplification from triggers. It includes throttling mechanisms (pause on high load, replica lag) to prevent impacting production traffic.
+
+**Q: How does pgroll let the old and new application versions run against one PostgreSQL database during a breaking change?**
+**Short:** pgroll exposes each schema version as its own schema of views over the physical tables, and triggers sync the old and new columns until pgroll complete drops the old version.
+
+`pgroll start migration.json` makes only additive physical changes: for an `alter_column` that sets NOT NULL or changes a type, it adds a new column next to the old one. It then creates a schema named after the migration (for example `public_02_user_email_not_null`) containing one view per table, so the new version sees the new column under the original name, while the previous version's schema still maps to the old column. Triggers run the migration's `up` SQL on writes from old clients and `down` on writes from new clients, and existing rows are backfilled in batches (`--backfill-batch-size`, `--backfill-batch-delay`). Each app version chooses its schema with `search_path`. `pgroll complete` drops the old schema, the triggers, and the old column and renames the new one; `pgroll rollback` drops the new version and leaves the old untouched. DDL runs with a 500 ms `lock_timeout` by default, so a lock wait fails fast instead of stalling traffic. The cost is that every connection must set `search_path` and writes pay trigger overhead until `complete`.
+
+**Q: When does a declarative schema tool such as Atlas fit better than hand-written Flyway migrations?**
+**Short:** When many schemas or teams make hand-written DDL hard to review: Atlas plans DDL from a desired-state schema and lints it in CI for destructive, locking, and breaking changes.
+
+Hand-written Flyway files work well when one team owns one schema and reviewers read every `ALTER TABLE`. Atlas starts from the desired schema (HCL or SQL): `atlas schema apply` diffs it against the live database and plans the DDL, and `atlas migrate diff` writes that plan out as versioned files, so the history stays reviewable. `atlas migrate lint` then checks the files in CI for destructive changes (dropped columns or tables), backward-incompatible changes, data-dependent changes, and table locks or rewrites, and fails the build unless a statement or file opts out with `--atlas:nolint`; since v0.38 lint is not in the free Starter plan, so it needs Atlas Pro or the Apache-2.0 community build. This pays off with dozens of services or tenants where reviewers miss a lock-heavy statement. It does not replace expand-contract: Atlas can generate a rename as one `ALTER`, and keeping the old app version working is still a sequencing decision that pgroll or a manual expand-contract plan has to make.
 
 **Q: How do you test database migrations in a CI pipeline?**
 **Short:** Test migrations with a real database via Testcontainers, covering schema structure, data transformation, rollback, and performance.
@@ -520,7 +610,7 @@ The `out-of-order` setting controls whether Flyway will apply a migration whose 
 - Run migrations from a single init container or migration job, not from each application instance.
 - Include migration tests in CI with Testcontainers running the real database engine.
 - Break large data migrations (UPDATE ALL rows) into batches of 1,000–10,000 rows with COMMIT between batches.
-- Add NOT NULL constraints as NOT VALID first, then validate separately to avoid table locks.
+- On PostgreSQL 18+, add NOT NULL constraints as NOT VALID and finish with `VALIDATE CONSTRAINT`; on 12 to 17, validate a CHECK first and then `SET NOT NULL`.
 - Document each migration's purpose with a comment at the top of the SQL file.
 
 ---
@@ -550,7 +640,8 @@ CREATE INDEX CONCURRENTLY idx_orders_buyer_name ON orders(buyer_name);
 -- Phase 2: Backfill in batches (run separately, not in one migration transaction)
 -- (This migration calls a custom Flyway Java callback that does batched updates)
 -- Or: use a separate batch job outside migration:
--- UPDATE orders SET buyer_name = customer_name WHERE buyer_name IS NULL LIMIT 10000;
+-- UPDATE orders SET buyer_name = customer_name
+--   WHERE id IN (SELECT id FROM orders WHERE buyer_name IS NULL LIMIT 10000);
 -- (repeat 20,000 times for 200M rows, ~2 rows/ms = ~28 hours for 200M)
 ```
 

@@ -207,7 +207,7 @@ C3 merge step-by-step:
   L(D) = D + merge(L(B), L(C), [B, C])
   L(B) = [B, A, object]
   L(C) = [C, A, object]
-  
+
   Step 1: head=B, not in tail of any list -> take B
           remaining: [A, object], [C, A, object], [C]
   Step 2: head=A, A is in tail of [C, A, object] -> skip; try C
@@ -703,7 +703,7 @@ print(plugin.process())  # processing json
 
 **dataclasses** [3.7] generate `__init__`, `__repr__`, `__eq__`, and optionally `__hash__`, `__lt__`, and `__slots__` [3.10] based on field annotations. The `frozen=True` option generates `__setattr__` and `__delattr__` that raise `FrozenInstanceError`, making instances hashable without explicit `__hash__`.
 
-**`functools.lru_cache`** relies on arguments being hashable (via `__hash__`). Passing unhashable arguments (lists, dicts) raises `TypeError` at call time, not at decoration time.
+**`functools.lru_cache`** relies on arguments being hashable (via `__hash__`). Passing unhashable arguments (lists, dicts) raises `TypeError` at call time, not at decoration time. Pass a `tuple` or a `frozendict` `[3.15]` instead; see [Collections and Data Structures](../collections_and_data_structures/collections_and_data_structures.md).
 
 **NamedTuple** sets `__slots__ = ()` and generates `__repr__`, `__getnewargs__` and the field-name properties, inheriting `__eq__` and `__hash__` from `tuple`. A three-field named tuple measures 72 bytes per instance against 96 for the equivalent plain class — 25% smaller — but 56-byte `__slots__` classes beat it, because a tuple stores an `ob_size` and pays 16-byte allocation granularity.
 

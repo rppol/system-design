@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
-> **Version anchor (2026-09-04).** **Kubernetes v1.37 "Garhwal"** (2026-08-26) is current; **v1.36 "Haru"** (2026-04-22) is the prior minor. **User namespaces** (`hostUsers: false`) reached **stable/GA in v1.36** (beta and on-by-default since v1.33). `ValidatingAdmissionPolicy` has been **stable since v1.30**; `MutatingAdmissionPolicy` reached **stable and enabled-by-default in v1.36**, removing the feature gate. The OCI **image volume source** (mounting an OCI artifact as a read-only volume) reached **GA in v1.36** (alpha v1.31, beta v1.32). Every version-tagged claim on this page is checked against these anchors.
+> **Version anchor (2026-10-19).** **Kubernetes v1.37 "Garhwal"** (2026-08-26) is current; **v1.36 "Haru"** (2026-04-22) is the prior minor. **User namespaces** (`hostUsers: false`) reached **stable/GA in v1.36** (beta and on-by-default since v1.33). `ValidatingAdmissionPolicy` has been **stable since v1.30**; `MutatingAdmissionPolicy` reached **stable and enabled-by-default in v1.36**, removing the feature gate. The OCI **image volume source** (mounting an OCI artifact as a read-only volume) reached **GA in v1.36** (alpha v1.31, beta v1.32). In v1.37, **Pod certificates** and **ClusterTrustBundles** reached **stable**, and **manifest-based admission configuration** (`staticManifestsDir`, KEP-5793) reached **beta, on by default**. Every version-tagged claim on this page is checked against these anchors.
 
 A Kubernetes cluster is a large attack surface: an API server, thousands of credentials (ServiceAccount tokens), Secrets, a shared kernel across tenants, and a network where everything talks to everything by default. Securing it means defense in depth across four planes — **authentication/authorization (RBAC)**, **workload hardening (Pod Security, securityContext)**, **network segmentation (NetworkPolicy)**, and **secrets + admission control**. This is among the most-tested DevOps interview areas.
 
@@ -306,6 +306,31 @@ Every `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` entry de
 
 The `failurePolicy` choice on each webhook is the other half of the tradeoff: `Fail` (the safer default for security-critical policy) means a slow or crashed webhook blocks **every** matching write cluster-wide, turning a webhook outage into a cluster-wide outage; `Ignore` means the same outage silently admits everything the webhook would have rejected. Neither is free — choose per webhook based on whether "reject writes" or "silently stop enforcing" is the safer failure mode for that specific policy, and keep `Fail`-policy webhooks highly available and fast enough that their timeout is never the thing that fires.
 
+### Manifest-based admission configuration (`staticManifestsDir`)
+
+A `ValidatingAdmissionPolicy` stored in the API is an object like any other: anyone whose RBAC allows `delete` on `validatingadmissionpolicies` or its binding can remove the policy, and it does nothing until the API server has read it from etcd. Since v1.37 (beta, `ManifestBasedAdmissionControlConfig` on by default) the API server can also load webhook configurations and CEL policies from files. Point the plugin entry in the `AdmissionConfiguration` passed by `--admission-control-config-file` at a directory:
+
+```yaml
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+- name: ValidatingAdmissionPolicy
+  configuration:
+    apiVersion: apiserver.config.k8s.io/v1
+    kind: ValidatingAdmissionPolicyConfiguration
+    staticManifestsDir: "/etc/kubernetes/admission/policies/"   # absolute path, direct-child .yaml/.yml/.json only
+```
+
+| | API-stored policy | Manifest-loaded policy |
+|---|---|---|
+| Who can remove it | anyone with RBAC `delete` on the policy or binding | only someone who can write files on the control-plane host |
+| Enforced from | after the API server reads it from etcd | API server startup |
+| etcd outage | policy objects cannot be read or changed | keeps enforcing from the files |
+| Visible to `kubectl get` | yes | no; names must end in `.static.k8s.io`, and audit annotations and metrics carry that suffix |
+| Changes | `kubectl apply` | edit the file; a valid change reloads within about a minute, an invalid one keeps the last good set, and an invalid file at startup stops the API server from starting |
+
+Put a policy and its binding in the same file so they reload together. Use the manifest path for the few policies a compromised cluster-admin must not be able to switch off, such as a policy that blocks edits to the API-stored admission objects themselves; keep team-owned policies in the API, where `kubectl apply` and GitOps manage them.
+
 ### KMS v2 envelope encryption — why it replaced v1
 
 KMS v1 called out to the external KMS plugin on **every** Secret write to encrypt a fresh Data Encryption Key (DEK), which is why it needed a configurable DEK cache (`cacheSize`) just to keep write latency and KMS API cost bounded. **KMS v2** removes that tradeoff structurally: it generates one 32-byte random **DEK seed** on API server startup and again only when the KMS plugin reports the remote Key Encryption Key (KEK) has rotated — not on every write. Each individual write still gets its own unique derived key (via HKDF-Expand from that seed, keyed by a per-write random nonce), so no two Secrets ever share literal key material, but deriving a key from an in-memory seed is a cheap, deterministic, memoized CPU operation rather than a network call — which is also why KMS v2 has **no `cacheSize` knob**: there is nothing sized to tune, the seed just lives in memory until the next KEK rotation.
@@ -328,6 +353,7 @@ resources:
 
 - **Bound ServiceAccount tokens** default to `expirationSeconds: 3600` (1 hour) via the `TokenRequest` API and the projected-volume mechanism every Pod uses; the kubelet proactively rotates a token once it has lived past 80% of its TTL, or after 24 hours, whichever comes first. The API server refuses to issue a token with `expirationSeconds` below **600 (10 minutes)** — there is a floor on how short-lived a token can be, so "rotate every few seconds" is not an available knob.
 - Treat a `TokenRequest` audience-bound token (scoped to one API via `audiences:`) as the default for any workload that calls an external service — an unaudienced token is valid wherever the issuer is trusted, while an audience-scoped one is worthless if exfiltrated to anywhere else.
+- **Pod certificates** (stable in v1.37): the signer sets `status.beginRefreshAt` on each `PodCertificateRequest` and the kubelet generates a new key and requests a new certificate when that time passes; the API caps third-party signer lifetimes at **91 days**. See [workload_identity_and_federation](workload_identity_and_federation.md).
 - Client-certificate authentication (kubeadm-issued control-plane and kubelet client certs) has no equivalent short default — treat any long-lived cert credential as the weaker option versus a bound, auto-rotated token wherever the client can use one.
 
 ---
@@ -402,6 +428,7 @@ roleRef: {kind: ClusterRole, name: cluster-admin, apiGroup: rbac.authorization.k
 | RBAC (Roles/Bindings) | Authorization |
 | Pod Security Admission | Built-in PSS enforcement |
 | ValidatingAdmissionPolicy / MutatingAdmissionPolicy | In-tree CEL admission policy — no webhook to run, no availability risk |
+| `staticManifestsDir` in AdmissionConfiguration | Load webhook configs and CEL policies from files on the control-plane host; enforced from startup, not deletable through the API |
 | OPA Gatekeeper / Kyverno | Custom admission policy where CEL isn't enough (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)) |
 | kube-bench | CIS Benchmark auditing |
 | Trivy / Grype | Image + cluster CVE scanning |
@@ -415,79 +442,79 @@ roleRef: {kind: ClusterRole, name: cluster-admin, apiGroup: rbac.authorization.k
 
 ## 12. Interview Questions with Answers
 
-**Q1: How does authentication work in Kubernetes — is there a user database?**
+**Q: How does authentication work in Kubernetes — is there a user database?**
 **Short:** No — Kubernetes has no built-in user store; the API server authenticates via external mechanisms like client certs, OIDC tokens, or ServiceAccount tokens.
 No — Kubernetes has no built-in user store. The API server authenticates requests via external mechanisms: client certificates, OIDC tokens (from an IdP), bearer tokens, or ServiceAccount tokens (for workloads). It extracts a username and groups from the credential and hands those to authorization. "Users" are an external concept; only ServiceAccounts are first-class API objects.
 
-**Q2: Explain RBAC: Role vs ClusterRole, RoleBinding vs ClusterRoleBinding.**
+**Q: Explain RBAC: Role vs ClusterRole, RoleBinding vs ClusterRoleBinding.**
 **Short:** A Role/RoleBinding grant permissions within one namespace, a ClusterRole/ClusterRoleBinding grant them cluster-wide, and RBAC is default-deny until bound.
 A Role grants permissions within a single namespace; a ClusterRole grants them cluster-wide or for cluster-scoped resources. A RoleBinding grants a Role's (or ClusterRole's) permissions to subjects *within a namespace*; a ClusterRoleBinding grants a ClusterRole cluster-wide. RBAC is default-deny — subjects have no permissions until bound. The dangerous combination is binding broad ClusterRoles (especially `cluster-admin`) to widely-used subjects.
 
-**Q3: Why is the ServiceAccount token the most dangerous default credential?**
+**Q: Why is the ServiceAccount token the most dangerous default credential?**
 **Short:** Every Pod auto-mounts its namespace's default ServiceAccount token, so a compromised Pod inherits whatever RBAC that SA has, making over-privileged SAs a direct escalation path.
 By default every Pod auto-mounts its namespace's `default` ServiceAccount token at a known path. If the Pod is compromised, the attacker has that token and can call the API server with whatever RBAC the SA has. If the SA is over-privileged (or `default` was granted broad rights), this is direct cluster escalation. Mitigate by `automountServiceAccountToken: false` where unneeded and scoping every SA's RBAC to least privilege.
 
-**Q4: What is a hardened securityContext?**
+**Q: What is a hardened securityContext?**
 **Short:** A hardened securityContext runs as non-root, disallows privilege escalation, uses a read-only root filesystem, drops all capabilities, and applies RuntimeDefault seccomp.
 `runAsNonRoot: true` with a non-zero `runAsUser`; `allowPrivilegeEscalation: false`; `readOnlyRootFilesystem: true` (with writable `emptyDir` for `/tmp`); `capabilities.drop: ["ALL"]` adding back only what's required (e.g., `NET_BIND_SERVICE`); `seccompProfile: RuntimeDefault`; never `privileged: true`. Together these ensure a code-execution exploit in the container has minimal local power and can't trivially escape.
 
-**Q5: What replaced PodSecurityPolicy and how does it work?**
+**Q: What replaced PodSecurityPolicy and how does it work?**
 **Short:** Pod Security Admission, enforced per namespace via labels with three built-in Privileged/Baseline/Restricted profiles, is simpler but less flexible than PSP was.
 Pod Security Admission (PSA) with Pod Security Standards (Privileged/Baseline/Restricted), enforced per namespace via labels (`pod-security.kubernetes.io/enforce: restricted`). PSP was removed in 1.25 because it was hard to use and inconsistent. PSA is simpler (three built-in profiles, with `warn`/`audit` modes for safe rollout) but less flexible. For custom rules, reach first for the in-tree CEL policies — a `ValidatingAdmissionPolicy` plus a `ValidatingAdmissionPolicyBinding` in `admissionregistration.k8s.io/v1`, which run inside the API server with no webhook to deploy — and layer OPA Gatekeeper or Kyverno when you need policy logic, external data, or reporting that CEL alone can't express.
 
-**Q6: Are Kubernetes Secrets encrypted? How do you actually protect them?**
+**Q: Are Kubernetes Secrets encrypted? How do you actually protect them?**
 **Short:** Secrets are only base64-encoded plaintext in etcd by default, so protect them with KMS envelope encryption, tight RBAC, or an external store like Vault.
 By default Secrets are only base64-encoded and stored as plaintext in etcd — anyone with `get secrets` RBAC or etcd access can read them. To protect them: enable encryption-at-rest with a KMS provider (envelope encryption) so etcd holds ciphertext; tightly scope RBAC on secrets; and prefer an external store (Vault) via the External Secrets Operator so the sensitive material never lives in etcd at all.
 
-**Q7: How do admission controllers enforce security, and what's the risk?**
+**Q: How do admission controllers enforce security, and what's the risk?**
 **Short:** Mutating then validating webhooks intercept requests after authn/authz to reject non-compliant objects, but a slow or down webhook can block or silently allow writes.
 After authn/authz, mutating then validating admission webhooks intercept the request before persistence. Validating webhooks (Gatekeeper/Kyverno/PSA) reject non-compliant objects — e.g., Pods running as root, missing limits, or using unsigned images. The risk: a slow or unavailable webhook can block all writes (if `failurePolicy: Fail`) or silently allow violations (if `Ignore`), so webhook latency, availability, and failure policy must be designed carefully. That risk is the reason to express what you can as a `ValidatingAdmissionPolicy` or `MutatingAdmissionPolicy` instead: those evaluate CEL inside the API server itself, so there is no extra Deployment to keep highly available and no network hop in the write path.
 
-**Q8: How do you avoid storing long-lived cloud credentials in the cluster?**
+**Q: How do you avoid storing long-lived cloud credentials in the cluster?**
 **Short:** Workload identity federation like EKS IRSA or GKE Workload Identity binds a ServiceAccount to a cloud IAM role via OIDC, issuing short-lived rotated credentials with no static keys.
 Use workload identity federation: EKS IRSA or GKE Workload Identity bind a Kubernetes ServiceAccount to a cloud IAM role via a projected OIDC token. The Pod assumes the role and gets short-lived, automatically-rotated cloud credentials — no static access keys in Secrets to leak. This eliminates the most commonly exfiltrated secret type. On EKS there are two supported bindings: IRSA, where the IAM role's trust policy names the cluster's OIDC provider, and EKS Pod Identity, where an association maps a ServiceAccount to a role and EKS itself owns the trust relationship — the latter is the simpler choice for new clusters because one role works across clusters without per-cluster trust-policy edits.
 
-**Q9: How does NetworkPolicy contribute to security?**
+**Q: How does NetworkPolicy contribute to security?**
 **Short:** NetworkPolicy lets you default-deny the otherwise-flat Pod network and explicitly allow only required flows, containing a compromised Pod's lateral movement.
 By default all Pods can talk to all Pods (flat network), enabling lateral movement after a breach. NetworkPolicy lets you default-deny and explicitly allow only required flows (e.g., api→db on 5432), containing a compromised Pod. It's only enforced if the CNI supports it (Calico/Cilium). Remember to allow DNS egress when default-denying egress (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)).
 
-**Q10: What's the difference between Baseline and Restricted Pod Security Standards?**
+**Q: What's the difference between Baseline and Restricted Pod Security Standards?**
 **Short:** Baseline blocks known privilege escalations while staying broadly compatible, while Restricted additionally requires non-root, drops all capabilities, and restricts volume types.
 Baseline blocks known privilege escalations (no host namespaces, no privileged containers, no hostPath) while staying broadly compatible — a sane default for most apps. Restricted is hardened further: requires non-root, drops all capabilities, requires seccomp `RuntimeDefault`, disallows privilege escalation, and restricts volume types — appropriate for security-sensitive or multi-tenant workloads, at the cost of needing apps to be well-behaved.
 
-**Q11: How would you secure a multi-tenant cluster?**
+**Q: How would you secure a multi-tenant cluster?**
 **Short:** Layer namespace-per-tenant Restricted PSA, default-deny NetworkPolicy, per-tenant RBAC, resource quotas, and sandboxed runtimes for untrusted workloads.
 Layer controls: namespace-per-tenant with Restricted PSA; default-deny NetworkPolicy with explicit allows; per-tenant RBAC (no cross-namespace access); ResourceQuotas/LimitRanges to prevent resource starvation; separate node pools or sandboxed runtimes (gVisor/Kata) for untrusted workloads; encrypted secrets with tenant-scoped RBAC; and admission policy (Gatekeeper/Kyverno) enforcing all of it. For strong isolation (hostile tenants), separate clusters beat soft multi-tenancy.
 
-**Q12: How do you detect a compromise at runtime?**
+**Q: How do you detect a compromise at runtime?**
 **Short:** Runtime tools like Falco or Tetragon watch syscalls and events via eBPF, alerting on suspicious behavior such as a spawned shell or unexpected outbound connections.
 Runtime security tools like Falco or Tetragon (eBPF) watch syscalls/events and alert on suspicious behavior — a shell spawned in a container, writes to sensitive paths, unexpected outbound connections, or privilege escalation attempts. They complement preventive controls (which reduce the chance of breach) by detecting the breaches that get through, feeding alerts into incident response.
 
-**Q13: What is the principle of least privilege in a Kubernetes context, concretely?**
+**Q: What is the principle of least privilege in a Kubernetes context, concretely?**
 **Short:** Every identity — ServiceAccounts, containers, network flows — gets only the narrow permissions it actually needs, verified with `kubectl auth can-i --list`.
 Every identity gets the minimum it needs: ServiceAccounts bound to narrow Roles (specific verbs on specific resources, even `resourceNames`), `automountServiceAccountToken: false` when the app doesn't call the API, containers with dropped capabilities and non-root users, NetworkPolicies allowing only required flows, and no use of `cluster-admin` for workloads. You verify it with `kubectl auth can-i --list --as=<sa>`.
 
-**Q14: How do you audit a cluster's security posture?**
+**Q: How do you audit a cluster's security posture?**
 **Short:** Run `kube-bench` for CIS compliance, `kubectl auth can-i` for effective permissions, image scanning, and checks for root/privileged Pods and encryption.
 Run `kube-bench` for CIS Benchmark compliance (control-plane and node config); enumerate dangerous bindings (`grep cluster-admin` in ClusterRoleBindings); use `kubectl auth can-i` to test effective permissions; scan images and running workloads with Trivy/Grype; check for Pods running as root/privileged; verify encryption-at-rest and audit logging are enabled; and review NetworkPolicy coverage. Continuous scanning (in CI and runtime) beats point-in-time audits.
 
-**Q15: What's "assume breach" and how does it shape design?**
+**Q: What's "assume breach" and how does it shape design?**
 **Short:** It architects the cluster to minimize what a compromised container can achieve, layering non-root, least-privilege RBAC, default-deny networking, and runtime detection.
 It's the assumption that a container *will* be compromised, so you architect to minimize what that achieves rather than only trying to prevent it. Concretely: non-root + read-only + dropped caps (limit local damage), least-privilege RBAC + no auto-mounted token (limit cluster access), default-deny NetworkPolicy (limit lateral movement), encrypted/external secrets (limit data theft), and runtime detection (catch what gets through). Defense in depth so no single failure is catastrophic.
 
-**Q16: Three admission webhooks each set `timeoutSeconds: 10`. What's actually at risk, and how do you budget for it?**
+**Q: Three admission webhooks each set `timeoutSeconds: 10`. What's actually at risk, and how do you budget for it?**
 **Short:** Webhook timeouts in the same admission phase are additive, so three webhooks at the 10-second default can add up to 30 seconds of latency, or an outage, to every write.
 Each webhook's timeout applies independently and they run in sequence within their phase (mutating, then validating), so the worst case is additive: three webhooks at the unset default of 10 seconds is up to 30 seconds of added latency on a single write, and any one of them stalling or crashing hits whatever `failurePolicy` says — `Fail` blocks every matching write cluster-wide, `Ignore` silently stops enforcing the policy the webhook exists to check. Budget by setting each webhook's `timeoutSeconds` (1-30 range) to the smallest value its own logic needs, choosing `failurePolicy` per webhook based on which failure mode — a blocked cluster or a silently unenforced policy — is worse for that specific check, and moving what you can to a `ValidatingAdmissionPolicy`/`MutatingAdmissionPolicy`, which has no timeout budget to spend because it never leaves the API server process.
 
-**Q17: Why did Kubernetes replace KMS v1 with KMS v2 for Secrets encryption?**
+**Q: Why did Kubernetes replace KMS v1 with KMS v2 for Secrets encryption?**
 **Short:** KMS v1 called the external KMS on every write to get a fresh key, while KMS v2 derives a per-write key locally from a seed cached until the next KEK rotation.
 KMS v1 generated a brand-new Data Encryption Key (DEK) for every Secret write and had to call the external KMS plugin over the network each time, which is why it needed a configurable DEK cache just to bound latency and KMS API cost. KMS v2 generates one random DEK seed at API server startup (and again only on a reported Key Encryption Key rotation), then derives a unique per-write key from that seed locally via HKDF — a cheap, deterministic, memoized computation instead of a network round trip — which is also why KMS v2 has no `cacheSize` knob to tune. The practical effect: KMS v2 removes the KMS-call-per-write bottleneck entirely while still giving every Secret its own unique key material.
 
-**Q18: Why is a pod-level user namespace a stronger control than `runAsNonRoot`, and what does it require?**
+**Q: Why is a pod-level user namespace a stronger control than `runAsNonRoot`, and what does it require?**
 **Short:** runAsNonRoot only blocks UID 0 in the host's own UID space, while a user namespace maps in-container UIDs to unprivileged host UIDs, so even root-in-container has no host privilege.
 `runAsNonRoot` forbids UID 0 inside the container, but the container's UID namespace is still the host's — a container running as UID 1000 is genuinely host UID 1000. `hostUsers: false` (stable in v1.36) instead gives the pod its own UID/GID namespace, mapping a 65,536-wide block per pod to unprivileged host UIDs, so a container can run as UID 0 internally while that UID resolves to an unprivileged, non-overlapping host identity — a kernel exploit or capability leak inherits no real host privilege. It needs a runtime that understands the mapping (containerd 2.0+/CRI-O 1.25+ — an older runtime silently ignores the field) and a kernel new enough for idmapped mounts (5.19+, 6.3+ for full overlayfs support), and it cannot be combined with `hostNetwork`/`hostPID`/`hostIPC` on the same pod.
 
-**Q19: Pods can now mount an OCI artifact directly as a volume. What's the new security surface, and how do you treat it?**
+**Q: Pods can now mount an OCI artifact directly as a volume. What's the new security surface, and how do you treat it?**
 **Short:** An OCI-artifact volume is pulled and trusted the same way a container image is, so it needs the same pull-auth, provenance, and admission-policy coverage as any container image.
 The `image` volume source (GA in v1.36) lets a Pod mount an OCI artifact — config, model weights, static data — as a read-only volume without baking it into the container image, which means whoever controls that registry entry controls what the workload sees on disk just as surely as whoever controls a container image controls what it runs. Treat it identically: require pull secrets/registry auth the same as any image reference, verify signatures/provenance before trusting it, and confirm your admission policy actually inspects `spec.volumes[].image` — a policy engine that only scans `spec.containers[].image` has a blind spot for artifacts arriving through this newer path, and coverage there deserves the same audit as image-pull policy gets everywhere else.
 

@@ -101,9 +101,9 @@ Stage 2: Instruction fine-tuning
 | LLaVA-1.6 | CLIP ViT-L | LLaMA 7B | 4K | Open; baseline |
 | Llama 4 (Scout/Maverick) | MetaCLIP-based, early fusion | Llama 4 (MoE) | Long (Scout: 10M advertised) | Open; native multimodal pre-training |
 | InternVL3.5 | InternViT | InternLM | Long | Best open-source pure image understanding |
-| GPT-5.6 | Unknown | GPT-5.6 | 1M | Best overall; closed |
-| Gemini 3.1 Pro | Proprietary | Gemini | 1M | Long context; multimodal |
-| Claude Opus 5 / Sonnet 5 | Unknown | Claude Opus 5 / Sonnet 5 | 1M | Best OCR; document understanding |
+| GPT-6 Astra | Unknown | GPT-6 Astra | 1.05M | Closed; text + image input |
+| Gemini 4 Argon | Proprietary | Gemini | 1M | Closed; image, video and audio input |
+| Claude Opus 5.5 / Sonnet 5.5 | Unknown | Claude Opus 5.5 / Sonnet 5.5 | 1M | Closed; OCR and document understanding |
 | Qwen3-VL | ViT | Qwen3 | Long | Multilingual; open; OCR/GUI leader |
 
 ### 4.2 Diffusion Models (Text-to-Image)
@@ -124,10 +124,10 @@ Text conditioning:
 
 Key models:
   Stable Diffusion (Stability AI): open weights; community ecosystem
-  DALL-E 3 (OpenAI): integrated with ChatGPT; high quality
+  GPT Image 2.5 (OpenAI): Sunburst (quality) and Flare (fast); generation + editing
   Midjourney: subscription; best artistic quality
-  Flux (Black Forest Labs): best open-source quality (2024)
-  Imagen (Google): large T5 text encoder; photorealistic
+  Flux (Black Forest Labs): open weights
+  Nano Banana 2.1 (Google): Gemini API image generation + editing
 ```
 
 ```
@@ -171,7 +171,11 @@ Two consequences interviewers like. First, **doubling the prompt length barely c
 
 **Speech-to-Text (ASR):**
 ```
-Whisper (OpenAI):
+gpt-transcribe / gpt-live-transcribe (OpenAI, hosted):
+  gpt-transcribe: files and final Realtime turn transcripts
+  gpt-live-transcribe: low-latency streaming transcription
+
+Whisper (OpenAI, open weights; the architecture walked through below):
   Input: raw audio → mel spectrogram → transformer encoder
   Output: transcribed text (multilingual, with timestamps)
   Architecture: encoder-decoder transformer
@@ -214,20 +218,22 @@ That is the audio budget rule in one sentence: a minute of silence costs exactly
 ```
 Bark (Suno AI): realistic speech with emotion, laughter, music
 ElevenLabs: voice cloning with very little data
-OpenAI TTS: gpt-4-voice; natural, consistent voices
+OpenAI TTS: gpt-4o-mini-tts and tts-1 (shut down 2027-01-06; gpt-realtime-2.1-mini replaces them)
 XTTS (Coqui): open source; voice cloning
 ```
 
 **Native multimodal audio:**
 ```
-GPT-4o (realtime API):
+gpt-realtime-2.1 / GPT-Live 1 (OpenAI), Gemini 3.8 Live (Google):
   Audio input → audio output directly (no text intermediate)
   Captures tone, emotion, non-verbal cues
   Very low latency (sub-second response)
   Enables true voice assistants
+  GPT-Live 1: $0.05/min session fee, billed per second; model and tool use billed separately
+  Gemini 3.8 Live: $0.005/min audio in, $0.018/min audio out
 
-Gemini 1.5 Pro:
-  Audio + video + text in single context
+Gemini 4 Argon:
+  Audio + video + text in a single 1M-token context
   Can analyze hour-long audio recordings
 ```
 
@@ -237,11 +243,12 @@ Gemini 1.5 Pro:
 Video understanding:
   Video-LLaMA: video frames sampled → encoded → LLM
   InternVideo2: 1B video clips pre-training
-  Gemini 1.5 Pro: can process 1-hour video in context
+  Gemini 4 Argon: about 1 hour of video at 1 fps in its 1M context
 
 Video generation:
-  Sora (OpenAI): world model; 1-min realistic video
-  Runway Gen-3: commercial video generation
+  Veo 3.1 (Google): Gemini API text-to-video; $0.40/s at 720p-1080p, Fast $0.10/s at 720p
+  Gemini Omni Flash (Google): video generation and editing; about $0.10/s of 720p
+  Runway: commercial video generation
   CogVideoX: open-source video generation
   Kling, HailuoAI: commercial Asian competitors
 
@@ -249,9 +256,12 @@ Architecture: DiT (Diffusion Transformer) replacing UNet for video
   Apply attention across spatial + temporal dimensions
 ```
 
+OpenAI has no video-generation API: the Videos API and the `sora-2` models shut down on
+2026-09-24, so a hosted video pipeline on these providers runs on Veo 3.1 or Gemini Omni Flash.
+
 **Put simply.** "A video is just a stack of images, so its token cost is `sampled frames x tokens per frame` — and the sampling rate you pick is the only knob standing between a one-hour clip and a blown context window."
 
-This is why "can it process a 1-hour video?" is really a question about frame sampling, not about model capability. Gemini 1.5 Pro's 1M-token context is what buys the headroom.
+This is why "can it process a 1-hour video?" is really a question about frame sampling, not about model capability. Gemini 4 Argon's 1M-token context is what buys the headroom.
 
 | Symbol | What it is |
 |--------|------------|
@@ -259,7 +269,7 @@ This is why "can it process a 1-hour video?" is really a question about frame sa
 | `frames` | `duration_seconds x fps_sample` |
 | `tokens_per_frame` | Whatever the vision encoder emits for one image. 256 at 224x224 with 14x14 patches |
 | `total = frames x tokens_per_frame` | The full video's context bill |
-| context window | The hard ceiling. 1M for Gemini 1.5 Pro; 128K for GPT-4o |
+| context window | The hard ceiling. 1M for Gemini 4 Argon; 1.05M for GPT-6 Astra |
 
 **Walk one example.** One hour of video at 256 tokens per frame:
 
@@ -348,8 +358,8 @@ High-resolution handling:
 
 OCR capability:
   High resolution is critical for text in images
-  Claude 3.5 Sonnet excels at document OCR
-  GPT-4o excels at mathematical expressions in images
+  OCR quality varies by model and document type
+  Compare models on your own scans before choosing one
 ```
 
 **What this actually says.** "Tile the image with square patches and call each tile a token — so the token count is `(image side / patch side)` squared, and it grows with the *area* of the image, not its width."
@@ -428,21 +438,21 @@ Medical multimodal:
 
 ## 7. Real-World Examples
 
-### GPT-4o Vision
-- Processes images up to 20MB
-- "High detail" mode: 4x more tokens, better for dense text/diagrams
+### GPT-6 Astra (Vision)
+- Text + image input, 1.05M-token context, $10/$50 per MTok; GPT-6.1 Sol ($2/$10) and GPT-6 Luna ($0.10/$0.50) take images too
+- High-detail image mode tiles the image: more tokens, better for dense text/diagrams
 - Used for: document processing, accessibility (describe images for visually impaired), medical image analysis, code screenshot debugging
 - Demonstrated: solve math problems from photo of whiteboard
 
-### Claude 3.5 Sonnet (Vision)
-- Best-in-class OCR for documents, forms, tables
-- Accurately extracts text from complex PDFs with mixed layouts
+### Claude Opus 5.5 / Sonnet 5.5 (Vision)
+- OCR for documents, forms, tables; 1M-token context
+- Extracts text from complex PDFs with mixed layouts
 - Used for: legal document review, financial statement analysis, form processing
 - Can describe complex charts and technical diagrams
 
-### Gemini 1.5 Pro
-- 1M token context = process entire movies
-- Needle-in-a-haystack: find a specific frame in a 1-hour video
+### Gemini 4 Argon
+- 1M-token context: about an hour of video sampled at 1 fps (Section 4.4)
+- Takes image, video and audio input in one request
 - Used for: long video analysis, multi-document processing with images
 
 ### Medical Imaging: Med-PaLM M
@@ -457,11 +467,11 @@ Medical multimodal:
 
 | Model | Image Quality | Video | Audio | Context | Open? |
 |-------|-------------|-------|-------|---------|-------|
-| GPT-4o | Excellent | No | Yes | 128K | No |
-| Claude 3.5 | Excellent (OCR) | No | No | 200K | No |
-| Gemini 1.5 Pro | Very good | Yes | Yes | 1M | No |
-| LLaMA 3.2 Vision | Good | No | No | 128K | Yes |
-| InternVL2 | Very good | No | No | 8K | Yes |
+| GPT-6 Astra | Excellent | No | Separate models (gpt-realtime-2.1, gpt-transcribe) | 1.05M | No |
+| Claude Opus 5.5 / Sonnet 5.5 | Excellent (OCR) | No | No | 1M | No |
+| Gemini 4 Argon | Very good | Yes | Yes | 1M | No |
+| Llama 4 Scout | Good | No | No | 10M advertised | Yes |
+| Qwen3-VL | Very good | Yes | No | 256K | Yes |
 
 ---
 
@@ -502,9 +512,9 @@ Pitfall 4 above is the one that surprises teams in production, because an image 
 | Symbol | What it is |
 |--------|------------|
 | `tokens_per_image` | 1,000-4,000 depending on detail mode and resolution (Pitfall 4) |
-| high detail | GPT-4o's mode that tiles the image for fine text — "4x more tokens" per Section 7 |
+| high detail | The API mode that tiles the image for fine text (Section 7) |
 | `n_images` | How many images ride along in one request |
-| context window | 128K for GPT-4o, 200K for Claude 3.5 Sonnet, 1M for Gemini 1.5 Pro |
+| context window | 1M for Claude Opus 5.5 / Sonnet 5.5 and Gemini 4 Argon, 1.05M for GPT-6 Astra; the example below uses a 128K window |
 | headroom | What is left for the system prompt, the question, history, and the answer |
 
 **Walk one example.** A 20-page scanned contract, one image per page, into a 128K window:
@@ -525,15 +535,22 @@ Pitfall 4 above is the one that surprises teams in production, because an image 
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **GPT-4o API** | Vision + text | Best quality; image input |
-| **Claude 3.5 API** | Vision + text | Best OCR; document understanding |
-| **LLaMA 3.2 Vision** | Open VLM | 11B/90B; self-hostable |
-| **InternVL2** | Open VLM | Best open-source quality |
-| **Whisper** | ASR | OpenAI; multilingual; state of art |
+| **OpenAI API (GPT-6 Astra / Sol / Luna)** | Vision + text | Image input on all three; 1.05M context |
+| **Claude API (Opus 5.5 / Sonnet 5.5)** | Vision + text | OCR; PDF and document understanding; 1M context |
+| **Gemini API (Gemini 4 Argon)** | Vision + video + audio + text | 1M context |
+| **Llama 4 Scout / Maverick** | Open VLM | MoE; self-hostable |
+| **Qwen3-VL / InternVL3.5** | Open VLM | Open weights; OCR and GUI tasks |
+| **gpt-transcribe / gpt-live-transcribe** | ASR | OpenAI hosted; file and realtime transcription |
+| **Whisper large-v3** | ASR | Open weights; multilingual; self-hostable |
 | **ElevenLabs** | TTS + voice clone | Commercial; highest quality |
 | **Stable Diffusion** | Text-to-image | Open; massive ecosystem |
-| **DALL-E 3** | Text-to-image | Best prompt following |
-| **Flux** | Text-to-image | Best open-source (2024) |
+| **GPT Image 2.5** | Text-to-image + editing | OpenAI; Sunburst (quality) and Flare (fast) |
+| **Nano Banana 2.1** | Text-to-image + editing | Google Gemini API |
+| **Flux** | Text-to-image | Black Forest Labs; open weights |
+| **Veo 3.1** | Text-to-video | Google Gemini API; per-second pricing, audio included |
+| **Gemini Omni Flash** | Video generation + editing | Google Gemini API; about $0.10 per second of 720p |
+| **gpt-realtime-2.1 / GPT-Live 1** | Native speech-to-speech | OpenAI; GPT-Live 1 GA 2026-09-10 at $0.05/min |
+| **Gemini 3.8 Live** | Native speech-to-speech | Google Gemini API; $0.005/min audio in, $0.018/min audio out |
 | **LLaVA** | Open VLM | Research; widely used baseline |
 
 ---
@@ -570,7 +587,7 @@ SigLIP (Zhai et al., 2023) replaces CLIP's softmax-based contrastive loss with a
 
 **Q: How do you manage the token budget for high-resolution images in production?**
 **Short:** High-resolution image token budgets are managed with dynamic resolution selection, region-of-interest cropping, and tiered low-then-high-res processing.
-High-resolution image processing requires careful token budget management because a single 1024x1024 image can consume 1,000-4,000 tokens. Strategies: (1) dynamic resolution — assess each image and choose the minimum resolution that preserves needed detail (e.g., a simple diagram vs. dense text); (2) region of interest cropping — crop to the relevant portion before encoding; (3) tiered processing — use low-res for initial classification, high-res only for images flagged as needing detail; (4) token cost monitoring — track image token consumption separately from text tokens. At GPT-4o pricing, 1,000 high-res images per day at 2,000 tokens each = 2M tokens = $10/day input cost.
+High-resolution image processing requires careful token budget management because a single 1024x1024 image can consume 1,000-4,000 tokens. Strategies: (1) dynamic resolution: assess each image and choose the minimum resolution that preserves needed detail (e.g., a simple diagram vs. dense text); (2) region of interest cropping: crop to the relevant portion before encoding; (3) tiered processing: use low-res for initial classification, high-res only for images flagged as needing detail; (4) token cost monitoring: track image token consumption separately from text tokens. At GPT-6.1 Sol input pricing ($2/MTok), 1,000 high-res images per day at 2,000 tokens each = 2M tokens = $4/day input cost.
 
 **Q: What are the tradeoffs between two-tower (modular) and native multimodal architectures?**
 **Short:** Two-tower architectures like LLaVA bridge a separate vision encoder and LLM cheaply, while native models like Gemini train all modalities jointly for deeper cross-modal reasoning.
@@ -596,9 +613,9 @@ Whisper uses an encoder-decoder transformer trained on 680,000 hours of weakly s
 **Short:** Document-understanding VLMs are evaluated on character-level OCR accuracy, layout association, multi-part reasoning, and robustness to rotated or low-quality scans.
 Evaluate on four dimensions specific to document understanding: (1) OCR accuracy — character-level exact match on representative document types (invoices, contracts, forms), not just general benchmarks; (2) layout understanding — can it correctly associate labels with values in tables, multi-column layouts, and forms with complex structure; (3) reasoning — can it answer questions that require combining information from multiple parts of the document; (4) robustness — test with rotated, skewed, low-quality scans, and mixed-language documents. Key metrics: field extraction F1 (per field type), table extraction accuracy, end-to-end task accuracy. Compare against specialized tools (AWS Textract, Google Document AI) which may outperform general VLMs on structured extraction. For production, measure latency per page and cost per document alongside accuracy.
 
-**Q: How does a native speech-to-speech model (GPT-4o realtime) differ from an ASR → LLM → TTS cascade?**
+**Q: How does a native speech-to-speech model (gpt-realtime-2.1, Gemini 3.8 Live) differ from an ASR → LLM → TTS cascade?**
 **Short:** A native speech-to-speech model processes audio tokens directly and responds sub-second, while a cascade strips paralinguistic tone through a text intermediate and stacks latency.
-A native audio model consumes and produces audio tokens directly, with no text intermediate, while a cascade transcribes speech with an ASR model (e.g., Whisper), feeds text to an LLM, then synthesizes the response with TTS. The cascade loses paralinguistic information — tone, emotion, hesitation, emphasis are stripped at the transcription step and cannot inform the response — and stacks three model latencies (often 1.5-3 s total), whereas native models respond sub-second and can react to how something was said. The cascade's advantages: each stage is independently swappable and debuggable, transcripts are available for logging/compliance, and it works with any text-only LLM. Choose native audio for conversational voice assistants where naturalness matters; choose the cascade when you need auditable transcripts, custom domain LLMs, or fine-grained control over each stage.
+A native audio model consumes and produces audio tokens directly, with no text intermediate, while a cascade transcribes speech with an ASR model (e.g., gpt-live-transcribe or self-hosted Whisper), feeds text to an LLM, then synthesizes the response with TTS. The cascade loses paralinguistic information (tone, emotion, hesitation and emphasis are stripped at the transcription step and cannot inform the response) and stacks three model latencies (often 1.5-3 s total), whereas native models respond sub-second and can react to how something was said. The cascade's advantages: each stage is independently swappable and debuggable, transcripts are available for logging/compliance, and it works with any text-only LLM. Choose native audio for conversational voice assistants where naturalness matters; choose the cascade when you need auditable transcripts, custom domain LLMs, or fine-grained control over each stage. Production stacks, barge-in and telephony are in [Voice Agents](../voice_agents/voice_agents.md).
 
 ---
 

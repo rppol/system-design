@@ -1210,7 +1210,7 @@ See the [CUDA Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md)
 
 ### CS Fundamentals — Senior Engineer & Interview Prep Guide
 
-The language-agnostic computer-science spine: 28 modules across 6 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (25 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
+The language-agnostic computer-science spine: 27 modules across 5 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (28 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
 
 #### Phase 1 — Complexity & Computation
 
@@ -1281,12 +1281,12 @@ The language-agnostic computer-science spine: 28 modules across 6 phases + 6 int
 
 | File | Purpose |
 |------|---------|
-| [dsa_patterns/README.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/dsa_patterns.md) | Recognition engine: UMPIRE method, constraints→complexity table, cue→pattern lookup, decision tree, 25-pattern index |
+| [dsa_patterns/README.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/dsa_patterns.md) | Recognition engine: UMPIRE method, constraints→complexity table, cue→pattern lookup, decision tree, 26-pattern index |
 | [dsa_patterns/interview_execution_playbook.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
 | [dsa_patterns/study_plans.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/study_plans.md) | Blind 75 + NeetCode 150 mapped to patterns with LeetCode links |
-| 25 pattern playbooks | Two pointers, sliding window, fast/slow, prefix sum, hashing, cyclic sort, monotonic stack, LL reversal, merge intervals, binary search, top-K, k-way merge, two heaps, tree BFS/DFS, graph traversal, topo sort, union-find, trie, shortest path, backtracking, DP, greedy, bit manipulation, matrix traversal |
+| 26 pattern playbooks | Two pointers, sliding window, fast/slow, prefix sum, hashing, cyclic sort, monotonic stack, LL reversal, merge intervals, binary search, top-K, k-way merge, two heaps, tree BFS/DFS, graph traversal, topo sort, union-find, trie, shortest path, backtracking, DP, greedy, bit manipulation, matrix traversal, sweep line |
 
-See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_fundamentals/README.md) for the full 6-phase learning path, scope & non-overlap boundary, cross-reference map, and build-status tracker.
+See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_fundamentals/README.md) for the full 5-phase learning path, scope & non-overlap boundary, cross-reference map, and build-status tracker.
 
 ---
 

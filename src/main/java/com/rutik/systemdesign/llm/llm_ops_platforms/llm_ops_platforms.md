@@ -6,9 +6,9 @@
 
 LLMOps platforms provide the operational infrastructure needed to develop, evaluate, deploy, and monitor large language model applications. Three distinct categories address different phases of the LLM lifecycle:
 
-**Experiment Tracking** platforms capture what happened during model training — hyperparameters, loss curves, evaluation metrics, checkpoints, and dataset versions. MLflow, Weights & Biases (W&B), Neptune, and Comet ML are the primary tools in this category. They were originally built for tabular ML but have been extended to support fine-tuning workflows.
+**Experiment Tracking** platforms capture what happened during model training: hyperparameters, loss curves, evaluation metrics, checkpoints, and dataset versions. MLflow, Weights & Biases (W&B), and Comet ML are the primary tools in this category. They were originally built for tabular ML but have been extended to support fine-tuning workflows.
 
-**LLM-specific Observability** platforms capture what happens at inference time in production — which prompts were sent, which tools were called, how many tokens were consumed, what each call cost, and where latency was spent. LangSmith, LangFuse, Arize Phoenix, Helicone, and Braintrust fill this role. Standard APM tools (Datadog, New Relic) cannot capture the nested call structure of an LLM agent chain, which is why this dedicated category exists (concepts deep dive: [LLM Observability & Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md)).
+**LLM-specific Observability** platforms capture what happens at inference time in production: which prompts were sent, which tools were called, how many tokens were consumed, what each call cost, and where latency was spent. LangSmith, LangFuse, Arize Phoenix, and Braintrust fill this role, and gateway proxies such as LiteLLM and Portkey log every call at the API boundary. Standard APM tools (Datadog, New Relic) cannot capture the nested call structure of an LLM agent chain, which is why this dedicated category exists (concepts deep dive: [LLM Observability & Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md)).
 
 **Evaluation Platforms** automate quality assessment before and after deployment — running a model or prompt version against a golden dataset and scoring it on domain-specific metrics. DeepEval, Ragas, LangSmith Evals, and Braintrust enable eval-gated CI/CD pipelines (testing methodology deep dive: [LLM Testing Strategies](../llm_testing_strategies/llm_testing_strategies.md)).
 
@@ -56,7 +56,6 @@ For the lifecycle these platforms support, from data to retirement, see [MLOps F
 |----------|------------|-------------|-------------|
 | MLflow | Training run tracking, model registry | Both | Open source, Databricks-native |
 | Weights & Biases (W&B) | Training visualization, hyperparameter sweeps | Hosted | Best-in-class sweep and Bayesian search |
-| Neptune | Research experiment tracking | Hosted | Strong metadata querying |
 | Comet ML | Training + production monitoring | Hosted | CI/CD model evaluation integration |
 
 These platforms were designed around the training loop: start a run, log scalars per step, save artifacts when done, compare runs in a UI. They excel at training-time observability but have limited support for the nested span structure of LLM agent calls.
@@ -68,7 +67,7 @@ These platforms were designed around the training loop: start a run, log scalars
 | LangSmith | LangChain application tracing | Both | Deep LangChain/LangGraph integration |
 | LangFuse | Open-source LLM observability | Both | Best open-source option, self-hostable |
 | Arize Phoenix | LLM + traditional ML observability | Both | Strong embedding drift detection |
-| Helicone | OpenAI/Anthropic proxy with logging | Hosted | Zero-code integration via proxy |
+| LiteLLM Proxy / Portkey | LLM gateway with request and spend logging | Both | Zero-code integration via proxy |
 | Braintrust | Eval + observability combined | Hosted | Strong eval + logging combination |
 
 These platforms model production LLM calls as nested traces: a top-level chain contains tool calls and LLM calls as child spans, each with token counts, latency, and cost. This structure mirrors OpenTelemetry spans but with LLM-specific attributes (model, prompt, completion, token usage).
@@ -148,7 +147,7 @@ PRODUCTION PHASE
   Request   -->  (FastAPI / LangChain)  --> (OpenAI /   -->  (to user)
                          |                   Anthropic)
                          |                        |
-                    [LangSmith /           [Helicone /
+                    [LangSmith /           [LiteLLM /
                      LangFuse]              LangFuse]
                     Trace full chain:       Log per call:
                     - Chain start          - input tokens
@@ -229,7 +228,7 @@ mlflow.register_model(f"runs:/{run_id}/model", "llama3-customer-support")
 ### LangSmith Trace Tree
 
 ```
-Run ID: abc-123  Total: 3.2s  $0.0023  2,847 tokens
+Run ID: abc-123  Total: 3.2s  $0.0116  2,847 tokens
 |
 +-- Chain: CustomerSupportAgent (3.2s)
 |     |
@@ -237,10 +236,10 @@ Run ID: abc-123  Total: 3.2s  $0.0023  2,847 tokens
 |     |     Input:  {"order_id": "789"}
 |     |     Output: "order #789: shipped 2026-06-07"
 |     |
-|     +-- LLM: gpt-4o (2.7s)
+|     +-- LLM: gpt-6.1-sol (2.7s)
 |     |     Input tokens:  2,103
 |     |     Output tokens:   744
-|     |     Cost: $0.0023
+|     |     Cost: $0.0116
 |     |     System prompt: 847 tokens
 |     |     User query:    156 tokens
 |     |     Tool result:   100 tokens
@@ -408,8 +407,8 @@ langfuse = Langfuse(
 
 def calculate_cost(usage: object, model: str) -> float:
     pricing = {
-        "gpt-4o": {"input": 0.0025 / 1000, "output": 0.01 / 1000},
-        "gpt-4o-mini": {"input": 0.00015 / 1000, "output": 0.0006 / 1000},
+        "gpt-6.1-sol": {"input": 0.002 / 1000, "output": 0.01 / 1000},
+        "gpt-6-luna": {"input": 0.0001 / 1000, "output": 0.0005 / 1000},
     }
     p = pricing.get(model, {"input": 0, "output": 0})
     return usage.prompt_tokens * p["input"] + usage.completion_tokens * p["output"]
@@ -427,11 +426,11 @@ async def generate_response(
     )
 
     response = await openai_client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-6.1-sol",
         messages=[{"role": "user", "content": user_query}],
     )
 
-    cost = calculate_cost(response.usage, "gpt-4o")
+    cost = calculate_cost(response.usage, "gpt-6.1-sol")
 
     # Update the span with token + cost data
     langfuse_context.update_current_observation(
@@ -690,7 +689,7 @@ Stage 1 (prototype, <1k calls/day):
   - Exception: add experiment tracking immediately if fine-tuning
 
 Stage 2 (beta, 1k–10k calls/day, paying users):
-  - Add LangFuse or Helicone for cost visibility and error tracing
+  - Add LangFuse, or a LiteLLM or Portkey proxy, for cost visibility and error tracing
   - Create a golden eval dataset (50 examples minimum)
 
 Stage 3 (production, >10k calls/day, multiple engineers):
@@ -765,7 +764,7 @@ A golden eval dataset created in Month 1 reflects the query distribution at laun
 - **LangSmith** — LangChain's tracing and evaluation platform, with nested run traces, a prompt registry, eval datasets and human annotation queues.
   - Built by LangChain; deeply integrated with LangChain Expression Language and LangGraph
   - Features: nested run traces, LangSmith Hub (prompt registry), eval datasets, human annotation queues
-  - Tracing: `LANGCHAIN_TRACING_V2=true` environment variable enables automatic tracing with zero code changes for LangChain applications
+  - Tracing: `LANGSMITH_TRACING=true` environment variable enables automatic tracing with zero code changes for LangChain applications
   - Self-hosted version available for enterprise customers (requires Kubernetes)
 
 - **Langfuse** — Open-source, self-hostable LLM observability covering traces, scores, datasets, prompt management and cost tracking.
@@ -779,10 +778,10 @@ A golden eval dataset created in Month 1 reflects the query distribution at laun
   - Runs as a local server (`python -m phoenix.server.main serve`) with no external dependencies
   - Integrates with OpenTelemetry — traces exported as OTLP spans, compatible with existing observability infrastructure
 
-- **Helicone** — Reverse-proxy LLM logging: repoint the base URL and prompt, completion, token, cost and latency data is captured with no other code change.
-  - Reverse proxy: change `OPENAI_BASE_URL=https://oai.helicone.ai/v1` to enable logging with no other code changes
-  - Captures: prompt, completion, tokens, cost, latency, user ID, custom properties
-  - Limitations: only works with OpenAI and Anthropic-compatible APIs; no support for LangChain chain-level tracing
+- **LiteLLM Proxy / Portkey**: gateway proxies that log at the API boundary. Repoint the base URL and every call's prompt, completion, tokens, cost and latency are captured with no other code change.
+  - LiteLLM Proxy: open-source, OpenAI-format endpoint over 100+ providers, with per-key spend tracking and logging callbacks to Langfuse and other tracers
+  - Portkey: open-source AI gateway with a hosted control plane, adding fallbacks, retries and request logs
+  - Limitations: a proxy sees single calls, not chain-level structure; pair it with a tracer such as LangSmith or Langfuse for nested spans
 
 - **Braintrust** — Combined evaluation and tracing platform with custom or LLM-as-judge scoring functions, prompt A/B testing on live traffic and a human review UI.
   - Combined eval + tracing platform
@@ -794,7 +793,7 @@ A golden eval dataset created in Month 1 reflects the query distribution at laun
   - pytest-style LLM unit testing: `deepeval test run tests/` integrates with existing CI pipelines
   - Built-in metrics: answer relevancy, faithfulness, hallucination detection, contextual precision, toxicity, bias, summarization
   - Custom metrics: extend `BaseMetric` class to implement domain-specific scoring
-  - LLM judge: uses GPT-4o or Claude by default for automated scoring; configurable
+  - LLM judge: defaults to an OpenAI model (`DEFAULT_GPT_MODEL = "gpt-5.4"` in the DeepEval source on 2026-10-19); configurable to Anthropic, Gemini or a local model
 
 - **RAGAS** — RAG-specific evaluation framework scoring faithfulness, answer relevancy, context precision and context recall.
   - RAG-specific evaluation framework
@@ -834,7 +833,7 @@ Faithfulness (is the answer grounded in retrieved context — catches hallucinat
 
 **Q: How do you compare two prompt versions at scale without manual review of thousands of outputs?**
 **Short:** Comparing prompt versions at scale uses an LLM judge scoring both on a golden dataset, or a small live traffic split analyzed for statistical significance.
-Use LLM-as-judge evaluation: run both prompt versions on the golden dataset (200–500 examples), score each output using a judge LLM (GPT-4o prompted as an evaluator) on the specific quality criteria that matter, and compute aggregate scores. For production A/B testing, use Braintrust's traffic splitting — route 5% of production traffic to the new prompt, collect traces, run automated scoring on the sample, and compare score distributions. Statistical significance at 5% traffic in 24 hours requires roughly 500–1,000 samples for most quality metrics. Promote the new version if it wins with p < 0.05 on the primary metric and does not regress on any secondary metric.
+Use LLM-as-judge evaluation: run both prompt versions on the golden dataset (200-500 examples), score each output using a judge LLM (a pinned current model such as GPT-6.1 Sol, prompted as an evaluator) on the specific quality criteria that matter, and compute aggregate scores. For production A/B testing, use Braintrust's traffic splitting: route 5% of production traffic to the new prompt, collect traces, run automated scoring on the sample, and compare score distributions. Statistical significance at 5% traffic in 24 hours requires roughly 500-1,000 samples for most quality metrics. Promote the new version if it wins with p < 0.05 on the primary metric and does not regress on any secondary metric.
 
 **Q: What is a W&B Sweep and how does Bayesian optimization differ from grid search?**
 **Short:** A W&B Sweep's Bayesian optimization fits a surrogate model to prior trials and picks the next promising hyperparameter combination, needing far fewer runs than grid search.
@@ -854,7 +853,7 @@ Offline evaluation runs a fixed model/prompt version against a curated golden da
 
 **Q: How do you integrate LangSmith with an existing OpenTelemetry setup?**
 **Short:** LangSmith exports traces in OpenTelemetry format via OTLP, though its token and cost attributes need custom OTel attributes since they aren't part of the standard schema.
-LangSmith supports exporting traces in OpenTelemetry format via its OTLP exporter. Configure the LangSmith client with `LANGCHAIN_TRACING_V2=true` and use the `langsmith.wrappers.wrap_openai` wrapper to capture OpenAI calls. To bridge to an existing OTel collector, use `from langsmith.run_helpers import get_current_run_tree` to access span context and attach it to OTel spans manually. Alternatively, use Arize Phoenix, which natively speaks OTLP and integrates with any OTel-compatible collector. The challenge is that LangSmith's trace model (parent runs with child runs) maps to OTel spans (parent span with child spans), but token/cost attributes are LangSmith-specific and require custom OTel attributes.
+LangSmith supports exporting traces in OpenTelemetry format via its OTLP exporter. Configure the LangSmith client with `LANGSMITH_TRACING=true` and use the `langsmith.wrappers.wrap_openai` wrapper to capture OpenAI calls. To bridge to an existing OTel collector, use `from langsmith.run_helpers import get_current_run_tree` to access span context and attach it to OTel spans manually. Alternatively, use Arize Phoenix, which natively speaks OTLP and integrates with any OTel-compatible collector. The challenge is that LangSmith's trace model (parent runs with child runs) maps to OTel spans (parent span with child spans), but token/cost attributes are LangSmith-specific and require custom OTel attributes.
 
 **Q: What is the "no baseline" problem in LLM evaluation, and how do you avoid it?**
 **Short:** The no-baseline problem is deploying a prompt without first building a golden dataset, leaving no objective way to tell whether a later revision actually improved anything.
@@ -902,13 +901,13 @@ Tag every LLM API call with metadata at call time: `customer_id` from the authen
 
 ### LLMOps Stack for a RAG-Based Customer Support Agent
 
-**System requirements**: 10,000 support queries per day using GPT-4o for response generation and text-embedding-3-small for retrieval. Must detect quality regressions before production deployments. Must attribute cost to individual enterprise customers.
+**System requirements**: 10,000 support queries per day using GPT-6.1 Sol for response generation and text-embedding-3-small for retrieval. Must detect quality regressions before production deployments. Must attribute cost to individual enterprise customers.
 
 ---
 
 ### Experiment Tracking Setup
 
-The system uses a fine-tuned embedding model (text-embedding-3-small fine-tuned on domain-specific query/document pairs) alongside the base GPT-4o. MLflow tracks all fine-tuning experiments.
+The system uses a fine-tuned embedding model (text-embedding-3-small fine-tuned on domain-specific query/document pairs) alongside the base GPT-6.1 Sol. MLflow tracks all fine-tuning experiments.
 
 ```python
 # Fine-tuning the embedding model with experiment tracking
@@ -958,13 +957,13 @@ FastAPI application
          +-- Retrieval: pgvector similarity search (0.05s)
          |         top-5 chunks retrieved, MRR logged
          |
-         +-- Generation: GPT-4o call (2.1s)
+         +-- Generation: GPT-6.1 Sol call (2.1s)
          |         input: 1,847 tokens  output: 412 tokens
-         |         cost: $0.00875
+         |         cost: $0.00781
          |
          +-- LangFuse trace end
                total_tokens: 2,359
-               total_cost: $0.00876
+               total_cost: $0.00783
                customer_id: acme-corp
                latency_ms: 2,310
 ```
@@ -980,7 +979,7 @@ it is spent, and the monthly invoice becomes a reconciliation check rather than 
 | Symbol | What it is |
 |--------|------------|
 | span cost | Cost of one billable operation — one embedding call or one generation call |
-| trace cost | Sum of the span costs. `$0.000013 + $0.00875 = $0.008763`, rounded to `$0.00876` |
+| trace cost | Sum of the span costs. `$0.000013 + $0.007814 = $0.007827`, rounded to `$0.00783` |
 | `customer_id` tag | Propagated from the `X-Customer-ID` header onto every span in the trace |
 | grouping key | Whatever you aggregate by: customer, feature, model, day. The arithmetic is identical |
 | billing variance | Gap between what you charge and what the provider actually bills you |
@@ -990,28 +989,28 @@ it is spent, and the monthly invoice becomes a reconciliation check rather than 
 ```
   ONE TRACE
     embedding span   $0.000013
-    generation span  $0.008750
+    generation span  $0.007814   (1,847 x $2/1M + 412 x $10/1M)
                      ---------
-    trace total      $0.008763  -> logged as $0.00876
+    trace total      $0.007827  -> logged as $0.00783
 
   SCALE TO THE SYSTEM (10,000 support queries per day)
-    per day    10,000 x $0.00876 = $87.60
-    per month  $87.60 x 30       = $2,628
-    per year   $87.60 x 365      = $31,974
+    per day    10,000 x $0.00783 = $78.30
+    per month  $78.30 x 30       = $2,349
+    per year   $78.30 x 365      = $28,580
 
   ONE ENTERPRISE CUSTOMER sending 500 queries/day
-    500 x $0.00876 = $4.38/day, tagged automatically, no estimation
+    500 x $0.00783 = $3.92/day, tagged automatically, no estimation
 
-  WHAT THE ACCURACY IMPROVEMENT IS WORTH (monthly, at $2,628)
-    old flat-rate estimate, 40% variance:  +/- $1,051
-    traced attribution,      2% variance:  +/-    $53
+  WHAT THE ACCURACY IMPROVEMENT IS WORTH (monthly, at $2,349)
+    old flat-rate estimate, 40% variance:  +/- $940
+    traced attribution,      2% variance:  +/-  $47
 ```
 
-That variance line is the whole business case for tracing. A 40% swing on a $2,628 monthly bill is
-±$1,051 of un-attributable cost, which means every enterprise contract is either overcharging a
-customer or silently eating margin, and nobody can tell which. Tagged spans collapse that to ±$53.
+That variance line is the whole business case for tracing. A 40% swing on a $2,349 monthly bill is
+±$940 of un-attributable cost, which means every enterprise contract is either overcharging a
+customer or silently eating margin, and nobody can tell which. Tagged spans collapse that to ±$47.
 Note also that the cost is dominated almost entirely by generation — the embedding span is
-`$0.000013 / $0.008763 = 0.15%` of the trace — so retrieval optimization is a latency lever, not a
+`$0.000013 / $0.007827 = 0.17%` of the trace, so retrieval optimization is a latency lever, not a
 cost lever. Teams routinely invert this and spend weeks shrinking embedding calls that account for
 one-sixth of one percent of the bill.
 

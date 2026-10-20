@@ -26,14 +26,15 @@ Components honestly without the framework that implements them.
 
 ---
 
-## PRIMARY TARGET VERSION — React 19.2
+## PRIMARY TARGET VERSION — React 19.3
 
-Released **2025-10-01**. **There is no React 20.** Latest patches are **19.2.8 / 19.1.9 /
-19.0.8** (2026-07-21). Verified 2026-09-02 — check `react.dev/versions` before writing a
-version number, never memory.
+Released **2026-09-09**. **There is no React 20.** Latest patches are **19.3.1 / 19.2.9 /
+19.1.10 / 19.0.9** (2026-10-14). Verified 2026-10-20 against the npm registry — check
+`react.dev/versions` before writing a version number, never memory.
 
 | Tag | What it gates |
 |-----|---------------|
+| `[19.3]` | A Server Component renders a `"use client"` context directly (`<UserContext value={...}>`), `use(browser())` for client-only subtrees, unrelated concurrent transitions render independently, StrictMode double-invokes effects on `hydrateRoot` roots |
 | `[19.2]` | `<Activity>`, `useEffectEvent`, `cacheSignal`, React Performance Tracks, `useId` prefix changed to `_r_` for View Transitions compatibility |
 | `[19]` | Actions and `useActionState`, `useFormStatus`, `useOptimistic`, `use()`, ref as an ordinary prop, `<Context>` as provider, document metadata hoisting, `preload`/`preinit`, stable Server Components |
 
@@ -60,7 +61,7 @@ never as the way to write new code.
    Remix v3 shipped as **React Router v7**; React Router is
    now at **v8** (2026-06-17). Never present Remix v3 as a React upgrade path — this is the
    easiest factual error in the section.
-3. **Next.js 16** (2025-10-21, current 16.3.x) made Turbopack default, replaced
+3. **Next.js 16** (2025-10-21, current 16.4.x) made Turbopack default, replaced
    `experimental.ppr` / `dynamicIO` with **Cache Components** and the `"use cache"`
    directive, and renamed `middleware.ts` to **`proxy.ts`** on the Node runtime.
    `revalidateTag()` now requires a `cacheLife` profile as its second argument.
@@ -69,28 +70,29 @@ never as the way to write new code.
 **React Foundation** under the Linux Foundation. This comes up in questions about
 ecosystem risk and is worth one line in §1 of module 1.
 
-**Security:** the `react-server-dom-*` packages carry **three** separate advisories, routinely
-conflated. Source exposure: **CVE-2025-55183** (CVSS 5.3, 2025-12-11), patched 19.0.2 /
-19.1.3 / 19.2.2. Denial of service: **CVE-2026-23864** (CVSS 7.5, 2026-01-26), patched
-19.0.4 / 19.1.5 / 19.2.4. A second denial of service: **CVE-2026-23869** (CVSS 7.5,
-2026-04-08), patched **19.0.5 / 19.1.6 / 19.2.5** — which is the recommended floor. Never
-quote 19.2.4 as safe, and never merge the DoS and source-exposure issues into one advisory. This belongs
-in a §10 Common Pitfalls entry in `server_components_and_server_functions`, not a footnote.
+**Security:** the `react-server-dom-*` packages carried **ten** separate advisories between
+2025-12-03 and 2026-10-14, routinely conflated. Two are remote code execution:
+**CVE-2025-55182** (CVSS 10.0, 2025-12-03) and **GHSA-xqc2-xf4c-x3h3** (CVSS 4.0 score 9.5,
+2026-10-14, no CVE). The rest are source exposure (CVE-2025-55183) and denial of service.
+Each patch line supersedes the last; the floor is **19.3.1 / 19.2.9 / 19.1.10 / 19.0.9**
+(2026-10-14). Next.js ships its own compiled copy, so its floor is **16.4.1** (or **15.5.28**
+on 15.5). Never merge the advisories into one, and never quote an older patch as safe. The
+full table lives in `server_components_and_server_functions` §12 and §10.
 
-### Ecosystem pins — verified 2026-09-02
+### Ecosystem pins — verified 2026-10-20
 
 | Area | Pin | Note |
 |------|-----|------|
-| React Router | **v8** (2026-06-17) | v7 was the Remix merge; "framework mode" is the former Remix |
-| TanStack Start | **Release Candidate** | not 1.0 — say so explicitly |
-| Astro | **7** (2026-06-22) | Rust compiler, on Vite 8 |
+| React Router | **v8** (2026-06-17), current 8.5 | v7 was the Remix merge; "framework mode" is the former Remix |
+| TanStack Start | **1.0**, stable since 2026-10-13 | Vite plus Nitro; RSC opt-in |
+| Astro | **7** (2026-06-22), current 7.4 | Rust compiler, on Vite 8 |
 | RSC outside Next | `@vitejs/plugin-rsc`, Waku, Parcel | a framework-agnostic Vite RSC story now exists |
 | TanStack Query / Zustand | **v5** / **v5** | Zustand v5 uses native `useSyncExternalStore`, no polyfill dep |
 | Tailwind CSS | **v4** | Oxide engine, CSS-first `@theme`; no `tailwind.config.js` required |
 | shadcn/ui | defaults to **Base UI** since 2026-07 | Radix is **not** deprecated; `radix-ui` is now a single package. React Aria is also first-class |
 | styled-components | **maintenance mode** (since Jan 2024) | runtime injection is fundamentally incompatible with RSC — a good teaching point, not a slur |
-| MUI | **v9** (2026-04-08), current 9.4 — **still defaults to Emotion** | There is no v8: v7 jumped to v9 to re-align with MUI X. Pigment CSS is opt-in since v6, repo alpha/on-hold. **Do not write that MUI "moved to" Pigment** |
-| Testing | RTL **16.3.3**, Vitest **4.1.11**, Jest **30.4.2**, MSW **v2**, Storybook **10** (ESM-only) | |
+| MUI | **v9** (2026-04-08), current 9.5 — **still defaults to Emotion** | There is no v8: v7 jumped to v9 to re-align with MUI X. Pigment CSS is opt-in since v6, repo alpha/on-hold. **Do not write that MUI "moved to" Pigment** |
+| Testing | RTL **16.3.3**, Vitest **5.0.5**, Jest **30.5.2**, MSW **3.0.3**, Storybook **10** (ESM-only) | Vitest 5 (2026-09-03) needs Node 22.12+ and Vite 6.4+ |
 | Forms | React Hook Form, TanStack Form v1, Conform | Zod v4 via `@hookform/resolvers` v5 / Standard Schema |
 
 ---
@@ -118,7 +120,7 @@ in a §10 Common Pitfalls entry in `server_components_and_server_functions`, not
 | 17 | `rendering_strategies_hydration_and_seo/` | 4 | CSR/SSR/SSG/ISR/PPR on numbers, client hydration and mismatches, selective hydration, Cache Components, SEO and metadata |
 | 18 | `meta_frameworks_and_routing/` | 4 | Next.js 16 App Router, React Router v8, TanStack Start, Astro 7, file-based routing, nested layouts, i18n routing |
 | 19 | `styling_and_design_systems/` | 5 — Application Engineering | Tailwind v4, CSS Modules, vanilla-extract, Panda, why runtime CSS-in-JS struggles with RSC, shadcn and Base UI, tokens |
-| 20 | `testing_and_frontend_ci/` | 5 | RTL, role queries, `act()`, Vitest browser mode, Playwright, MSW v2, Storybook 10, visual regression, the UI test pyramid |
+| 20 | `testing_and_frontend_ci/` | 5 | RTL, role queries, `act()`, Vitest browser mode, Playwright, MSW 3, Storybook 10, visual regression, the UI test pyramid |
 | 21 | `react_architecture_and_antipatterns/` | 5 | Feature-sliced structure, the client/server seam, micro-frontends and Module Federation, migration, the antipattern catalogue |
 
 **Two ordering decisions that are deliberate, not accidents:**
@@ -293,7 +295,7 @@ render-vs-commit timeline, and the RSC payload layout — all alignment-critical
 
 1. Create `<module_name>/<module_name>.md` — the 14-section template, named for its folder.
    Never `*_deep_dive.md` or `*_internals.md`
-2. Target React 19.2; verify anything version-gated against `react.dev` before writing it
+2. Target React 19.3; verify anything version-gated against `react.dev` before writing it
 3. Meet the Q&A minimum, every answer opening with its `**Short:**` line
 4. Add the module dir to `STUDY_ORDER.react` in `game/app.js` at its phase position — a
    module missing from it falls to the 9999 sort and fails `--strict`

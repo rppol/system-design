@@ -560,6 +560,96 @@ The `+ threads - 1` is the whole trick: plain integer division truncates, so `n 
 
 The tradeoff is paid once per process (or once per distinct kernel signature, if cached): the first launch pays nvrtc's compile time plus the driver's JIT time, which can be tens to hundreds of milliseconds for a nontrivial kernel — acceptable for a long-lived server process, poor for a short CLI tool invoked thousands of times.
 
+### Device Link-Time Optimization and `nvJitLink`
+
+Separate compilation (`-rdc=true`, needed whenever a kernel calls a `__device__` function
+defined in another `.cu` file, a device library, or a user callback) stops the compiler
+from inlining across files: each object is compiled to SASS on its own and the device
+linker only patches call addresses. A call that would have been inlined becomes a real
+ABI call with register save and restore, and constants never propagate into the callee.
+Device LTO stores NVVM-level IR (LTO-IR) in each object instead and optimizes the whole
+device program at link time, which gets back the whole-program code quality.
+
+```bash
+# Offline LTO: LTO-IR at compile time (target lto_90), optimized at device-link time.
+# -dlto must appear in BOTH steps, or the IR is ignored with no error.
+nvcc -dc   -dlto -arch=sm_90 kernels.cu callbacks.cu
+nvcc       -dlto -arch=sm_90 kernels.o callbacks.o main.cu -o app
+```
+
+`nvJitLink` (CUDA 12.0+) does the same link at process runtime, so code that only exists
+at runtime (a user callback compiled by `nvrtc`, a generated epilogue) can be optimized
+together with precompiled library code:
+
+```cpp
+#include <nvrtc.h>
+#include <nvJitLink.h>
+
+// 1. nvrtc emits LTO-IR (not PTX) for the runtime-generated callback.
+const char* rtcOpts[] = {"-arch=sm_90", "-dlto", "-rdc=true"};
+nvrtcCompileProgram(prog, 3, rtcOpts);
+size_t irSize;  nvrtcGetLTOIRSize(prog, &irSize);
+std::vector<char> ir(irSize);  nvrtcGetLTOIR(prog, ir.data());
+
+// 2. Link it with the library's LTO-IR and optimize across both.
+nvJitLinkHandle h;
+const char* linkOpts[] = {"-arch=sm_90", "-lto"};       // -arch is required
+nvJitLinkCreate(&h, 2, linkOpts);
+nvJitLinkAddFile(h, NVJITLINK_INPUT_FATBIN, "kernels_lto.fatbin");
+nvJitLinkAddData(h, NVJITLINK_INPUT_LTOIR, ir.data(), irSize, "callback");
+nvJitLinkComplete(h);                                    // the actual link + optimize
+size_t cubinSize;  nvJitLinkGetLinkedCubinSize(h, &cubinSize);
+std::vector<char> cubin(cubinSize);  nvJitLinkGetLinkedCubin(h, cubin.data());
+nvJitLinkDestroy(&h);
+
+// 3. Load the result like any cubin.
+CUmodule mod;  cuModuleLoadData(&mod, cubin.data());
+```
+
+Inputs can be `NVJITLINK_INPUT_LTOIR`, `PTX`, `CUBIN`, `FATBIN`, `OBJECT` or `LIBRARY`.
+NVIDIA's CUDA 12.0 announcement reports cuFFT building kernels this way at runtime, up to
+3x faster for sizes under 8K, and callbacks linked with JIT LTO running nearly 2x faster
+than the same callbacks called through a function pointer.
+
+Version rules from the nvJitLink 13.4 documentation: the `nvJitLink` library must be at
+least as new as the newest toolkit that produced any input, and with LTO "compatibility
+is only guaranteed within a major release", so LTO-IR built with CUDA 12.x is not
+guaranteed to link under a 13.x `nvJitLink`; rebuild it as 13.x LTO-IR (or ship PTX/cubin).
+Because `nvJitLink` ships with the toolkit, not the driver, an application that bundles
+it keeps working on any minor-version-compatible driver.
+
+### Lazy Module Loading (`CUDA_MODULE_LOADING`)
+
+At CUDA initialization the runtime used to load every module in every fatbinary linked
+into the process: SASS for each kernel copied to device memory, PTX JIT-compiled where no
+SASS matched. A framework binary that carries thousands of kernels paid that for kernels
+it never launched. With lazy loading the driver loads a module, and a kernel, on first
+use instead.
+
+| Fact | Value (CUDA Programming Guide 13.4) |
+|------|-------------------------------------|
+| Introduced | CUDA 11.7, off by default |
+| Default on | Linux from CUDA 12.2; all platforms from CUDA 12.3 |
+| Minimum driver | R515 |
+| Switch | `CUDA_MODULE_LOADING=LAZY` (default) or `EAGER` |
+| Query | `cuModuleGetLoadingMode()` returns `CU_MODULE_LAZY_LOADING` |
+| Not lazy | Modules with `__managed__` variables load eagerly; libraries built with a pre-11.7 runtime load eagerly |
+| Force one kernel to load | `cudaFuncGetAttributes()` (kernel), `cuModuleGetFunction()` (module); `cuModuleLoad()` does not guarantee it |
+
+Three ways it bites, all listed in the guide:
+
+- **Benchmarks.** The first launch of a kernel now includes loading it (and JIT, if it
+  came from PTX), so an un-warmed timing loop measures module load. Run a warm-up
+  iteration or preload the kernel with `cudaFuncGetAttributes` before timing.
+- **Allocators that take all of VRAM at startup.** A caching allocator that reserves
+  nearly the whole device leaves no room for modules loaded later, and the first launch
+  of a new kernel fails with an out-of-memory error. Preload kernels before the
+  allocator grabs memory, leave headroom, or use `cudaMallocAsync`.
+- **Kernels that must run at the same time.** A producer kernel spinning on a flag that
+  a consumer kernel in another stream sets can deadlock: loading a kernel on first
+  launch can serialize execution, so the consumer may never start while the producer
+  spins. Preload both kernels or run with `CUDA_MODULE_LOADING=EAGER`.
+
 ### Wiring It Up With CMake
 
 ```cmake
@@ -763,9 +853,11 @@ nvcc -gencode arch=compute_80,code=sm_80 \
 
 - **Assuming an explicit `-gencode arch=compute_XX,code=sm_XX` behaves like the `-arch=sm_XX` shorthand.** It does not. `nvcc -arch=sm_80` expands to `--gpu-code=sm_80,compute_80` and quietly embeds a PTX fallback; the moment you spell the target out as `-gencode arch=compute_80,code=sm_80` — which is what every multi-architecture build, every `CUDA_ARCHITECTURES "80-real"`, and every `TORCH_CUDA_ARCH_LIST` entry without `+PTX` does — the PTX disappears and you must re-add it as a separate `-gencode arch=compute_80,code=compute_80` entry.
 - **Forgetting to update the PTX target when adding new hardware support.** Adding `-gencode arch=compute_90,code=sm_90` for H100 support but leaving the fallback PTX at the old `compute_80` means GPUs newer than Hopper can still JIT from `compute_80` PTX, but miss any Hopper-only PTX instruction the rest of your build now emits — keep the fallback PTX at your *newest* supported virtual architecture.
+- **Timing the first launch under lazy loading.** Since CUDA 12.3 lazy loading is the default on every platform, so a kernel's first launch includes loading its module (and JIT-compiling PTX if no SASS matched). A benchmark without a warm-up iteration reports that load as kernel time; a caching allocator that reserved nearly all of VRAM first then fails the load with out-of-memory. Warm up, or preload with `cudaFuncGetAttributes`.
 - **Benchmarking a `-G` (device debug) build.** `-G` disables nearly all `ptxas`/NVVM optimizations to preserve debuggability and can be 10-100x slower than a `-O3` release build; a debug build's timings are meaningless for performance decisions.
 - **Ignoring `ptxas -v` output.** Register/shared-memory usage is only visible with `--ptxas-options=-v`; without it, a kernel can silently regress to register spilling (`spill stores`/`spill loads` > 0) after an innocuous code change, quietly cutting occupancy and throughput with no compiler warning.
 - **Using `__CUDA_ARCH__` unguarded in code the host compiler also sees.** Because the macro is undefined during the host-code pass, an `#if __CUDA_ARCH__ >= 800` guarding a device-only intrinsic with no `#else` for the host pass can leave that branch's *absence* silently compiled out on the host — usually harmless, but referencing a device intrinsic (e.g. `__ldg`) directly without any `__CUDA_ARCH__` guard breaks host compilation outright.
+- **Installing the CUDA 13.4 toolkit on Linux and expecting a driver upgrade.** From CUDA 13.4 the Linux toolkit installer no longer bundles the NVIDIA driver (Windows dropped it in 13.1). A machine that only gets the toolkit keeps its old driver. Minor-version compatibility still runs prebuilt SASS, but JIT of the PTX ISA 9.4 that 13.4 emits fails with `cudaErrorUnsupportedPtxVersion`, and a kernel built for `sm_107` needs R615 to run at all. Install the R615 driver branch as its own step and check it at startup (see "Checking Driver/Runtime Compatibility at Startup" in §6).
 - **Shipping unstripped host debug symbols alongside multi-arch fatbinaries.** Combining `-g` (host debug info) with several `-gencode` SASS targets produces bloated binaries; strip host symbols for release builds even when you intentionally keep `-lineinfo` for device-side profiling.
 
 ---
@@ -778,11 +870,18 @@ nvcc -gencode arch=compute_80,code=sm_80 \
 | `ptxas` | PTX-to-SASS assembler | Invoked by `nvcc`; `--ptxas-options=-v` reports registers/spills/shared memory |
 | `nvrtc` | Runtime CUDA C++ -> PTX compiler | Library, not a CLI; underlies CuPy/Numba/PyTorch JIT kernel paths |
 | `cuobjdump` | Inspect fatbinaries/object files | `-sass` for disassembly, `--dump-elf`/`-lelf` for embedded arch list |
+| `nvJitLink` (CUDA 12.0+) | Runtime device linker with LTO | `nvJitLinkCreate` / `AddData` / `Complete` / `GetLinkedCubin`; `-arch=sm_XX` required, `-lto` for LTO; LTO-IR links only within one major release |
+| `nvcc -dlto` | Offline device link-time optimization | Pass at compile (`-dc -dlto`) and at link; stores `lto_NN` IR in the object |
+| `CUDA_MODULE_LOADING` | Lazy vs eager module loading | `LAZY` default on all platforms since CUDA 12.3; `EAGER` restores load-at-init |
 | `nvdisasm` | Standalone SASS disassembler | Works directly on `.cubin` files, independent of `cuobjdump` |
 | `fatbinary` | Bundles multiple cubins/PTX | Invoked internally by `nvcc`; rarely called directly |
 | CMake `CUDA_ARCHITECTURES` | Modern build-system arch targeting | `-real`/`-virtual` suffixes map to `code=sm_XX`/`code=compute_XX` |
 | Nsight Compute / Nsight Systems | Profiling | Consumes `-lineinfo` builds for source correlation |
 | CUDA Driver API (`cuda.h`) | Low-level context/module/launch | What `nvrtc`-compiled PTX is ultimately loaded and launched through |
+| CompileIQ (CUDA 13.3) | Compiler autotuning framework | Searches PTXAS and NVCC Advanced Controls against your own kernel benchmark and writes an Advanced Control File (ACF), applied with `nvcc --apply-controls=<file>`; covers CUDA C++, Triton, and Helion kernels; not supported in NVRTC |
+| C++ dialect and host compilers | Language level `nvcc`/`nvrtc` accept | CUDA 13.3 adds full C++23 in `nvcc` and `nvrtc`; CUDA 13.4 adds GCC 16 and Clang 22 as host compilers |
+| PTX ISA 9.4 (CUDA 13.4) | Virtual ISA version | The PTX version a 13.4 `nvcc` emits; a driver older than the toolkit cannot JIT it |
+| Windows on Arm (CUDA 13.4) | Platform support | Toolkit support for Windows on Arm on RTX Spark devices |
 
 ---
 
@@ -808,6 +907,10 @@ The first assembles real SASS machine code for exactly an `sm_80` GPU using Ampe
 **Short:** -arch=sm_80 does embed a PTX fallback since it expands to gpu-code=sm_80,compute_80; the fallback is lost only when switching to an explicit -gencode code=sm_80 form.
 Yes — `-arch=sm_80` is shorthand for `--gpu-architecture=compute_80 --gpu-code=sm_80,compute_80`, so it ships a cubin *and* a `compute_80` PTX blob. The fallback is lost the moment you move to the explicit `-gencode arch=compute_80,code=sm_80` form (which is what any multi-architecture build, CMake's `80-real`, or a `TORCH_CUDA_ARCH_LIST` entry without `+PTX` produces), because there `code=` lists exactly what gets emitted — so you have to add `-gencode arch=compute_XX,code=compute_XX` back by hand.
 
+**Q: Why does the first launch of each kernel in a CUDA 12.3+ process take milliseconds longer than later launches, even with real SASS for the GPU?**
+**Short:** Lazy loading is the default, so the driver loads a kernel's module on its first launch rather than at CUDA init; warm up or preload with cudaFuncGetAttributes before timing.
+Since CUDA 12.3 lazy loading (`CUDA_MODULE_LOADING=LAZY`) is the default on every platform (Linux since 12.2), so the driver loads a module and kernel into device memory on first use instead of loading every kernel in every linked fatbinary at initialization. The first launch carries that load, plus a PTX JIT if no matching SASS exists, and an un-warmed benchmark reports it as kernel time. The same shift can surface as an out-of-memory error on a first launch when a caching allocator already reserved nearly all of VRAM, and as a deadlock between kernels that must run at the same time. Run a warm-up iteration, preload hot kernels with `cudaFuncGetAttributes()`, or set `CUDA_MODULE_LOADING=EAGER` for a process that needs every kernel resident up front.
+
 **Q: What does `__CUDA_ARCH__` do, and when is it undefined?**
 **Short:** __CUDA_ARCH__ is a preprocessor macro set to 100*major+10*minor during each device-code compile pass, and it is undefined during the host-code compilation pass.
 It is a preprocessor macro `nvcc` defines during each device-code compilation pass, set to `100 * major + 10 * minor` (e.g. `800` for `sm_80`), letting a single kernel source branch to different code per target architecture. It is undefined during the host-code compilation pass, so guarding device-only intrinsics with it protects the host build but only if there's no unguarded fallback path referencing them directly.
@@ -823,6 +926,10 @@ It reports the register count, shared-memory usage, and any register spill store
 **Q: What is `nvrtc` and when would you reach for it over ahead-of-time `nvcc`?**
 **Short:** nvrtc compiles CUDA C++ source strings to PTX at process runtime with no .cu file, used when the kernel body depends on runtime-known information like a tensor shape.
 `nvrtc` is a library that compiles CUDA C++ source strings to PTX at process runtime rather than at build time, with no `.cu` file and no `nvcc` subprocess involved. It's the right tool when the kernel body itself depends on information only known at runtime (a tensor shape, a traced computation graph) — it's what CuPy's `RawModule`, Numba's `@cuda.jit`, and PyTorch's Inductor-generated kernels use under the hood.
+
+**Q: What does `nvJitLink` add over compiling a kernel with `nvrtc` and loading its PTX?**
+**Short:** It links several device-code pieces at runtime with link-time optimization, so a runtime-generated callback can be inlined into precompiled library LTO-IR instead of called indirectly.
+`nvrtc` compiles one source string; code that calls into another module still needs separate compilation, and without LTO each piece is compiled alone, so cross-module calls stay real calls and nothing inlines. `nvJitLink` (CUDA 12.0+) takes LTO-IR from `nvrtc -dlto` and from shipped library fatbinaries, plus PTX or cubin, runs the whole-program optimizer with `-lto`, and returns one cubin for `cuModuleLoadData`. NVIDIA's CUDA 12.0 announcement reports nearly 2x faster cuFFT callbacks with JIT LTO than through indirect calls, and cuFFT using it to build kernels at runtime up to 3x faster for sizes under 8K. The constraint is versioning: the `nvJitLink` library must be at least as new as the newest input, and LTO-IR is link-compatible only within one major release.
 
 **Q: What is the difference between the CUDA Driver API and the Runtime API?**
 **Short:** The Runtime API offers implicit context management via <<<grid,block>>> syntax, while the lower-level Driver API exposes explicit context/module handles and loads PTX/cubin at runtime.

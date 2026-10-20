@@ -587,6 +587,82 @@ without collapsing back to serial execution via `cudaDeviceSynchronize` — only
 dependency is enforced, leaving every other independent operation on both streams free to
 run concurrently.
 
+### Programmatic Dependent Launch (PDL): Overlapping Two Kernels in One Stream
+
+Stream order says kernel B starts only after every block of kernel A has exited and A's
+writes are flushed. For a chain of short kernels (a transformer decode step is dozens of
+10-50 us kernels) the gap between A's last wave draining and B's blocks finishing their
+prologue (shared-memory carve-up, `mbarrier` init, TMA descriptor prefetch, loading
+weights that do not depend on A) is a real fraction of each kernel. Programmatic
+Dependent Launch, available from compute capability 9.0 (Hopper), lets B launch early
+and run that prologue while A's tail is still executing, then block at one explicit point
+until A's results are ready.
+
+```
+Plain stream order:
+A  [wave 1 ][wave 2 ][tail..]
+B                              [launch][prologue][wait-free main body]
+
+With PDL:
+A  [wave 1 ][wave 2 ][tail..]
+                     ^ every A block called the trigger
+B                    [launch][prologue][GridDependencySync]-->[main body]
+                                        blocks here until A completes and flushes
+```
+
+Three pieces, one on each side plus the launch:
+
+```cpp
+__global__ void primary(float* out, const float* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = in[i] * 2.0f;
+    // Signal: B may be launched now. This does NOT publish `out` to B.
+    cudaTriggerProgrammaticLaunchCompletion();
+}
+
+__global__ void secondary(float* y, const float* out, const float* w, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    float wi = (i < n) ? w[i] : 0.0f;      // prologue: independent of `primary`
+    cudaGridDependencySynchronize();       // waits for primary to finish + flush
+    if (i < n) y[i] = out[i] + wi;         // only now is `out` safe to read
+}
+
+primary<<<grid, block, 0, stream>>>(d_out, d_in, n);
+
+cudaLaunchAttribute attr;
+attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+attr.val.programmaticStreamSerializationAllowed = 1;
+cudaLaunchConfig_t cfg = {};
+cfg.gridDim = grid; cfg.blockDim = block; cfg.stream = stream;
+cfg.attrs = &attr; cfg.numAttrs = 1;
+CUDA_CHECK(cudaLaunchKernelEx(&cfg, secondary, d_y, d_out, d_w, n));
+```
+
+The rules that make it correct, from the CUDA Programming Guide (13.4):
+
+- **The trigger is a launch permission, not a memory fence.** The guide warns that
+  secondary blocks "might launch before data written by the primary kernel is visible".
+  Only `cudaGridDependencySynchronize()` returns after the primary grids have completed
+  and flushed to global memory, so every read of A's output goes after it.
+- **No trigger means the trigger fires at exit.** If A never calls
+  `cudaTriggerProgrammaticLaunchCompletion`, it implicitly fires once all of A's blocks
+  exit, so B still gets launch-latency hiding but no overlap with A's tail.
+- **The overlap is opportunistic.** B's early blocks run only if A left SM resources free.
+  Code that spins waiting for B to make progress while A is still running can deadlock;
+  never build cross-kernel handshakes on top of PDL.
+- **Only `cudaLaunchKernelEx` carries the attribute.** A `<<<>>>` launch of B silently gets
+  plain stream order.
+- **Graphs keep it.** Stream capture turns the attribute into a programmatic edge
+  (`cudaGraphDependencyTypeProgrammatic` from port `cudaGraphKernelNodePortProgrammatic`),
+  and `cudaLaunchAttributeProgrammaticEvent` with `triggerAtBlockStart = 1` maps to an edge
+  from `cudaGraphKernelNodePortLaunchCompletion`, which fires as soon as A's blocks start.
+
+cuBLAS ships PDL-enabled kernels from CUDA 13.0 Update 1, so a GEMM followed by a custom
+epilogue kernel can overlap without touching the GEMM. The same release notes record a
+known issue in 13.0 Update 2 through 13.3 Update 1: a preceding PDL kernel that writes
+device-side `alpha`/`beta` can race with the GEMM that reads them (a write-after-read
+hazard), which is the trigger-is-not-a-fence rule hitting a library.
+
 ### Stream Priorities
 
 ```cpp
@@ -900,6 +976,7 @@ void fixed_explicit_streams(int num_chunks, int chunk_n, float* h_pinned,
 | `cudaStreamWaitEvent` | Cross-stream dependency | Cheaper than `cudaDeviceSynchronize` for partial ordering |
 | `cudaStreamSynchronize` / `cudaDeviceSynchronize` | Host-blocking sync | Prefer the per-stream call; the device-wide call kills concurrency |
 | `cudaLaunchHostFunc` | Host-side callback from a stream | Must not call CUDA APIs inside the callback |
+| `cudaLaunchKernelEx` + `cudaLaunchAttributeProgrammaticStreamSerialization` | Programmatic Dependent Launch | cc 9.0+; pair with `cudaTriggerProgrammaticLaunchCompletion` / `cudaGridDependencySynchronize` in the kernels |
 | `cudaDeviceGetStreamPriorityRange` | Query valid priority range | Lower numeric value = higher priority; device-dependent range |
 | Nsight Systems | Visualize actual stream/engine overlap on a timeline | The definitive way to confirm overlap is really happening, not just assumed |
 | `cupy.cuda.Stream` / `cupy.cuda.Event` | Python (CuPy) equivalent API | Near 1:1 mapping to the CUDA C++ runtime API |
@@ -941,6 +1018,10 @@ No — `cudaEventElapsedTime` has roughly 0.5 microsecond resolution, which is m
 **Short:** No — different streams are necessary but not sufficient; overlap also needs pinned memory, free engine resources, and enough independent chunks in flight.
 No — different streams are necessary but not sufficient for overlap. Concurrency additionally requires pinned host memory for the copy, enough free hardware resources on the relevant engines, and, in practice, enough independent chunks in flight to fill the pipeline.
 
+**Q: Under Programmatic Dependent Launch, can the secondary kernel read the primary's output right after the primary calls `cudaTriggerProgrammaticLaunchCompletion`?**
+**Short:** No. The trigger only permits the secondary to launch; its reads of the primary's output must come after `cudaGridDependencySynchronize()`, which waits for completion and flush.
+No. `cudaTriggerProgrammaticLaunchCompletion()` is a launch permission, not a memory fence: the CUDA Programming Guide states that secondary blocks "might launch before data written by the primary kernel is visible". Only `cudaGridDependencySynchronize()` in the secondary returns after every primary grid has completed and flushed its results to global memory. A secondary that reads the primary's buffer before that call has a data race that passes most test runs and fails under load, when the primary's tail runs longer. cuBLAS hit this exact shape: CUDA 13.0 Update 2 through 13.3 Update 1 list a known write-after-read hazard when a preceding PDL kernel produces device-side `alpha`/`beta`. Put only work that is independent of the primary (weight loads, barrier init, descriptor prefetch) before the synchronize call.
+
 **Q: What is a CUDA stream, in one sentence?**
 **Short:** An in-order, asynchronous host-issued queue with no ordering guarantee relative to any other stream, which is exactly what enables concurrency.
 A stream is an in-order, asynchronous queue of GPU operations issued from the host, where operations within one stream execute in the order enqueued but carry no ordering guarantee relative to any other stream. That lack of cross-stream ordering is precisely what makes concurrency possible.
@@ -960,6 +1041,10 @@ The legacy default stream is a single, process-wide stream that implicitly synch
 **Q: How do you express a fine-grained dependency between two streams without a full device synchronization?**
 **Short:** Record a `cudaEvent_t` in the producing stream and call `cudaStreamWaitEvent` on the consuming stream, enforcing only that dependency while everything else runs free.
 Record a `cudaEvent_t` in the producing stream via `cudaEventRecord`, then call `cudaStreamWaitEvent` on the consuming stream with that event. Only the specific dependency is enforced — every other operation queued on either stream that doesn't depend on that event remains free to run concurrently, unlike `cudaDeviceSynchronize`, which stalls everything.
+
+**Q: What does Programmatic Dependent Launch overlap that plain stream ordering cannot, and what does it require?**
+**Short:** It lets a dependent kernel launch and run its prologue while the previous kernel's tail is still executing in the same stream; it needs cc 9.0+ and `cudaLaunchKernelEx` with the PDL attribute.
+Plain stream order starts kernel B only after every block of kernel A has exited, so the drain of A's last wave plus B's launch and prologue (shared-memory setup, `mbarrier` init, loading data that does not depend on A) is dead time between them. With PDL, B is launched with `cudaLaunchKernelEx` carrying `cudaLaunchAttributeProgrammaticStreamSerialization` with `programmaticStreamSerializationAllowed = 1`; once every block of A has called `cudaTriggerProgrammaticLaunchCompletion()` (or exited), B's blocks can start, run their prologue, and block in `cudaGridDependencySynchronize()` until A finishes. It needs compute capability 9.0 or newer, and a `<<<>>>` launch of B silently falls back to plain ordering. It pays off on chains of short kernels, such as an LLM decode step, where the inter-kernel gap is a visible share of each kernel's runtime; stream capture keeps it as a programmatic edge inside a CUDA graph.
 
 **Q: What happens if too many streams each request large pinned-memory buffers?**
 **Short:** Pinned memory is a finite, non-swappable OS resource, so over-allocating it can starve the rest of the system and degrade overall performance, not just the GPU.

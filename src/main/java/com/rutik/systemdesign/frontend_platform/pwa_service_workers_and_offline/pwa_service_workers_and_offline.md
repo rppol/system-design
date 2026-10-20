@@ -323,7 +323,28 @@ all — without it a stalled socket leaves the shell blank for minutes instead o
 after 3 seconds. Abort mechanics and the one-shot body rule behind `res.clone()` are
 [`../http_in_the_browser_and_fetch/http_in_the_browser_and_fetch.md`](../http_in_the_browser_and_fetch/http_in_the_browser_and_fetch.md).
 
-This repository's learning game ships exactly this shape in a 3,979-byte `game/sw.js`:
+A controlled request that finds the worker stopped waits for it to start before the `fetch`
+handler runs: about 50 ms, 250 ms on mobile and over 500 ms on a slow device (web.dev,
+navigation preload). Static routes, declared at install with `InstallEvent.addRoutes()` (Chromium 123+, Safari 27.0),
+let the browser serve a matching request from the network or a named cache without starting the
+worker at all:
+
+```js
+self.addEventListener("install", (event) => {
+  if (!event.addRoutes) return;                  // TypeError in browsers without static routing
+  event.waitUntil(event.addRoutes([
+    { condition: { urlPattern: "/assets/*" }, source: { cacheName: SHELL } },  // hashed, precached
+    { condition: { urlPattern: "/api/*" }, source: "network" },
+  ]));
+});
+```
+
+Requests that match no route still go through the `fetch` handler, so the shell keeps its
+network-first logic. A miss in a `{ cacheName }` source goes straight to the network, never to the
+`fetch` handler, so route to it only URLs the install step precached.
+
+This repository's learning game ships the three strategies above, without static routes, in a
+3,979-byte `game/sw.js`:
 `addAll` of eight shell files, a cache name carrying a per-deploy build stamp,
 stale-while-revalidate for generated JSON banks, and network-first with a capped 80-entry
 bucket for `.md` pages. It calls `skipWaiting()` and `clients.claim()` unconditionally,
@@ -652,6 +673,17 @@ Content-hashed filenames can never change their bytes, so cache-first is correct
 The HTML shell and API reads are network-first with a short timeout and a cached fallback;
 semi-fresh data takes stale-while-revalidate; mutations, auth and payments are network-only.
 A cache-first shell has an excellent hit rate and is the worst mistake in this module.
+
+**Q: Why does a service worker slow down requests it never caches, and how do static routes avoid it?**
+**Short:** A controlled request waits for a stopped worker to boot, about 50 ms and 250 ms on mobile; addRoutes rules let the browser send matched requests to network or cache without starting it.
+
+A `fetch` handler that only calls `fetch(event.request)` still costs a worker start on every
+cold request, measured by web.dev at about 50 ms, 250 ms on mobile and over 500 ms on a slow
+device. `InstallEvent.addRoutes()` (Chromium 123+, Safari 27.0) registers `urlPattern` rules
+with a `"network"`, `"cache"`, `{ cacheName }`, `"fetch-event"` or
+`"race-network-and-fetch-handler"` source, and the browser applies them before the worker runs.
+Route API calls to `"network"` and precached hashed assets to their cache; leave navigations to
+the handler.
 
 **Q: How does the Cache API differ from the browser's own HTTP cache?**
 **Short:** Explicit Request/Response pairs stored under your control ignore Cache-Control entirely, so nothing expires unless your code deletes it.

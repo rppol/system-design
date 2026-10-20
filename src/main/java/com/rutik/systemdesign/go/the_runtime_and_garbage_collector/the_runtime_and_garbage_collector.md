@@ -406,6 +406,100 @@ cycle. A million goroutines is a million stacks to scan, and if their stacks hav
 that is 8 GB of roots. This is why "one goroutine per connection" scales beautifully to a million
 *idle* connections and badly to a million connections each holding deep call stacks full of pointers.
 
+### Cleanups and weak pointers `[1.24]`
+
+The collector exposes two hooks to user code: run something after an object dies
+(`runtime.AddCleanup`), and hold a pointer that does not keep its target alive (`weak.Pointer`).
+Both shipped in Go 1.24 alongside `maphash.Comparable`. `runtime.SetFinalizer` still exists, and the
+Go GC guide recommends cleanups for every use except structures with a strict destruction order.
+
+```go
+func AddCleanup[T, S any](ptr *T, cleanup func(S), arg S) Cleanup
+func (c Cleanup) Stop()
+
+func Make[T any](ptr *T) weak.Pointer[T]
+func (p weak.Pointer[T]) Value() *T // nil once the target is unreachable
+```
+
+The difference from a finalizer is what the callback receives. A finalizer is called with the object
+itself, so the runtime must **resurrect** it: the object and everything it points to are marked live
+again, survive the current cycle, and can be freed no earlier than the next one. A cleanup is called
+with a separate `arg` (typically the file descriptor or C pointer the object wraps), so the object is
+freed in the cycle that found it unreachable.
+
+```mermaid
+flowchart LR
+    classDef req  fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef bad  fill:#e06c75,stroke:#c0392b,color:#ffffff
+    classDef good fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    U(["cycle N marks obj<br/>unreachable"]) --> K{"what is attached?"}
+    K -->|"SetFinalizer"| R(["resurrect obj and<br/>everything it points to"])
+    R --> F(["finalizer goroutine<br/>runs fn(obj), one at a time"])
+    F --> N1(["obj freed at cycle N+1<br/>at the earliest"])
+    K -->|"AddCleanup"| FREE(["obj freed in cycle N"])
+    FREE --> C(["cleanup(arg) queued<br/>cleanups may run concurrently"])
+
+    class U,K req
+    class R,F,N1 bad
+    class FREE,C good
+```
+
+| Property | `runtime.SetFinalizer` | `runtime.AddCleanup` `[1.24]` |
+|----------|------------------------|--------------------------------|
+| Callback receives | The object, which is resurrected | A separate `arg`; the object is already gone |
+| Callbacks per object | One; must point at the start of the allocation | Many; interior pointers allowed |
+| Object in a reference cycle | Not guaranteed to be collected, finalizer may never run | Collected; cleanups run in unspecified order |
+| Chain of 10 finalized nodes | At least 10 cycles to free | All freed in one cycle |
+| Execution | One goroutine, sequential, ordered | Concurrent with each other; long ones should spawn a goroutine |
+| Cancel | `SetFinalizer(obj, nil)` | `Cleanup.Stop()` |
+
+Neither is guaranteed to run, including at program exit, and neither runs reliably for objects under
+16 bytes with no pointers, because the tiny allocator batches those into one 16-byte block that stays
+alive while any neighbour is live. `runtime.GC()` waits only until cleanups are queued, not until they
+have run, so a test must poll or synchronise on a channel the cleanup closes.
+
+`weak.Pointer` is the other half. `weak.Make(p)` records the target without marking it; once the
+target is unreachable, `Value()` returns nil, and it may do so as early as the cycle that found it
+dead. Two weak pointers compare equal only if the strong pointers they came from were equal, which
+makes them usable as map keys after the target is gone. The `unique` package `[1.23]` is built on the
+same mechanism. The standard combination is a canonicalising map: values live as long as some caller
+holds them, and a cleanup deletes the stale entry.
+
+```go
+type Cache[K comparable, V any] struct {
+    mu sync.Mutex
+    m  map[K]weak.Pointer[V]
+}
+
+func (c *Cache[K, V]) Get(k K, load func() *V) *V {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    if v := c.m[k].Value(); v != nil {
+        return v
+    }
+    v := load()
+    if c.m == nil {
+        c.m = make(map[K]weak.Pointer[V]) // the zero Cache is usable
+    }
+    c.m[k] = weak.Make(v)
+    // The closure captures only c and gets the key as arg; capturing v would keep it alive forever.
+    runtime.AddCleanup(v, func(k K) {
+        c.mu.Lock()
+        defer c.mu.Unlock()
+        if c.m[k].Value() == nil { // a later Get may have stored a fresh value
+            delete(c.m, k)
+        }
+    }, k)
+    return v
+}
+```
+
+A missing key returns the zero `weak.Pointer`, whose `Value()` is nil, so the lookup needs no
+`ok` check. The map holds no strong reference, so an entry nobody else holds is dropped at the next
+cycle: this deduplicates live values, it does not retain hot ones. A retention cache still needs a
+size bound and an eviction policy.
+
 ### Runtime metrics worth exporting
 
 ```go
@@ -653,6 +747,19 @@ Go 1.25 and later the runtime reads the cgroup CPU limit itself; on anything old
 explicitly. See [OS and I/O Performance](../../backend/os_and_io_performance/os_and_io_performance.md)
 for how CFS quota accounting produces this class of surprise.
 
+### Pitfall 8: a cleanup that keeps its own object alive
+
+A wrapper around a C image buffer kept its decoder state in a separate struct with a back-pointer
+(`img.dec.img == img`) and registered its release with
+`runtime.AddCleanup(img, func(d *decoder) { C.free(d.buf) }, img.dec)`. The `arg` reached `img`
+through that back-pointer, so `img` was reachable from the cleanup the runtime itself holds, was never
+collected, and the cleanup never ran. Every decoded image leaked its C buffer, invisible to
+`GOMEMLIMIT` and to the heap profile, until the pod hit its limit after about 40,000 images. The fix
+passes only the C pointer: `runtime.AddCleanup(img, func(p unsafe.Pointer) { C.free(p) }, img.dec.buf)`.
+Since Go 1.26 `AddCleanup` panics when `arg` equals or points into the object, or when the closure
+captures a pointer into it, but it checks only those direct pointers, so a path through a second
+object passes silently.
+
 ---
 
 ## 11. Technologies & Tools
@@ -666,6 +773,7 @@ for how CFS quota accounting produces this class of surprise.
 | `go tool pprof -http=:8080` | Flame-graph web UI by default `[1.26]`; graph view at `/ui/graph` |
 | `runtime/trace` and `go tool trace` | Where GC phases fall relative to your goroutines; why a request waited |
 | `runtime/debug` | `SetGCPercent`, `SetMemoryLimit`, `FreeOSMemory`, `ReadGCStats` — the programmatic knobs |
+| `runtime.AddCleanup`, `weak`, `unique` | Post-collection cleanup and non-retaining references `[1.24]`; `unique` interns comparable values `[1.23]` |
 | `GOEXPERIMENT=nogreenteagc` | A/B the `[1.26]` collector against the previous one on your own workload |
 | `GOEXPERIMENT=nosizespecializedmalloc` | A/B the `[1.27]` small-allocation fast paths |
 | `GOEXPERIMENT=norandomizedheapbase64` | Disable heap base address randomization `[1.26]`; only relevant if a test depends on address layout |
@@ -716,6 +824,18 @@ appear together in `gctrace` — cycles per second above 5, `N MB goal` identica
 to the limit, and the leading percentage climbing toward 50. Raising the limit slightly only buys days;
 the real fix is to shrink the live set (usually an unbounded in-process cache) or move to a bigger box,
 and the design rule is to keep live heap under 60–70% of `GOMEMLIMIT`.
+
+**Q: Why might a cleanup registered with runtime.AddCleanup never run?**
+**Short:** The object is still reachable through the cleanup closure or its arg, it is a tiny pointer-free object batched with live ones, or the program exits first.
+
+The runtime holds the cleanup function and its argument, so anything they reference is a root. A
+closure that mentions the object, or an `arg` that points back to it, keeps it alive forever. Since
+Go 1.26 the runtime panics when `arg` or a captured pointer points directly into the object, but a
+path through another object goes unnoticed. Objects of 16 bytes or less with no pointers
+share a tiny-allocator block, and the block survives while any neighbour is live. Cleanups are also
+not run at exit, and `runtime.GC()` returns once they are queued rather than run. Pass the underlying
+resource (fd, C pointer) as `arg`, capture nothing from the wrapper, and keep a deterministic `Close`
+as the primary path with the cleanup as a backstop.
 
 **Q: Why does Go not use a generational collector?**
 **Short:** Escape analysis already keeps most short-lived values off the heap, so the population a nursery would target is largely filtered out before allocation.
@@ -895,6 +1015,30 @@ engagement is worth an alert. Note the interaction with CFS quota — before con
 `GOMAXPROCS` `[1.25]`, a 2-CPU pod on a 64-core node sized this budget from 64 Ps and made every cycle
 overshoot.
 
+**Q: Why should new code prefer runtime.AddCleanup over runtime.SetFinalizer?**
+**Short:** A finalizer resurrects its object for one more cycle and blocks collection of cycles; a cleanup gets a separate arg, so the object is freed at once.
+
+`SetFinalizer` passes the object to the callback, so the collector must mark it and everything it
+references live again; the memory is reusable no earlier than the next cycle, a chain of 10 finalized
+nodes takes at least 10 cycles, and a cycle containing a finalized object may never be collected.
+It also allows one finalizer per object, attached at the start of the allocation, run sequentially on
+a single goroutine. `AddCleanup` `[1.24]` takes `(ptr, func(S), arg S)`, frees `ptr` in the cycle
+that finds it dead, permits several cleanups per object and interior pointers, collects cycles, and
+returns a `Cleanup` handle with `Stop()`. The one case left for finalizers is a structure that needs
+a defined destruction order, since cleanups run in no particular order and concurrently.
+
+**Q: What does weak.Pointer give you, and why is a weak-keyed cache not a replacement for an LRU?**
+**Short:** It references an object without keeping it alive, so a weak map deduplicates values that callers already hold but drops anything unreferenced at the next GC.
+
+`weak.Make(p)` `[1.24]` returns a `weak.Pointer[T]` whose `Value()` is the original pointer while
+the target is reachable and nil afterwards, possibly as early as the cycle that found it dead. Two
+weak pointers compare equal exactly when their source pointers did, even after collection, which is
+what lets a canonicalisation map (the pattern `unique` `[1.23]` is built on) key or value by them
+and pair each entry with an `AddCleanup` that deletes it. Retention is the gap: with no strong
+reference anywhere, a hot entry is gone after the next cycle, which under `GOGC=100` arrives
+whenever the heap has grown by the size of the live set. Use weak maps to share one copy of values that are already live, and a
+size-bounded LRU when the point is to keep values nobody holds.
+
 ---
 
 ## 13. Best Practices
@@ -927,6 +1071,8 @@ overshoot.
     the answer for your allocation shape may differ from the published 10–40%.
 13. **Watch the `N MB stacks` field.** Growth there with a flat live heap is a goroutine leak, and it
     is cheaper to spot in `gctrace` than in a profile.
+14. **Release resources with `Close`, back it with `runtime.AddCleanup`.** Cleanup timing follows
+    `GOGC`, not your fd limit; pass the raw resource as `arg` and never capture the wrapper.
 
 ---
 

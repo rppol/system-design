@@ -72,6 +72,33 @@ register does not care which discipline owns a failure. And `LLM10` did not exis
 edition — a threat model written against the 2023 list has no entry for it at all, which is exactly
 why §10.7 below had to be written.
 
+**OWASP Top 10 for Agentic Applications 2026.** The OWASP GenAI Security Project published a
+second list on 2025-12-09 for systems where the model plans, holds credentials, calls tools, keeps
+memory, and talks to other agents. The LLM list scores the model-and-app boundary; the agentic list
+scores what an autonomous loop can do with that boundary once it is crossed. Its IDs are `ASI01`
+to `ASI10` (Agentic Security Initiative). They are a ranked list, separate from the T-numbered
+threat taxonomy of the earlier *Agentic AI - Threats and Mitigations* v1.0 (February 2025), so
+`ASI06` and `T1` both name memory poisoning; cite the one your auditor uses.
+
+| OWASP ID | Title | Closest LLM entry | Where it lives in this repo |
+|----------|-------|-------------------|-----------------------------|
+| `ASI01` | Agent Goal Hijack | `LLM01` | §4.1 indirect injection; the goal, not one reply, is redirected |
+| `ASI02` | Tool Misuse and Exploitation | `LLM06` | [function_calling_and_tool_design.md](../agents_and_tool_use/function_calling_and_tool_design.md), §14 Decision 2 |
+| `ASI03` | Identity & Privilege Abuse | `LLM06` | [mcp_security.md](../mcp_model_context_protocol/mcp_security.md) - token passthrough, confused deputy |
+| `ASI04` | Agentic Supply Chain Vulnerabilities | `LLM03` | §4.4, plus MCP servers, plugins, and agent cards fetched at run time |
+| `ASI05` | Unexpected Code Execution | `LLM05` | [sandboxed_code_execution.md](../agents_and_tool_use/sandboxed_code_execution.md) |
+| `ASI06` | Memory & Context Poisoning | `LLM04`, `LLM08` | [agent_memory.md](../agents_and_tool_use/agent_memory.md), [multi_agent_security.md](../multi_agent_systems/multi_agent_security.md) |
+| `ASI07` | Insecure Inter-Agent Communication | none | [multi_agent_security.md](../multi_agent_systems/multi_agent_security.md), A2A message signing |
+| `ASI08` | Cascading Failures | `LLM10` | [agent_reliability.md](../agents_and_tool_use/agent_reliability.md) - budgets, circuit breakers |
+| `ASI09` | Human-Agent Trust Exploitation | `LLM09` | [agent_ux_patterns.md](../agents_and_tool_use/agent_ux_patterns.md) - approval fatigue, persuasive summaries |
+| `ASI10` | Rogue Agents | none | [multi_agent_security.md](../multi_agent_systems/multi_agent_security.md) - drift, collusion, kill switch |
+
+Use both lists on an agent. A chatbot review in `LLM` terms passes an agent whose every single reply
+is safe but whose loop is not: `ASI08` is one bad tool result fanning out across 40 downstream steps,
+and `ASI10` is an agent acting outside its mandate with no single malicious turn to point at.
+`ASI07` and `ASI10` have no LLM-list equivalent at all, which is why a threat model written only
+against the 2025 LLM list misses them.
+
 ### 4.1 Prompt Injection
 
 The most critical and novel LLM vulnerability. Attacker-crafted input manipulates the model into ignoring its instructions and following the attacker's instead.
@@ -1071,6 +1098,11 @@ It is resource and cost exhaustion achieved by sending maximally expensive reque
 **Short:** System Prompt Leakage, Vector and Embedding Weaknesses, Misinformation, and Unbounded Consumption are the four OWASP LLM Top 10 entries added or restructured in 2025.
 
 System Prompt Leakage, Vector and Embedding Weaknesses, Misinformation, and Unbounded Consumption — all four were added or substantially restructured in v2.0. The gaps are practical, not editorial. System Prompt Leakage (`LLM07`) got its own entry because teams kept treating the system prompt as a secret and shipping tenant configuration inside it; the defense is canary tokens plus output scanning and, more fundamentally, designing so that disclosure costs nothing. Vector and Embedding Weaknesses (`LLM08`) covers the RAG-layer risks that pure model-centric threat models skip: embedding inversion reconstructing source text, cross-tenant retrieval from a missing filter, and poisoned chunks as a persistent injection vector. Misinformation (`LLM09`) is a hallucination and over-reliance risk that most security teams had classified as a quality problem and therefore nobody's responsibility. Unbounded Consumption (`LLM10`) is the cost and resource exhaustion class described above, which a request rate limiter does not address. The other structural change worth knowing is that `LLM04` became Data and Model Poisoning, widening older "training data poisoning" wording to cover embedding-time and fine-tuning-time poisoning as well.
+
+**Q: Why is the OWASP LLM Top 10 not enough to threat-model a tool-using agent, and what does the Agentic Top 10 add?**
+**Short:** The LLM list judges single model calls; OWASP's ASI01-ASI10 list (December 2025) adds loop-level risks such as cascading failures, inter-agent messaging, and rogue agents.
+
+The LLM Top 10 scores the boundary between one model call and the application, so an agent can pass it turn by turn while its loop still fails. The OWASP Top 10 for Agentic Applications 2026, published 2025-12-09, scores the loop: `ASI01` Agent Goal Hijack, `ASI02` Tool Misuse and Exploitation, `ASI03` Identity & Privilege Abuse, `ASI04` Agentic Supply Chain Vulnerabilities, `ASI05` Unexpected Code Execution, `ASI06` Memory & Context Poisoning, `ASI07` Insecure Inter-Agent Communication, `ASI08` Cascading Failures, `ASI09` Human-Agent Trust Exploitation, and `ASI10` Rogue Agents. Several are sharper versions of LLM entries: goal hijack is indirect injection that redirects a multi-step plan instead of one reply, and identity abuse is excessive agency expressed as a borrowed OAuth token or a confused-deputy MCP server. Two have no LLM-list equivalent: `ASI07` (spoofed or replayed agent-to-agent messages) and `ASI10` (an agent acting outside its mandate with no single malicious turn). `ASI08` shares only resource exhaustion with `LLM10`; its real subject is one poisoned tool result propagating through every downstream step. The controls follow: per-agent identities with scoped short-lived credentials, signed inter-agent messages, step and spend budgets with circuit breakers, provenance on memory writes, and a kill switch that does not depend on the agent's cooperation. Run both lists on any agent; the LLM list still covers the model calls inside it.
 
 ---
 

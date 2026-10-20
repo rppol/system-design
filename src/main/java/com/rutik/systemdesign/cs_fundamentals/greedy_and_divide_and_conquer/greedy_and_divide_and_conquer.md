@@ -829,7 +829,7 @@ def fixed_strip_scan(strip, d):
 
 | Tool / Library | Use case | Notes |
 |----------------|----------|-------|
-| `heapq` (Python) | Huffman coding, Prim's/Dijkstra, interval scheduling | Min-heap; negate for max-heap |
+| `heapq` (Python) | Huffman coding, Prim's/Dijkstra, interval scheduling | Min-heap; `heappush_max`/`heappop_max` on 3.14+, or negate on 3.13 and earlier |
 | `sortedcontainers.SortedList` | Interval management with O(log n) insert | Mutable sorted structure |
 | `zlib` / `gzip` | DEFLATE (LZ77 + Huffman) compression | Industry standard; Huffman codes applied |
 | `brotli` | Brotli compression (improved DEFLATE) | Better than gzip for web; also uses Huffman |

@@ -2,6 +2,8 @@
 
 > Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A floor: 15
 
+> **Version anchor (2026-10-19).** **Apache Kafka 4.3.1** (2026-06-25) is the latest release, with 4.4.0 at release candidate; Kafka is KRaft-only since 4.0. The **KIP-848 consumer rebalance protocol** (`group.protocol=consumer`) is GA since 4.0 but opt-in on the client, and 4.3 logs a warning when a consumer starts on the `classic` protocol (KIP-1274) and deprecates for removal in 5.0 the broker setting `group.coordinator.rebalance.protocols` (KIP-1237), the `streams-scala` module (KIP-1244), and the old MirrorMaker metric names (KIP-1280). **Share groups** (KIP-932, Queues for Kafka) are production-ready since 4.2. **Strimzi 1.3.0** (2026-10-12) serves only `kafka.strimzi.io/v1` (the `v1beta2` API was removed in 1.0.0) and requires `KafkaNodePool`. **KEDA v2.21.0** (2026-09-23).
+
 Operating Apache Kafka (and Kafka-compatible streaming) as platform infrastructure: the Strimzi operator on Kubernetes, partition and disk capacity sizing, consumer-lag monitoring, rebalancing without latency spikes, rack awareness for AZ-failure survival, and tiered storage for cost. This module owns the **run-it-at-scale** angle. For the *messaging concepts* themselves (delivery semantics, partitioning theory, log compaction, the dual-write/outbox pattern) cross-reference [`../../hld/`](../../hld/README.md) and the backend messaging material; for *application consumer/producer code patterns* see [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md). Here we focus on keeping the cluster alive, sized, and observable.
 
 ---
@@ -37,7 +39,7 @@ The operational surface area:
 1. **Durability is `acks=all` + `min.insync.replicas=2` + RF=3.** Producers must wait for all in-sync replicas; the topic must require at least 2 ISR to accept a write. RF=3 with `min.insync.replicas=2` survives one broker loss and still accepts writes; lose two and writes block (correctly — better than losing data).
 2. **Partitions are the unit of parallelism and the unit of cost.** More partitions = more consumer parallelism and more producer throughput, but also more open files, more memory for the page cache, longer leader-election and rebalance times, and more replication traffic. There is a real upper bound per broker (~4,000 partitions/broker is a common practical ceiling; KRaft raised cluster totals into the millions but per-broker limits remain).
 3. **Lag, not throughput, is the health signal.** A consumer group keeping up has near-zero lag; growing lag means consume rate < produce rate, and the consumer will eventually hit the retention edge and lose data.
-4. **Rebalances are stop-the-world by default.** When group membership changes (a consumer joins/leaves/dies, or a deploy), the group pauses all consumption to reassign partitions. Frequent or slow rebalances are a top cause of lag spikes; cooperative/incremental rebalancing and static membership mitigate this.
+4. **Rebalances are stop-the-world on the classic protocol's default assignor.** When group membership changes (a consumer joins/leaves/dies, or a deploy), an unconfigured Java consumer pauses all consumption to reassign partitions. Frequent or slow rebalances are a top cause of lag spikes; the KIP-848 consumer protocol, cooperative rebalancing and static membership mitigate this.
 5. **Rack awareness is mandatory for AZ-failure survival.** Without `broker.rack` set to the AZ, Kafka may place all 3 replicas of a partition in one AZ; that AZ failing takes the partition offline despite RF=3.
 6. **Reassignment must be throttled.** Moving partitions between brokers (to rebalance load or add a broker) copies data; unthrottled, it saturates the network and starves client traffic. Always set a replication throttle.
 
@@ -65,8 +67,9 @@ The operational surface area:
 
 | Protocol | Behavior | Tradeoff |
 |----------|----------|----------|
-| Eager (range/round-robin) | Revoke ALL partitions, reassign | Simple; full stop-the-world pause |
-| Cooperative (incremental) | Revoke only moving partitions | Much smaller pause; default for new clients |
+| Eager (range/round-robin) | Revoke ALL partitions, reassign | Full stop-the-world pause; what an unconfigured classic-protocol client gets, because the default `partition.assignment.strategy` is `[RangeAssignor, CooperativeStickyAssignor]` and the first entry wins |
+| Cooperative (incremental) | Revoke only moving partitions | Much smaller pause; opt in on the classic protocol by listing `CooperativeStickyAssignor` alone |
+| Consumer protocol (KIP-848) | Broker computes the assignment and moves partitions member by member | No group-wide pause and no client-side assignor; `group.protocol=consumer`, GA since Kafka 4.0 |
 | Static membership | `group.instance.id` pins assignment | Survives transient restarts without rebalancing at all |
 
 Why cooperative pauses less than eager — same trigger, different blast radius:
@@ -343,7 +346,7 @@ Disk per broker — retention drives this:
 ```
 ingest          = 600 MB/s
 retention       = 7 days = 604,800 s
-raw data        = 600 MB/s × 604,800 s ≈ 363 TB over the window... 
+raw data        = 600 MB/s × 604,800 s ≈ 363 TB over the window...
   (that's the WRONG way — that's cumulative writes, not stored bytes)
 
 Correct: stored bytes = average_ingest_rate × retention_window × replication_factor
@@ -534,6 +537,14 @@ The unthrottled row is the pitfall: replication is a bulk sequential copy that w
 
 **Why 50 MB/s and an 11-hour migration is usually the right answer.** Nothing about the rebalance is urgent; the cluster was already serving traffic before the new broker arrived. Trading 11 hours of background copying for a 4% bandwidth footprint is almost always better than a 20-minute migration that spikes client p99. This is also why Cruise Control is preferred over the manual script — it moves partitions gradually under its own throttle and watches capacity goals, rather than relying on an operator remembering the `--throttle` flag at 2am.
 
+**Draining a broker or a disk.** Moving partitions off a broker you plan to remove, or off one failing JBOD disk, has a race: Kafka keeps placing new topics and partitions on it while the drain runs, and for JBOD it picks the log directory with the fewest partitions, which is the one you are emptying. Kafka 4.3 adds `cordoned.log.dirs` (KIP-1066), a per-broker dynamic config that stops new partitions from being placed on the listed directories (`*` cordons all of them, which cordons the broker). It does not move existing replicas, so cordon first, then reassign under a throttle:
+
+```bash
+kafka-configs.sh --bootstrap-server prod-kafka:9092 --alter \
+  --entity-type brokers --entity-name 3 --add-config 'cordoned.log.dirs=*'
+# then a throttled reassignment (Cruise Control remove_broker, or KafkaRebalance mode: remove-brokers in Strimzi)
+```
+
 ### 6.5 Rolling upgrades without downtime
 
 Strimzi performs rolling restarts respecting **PodDisruptionBudgets** and waiting for ISR to fully recover between brokers — it restarts one broker, waits until all its partitions are back in-sync, then proceeds. Doing this by hand and restarting two brokers of an RF=3/`min.insync.replicas=2` topic at once would drop ISR below 2 and block writes.
@@ -568,7 +579,7 @@ Keeping them apart is what preserves the rollback: new binaries at an old metada
 | Run-it | Strimzi on K8s | MSK / Confluent Cloud | Strimzi for control + K8s-native ops; managed for less ops burden |
 | Partition count | Few large | Many small | Few = less overhead but caps parallelism; many = parallelism but file-handle/rebalance cost |
 | Retention | Long on local disk | Short hot + tiered to S3 | Tiered for cheap long retention; local-only for lowest read latency |
-| Rebalance protocol | Eager | Cooperative + static membership | Cooperative+static for low-pause; eager only for old clients |
+| Rebalance protocol | Eager | KIP-848 consumer protocol or cooperative, + static membership | KIP-848 on 4.x clients and brokers; cooperative+static on the classic protocol; eager only for old clients |
 | Replication factor | 3 | 2 | 3 for prod durability/AZ survival; 2 only for non-critical, cost-sensitive topics |
 | Controller | ZooKeeper | KRaft | KRaft for all new clusters (ZK removed in 4.0) |
 
@@ -592,7 +603,7 @@ Keeping them apart is what preserves the rollback: new binaries at an old metada
 - You have low volume and a simple work-queue need — SQS/RabbitMQ or a managed queue is far less operational burden.
 - Request/response or RPC semantics — Kafka is a log, not an RPC bus.
 - You lack the team to operate stateful infra — use MSK Serverless / Confluent Cloud and pay for someone else to run it.
-- You need per-message TTL, priority queues, or selective ack — those are queue semantics Kafka doesn't natively provide.
+- You need per-message TTL or priority queues, which Kafka does not provide. Per-record acknowledgement and work-queue consumption are covered: share groups (KIP-932), production-ready since Kafka 4.2, let many consumers read one partition with per-record ack, redelivery counting and no partition-to-consumer cap.
 
 ---
 
@@ -629,13 +640,15 @@ The broken config silently loses acknowledged messages on leader failure — the
 
 **Pitfall 6: Heap too large, page cache too small.** Kafka relies on the OS **page cache** for read performance, not the JVM heap. Setting `-Xmx24g` on a 32GB broker starves the page cache and tanks throughput. Keep heap ~6–8 GB; leave the rest for the page cache.
 
+**Pitfall 7: Upgrading the Strimzi operator past 1.0 with `v1beta2` resources still in the cluster.** Strimzi 1.0.0 (2026-04-28) removed the `v1beta2` API from its CRDs and serves only `kafka.strimzi.io/v1`, so GitOps manifests or stored objects still on `v1beta2` stop working once the new operator and CRDs land. Fix: on a 0.49+ operator, convert every custom resource with Strimzi's v1 API Conversion Tool (it rewrites both YAML files in Git and live resources), upgrade the CRDs as the release notes describe, and only then install 1.x.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| Strimzi | Kafka operator | CRDs: `Kafka`, `KafkaNodePool`, `KafkaTopic`, `KafkaUser`, `KafkaRebalance`; rolling ops; KRaft-only, node pools required |
+| Strimzi | Kafka operator | CRDs: `Kafka`, `KafkaNodePool`, `KafkaTopic`, `KafkaUser`, `KafkaRebalance`; rolling ops; KRaft-only, node pools required; since 1.1.0 a `type: tlsroute` listener exposes brokers through Gateway API `TLSRoute`s |
 | Cruise Control | Rebalancing | Goal-based partition rebalancing, broker add/remove, anomaly detection |
 | Kafka Lag Exporter / Burrow | Lag monitoring | Per-group lag → Prometheus; Burrow adds lag-trend evaluation |
 | Cluster Operator + Kafka Exporter | Metrics | JMX → Prometheus → Grafana dashboards |
@@ -671,8 +684,8 @@ Take the max of two requirements: throughput and consumer parallelism. For throu
 Lag is `log-end-offset − committed-offset` summed across a group's partitions — how many messages the consumer is behind the head of the log. It's the key metric because it directly measures whether consumers are keeping up: flat near zero is healthy, steadily rising means consume rate < produce rate. The danger is hitting the **retention edge** — if lag grows until the oldest un-consumed messages expire past `retention.ms`, you permanently lose data the consumer never read. So you alert on rising lag *before* it approaches the retention window, which buys time to scale consumers or fix the bottleneck. Throughput alone can look healthy while lag silently grows.
 
 **Q: Explain what happens during a consumer-group rebalance and why frequent rebalances hurt.**
-**Short:** A rebalance triggers on any group membership change, and with the default eager protocol it revokes all partition assignments from all consumers at once, pausing consumption entirely.
-A rebalance triggers whenever group membership changes — a consumer joins, leaves, crashes, or a deploy restarts pods. With the default eager protocol, the group coordinator revokes **all** partition assignments from **all** consumers, then reassigns them; during this stop-the-world pause, no one consumes, so lag spikes. Frequent rebalances (e.g., on every deploy of a large group) cause repeated pauses and unstable consumption. Mitigations: cooperative/incremental rebalancing (only the moving partitions are revoked, not all), and static membership (`group.instance.id`) so a consumer that briefly restarts rejoins with its old assignment without triggering a reassignment at all.
+**Short:** Any group membership change triggers one; an unconfigured classic-protocol consumer rebalances eagerly, so every member gives up all partitions at once and the whole group stops consuming.
+A rebalance triggers whenever group membership changes: a consumer joins, leaves, crashes, or a deploy restarts pods. An unconfigured Java consumer uses the `classic` protocol with `partition.assignment.strategy = [RangeAssignor, CooperativeStickyAssignor]`; the first entry wins, so the group rebalances eagerly. The coordinator revokes **all** partition assignments from **all** consumers, then reassigns them; during this stop-the-world pause no one consumes, so lag spikes. Frequent rebalances (e.g., on every deploy of a large group) cause repeated pauses and unstable consumption. Mitigations: the KIP-848 consumer protocol (`group.protocol=consumer`, GA since Kafka 4.0), where the broker computes assignments and moves only the affected partitions member by member; on the classic protocol, `CooperativeStickyAssignor` alone, so only the moving partitions are revoked; and static membership (`group.instance.id`) so a consumer that briefly restarts rejoins with its old assignment without triggering a reassignment at all. Kafka 4.3 logs a warning when a consumer starts on the classic protocol.
 
 **Q: Why is rack awareness critical and what breaks without it?**
 **Short:** Rack awareness places a partition's replicas across different AZs, so without it Kafka can put all replicas in one AZ and an AZ failure can take the whole partition offline despite RF=3.
@@ -681,6 +694,10 @@ Rack awareness tells Kafka which AZ each broker is in (`broker.rack`), so it pla
 **Q: How do you add a broker and rebalance data without impacting clients?**
 **Short:** Reassigning partitions to a new broker needs a replication throttle so the data-copy traffic doesn't saturate NICs and starve client traffic, typically automated with Cruise Control.
 A new broker starts empty — it holds no partitions until you reassign some to it. The reassignment copies partition data over the network, which, unthrottled, saturates NICs and starves producer/consumer traffic. The safe procedure: use Cruise Control (or `kafka-reassign-partitions.sh`) to generate a balanced plan, execute it with a **replication throttle** (e.g., `--throttle 50000000` for 50 MB/s) so client traffic is preserved, and let it move gradually. Cruise Control automates this with capacity/rack goals and built-in throttling, which is why LinkedIn built it. Verify under-replicated partitions return to zero before removing the throttle.
+
+**Q: How do you safely remove a Kafka broker or a failing JBOD disk?**
+**Short:** Cordon it first with `cordoned.log.dirs` (Kafka 4.3+) so no new partitions land there, move its replicas off under a throttle, wait for zero under-replicated partitions, then remove it.
+Reassigning replicas off the broker is only half the job: while the drain runs, new topics and partition-count increases can still place replicas on it, and on JBOD Kafka prefers the log directory with the fewest partitions, which is exactly the disk being emptied. Since Kafka 4.3, set the per-broker dynamic config `cordoned.log.dirs` (one directory for a failing disk, `*` for the whole broker) first; it blocks new placements but moves nothing. Then run a throttled reassignment (Cruise Control `remove_broker`, or a Strimzi `KafkaRebalance` with `mode: remove-brokers`) honoring rack awareness so each partition keeps replicas in three AZs. Wait until the broker holds no replicas and under-replicated partitions are zero, then shut it down or scale the node pool. For a KRaft controller, also remove it from the quorum, since it is a voter, not just a data holder.
 
 **Q: Why do you keep the Kafka JVM heap small on a large-memory broker?**
 **Short:** Kafka's read performance comes from the OS page cache, not the JVM heap, so an oversized heap starves the cache, forces disk reads, and creates long GC pauses.
@@ -731,7 +748,7 @@ Redpanda is a Kafka-API-compatible broker written in C++ with no JVM and no ZooK
 - **Size partitions to the max of throughput and parallelism needs**, round up modestly, avoid frequent re-partitioning.
 - **Size disk to `avg_ingest × retention × RF`**; alert at 75% disk; use tiered storage for long retention.
 - **Monitor consumer lag as the primary health signal**; alert on rising lag before it nears the retention edge.
-- **Use cooperative rebalancing + static membership** to make deploys non-disruptive.
+- **Use the KIP-848 consumer protocol (or cooperative rebalancing on classic) + static membership** to make deploys non-disruptive.
 - **Throttle every partition reassignment**; prefer Cruise Control for automated, goal-based rebalancing.
 - **Keep JVM heap small (~6–8 GB)**; leave RAM for the page cache.
 - **Manage topics as `KafkaTopic` CRDs under GitOps**, not ad-hoc `kafka-topics.sh`.

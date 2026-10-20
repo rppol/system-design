@@ -51,6 +51,8 @@ The architecture is three layers: JUnit Platform (the launcher and engine SPI), 
 | `@ExtendWith` | Register extensions (e.g., MockitoExtension) |
 | `@TestInstance(PER_CLASS)` | One instance per class instead of per-method |
 | `@TempDir` | Injects a JUnit-managed temporary directory (parameter or field); deleted automatically after the test |
+| `@DefaultLocale` / `@DefaultTimeZone` | JUnit 6.1+ (`org.junit.jupiter.api.util`): set `Locale.getDefault()` / `TimeZone.getDefault()` for a test or class, restored afterwards |
+| `@SetSystemProperty` / `@ClearSystemProperty` / `@RestoreSystemProperties` | JUnit 6.1+ (`org.junit.jupiter.api.util`): set, clear, or snapshot-and-restore JVM system properties around a test |
 
 ### 4.2 Parameterized Test Sources
 
@@ -62,6 +64,8 @@ The architecture is three layers: JUnit Platform (the launcher and engine SPI), 
 | `@MethodSource("provideArguments")` | Static factory method returning `Stream<Arguments>` |
 | `@EnumSource(Status.class)` | All or subset of enum values |
 | `@NullSource` / `@EmptySource` | Null and/or empty argument |
+
+The same sources also drive `@ParameterizedClass` (JUnit 5.13+), which runs every test in a class once per argument set instead of one method.
 
 ### 4.3 Mockito Test Double Taxonomy (Meszaros)
 
@@ -271,6 +275,39 @@ private static Stream<Arguments> provideInvalidInputs() {
 }
 ```
 
+### `@ParameterizedClass` [JUnit 5.13+, experimental]
+
+`@ParameterizedTest` repeats one method. `@ParameterizedClass` repeats a whole class, including its `@Nested` classes and any `@ParameterizedTest` methods inside it, once per argument set. It fits a contract test that must pass against several implementations or configurations: write the five tests once and run them against each `Codec`, instead of repeating the same `@MethodSource` on five methods. The JUnit user guide marks the feature experimental, so its API can still change in a minor release.
+
+```java
+@ParameterizedClass
+@ValueSource(strings = {"gzip", "zstd", "lz4"})
+class CodecContractTest {
+
+    @Parameter            // field injection; constructor injection also works with PER_METHOD lifecycle
+    String algorithm;
+
+    Codec codec;
+
+    @BeforeEach
+    void setUp() { codec = Codecs.forName(algorithm); }
+
+    @Test
+    void roundTripsEmptyInput() {
+        assertArrayEquals(new byte[0], codec.decode(codec.encode(new byte[0])));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 1024, 1 << 20})
+    void roundTripsRandomInput(int size) {
+        byte[] in = randomBytes(size);
+        assertArrayEquals(in, codec.decode(codec.encode(in)));
+    }
+}
+```
+
+The report nests each method under its class invocation: `[1] algorithm = "gzip"` holds one `roundTripsEmptyInput` and three `roundTripsRandomInput` runs, so this class runs 3 x (1 + 3) = 12 tests. `@Parameter(0)`, `@Parameter(1)` bind positional arguments from `@CsvSource` or `@MethodSource` to fields. `@BeforeParameterizedClassInvocation` and `@AfterParameterizedClassInvocation` run once around each class invocation, for example to start one server per configuration, and must be `static` unless the class uses `@TestInstance(Lifecycle.PER_CLASS)`.
+
 ### Mockito Core Patterns
 
 ```java
@@ -424,6 +461,35 @@ void counterIsThreadSafe() throws InterruptedException {
 }
 ```
 
+### Async Assertions with Awaitility
+
+Code that finishes its work on another thread (a message listener, an `@Async` handler, a cache refresh) cannot be asserted right after the trigger call. The common wrong fix is a fixed sleep:
+
+```java
+// BROKEN: flaky and slow at once
+orderService.submit(order);            // publishes an event; a listener ships the order later
+Thread.sleep(2000);                    // fails when CI is slower than 2 s, wastes 2 s when it is faster
+assertEquals(SHIPPED, repo.status(order.id()));
+```
+
+The sleep has to cover the slowest CI run, so every run pays the worst case, and a loaded build agent still fails it. Awaitility polls the assertion until it passes or a timeout expires:
+
+```java
+// FIXED: returns as soon as the listener has run, fails only after 5 s
+await().atMost(Duration.ofSeconds(5))
+       .pollInterval(Duration.ofMillis(50))
+       .untilAsserted(() -> assertEquals(SHIPPED, repo.status(order.id())));
+```
+
+| Setting | Default | Note |
+|---------|---------|------|
+| `atMost` timeout | 10 s | Set it explicitly to the slowest legal latency plus margin |
+| `pollInterval` | 100 ms | Fixed interval; `FibonacciPollInterval` backs off for slow conditions |
+| `pollDelay` | 100 ms | Delay before the first check |
+| Failure | `ConditionTimeoutException` | Message carries the last assertion error, so the report shows the last observed value |
+
+Three details decide whether an Awaitility test is correct. By default the condition runs on a separate polling thread, so a condition that reads a `ThreadLocal` (an open transaction, a security context, MDC) sees nothing; `pollInSameThread()` fixes that. `untilAsserted` treats an `AssertionError` as "not yet", but any other exception fails at once unless `ignoreExceptions()` is set. And `await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(2)).until(...)` asserts that a condition stays true for a whole second, which is how to test "no duplicate message arrives", a check a single poll cannot make.
+
 ### Testing Time-Dependent Code
 
 ```java
@@ -455,6 +521,22 @@ void expiredSubscription_returnsTrue() {
 }
 // No mocking needed — just inject a fixed clock.
 ```
+
+When the code under test reads the JVM default zone or locale implicitly, for example a `TimeZone.getDefault()` call deep inside a legacy formatter, a `Clock` cannot reach it. JUnit 6.1 ships the former JUnit Pioneer extensions for that case:
+
+```java
+import org.junit.jupiter.api.util.DefaultLocale;
+import org.junit.jupiter.api.util.DefaultTimeZone;
+import org.junit.jupiter.api.util.SetSystemProperty;
+
+@Test
+@DefaultTimeZone("Asia/Kolkata")
+@DefaultLocale("de-DE")
+@SetSystemProperty(key = "app.region", value = "eu")
+void invoiceHeader_usesDefaults() { /* restored after the test, pass or fail */ }
+```
+
+These change JVM-wide state, so JUnit holds a resource lock and never runs two such tests in parallel. A test that reads the same state without these annotations is not covered: mark it `@ReadsDefaultTimeZone`, `@ReadsDefaultLocale`, or `@ReadsSystemProperty` so the scheduler keeps it apart.
 
 ### `@TempDir` — Replacing Hand-Rolled Temporary Files
 
@@ -563,6 +645,40 @@ and Mockito currently self-attaches one at runtime while warning that this will 
 in a future JDK — configure `mockito-core` as `-javaagent` in Surefire now rather than after
 the JDK removes dynamic attach.
 
+### Property-Based Testing with jqwik
+
+An example-based test checks the inputs the author thought of. A property-based test states a rule that must hold for every input, lets the framework generate hundreds of inputs, and on a failure shrinks the input to the smallest one that still fails. jqwik (1.10.x) is the JUnit Platform engine for this in Java:
+
+```java
+class MoneyProperties {
+
+    @Property                           // 1,000 generated tries by default
+    void splitNeverLosesACent(@ForAll @LongRange(min = 0, max = 10_000_000) long cents,
+                              @ForAll @IntRange(min = 1, max = 100) int parts) {
+        List<Long> shares = Money.split(cents, parts);
+        assertEquals(cents, shares.stream().mapToLong(Long::longValue).sum());
+        assertTrue(shares.stream().allMatch(s -> s >= 0));
+    }
+
+    @Property
+    void jsonRoundTrip(@ForAll("orders") Order order) {
+        assertEquals(order, Json.read(Json.write(order), Order.class));
+    }
+
+    @Provide
+    Arbitrary<Order> orders() {
+        return Combinators.combine(
+                Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(20),
+                Arbitraries.longs().between(0, 1_000_000))
+            .as(Order::new);
+    }
+}
+```
+
+If `Money.split` loses a cent for `cents = 9_347_211, parts = 7`, jqwik shrinks both values and reports a minimal case such as `cents = 1, parts = 2`, plus the random seed so the run can be repeated. Shrinking runs in `BOUNDED` mode by default and stops after 10 seconds. Good properties are round trips (`decode(encode(x)) == x`), invariants (sum preserved, output sorted), and agreement with a slow but obviously correct oracle.
+
+jqwik is its own test engine beside Jupiter, not a Jupiter extension. A `@Property` method does not get Jupiter's `@BeforeEach` or `@ExtendWith(MockitoExtension.class)`; it uses jqwik's `@BeforeProperty` and `@BeforeTry` instead, and jqwik refuses to run a method that also carries Jupiter annotations. Keep property classes separate from Jupiter test classes.
+
 ### Mutation Testing (PIT) — What Line Coverage Doesn't Tell You
 
 Line coverage answers "did this line execute during the suite," not "did any test check what it did." A suite can run every branch, see nothing fail because no assertion was written against that branch's output, and still report 90%+ coverage:
@@ -589,7 +705,7 @@ PIT (`org.pitest:pitest-maven`) answers the question line coverage can't. It rec
 <plugin>
     <groupId>org.pitest</groupId>
     <artifactId>pitest-maven</artifactId>
-    <version>1.25.9</version>
+    <version>1.30.1</version>
     <configuration>
         <targetClasses><param>com.payflow.payments.*</param></targetClasses>
         <targetTests><param>com.payflow.payments.*</param></targetTests>
@@ -659,13 +775,16 @@ A developer used `@Spy List<String> spy = new ArrayList<>()` and wrote `when(spy
 ### War Story 4: Concurrent test with data race between test threads
 A team tested a concurrent queue by creating threads in `@Test`, having them `add` to the queue, and asserting size at the end. They forgot to `join()` the threads before asserting. The assertion ran before all threads finished. Intermittently failing test. **Fix**: Use `CountDownLatch` to synchronize test threads; always `latch.await()` before asserting on shared state.
 
+### Pitfall: Parallel test runs that oversubscribe the `ForkJoinPool` executor
+With `junit.jupiter.execution.parallel.enabled=true`, Jupiter runs tests on a `ForkJoinPool` by default (`fork_join_pool`). When test or production code also uses a `ForkJoinPool`, or blocks in a JDK API that compensates by adding workers, the number of tests running at once can climb past the configured parallelism, which shows up as connection-pool exhaustion or timeouts that appear only in the parallel CI run. **Fix**: on JUnit 6.1+, set `junit.jupiter.execution.parallel.config.executor-service=worker_thread_pool` (experimental in 6.1) to run tests on a plain thread pool that does not grow, or cap the work with `@ResourceLock` on the shared resource.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| JUnit Jupiter | 6.x (Java 17 baseline) | Test framework — lifecycle, assertions, parameterization |
+| JUnit Jupiter | 6.1.x (Java 17 baseline) | Test framework: lifecycle, assertions, parameterization; 6.1 adds `@DefaultLocale`, `@DefaultTimeZone`, and the system-property extensions |
 | JUnit Platform | 6.x (same version as Jupiter) | Launcher and engine SPI; discovers and runs the engines |
 | Mockito | 5.x (`mockito-core` + `mockito-junit-jupiter`) | Mocking — stubs, spies, verification, inline mock maker by default |
 | `mockito-subclass` | 5.x | Opt-out mock maker for GraalVM native image |
@@ -673,9 +792,12 @@ A team tested a concurrent queue by creating threads in `@Test`, having them `ad
 | Testcontainers | 2.x | Real Docker containers in integration tests |
 | Surefire plugin | 3.5.x | Maven plugin that discovers and runs tests |
 | Jacoco | — | Code coverage reporting (line/branch, not mutation) |
+| `org.junit.start` module | 6.1+ (Java 25+) | `import module org.junit.start;` plus `JUnit.run()` runs tests from a single compact source file with the `java` launcher |
 | `junit-platform-suite` | 6.x (same version as Jupiter) | Separate artifact providing `@Suite`, `@SelectPackages`, `@SelectClasses`, `@IncludeTags` |
+| Awaitility (`org.awaitility:awaitility`) | 4.x | Polling async assertions (`await().atMost(...).untilAsserted(...)`) |
+| jqwik (`net.jqwik:jqwik`) | 1.10.x | Property-based testing engine on the JUnit Platform, with generators and shrinking |
 | ArchUnit (`archunit-junit5`) | 1.5.x | Architecture-fitness tests — layering, naming, and dependency-direction rules enforced at build time |
-| PIT (`pitest-maven`) | 1.25.x | Mutation testing — measures whether tests verify behavior, not just execute it |
+| PIT (`pitest-maven`) | 1.30.x | Mutation testing, measures whether tests verify behavior, not just execute it |
 | `pitest-junit5-plugin` | 1.2.x | Bridge letting PIT discover and run JUnit 5/Jupiter tests |
 | `@SpringBootTest` / `@MockitoBean` | Spring Boot | Spring context integration test with bean overrides; `@MockitoBean` is the only form — `@MockBean` was removed in Boot 4 |
 
@@ -703,35 +825,43 @@ The test pyramid says most of your tests should be fast, isolated unit tests, wi
 **Short:** A CountDownLatch synchronizes worker thread start and completion so concurrent-code tests maximize contention without racing themselves.
 Use `CountDownLatch` to synchronize thread start and completion: (1) Create a start latch initialized to 1; all worker threads call `start.await()` before doing work. (2) Create a done latch initialized to N (number of threads); each calls `done.countDown()` when finished. (3) Test thread calls `start.countDown()` to release all workers simultaneously, then `done.await(timeout)` to wait for completion. This maximizes contention (all threads start at the same time) and ensures assertions run only after all threads complete. Also assert with timeout to avoid hanging on deadlocks.
 
-**Q6: What is the difference between a Stub and a Mock (Meszaros taxonomy)?**
+**Q6: Why is `Thread.sleep` the wrong way to wait for async work in a test, and what replaces it?**
+**Short:** A fixed sleep is both slow and flaky; Awaitility polls the assertion until it passes or a timeout expires.
+A sleep must cover the slowest CI run, so every run pays that worst case, and a loaded build agent still fails it. Awaitility polls instead: `await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertEquals(SHIPPED, repo.status(id)))` returns as soon as the assertion passes and throws `ConditionTimeoutException` with the last assertion error after the timeout. Defaults are a 10 s timeout and a 100 ms poll interval and delay. The condition runs on a separate polling thread unless `pollInSameThread()` is set, which matters when it reads a `ThreadLocal` such as an open transaction. Use `during(...)` to assert that something stays true, for example that no duplicate message arrives.
+
+**Q7: What is the difference between a Stub and a Mock (Meszaros taxonomy)?**
 **Short:** A stub returns canned answers with no expectations, while a mock is verified to have received specific expected calls.
 Stub: an object that provides canned answers to calls made during the test. The test makes no assertions about how the stub was used. Example: `when(repo.findById(1L)).thenReturn(user)` — you only care that when asked, it returns the right thing. Mock: a pre-programmed object with expectations about which calls it will receive. The test fails if the mock wasn't called as expected. Example: `verify(emailService).send(...)` — you're asserting the mock was called. In Mockito, every mock can act as both stub and mock: stub with `when()`, verify with `verify()`. Best practice: stub for state verification (check the return value), verify for behavior verification (check interactions).
 
-**Q7: How do you test time-dependent code?**
+**Q8: How do you test time-dependent code?**
 **Short:** Time-dependent code should inject a java.time.Clock dependency, using Clock.fixed() in tests instead of calling now() directly.
 The key is to never call `Instant.now()`, `LocalDate.now()`, or `System.currentTimeMillis()` directly in production code. Instead, inject a `java.time.Clock` dependency. In production, pass `Clock.systemUTC()`. In tests, pass `Clock.fixed(someInstant, someZone)`. This makes tests fully deterministic and removes any real-time dependency. `Clock.tick(baseClock, tickDuration)` truncates the base clock's instant down to whole units — `Clock.tick(fixedAt("12:34:56.789Z"), Duration.ofMinutes(1))` reads `12:34:00Z` — which is how you test code that must not depend on sub-minute precision. To move time forward across a test, keep a mutable holder and hand out a new `Clock.fixed` for each step; `Clock` itself is immutable. Alternative for legacy code: extract to a thin wrapper interface and mock that wrapper.
 
-**Q8: What does `ArgumentCaptor` provide that `verify()` doesn't?**
+**Q9: What does `ArgumentCaptor` provide that `verify()` doesn't?**
 **Short:** ArgumentCaptor records the actual argument passed during a real call, letting you assert on its fields instead of matching a known value.
 `verify(mock).method(arg)` checks that a method was called with a specific argument — but `arg` must be a known value or an `ArgumentMatcher`. `ArgumentCaptor<T>.capture()` records the actual argument passed during the real call and makes it available after verification via `.getValue()` (or `.getAllValues()` for multiple calls). Use `ArgumentCaptor` when: the argument is a complex object created inside the method under test (you can't predict its exact instance), and you need to assert multiple fields of that object. Example: capturing an `EmailMessage` built inside `service.sendWelcome(userId)` to assert its subject, recipients, and attachments.
 
-**Q9: What is `assertAll()` and when should you use it?**
+**Q10: What is `assertAll()` and when should you use it?**
 **Short:** assertAll() runs every provided assertion even after one fails and reports all failures together, unlike assertEquals().
 `assertAll(heading, Executable... executables)` runs all the provided assertions even if some fail, then reports ALL failures at once. Regular `assertEquals()` stops at the first failure. Use `assertAll()` when a single test logically validates multiple aspects of one result — e.g., asserting multiple fields of a returned object. Without `assertAll()`, you'd need one test per field or accept that only the first failure is reported. Do not overuse: if the assertions are logically independent, they belong in separate tests. `assertAll()` is for "this single result must satisfy ALL these conditions simultaneously."
 
-**Q10: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
+**Q11: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
 **Short:** submit() swallows a task's exception into its Future until get() is called, while execute() lets it reach the UncaughtExceptionHandler.
 It depends entirely on whether the task was handed to `submit()` or to `execute()`, and mixing them up is why these exceptions go missing. With `submit()` the exception is captured into the `Future` and nothing is printed; the task's `UncaughtExceptionHandler` is never invoked, because `FutureTask.run()` catches the `Throwable` itself. Nobody sees it until someone calls `Future.get()`, which rethrows it as an `ExecutionException` with the original as its cause — so a fire-and-forget `submit()` whose `Future` is discarded loses the exception permanently. With `execute()` there is no `Future`, so the `Throwable` propagates out of the worker thread and does reach the thread's `UncaughtExceptionHandler`, which is where a `ThreadFactory`-installed handler earns its keep. `CompletableFuture.runAsync()` behaves like `submit()`: the stage completes exceptionally and you must chain `.exceptionally()` or `.handle()` to observe it. Practical rule: always consume the `Future` from `submit()`, install an `UncaughtExceptionHandler` via the `ThreadFactory` for `execute()`, and in tests assert on the captured exception rather than on log output.
 
-**Q11: What is `@Nested` and when is it useful?**
+**Q12: What is `@Nested` and when is it useful?**
 **Short:** @Nested defines an inner test class with its own lifecycle, letting tests be grouped hierarchically by method or precondition.
 `@Nested` defines an inner class inside a test class, with its own lifecycle and grouping. It's useful for expressing hierarchical test structure: group tests by method being tested, or by pre-condition. Example: `UserServiceTest` has `@Nested class FindById` with `@Nested class WhenUserExists` and `@Nested class WhenUserDoesNotExist`. Each nested class can have its own `@BeforeEach` setup. The outer class's `@BeforeEach` runs first, then the nested class's — providing additive setup layers. This makes tests more readable and reflects the structure of the domain.
 
-**Q12: What is `@RepeatedTest` useful for and how does it differ from `@ParameterizedTest`?**
+**Q13: What is `@RepeatedTest` useful for and how does it differ from `@ParameterizedTest`?**
 **Short:** @RepeatedTest reruns the same test method with no argument variation, while @ParameterizedTest supplies a distinct input each time.
 `@RepeatedTest(n)` runs the same test method n times with no argument variation. Use it for: (1) Tests with random inputs (property-based testing style) where you want to exercise many random values. (2) Tests for eventually consistent behavior where you want to verify it passes consistently. (3) Performance tests or flakiness detection runs. `@ParameterizedTest` is for explicit different inputs — each invocation gets a distinct argument combination. `@RepeatedTest` is for running the same test repeatedly. Each repetition has a `RepetitionInfo` parameter you can inject to track which repetition is running.
 
-**Q13: What is the difference between `@Mock` and `@Spy` in Mockito, and when should you use each?**
+**Q14: What does `@ParameterizedClass` do that `@ParameterizedTest` cannot?**
+**Short:** It runs every test in a class, including @Nested classes, once per argument set, injecting arguments by constructor or @Parameter fields.
+`@ParameterizedTest` repeats one method with different arguments. `@ParameterizedClass` (JUnit 5.13+, marked experimental in the user guide) repeats the whole class: every `@Test`, every `@ParameterizedTest`, and every `@Nested` class runs once per argument set. Arguments come from the same sources (`@ValueSource`, `@CsvSource`, `@MethodSource`) and reach the class through constructor injection (only with the default `PER_METHOD` lifecycle) or `@Parameter(index)` fields. It fits contract tests: one test class run against three `Codec` implementations. `@BeforeParameterizedClassInvocation` runs once per class invocation, for example to start one server per configuration.
+
+**Q15: What is the difference between `@Mock` and `@Spy` in Mockito, and when should you use each?**
 **Short:** @Mock fully fakes a collaborator's methods, while @Spy calls the real implementation except for methods explicitly stubbed.
 `@Mock` creates a completely fake object — all methods return default values (null, 0, false) unless stubbed. No real code from the original class is ever called. `@Spy` wraps a real instance — unstubbed methods invoke the real implementation; only explicitly stubbed methods are intercepted. Use `@Mock` by default for collaborators you want to fully control. Use `@Spy` when you need the real implementation for most methods but want to intercept specific ones — typically for partial mocking of legacy code or when you need to verify real side effects while controlling one method:
 
@@ -744,7 +874,7 @@ doNothing().when(spyEmail).sendAlert(any()); // use doNothing/doReturn with Spy,
 // BROKEN with Spy: when(spyEmail.sendAlert(any())).thenReturn(...) calls the real method before stubbing
 ```
 
-**Q14: How do you capture and assert on method arguments using `ArgumentCaptor`?**
+**Q16: How do you capture and assert on method arguments using `ArgumentCaptor`?**
 **Short:** ArgumentCaptor.capture() inside verify() retrieves the real argument via getValue() so you can assert on its individual fields.
 Declare a captor, pass `captor.capture()` inside `verify()`, then read the recorded argument back with `getValue()` and assert on its fields. This beats an `eq()` matcher whenever the argument is a complex object constructed inside the code under test, because you never have to reconstruct an equal instance:
 
@@ -764,7 +894,7 @@ assertThat(savedOrder.getStatus()).isEqualTo(Status.PENDING);
 
 For multiple invocations, use `orderCaptor.getAllValues()` to get a `List<Order>`. Prefer `ArgumentCaptor` over over-specified `eq()` matchers for value objects that lack a custom `equals()` — it lets you assert on individual fields rather than needing exact equality.
 
-**Q15: What are the five test double types and when is each appropriate?**
+**Q17: What are the five test double types and when is each appropriate?**
 **Short:** The five test doubles are Dummy, Stub, Fake, Spy, and Mock, each isolating the system under test in a different way.
 Dummy, Stub, Fake, Spy and Mock — the taxonomy Gerard Meszaros defined in *xUnit Test Patterns* and Martin Fowler popularised in "Mocks Aren't Stubs". Taken in order:
 1. **Dummy** — passed as a placeholder, never called. Use for required method parameters that are irrelevant to the test.
@@ -773,25 +903,29 @@ Dummy, Stub, Fake, Spy and Mock — the taxonomy Gerard Meszaros defined in *xUn
 4. **Spy** — wraps a real object and records calls. Use to verify that specific methods were called on an otherwise real implementation.
 5. **Mock** — a pre-programmed object with strict expectations; fails if unexpected calls happen or expected calls don't occur. Mockito's `@Mock` is a stub by default; add `verify()` to make it a mock. **Practical rule**: prefer stubs for "tell-don't-ask" APIs; use mocks (with `verify`) only for side effects you must assert on (emails sent, events published, DB writes). Over-mocking — asserting on every method call — makes tests brittle to refactoring.
 
-**Q16: What is strict stubbing, and what do you do when it fails your build?**
+**Q18: What is strict stubbing, and what do you do when it fails your build?**
 **Short:** Strict stubbing throws UnnecessaryStubbingException at teardown for any stub that no test in the class ever calls.
 Strict stubbing is `MockitoExtension`'s default (`Strictness.STRICT_STUBS`): a stub that no test ever calls throws `UnnecessaryStubbingException` at teardown. It also reports an argument mismatch — calling `repo.find(2L)` when only `repo.find(1L)` was stubbed — as a `PotentialStubbingProblem` naming both arguments, instead of quietly returning `null` and surfacing as an NPE ten frames later. When it fires, the first move is to delete the stub, because dead setup left behind by a refactor is exactly what the check is for. When the stub genuinely belongs to a shared `@BeforeEach` that only some tests exercise, narrow the exemption to that one line with `lenient().when(...)`. Relaxing the whole class with `@MockitoSettings(strictness = Strictness.LENIENT)` is a last resort — it turns off the mechanism that tells you your test has drifted from the code it exercises.
 
-**Q17: How do you mock a `final` class, a static method, or an object the code constructs itself?**
+**Q19: How do you mock a `final` class, a static method, or an object the code constructs itself?**
 **Short:** Mockito 5's inline mock maker lets mock(), mockStatic(), and mockConstruction() mock final classes, statics, and constructed objects directly.
 All three work with plain `mockito-core` 5.x, because the inline mock maker became the default in Mockito 5.0. `mock(FinalGateway.class)` needs no extra artifact and no `MockMaker` resource file; the separate `mockito-subclass` artifact now exists for the cases the inline maker cannot serve, chiefly GraalVM native image. Statics use `mockStatic(Util.class)` and constructors use `mockConstruction(Foo.class)`; both return a `Closeable` scope that must sit in a try-with-resources, because the mock is registered per thread and leaking it corrupts every later test in that JVM. Treat all three as escape hatches for code you cannot change — a `final` collaborator you own is better injected as an interface, and a static call is better wrapped behind one. One build concern: the inline maker needs a Java agent, and Mockito currently self-attaches one while warning that dynamic attach will be disallowed in a future JDK, so wire `mockito-core` in as a `-javaagent` in Surefire before that lands.
 
-**Q18: A service has 92% line coverage and still ships bugs — what does that number not tell you, and what measures the gap?**
+**Q20: A service has 92% line coverage and still ships bugs — what does that number not tell you, and what measures the gap?**
 **Short:** Line coverage shows which lines ran, not which lines were actually verified by an assertion.
 Line coverage only proves a line executed during the suite; it says nothing about whether any assertion checked the result that line produced. A test can call a method, run every branch inside it, and assert something trivial or unrelated — coverage still reports 100% on code nothing meaningfully checks. Mutation testing (PIT) measures the gap directly: it changes the production code in small ways (flip a conditional, swap an operator, return a constant) and reruns the suite; if every test still passes, that mutant *survived*, meaning the line it changed was executed but never verified. A high line-coverage number paired with a low mutation score is the signature of a suite that runs code without testing it — the fix is adding assertions on the actual computed values, not adding more calls that merely invoke the method.
 
-**Q19: Why is `@TempDir` better than `File.createTempFile()` plus `deleteOnExit()`?**
+**Q21: Why is `@TempDir` better than `File.createTempFile()` plus `deleteOnExit()`?**
 **Short:** deleteOnExit only fires on a normal JVM exit, so a killed test run leaks the file forever.
 `File.deleteOnExit()` registers a JVM shutdown hook that only runs on *normal* termination — a test killed by a CI timeout, a crashed JVM, or a `System.exit()` elsewhere in the run leaves the file on disk permanently, and thousands of orphaned files across CI history is a real "runner disk full" incident, not a hypothetical one. `@TempDir` hands JUnit Jupiter ownership of the entire lifecycle instead: it allocates a fresh, uniquely-named directory per injection point and deletes it recursively after the test method returns, whether it passed, failed, or threw, with no shutdown-hook race. It also removes a second hand-rolled bug: a fixed, shared temp path makes tests order- and concurrency-dependent, while `@TempDir`'s per-invocation uniqueness makes parallel test execution safe by construction rather than by discipline.
 
-**Q20: What class of bug does ArchUnit catch that no ordinary unit test can?**
+**Q22: What class of bug does ArchUnit catch that no ordinary unit test can?**
 **Short:** ArchUnit catches structural violations — a domain class importing infrastructure — unit tests can't see.
 A unit test verifies one class's *behavior* in isolation; it has no visibility into whether that class violates a project-wide *structural* rule, such as a `..domain..` class importing `..infrastructure..`, a service class breaking a naming convention, or two modules forming a dependency cycle — none of that is observable from inside a single test's assertions, no matter how thorough the test is. ArchUnit (`archunit-junit5`) scans the compiled bytecode of an entire package tree and evaluates rules like `noClasses().that().resideInAPackage("..domain..").should().dependOnClassesThat().resideInAPackage("..infrastructure..")` against the whole graph, catching a layering violation the moment it's introduced instead of relying on a reviewer to notice an unrelated import three files deep. It is genuinely a test — it fails the build — but the invariant it checks is about the codebase's shape, not any one class's output.
+
+**Q23: What is property-based testing, and what does jqwik add over a `@ParameterizedTest`?**
+**Short:** It checks a rule against generated inputs and shrinks a failure to the minimal case; a @ParameterizedTest only runs the inputs you list.
+A `@ParameterizedTest` runs the inputs the author listed. A jqwik `@Property` states a rule, such as `decode(encode(x)) == x` or "splitting money preserves the sum", and runs it against generated inputs, 1,000 tries by default, from `@ForAll` parameters or `@Provide` arbitraries. On a failure it shrinks the input to a minimal failing case and prints the seed so the run can be repeated. jqwik is a separate JUnit Platform engine, not a Jupiter extension, so `@BeforeEach` and `MockitoExtension` do not apply to `@Property` methods; use `@BeforeTry` or `@BeforeProperty`. Good properties are round trips, invariants, and agreement with a simple oracle.
 
 ---
 
@@ -807,6 +941,8 @@ A unit test verifies one class's *behavior* in isolation; it has no visibility i
 8. **Use `ArgumentCaptor`** for complex objects instead of `eq()` matchers with manually constructed expected objects.
 9. **Don't verify trivial interactions** — verifying a getter was called adds no value; test the behavior, not implementation.
 10. **Run tests with mutation testing** (PIT) occasionally — catches tests that always pass regardless of code correctness.
+11. **Never `Thread.sleep` to wait for async work**; poll with Awaitility `untilAsserted` and an explicit `atMost` timeout.
+12. **Add a jqwik property for code with a clear invariant** (round trip, sum preserved, sort order) next to the example-based tests, and keep property classes separate from Jupiter classes.
 
 ---
 
@@ -988,6 +1124,8 @@ service = new PaymentService(gateway, auditRepo, fraudDetector);
 
 **How do you verify an ordering constraint between mocks?** Use `InOrder` over the relevant mocks and call `verify` on it in sequence; this proved the fraud check runs before the costly gateway call, a business rule that a set of unordered `verify` calls would not enforce.
 
+**Why does the test pyramid put 80% of tests at the unit level?** Unit tests are the cheapest to run and the most precise at localizing failures; integration and e2e tests are slower and flakier, so you keep them few and reserve them for wiring and contract coverage that mocks cannot prove — inverting the ratio (the "ice-cream cone") yields slow, brittle suites.
+
 ---
 
 ## Related / See Also
@@ -995,5 +1133,3 @@ service = new PaymentService(gateway, auditRepo, fraudDetector);
 - [Concurrency](../concurrency/concurrency.md) — concurrent test patterns, thread-safety verification strategies
 - [JDBC & Database](../jdbc_and_database/jdbc_and_database.md) — integration test patterns for database code, Testcontainers usage
 - [Backend Testing Strategies](../../backend/backend_testing_strategies/backend_testing_strategies.md) — test pyramid, contract testing, and Testcontainers at the service/system level beyond this module's unit-test focus
-
-**Why does the test pyramid put 80% of tests at the unit level?** Unit tests are the cheapest to run and the most precise at localizing failures; integration and e2e tests are slower and flakier, so you keep them few and reserve them for wiring and contract coverage that mocks cannot prove — inverting the ratio (the "ice-cream cone") yields slow, brittle suites.

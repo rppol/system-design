@@ -194,6 +194,81 @@ Architecture differs from standard VQA: the model needs a detection head (or spe
 
 ---
 
+### 4.6 Native-Resolution Encoders and Visual Token Compression
+
+A CLIP-style encoder resizes every image to one fixed square (224, 336 or 384 px). A receipt at
+600x2000 px gets squashed, and small text becomes unreadable. AnyRes tiling (LLaVA-NeXT, InternVL;
+see [Multimodal Models](../multimodal_models/multimodal_models.md)) cuts the image into fixed tiles.
+Native-resolution encoders remove the fixed size instead.
+
+**NaViT (Dehghani et al., Google, July 2023), "Patch n' Pack".** Each image is cut into patches
+at its own resolution and aspect ratio. Patches from several images are packed into one sequence,
+with an attention mask so a patch only attends within its own image. Position embeddings are
+factorized into x and y so any grid shape is valid. Batching variable-size images this way also lets
+training drop a random fraction of tokens per image.
+
+**Qwen2-VL (September 2024) and later.** Qwen2-VL applies the same idea inside a VLM with "naive
+dynamic resolution": the image is resized to the nearest multiple of 28 px, cut into 14 px patches,
+and the ViT runs on however many patches result. Two mechanisms make that work:
+
+- **M-RoPE.** Rotary position embedding is split into three parts: temporal, height and width. Text
+  tokens use the same value in all three, so they behave as 1D RoPE. Image patches get (row,
+  column) and video frames add the time index. The LLM therefore sees 2D and 3D position without a
+  learned position table tied to one grid size.
+- **2x2 merge.** An MLP merges each 2x2 block of adjacent patch embeddings into one token, so one
+  LLM token covers 28x28 px. A 224x224 image becomes 64 tokens plus 2 boundary tokens. The default
+  range is 4 to 16,384 visual tokens per image, set with `min_pixels` and `max_pixels`.
+
+Qwen2.5-VL (February 2025) added window attention inside the ViT to keep native-resolution encoding
+affordable and aligned the temporal M-RoPE index to absolute time for video.
+
+**Pixel shuffle (space-to-depth).** The other way to cut visual tokens: fold an r x r block of
+neighboring patch embeddings into the channel dimension of one token, then project it with an MLP.
+
+```
+Pixel shuffle, r = 2 (InternVL), one 448x448 tile, 14 px patches
+
+ViT output: 32 x 32 = 1024 patch tokens, each C channels
+
+  a b | e f                 one token, 4C channels: [a b c d]
+  c d | g h     ------>     one token, 4C channels: [e f g h]
+  ----+----
+  i j | m n                 grid 16 x 16 = 256 tokens
+  k l | o p                 then MLP projects 4C -> LLM width
+
+r = 2: 1024 -> 256 tokens per tile   (4x fewer, InternVL 1.5 and later)
+r = 3:  729 ->  81 tokens per tile   (9x fewer, SmolVLM, 384x384 tile)
+```
+
+No information is dropped by the shuffle itself: the same numbers move from 4 tokens into 1 wider
+token, and the MLP learns what to keep. What is lost is the LLM's ability to attend to each patch
+separately. Hugging Face reported SmolVLM encodes a test prompt plus one image in 1.2k tokens against
+16k for Qwen2-VL, which is the difference between fitting on a phone and not.
+
+| Approach | Tokens for a 448x448 image | Aspect ratio | Example |
+|----------|---------------------------|--------------|---------|
+| Fixed-size encoder, 14 px patches, no compression | 1,024 | Distorted | LLaVA-style at 448 px |
+| Q-Former | 32 (fixed) | Distorted | BLIP-2 |
+| Native resolution + 2x2 merge | 256 (scales with pixels) | Kept | Qwen2-VL, Qwen2.5-VL |
+| Fixed tiles + pixel shuffle r=2 | 256 per tile, plus thumbnail | Approximated by tile grid | InternVL |
+| Fixed tiles + pixel shuffle r=3 | 81 per 384 px tile | Approximated by tile grid | SmolVLM |
+
+**Encoders behind 2025-era VLMs.**
+
+- **SigLIP 2 (Google, February 20, 2025).** Keeps SigLIP's sigmoid image-text loss and adds a
+  captioning decoder objective, self-distillation, masked prediction and online data curation. It
+  ships in four sizes, ViT-B (86M), L (303M), So400m (400M) and g (1B), with stronger multilingual
+  understanding, and a NaFlex variant that keeps the native aspect ratio at variable sequence length.
+  The dense-feature objectives make it a better VLM encoder than a contrastive-only model, whose
+  loss supervises only the pooled embedding and trains patch features indirectly.
+- **DINOv3 (Meta, August 13, 2025).** Self-supervised, with no text at all: a 7B-parameter ViT trained
+  on 1.7B images, with Gram anchoring to stop dense feature maps from degrading over long training.
+  It is distilled into ViT-B, ViT-L and ConvNeXt T/S/B/L. Use it for dense tasks (segmentation, depth,
+  satellite imagery) and as a frozen backbone; it is not text-aligned, so it cannot do zero-shot
+  retrieval the way CLIP or SigLIP 2 can.
+
+---
+
 ## 5. Architecture Diagrams
 
 ### CLIP Contrastive Loss — the N x N Similarity Matrix
@@ -766,6 +841,10 @@ The tile formula is the part people miss: cost scales with image *area*, so doub
 |-------|-------------|----------------|---------|
 | CLIP ViT-L/14 | OpenAI | `openai/clip-vit-large-patch14` | Image-text retrieval, zero-shot classification |
 | SigLIP SO400M | Google | `google/siglip-so400m-patch14-384` | Improved CLIP, 384px input |
+| SigLIP 2 So400m | Google | `google/siglip2-so400m-patch14-384` | VLM encoder with dense features; NaFlex variants keep native aspect ratio |
+| DINOv3 ViT-L | Meta | `facebook/dinov3-vitl16-pretrain-lvd1689m` | Self-supervised dense features (segmentation, depth); not text-aligned |
+| Qwen2.5-VL-7B | Alibaba | `Qwen/Qwen2.5-VL-7B-Instruct` | Native dynamic resolution with M-RoPE; documents and video |
+| SmolVLM | Hugging Face | `HuggingFaceTB/SmolVLM-Instruct` | Pixel shuffle r=3, 81 tokens per tile; on-device |
 | BLIP-2 OPT-2.7B | Salesforce | `Salesforce/blip2-opt-2.7b` | Lightweight VQA, captioning |
 | InstructBLIP | Salesforce | `Salesforce/instructblip-vicuna-7b` | Instruction-following VQA |
 | LLaVA-1.5-7B | LLaVA team (UW) | `llava-hf/llava-1.5-7b-hf` | VQA, balanced quality/cost |
@@ -781,9 +860,9 @@ The tile formula is the part people miss: cost scales with image *area*, so doub
 
 | Model | Provider | Strength |
 |-------|---------|----------|
-| GPT-4V / GPT-4o | OpenAI | Best overall reasoning, multi-image |
-| Gemini 1.5 Pro | Google | Native multimodality, video, 1M context |
-| Claude 3.5 Sonnet (vision) | Anthropic | Document/OCR accuracy, structured extraction |
+| `gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna` | OpenAI | Text and image input, text output |
+| `gemini-4-argon` / `gemini-3.8-flash` | Google | Text, image, video, audio and PDF input; 1M context |
+| Claude Opus 5.5 / Sonnet 5.5 | Anthropic | Text and image input on every current model; 1M context |
 
 ### Supporting Libraries
 
@@ -851,6 +930,18 @@ SigLIP (Sigmoid Loss for Language-Image Pre-Training) replaces CLIP's softmax cr
 **Q: How does LLaVA-1.6 handle high-resolution images differently from LLaVA-1.5, and why does it matter?**
 **Short:** LLaVA-1.5 crushes every image to 336x336 losing small text, while LLaVA-1.6 tiles high-resolution images into multiple tiles plus a thumbnail, roughly quadrupling resolution.
 LLaVA-1.5 downsamples all input images to 336x336 pixels before ViT processing. A 1200x800 document image is crushed to 336x336, making small text illegible and fine chart details unreadable. LLaVA-1.6 uses dynamic high-resolution tiling: the image is divided into up to 6 non-overlapping 336x336 tiles based on the original aspect ratio, plus one global thumbnail tile. Each tile is processed independently by ViT, producing 196 tokens per tile. For a 1344x336 image, this yields 4 tiles x 196 + 1 thumbnail x 196 = 980 visual tokens passed to the LLM. This roughly quadruples the effective visual resolution, dramatically improving chart reading, document QA, and OCR tasks at the cost of ~5x more visual tokens and ~1.5x higher LLM latency.
+
+**Q: How do Qwen2-VL-style native-resolution encoders differ from AnyRes tiling, and what does M-RoPE add?**
+**Short:** Native-resolution encoders run the ViT on the image's own size and aspect ratio instead of fixed tiles, and M-RoPE gives each visual token separate time, height and width rotary positions.
+Tiling (LLaVA-NeXT, InternVL) keeps a fixed-size encoder and cuts the image into fixed tiles plus a thumbnail, so the tile grid only approximates the aspect ratio and an object can be split across a tile boundary. A native-resolution encoder, following NaViT's Patch n' Pack (2023), runs the ViT on the image at its own size: Qwen2-VL rounds each side to a multiple of 28 px, cuts 14 px patches, and merges each 2x2 block into one LLM token, so a 224x224 image costs 64 tokens plus 2 boundary tokens and a tall receipt costs proportionally more. M-RoPE splits rotary position into temporal, height and width components; text tokens use the same index in all three and behave as ordinary 1D RoPE, image tokens get their row and column, and video tokens add the frame index, so no learned position table is tied to one grid size. The gotcha is cost control: token count now scales with pixels, up to 16,384 per image by default, so set `max_pixels` per use case or one 4K screenshot can consume most of the context and the latency budget.
+
+**Q: What is pixel shuffle in a VLM connector, and what does it trade away?**
+**Short:** Pixel shuffle folds each r x r block of neighboring patch embeddings into one wider token, cutting visual tokens by r squared, at the cost of the LLM no longer attending to individual patches.
+Pixel shuffle (space-to-depth) reshapes the ViT output so an r x r block of adjacent patch embeddings becomes one token with r squared times the channels, and an MLP projects it to the LLM width. With r = 2, InternVL turns a 448x448 tile's 1,024 patch tokens into 256; with r = 3, SmolVLM turns a 384x384 tile's 729 tokens into 81, and Hugging Face measured a prompt plus one image at 1.2k tokens for SmolVLM against 16k for Qwen2-VL. Unlike a Q-Former's 32 learned queries, the shuffle itself drops nothing; the numbers move into fewer, wider tokens and the MLP learns what to keep, so spatial layout survives far better. What is lost is per-patch attention in the LLM, which hurts the finest detail: small text, thin lines and dense tables. Use a larger r for phones and high-volume captioning, and r = 2 or less for OCR-heavy document work, and evaluate on your own smallest-font samples before choosing.
+
+**Q: When would you pick SigLIP 2 over DINOv3 as the vision encoder, and why not a plain CLIP model?**
+**Short:** Pick SigLIP 2 when the encoder must align with text for a VLM or retrieval, and DINOv3 for dense pixel tasks like segmentation or depth, since DINOv3 has no text alignment.
+SigLIP 2 (Google, February 2025) is text-aligned: it keeps SigLIP's sigmoid image-text loss and adds a captioning objective, self-distillation, masked prediction and data curation, ships at 86M, 303M, 400M and 1B, and has NaFlex variants that keep the native aspect ratio, which makes it the default encoder for a VLM, zero-shot classification or image-text retrieval. DINOv3 (Meta, August 2025) is self-supervised on 1.7B images with no text, scaled to a 7B ViT with Gram anchoring to keep dense feature maps sharp, and distilled into ViT-B/L and ConvNeXt sizes; it gives the best frozen features for segmentation, depth, detection and satellite imagery, but it cannot score an image against a caption. A plain CLIP model still works as a VLM encoder (LLaVA uses one), but its contrastive loss supervises only the pooled embedding, so the patch features the LLM actually reads are trained only indirectly; SigLIP 2 adds losses that supervise them. Choose by what the downstream head consumes: text alignment for language, dense features for pixels.
 
 **Q: What is the Q-Former in BLIP-2 and what problem does it solve?**
 **Short:** The Q-Former uses fixed learnable query tokens to cross-attend into ViT patches, compressing 196 variable image tokens into a fixed-length prefix bridging a frozen ViT and LLM.

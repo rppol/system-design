@@ -170,7 +170,7 @@ classDiagram
 
 3. **Serialization breaks Singleton:** If the Singleton implements `Serializable`, deserialization creates a new instance, defeating the pattern. You must implement `readResolve()` to return the existing instance.
 
-4. **Reflection breaks Singleton:** Using `java.lang.reflect`, any code can call the private constructor and create a second instance. Defend by throwing an exception inside the constructor if the instance already exists.
+4. **Reflection breaks Singleton:** Using `java.lang.reflect`, any code can call the private constructor and create a second instance. Defend by throwing an exception inside the constructor if the instance already exists, or use an enum. JEP 500 (JDK 26) does not close this hole: it covers `Field.set` on `final` fields, not `Constructor.newInstance`.
 
 5. **Class loader issues:** In complex environments (OSGi, web containers), multiple class loaders can each load the Singleton class independently, creating multiple instances. Scope the Singleton to the right class loader.
 
@@ -377,6 +377,18 @@ c.setAccessible(true);
 ApiKeyStore second = c.newInstance(); // singleton violated
 ```
 
+**What JEP 500 (JDK 26) changes, and what it does not.** JEP 500, "Prepare to Make Final Mean Final", adds `--illegal-final-field-mutation=allow|warn|debug|deny` with `warn` as the JDK 26 default. It governs deep reflection that writes a `final` field: `Field.setAccessible(true)` still succeeds, but the following `Field.set` (or a setter from `MethodHandles.Lookup.unreflectSetter`) prints `WARNING: Final field f in p.C has been mutated by class ...` once per module, `debug` adds a stack trace per mutation, and `deny` makes `Field.set` throw `IllegalAccessException`. The JEP states that a future release makes throwing the default. Code that must keep doing it opts in with `--enable-final-field-mutation=ALL-UNNAMED` (class path) or `=M1,M2` (named modules), or with the `Enable-Final-Field-Mutation: ALL-UNNAMED` manifest attribute on an executable JAR.
+
+Three consequences for a singleton:
+
+| Attack or idiom | Effect of JEP 500 |
+|-----------------|-------------------|
+| `getDeclaredConstructor().setAccessible(true).newInstance()` (above) | None. Constructor reflection is outside the JEP, so the constructor guard or an enum is still the defense |
+| Rewriting a field of the live instance, e.g. swapping `INSTANCE.apiKey` where `apiKey` is `private final` | Warns on JDK 26, throws under `deny` and in the release that makes `deny` the default |
+| Resetting `private static final INSTANCE` to `null` in a test teardown | Already blocked: `Field.set` on a `static final` field has always thrown `IllegalAccessException`. Tests that reset a singleton reached for `sun.misc.Unsafe` instead, and JEP 498 (JDK 24) makes those memory-access methods print a warning on first use |
+
+Run the test suite once with `--illegal-final-field-mutation=deny` to find mocking or serialization libraries that write `final` fields; the JEP recommends exactly this.
+
 ### Production-Safe Alternative: Enum Singleton (Java 5+; unchanged on the Java 17 / 21 / 25 LTS releases)
 
 Effective Java (3rd ed.) Item 3 is titled "Enforce the singleton property with a private constructor
@@ -460,6 +472,26 @@ or DCL with `volatile`) cost a plain field read, so at the same rate their overh
 Note that JSR-133's own FAQ recommends the holder idiom over DCL — it is "thread-safe and a lot
 easier to understand," and the FAQ argues the performance advantage that originally motivated DCL
 no longer exists — even though DCL-with-`volatile` is correct.
+
+### Lazy initialization: holder idiom, DCL with `volatile`, and `LazyConstant`
+
+JEP 531 (Lazy Constants, third preview in JDK 27) compares the two existing lazy idioms with a JDK API that does the same job. It first previewed as `StableValue` in JDK 25 (JEP 502), was renamed `LazyConstant` in JDK 26 (JEP 526), and JEP 547 proposes a fourth preview with no change for JDK 28. It needs `--enable-preview` on `javac` and `java`.
+
+| Approach | Field kinds | JIT constant folding | Cost |
+|---|---|---|---|
+| Holder idiom | `static` only | Yes, the holder's field is `static final` | One nested holder class per lazy field; JEP 531 notes each extra class slows startup and uses memory |
+| DCL with `volatile` | `static` or instance | No, the field is mutable | A `volatile` read on every call; broken if `volatile` is left out |
+| `LazyConstant.of(supplier)` | `static` or instance; `List.ofLazy`, `Set.ofLazy`, `Map.ofLazy` for collections | Yes when stored in a `static final` field; instance `final` fields fold only in records and hidden classes, because reflection can still change other instance `final` fields | Preview API; the supplier runs at most once, even when threads race on `get()` |
+
+```java
+class AppConfig {
+    private static final LazyConstant<AppConfig> INSTANCE = LazyConstant.of(AppConfig::load);
+
+    static AppConfig get() { return INSTANCE.get(); }   // load() runs on the first get() only
+}
+```
+
+For one singleton per class on a GA JDK, the holder idiom or an enum is still the answer. `LazyConstant` pays off when one class has several lazy fields, or a lazy per-instance field, which the holder idiom cannot express without one class per field.
 
 ### Migration Story: When to Move TO Enum Singleton, and When to Move AWAY
 
@@ -550,6 +582,11 @@ A: Java guarantees each enum value is instantiated once by the classloader. It's
 
 A: Yes — via reflection (calling private constructor), serialization (deserializing creates a new instance), or multiple class loaders. Explain the defenses.
 
+**Q: Does JEP 500 in JDK 26 stop reflection from creating a second Singleton instance?**
+**Short:** No, JEP 500 restricts writes to final fields via Field.set, not private constructor calls, so the newInstance attack still needs a constructor guard or an enum.
+
+A: No. JEP 500 adds `--illegal-final-field-mutation` (default `warn` in JDK 26, `deny` planned as a later default) and it only covers deep-reflective writes to `final` fields through `Field.set` and `Lookup.unreflectSetter`. `getDeclaredConstructor()`, `setAccessible(true)` and `newInstance()` are untouched, so a class-based singleton is still breakable that way; the enum form stays immune because `Constructor.newInstance` refuses enum types. What JEP 500 does protect is the state of the one instance: rewriting a `private final` field of `INSTANCE` now prints a warning naming the caller, and throws `IllegalAccessException` under `deny`. Writing a `static final` field such as `INSTANCE` itself was never allowed through `Field.set`. Run tests with `--illegal-final-field-mutation=deny` to flush out libraries that still mutate `final` fields.
+
 **Q: What's wrong with Singletons?**
 **Short:** Singletons introduce global state, hide dependencies, hurt testability, and violate the Single Responsibility Principle.
 
@@ -599,6 +636,10 @@ A: Only one instance per class loader per JVM, which means a service scaled to s
 **Q: Is lazy initialization actually worth it for a Singleton?**
 **Short:** Usually not, because class initialization is already lazy, so an eager static final field costs nothing until the class is first touched.
 A: Usually not. A `private static final Instance INSTANCE = new Instance();` is only executed when the class is first actively used, so the "eager" version is already lazy at class-loading granularity and needs no synchronization, no `volatile`, and no double-checked locking to reason about. Laziness only buys something in narrow cases: construction is genuinely expensive or has side effects such as opening a connection, and the class is touched for some other reason first — a static constant or a static helper method — which triggers initialization earlier than you want. That is exactly the case the holder idiom exists for, since it moves the instance into a nested class that is initialized only by the call to `getInstance()`. Start with the eager static final field or an enum, and reach for the holder idiom only when you can name the early touch that forces initialization too soon.
+
+**Q: How does `LazyConstant` (JEP 531) compare with the holder idiom and DCL for lazy initialization?**
+**Short:** Like the holder idiom it is lazy, once-only, and constant-folded in a static final field, but it needs no holder class per field and also works for instance fields.
+A: The holder idiom gets constant folding because its field is `static final`, but it works only for static fields and needs one nested class per lazy field. DCL works for instance fields too, but the `volatile` field is mutable, so the JIT cannot fold it, and leaving out `volatile` breaks it. `LazyConstant.of(supplier)` runs the supplier at most once under concurrent `get()` calls and is folded when held in a `static final` field; instance `final` fields fold only in records and hidden classes until reflection stops changing `final` fields. `List.ofLazy`, `Set.ofLazy`, and `Map.ofLazy` give per-element laziness, which DCL can only do with a `VarHandle` and one lock per slot. The catch: it is a preview API in JDK 27 (third preview, JEP 531, after `StableValue` in JDK 25 and the rename in JDK 26), so production code on a GA JDK without `--enable-preview` stays on the holder idiom or an enum.
 
 ### Key Phrases
 - "Lazy vs. eager initialization"
@@ -654,6 +695,7 @@ A: Usually not. A `private static final Instance INSTANCE = new Instance();` is 
 | Spring `@Component` / `@Bean` (default singleton scope) | One instance **per `ApplicationContext`**, injected rather than looked up, and trivially replaceable in tests | Every singleton in a Spring application; the per-context (not per-JVM) scope is a standard interview trap |
 | Jakarta CDI `@ApplicationScoped` | A container-managed single instance with proxy-based injection | Jakarta EE applications |
 | Google Guice `@Singleton` / `Scopes.SINGLETON` | Container-managed single instance outside Spring | Guice-based applications |
+| `LazyConstant.of(Supplier)`, `List.ofLazy`, `Set.ofLazy`, `Map.ofLazy` (preview, JEP 531 in JDK 27) | At-most-once lazy init that the JIT can constant-fold, for static or instance fields, with no holder class | Several lazy fields in one class on a JDK run with `--enable-preview`; not a GA option |
 | Guava `Suppliers.memoize(Supplier)` | Thread-safe lazy single computation without writing any locking | A lazily created value rather than a lazily created *class* |
 | `AtomicReference.compareAndSet` | Lock-free lazy init where a rare duplicate construction is acceptable | Cheap-to-construct values in a very hot path |
 | JDK singletons — `Runtime.getRuntime()`, `ProcessHandle.current()`, `Collections.emptyList()` | Concrete examples in the standard library, including the flyweight-style shared empty collections | Naming real instances in an interview |

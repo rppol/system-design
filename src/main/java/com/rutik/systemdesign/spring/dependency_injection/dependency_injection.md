@@ -42,14 +42,16 @@ Think of a restaurant chef who declares "I need a knife, a cutting board, and fr
 
 ### Resolution Order
 
-When multiple beans match an injection point, `DefaultListableBeanFactory` resolves in this order:
+When multiple beans match an injection point, `DefaultListableBeanFactory` (Framework 6.2 and 7.0) resolves in this order:
 1. **Qualifier filtering first.** `findAutowireCandidates()` narrows the candidate set to beans matching any `@Qualifier` (or custom qualifier annotation) on the injection point. Everything below runs only on what survives.
-2. **`@Primary`** — `determinePrimaryCandidate()`; exactly one primary among the survivors wins.
-3. **Name match** — the field/parameter name, then a qualifier-suggested name, against the bean names.
-4. **`@Priority`** — `determineHighestPriorityCandidate()`; lowest numeric value wins.
-5. `NoUniqueBeanDefinitionException` if still ambiguous.
+2. **`@Primary`**: `determinePrimaryCandidate()`; exactly one primary among the survivors wins. Two primaries throw `NoUniqueBeanDefinitionException`.
+3. **`@Fallback`** (6.2+): with no primary, the same method makes a second pass; if exactly one survivor is NOT marked `@Fallback`, it wins.
+4. **Name match**: the field/parameter name, then a qualifier-suggested name, against the bean names.
+5. **`@Priority`**: `determineHighestPriorityCandidate()`; lowest numeric value wins.
+6. **Unique default candidate**: if exactly one survivor is a default candidate (beans declared `@Bean(defaultCandidate = false)` are not, 6.2+), it wins.
+7. `NoUniqueBeanDefinitionException` if still ambiguous.
 
-This is why `@Qualifier` beats `@Primary`: the qualifier removes the primary bean from the candidate set before the primary check ever runs.
+This is why `@Qualifier` beats `@Primary`: the qualifier removes the primary bean from the candidate set before the primary check ever runs. It is also why a parameter named after a `@Fallback` bean does not select it: step 3 picks the single non-fallback bean before step 4 compares names.
 
 ### Injection Annotations Comparison
 
@@ -75,23 +77,28 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Point(["Injection Point:\n@Autowired UserRepository repo"]) --> Find["Find all beans of type UserRepository"]
-    Find --> Count{"how many matches?"}
-    Count -->|"1 match"| Inject(["Inject"])
-    Count -->|"0 matches"| ReqCheck{"required=false?"}
-    Count -->|"2+ matches"| Primary{"exactly one @Primary\namong candidates?"}
+    Point(["Injection point:<br/>@Autowired PaymentService p"]) --> Find("Find all beans<br/>of the type")
+    Find --> Qual{"@Qualifier on the<br/>injection point?"}
+    Qual -->|"yes"| Filter("Keep only<br/>qualified beans")
+    Qual -->|"no"| Count
+    Filter --> Count{"How many<br/>candidates left?"}
+    Count -->|"1"| Inject(["Inject"])
+    Count -->|"0"| ReqCheck{"required=false?"}
+    Count -->|"2+"| Primary{"Exactly one<br/>@Primary?"}
     ReqCheck -->|"yes"| OkNull(["OK, field stays null"])
-    ReqCheck -->|"no"| ThrowNSBDE(["throw NoSuchBeanDefinitionException"])
+    ReqCheck -->|"no"| ThrowNSBDE(["throw NoSuchBean-<br/>DefinitionException"])
     Primary -->|"yes"| Inject
-    Primary -->|"no (0 or 2+)"| Qualifier{"@Qualifier on\ninjection point matches?"}
-    Qualifier -->|"yes"| Inject
-    Qualifier -->|"no"| NameMatch{"field/param name\nmatches a bean name?"}
+    Primary -->|"none"| Fallback{"Exactly one bean<br/>without @Fallback?"}
+    Fallback -->|"yes"| Inject
+    Fallback -->|"no"| NameMatch{"Param name matches<br/>a bean name?"}
     NameMatch -->|"yes"| Inject
-    NameMatch -->|"no"| ThrowNUBDE(["throw NoUniqueBeanDefinitionException"])
+    NameMatch -->|"no"| Priority{"Single highest<br/>@Priority?"}
+    Priority -->|"yes"| Inject
+    Priority -->|"no"| ThrowNUBDE(["throw NoUniqueBean-<br/>DefinitionException"])
 
     class Point req
-    class Find base
-    class Count,ReqCheck,Primary,Qualifier,NameMatch mathOp
+    class Find,Filter base
+    class Qual,Count,ReqCheck,Primary,Fallback,NameMatch,Priority mathOp
     class Inject,OkNull io
     class ThrowNSBDE,ThrowNUBDE lossN
 ```
@@ -204,6 +211,47 @@ public class OrderService {
     private PaymentService legacyPayment;
 }
 ```
+
+### @Fallback (Framework 6.2+)
+
+`@Fallback` is the inverse of `@Primary`: it marks a bean as the one to use only when no other
+candidate of the type exists. The main use is a library or shared configuration that ships a
+default implementation and lets the application override it by defining its own bean, with no
+`@ConditionalOnMissingBean` and no edits to the library.
+
+```java
+// Shared platform library
+@Configuration
+public class NotifierDefaults {
+    @Bean
+    @Fallback   // used only when the application defines no other Notifier
+    Notifier logNotifier() { return msg -> log.info("notify: {}", msg); }
+}
+
+// Application
+@Bean
+Notifier slackNotifier(SlackClient client) { return client::post; }
+
+@Service
+public class AlertService {
+    // Two candidates: logNotifier (@Fallback) and slackNotifier.
+    // No @Primary -> second pass picks the single non-fallback bean -> slackNotifier.
+    AlertService(Notifier logNotifier) { ... }   // parameter name does NOT select the fallback
+}
+```
+
+| | `@Primary` | `@Fallback` |
+|---|---|---|
+| Declared on | The bean that should win | The bean that should lose |
+| Resolution step | First pass of `determinePrimaryCandidate()` | Second pass, only when no primary exists |
+| Two of them among candidates | `NoUniqueBeanDefinitionException` | Fine, as long as exactly one non-fallback bean exists |
+| Still injected into `List<T>` / `ObjectProvider.stream()` | Yes | Yes |
+| Typical owner | Application overriding a library | Library offering a default |
+
+Compared with `@ConditionalOnMissingBean`: the condition removes the default bean definition at
+startup, so it does not exist at all, and it depends on auto-configuration ordering. `@Fallback`
+keeps both beans registered and decides at each single-bean injection point, so the default is
+still available to collection injection and works in plain Spring without Boot.
 
 ### @Resource (Name-First Resolution)
 
@@ -477,6 +525,7 @@ private int timeoutSeconds;
 | `ObjectProvider<T>` | Lazy, optional, multi-bean injection |
 | `@Primary` | Mark default bean when multiple candidates exist |
 | `@Qualifier` | Disambiguate bean selection by name |
+| `@Fallback` | Mark a default bean that loses to any other candidate (Framework 6.2+) |
 | `@Resource` | JSR-250 name-first injection |
 | `@Inject` | JSR-330 type-first injection (no `required=false`) |
 | `@Value` | Property/SpEL injection |
@@ -492,9 +541,9 @@ private int timeoutSeconds;
 Constructor injection (via constructor parameters), setter injection (via `@Autowired` setter methods), and field injection (via `@Autowired` on instance fields). Constructor injection is strongly preferred because it makes dependencies explicit (visible in method signature), allows `final` fields (immutability), enables testing without Spring (just call `new`), and provides fail-fast behavior when a required dependency is missing. Field injection is an anti-pattern despite its convenience.
 
 **Q: How does Spring resolve ambiguity when multiple beans of the same type exist?**
-**Short:** @Qualifier filters candidates first, then @Primary and name matching apply only to the survivors of that filter.
+**Short:** @Qualifier filters candidates first; among survivors Spring tries @Primary, then a sole non-@Fallback bean, then name match, then @Priority.
 
-A `@Qualifier` on the injection point is applied first, as a filter on the candidate set, and only the survivors go through the rest of the resolution. Within that filtered set Spring checks `@Primary`, then matches the field/parameter name (and any qualifier-suggested name) against bean names, then falls back to `@Priority` (lowest numeric value wins). If nothing selects a single candidate, `NoUniqueBeanDefinitionException` is thrown at startup. This filter-then-select ordering is exactly why `@Qualifier` beats `@Primary` — the qualifier has already removed the primary bean from consideration before `determinePrimaryCandidate()` runs. Best practice: use `@Primary` for the default implementation, `@Qualifier` for explicit overrides.
+A `@Qualifier` on the injection point is applied first, as a filter on the candidate set, and only the survivors go through the rest of the resolution. Within that filtered set Spring checks `@Primary`, then (Framework 6.2+) picks the single candidate not marked `@Fallback` if exactly one exists, then matches the field/parameter name (and any qualifier-suggested name) against bean names, then falls back to `@Priority` (lowest numeric value wins). If nothing selects a single candidate, `NoUniqueBeanDefinitionException` is thrown at startup. This filter-then-select ordering is exactly why `@Qualifier` beats `@Primary`: the qualifier has already removed the primary bean from consideration before `determinePrimaryCandidate()` runs. Best practice: use `@Primary` for the default implementation, `@Qualifier` for explicit overrides.
 
 **Q: What is the difference between @Autowired, @Resource, and @Inject?**
 **Short:** @Autowired resolves by type first; @Resource resolves by name first; @Inject is the most portable JSR-330 standard.
@@ -520,6 +569,11 @@ Declare the injection point as `List<T>` to get all matching beans in `@Order` o
 **Short:** Spring uses the no-arg constructor if one exists and otherwise fails; only a class with exactly one constructor gets implicit injection.
 
 Spring falls back to the no-argument constructor, and if there is no no-arg constructor the context fails to start with a `BeanInstantiationException`. The rule people half-remember is that `@Autowired` is optional on a constructor — true, but only when the class has **exactly one** constructor, which is why single-constructor injection looks like magic and works without annotations. Add a second constructor for a test fixture or a legacy call site and that implicit resolution disappears: Spring will not guess between them, so it takes the no-arg one and leaves every dependency null, or refuses to instantiate the bean at all. The failure is loud when there is no no-arg constructor and quiet when there is, which is the dangerous case — you get a fully constructed bean with null collaborators and an NPE on first request. If you genuinely need several constructors, annotate exactly one with `@Autowired`; you cannot annotate two, since Spring rejects more than one required autowired constructor. This is also the reason Lombok's `@AllArgsConstructor` plus a hand-written convenience constructor is a recurring incident: the class silently crosses from one constructor to two.
+
+**Q: What does `@Fallback` do, and why does a parameter named after a fallback bean still not receive it?**
+**Short:** @Fallback (Framework 6.2) marks a bean to use only when no other candidate exists; the non-fallback check runs before name matching, so the name is ignored.
+
+`@Fallback` is the opposite of `@Primary`. When several beans match and none is `@Primary`, `determinePrimaryCandidate()` makes a second pass and returns the single candidate that is not `@Fallback`. That step runs before the field or parameter name is compared with bean names, and the early name-match shortcut in `doResolveDependency()` also skips fallback beans, so `AlertService(Notifier logNotifier)` receives the application's `slackNotifier` even though a bean named `logNotifier` exists. Only `@Qualifier("logNotifier")` selects it, because qualifier filtering removes the other candidate first. Fallback beans still appear in `List<Notifier>` and `ObjectProvider.stream()`. The intended use is a shared library that ships a default bean the application can replace by declaring its own, without `@ConditionalOnMissingBean`, which deletes the default definition entirely and depends on auto-configuration ordering.
 
 **Q: What is the difference between @Primary and @Qualifier?**
 **Short:** @Primary sets a global default candidate on the bean itself; @Qualifier overrides it locally at one injection point.

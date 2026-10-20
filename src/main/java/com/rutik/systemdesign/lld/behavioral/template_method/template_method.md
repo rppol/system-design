@@ -377,7 +377,7 @@ public class OrderExportBatchConfig extends DefaultBatchConfiguration {
   wraps the same invariant create-execution / launch / persist sequence.
 - **JUnit's `junit.framework.TestCase.runBare()`** (JUnit 3): calls `setUp()` before and
   `tearDown()` after `runTest()` — the first widely-known Java template method for test lifecycle
-  management. JUnit 5 keeps the same fixed lifecycle but drives it from annotations
+  management. JUnit 6 (Jupiter) keeps the same fixed lifecycle but drives it from annotations
   (`@BeforeEach` -> `@Test` -> `@AfterEach`) rather than an inherited base class.
 
 ---
@@ -728,7 +728,7 @@ A: Add a boolean hook such as `shouldValidate()` that the skeleton consults, so 
 | Spring `JdbcTemplate`, `TransactionTemplate`, `RedisTemplate`, `KafkaTemplate` | The invariant part — acquire, execute, translate exceptions, release — with your logic passed as a callback rather than a subclass | Resource-bound operations; this is Template Method inverted into a callback, and it composes better |
 | Spring Batch `ItemReader` / `ItemProcessor` / `ItemWriter` | A fixed chunk-oriented step (read n, process, write, commit, repeat) with three slots for your code | Batch jobs — the transaction and restart semantics come free |
 | Spring Security `AbstractAuthenticationProcessingFilter` | A fixed authentication flow with `attemptAuthentication` as the hook, plus success and failure handlers | Custom authentication mechanisms |
-| JUnit 5 lifecycle (`@BeforeEach`, `@AfterEach`, `@TestTemplate`) | The test-execution skeleton with your fixture and assertion steps injected | Every test class you write is already using this pattern |
+| JUnit 6 lifecycle (`@BeforeEach`, `@AfterEach`, `@TestTemplate`) | The test-execution skeleton with your fixture and assertion steps injected | Every test class you write is already using this pattern |
 | Java 8+ default methods on interfaces | A template method without forcing a base class, so implementors keep their inheritance slot | You want the skeleton but the implementor already extends something |
 
 The decision that shows seniority: **prefer the callback form over the subclass form when the varying step is small**. `JdbcTemplate.query(sql, rowMapper)` and a `TemplateMethod` subclass solve the same problem, but the callback version can be composed, tested in isolation, and used with a lambda, while the subclass version consumes the implementor's only superclass slot and makes the hook untestable without instantiating the whole hierarchy.

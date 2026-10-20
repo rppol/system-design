@@ -548,7 +548,7 @@ A bug is reported: "the payment page is slow sometimes." You have 15 services. W
 | Async messaging | Apache Kafka, RabbitMQ, AWS SQS, AWS SNS, Google Pub/Sub |
 | Service discovery | Kubernetes Services (CoreDNS), Consul, Eureka (Spring Cloud Netflix) |
 | API gateway | Spring Cloud Gateway, Kong, AWS API Gateway, Nginx, Envoy |
-| Distributed tracing | Jaeger, Zipkin, AWS X-Ray, Micrometer Tracing + OpenTelemetry |
+| Distributed tracing | Micrometer Tracing + OpenTelemetry, exporting to Jaeger, Zipkin, or AWS X-Ray (via the ADOT Collector or CloudWatch agent) |
 | Log aggregation | ELK stack (Elasticsearch, Logstash, Kibana), Grafana Loki, Splunk |
 | Circuit breaker | Resilience4j (via the Spring Cloud CircuitBreaker SPI), Envoy/Istio outlier detection (service mesh level) |
 | Saga orchestration | Temporal, Apache Camel, custom Kafka-based state machine |

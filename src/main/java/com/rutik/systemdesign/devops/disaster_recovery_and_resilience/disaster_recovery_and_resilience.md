@@ -266,6 +266,26 @@ resource "aws_route53_record" "secondary" {
 
 **S3 Cross-Region Replication (CRR)** replicates objects asynchronously; with S3 Replication Time Control (RTC) AWS contractually replicates 99.99% of objects within 15 minutes. Enabling object lock on the destination protects against ransomware deletes.
 
+**AWS Backup logically air-gapped vaults** (GA August 2024) are the managed answer to "the attacker has admin in the backup account too". A standard backup vault lives in your account, uses your KMS key, and is only as safe as that account's root and KMS key policies. A logically air-gapped vault differs in four ways: it is always locked with Vault Lock in **compliance mode** (no one, including root and AWS, can delete a recovery point before its retention ends), its minimum and maximum retention are set at creation (the minimum cannot be under 7 days), backups are stored in an AWS Backup service-owned account and encrypted by default with an **AWS-owned key** (a customer-managed key is optional), and the vault can be shared through **AWS RAM** with another account, even in another AWS Organization, which can restore directly from it. With **multi-party approval** (MPA) integration, a team of approvers can grant access to the vault even when the owning account is locked out or closed, for as long as the account's post-closure period lasts. The usual layout: the backup plan writes to a standard vault in each workload account and copies to a logically air-gapped vault in a central account in another Region, and a separate recovery account holds the RAM share and is where restore tests run.
+
+```bash
+aws backup create-logically-air-gapped-backup-vault \
+  --backup-vault-name tier0-lag --min-retention-days 7 --max-retention-days 35
+aws ram create-resource-share --name tier0-lag-restore \
+  --resource-arns arn:aws:backup:us-west-2:111122223333:backup-vault:tier0-lag \
+  --principals 444455556666          # the clean recovery account
+```
+
+**Zonal shift and zonal autoshift (Amazon Application Recovery Controller)** handle the failure one level below a Region: one impaired AZ, or a bad deploy that only hit one AZ. A **zonal shift** moves traffic for an opted-in resource away from one AZ to the other AZs in the same Region. Supported resources are Application and Network Load Balancers (cross-zone on or off), EKS clusters, and EC2 Auto Scaling groups. A shift is temporary: you set an expiry from 1 minute to 3 days (72 hours) and can extend it, and cancelling it sends traffic back. With **zonal autoshift**, you authorize AWS to start the shift itself when its internal telemetry sees an AZ impairment that could affect customers; it does not inspect your resources' health, so it can shift a resource that was not affected. Autoshift requires **practice runs**: ARC shifts each resource out of one AZ for about 30 minutes every week and reports `SUCCEEDED` or `FAILED` from an outcome alarm you supply, so you find out on a Tuesday afternoon, not during an outage, that two AZs cannot carry the load.
+
+| Failure | Mechanism | Who triggers | Typical time to move traffic |
+|---|---|---|---|
+| One AZ impaired or one AZ's deploy bad | ARC zonal shift | You (console, CLI, runbook automation) | Minutes, bounded by DNS TTL and client connection reuse |
+| One AZ impaired, AWS-detected | ARC zonal autoshift | AWS | Same, without a human |
+| Whole Region impaired | Route 53 failover / ARC Region switch | Health checks or you | Minutes plus data-layer promotion |
+
+Two rules make AZ evacuation work. Pre-scale: with 3 AZs, each must be sized for 150% of its normal share (about 67% utilization) so the remaining two can carry 100% of load, because zonal shift and autoshift do not wait for Auto Scaling, and capacity launched during an AZ event competes with every other customer doing the same. And watch connection reuse: a shift changes where new connections go, so long-lived keep-alive or gRPC connections to the shifted AZ keep flowing until they close; cap connection lifetime on clients and servers. A zonal shift also has no effect on a load balancer that is failing open because every target is unhealthy.
+
 **Failback** is the reverse: once the primary region recovers, you re-establish replication *back* into it (now as a secondary), let it catch up, then perform a planned, low-traffic-window failover to promote it again. Skipping the catch-up step risks split-brain and data loss.
 
 The region lifecycle below makes the "gate failback" rule concrete: the happy path (green) resyncs and promotes deliberately, while skipping fencing on the primary's return falls into the split-brain danger path (red) instead:
@@ -404,10 +424,13 @@ resource "aws_route53_record" "primary" {
 |---|---|---|---|---|
 | Aurora Global Database | Database | <1s unplanned, 0 on planned switchover | minutes (managed failover) | Storage-layer replication, up to 5 secondaries |
 | RDS cross-region read replica | Database | seconds–minutes | 10–30 min (promote) | Engine-log shipping (binlog on MySQL, WAL on PostgreSQL), manual promote |
-| DynamoDB Global Tables | Database | sub-second | seconds | Multi-active, last-writer-wins |
+| DynamoDB Global Tables | Database | MREC: replication delay, typically under 1 s; MRSC: 0 | seconds | Mode fixed at creation: MREC (default, last-writer-wins) or MRSC (synchronous, exactly 3 Regions) |
 | AWS Route53 health checks | DNS failover | n/a | 60–90s detection + TTL | 30s/10s intervals, failover routing |
 | S3 CRR + RTC | Object storage | <15 min p99.99 | n/a (always available) | Object lock for ransomware protection |
 | AWS Elastic Disaster Recovery (DRS) | Block/host | seconds (CDP) | minutes | Continuous block replication, pilot-light style |
+| ARC Region switch | Failover orchestration | inherits the data layer's | sum of its steps | Since 2025-08-01: a plan of ordered steps (Aurora Global Database switchover or failover, EC2 Auto Scaling / EKS / ECS scaling, Route 53 health checks, ARC routing controls, Lambda, manual approval) that runs the §4 RTO chain as one audited workflow. Plans replicate to every Region the app uses and run from that Region's data plane, so failover does not depend on the impaired Region; readiness is evaluated every 30 minutes |
+| AWS Backup logically air-gapped vault | Backup | backup frequency | restore time | Compliance-mode Vault Lock always on, AWS-owned key by default, RAM-shareable for restore from a clean account, MPA recovery if the owning account is lost |
+| ARC zonal shift / zonal autoshift | AZ traffic steering | n/a | minutes | Shift ALB, NLB, EKS, or ASG traffic out of one AZ for 1 min to 72 h (extendable); autoshift lets AWS start it, with weekly 30-minute practice runs |
 | Gremlin / Chaos Mesh / LitmusChaos / Chaos Monkey | Fault injection | n/a | validates the RTO you claim | Prove the failover path works before an outage does — see [chaos_engineering](../../backend/chaos_engineering/chaos_engineering.md) and [AWS Fault Injection Service](../sre_principles_and_slos/sre_principles_and_slos.md) for managed game days |
 
 GCP equivalents: Cloud SQL cross-region replicas, Spanner multi-region (RPO 0), Cloud DNS routing policies. Azure: Azure Site Recovery, SQL auto-failover groups, Cosmos DB multi-region writes, Traffic Manager / Front Door for DNS failover.
@@ -449,8 +472,16 @@ Split-brain is when both the primary and the promoted secondary accept writes si
 At a regional outage every tenant fails over at once, so the DR region's spare capacity is in contention and your scale-from-2-to-20 request may be throttled or denied exactly when you need it. Mitigate with On-Demand Capacity Reservations, EC2 warm pools (pre-initialized stopped instances), or running closer to full capacity. Pre-baked AMIs also cut the per-node boot time materially.
 
 **Q: How do you protect backups against ransomware and accidental deletion?**
-**Short:** Store backups in a separate account with S3 Object Lock in compliance mode so even root cannot delete them before retention expires, breaking the blast radius from a compromised credential.
-Store backups in a separate AWS account with cross-account replication, enable S3 Object Lock (WORM) in compliance mode so even root cannot delete before retention expires, and use MFA-delete. This breaks the blast radius — a compromised production credential cannot reach the immutable backup copy. Combine with versioning and at least one offline or logically-airgapped copy for tier-0 data.
+**Short:** Keep copies in a separate account under compliance-mode locks (S3 Object Lock, or an AWS Backup logically air-gapped vault) so no credential, including root, can delete them before retention ends.
+Store backups in a separate AWS account with cross-account copy, and lock them in compliance mode so even root cannot delete before retention expires: S3 Object Lock (WORM) for object data, and for AWS Backup recovery points a logically air-gapped vault, which is always compliance-locked, stores backups in an AWS-owned account with an AWS-owned key by default, and can be shared through AWS RAM to a clean recovery account. This breaks the blast radius: a compromised production credential cannot reach the immutable copy. Combine with versioning, cross-Region copies, and regular restore tests from the recovery account, since a backup you have never restored is not yet a backup.
+
+**Q: What does an AWS Backup logically air-gapped vault give you that a Vault Lock vault in a separate account does not?**
+**Short:** It is always compliance-locked, stores backups in an AWS-owned account under an AWS-owned key, and is reachable through RAM or multi-party approval, so losing your account or KMS key does not lose them.
+A standard vault with Vault Lock in compliance mode already stops deletion, but its recovery points depend on things an attacker or an accident can still take away: your KMS key (schedule it for deletion and the backups become unreadable) and the owning account (close it or lock out its admins and you cannot restore). A logically air-gapped vault stores recovery points in an AWS Backup service-owned account, encrypts them with an AWS-owned key by default, and is always compliance-locked with minimum and maximum retention set at creation (the minimum cannot be under 7 days). It can be shared through AWS RAM to another account, even in another Organization, which restores directly from it, and with multi-party approval a quorum of approvers can regain access if the owning account is compromised or closed, until the post-closure period ends. Use it for tier-0 copies, and keep restore testing in the recovery account so the path is exercised before you need it.
+
+**Q: One Availability Zone is degraded but the Region is fine. How do you get traffic out of it, and what must already be true?**
+**Short:** Start an ARC zonal shift (or let zonal autoshift do it) for the load balancers, EKS cluster, or ASG; it works only if the other AZs are pre-scaled to carry full load, since it does not wait for Auto Scaling.
+Region failover is the wrong tool for an AZ problem: it is slower, moves data-layer leadership, and abandons two healthy AZs. An ARC zonal shift moves traffic for an opted-in ALB, NLB, EKS cluster, or EC2 Auto Scaling group out of one AZ for 1 minute to 72 hours (extendable), and cancelling it moves traffic back. With zonal autoshift, AWS starts the shift when its own telemetry detects an AZ impairment, and weekly 30-minute practice runs, judged by an outcome alarm you provide, prove the app survives without each AZ. Neither waits for scaling, so with 3 AZs each must be sized for 150% of its normal share (about 67% utilization) to absorb the lost third. Long-lived connections to the shifted AZ keep flowing until they close, so cap keep-alive and gRPC connection age, and note that a load balancer failing open because all targets are unhealthy ignores the shift.
 
 **Q: What is chaos engineering and how does it relate to DR?**
 **Short:** Chaos engineering deliberately injects failures into production-like systems to validate that resilience mechanisms actually work, turning DR into a continuously verified property.
@@ -465,8 +496,8 @@ RPO equals the replication lag at the moment of failure for async systems, or th
 Warm standby in a second region: continuous async replication (Aurora cross-region replica or Global DB for sub-second lag, comfortably under 30s RPO) plus a scaled-down but live app tier behind Route53 failover with a fast (10s) health check. Pre-bake AMIs and use warm pools so scaling from minimal to full completes within the 5-minute RTO, and reserve capacity in the DR region. Validate the full failover quarterly with a game day that measures actual RTO/RPO, and store immutable cross-account backups as the logical-corruption safety net.
 
 **Q: How does DynamoDB Global Tables achieve multi-region writes, and what's the tradeoff?**
-**Short:** DynamoDB Global Tables lets every region accept writes locally with near-zero RPO, but resolves concurrent conflicts with last-writer-wins, silently discarding the losing write.
-DynamoDB Global Tables replicates a table to multiple regions in a multi-active configuration, so every region accepts writes locally with sub-second cross-region propagation and near-zero RPO. The tradeoff is conflict resolution: because two regions can write the same item concurrently, DynamoDB resolves conflicts with last-writer-wins based on a timestamp, which silently discards the losing write rather than merging it. This makes Global Tables a strong fit for workloads where per-item last-write-wins is acceptable (session state, user preferences) but a poor fit for financial ledgers or anything requiring strict conflict-free accounting.
+**Short:** Every Region accepts writes; the default MREC mode replicates asynchronously with last-writer-wins, while MRSC replicates synchronously across exactly three Regions for RPO 0 at higher write latency.
+DynamoDB Global Tables replicate a table across Regions, and the consistency mode is fixed when the table is created. The default, multi-Region eventual consistency (MREC), lets every Region accept writes locally and replicates asynchronously, typically within a second; two Regions writing the same item concurrently are resolved by last-writer-wins on an internal timestamp, which silently discards the losing write, and RPO equals the replication delay. Multi-Region strong consistency (MRSC), GA since 2025-06-30, replicates every write synchronously to at least one other Region before it returns, so a strongly consistent read on any replica sees the latest item and RPO is 0; a write to an item already being modified in another Region fails with `ReplicatedWriteConflictException` instead of being dropped. The price is cross-Region write latency, exactly three Regions (three replicas, or two replicas and a witness), and no transactions, TTL or LSIs. Use MREC where per-item last-write-wins is acceptable (session state, user preferences); for a ledger, MRSC removes the lost-write problem, but its lack of `TransactWriteItems` usually still sends double-entry accounting to a single-writer relational store.
 
 **Q: What does AWS Elastic Disaster Recovery (DRS) do differently from Aurora Global Database?**
 **Short:** AWS DRS continuously replicates an entire server's disk blocks for whole-machine recovery, while Aurora Global Database only replicates the managed database layer.
@@ -513,16 +544,14 @@ export DATABASE_URL="postgres://app@app-primary.cluster-abc123.us-east-1.rds.ama
 ```
 
 ```bash
-# FIX: dial the Global Database *cluster* endpoint (region-local writer
-# resolution) and resolve the region at runtime from instance metadata,
-# so the app always talks to whichever region is currently the writer.
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-export DATABASE_URL="postgres://app@app-global.cluster-write.${REGION}.rds.amazonaws.com:5432/ledger?target_session_attrs=read-write"
-# target_session_attrs=read-write ensures the driver only commits to a true
-# writer, rejecting a stale read-only endpoint after a partial failover.
+# FIX: dial the Aurora Global Database writer endpoint. Aurora repoints it to the
+# new primary on switchover or failover, so the connection string never changes.
+export DATABASE_URL="postgres://app@app-global.global-abc123xyz.global.rds.amazonaws.com:5432/ledger?target_session_attrs=read-write"
+# The endpoint moves by DNS: keep client DNS caching short, and let
+# target_session_attrs=read-write reject a cached address that is no longer the writer.
 ```
 
-**Outcome**: After fixing the endpoint resolution and adding `target_session_attrs=read-write` so the driver refuses to write to a read-only node, the next game day measured RTO of 2 minutes 50 seconds and RPO 0 for committed transactions (verified by reconciling the last committed ledger ID across regions). The team now runs the region-evacuation game day monthly, and replication lag is alerted at 500 ms — half the RPO budget — giving headroom before any breach.
+**Outcome**: After switching to the global writer endpoint and adding `target_session_attrs=read-write` so the driver refuses to write to a read-only node, the next game day measured RTO of 2 minutes 50 seconds and RPO 0 for committed transactions (verified by reconciling the last committed ledger ID across regions). The team now runs the region-evacuation game day monthly, and replication lag is alerted at 500 ms, half the RPO budget, giving headroom before any breach. The game day itself is an ARC Region switch plan (Aurora Global Database switchover, ECS scaling in us-west-2, a manual-approval step, then the Route 53 shift), so the drill and a real failover run the same steps in the same order, and the plan's 30-minute readiness check flags a broken step, such as a deleted IAM role, between drills.
 
 ### Decoding the numbers behind the mandate
 

@@ -597,40 +597,43 @@ spring:
         multiplier: 1.1
 ```
 
-### Pitfall 4: @Value fields not refreshed (only @ConfigurationProperties works with @RefreshScope)
+### Pitfall 4: @Value in a bean without @RefreshScope is never refreshed
 
 ```java
-// BROKEN: @Value field injection does not pick up new values after refresh
-// because the field is set once at bean creation time.
-// Adding @RefreshScope to the class is necessary, but also the field must be
-// accessed through the refreshed bean proxy — not captured in a local variable at init.
+// BROKEN: no @RefreshScope, so this singleton is never rebuilt.
+// /actuator/refresh updates the Environment, but taxRate keeps its startup value.
 @Service
 public class PricingService {
 
-    private final double taxRate;  // captured at construction time, never updated
+    private final double taxRate;
 
     public PricingService(@Value("${pricing.tax-rate}") double taxRate) {
-        this.taxRate = taxRate;  // WRONG: constructor injection bypasses refresh
+        this.taxRate = taxRate;
     }
 }
 ```
 
 ```java
-// FIXED option 1: use @RefreshScope + field injection (not constructor injection for refreshable props)
+// FIXED option 1: @RefreshScope. On refresh the proxy drops the instance and the next call
+// builds a new one, so constructor and field @Value injection both see the new value.
 @Service
 @RefreshScope
 public class PricingService {
 
-    @Value("${pricing.tax-rate}")
-    private double taxRate;  // re-injected when bean is re-created by @RefreshScope
+    private final double taxRate;
+
+    public PricingService(@Value("${pricing.tax-rate}") double taxRate) {
+        this.taxRate = taxRate;
+    }
 
     public double calculateTax(double price) {
         return price * taxRate;
     }
 }
 
-// FIXED option 2 (preferred for complex config): use @ConfigurationProperties + @RefreshScope
-@RefreshScope
+// FIXED option 2 (preferred for grouped config): @ConfigurationProperties with setters.
+// ConfigurationPropertiesRebinder rebinds it in place on EnvironmentChangeEvent; no @RefreshScope needed.
+// Callers must read the getter on each use, not copy the value into their own final field.
 @ConfigurationProperties(prefix = "pricing")
 @Component
 public class PricingProperties {

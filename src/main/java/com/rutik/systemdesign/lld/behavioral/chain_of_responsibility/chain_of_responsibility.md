@@ -636,7 +636,7 @@ You almost never write the chain infrastructure yourself in a Java service — e
 
 | Technology | What it gives you | When to reach for it |
 |-----------|-------------------|---------------------|
-| `jakarta.servlet.Filter` + `FilterChain` (Jakarta EE 10 / Servlet 6.0) | The canonical CoR in Java web apps: each filter may handle, transform, or call `chain.doFilter()` | Cross-cutting concerns on every HTTP request — correlation IDs, compression, CORS |
+| `jakarta.servlet.Filter` + `FilterChain` (Jakarta EE 11 / Servlet 6.1) | The canonical CoR in Java web apps: each filter may handle, transform, or call `chain.doFilter()` | Cross-cutting concerns on every HTTP request — correlation IDs, compression, CORS |
 | Spring Security `SecurityFilterChain` | An ordered, container-managed filter chain with a declarative lambda DSL and per-path `securityMatcher` | Authentication and authorization; multiple chains for API vs UI paths |
 | Spring MVC `HandlerInterceptor` | `preHandle` / `postHandle` / `afterCompletion` hooks that run inside the DispatcherServlet, after handler mapping | Concerns that need the resolved handler (method-level annotations, per-controller metrics) |
 | Netty `ChannelPipeline` + `ChannelHandler` | A doubly-linked, dynamically reconfigurable inbound/outbound handler chain per connection | Custom protocol servers where decode, framing, and business handling are separate stages |

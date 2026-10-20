@@ -195,43 +195,52 @@ export const options = {
 
 ### Gatling Simulation
 
-```scala
-class OrderSimulation extends Simulation {
+```java
+import static io.gatling.javaapi.core.CoreDsl.*;
+import static io.gatling.javaapi.http.HttpDsl.*;
 
-  val httpProtocol = http
-    .baseUrl("http://localhost:8080")
-    .acceptHeader("application/json")
-    .contentTypeHeader("application/json")
+import io.gatling.javaapi.core.*;
+import io.gatling.javaapi.http.*;
+import java.time.Duration;
 
-  val feeder = csv("orders.csv").random  // CSV with userId, sku columns
+public class OrderSimulation extends Simulation {
 
-  val createOrderScenario = scenario("Create Order")
-    .feed(feeder)
-    .exec(
-      http("Create Order")
-        .post("/api/orders")
-        .body(StringBody("""{"userId":"${userId}","items":[{"sku":"${sku}","quantity":1}]}"""))
-        .check(status.is(201))
-        .check(jsonPath("$.id").saveAs("orderId"))
-    )
-    .pause(1)  // think time
-    .exec(
-      http("Get Order")
-        .get("/api/orders/${orderId}")
-        .check(status.is(200))
-        .check(jsonPath("$.status").is("PENDING"))
-    )
+  HttpProtocolBuilder httpProtocol = http
+      .baseUrl("http://localhost:8080")
+      .acceptHeader("application/json")
+      .contentTypeHeader("application/json");
 
-  setUp(
-    createOrderScenario.inject(
-      rampUsersPerSec(10).to(100).during(2.minutes),
-      constantUsersPerSec(100).during(10.minutes)
-    )
-  ).protocols(httpProtocol)
-    .assertions(
-      global.responseTime.percentile3.lt(200),  // p99 < 200ms
-      global.failedRequests.percent.lt(1)        // error rate < 1%
-    )
+  FeederBuilder<String> feeder = csv("orders.csv").random();  // CSV with userId, sku columns
+
+  ScenarioBuilder createOrder = scenario("Create Order")
+      .feed(feeder)
+      .exec(
+          http("Create Order")
+              .post("/api/orders")
+              .body(StringBody("{\"userId\":\"#{userId}\",\"items\":[{\"sku\":\"#{sku}\",\"quantity\":1}]}"))
+              .check(status().is(201))
+              .check(jsonPath("$.id").saveAs("orderId"))
+      )
+      .pause(1)  // think time
+      .exec(
+          http("Get Order")
+              .get("/api/orders/#{orderId}")
+              .check(status().is(200))
+              .check(jsonPath("$.status").is("PENDING"))
+      );
+
+  {
+    setUp(
+        createOrder.injectOpen(
+            rampUsersPerSec(10).to(100).during(Duration.ofMinutes(2)),
+            constantUsersPerSec(100).during(Duration.ofMinutes(10))
+        )
+    ).protocols(httpProtocol)
+     .assertions(
+         global().responseTime().percentile(99.0).lt(200),  // p99 < 200ms
+         global().failedRequests().percent().lt(1.0)          // error rate < 1%
+     );
+  }
 }
 ```
 
@@ -384,7 +393,7 @@ flowchart LR
 | Tool | Language | Strengths | Weaknesses |
 |------|----------|-----------|------------|
 | k6 | JavaScript | Modern, CI-friendly, scenarios, cloud execution | No Java DSL |
-| Gatling | Scala | Excellent reports, Scala DSL expressive, open-model | Scala learning curve |
+| Gatling | Java, Kotlin, Scala, JavaScript/TypeScript | Excellent reports, test-as-code DSL, open-model injection | JVM runtime on every generator; distributed execution is a Gatling Enterprise feature |
 | JMeter | Java/XML | Mature, GUI, wide plugin ecosystem | XML config verbose, GUI-driven |
 | wrk2 | C | Extremely high RPS, constant rate, low overhead | Limited scripting |
 | Locust | Python | Python scripting, distributed, real-time UI | Higher resource usage |
@@ -418,13 +427,13 @@ Use soak tests specifically for detecting: memory leaks (heap growing 1MB/hour �
 | Tool | Purpose |
 |------|---------|
 | k6 | Modern load testing, scripted in JavaScript, CI-native |
-| Gatling | Scala-based simulation, detailed HTML reports |
+| Gatling | Test-as-code simulations in the Java, Kotlin, Scala, or JavaScript/TypeScript SDK, detailed HTML reports |
 | JMeter | Traditional load testing, GUI + distributed mode |
 | async-profiler | CPU/allocation flamegraphs during load tests |
 | JFR (Java Flight Recorder) | JVM-level event recording during load tests |
 | Prometheus + Grafana | Real-time metrics dashboards during load tests |
 | pg_stat_statements | PostgreSQL query performance statistics |
-| k6 Cloud | Distributed k6 execution and results storage |
+| Grafana Cloud k6 | Distributed k6 execution and results storage; k6 2.x drives it with `k6 cloud login` and `k6 cloud run` |
 
 ---
 
@@ -519,7 +528,7 @@ If measured throughput plateaus below what Little's Law predicts for a given con
 - Parameterize test data with feeders (CSV, JSON) to avoid cache artifacts skewing results
 - Run load tests from a separate machine or cloud environment — the test tool itself consumes CPU
 - Monitor the load generator's resource usage — if k6 is CPU-bound, it throttles itself and the results are invalid
-- Co-locate load test execution with CI: k6 Cloud, Gatling Enterprise, or self-hosted k6 with InfluxDB output
+- Co-locate load test execution with CI: Grafana Cloud k6, Gatling Enterprise, or self-hosted k6 with InfluxDB output
 - Set `--out influxdb=http://influxdb:8086/k6` in k6 to stream results to Grafana in real time
 - Keep load test scripts in the same repository as the service code — reviewed and version-controlled
 - Annotate Grafana dashboards with deployment markers (vertical lines when a deploy happened)

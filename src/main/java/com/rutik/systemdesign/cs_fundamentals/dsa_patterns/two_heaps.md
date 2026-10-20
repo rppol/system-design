@@ -220,7 +220,7 @@ two heaps face each other across the cut like two funnels mouth-to-mouth.
 |---|---|
 | `left` | Max-heap of the smaller half. Its root is the *largest* small value |
 | `right` | Min-heap of the larger half. Its root is the *smallest* large value |
-| `-left[0]` | The true max of `left`. Python has no max-heap, so values are stored negated |
+| `-left[0]` | The true max of `left`. Values are stored negated so the code runs on any Python; on 3.14+ `heapq.heappush_max` avoids the negation |
 | `right[0]` | The min of `right`, stored as-is |
 | `O(log n)` | One push or pop — the height of a heap holding `n` items |
 | `O(1)` | Reading a heap root. No traversal, it is array slot 0 |

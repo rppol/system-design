@@ -45,6 +45,7 @@ graph and whose independent branches are fanned out.
 | FLARE | The decoder itself, from token confidence mid-generation | Interleaved with generation | Long-form answers where the knowledge gap only surfaces once the model starts writing | Confidence thresholds are model-specific and need calibration |
 | Tool-calling agent | The model's native function calling, choosing among several retrievers | Serial, model-directed | Heterogeneous back ends: vector DB, SQL, web search, internal APIs | Tool-selection errors; unbounded unless you impose an iteration cap |
 | Parallel fan-out (DAG) | A planner that emits sub-questions plus "needs the answer of" edges | Concurrent within each DAG level | Joined questions ("compare A and B") whose sub-queries are all writable up front | Peak context arrives at once; deduplication across concurrent branches |
+| RL-trained search policy (Search-R1, R1-Searcher, DeepResearcher) | The model's own weights, learned from outcome reward on search rollouts | Serial, interleaved with reasoning tokens | High-volume multi-hop QA or research where a small open model must search well without a hand-written loop | A GPU RL run (rollouts call a live retriever) and a reward that can be gamed |
 
 Two structural choices cut across all five:
 
@@ -55,6 +56,13 @@ Two structural choices cut across all five:
   standard RAG actually fails on down the agentic path is what makes any of these topologies
   affordable; an escalation variant runs standard RAG first and promotes the query only when
   retrieval relevance or answer faithfulness scores low.
+
+The first five are **prompted**: the search behaviour lives in the orchestrator code and the
+system prompt, and the model is used as shipped. The sixth is **trained**: the model learns
+when to search, what to type into the search box, and when to stop, from a reward that only
+checks the final answer. Prompted loops are the default because they need no training run;
+the trained variant pays off when the same agent runs millions of times and a 3B-7B open
+model has to match a frontier model's search judgement (section 6.6).
 
 Related-but-different: [Self-RAG](self_rag.md) moves the same decisions *inside* the model
 via fine-tuned reflection tokens rather than an external orchestrator, and
@@ -342,6 +350,84 @@ Four things break when you parallelize the loop, and all four are silent:
 - **The slowest branch sets the wall clock.** A per-branch timeout with partial-result handling is mandatory; without it, one slow tool erases the entire speedup.
 - **Peak context arrives all at once.** Serial accumulation gives the compressor a chance to run between hops; a fan-out delivers `N` branches' worth of chunks simultaneously, so the token-budget guard from 6.2 has to be enforced before dispatch, not after.
 
+### 6.6 RL-Trained Search Agents (Search-R1, R1-Searcher, DeepResearcher)
+
+A prompted loop asks the model to judge sufficiency and write queries with whatever skill it
+already has. RL-trained search agents treat the retriever as an environment and optimize the
+policy directly on outcome reward, using the same GRPO/PPO machinery as
+[RLVR](../alignment_and_rlhf/grpo_and_rlvr.md). Three papers set the recipe in early 2025:
+
+- **Search-R1** (Jin et al., arXiv:2503.09516). The rollout is free text with four tags:
+  `<think>`, `<search>query</search>`, `<information>...</information>` (inserted by the
+  environment), and `<answer>`. Generation pauses at `</search>`, the E5 retriever returns
+  top-3 passages from a 2018 Wikipedia dump, and decoding resumes, within a budget of 4
+  actions. Reward is exact match on the extracted answer only: no format reward, no
+  learned reward model. Trained on merged NQ and HotpotQA with PPO (KL beta 0.001, 500
+  steps), it beats RAG baselines by 41% on Qwen2.5-7B and 20% on Qwen2.5-3B across seven
+  QA datasets. GRPO (5 samples per prompt) converged faster but its reward collapsed late
+  in training, so the authors kept PPO. Top-3 passages beat top-1 (low recall) and top-5
+  (noise): average EM 0.431 against 0.375 and 0.400.
+- **R1-Searcher** (Song et al., arXiv:2503.05592). Two stages, pure RL, no SFT cold start.
+  Stage 1 teaches the habit of searching: reward = 0.5 for at least one retrieval call plus
+  0.5 for correct format, with no answer reward. Stage 2 teaches using the results: reward =
+  answer F1 plus a format penalty of -2. On Qwen-2.5-7B-Base it reaches 0.750 LLM-judged
+  accuracy on HotpotQA and 0.650 on 2Wiki, against 0.506 and 0.534 for ReARTeR on
+  GPT-4o-mini.
+- **DeepResearcher** (Zheng et al., arXiv:2504.03160). Trains against live web search
+  instead of a fixed corpus, with browsing sub-agents that read pages and pass back
+  extracts. It reports up to 28.9 points over prompt-engineered baselines and up to 7.2
+  points over RL agents trained on a local RAG corpus: the live web's noise, rate limits
+  and changing pages are part of what the policy has to learn.
+
+The one mechanism every recipe shares is **retrieved-token masking**. The passages inside
+`<information>` are written by the environment, not the policy, so they must not enter the
+policy-gradient loss; otherwise the model is rewarded or punished for text it never chose,
+and the gradient pushes it to imitate Wikipedia. In Search-R1 masking raised the 7B base
+model's average EM from 0.343 to 0.431.
+
+```
+rollout tokens  <think> need birthplace </think> <search> X founder </search> <information>
+loss mask         1  1   1      1          1      1    1     1      1       1      0
+                ... Wikipedia passage text, 300 tokens ... </information> <answer> Paris </answer>
+                0    0       0       0       0           0         0         1      1      1
+
+mask = 1: policy wrote it, gets the advantage     mask = 0: environment wrote it, no gradient
+```
+
+The mask is a per-token multiplier on the loss, so the implementation is one line once the
+rollout records which spans the environment inserted:
+
+```python
+import torch
+
+def masked_policy_loss(logprobs: torch.Tensor, old_logprobs: torch.Tensor,
+                       advantages: torch.Tensor, env_mask: torch.Tensor,
+                       clip: float = 0.2) -> torch.Tensor:
+    # env_mask[b, t] = 0 for tokens inside <information>...</information>, else 1
+    ratio = torch.exp(logprobs - old_logprobs)
+    unclipped = ratio * advantages
+    clipped = torch.clamp(ratio, 1 - clip, 1 + clip) * advantages
+    per_token = -torch.min(unclipped, clipped) * env_mask
+    return per_token.sum() / env_mask.sum().clamp(min=1)
+```
+
+**Reward choices and how each gets gamed:**
+
+| Reward | Used by | What the policy learns to exploit |
+|--------|---------|-----------------------------------|
+| Exact match on answer | Search-R1 | Short, hedge-free answers; skipping search on questions it can guess |
+| Bonus for calling search | R1-Searcher stage 1 | One token-cheap search per rollout regardless of need, so the bonus is dropped in stage 2 |
+| Answer F1 | R1-Searcher stage 2 | Long answers that list several candidates to raise token overlap |
+| LLM-judge score | Deep-research style long reports | Confident, well-formatted prose the judge likes, whether or not cited facts check out |
+
+Deep-research products apply the same idea at larger scale: OpenAI's launch post for deep
+research (2025-02-02) says the agent was trained with end-to-end reinforcement learning on
+hard browsing and reasoning tasks. For an application team the practical lesson is about
+the boundary: training a search policy is an RL infrastructure project
+([RL environments](../alignment_and_rlhf/rl_environments_and_agentic_rl.md)), and the
+prompted loops in 6.1-6.5 remain the right tool until query volume and a fixed retrieval
+stack justify one.
+
 ---
 
 ## 7. Real-World Examples
@@ -357,6 +443,11 @@ Four things break when you parallelize the loop, and all four are silent:
 - Can run for minutes to hours on complex research tasks
 - Uses browse tool + search tool iteratively; up to 100+ web visits per query
 - Explicitly designed for professional research workflows
+
+### Search-R1 and R1-Searcher (open RL recipes)
+- Open code and checkpoints for training 3B-8B models to interleave reasoning and search with outcome reward
+- Search-R1: +41% (Qwen2.5-7B) and +20% (Qwen2.5-3B) over RAG baselines on seven QA datasets
+- R1-Searcher: 0.750 on HotpotQA with a 7B base model versus 0.506 for a GPT-4o-mini prompted pipeline
 
 ### LlamaIndex Agentic RAG
 - `SubQuestionQueryEngine`: decomposes complex questions, routes sub-questions to different indices
@@ -452,6 +543,8 @@ Fix: Add a query classifier that routes simple queries to standard RAG and compl
 | **RAGAS** | Evaluate agentic RAG quality | Faithfulness, context recall across iterations |
 | **Arize Phoenix** | Trace agentic loops | Critical for debugging multi-step retrieval |
 | **LangSmith** | Trace + evaluate agentic runs | End-to-end tracing for LangGraph pipelines |
+| **Search-R1 / R1-Searcher codebases** | Train a search policy with RL | PPO/GRPO with retrieved-token masking; outcome reward on QA |
+| **verl** | RL training framework | Rollout engine and trainer that Search-R1 is built on |
 
 ---
 
@@ -460,6 +553,14 @@ Fix: Add a query classifier that routes simple queries to standard RAG and compl
 **Q: When would you choose agentic RAG over standard RAG?**
 **Short:** Choose it for multi-hop queries where each retrieval depends on the prior result, accepting 5-10x latency for the ability to chain retrievals.
 A: Agentic RAG is worth the added complexity when queries are multi-hop — where the next retrieval step depends on what was found in the previous one. Examples: "Who is the CEO of the company that acquired X?" requires first finding which company acquired X, then finding that company's CEO. Standard RAG fires one query and can't chain these retrievals. The cost is 5-10× latency and significant debugging complexity. Start with standard RAG and measure accuracy on your query distribution first; only add agentic retrieval when standard RAG fails on multi-hop questions that matter to your users.
+
+**Q: Why must retrieved passages be masked out of the loss when training a search agent with RL?**
+**Short:** The passages are written by the environment, not the policy, so including them in the policy-gradient loss trains the model on text it never chose and destabilizes training.
+A: In an RL search rollout the model writes `<think>` and `<search>` tokens, then the environment inserts hundreds of retrieved tokens inside `<information>`. PPO and GRPO assign the rollout's advantage to every token in the loss; if retrieved tokens are included, a good rollout raises the probability of the model generating Wikipedia text itself, and a bad one punishes text it had no control over. Search-R1 multiplies the per-token loss by a mask that is 0 inside `<information>`, which raised its 7B base model's average EM from 0.343 to 0.431. Any multi-turn agent RL with tool outputs in the context needs the same mask on every observation span.
+
+**Q: When is an RL-trained search policy worth it over a prompted agentic RAG loop?**
+**Short:** When query volume is high, the retrieval stack is fixed, and a small open model must search like a frontier model; otherwise a prompted loop needs no training run and wins.
+A: A prompted loop uses the model's existing judgement about when and what to search, and changing behaviour is a prompt edit. RL training (Search-R1, R1-Searcher, DeepResearcher) optimizes that judgement on outcome reward: Search-R1 gained 41% over RAG baselines on Qwen2.5-7B, and R1-Searcher's 7B model scored 0.750 on HotpotQA against 0.506 for a GPT-4o-mini pipeline. The cost is an RL run whose rollouts call a live retriever, a reward that can be gamed (F1 rewards listing several candidates, a search bonus rewards pointless searches), and a policy tied to the retriever it was trained with. Train only when the per-query savings of a small model at high volume pay for that, and keep the prompted loop as the baseline the trained policy must beat.
 
 **Q: How do you prevent infinite loops in agentic RAG?**
 **Short:** Enforce a hard max-iteration limit in code, exclude already-retrieved document IDs from new searches, and add a wall-clock timeout independent of iteration count.
@@ -507,7 +608,7 @@ A: Tool selection accuracy — choosing the right source (internal knowledge bas
 
 **Q: How do you control cost for iterative retrieval when each iteration adds LLM and retrieval calls?**
 **Short:** Cap iterations at 3-5, use a cheap model for query generation and sufficiency checks, enforce a token budget, and route only 20-30% of queries into the agentic path.
-A: Cost control requires both architectural limits and monitoring. Set hard iteration caps (3 in production, 5 maximum). Use a cheap small tier (GPT-4o-mini at $0.15/1M in, Claude Haiku 4.5 at $1/1M in, or a nano tier) for retrieval query generation and sufficiency checks; reserve the capable model only for final answer generation. Implement query-level budget tracking: if a query has consumed more than a configured token budget, force early termination with a best-effort answer. Route simple queries to standard RAG using an upfront classifier — agentic RAG should be triggered for fewer than 20-30% of all queries. Monitor average iterations per query in production; a creeping average above 2.5 signals the sufficiency check is miscalibrated.
+A: Cost control requires both architectural limits and monitoring. Set hard iteration caps (3 in production, 5 maximum). Use a cheap small tier (GPT-4o-mini at $0.15/1M in, Claude Haiku 5.5 at $0.10/1M in up to 100K-token prompts, or a nano tier) for retrieval query generation and sufficiency checks; reserve the capable model only for final answer generation. Implement query-level budget tracking: if a query has consumed more than a configured token budget, force early termination with a best-effort answer. Route simple queries to standard RAG using an upfront classifier; agentic RAG should be triggered for fewer than 20-30% of all queries. Monitor average iterations per query in production; a creeping average above 2.5 signals the sufficiency check is miscalibrated.
 
 **Q: How do you combine agentic RAG with traditional RAG as a fallback?**
 **Short:** Run standard RAG first and only escalate to agentic RAG when retrieval relevance or answer faithfulness scores fall below threshold.
@@ -536,6 +637,7 @@ A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration ef
 5. **Compress context across iterations** — don't blindly accumulate; summarize or select top-K relevant chunks to avoid hitting context limits.
 6. **Track circular retrieval** — if the same document IDs appear in consecutive iterations, terminate early.
 7. **Benchmark against standard RAG on your query distribution** — if your queries are 90% single-hop, agentic RAG adds cost with no quality gain.
+8. **When training a search policy with RL, mask every environment-written span out of the loss** and check the reward for shortcuts (answer padding, token-cheap searches) before scaling the run.
 
 ---
 

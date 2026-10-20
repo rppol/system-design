@@ -6,7 +6,7 @@
 
 React's render model has always had one unpriced cost: a component body re-runs on every render of its parent, and everything it allocates — an object literal, an arrow function, a filtered array, a JSX element — is a new reference. Downstream, `memo` compares by reference and finds a mismatch, an effect's dependency array finds a mismatch, and the work spreads. The fix was manual: wrap the value in `useMemo`, wrap the handler in `useCallback`, wrap the child in `React.memo`. Three APIs, hand-applied, at hundreds of sites per application, each one an unverified guess.
 
-**The React Compiler is a build-time Babel plugin that applies that memoization for you.** It reached 1.0 on **2025-10-07** as `babel-plugin-react-compiler`, it targets React 17, 18 and 19, and it works for React Native. It reads your components, proves which values can be reused because nothing mutated them, and emits a version of the same function that caches those values in a per-instance array. Meta reports up to **12% faster loads** and roughly **2.5x** on some interactions across its own surfaces after enabling it.
+**The React Compiler is a build-time transform that applies that memoization for you.** It reached 1.0 on **2025-10-07** as the Babel plugin `babel-plugin-react-compiler`, and experimental Rust versions run it inside Turbopack (Next.js 16.3) and Vite (`@vitejs/plugin-react` 6.1 with `oxc-transform-react`) with no Babel pass. It targets React 17, 18 and 19, and it works for React Native. It reads your components, proves which values can be reused because nothing mutated them, and emits a version of the same function that caches those values in a per-instance array. Meta reports up to **12% faster loads** and roughly **2.5x** on some interactions across its own surfaces after enabling it.
 
 The consequence for how you write React is larger than the speedup. `useMemo`, `useCallback` and `React.memo` stop being the primary optimization technique and become **escape hatches** — for a referential identity a third-party library depends on, for a value whose cost the compiler cannot see, for the rare shape the compiler declines. New code written against a compiled build reaches for none of them. A curriculum that still teaches manual memoization as the default is teaching 2023.
 
@@ -208,7 +208,7 @@ The loop closes on a measurement, not on the plugin being installed. A component
 
 ### 6.1 Installing it
 
-The plugin is a Babel plugin, and Babel is where it runs even in a project whose bundler is otherwise Babel-free.
+The stable 1.0 compiler is a Babel plugin, and Babel is where it runs even in a project whose bundler is otherwise Babel-free, unless you opt into the experimental Rust port covered in §6.8.
 
 ```js
 // babel.config.js -- the plugin must be FIRST so it sees the original source,
@@ -408,16 +408,36 @@ export default config;
 ```
 
 ```js
-// vite.config.js -- the plugin rides inside @vitejs/plugin-react's babel hook.
-import react from "@vitejs/plugin-react";
+// vite.config.js -- @vitejs/plugin-react 6 has no babel option; the compiler
+// runs through @rolldown/plugin-babel with the preset plugin-react exports.
+import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import babel from "@rolldown/plugin-babel";
 export default {
-  plugins: [react({ babel: { plugins: [["babel-plugin-react-compiler", { target: "19" }]] } })],
+  plugins: [react(), babel({ presets: [reactCompilerPreset()] })],
 };
 ```
 
+`@vitejs/plugin-react` 6.0 (2026-03-12) dropped its Babel dependency and the `babel` option. Since 6.1.0 (2026-08-20) `react({ compiler: true })` runs an experimental Rust port of the compiler, `oxc-transform-react`, with no Babel pass at all.
+
 New Expo SDK 54 and later projects and the current Vite React templates ship with it enabled, so on a greenfield app the decision is usually already made for you.
 
-**The cost is build time.** The plugin is Babel, and a project on SWC or Turbopack is otherwise paying no Babel cost at all. Next.js 16 limits the pass to files that actually contain components or hooks, which keeps the penalty bounded; a 1,900-component application measured a cold production build going from 94 s to 128 s, a 36% increase, and an incremental dev rebuild of a single file from 210 ms to 340 ms. That is a real number to put in front of a team, and it is paid by every engineer on every build in exchange for a runtime win paid to every user.
+**The cost is build time.** The stable plugin is Babel, and a project on SWC or Turbopack is otherwise paying no Babel cost at all. Next.js 16 limits the pass to files that actually contain components or hooks, which keeps the penalty bounded; a 1,900-component application measured a cold production build going from 94 s to 128 s, a 36% increase, and an incremental dev rebuild of a single file from 210 ms to 340 ms. That is a real number to put in front of a team, and it is paid by every engineer on every build in exchange for a runtime win paid to every user.
+
+**The Rust port removes the Babel pass.** Next.js 16.3 (2026-08-03) runs an experimental Rust port of the compiler directly inside Turbopack, which skips generating and reparsing code for Babel:
+
+```ts
+// next.config.ts
+import type { NextConfig } from "next";
+
+const config: NextConfig = {
+  reactCompiler: true,
+  experimental: { turbopackRustReactCompiler: true },
+};
+
+export default config;
+```
+
+On v0, the Rust path cut the time from `next dev` to a ready page by 34% on a cold build and 46% on a warm one. Those figures assume no Babel at all; a project that still runs Babel for another transform sees a smaller gain. Next.js 16.4 (2026-10-06) added a fast check that skips files with nothing to optimize and stopped re-optimizing Client Components for the server build, and Turbopack allocation changes cut the compiler's memory use by 30% and compile time by 15%. The Vite equivalent is `react({ compiler: true })` with `oxc-transform-react` installed. Both are experimental flags; the Babel plugin is still the stable path.
 
 ### 6.9 Adoption: what to do with the memoization you already have
 
@@ -454,6 +474,7 @@ The rule of thumb that holds up: **new code relies on the compiler and adds no m
 | Design choice | Bought | Paid |
 |---------------|--------|------|
 | Build-time analysis over a runtime memoizer | Zero runtime analysis cost, output is plain JavaScript | A Babel pass in a toolchain that may otherwise have none — 36% on one cold build |
+| Experimental Rust port over the Babel plugin | No Babel pass: 34% cold and 46% warm faster `next dev` to a ready page on v0 | An experimental flag, and the gain shrinks if Babel still runs for another transform |
 | Bail out rather than compile unsafely | No silent miscompilation, ever | A bailed-out component is invisible unless you check for the badge |
 | Memoize every value with a nameable dependency | Nothing is missed through inattention | Cache slots and comparisons for values that cost 0.1 ms |
 | Cache array on the fiber | Lifetime is exactly instance lifetime, freed on unmount | Memory grows with component count, not with what is worth caching |
@@ -535,11 +556,12 @@ function SceneGraph({ scene }: { scene: Scene }) {
 | React DevTools | The `Memo` badge marking which components were actually compiled |
 | React Performance Tracks | 19.2 Chrome performance-panel tracks for comparing commit cost before and after |
 | React Compiler Playground | Paste a component, read the emitted cache array and the bail-out diagnostic |
-| Next.js | 16 exposes `reactCompiler` as a stable config flag, no longer experimental |
-| Vite | Runs the plugin through the babel hook of `@vitejs/plugin-react` |
+| Next.js | 16 exposes `reactCompiler` as a stable config flag, and 16.3 adds `experimental.turbopackRustReactCompiler` |
+| Vite | Runs the plugin through `@rolldown/plugin-babel` with `reactCompilerPreset()` from `@vitejs/plugin-react` 6, or experimentally through `react({ compiler: true })` |
+| oxc-transform-react | The experimental Rust port behind `react({ compiler: true })` in `@vitejs/plugin-react` 6.1 |
 | Expo | SDK 54 and later enable it by default for React Native projects |
-| Babel | The host the plugin runs inside, even in an otherwise Babel-free toolchain |
-| Turbopack | Default bundler in Next.js 16, which still shells out to Babel for this pass |
+| Babel | The host the stable plugin runs inside, even in an otherwise Babel-free toolchain |
+| Turbopack | Default bundler in Next.js 16; shells out to Babel for the stable plugin, or runs the Rust port in-process |
 | react-scan | Shows which components still re-render after compilation, live in the page |
 | Playwright | Scripted interaction traces that make the before-and-after number reproducible |
 
@@ -632,11 +654,11 @@ The badge is the first check because a bail-out is silent — an uncompiled comp
 Then compare commit counts and commit durations across the same scripted interaction, using React Performance Tracks in the Chrome performance panel. The profiling workflow itself belongs to the performance and profiling module, which precedes this one for that reason.
 
 **Q: What does the compiler cost at build time?**
-**Short:** Babel back in the pipeline is the price, and a project on Turbopack or SWC that had no Babel pass at all now pays for one on every component file.
+**Short:** The stable Babel plugin puts a Babel pass back into a Turbopack or SWC build, while experimental Rust versions in Next.js 16.3 and Vite remove that pass.
 
-A 1,900-component Next.js 16 application measured a cold production build going from 94 s to 128 s, a 36% increase, and a single-file incremental dev rebuild from 210 ms to 340 ms.
+A 1,900-component Next.js 16 application on the Babel plugin measured a cold production build going from 94 s to 128 s, a 36% increase, and a single-file incremental dev rebuild from 210 ms to 340 ms.
 
-Next.js 16 limits the pass to files that actually contain components or hooks, which bounds it. The trade is explicit: every engineer pays on every build, every user collects on every interaction, and on a table used by 400 people daily that is easy to justify.
+Next.js 16 limits the pass to files that actually contain components or hooks, which bounds it. `experimental.turbopackRustReactCompiler` runs the compiler inside Turbopack instead, and on v0 cut `next dev` to a ready page by 34% cold and 46% warm against the Babel path, a gain that assumes no other Babel transform remains. The trade is explicit: every engineer pays on every build, every user collects on every interaction, and on a table used by 400 people daily that is easy to justify.
 
 **Q: Can I use the compiler on React 17, or in React Native?**
 **Short:** Runtime polyfill via react-compiler-runtime supplies the cache hook that React 19 has built in, so the plugin targets 17 and 18 as well, and React Native is supported.

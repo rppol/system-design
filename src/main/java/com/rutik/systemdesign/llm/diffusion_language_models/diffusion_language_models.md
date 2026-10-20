@@ -295,6 +295,8 @@ context resolved around them.
 | **Block Diffusion (BD3-LM)** | 2025 | Hybrid: AR over fixed-size *blocks*, diffusion *within* each block | Generates block-by-block left-to-right (so KV-cache works *across* blocks), but tokens *within* a block are produced via parallel diffusion; addresses both the KV-cache mismatch (§10) and the fixed-length limitation of pure diffusion |
 | **Mercury / Mercury Coder** (Inception Labs) | 2025 | Absorbing-state masking, transformer backbone | First **commercially deployed** diffusion-LM; advertises >1,000 tok/s on H100; targets IDE autocomplete (Cursor-style) where low latency on short, structured completions matters more than open-ended creative generation |
 | **Gemini Diffusion** (Google DeepMind, experimental) | 2025 | Absorbing-state masking | Internal benchmarks ~1,400+ tok/s on coding tasks; matched Gemini 2.0 Flash on several benchmarks at a fraction of the wall-clock latency; not GA as of writing |
+| **LLaDA2.0-flash** (inclusionAI) | 2025 | Absorbing-state masking, MoE backbone, `block_length` 32 | 100B total / 6.1B active parameters, 32,768-token context, Apache 2.0 (arXiv 2512.15745); served natively by SGLang |
+| **DiffusionGemma 26B-A4B** (Google) | 2026 | Block diffusion over a 256-token canvas, up to 48 denoising steps | Open weights under Apache 2.0, 25.2B total / 3.8B active MoE (128 experts, 8 active plus 1 shared) on the Gemma 4 26B-A4B backbone; commits 15-20 tokens per forward pass and exceeds 1,100 tok/s at low batch size on H100 FP8; SGLang serves it with the `Gemma4Renoise` sampler, and vLLM v0.31.0 added its structured generation mode |
 
 ### 4.1 Discrete vs. Continuous Diffusion
 
@@ -871,7 +873,8 @@ positions get committed first (§6.3) — over-guided runs commit aggressively a
 | Bidirectional context | Yes, from step 1 | No — only left context, ever |
 | Infilling / editing | Native (mask any subset of positions) | Requires special FIM training |
 | Token streaming UX | Awkward — tokens resolve out of order | Natural — tokens stream left-to-right as generated |
-| Serving ecosystem (2026) | Immature — vLLM/TensorRT-LLM lack first-class support | Mature — PagedAttention, continuous batching, speculative decoding all assume AR |
+| Serving ecosystem (2026) | Early: SGLang serves LLaDA2.0, SDAR and DiffusionGemma natively (`--dllm-algorithm`); vLLM also serves DiffusionGemma; PagedAttention and speculative decoding do not transfer | Mature — PagedAttention, continuous batching, speculative decoding all assume AR |
+| Quality at matched backbone | DiffusionGemma 26B-A4B vs Gemma 4 26B-A4B (Google model card): GPQA Diamond 73.2% vs 82.3%, AIME 2026 69.1% vs 88.3%, LiveCodeBench v6 69.1% vs 77.1%, MMLU Pro 77.6% vs 82.6% | Better on 14 of the 15 rows of that card; HLE without tools (DiffusionGemma 11.0%, Gemma 4 8.7%) is the only exception |
 | Likelihood | ELBO (upper bound on NLL) | Exact, via chain rule |
 | Best-fit workloads | Short structured completions, code, parallel batch jobs | General chat, long-form, anything needing per-token streaming |
 
@@ -928,8 +931,9 @@ positions get committed first (§6.3) — over-guided runs commit aggressively a
   (without block-diffusion) make this expensive, and research on diffusion-LM chain-of-thought
   reasoning is still early (see Pitfall 10.6 and Q12).
 - Your **serving infrastructure is built around AR primitives** (vLLM's PagedAttention,
-  speculative decoding, continuous batching) and you can't justify a parallel/custom serving stack
-  — as of 2026 these engines do not have first-class diffusion-LM support (see
+  speculative decoding, continuous batching) and you can't justify a second serving path:
+  diffusion-LMs need a diffusion-aware scheduler, such as SGLang's `--dllm-algorithm` mode, and
+  lose the AR KV-cache and speculative-decoding gains (see
   [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) and Pitfall 10.7).
 - You need **exact likelihoods** for downstream use (e.g., as a reward model component, or for
   certain calibration techniques) — diffusion training only provides an ELBO, not exact NLL.
@@ -1039,9 +1043,12 @@ multi-step reasoning is an open research problem — do not assume parity with A
 Production AR serving gets enormous value from **PagedAttention** (KV-cache memory management),
 **continuous batching**, and **speculative decoding** — all of which are built around the AR
 KV-cache model. None of these transfer directly to pure diffusion (§5.5, §10.1). Teams adopting
-Mercury/LLaDA-class models in 2026 should expect to either (a) use the vendor's managed API
-(Mercury's hosted endpoint), or (b) build custom serving (block-diffusion-aware batching) rather
-than dropping a diffusion checkpoint into an unmodified vLLM deployment.
+Mercury/LLaDA-class models in 2026 should expect to (a) use the vendor's managed API
+(Mercury's hosted endpoint), (b) serve on SGLang, which supports LLaDA2.0 (100B MoE), SDAR and
+DiffusionGemma natively through `--dllm-algorithm` (`LowConfidence` or `JointThreshold` for LLaDA2.0
+and SDAR; DiffusionGemma requires `Gemma4Renoise`) with First-Done-First-Out scheduling on by default (`--no-dllm-fdfo` falls back to lockstep batches), or (c) build custom
+serving (block-diffusion-aware batching), rather than dropping a diffusion checkpoint into a
+deployment tuned for AR models.
 
 ### 10.8 Wall-Clock Comparisons That Don't Control for Per-Step Cost
 
@@ -1060,6 +1067,7 @@ not derived from the step-count ratio alone. Always benchmark, never extrapolate
 |---|---|
 | **LLaDA (open weights + code)** | Reference implementation of an 8B masked diffusion LM; basis for most open research replication |
 | **Mercury / Mercury Coder API (Inception Labs)** | Commercial hosted diffusion-LM, primarily for code completion integrations |
+| **SGLang diffusion-LM serving** | Native serving for LLaDA2.0, SDAR and DiffusionGemma; `--dllm-algorithm` picks the commit rule, FDFO scheduling lets converged requests leave the batch early |
 | **Gemini Diffusion (Google DeepMind, experimental)** | Closed experimental access; benchmarked via Google's API preview program |
 | **HuggingFace `diffusers`** | Primarily an image/audio diffusion library, but increasingly used as a reference for discrete-diffusion samplers ported to text |
 | **PyTorch / `transformers`** | Standard backbone for implementing the bidirectional transformer used by LLaDA/SEDD-style models — same architecture class as BERT, but with the masked-diffusion training loop (§6.2) instead of static 15% MLM |
@@ -1139,7 +1147,7 @@ Discrete diffusion (D3PM/SEDD/LLaDA) operates directly on token IDs with a categ
 **Q14: As of 2026, what specifically is "missing" from inference engines like vLLM that prevents diffusion-LMs from being served the same way as AR models?**
 **Short:** vLLM's PagedAttention, continuous batching, and speculative decoding all assume growing causal AR sequences, none of which hold for diffusion's bidirectional resolving process.
 
-Three core vLLM primitives assume AR generation and don't transfer: PagedAttention manages a KV-cache that grows by one token per step with causal attention — diffusion's bidirectional, content-changing sequence breaks the cache-validity assumption (§5.5). Continuous batching schedules requests based on "how many new tokens does each sequence need this iteration," which is trivial for AR (always 1) but ill-defined for diffusion (depends on confidence-based commits, which vary per sequence per step). Speculative decoding drafts future AR tokens with a small model and verifies with the large model in one pass — there's no analogous "draft" concept for a process that's already resolving all positions per step. Production diffusion-LM serving (Mercury's hosted API) uses custom infrastructure rather than an off-the-shelf vLLM deployment.
+Three core vLLM primitives assume AR generation and don't transfer: PagedAttention manages a KV-cache that grows by one token per step with causal attention — diffusion's bidirectional, content-changing sequence breaks the cache-validity assumption (§5.5). Continuous batching schedules requests based on "how many new tokens does each sequence need this iteration," which is trivial for AR (always 1) but ill-defined for diffusion (depends on confidence-based commits, which vary per sequence per step). Speculative decoding drafts future AR tokens with a small model and verifies with the large model in one pass — there's no analogous "draft" concept for a process that's already resolving all positions per step. SGLang closes the scheduling gap with a diffusion-specific mode: `--dllm-algorithm` sets the commit rule (LowConfidence or JointThreshold for LLaDA2.0 and SDAR, Gemma4Renoise for DiffusionGemma), and First-Done-First-Out scheduling, on by default, lets a converged request leave the batch without waiting for slower ones; Mercury's hosted API runs on Inception Labs' own stack.
 
 **Q15: If you wanted to benchmark a diffusion-LM's quality without relying on AR-style perplexity, what would you measure?**
 **Short:** Benchmark diffusion LMs with task-level output metrics like exact-match, pass@1, and BLEU, and only compare ELBOs against other diffusion models, never against AR perplexity.
@@ -1199,8 +1207,9 @@ Push back on "replace" — the evidence so far supports diffusion-LMs as a *stro
    stream that doesn't match the model's actual resolution order.
 8. **Tune classifier-free guidance scale empirically** in the 1.2-2.0 range for instruction
    following; treat values above ~2.5 as a red flag for repetitive/over-literal output.
-9. **Don't assume serving-stack parity with AR** — plan for either a vendor-hosted API (Mercury) or
-   a custom serving layer; don't expect drop-in vLLM/TensorRT-LLM support as of 2026.
+9. **Don't assume serving-stack parity with AR**: plan for a vendor-hosted API (Mercury), SGLang's
+   diffusion-LM mode (`--dllm-algorithm`), or a custom serving layer, and check each engine's
+   supported-model list per checkpoint.
 10. **Prototype on the workload where diffusion's strengths are clearest** — IDE autocomplete,
     infilling/editing tasks, and parallel batch generation — before evaluating it for general chat
     or long-form use cases where the evidence base is thinner.

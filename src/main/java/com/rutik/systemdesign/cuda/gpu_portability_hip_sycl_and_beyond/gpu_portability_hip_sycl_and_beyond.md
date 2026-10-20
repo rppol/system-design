@@ -129,6 +129,68 @@ The layer nearly everyone touches directly: **PyTorch's device abstraction**. `t
 
 The HPC world reaches the same conclusion through two different libraries, worth knowing because they dominate national-lab codebases the way PyTorch dominates ML ones. **Kokkos** is a C++ performance-portability library: you express a loop as `Kokkos::parallel_for` over an execution space and your arrays as `Kokkos::View`s with a policy-chosen memory layout, and one source compiles to CUDA, HIP, SYCL, OpenMP or serial CPU — crucially including the *layout* switch (row-major on CPU, column-major on GPU) that a hand-ported kernel has to make by hand. **OpenMP target offload** is the pragma-based route: `#pragma omp target teams distribute parallel for` annotates an existing loop nest, and a supporting compiler (nvc++, `clang`, `icpx`, AMD's `amdclang`) generates GPU code from it. It is the lowest-effort option for an existing CPU code and generally the lowest ceiling, because the compiler is inferring a parallel decomposition you never stated. Both are the same bargain as PyTorch — someone else already absorbed the per-vendor work — applied to hand-written numerical kernels instead of tensor ops.
 
+### 4.7 CUDA without translation: ZLUDA, SCALE, and chipStar
+
+Everything above changes the source: `hipify` rewrites it to HIP, `dpct` to SYCL. A third
+family keeps the CUDA source, or even the compiled binary, unchanged and supplies the CUDA
+side on other hardware instead. They differ in where they cut in:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    src([".cu source"]) --> hip(["hipify:<br/>rewrite to HIP"])
+    src --> scale(["SCALE:<br/>nvcc-compatible compiler"])
+    src --> chip(["chipStar:<br/>compile to SPIR-V"])
+    bin(["Built CUDA app<br/>PTX in fatbinary"]) --> zluda(["ZLUDA:<br/>replacement libcuda"])
+    hip --> amd(["AMD GPU"])
+    scale --> amd
+    zluda --> amd
+    chip --> intel(["Intel / OpenCL /<br/>Level Zero GPUs"])
+
+    class src,bin io
+    class hip mathOp
+    class scale,chip req
+    class zluda frozen
+    class amd,intel train
+```
+
+`hipify` is the only path that leaves you owning different source; the other three keep
+CUDA as the source of truth and move the porting work into someone else's compiler or
+runtime.
+
+| | ZLUDA | SCALE (Spectral Compute) | chipStar |
+|---|---|---|---|
+| Input | An already-built CUDA application | CUDA source in the `nvcc` dialect | CUDA or HIP source |
+| Mechanism | Replacement CUDA libraries the app loads instead of NVIDIA's; recompiles the app's PTX for the AMD GPU; reimplemented math libraries (`zluda_blas`, `zluda_dnn`, `zluda_fft` in the repo) | Drop-in `nvcc` replacement; implements the CUDA runtime, driver, and math APIs on AMD; CUDA-X library calls forwarded to ROCm libraries | Compiles device code to SPIR-V; runs on OpenCL or Level Zero (Level Zero preferred when both exist) |
+| Targets | AMD Radeon RX 5000 series (RDNA1) and newer, desktop and integrated; server-class GPUs are not supported | AMD gfx900 to gfx950, Vega through CDNA 4 (MI300X is gfx942, MI350 is gfx950), and RDNA1 to RDNA4; also NVIDIA sm_20 to sm_120 as a plain `nvcc` replacement | Intel GPUs first; ARM Mali and PowerVR with known gaps (no FP64) |
+| Status (October 2026) | Version 6 (June 29, 2026) is the latest stable release, with version 7 in preview builds; the author's June 29, 2026 update states it is "no longer commercially funded" | Docs say "SCALE is a work in progress" | chipStar 1.3, "still heavily in development mode with plenty of known issues" |
+
+What each one cannot fix:
+
+- **None of them change the hardware constants.** Code that hardcodes `32` as the warp
+  size still assumes 32 lanes on a 64-wide CDNA wavefront (§5). A compatibility layer
+  makes the code run; whether `__shfl_sync` masks, shared-memory tiling and occupancy
+  math tuned for an NVIDIA SM are right for the target is still your problem.
+- **ZLUDA needs PTX.** It recompiles PTX, so a binary that ships SASS only, with no PTX
+  entry in its fatbinary, gives it nothing to translate (see
+  [cuda_toolkit_and_compilation](../cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md)
+  for which `-gencode` forms keep PTX). Inline SASS-level tricks and NVIDIA-only
+  instructions (`tcgen05`, TMA) have no target equivalent.
+- **Library coverage is the real limit.** SCALE forwards cuBLAS-style calls to rocBLAS and
+  friends, ZLUDA reimplements them; a library or flag that neither covers is a hard stop.
+  Closed NVIDIA libraries such as cuDNN's fused attention engines and TensorRT are where
+  most real applications reach that stop.
+- **Single maintainers and work-in-progress labels** make all three a test or migration
+  tool, not a production dependency, unless you can fund or fork them. ZLUDA's history
+  shows the risk: in 2024 its code was rolled back "to the pre-AMD state" and development
+  restarted on new funding announced October 4, 2024; by June 2026 it was unfunded
+  again.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -777,6 +839,9 @@ Other common pitfalls:
 | Intel oneAPI / DPC++ compiler | SYCL implementation + toolchain, Intel-first-class | `icpx -fsycl` compiles SYCL source (the older standalone `dpcpp` driver is deprecated); oneMKL/oneDNN are the math/DNN library mirrors |
 | oneAPI for NVIDIA GPUs / oneAPI for AMD GPUs | SYCL-for-CUDA, SYCL-for-HIP backends for NVIDIA and AMD GPUs, built by Codeplay (an Intel subsidiary) | Let a single SYCL source target NVIDIA/AMD hardware, not only Intel |
 | **AdaptiveCpp** (formerly hipSYCL, then Open SYCL) | Independent community SYCL implementation | Targets NVIDIA, AMD, Intel and CPUs from one compiler with several compilation flows, including a generic flow that finalizes code generation at runtime. Both old names still appear in package managers and papers |
+| ZLUDA | Runs an already-built CUDA application on AMD Radeon GPUs | Replacement CUDA libraries plus PTX recompilation; Radeon RX 5000 (RDNA1) and newer, no server-class GPUs; version 6, maintained without commercial funding since 2026. See §4.7 |
+| SCALE (Spectral Compute) | `nvcc`-compatible compiler that builds unmodified CUDA source for AMD GPUs | Implements CUDA runtime/driver/math APIs on AMD and forwards CUDA-X library calls to ROCm; gfx900 to gfx950 (Vega through CDNA 4) and RDNA1 to RDNA4. See §4.7 |
+| chipStar (formerly CHIP-SPV) | Compiles CUDA and HIP source to SPIR-V | OpenCL or Level Zero runtime; Intel GPUs first, ARM Mali and PowerVR partially; 1.3, still in heavy development. See §4.7 |
 | Kokkos | C++ performance-portability library (`parallel_for`, `View`) | One source to CUDA/HIP/SYCL/OpenMP/serial; switches memory layout per backend, which a hand port has to do manually. Heavily used in DOE/HPC codebases |
 | OpenMP target offload | Pragma-based GPU offload of existing loop nests | `#pragma omp target teams distribute parallel for`; supported by nvc++, clang, `icpx`, `amdclang`. Lowest porting effort, generally the lowest performance ceiling |
 | Xcode + Metal / Metal Performance Shaders (MPS) | Apple's compute toolchain + tuned kernel library | MPSGraph gives a higher-level graph API above raw MSL kernels |
@@ -791,6 +856,10 @@ Other common pitfalls:
 **Q: Does `hipify`-translating a CUDA kernel to HIP automatically make it fast on AMD hardware?**
 **Short:** No — hipify gets you correctness and mechanical API translation, not tuning, since it knows nothing about the target hardware's actual constants like wavefront width.
 No — `hipify` gets you correctness and compilation, not tuning, because it performs a largely mechanical API translation without knowing anything about the target's actual hardware constants. The classic failure is a warp-shuffle reduction whose loop bound was tuned for CUDA's 32-wide warp silently under-covering AMD's 64-wide wavefront, producing a wrong partial result rather than a compile error.
+
+**Q: Tools like ZLUDA and SCALE run CUDA code on AMD GPUs without `hipify`. Does that mean the port is done?**
+**Short:** No. They make CUDA code run on AMD, but warp-size assumptions, NVIDIA-tuned tiling, and uncovered libraries remain, and all are work-in-progress projects, not production dependencies.
+No. ZLUDA replaces the CUDA libraries an already-built application loads and recompiles its PTX for the AMD GPU; SCALE is an `nvcc`-compatible compiler that builds unmodified CUDA source for AMD gfx900 to gfx950 and RDNA targets and forwards CUDA-X library calls to ROCm. Both solve "it does not run", which `hipify` also solves. Neither changes the hardware: code that hardcodes 32-lane warps is still wrong on a 64-wide CDNA wavefront, tiling and occupancy tuned for an NVIDIA SM are still tuned for the wrong machine, and NVIDIA-only instructions (TMA, `tcgen05`) and SASS-only binaries have nothing to map to. Library coverage is the usual hard stop. SCALE's docs call it "a work in progress" and ZLUDA has been unfunded since its June 2026 update, so treat them as a fast way to test and measure an AMD target, then port and tune the hot kernels natively.
 
 **Q: What is the single biggest architectural constant that differs between a CUDA warp and an AMD wavefront, and why does it matter?**
 **Short:** CUDA's warp is 32 threads while AMD's CDNA wavefront is 64, so any width-dependent code like shuffle reductions must be re-derived, not copy-pasted, across the port.
@@ -835,6 +904,10 @@ It is writing application code against a high-level framework (PyTorch, CuPy) wh
 **Q: Is OpenCL still relevant for a new ML infrastructure project started today?**
 **Short:** Rarely as a first choice for data-center ML, but yes for embedded, mobile, or legacy targets lacking SYCL or HIP toolchain support, since OpenCL remains the broadest cross-vendor standard.
 Rarely as a first choice for data-center ML, but yes for embedded, mobile, or legacy targets where SYCL and HIP toolchains are unavailable or unsupported. OpenCL remains the broadest genuinely cross-vendor, cross-device-class standard (GPUs, CPUs, some DSPs/FPGAs), but its C99-based kernel language and verbose host-side platform/device/context enumeration make HIP or SYCL the more ergonomic choice wherever they are actually available.
+
+**Q: Why can't ZLUDA run a CUDA binary that was built with only `-gencode arch=compute_90,code=sm_90`?**
+**Short:** ZLUDA works by recompiling the PTX embedded in the application; a SASS-only fatbinary contains NVIDIA machine code and no PTX, so there is nothing for it to translate.
+ZLUDA stands in for the CUDA driver libraries and compiles each module's PTX, the virtual ISA, for the AMD GPU at load time. SASS is NVIDIA's native machine code for one architecture family and has no portable meaning, so a fatbinary built with explicit `code=sm_90` and no `code=compute_90` entry gives ZLUDA nothing it can use, and the load fails the same way it would on a newer NVIDIA GPU with no PTX fallback. The `-arch=sm_90` shorthand does embed PTX, which is why many applications happen to work. If you control the build and want ZLUDA (or forward compatibility on NVIDIA) to work, ship a `code=compute_XX` PTX entry; see [cuda_toolkit_and_compilation](../cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md).
 
 **Q: Can HIP source run on NVIDIA hardware, and why would you want that?**
 **Short:** Yes — HIP's NVIDIA backend is a thin wrapper over the CUDA runtime, letting one HIP codebase build for both AMD and NVIDIA from a single source tree.

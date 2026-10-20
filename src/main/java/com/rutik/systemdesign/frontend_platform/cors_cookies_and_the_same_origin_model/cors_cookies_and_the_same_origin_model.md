@@ -362,14 +362,15 @@ Set-Cookie: session=...; HttpOnly; Secure; SameSite=None; Path=/
 
 `SameSite=None` without `Secure` is rejected outright. And note the distinction the name
 gets wrong: `SameSite` is about **site** (registrable domain plus scheme), not origin, so
-`app.example` and `api.example` are the same site and different origins. A request between
+`app.example.com` and `api.example.com` are the same site and different origins. A request between
 them is same-site for cookies and cross-origin for CORS — which is precisely why a team can
 have CORS problems and no cookie problems, or the reverse.
 
 ### 6.5 Partitioned cookies (CHIPS)
 
-As third-party cookies are restricted, a cookie set in a third-party context can opt into
-partitioned storage — one jar per top-level site:
+Safari blocks third-party cookies and Firefox partitions them by default; Chrome keeps them,
+and Google's 2025-10-17 update retired most Privacy Sandbox APIs while keeping CHIPS. A cookie set
+in a third-party context can opt into partitioned storage, one jar per top-level site:
 
 ```
 Set-Cookie: sess=...; Secure; SameSite=None; Partitioned; Path=/
@@ -616,20 +617,22 @@ allowlist decision. Reflecting the `Origin` header without checking it re-create
 while looking intentional, so match against a list.
 
 **Q: CORS looks correct but the API says the user is not authenticated. What do you check?**
-**Short:** Whether the Cookie header is on the request at all, because SameSite drops it before CORS is ever consulted.
+**Short:** Whether the Cookie header is on the request at all, because SameSite or a host-only cookie scope drops it before CORS is ever consulted.
 
 `SameSite=Lax`, which is the default when the attribute is absent, prevents a cookie from
-being attached to a cross-site `fetch`. The request then arrives anonymous no matter how
-permissive the CORS headers are. Look at the outgoing request's Cookie header in DevTools
-first: if it is missing there, the fix is `SameSite=None; Secure` (or moving to same-origin),
-not CORS configuration.
+being attached to a cross-site `fetch`. Between same-site subdomains the usual cause is scope:
+a cookie set without `Domain` is host-only, so `app.example.com` never sends it to
+`api.example.com`. The request then arrives anonymous no matter how permissive the CORS headers
+are. Look at the outgoing request's Cookie header in DevTools first: if it is missing there, the
+fix is the cookie's `Domain` or `SameSite` attribute (or moving to same-origin), not CORS
+configuration.
 
 **Q: What is the difference between "same-site" and "same-origin"?**
 **Short:** Origin is scheme plus host plus port, while site is the registrable domain plus scheme, so two origins can be same-site.
 
-`https://app.example` and `https://api.example` are **different origins** and the **same
-site**. That means a request between them is subject to CORS but is not cross-site for
-cookie purposes, so `SameSite=Lax` cookies still flow. Conflating the two is why teams
+`https://app.example.com` and `https://api.example.com` are **different origins** and
+the **same site**, because both share the registrable domain `example.com`. That means a
+request between them is subject to CORS but is not cross-site for cookie purposes, so `SameSite=Lax` cookies still flow. Conflating the two is why teams
 sometimes fix a cookie problem that did not exist while the real failure was an
 `Allow-Origin` mismatch.
 
@@ -742,18 +745,20 @@ activation — a call on load is rejected outright — and the embedding page mu
 as a hosted checkout or a support widget; if you control both ends, `CHIPS`
 (`Partitioned` cookies) is the simpler answer because it needs no prompt at all.
 
-**Q: What is Private Network Access, and how does it break a local development setup?**
-**Short:** It makes a page on a public origin preflight any request to a private or loopback address, so a hosted app calling a device on localhost fails until that device answers the preflight.
+**Q: What is Local Network Access, and how does it break a local development setup?**
+**Short:** Chrome makes a page on a public origin get the user's permission before any request to a private or loopback address, so a hosted app calling a localhost agent fails until the user allows it.
 
 The threat it closes is a public website quietly scanning `192.168.x.x` or hitting an
-unauthenticated router admin page using the visitor's browser as the pivot. The browser now
-sends a preflight carrying `Access-Control-Request-Private-Network: true` before any
-public-to-private request, and the local server must answer with
-`Access-Control-Allow-Private-Network: true` plus the ordinary CORS headers, over HTTPS or
-from a secure context. This bites two common setups: a hosted dashboard talking to a
-hardware agent on `localhost`, and a staging site pointing at a developer's LAN box. The fix
-belongs on the local server, not the page — and if you own the local agent, shipping it a
-certificate and answering the preflight is a smaller job than arguing with the browser.
+unauthenticated router admin page using the visitor's browser as the pivot. Since Chrome 142
+(stable 2025-10-28) a public-to-local `fetch()`, subresource load or subframe navigation shows a
+Local Network Access permission prompt, and the request fails if the user declines. Only a
+secure context can ask. Chrome exempts the request from mixed-content blocking when it knows
+the target is local: a private IP literal, a `.local` host, or
+`fetch(url, { targetAddressSpace: "local" })`. It replaced Private Network Access, whose
+`Access-Control-Request-Private-Network` preflight Chrome put on hold. This bites a hosted
+dashboard talking to a hardware agent on `localhost` and a staging site pointing at a
+developer's LAN box: serve the page over HTTPS, annotate the local calls, and design the
+first-run flow around the prompt.
 
 ---
 
@@ -792,7 +797,7 @@ network panel showed `200` responses. CORS had been configured; `Access-Control-
 was present. Three engineers spent a day widening CORS configuration that was already
 correct.
 
-**Step 1 — the request, not the response.** The diagnosis took two minutes once someone
+**Step 1: the request, not the response.** The diagnosis took two minutes once someone
 looked at the right half of the exchange: the outgoing request had **no Cookie header at
 all**. CORS governs the response. If the credential never left the browser, no response
 header can help.
@@ -803,8 +808,8 @@ const me = await fetch("https://api.acme.test/v1/me").then(r => r.json());
 ```
 
 ```
-# BROKEN #2: the cookie itself cannot go cross-site
-Set-Cookie: session=...; HttpOnly; Secure; Path=/          # SameSite defaults to Lax
+# BROKEN #2: no Domain attribute, so the cookie is host-only to app.acme.test
+Set-Cookie: session=...; HttpOnly; Secure; Path=/
 ```
 
 ```
@@ -815,7 +820,8 @@ Access-Control-Allow-Origin: *
 Three independent defects, each individually sufficient to produce "logged out", and each
 invisible in the response headers everyone was staring at.
 
-**Step 2 — the four-part fix.**
+**Step 2: the three-part fix.** `app.acme.test` and `api.acme.test` share the site
+`acme.test`, so `SameSite=Lax` was never the blocker; the cookie's scope was.
 
 ```ts
 // FIX: opt in on the client
@@ -825,8 +831,8 @@ const me = await fetch("https://api.acme.test/v1/me", {
 ```
 
 ```
-# FIX: cookie may travel cross-site
-Set-Cookie: session=...; HttpOnly; Secure; SameSite=None; Path=/
+# FIX: scope the cookie to the registrable domain; the call is same-site, so Lax still flows
+Set-Cookie: session=...; HttpOnly; Secure; SameSite=Lax; Domain=acme.test; Path=/
 
 # FIX: explicit origin, credentials permitted, cache keyed correctly
 Access-Control-Allow-Origin: https://app.acme.test
@@ -834,7 +840,7 @@ Access-Control-Allow-Credentials: true
 Vary: Origin
 ```
 
-**Step 3 — the preflight bill.** Sessions worked, and the dashboard got slower. Every API
+**Step 3: the preflight bill.** Sessions worked, and the dashboard got slower. Every API
 call was now preflighted (`application/json` plus `Authorization`), and the gateway sent no
 `Access-Control-Max-Age`, so each of the 14 calls on the dashboard paid two round trips.
 
@@ -842,30 +848,31 @@ call was now preflighted (`application/json` plus `Authorization`), and the gate
 Access-Control-Max-Age: 600
 ```
 
-**Step 4 — the CSRF debt.** `SameSite=None` removed a CSRF defence the team had been
-relying on without knowing it. They added a double-submit token on state-changing
-endpoints, which is work the migration created and nobody had budgeted.
+**Step 4: the scope debt.** `Domain=acme.test` sends the session cookie to every
+`*.acme.test` host, including a status page run by a third-party vendor on
+`status.acme.test`. They moved that page to a separate registrable domain, which is work the
+migration created and nobody had budgeted.
 
 | Metric | Before cutover | After cutover | After fixes |
 |--------|---------------|---------------|-------------|
 | Authenticated users on load | 100% | 0% | 100% |
 | Preflight requests per dashboard load | 0 | 14 | 1 |
 | Dashboard API time, p75 | 340 ms | 710 ms | 380 ms |
-| CSRF defence | `SameSite=Lax` | none | double-submit token |
+| Hosts receiving the session cookie | `app.acme.test` | `app.acme.test` | every `*.acme.test` host |
 | CORS configuration to maintain | none | 6 headers | 6 headers |
 
 Six months later the team moved the API back under `app.acme.test/api` behind a reverse
-proxy, reverted the cookie to `SameSite=Lax`, deleted the CORS configuration and the CSRF
-token machinery, and recovered the original p75.
+proxy, dropped the `Domain` attribute so the cookie is host-only again, deleted the CORS
+configuration, and recovered the original p75.
 
 **What the team took away.**
 
-1. Look at the **request** before the response. A missing Cookie header is a `SameSite`
-   problem and no CORS header will fix it.
+1. Look at the **request** before the response. A missing Cookie header is a cookie scope
+   or `SameSite` problem and no CORS header will fix it.
 2. `Allow-Origin: *` and `credentials: "include"` are mutually exclusive by specification,
    and the failure names neither.
-3. Splitting an app and its API across origins is a four-part change — client flag, cookie
-   attribute, CORS headers, CSRF replacement — and teams routinely budget for one.
+3. Splitting an app and its API across origins is a four-part change: client flag, cookie
+   scope, CORS headers, preflight caching. Teams routinely budget for one.
 4. Preflight is a latency decision, not just a configuration one. Fourteen uncached
    preflights doubled the dashboard's API time.
 5. The cheapest CORS configuration remains the one you do not have.

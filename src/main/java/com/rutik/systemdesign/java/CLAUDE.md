@@ -36,8 +36,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `annotation_processing/` | JSR 269 rounds, AbstractProcessor, Filer/Messager, javax.lang.model element model, JavaPoet codegen, Lombok AST mutation, MapStruct, AutoService, compile-time vs runtime tradeoff |
 | `java_time_datetime/` | Instant vs LocalDateTime, ZoneId/ZoneOffset, Duration vs Period, ChronoUnit, TemporalAdjuster, DateTimeFormatter, Clock (testable time), DST gaps/overlaps, legacy Date interop |
 | `bytecode_and_classfile/` | .class structure + constant pool, opcode families, all 5 invoke*, invokedynamic (LambdaMetafactory/StringConcatFactory), javap, verification, ASM/Byte Buddy, java agents + Instrumentation |
-| `security_and_cryptography/` | JCA/JCE providers, MessageDigest/Mac, AES-GCM vs CBC, RSA-OAEP/ECDH, KeyStore, SecureRandom, PBKDF2/bcrypt/Argon2, Signature, TLS/SSLEngine handshake + mTLS, JAAS |
-| `json_processing_jackson/` | ObjectMapper thread-safety + reuse, streaming/tree/databind, records/@JsonCreator, TypeReference generics, @JsonTypeInfo + polymorphic-typing CVEs, PolymorphicTypeValidator, JavaTimeModule, FAIL_ON_UNKNOWN_PROPERTIES |
+| `security_and_cryptography/` | JCA/JCE providers, MessageDigest/Mac, AES-GCM vs CBC, RSA-OAEP/ECDH, KeyStore, SecureRandom, PBKDF2/bcrypt/Argon2, Signature, TLS/SSLEngine handshake + mTLS, JAAS login (`LoginContext`, `LoginModule`, `Subject`, Kerberos) |
+| `json_processing_jackson/` | Jackson 3 (`tools.jackson.*`), immutable `JsonMapper` built once and reused, streaming/tree/databind, records/@JsonCreator, TypeReference generics, @JsonTypeInfo + polymorphic-typing CVEs, PolymorphicTypeValidator, built-in `java.time` support, FAIL_ON_UNKNOWN_PROPERTIES |
 | `logging/` | SLF4J facade + bindings, Logback/Log4j2, parameterized logging, MDC across threads/pools/virtual-threads, async appenders (Disruptor), structured JSON, Log4Shell (CVE-2021-44228) |
 | `java_platform_module_system/` | JPMS: module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink |
 | `reference_types_and_cleaners/` | Strong/Soft/Weak/Phantom references, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks |
@@ -48,6 +48,10 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 **Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry):
 - `strings_and_text/regex_engine_and_redos.md` — backtracking NFA engine, catastrophic backtracking / ReDoS, possessive/atomic groups, mitigations.
 - `performance_and_tuning/jmx_and_management.md` — MBeanServer/MXBeans, custom MBeans, `ThreadMXBean` deadlock detection, remote-JMX security, JMX vs Prometheus.
+- `performance_and_tuning/jfr_and_production_diagnostics.md` — Java Flight Recorder: always-on recording, `jcmd`, JFR event streaming, production diagnostics.
+- `performance_and_tuning/jvm_in_containers.md` — the JVM in containers: cgroup CPU and memory detection, lifecycle and signals, image construction.
+- `generics_and_type_system/type_inference_and_bounds.md` — how `javac` infers type arguments you did not write, and what a bound list does to that inference.
+- `security_and_cryptography/post_quantum_and_modern_jca.md` — post-quantum cryptography (ML-KEM, ML-DSA) and the modern JCA.
 
 ---
 
@@ -147,7 +151,7 @@ Learning-path index: `case_studies/case_studies.md` (mandatory; update with ever
 
 When covering a feature, always include the version it was introduced and LTS status:
 - Java 8 (LTS), Java 11 (LTS), Java 17 (LTS), Java 21 (LTS), Java 25 (LTS — the current baseline)
-- Non-LTS: 9, 10, 12–16, 18–20, 22–24, 26
+- Non-LTS: 9, 10, 12–16, 18–20, 22–24, 26, 27 (GA 2026-09-15)
 - Format: `[Java 25]` or `[JEP 444, Java 21 GA]`
 
 ## Content Rules (Java-specific)

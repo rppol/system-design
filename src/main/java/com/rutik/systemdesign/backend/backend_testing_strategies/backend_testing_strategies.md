@@ -212,11 +212,11 @@ class OrderServiceTest {
 @ActiveProfiles("test")
 class OrderRepositoryIntegrationTest {
 
+    // org.testcontainers.postgresql.PostgreSQLContainer (testcontainers-postgresql 2.x).
+    // @ServiceConnection sets spring.datasource.* from the container.
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15-alpine")
-        .withDatabaseName("testdb")
-        .withUsername("test")
-        .withPassword("test");
+    @ServiceConnection
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17-alpine");
 
     // org.testcontainers.kafka.KafkaContainer: KRaft mode, broker on 9092, and
     // getBootstrapServers() returns a bare host:port with no PLAINTEXT:// prefix.
@@ -226,9 +226,6 @@ class OrderRepositoryIntegrationTest {
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", postgres::getJdbcUrl);
-        registry.add("spring.datasource.username", postgres::getUsername);
-        registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
     }
 
@@ -521,7 +518,7 @@ WireMock stubs HTTP responses in-process so tests never make a real network call
 - Name tests: `methodName_givenCondition_expectedOutcome` for readability in failure reports
 - Use `@ParameterizedTest` with `@MethodSource` or `@CsvSource` for boundary value testing
 - Keep Testcontainers containers `static` and `@Container` so they are reused across all tests in the class
-- Use `DynamicPropertySource` to inject container properties rather than hardcoded test config
+- Use `@ServiceConnection` on supported containers (PostgreSQL, Kafka, Redis) and `@DynamicPropertySource` only for properties it does not cover
 - Run integration tests in a separate Maven phase/profile: `mvn test` for unit, `mvn verify` for integration
 - Use `Awaitility` for all async assertions — never `Thread.sleep(1000)` in tests
 - Capture test coverage in CI but treat 80% mutation score as the real quality gate, not line coverage

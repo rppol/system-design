@@ -361,7 +361,7 @@ Collecting requests for 500ms before solving allows batched optimal assignment, 
 | Real-time driver state | Redis Cluster | DynamoDB | Sub-millisecond position lookup per request |
 | Forecasting store | S3 + TimescaleDB | InfluxDB, BigQuery | TimescaleDB for time-series queries; S3 for training data |
 | Feature store | Redis (online) + S3 Parquet (offline) | Feast, Tecton | Feature freshness SLO 30s for supply features |
-| ML platform | MLflow + SageMaker | Vertex AI | MLflow for experiment tracking; SageMaker for distributed training |
+| ML platform | MLflow + SageMaker | Agent Platform (formerly Vertex AI) | MLflow for experiment tracking; SageMaker for distributed training |
 
 ---
 

@@ -72,11 +72,11 @@ The top-level routing is deterministic code; within each branch, an LLM orchestr
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
     Orch["Orchestrator\n(LLM or Code)\nTask list: research→draft→review"] --> W1
-    W1["Research Worker\nGPT-4o-mini\nweb_search, fetch_url\nOutput: research_findings JSON"] --> Orch2
+    W1["Research Worker\nGPT-6 Luna\nweb_search, fetch_url\nOutput: research_findings JSON"] --> Orch2
     Orch2["Orchestrator\nmark 1 done, start 2"] --> W2
-    W2["Draft Writer Worker\nClaude Sonnet 5\nInput: research_findings\nOutput: draft_document Markdown"] --> Orch3
+    W2["Draft Writer Worker\nClaude Sonnet 5.5\nInput: research_findings\nOutput: draft_document Markdown"] --> Orch3
     Orch3["Orchestrator\nmark 2 done, start 3"] --> W3
-    W3["Review Worker\nGPT-4o\nInput: draft_document\nOutput: review_result JSON"] --> Approved{"approved?"}
+    W3["Review Worker\nGPT-6.1 Sol\nInput: draft_document\nOutput: review_result JSON"] --> Approved{"approved?"}
     Approved -- YES --> Result([Return draft])
     Approved -- "NO (with comments)" --> W2
 
@@ -226,9 +226,7 @@ async def run_worker(task: Task, context: dict[str, Any]) -> Any:
         f"Context from prior tasks:\n{json.dumps(context, indent=2)}"
     )
     response = await client.messages.create(
-        # Cheap worker tier. NOTE: claude-3-5-haiku-20241022 was RETIRED on
-        # 2026-02-19 -- requests to it now fail. claude-haiku-4-5 is the successor.
-        model="claude-haiku-4-5",
+        model="claude-haiku-5-5",  # cheap worker tier
         max_tokens=2048,
         system=system,
         messages=[{"role": "user", "content": user_msg}],
@@ -251,7 +249,7 @@ async def orchestrate(goal: str, max_retries: int = 2) -> str:
         "Return JSON: list of {task_id, description, depends_on (list of task_ids)}."
     )
     plan_response = await client.messages.create(
-        model="claude-opus-5",   # expensive orchestrator model
+        model="claude-opus-5-5",  # expensive orchestrator model
         max_tokens=1024,
         messages=[{"role": "user", "content": plan_prompt}],
     )
@@ -299,7 +297,7 @@ async def orchestrate(goal: str, max_retries: int = 2) -> str:
         "Synthesize a final comprehensive answer."
     )
     final_response = await client.messages.create(
-        model="claude-opus-5",
+        model="claude-opus-5-5",
         max_tokens=4096,
         messages=[{"role": "user", "content": integration_prompt}],
     )
@@ -320,10 +318,10 @@ from anthropic import AsyncAnthropic
 client = AsyncAnthropic()
 
 PIPELINE: list[dict] = [
-    {"stage": "extract_entities",  "model": "claude-haiku-4-5",  "max_tokens": 512},
-    {"stage": "classify_intent",   "model": "claude-haiku-4-5",  "max_tokens": 256},
-    {"stage": "generate_response", "model": "claude-sonnet-5",   "max_tokens": 2048},
-    {"stage": "review_response",   "model": "claude-haiku-4-5",  "max_tokens": 512},
+    {"stage": "extract_entities",  "model": "claude-haiku-5-5",  "max_tokens": 512},
+    {"stage": "classify_intent",   "model": "claude-haiku-5-5",  "max_tokens": 256},
+    {"stage": "generate_response", "model": "claude-sonnet-5-5", "max_tokens": 2048},
+    {"stage": "review_response",   "model": "claude-haiku-5-5",  "max_tokens": 512},
 ]
 
 SYSTEM_PROMPTS = {
@@ -352,7 +350,7 @@ async def run_deterministic_pipeline(user_input: str) -> str:
         if stage_config["stage"] == "review_response" and not stage_result.get("approved"):
             # Re-run generate_response with feedback
             accumulated["review_feedback"] = stage_result["feedback"]
-            regen = await run_stage("generate_response", "claude-sonnet-5", 2048, accumulated)
+            regen = await run_stage("generate_response", "claude-sonnet-5-5", 2048, accumulated)
             accumulated["generate_response"] = regen
     return accumulated["generate_response"]["response_text"]
 ```
@@ -417,7 +415,7 @@ only pays where task value justifies that spend.
 
 The numbers below are a self-consistent worked example built from current list prices, so you can
 see how the arithmetic behaves. **Only the per-token rates are sourced** — Anthropic's published
-list prices, Claude Opus 5 at $5/$25 per MTok and Claude Haiku 4.5 at $1/$5. Every *input* to the
+list prices on 2026-10-19, Claude Opus 5.5 at $4/$20 per MTok and Claude Haiku 5.5 at $0.10/$0.50. Every *input* to the
 model is a chosen value picked to make the arithmetic legible: the 62-minute sequential time, the
 14-minute wall clock, the fan-out of 8, and the 187K/24K and 12K/3K token counts are not
 measurements of anything. They are **not** a published benchmark and must not be cited as one.
@@ -426,23 +424,23 @@ measurements of anything. They are **not** a published benchmark and must not be
 Task: "Survey and summarize papers on speculative decoding published in a
        given window, with a structured comparison table."
 
-Single agent (Claude Opus 5, $5 / $25 per MTok):
+Single agent (Claude Opus 5.5, $4 / $20 per MTok):
   Wall-clock time:   62 minutes (sequential tool calls)
   Context used:      187K input + 24K output (near the useful working limit)
-  Cost:              187 x $5/1000  = $0.935
-                      24 x $25/1000 = $0.600   ->  $1.54
+  Cost:              187 x $4/1000  = $0.748
+                      24 x $20/1000 = $0.480   ->  $1.23
 
-Orchestrator-Worker (1 Opus 5 orchestrator + 8 Haiku 4.5 workers, $1 / $5 per MTok):
+Orchestrator-Worker (1 Opus 5.5 orchestrator + 8 Haiku 5.5 workers, $0.10 / $0.50 per MTok):
   Wall-clock time:   14 minutes
   Peak tokens/agent: 12K input (focused context per worker)
-  Workers:           8 x (12K x $1/1M + 3K x $5/1M) = 8 x $0.027 = $0.216
-  Plan call:         2K in / 1K out on Opus 5              = $0.035
-  Integrate call:    8K in / 4K out on Opus 5              = $0.140
-                                                    total ->  $0.39
+  Workers:           8 x (12K x $0.10/1M + 3K x $0.50/1M) = 8 x $0.0027 = $0.022
+  Plan call:         2K in / 1K out on Opus 5.5                = $0.028
+  Integrate call:    8K in / 4K out on Opus 5.5                = $0.112
+                                                        total ->  $0.16
 
   - 4.4x faster wall-clock
-  - 75% lower cost in THIS configuration, because the 8 workers together read
-    96K tokens rather than 187K AND read them on a 5x cheaper tier
+  - 87% lower cost in THIS configuration, because the 8 workers together read
+    96K tokens rather than 187K AND read them on a 40x cheaper tier
   - fan out wider than the work you replaced and the sign flips: Anthropic's
     real systems land at ~15x chat token usage, not a saving
 ```
@@ -478,13 +476,13 @@ worker count and then miss their latency target by the orchestration term they f
                                              (2 Opus calls: plan, then integrate)
 
   speedup         : 62 / 14              =  4.4x       (NOT 8x -- the tax eats 3.6x)
-  cost reduction  : (1.54 - 0.39) / 1.54 =  75%
+  cost reduction  : (1.23 - 0.16) / 1.23 =  87%
 ```
 
 The counter-intuitive line is the cost one: the orchestrator-worker run makes *more* LLM calls
 (1 + 8 = 9 vs 1) and is still cheaper here. Two things produce that, and only one of them is the
-architecture. First, tier: Claude Haiku 4.5 is 5x cheaper per token than Claude Opus 5 ($1/$5
-against $5/$25). Second, and larger, total input shrank — 8 workers x 12K = 96K tokens read
+architecture. First, and larger, tier: Claude Haiku 5.5 is 40x cheaper per token than Claude Opus 5.5
+($0.10/$0.50 against $4/$20), so the 8 workers cost less than either Opus call. Second, total input shrank: 8 workers x 12K = 96K tokens read
 against the single agent's 187K, because each worker reads only its own slice. Flip the tiers
 (Opus workers under a Haiku orchestrator) and the same architecture becomes several times *more*
 expensive than the single agent.
@@ -659,8 +657,8 @@ async def run_worker_rate_limited(task: Task, context: dict) -> Any:
 | Tool | Role in Orchestrator-Worker | Notes |
 |------|----------------------------|-------|
 | LangGraph | Graph-based orchestration with typed state | Best production choice; supports checkpoints, human-in-the-loop |
-| Anthropic Claude Opus | Orchestrator LLM | Highest reasoning capability; use sparingly. Opus 5: $5 / $25 per MTok |
-| Anthropic Claude Haiku | Worker LLM | Haiku 4.5: $1 / $5 per MTok — exactly 5x cheaper than Opus 5 on both input and output; sufficient for narrow tasks |
+| Anthropic Claude Opus | Orchestrator LLM | Highest reasoning capability; use sparingly. Opus 5.5: $4 / $20 per MTok |
+| Anthropic Claude Haiku | Worker LLM | Haiku 5.5: $0.10 / $0.50 per MTok for prompts up to 100K tokens, 40x cheaper than Opus 5.5 on both input and output; sufficient for narrow tasks |
 | LangSmith / Langfuse | Tracing inter-agent calls | Essential for debugging; log every dispatch and result |
 | Redis | Task ledger persistence | Allows orchestrator restart without losing progress |
 | asyncio (Python) | Parallel worker dispatch | Core Python; use `asyncio.gather` for fan-out |
@@ -717,7 +715,7 @@ A: Signs of overly coarse decomposition: (1) a worker's task description is so b
 
 **Q: How do you choose which model to use for orchestrator vs workers?**
 **Short:** Give the orchestrator the highest-capability model for planning and route workers to the cheapest model that reliably completes their task.
-A: The orchestrator requires high reasoning capability because it must understand the overall goal, generate a coherent task plan, evaluate whether worker outputs are sufficient, and handle unexpected situations. Use the highest-capability model you have (Claude Opus 5, or a frontier model from another vendor). Workers perform narrow, well-defined tasks with explicit instructions and output schemas; they do not need broad reasoning. Use the cheapest model that can reliably complete the specific worker task — often claude-haiku-4-5 or gpt-4o-mini. Size the saving from real list prices rather than a remembered ratio: Haiku 4.5 at $1/$5 against Opus 5 at $5/$25 is 5x, not the 15-60x gaps that held in earlier model generations.
+A: The orchestrator requires high reasoning capability because it must understand the overall goal, generate a coherent task plan, evaluate whether worker outputs are sufficient, and handle unexpected situations. Use the highest-capability model you have (Claude Opus 5.5, or a frontier model from another vendor). Workers perform narrow, well-defined tasks with explicit instructions and output schemas; they do not need broad reasoning. Use the cheapest model that can reliably complete the specific worker task, often claude-haiku-5-5 or gpt-6-luna. Size the saving from current list prices rather than a remembered ratio: at 2026-10-19 prices Haiku 5.5 ($0.10/$0.50) against Opus 5.5 ($4/$20) is 40x on both input and output.
 
 **Q: What is the "cascading hallucination" problem specific to orchestrator-worker systems?**
 **Short:** Cascading hallucination is one worker's error accepted and amplified by the next, so fact-check at key pipeline junctions.
@@ -771,12 +769,12 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Orch["Orchestrator (Claude Opus 5)<br/>- Reads case brief<br/>- Generates patent analysis plan<br/>- Maintains task ledger<br/>- Integrates final analysis"] --> B1 & B2 & B3
-    B1["Worker 1: patent #1<br/>Patent Analyst (Claude Haiku 4.5)<br/>Output: claim_analysis JSON"] --> Conflict
-    B2["Worker 2: patent #2<br/>Patent Analyst (Claude Haiku 4.5)<br/>Output: claim_analysis JSON, same format"] --> Conflict
+    Orch["Orchestrator (Claude Opus 5.5)<br/>- Reads case brief<br/>- Generates patent analysis plan<br/>- Maintains task ledger<br/>- Integrates final analysis"] --> B1 & B2 & B3
+    B1["Worker 1: patent #1<br/>Patent Analyst (Claude Haiku 5.5)<br/>Output: claim_analysis JSON"] --> Conflict
+    B2["Worker 2: patent #2<br/>Patent Analyst (Claude Haiku 5.5)<br/>Output: claim_analysis JSON, same format"] --> Conflict
     B3["Worker N: patent #N<br/>one worker per patent, 50 in flight<br/>Output: claim_analysis JSON, same format"] --> Conflict
-    Conflict["Conflict Detection Worker (Claude Sonnet 5)<br/>Input: all claim_analysis JSONs<br/>Output: overlap_matrix JSON"] --> Summary
-    Summary["Legal Summary Writer (Opus 5)<br/>Input: overlap_matrix<br/>Output: attorney-ready report"]
+    Conflict["Conflict Detection Worker (Claude Sonnet 5.5)<br/>Input: all claim_analysis JSONs<br/>Output: overlap_matrix JSON"] --> Summary
+    Summary["Legal Summary Writer (Opus 5.5)<br/>Input: overlap_matrix<br/>Output: attorney-ready report"]
 
     class Orch req
     class B1,B2,B3 base
@@ -785,37 +783,40 @@ flowchart TD
 
 ### Key Design Decisions
 
-- Orchestrator uses Claude Opus 5 (best reasoning for legal context) but runs only twice (planning + integration). Those two calls consume roughly 15K input and 22K output tokens combined — output-dominated, because the second one writes the attorney-ready report, and Opus 5 output at $25/MTok is what makes three calls carry 37.5% of the bill.
-- Patent analyst workers use Claude Haiku 4.5; each receives exactly one patent (2,000-8,000 tokens) plus a standard claim analysis schema. Up to 50 workers run concurrently under a semaphore; a 300-patent case runs six such waves.
+- Orchestrator uses Claude Opus 5.5 (best reasoning for legal context) but runs only twice (planning + integration). Those two calls consume roughly 15K input and 22K output tokens combined. They are output-dominated, because the second one writes the attorney-ready report, and Opus 5.5 output at $20/MTok is what makes three calls carry 84% of the bill.
+- Patent analyst workers use Claude Haiku 5.5; each receives exactly one patent (2,000-8,000 tokens) plus a standard claim analysis schema. Up to 50 workers run concurrently under a semaphore; a 300-patent case runs six such waves.
 - Workers return a fixed JSON schema: `{patent_id, filing_date, claims: [{claim_id, text, keywords}], novelty_flags}`. Any deviation triggers immediate retry.
-- Conflict detection worker is Claude Sonnet 5 (middle tier) — needs more reasoning than Haiku for cross-patent comparison, but less than Opus.
+- Conflict detection worker is Claude Sonnet 5.5 (middle tier); it needs more reasoning than Haiku for cross-patent comparison, but less than Opus.
 - Task ledger persisted in Redis with 48-hour TTL — cases can be paused and resumed.
 
 ### Results (illustrative, for a 50-patent case)
 
 - Wall-clock time per case: 18 minutes (vs. 3-4 hours single-agent)
 - Patent coverage: 100% (all patents analyzed; single-agent capped at ~15)
-- Cost per case: $2.40 average (50 Haiku workers × ~$0.03 each + 2 Opus calls + 1 Sonnet call)
+- Cost per case: $0.93 average (50 Haiku workers × ~$0.003 each + 2 Opus calls + 1 Sonnet call)
 
-**What the formula is telling you.** "Almost two-thirds of this bill is 50 cheap workers, and
-the remaining third is three expensive calls — so the lever on cost is which tier does the
+**What the formula is telling you.** "Five-sixths of this bill is three expensive calls, and
+the 50 workers are the remaining sixth, so the lever on cost is which tier does the
 integration, not how many patents you analyse."
 
 ```
   cost_per_case = num_workers x cost_per_worker  +  cost_orchestration
 
-  workers       : 50 x $0.03          = $1.50    (62.5% of the bill)
-  orchestration : $2.40 - $1.50       = $0.90    (37.5%, across just 3 calls)
-                  2 Opus (plan + integrate) + 1 Sonnet (conflict detection)
+  workers       : 50 x $0.003         = $0.15    (16% of the bill)
+  orchestration : 2 Opus (plan + integrate)
+                  15K x $4/1M + 22K x $20/1M     = $0.50
+                  1 Sonnet (conflict detection)  = $0.28
+                                                 = $0.78    (84%, across just 3 calls)
+  total                                          = $0.93
 
-  per-call cost : workers       $1.50 / 50 = $0.030
-                  orchestration $0.90 /  3 = $0.300   <- 10x per call
+  per-call cost : workers       $0.15 / 50 = $0.003
+                  orchestration $0.78 /  3 = $0.260   <- ~87x per call
 ```
 
-Fifty-three calls, and the three at the top cost ten times each what the fifty at the bottom do.
+Fifty-three calls, and the three at the top cost about 87 times each what the fifty at the bottom do.
 That ratio is the whole design argument: because the expensive tier is called a fixed 3 times
-regardless of case size, doubling the patent count to 100 does not double the bill — it adds
-`50 x $0.03 = $1.50`, taking the case from $2.40 to $3.90 — 100% more work for 62.5% more money.
+regardless of case size, doubling the patent count to 100 does not double the bill. It adds
+`50 x $0.003 = $0.15`, taking the case from $0.93 to $1.08: 100% more work for 16% more money.
 The orchestration cost amortises. That is why the pattern gets *more* attractive as fan-out
 widens, and why the orchestrator's token budget is worth defending: it is the one term that does
 not shrink when you move work to a cheaper model, and it is dominated by *output* — the report

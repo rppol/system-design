@@ -250,6 +250,49 @@ Used in LMDB, and at the filesystem layer in ZFS and Btrfs:
 - Enables lock-free MVCC: readers always see a consistent snapshot
 - Higher write amplification than B+tree in-place (must copy full path)
 
+### Disaggregated Compute and Storage (Aurora, Neon, AlloyDB, Hyperscale)
+
+A classic engine owns its disk: the buffer pool flushes dirty pages, a checkpoint bounds recovery, and a replica is a second full copy kept current by WAL replay. Disaggregated OLTP engines keep the query engine (parser, planner, buffer pool, lock manager) on a compute node and move durability into a shared, multi-tenant storage service. The compute node sends only log records over the network. Storage nodes apply those records to rebuild pages and serve page reads on a buffer-pool miss. In the phrase from the Aurora SIGMOD 2017 paper, "the log is the database".
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W(Writer compute<br/>buffer pool) -->|"redo / WAL<br/>records only"| L(Log tier<br/>quorum commit)
+    L -->|"replay into<br/>page versions"| PS(Page servers<br/>or storage nodes)
+    W -->|"page read<br/>on cache miss"| PS
+    R(Reader compute<br/>same storage) -->|"page read"| PS
+    L -->|"log stream to<br/>invalidate cache"| R
+    PS --> OS(Object or blob<br/>storage, backups)
+
+    class W,R io
+    class L mathOp
+    class PS train
+    class OS base
+```
+
+The four production designs differ in where the log quorum lives and what holds the pages:
+
+| System | Log durability | Page storage | Limits and numbers |
+|--------|----------------|--------------|--------------------|
+| Amazon Aurora (MySQL, PostgreSQL) | 6 copies across 3 AZs in 10 GB protection groups; write quorum 4 of 6, read quorum 3 of 6 | Same storage nodes apply redo and coalesce pages in the background | Cluster volume up to 256 TiB on supported engine versions; up to 15 readers share the volume |
+| Neon (PostgreSQL) | Safekeepers replicate WAL with Paxos; commit when a quorum acknowledges | Pageserver materializes page versions from base pages plus WAL, backed by object storage | Compute suspends after 5 minutes idle by default and resumes in a few hundred ms |
+| Google AlloyDB (PostgreSQL) | WAL written to a regional, multi-zone storage layer | Storage layer replays WAL into blocks (Google's 2022 post calls this the log processing service) | Read pools up to 20 nodes; HA primary is an active and a standby node in two zones |
+| Azure SQL Hyperscale (SQL Server) | Separate log service; log pushed to Azure Storage, no log truncation needed | Page servers, each covering up to 128 GB, with SSD caches (RBPEX) and a redundant replica | Database up to 128 TB; up to 4 HA replicas and 30 named replicas |
+
+Hyperscale descends from Microsoft's Socrates paper (SIGMOD 2019), which split the log, the pages, and the compute into separate services. Aurora's split is coarser: its storage nodes are both the log quorum and the page store.
+
+**Why it is fast to write.** A MySQL primary with a mirrored replica writes redo, binlog, the data page, the double-write copy, and metadata, and each of those crosses the network to the mirror. Aurora sends redo records only, and the paper reports 7.7x fewer I/Os per transaction than mirrored MySQL on the same benchmark. Checkpoints and the double-write buffer disappear from the compute node, because a torn page cannot happen when the compute node never writes pages.
+
+**Why it is fast to scale and recover.** A reader shares the volume, so adding one copies no data; it only applies the log stream to pages already in its own cache. Crash recovery no longer replays from the last checkpoint on the compute node, because storage applies redo continuously; a restarted writer opens with an empty cache and is accepting writes in seconds.
+
+**Branching and scale to zero.** Because the page store keeps every page version keyed by LSN, a point in history is just `(timeline, LSN)`. Neon creates a branch as a pointer to that point, copy-on-write, so a branch of a 500 GB database takes seconds, not a 500 GB copy, and the branch costs storage only for pages it later changes. The same property lets compute be stateless: it can be stopped when idle and started on the next connection, paying a cold cache instead of a restore.
+
+**What it costs.** Every buffer-pool miss is now a network round trip to a page server (hundreds of microseconds to a few milliseconds) instead of a local NVMe read (around 100 microseconds), so a working set that spills out of cache hurts more than on local disk. Commit latency includes a cross-AZ quorum write. And the storage tier is a managed service you cannot tune: no filesystem, no `fsync` knob, and per-I/O billing (Aurora Standard) that can exceed instance cost, which is why Aurora offers I/O-Optimized for clusters where I/O is 25% or more of spend.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -495,6 +538,8 @@ Without the buffer, a crash mid-write can corrupt a page beyond recovery; with i
 - **RocksDB**: LSM-tree, used by TiKV, MyRocks (MySQL engine), Kafka Streams and Flink state stores. CockroachDB started on RocksDB and replaced it with Pebble, a Go reimplementation of the same design, so it could evolve the engine in-tree; its unit of distribution is a range of up to 512 MiB. Cassandra is *not* a RocksDB user despite also being an LSM store — it ships its own SSTable engine (BigTable-derived, with the trie-indexed BTI format added in 5.0).
 - **LMDB**: Copy-on-write B+tree. Used by OpenLDAP, some embedded applications. Lock-free reads, single-writer constraint.
 - **ClickHouse**: MergeTree family — columnar LSM variant. Each part is immutable; background merge compacts parts.
+- **Amazon Aurora**: InnoDB and PostgreSQL engines with the page writer removed. The writer ships redo to six storage copies across three AZs and commits on 4 of 6; up to 15 readers share the same volume.
+- **Neon**: unmodified PostgreSQL compute over safekeepers (Paxos WAL quorum) and a pageserver backed by object storage; branching is a pointer to `(timeline, LSN)`, and Databricks acquired the company in 2025.
 
 ---
 
@@ -507,6 +552,7 @@ Without the buffer, a crash mid-write can corrupt a page beyond recovery; with i
 | LSM (RocksDB) | Fast | Medium | High | Low | Medium | Write-heavy |
 | Columnar (ClickHouse) | Slow (batch) | Very Fast | Very High | Low | Medium | Analytics |
 | CoW B+tree (LMDB) | Slow (single writer) | Fast | Low | Medium | Instant | Read-heavy embedded |
+| Disaggregated (Aurora, Neon) | Fast (log only), cross-AZ quorum per commit | Fast on cache hit, network on miss | Engine-dependent | Shared by all replicas | Seconds (storage applies log) | Managed OLTP with elastic replicas |
 
 ---
 
@@ -517,6 +563,8 @@ Without the buffer, a crash mid-write can corrupt a page beyond recovery; with i
 **LSM-tree**: Use for write-heavy workloads (time-series, log ingestion, NoSQL stores), good compression needed, sequential writes dominate. Do not use for read-heavy random-access OLTP.
 
 **Columnar**: Use for analytics, aggregation queries on large datasets, OLAP workloads. Do not use for OLTP point lookups or frequent updates.
+
+**Disaggregated storage (Aurora, Neon, AlloyDB, Hyperscale)**: Use for managed OLTP that needs fast replica creation, storage that grows without resharding, branching, or scale to zero. Do not use when the working set is far larger than compute memory and latency must stay at local-NVMe levels, or when per-I/O billing makes a write-heavy workload cost more than self-managed disks.
 
 **In-memory**: Use for cache layers, session stores, leaderboards. Do not use as primary store without WAL/persistence for durability requirements.
 
@@ -558,6 +606,10 @@ Team disabled InnoDB double-write buffer (`innodb_doublewrite=OFF`) for 10% writ
 | ClickHouse | MergeTree | Columnar | Analytics |
 | Parquet | Columnar | Columnar | Data lake analytics |
 | WiredTiger | B+tree + LSM | Both | MongoDB default engine |
+| Amazon Aurora | Log-structured shared storage, 6-way quorum | Row | Managed MySQL/PostgreSQL OLTP |
+| Neon | Safekeepers + pageserver over object storage | Row | Serverless PostgreSQL, branching |
+| AlloyDB | Disaggregated regional storage + columnar engine | Row + in-memory columnar | Managed PostgreSQL OLTP/HTAP |
+| Azure SQL Hyperscale | Log service + page servers (128 GB each) | Row | SQL Server up to 128 TB |
 
 ---
 
@@ -567,6 +619,11 @@ Team disabled InnoDB double-write buffer (`innodb_doublewrite=OFF`) for 10% writ
 **Short:** InnoDB stores rows in primary-key order, so every secondary index lookup costs an extra clustered-index traversal.
 
 InnoDB's primary key IS the B+tree — rows are physically stored in primary key order within leaf nodes. This makes primary key lookups require only one B+tree traversal. Secondary indexes store the primary key value as the row locator, not the physical row address. A secondary index lookup requires two B+tree traversals: first through the secondary index to get the PK, then through the clustered index (primary) to get the full row. This "double lookup" costs an extra I/O per secondary index scan if the data is not in the buffer pool.
+
+**Q: Why can the same query run slower on Aurora or Neon than on PostgreSQL with local NVMe?**
+**Short:** On disaggregated storage every buffer-pool miss is a network page read from a storage service, so a working set that spills out of cache costs far more than on local disk.
+
+The compute node of a disaggregated engine has no data files. When a page is not in its buffer pool (or a local cache tier), it asks a page server or storage node, which may itself have to apply pending log records before it can answer. That round trip costs hundreds of microseconds to a few milliseconds, against roughly 100 microseconds for a local NVMe read, so a scan or an index walk that misses cache can be several times slower. Commits also pay a cross-AZ quorum write (4 of 6 copies on Aurora, a safekeeper quorum on Neon). The fix is to size compute memory to the working set and watch the cache hit ratio more closely than on a self-managed server; for heavy analytical scans, use a columnar copy (AlloyDB's columnar engine, or a zero-ETL replica) instead of reading row pages over the network. Neon adds one more case: a compute that scaled to zero restarts with an empty cache, so the first queries after resume are the slowest.
 
 **Q: Walk me through a write operation in RocksDB from application to durable storage.**
 **Short:** A RocksDB write hits the WAL and MemTable before acknowledgment, then flushes and compacts into SSTables later.
@@ -617,6 +674,16 @@ Each SSTable has a per-file Bloom filter (typically 10 bits/key, ~1% false posit
 **Short:** LSM-trees typically recover faster than B+trees because they only replay the small unflushed MemTable's WAL.
 
 B+tree recovery (PostgreSQL/InnoDB): Replay WAL from last checkpoint. Checkpoint interval = 5min default. WAL at 100MB/sec for 5min = 30GB WAL to replay in worst case. Recovery takes seconds to minutes depending on WAL size and replay speed. LSM-tree recovery (RocksDB): Replay WAL for only the MemTable contents (since last flush). MemTable flush happens every ~64MB. WAL to replay is much smaller. Recovery typically takes < 1 second for small MemTables. However, opening an LSM database requires reading all SSTable metadata files, which can take several seconds for large databases.
+
+**Q: What does "the log is the database" mean in Aurora, and what quorum makes a commit durable?**
+**Short:** Aurora's writer ships only redo records to six storage copies across three AZs and commits on 4 of 6 acks; storage nodes build pages from the log, so pages never cross the network.
+
+In a mirrored MySQL setup the primary writes redo, binlog, data pages, the double-write copy, and metadata, and each write also goes to the mirror. Aurora removes page writes from the compute node: the writer sends redo records only, to six copies of each 10 GB protection group spread two per AZ across three AZs. A write is durable when 4 of 6 acknowledge, and a read quorum is 3 of 6, so the volume survives losing a whole AZ plus one more node for reads, and a whole AZ for writes. Storage nodes apply redo to their pages in the background and serve page reads on demand. The SIGMOD 2017 paper reports 7.7x fewer I/Os per transaction than mirrored MySQL. Consequences: no checkpoint or double-write buffer on the writer, crash recovery in seconds because storage already applied the log, readers that share the volume instead of copying it (up to 15), and a cluster volume up to 256 TiB on supported versions. It does not scale writes: there is still one writer per cluster.
+
+**Q: How do Neon branches and scale to zero work on top of PostgreSQL?**
+**Short:** Neon's pageserver keeps every page version keyed by LSN, so a branch is a copy-on-write pointer to (timeline, LSN), and stateless compute can stop after 5 idle minutes.
+
+Neon runs standard PostgreSQL as compute but redirects its storage. WAL goes to safekeepers, which replicate it with Paxos and acknowledge a commit when a quorum has it. The pageserver consumes that WAL and materializes page versions from base images plus WAL, keeping its long-term history in object storage. Because every past page version is addressable by LSN, creating a branch copies no data: the new timeline points at a parent timeline and LSN, and only pages it later modifies take new storage, so a branch of a 500 GB database takes seconds and costs almost nothing until it diverges. The same design makes compute disposable. Neon suspends a compute after 5 minutes of inactivity by default and restarts it in a few hundred milliseconds on the next connection; computes above 16 CU stay always on, and paid plans can turn suspension off. The costs are a cold buffer pool after every resume and page reads over the network, which is why latency-sensitive production branches usually disable scale to zero.
 
 **Q: What is the doublewrite buffer in InnoDB and is it still needed on modern SSDs?**
 **Short:** The doublewrite buffer prevents torn InnoDB pages on crash and can be safely disabled on power-loss-protected SSDs.

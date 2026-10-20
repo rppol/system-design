@@ -303,6 +303,55 @@ try (ConnectionHandle handle = new ConnectionHandle(socket)) {
 }   // close() runs here, unconditionally
 ```
 
+### `Reference.reachabilityFence` [Java 9]: An Object Can Die Mid-Method
+
+Reachability is decided by the JIT's liveness analysis, not by source scope. JLS §12.6.1 lets an optimizing compiler treat an object as unreachable once no later code needs it, and the `Reference.reachabilityFence` javadoc says this can happen "while a method of the object is still running". C2 loads `this.handle` into a register, then marks `this` dead in the GC map of every later safepoint. If the next safepoint triggers a GC, the object is phantom-reachable, its `Cleaner` runs on another thread and frees the native handle, and the method then calls into native code with a freed handle. The result is a use-after-free crash (SIGSEGV in `hs_err_pid*.log`) or silent corruption. It shows up only under load, after C2 has compiled the method, and never in a debugger, which keeps every local alive.
+
+```mermaid
+sequenceDiagram
+    participant App as "app thread: new Codec().encode(buf)"
+    participant GC as "GC at safepoint"
+    participant Cl as "Cleaner daemon thread"
+    App->>App: "long h = this.handle (last use of this)"
+    Note over App: "C2 liveness: this is dead from here"
+    App->>GC: "safepoint poll inside encode loop"
+    GC->>Cl: "Codec phantom-reachable, enqueue PhantomReference"
+    Cl->>Cl: "State.run(): free(h)"
+    App->>App: "nativeEncode(h, buf) reads freed memory"
+    Note over App,Cl: "fix: Reference.reachabilityFence(this) in finally keeps this alive past nativeEncode"
+```
+
+```java
+public final class Codec implements AutoCloseable {
+    private static final Cleaner CLEANER = Cleaner.create();
+    private final State state;                 // static nested class holding only the long handle
+    private final Cleaner.Cleanable cleanable;
+
+    public Codec() {
+        this.state = new State(Native.alloc());
+        this.cleanable = CLEANER.register(this, state);
+    }
+
+    public int encode(ByteBuffer buf) {
+        try {
+            return Native.encode(state.handle, buf);  // last use of `this` is the field load
+        } finally {
+            Reference.reachabilityFence(this);         // `this` stays strongly reachable until here
+        }
+    }
+
+    @Override public void close() { cleanable.clean(); }
+
+    private record State(long handle) implements Runnable {
+        @Override public void run() { Native.free(handle); }
+    }
+}
+```
+
+The fence goes in a `finally` block after the last native call, so every exit path, including an exception, keeps the object alive until the native work ends. The fence costs close to nothing: the method body is empty (`@ForceInline` through JDK 26, a C2 intrinsic marked `@IntrinsicCandidate` from JDK 27), and its only effect is that the reference stays in the GC maps up to the call. The javadoc lists `synchronized (this)` around every access as another option, since a locked object cannot be reclaimed, but that costs a monitor on every call. The fence is needed only when reclamation has a visible effect, which means a `Cleaner`, a finalizer, or code that reads a `ReferenceQueue`. A plain Java object with no cleanup action can die early with no effect.
+
+`try (Codec c = new Codec()) { c.encode(buf); }` does not need the fence at the call site, because `close()` runs after `encode` and keeps `c` reachable until then. The fence protects the case where a caller writes `new Codec().encode(buf)` and relies on the `Cleaner` backstop. That is the exact case the `Cleaner` exists for. The JDK uses the same pattern: NIO and FFM code that reads a direct buffer's address keeps the buffer alive with `reachabilityFence` until the native access ends. Code on an FFM `Arena` does not need its own fence, because the JDK's scoped memory access path fences the segment's scope on every access and a closed arena makes the access throw `IllegalStateException` instead of reading freed memory.
+
 ### `ThreadLocalMap.Entry`: Weak Key, Strong Value
 
 ```java
@@ -489,6 +538,14 @@ It is hard-coded that way so a reclaimable object can never be resurrected throu
 **Short:** A Cleaner never fires when its cleanup Runnable holds a strong reference back to the object it is meant to clean.
 The cleanup `Runnable` captures a reference back to the object it should clean, usually via a non-static inner class or a lambda that reads an instance field. That reference is itself a strong path, so the registered object can never become phantom-reachable, the `Cleaner` never fires, and the resource leaks with no exception and no log line to notice it by. The fix is mechanical: make the cleanup state a `static` nested class holding only the raw resource handle, never the enclosing object.
 
+**Q: How can a `Cleaner` free a native resource while a method of the object that owns it is still running?**
+**Short:** The JIT can mark `this` dead after its last field read, so a GC mid-method runs the Cleaner and frees the handle still in use.
+Reachability comes from the JIT's liveness analysis, not from source scope. JLS §12.6.1 allows an optimizing compiler to treat an object as unreachable once no later code reads it. In `long h = this.handle; nativeEncode(h, buf);` C2 marks `this` dead after the field load. A GC at the next safepoint finds the object phantom-reachable, the `Cleaner` thread frees `h`, and `nativeEncode` then reads freed memory. The bug appears only after C2 compiles the method and only under GC pressure, so tests and debuggers rarely show it. The fix is `Reference.reachabilityFence(this)` in a `finally` block after the last native call.
+
+**Q: When is `Reference.reachabilityFence` needed, and what does it cost?**
+**Short:** Only when reclamation has a visible effect (Cleaner, finalizer, ReferenceQueue code); its body is empty, so the cost is close to zero.
+It is needed only when the object's reclamation has a visible side effect: a `Cleaner` action, a finalizer, or code that reads a `ReferenceQueue`. A plain object with no cleanup can die early with no effect. Put the call in a `finally` block after the last use of the resource the object guards, so every exit path keeps the object strongly reachable. The method body is empty (`@ForceInline` through JDK 26, an `@IntrinsicCandidate` C2 intrinsic from JDK 27), so the cost is close to zero: the reference only stays in the GC maps up to the call. The javadoc names `synchronized (this)` on every access as an alternative, because a locked object cannot be reclaimed, but that adds a monitor to every call. The call site needs no fence when a `try`-with-resources `close()` runs later and keeps the object alive.
+
 **Q: Why can a `WeakHashMap` entry survive indefinitely even though its key has no external strong references?**
 **Short:** A WeakHashMap entry survives when its value strongly references its own key, defeating the weak wrapping entirely.
 Because the map's values are held by ordinary strong references, and a value that references its own key back defeats the weak wrapping entirely. `WeakHashMap` only weakens the key slot; if `value.owner == key` (a common accidental cycle), the map provides a strong path to the value, and the value provides a strong path back to the key, so neither can ever become just-weakly-reachable. This is the single most common `WeakHashMap` production bug — it looks like a self-cleaning cache but never actually cleans anything.
@@ -577,6 +634,7 @@ Shallow heap is the memory an object itself occupies — its header plus its own
 10. **Use `jcmd GC.class_histogram` as the first, cheap diagnostic** before committing to a full heap dump.
 11. **Exclude weak/soft references when tracing "Path to GC Root" in MAT** — otherwise the trace follows a cache, not the real leak.
 12. **Set `-XX:SoftRefLRUPolicyMSPerMB` deliberately, or avoid `SoftReference` caching**, rather than accepting its heap-size-dependent default blindly.
+13. **End every method that passes a `Cleaner`-guarded handle to native code with `Reference.reachabilityFence(this)` in a `finally` block**, so the object cannot be reclaimed mid-call.
 
 ---
 

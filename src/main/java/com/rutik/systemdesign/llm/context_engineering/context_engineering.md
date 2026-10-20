@@ -9,8 +9,8 @@ and RAG (retrieving documents) and addresses the meta-level problem: given a fix
 how do you allocate it optimally across system instructions, tools, retrieved content, memory,
 conversation history, and scratchpad space?
 
-The practical need arises because modern models have context windows from 200k (Claude Haiku 4.5)
-to 1M (Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line) tokens, but larger context
+The practical need arises because modern models have context windows of 1M tokens (every current
+Claude model: Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5; and Gemini 4 Argon), but larger context
 does not uniformly improve performance — there are
 reliability, cost, and latency penalties. Context engineering produces the smallest, most
 signal-dense context that answers the question.
@@ -175,6 +175,18 @@ when RAG becomes not just cheaper but more accurate, and the matrix flips.
   summary, discard raw text.
 - *Importance scoring* — score each message for relevance to the current query; keep top-k by
   score.
+- *Provider-managed compaction*: the API writes the summary on the server, so you ship no
+  summarizer. Anthropic offers two kinds, both in beta:
+
+| | Compaction on demand | Compaction at a token threshold | Your own summarizer |
+|---|---|---|---|
+| Who decides when | You, with a separate request | The API, when input tokens reach your trigger | You |
+| How you turn it on | Beta `compact-2026-09-04`, top-level `"compaction": {"type": "summarize"}` | `context_management` edit `compact_20260112` | Your code |
+| What you send back | The signed `compaction` block first in `messages`, in place of the summarized turns | The response as usual; the API drops what precedes the block | Your summary message |
+| Keep recent turns verbatim | Yes | Yes, by pausing after compaction and re-inserting them | Yes |
+| Runs in the background | Yes | No, inside the request that crosses the threshold | Yes |
+| Re-inserted turns keep their thinking | Yes, under the documented conditions | No on Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5: drop it | No: that thinking fails the validity check |
+| Custom prompt | `instructions`, up to 16,384 characters, replaces the default | No | Full control |
 
 **Offloading: the strategy that shrinks the budget instead of dividing it.** Every strategy above
 allocates a fixed window. Offloading changes the size of the thing being allocated by keeping
@@ -252,7 +264,7 @@ produces truncated answers under exactly the conditions where the answer matters
 
 | Symbol | What it actually is |
 |--------|---------------------|
-| `total` | The model's full context window. 32,000 here; 200k on Claude Haiku 4.5, 1M on Claude Opus 5 |
+| `total` | The model's full context window. 32,000 here; 1M on every current Claude model, 200k on legacy Claude Haiku 4.5 |
 | `sum(zones)` | Everything you send. Input tokens, billed at the input rate |
 | `output_reserve` | Tokens held back, unspent, for the completion. Pitfall 6 is forgetting this |
 | `slack` | Unallocated headroom. Your absorber for a long user turn or a mis-estimated chunk |
@@ -499,6 +511,10 @@ def fixed_build(user_id: str, system_base: str, user_msg: str) -> list[dict]:
     ]
 ```
 
+The same rule applies to tools, which sit before the system prompt in the cached prefix: change
+the tool set with appended `tool_addition` and `tool_removal` messages, not by editing `tools`.
+See [Tool Selection at Scale](../agents_and_tool_use/tool_selection_at_scale.md) (§4.7).
+
 ### Entity-centric history compaction
 
 ```python
@@ -583,6 +599,30 @@ knob you turn up: on the 17,000-token portion, going from 5x (3,400 tokens) to 1
 saves 1,700 tokens, or 1,700 x $2.50/1M = $0.004 per turn, which is nowhere near worth an agent
 that forgets the customer's name.
 
+### Provider-managed compaction: the block swap
+
+On-demand compaction is a separate request that returns one signed `compaction` block and no
+reply (`stop_reason: "compaction"`). The block then replaces the turns it summarizes:
+
+```python
+summary = client.beta.messages.create(
+    model="claude-opus-5-5", max_tokens=4096, system=SYSTEM, tools=TOOLS,
+    betas=["compact-2026-09-04"], messages=history,
+    compaction={"type": "summarize",
+                "instructions": "Keep every agreed field name and the open request. Do not call tools."},
+)
+if summary.stop_reason == "compaction":          # anything else: keep history, retry later
+    history = [{"role": "assistant", "content": summary.content}] + turns_taken_since_request
+```
+
+Send the same `system` and `tools` as the conversation: the summarizer reads them, and kept
+thinking stays valid only if they match. Three rules hold on every later request: the block goes
+first, the summarized turns are gone (a leftover turn in front returns 400
+`compaction_block_misplaced`), and exactly one block is sent. Two mistakes raise no error: leaving
+summarized turns after the block resends them, and dropping the block loses the summary. Images,
+documents, and fetched URLs inside the summarized range do not survive, and a per-message effort
+level set there is not carried over.
+
 ---
 
 ## 7. Real-World Examples
@@ -600,8 +640,8 @@ and summary length are not published.
 
 **Anthropic thinking** places Claude's reasoning in thinking blocks that precede the final answer
 inside the same assistant turn — and that budget is NOT separate from the response budget. On
-Opus 5, Sonnet 5 and Fable 5 you set `output_config.effort` (low / medium / high / xhigh / max) and
-the model decides how much to think; on models with manual extended thinking, such as Haiku 4.5,
+Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 you set `output_config.effort` (low / medium / high / xhigh / max) and
+the model decides how much to think; on legacy models with manual extended thinking, such as Haiku 4.5,
 you set `thinking.budget_tokens`, which must be less than `max_tokens` because thinking tokens
 count toward it. Either way `max_tokens` stays the hard ceiling on total output, so budget
 reasoning tokens out of your output reserve, not on top of it.
@@ -679,6 +719,7 @@ for output, especially for tasks that generate long structured responses.
 | instructor / guidance | Structured output to reduce verbose output tokens |
 | vLLM / SGLang | KV-prefix caching for stable context prefixes |
 | Anthropic prompt caching | Provider-level prefix caching (cache_control: ephemeral) |
+| Anthropic compaction (beta) | Server-written summaries: on demand (`compact-2026-09-04`) or at a token threshold (`compact_20260112`) |
 | ContextCite | Attribution — which context tokens influenced the output |
 | RAGAS | Evaluate faithfulness — how well the model used retrieved context |
 
@@ -780,6 +821,21 @@ exceeds the history budget (typically after 10-15 turns) or when a retrieved doc
 than its allocated zone. The compaction strategy matters: naive truncation loses continuity;
 hierarchical summarization preserves key facts; entity-centric compression (extract names,
 decisions, constraints) is the most faithful for long-term consistency.
+
+**Q: When do you keep your own summarizer instead of provider-managed compaction?**
+**Short:** Keep your own when you need a summary schema the API cannot express, a model mix, or turns whose thinking must stay valid on 5.5 models.
+Provider compaction (Anthropic's on-demand `compact-2026-09-04` or threshold `compact_20260112`)
+removes the summarizer code and returns a signed block you send back unchanged. Prefer it by
+default, and use on-demand when you must control timing, run it in the background, or keep recent
+turns with their thinking. Keep a client summarizer in three cases. First, the summary must follow
+your own schema (entity tables, a state object other services read); on-demand accepts a custom
+`instructions` prompt up to 16,384 characters, but the output is still free text inside a signed
+block you cannot edit. Second, you route across providers or summarize with a cheaper model; the
+API summarizes with the request's own model. Third, retention: threshold compaction is ZDR
+eligible because the block round-trips statelessly, so check eligibility for whichever variant you
+pick. Watch thinking blocks either way: on Fable 5.1 and the 5.5 models, turns you re-insert after
+threshold compaction or after your own summary must drop their thinking, because it fails the
+validity check.
 
 **Q: How do tool definitions affect context budget and what do you do with 50+ tools?**
 **Short:** Each tool definition costs 100-300 tokens, so past a few dozen tools, retrieve only the top-k most relevant tool descriptions per query instead of all of them.

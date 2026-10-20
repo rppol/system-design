@@ -26,6 +26,7 @@ This module covers:
 - HTTP caching: `ETag`, `Last-Modified`, `Cache-Control`, `Vary`
 - Serialization performance: `orjson`, `ujson`, `exclude_unset=True`
 - Connection pool sizing and Redis max connections
+- Live diagnosis of stuck coroutines: `python -m asyncio ps` / `pstree` [Python 3.14+]
 
 ---
 
@@ -752,6 +753,85 @@ async def update_user(user_id: int, update: UserProfile) -> dict:
 by the caller. For models with 20+ optional fields, this can reduce payload size by 60-80%,
 cutting both serialization time and network transfer cost.
 
+### 6.10 HTTP 103 Early Hints from a slow handler [Starlette 1.8+]
+
+When an HTML page takes 300 ms to build, the browser sits idle until the first byte. A 103
+response sent before the slow work lets it fetch the CSS and JS during those 300 ms:
+
+```python
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request) -> str:
+    await request.send_early_hints(
+        "</static/app.css>; rel=preload; as=style",
+        "</static/app.js>; rel=modulepreload",
+    )
+    data = await load_dashboard(request)      # the slow part
+    return render_dashboard(data)             # must still reference both assets
+```
+
+`send_early_hints()` emits the ASGI `http.response.early_hint` extension; each argument becomes
+one `Link` header. It needs server support and is a silent no-op without it: Uvicorn 0.54.0+
+sends it only over its experimental HTTP/2 (`--http zttp --http2`), Hypercorn over HTTP/2 and
+HTTP/3, and nothing reaches the browser over Uvicorn's default HTTP/1.1 stack. Browsers may
+ignore the hints, so the final HTML keeps its `<link>` and `<script>` tags. This is the
+replacement for HTTP/2 server push, which Chrome removed in 2022. For a JSON API it does
+nothing; it pays off on server-rendered HTML with a slow data fetch.
+
+### 6.11 Finding a stuck coroutine in a live worker [Python 3.14+]
+
+Two slow-worker symptoms need different tools. If one core sits at 100%, synchronous code is
+holding the event loop, and `py-spy dump --pid <pid>` shows the frame that is running. If CPU is
+near zero while requests hang, nothing is running: the coroutines are suspended on a lock, a
+pool, or an upstream call. A suspended coroutine is an object on the heap, not a frame on a
+thread stack, so `py-spy dump` shows only the loop thread idle in `select()`/`kqueue` and gives
+no hint which `await` the requests are parked on.
+
+Python 3.14 (October 2025) added `python -m asyncio ps <pid>` and `python -m asyncio pstree <pid>`.
+Both read the target process's memory, rebuild every `asyncio` task with its coroutine stack and
+the task that awaits it, and print a flat table (`ps`) or a tree (`pstree`). `pstree` also
+reports a cycle in the await graph (`ERROR: await-graph contains cycles`), which is the shape of
+an async deadlock. The same data is available in-process through `asyncio.format_call_graph(task)`
+and `asyncio.print_call_graph()`.
+
+Measured on Python 3.14.7, FastAPI 0.143.0 and Uvicorn, with a route that takes a module-level
+`asyncio.Lock` and never releases it, after two requests (`format_call_graph`, framework frames
+removed):
+
+```
+  * Task(name='Task-5')                    <- first request: holds the lock
+    |  asyncio/tasks.py:705     sleep()
+    |  app.py:8                 fetch_price()       await asyncio.sleep(3600) inside the lock
+    |  app.py:13                price()
+    |  fastapi/routing.py       run_endpoint_function() ... 20 Starlette/FastAPI frames
+    |  uvicorn/.../h11_impl.py  RequestResponseCycle.run_asgi()
+
+  * Task(name='Task-7')                    <- second request: queued behind it
+    |  asyncio/locks.py:110     Lock.acquire()
+    |  asyncio/locks.py:14      _ContextManagerMixin.__aenter__()
+    |  app.py:7                 fetch_price()       async with lock
+    |  app.py:13                price()
+    |  ...                      same framework frames
+```
+
+*Each Uvicorn request is its own task; reading the innermost frames shows one request parked in
+`Lock.acquire()` and the holder parked in the `sleep` it should never have awaited under the lock.*
+
+Operating constraints:
+
+| Constraint | Detail |
+|---|---|
+| Interpreter | Target and tool must both be CPython 3.14; run the tool from the same image as the app |
+| Linux permissions | Same user, plus Yama `ptrace_scope` allowing it; otherwise root or `CAP_SYS_PTRACE` |
+| macOS permissions | Needs root: without `sudo` the tool exits with "cannot be attached to due to insufficient permissions" (measured on macOS 26) |
+| Kubernetes | `kubectl debug -it <pod> --image=<app image> --target=<container>` shares the process namespace; the debug container needs `SYS_PTRACE` |
+| Hardened images | `PYTHON_DISABLE_REMOTE_DEBUG=1` or `-X disable-remote-debug` on the app turns the attach protocol off, and the tool then cannot read the process |
+| Uvicorn task names | Request tasks are unnamed (`Task-5`); the coroutine stack, not the name, identifies the route |
+
+Where root is unavailable, a debug route behind an admin dependency that returns
+`asyncio.format_call_graph(t)` for every task in `asyncio.all_tasks()` gives the same view from
+inside the worker. Export `len(asyncio.all_tasks())` as a gauge as well: a count that climbs
+with no matching traffic is a task leak, and the call graph then shows where the leaked tasks wait.
+
 ---
 
 ## 7. Real-World Examples
@@ -1011,6 +1091,8 @@ async def get_user(user_id: int) -> dict:
 | `orjson` | Fast JSON serializer | 3-5x faster than stdlib; handles `datetime`/`UUID` natively | Requires Rust toolchain for source install |
 | `ujson` | Fast JSON serializer | 2-3x faster than stdlib; drop-in replacement | Known float precision edge cases |
 | `dogpile.cache` | Anti-stampede + multi-backend | `dogpile` locking prevents stampede natively | Sync-first; async support is limited |
+| `python -m asyncio ps` / `pstree` | Live async task introspection (Python 3.14+) | Shows every task's await chain in a running worker; detects await cycles | Needs ptrace rights (root on macOS); target and tool must both be 3.14 |
+| `py-spy` | Sampling profiler for a live process | No code change; `dump` and `top` show running frames, flame graphs | Sees thread stacks only; suspended coroutines are invisible |
 
 ---
 
@@ -1151,15 +1233,29 @@ production-grade selective invalidation.
 **Short:** A single global lock serializes every cache miss regardless of key; a per-key lock instead lets unrelated misses run concurrently.
 A single global lock serializes every cache-miss code path regardless of which key is being fetched. That means a miss on `item_id=1` blocks a completely unrelated miss on `item_id=999`, even though the two lookups share no state and could safely run in parallel. Under high concurrency this collapses what should be N independent DB fetches into one queue, defeating the purpose of caching during the exact traffic spike when caching matters most. The fix is a per-key lock — typically `defaultdict(asyncio.Lock)` keyed by the cache key — so only requests racing for the *same* key contend with each other, while misses on different keys proceed concurrently. The remaining cost is that the lock dictionary itself grows unboundedly unless you periodically clean up locks that no coroutine is waiting on.
 
-**Q14: How does a Redis pipeline reduce the cost of fetching 100 keys, and what is the mechanism?**
+**Q14: A FastAPI worker's requests hang while its CPU is near zero, and `py-spy dump` shows the loop idle in `select()`. How do you find the stuck coroutine?**
+**Short:** Run python -m asyncio pstree PID (Python 3.14+), which rebuilds every task's await chain from the live process, something py-spy's thread stacks cannot show.
+
+Near-zero CPU with hanging requests means the coroutines are suspended, not running, so a
+thread-stack sampler like `py-spy` sees only the event loop waiting in `select()` or `kqueue`. A
+suspended coroutine lives on the heap. Python 3.14 added `python -m asyncio ps <pid>` (a table)
+and `python -m asyncio pstree <pid>` (a tree), which read the target's memory and print every
+task with its coroutine stack and the task awaiting it; the innermost frames show where each
+request waits, for example `Lock.acquire()` behind a holder parked in a long `await`, and
+`pstree` reports await cycles. Both interpreters must be 3.14, and attaching needs ptrace rights:
+root on macOS, `CAP_SYS_PTRACE` or a relaxed Yama `ptrace_scope` on Linux, and a
+`kubectl debug --target` container in Kubernetes. If you cannot get those rights, expose
+`asyncio.format_call_graph()` from an admin-only debug route.
+
+**Q15: How does a Redis pipeline reduce the cost of fetching 100 keys, and what is the mechanism?**
 **Short:** A Redis pipeline batches many commands into one network round trip, turning 100 sequential GETs into roughly one 0.5ms batch.
 A pipeline batches multiple Redis commands into a single network round trip instead of sending each command and waiting for its reply before sending the next. That cuts 100 sequential `GET` calls at roughly 0.3ms each (about 30ms total) down to roughly 0.5ms for the whole batch. The client buffers all queued commands locally, sends them to Redis in one TCP write, and Redis processes them back-to-back before returning all results together — `async with r.pipeline(transaction=False) as pipe: ...; results = await pipe.execute()`. Setting `transaction=False` skips Redis's `MULTI`/`EXEC` wrapping when you only need batching, not atomicity, across the commands. Use a pipeline whenever a single request needs to read or write more than a handful of independent keys.
 
-**Q15: `cachetools.TTLCache` supports both a size bound and a TTL — so why does the module still wrap it in an `asyncio.Lock`?**
+**Q16: `cachetools.TTLCache` supports both a size bound and a TTL, so why does the module still wrap it in an `asyncio.Lock`?**
 **Short:** TTLCache isn't async-safe on its own, so a double-checked asyncio.Lock stops concurrent coroutines from both missing and re-fetching.
 `cachetools.TTLCache` is not thread-safe or async-safe on its own, so concurrent reads and writes from multiple coroutines can race on the cache's internal eviction bookkeeping. The module's own type table marks it "Thread-Safe: No" and "Async-Safe: Manual" for exactly this reason. Wrapping access in `asyncio.Lock` with the double-checked pattern — check the cache, acquire the lock, check again, then populate — prevents two coroutines from both missing the cache and both fetching from the database simultaneously for the same key. The second check inside the lock is essential: without it, every coroutine that queued up waiting for the lock would still re-fetch from the DB once it finally acquires the lock, recreating the exact stampede the lock was meant to prevent. `asyncio.Lock` is correct here (not `threading.Lock`) because FastAPI's single-threaded event loop needs a lock that yields control while waiting rather than blocking the whole loop.
 
-**Q16: In the multi-tier case study, why is the in-process L1 TTL set to 10 seconds while the Redis L2 TTL is 300 seconds?**
+**Q17: In the multi-tier case study, why is the in-process L1 TTL set to 10 seconds while the Redis L2 TTL is 300 seconds?**
 **Short:** L1's TTL is shorter than L2's because L1's per-worker invalidation is the weaker guarantee of the two cache layers.
 The two TTLs serve different failure domains, and L1's is short because its invalidation is the weaker of the two. L1 is per-worker-process memory, so a short TTL bounds how long any single worker can serve stale data after an `invalidate_product()` call that only clears that one worker's L1 and the shared Redis key — the other workers' L1 entries simply expire naturally within the 10-second window. L2 (Redis) is shared across all workers and is explicitly invalidated on every write via `r.delete(redis_key)`, so its 300-second TTL only matters as a safety net for writes that bypass the invalidation path, not as the primary consistency mechanism. Making L1 TTL shorter than L2 TTL is a deliberate design rule: the layer with the weakest invalidation guarantee gets the shortest expiry. In the measured results, this combination pushed DB CPU from 100% down to 7% while keeping worst-case staleness bounded to single-digit seconds.
 
@@ -1167,8 +1263,11 @@ The two TTLs serve different failure domains, and L1's is short because its inva
 
 ## 13. Best Practices
 
-1. **Profile before caching.** Use `py-spy top --pid <pid>` or `cProfile` to confirm where
-   time is actually spent. Caching the wrong code path wastes memory without improving p99.
+1. **Profile before caching.** Use `py-spy top --pid <pid>`, `cProfile`, or on Python 3.15 the
+   stdlib sampler `python -m profiling.sampling attach <pid>` (add `--async-aware` for
+   per-task stacks) to confirm where time is actually spent. Caching the wrong code path wastes
+   memory without improving p99. When requests hang with idle CPU, profile the waits instead:
+   `python -m asyncio pstree <pid>` on Python 3.14+ shows which `await` each request is parked on.
 
 2. **Always set a TTL.** An unbounded cache entry that never expires is a memory leak in
    disguise. The only exception is truly immutable data (e.g., a content-addressed asset hash).

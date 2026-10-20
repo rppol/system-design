@@ -556,8 +556,7 @@ differences between them are adapter gradients, optimizer state and activations.
 | **Axolotl** | Training framework | Flexible YAML config; most popular for community fine-tuning |
 | **Unsloth** | Fast LoRA training | 2x faster than standard PEFT; low VRAM |
 | **LLaMA-Factory** | All-in-one fine-tuning | Web UI, many models, easy data format |
-| **torchtune** | PyTorch-native fine-tuning | Meta's official tool |
-| **TRL (HuggingFace)** | RLHF, DPO, SFT | SFTTrainer, DPOTrainer |
+| **TRL (HuggingFace)** | SFT, preference and RL post-training | `SFTTrainer`, `DPOTrainer`, `KTOTrainer`, `RewardTrainer`, `GRPOTrainer`, `RLOOTrainer`, `DistillationTrainer`; no PPO trainer since v1.13.0 (PPO runs in OpenRLHF or veRL) |
 | **BitsAndBytes** | 4/8-bit quantization | Required for QLoRA |
 | **DeepSpeed ZeRO** | Memory-efficient training | Works with PEFT |
 | **Modal / RunPod** | GPU cloud for fine-tuning | Cheap A100/H100 access |

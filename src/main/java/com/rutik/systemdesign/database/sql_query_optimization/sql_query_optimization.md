@@ -53,6 +53,8 @@ Limit  (cost=12500..12500 rows=10 width=36) (actual time=450.2..450.2 rows=10 lo
 -- Buffers: shared hit=N (buffer pool) read=N (disk)
 ```
 
+PostgreSQL 18 prints the `Buffers:` lines on every `EXPLAIN ANALYZE`, so `BUFFERS` only needs spelling out on PG17 and older. PostgreSQL 19 adds `EXPLAIN (ANALYZE, IO)`, which reports per scan node the prefetch distance, the number and average size of I/O requests, and the I/O waits. Use it to tell whether a slow scan is waiting on storage or on CPU; `auto_explain.log_io` logs the same data for slow queries.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -656,6 +658,8 @@ SELECT * FROM orders o WHERE NOT EXISTS (
 );
 ```
 
+PostgreSQL 19 plans `NOT IN` as an anti-join, the same plan as `NOT EXISTS`, when it can prove that neither the outer expression nor the subquery column is NULL (for example, both are `NOT NULL` columns). On PG18 and older, and on any nullable column in PG19, `NOT IN` stays a SubPlan and the NULL trap above still applies, so `NOT EXISTS` remains the safe default.
+
 **Pitfall 4: statistics_target too low for a LONG-TAILED column**
 The failure is not the dominant value — it is everything after the hundredth one. A `country`
 column that is 99% `'US'` needs no tuning at all: `'US'` is the first entry in the
@@ -772,9 +776,9 @@ A CTE referenced once is inlined and plans identically to a subquery, so predica
 The planner allocates `work_mem` (default 4MB) for the hash table of the smaller input. If the smaller input fits in `work_mem`, all rows are in memory and the probe phase is pure memory operations. If the input exceeds `work_mem`, PostgreSQL uses "batch hashing": splits the hash table into batches that fit in memory, processes one batch at a time (requires re-reading the probe side multiple times). EXPLAIN output: `Batches: 8` means the join was partitioned 8 ways; batch 1 is processed in memory while batches 2-8 of BOTH sides are written to temp files and read back once each, so roughly `(N-1)/N` = 87.5% of each input makes a round trip to disk. Fix: `SET work_mem = 'N MB'` for the session before the query. Warning: work_mem applies per sort/hash operation, per query. At 100 concurrent sessions, global `work_mem = 1GB` could allocate 100GB.
 
 **Q: What is the difference between EXISTS and IN for subqueries in performance terms?**
-**Short:** EXISTS short-circuits on the first match while IN scans everything, and NOT EXISTS avoids NOT IN's NULL trap.
+**Short:** PostgreSQL pulls both IN and EXISTS up into the same semi-join, so speed matches; the real difference is NOT IN returning no rows when the subquery has a NULL.
 
-For correlated subqueries: EXISTS short-circuits (returns immediately when first match found), while IN must scan all rows. `WHERE id IN (SELECT user_id FROM premium_users)` — scans all premium_users rows and builds a hash set. `WHERE EXISTS (SELECT 1 FROM premium_users WHERE user_id = o.id)` — for each outer row, stops at the first match. Modern PostgreSQL optimizes both to hash semi-joins for non-correlated cases, so the performance difference is minimal for simple cases. The critical behavioral difference: `NOT IN` with NULLs in the subquery returns no results (NULL semantics), while `NOT EXISTS` handles NULLs correctly. Always prefer NOT EXISTS over NOT IN.
+PostgreSQL pulls up both `WHERE id IN (SELECT user_id FROM premium_users)` and `WHERE EXISTS (SELECT 1 FROM premium_users WHERE user_id = o.id)` into a semi-join, usually a hash semi-join that reads `premium_users` once and builds a hash set. Both stop at the first match per outer row, so plans and speed are the same. Old MySQL (before 5.6) ran `IN (subquery)` as a dependent subquery per outer row, which is where the folk rule "EXISTS beats IN" comes from. When the subquery cannot be pulled up (it sits under `OR`, or references a volatile function), EXISTS runs as a correlated SubPlan that still stops at the first match, while IN runs as a hashed SubPlan over the full subquery result when that fits in `work_mem`. The critical behavioral difference: `NOT IN` with NULLs in the subquery returns no results (NULL semantics), while `NOT EXISTS` handles NULLs correctly. PostgreSQL 19 turns `NOT IN` into an anti-join only when both sides are provably non-null; on nullable columns it is still a SubPlan with the NULL trap. Always prefer NOT EXISTS over NOT IN.
 
 **Q: Explain lateral joins and when to use them.**
 **Short:** LATERAL lets a FROM-clause subquery reference columns from tables to its left, enabling per-row top-N queries.

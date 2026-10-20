@@ -103,7 +103,7 @@ itself, so nothing non-software reaches `tech_index.json` from §8.
 
 ---
 
-## Module List — 26 Modules (7 Phases)
+## Module List — 27 Modules (7 Phases)
 
 Order is the learning-path order; `STUDY_ORDER.soft_skills` in `game/app.js` is the
 authority for it.
@@ -114,7 +114,7 @@ authority for it.
 | 2 — Vocabulary & Precision | precise_technical_vocabulary, business_and_finance_vocabulary, leadership_and_org_vocabulary, hedging_commitment_and_disagreement |
 | 3 — Writing That Travels | technical_writing_for_engineers, design_docs_rfcs_and_adrs, executive_communication, upward_and_async_communication, incident_communication_and_postmortems |
 | 4 — Influence, Conflict, Negotiation | influence_without_authority, giving_and_receiving_feedback, difficult_conversations_and_conflict, negotiation_for_engineers, scope_prioritization_and_saying_no |
-| 5 — Leading People and Teams | mentorship_and_sponsorship, technical_leadership_and_execution, cross_functional_collaboration, team_health_and_sustainable_pace |
+| 5 — Leading People and Teams | mentorship_and_sponsorship, technical_leadership_and_execution, technical_strategy_and_vision, cross_functional_collaboration, team_health_and_sustainable_pace |
 | 6 — Interviews & Career Operations | behavioral_interview_systems, story_portfolio_and_star_frameworks, interviewing_as_the_interviewer, performance_reviews_and_promotions |
 | 7 — 2026 | ai_era_engineering_leadership |
 
@@ -201,8 +201,8 @@ working, not a bug. Do not "rescue" one by moving it under an interview heading.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the Full Path (all 26 modules) plus both curated tiers, **Senior
-(17)** and **Principal (17)**, with an overlap of 8. Nine of the seventeen principal
+`README.md` documents the Full Path (all 27 modules) plus both curated tiers, **Senior
+(18)** and **Principal (18)**, with an overlap of 9. Nine of the eighteen principal
 modules are material senior never sees, which is the repo's stated property: the tiers are
 different CUTS, not nested depths.
 

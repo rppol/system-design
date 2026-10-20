@@ -32,9 +32,9 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ## 4. Types / Strategies
 
-### 4.1 OpenAI GPT-5.6 Reasoning Series
+### 4.1 OpenAI GPT-6 and GPT-5.6 Reasoning Series
 
-OpenAI's reasoning line is the GPT-5.6 series: `gpt-5.6-sol` ($5/$30 per 1M), `gpt-5.6-terra` ($2.50/$15) and `gpt-5.6-luna` ($1/$6). Each runs a hidden "thinking" phase before responding, and you set depth with `reasoning.effort` (default `medium`) rather than a raw token budget. The benchmark figures quoted below and in Section 7 come from the o1/o3 generation that first demonstrated test-time-compute scaling — they are the published record of that result, while the tiers above are what you build on.
+OpenAI's reasoning line is the GPT-6 family: `gpt-6-astra` (2026-09-03, $10/$50 per 1M), `gpt-6-sol` and `gpt-6-luna` (2026-09-22; $2/$10 and $0.10/$0.50), and `gpt-6.1-sol` (2026-09-29, $2/$10). The GPT-5.6 series is still served: `gpt-5.6-sol` ($4/$20, a promotional price through at least 2026-11-21), `gpt-5.6-terra` ($2/$12) and `gpt-5.6-luna` ($0.20/$1.20). Each runs a hidden "thinking" phase before responding, and you set depth with `reasoning.effort` rather than a raw token budget. GPT-6 models take `low`, `medium`, `high`, `xhigh` and `max`; `gpt-6-sol` and `gpt-6-luna` also take `none` (their default is `medium`), and `gpt-6-astra` does not, so every Astra call pays for some reasoning. `gpt-6-astra` adds three controls for long-running work: effort can change mid-conversation while the cached prompt prefix survives, async tool calling lets the model keep working while your application runs a tool, and mid-turn steering accepts extra instructions over WebSockets while a response is in progress. The benchmark figures quoted below and in Section 7 come from the o1/o3 generation that first demonstrated test-time-compute scaling; they are the published record of that result, while the tiers above are what you build on.
 
 ```
 User: Prove that √2 is irrational.
@@ -492,10 +492,11 @@ max_thinking_tokens parameter controls how long the model can think:
 Cost model:
   Reasoning token cost = thinking_tokens × price_per_token
   Reasoning tokens are NOT returned to you, but they ARE billed as output tokens.
-  OpenAI reasoning line: gpt-5.6-sol $5/$30, gpt-5.6-terra $2.50/$15,
-    gpt-5.6-luna $1/$6 per 1M — thinking bills at the output rate.
-    A 10,000-token thinking chain on gpt-5.6-sol costs 10,000 × $30/1M = $0.30
-    — 50-100× a standard 100-200 token response at the same rate
+  OpenAI reasoning line: gpt-6-astra $10/$50, gpt-6-sol and gpt-6.1-sol $2/$10,
+    gpt-6-luna $0.10/$0.50, gpt-5.6-sol $4/$20, gpt-5.6-terra $2/$12 per 1M;
+    thinking bills at the output rate.
+    A 10,000-token thinking chain on gpt-5.6-sol costs 10,000 × $20/1M = $0.20,
+    50-100× a standard 100-200 token response at the same rate
   Budget 3-5× the expected VISIBLE output when sizing max_completion_tokens.
 
 Routing strategy to control cost:
@@ -523,6 +524,69 @@ Overthinking (budget too large):
 Break-even heuristic: stop extending budget when accuracy gain per
 additional 1,000 tokens drops below a domain-specific threshold
 ```
+
+### 4.9 Hybrid Thinking, Parallel Thinking and Open-Weight Reasoners
+
+**Hybrid thinking: one checkpoint, two modes.** A hybrid model serves both a fast non-thinking
+answer and a long reasoning trace from the same weights. The switch is in the prompt, not in the
+weights: the chat template either opens a thinking block for the model to fill or emits an already
+closed, empty one so the model goes straight to the answer.
+
+| Model | Release | Switch |
+|-------|---------|--------|
+| Claude 3.7 Sonnet | February 24, 2025 | Extended thinking on or off per request, with a token budget |
+| Qwen3 (hybrid) | April 29, 2025 | `enable_thinking` in the chat template, plus `/think` and `/no_think` soft switches in a user turn |
+| Gemini 2.5 Flash | April 2025 | Thinking budget 0 to 24,576 tokens; 0 turns thinking off |
+| DeepSeek V3.1 | August 21, 2025 | Template prefix; the API exposes it as `deepseek-chat` (non-thinking) and `deepseek-reasoner` (thinking), 128K context for both |
+| DeepSeek V3.2 | December 1, 2025 | Same two modes, and tool calls inside the thinking phase |
+
+The design is not settled. Qwen's July 2025 refresh shipped separate checkpoints:
+Qwen3-235B-A22B-Instruct-2507 "supports only non-thinking mode", and the Thinking-2507 sibling
+"supports only thinking mode", with the template forcing an opening `<think>`. One checkpoint
+halves the serving fleet and lets a router change depth without changing models. Two checkpoints
+let each RL run optimize one behavior without trading the other. Measure both modes of a hybrid
+model on your own eval before assuming its non-thinking mode matches a dedicated instruct model.
+
+**Parallel thinking.** A standard reasoning model follows one chain. Parallel thinking runs several
+chains at once and combines them before the final answer. Google's Gemini Deep Think uses this, and it
+differs from self-consistency (§4.4) in the merge step: self-consistency votes on final answers, while
+parallel thinking lets the model read the partial chains and write a combined solution, which is what
+an open-ended proof needs.
+
+```
+Single chain                      Parallel thinking (Deep Think style)
+
+prompt                            prompt
+  |                                 |-- chain A: induction ......
+  v                                 |-- chain B: extremal arg ...
+think ---> answer                   |-- chain C: invariant ......
+                                    v
+cost: T tokens                    model reads A, B, C partial work
+                                    v
+                                  combined proof ---> answer
+
+                                  cost: about N x T tokens, latency
+                                  near T if chains run in parallel
+```
+
+The diagram shows why parallel thinking is a serving decision as much as a model decision: tokens
+scale with the number of chains, wall-clock latency does not, so it needs batch capacity, not a
+longer timeout.
+
+**Open-weight reasoners.** Self-hosting a reasoner no longer means a distilled 7B model.
+
+| Model | Size | License | Reasoning control |
+|-------|------|---------|-------------------|
+| gpt-oss-120b (OpenAI, August 2025) | 117B total, 5.1B active (MoE) | Apache 2.0 | `Reasoning: low` / `medium` / `high` in the system prompt |
+| gpt-oss-20b | about 21B total, 3.6B active | Apache 2.0 | Same three levels |
+| DeepSeek V3.1 / V3.2 | about 671B total, 37B active (MoE) | MIT | Hybrid thinking via template |
+| Qwen3 Thinking-2507 | up to 235B total, 22B active | Apache 2.0 | Thinking-only checkpoint |
+
+gpt-oss ships with MXFP4 MoE weights, so the 120b model fits one 80 GB GPU and the 20b model runs in
+about 16 GB. It must be prompted in the harmony response format; plain `model.generate` without it
+produces broken output. Both gpt-oss and the DeepSeek models return the full raw chain of thought,
+which the OpenAI, Anthropic and Google APIs do not, so a self-hosted reasoner is the only option when you need to audit or
+monitor the raw trace. Treat that trace as debugging output, not as text to show end users.
 
 ---
 
@@ -694,7 +758,7 @@ Everything above treats thinking as *output* that gets billed. In any agent — 
 
 Whether prior *turns'* thinking survives is model-dependent: newer models keep earlier thinking blocks in context and bill them as input tokens, while several older ones strip them. Check the per-model table before you budget a long conversation, because "thinking is free after the turn ends" is true on one set of models and false on the other.
 
-**Both vendors punish an unstable prefix.** The thinking configuration is rendered into the prompt, so changing the budget or effort level mid-conversation invalidates cache breakpoints and re-pays the full write. Pick a level per conversation and hold it. The operational rule that follows from all of this: treat the reasoning state as an **opaque blob you carry**, never something you summarize, truncate or reconstruct — the summarizing you would do to save tokens is precisely what destroys the signature, the cache hit, and the 3%.
+**A top-level thinking change restarts the cache.** On Claude the thinking configuration and the effort level are rendered into the prompt, so changing `budget_tokens`, the thinking type or the top-level `output_config.effort` mid-conversation invalidates cache breakpoints and re-pays the full write. Two exceptions let you vary effort per turn and keep the cached prefix: Claude's per-message effort (beta), a `role: "system"` message carrying `output_config.effort`, on Fable 5.1, Mythos 5.1, Opus 5.5, Opus 5, Sonnet 5.5 and Haiku 5.5; and OpenAI's mid-conversation effort change on `gpt-6-astra`. On those models a per-turn policy (high for the hard step, low for routine follow-ups) costs no cache write; everywhere else, pick a level per conversation and hold it. The operational rule that follows from all of this: treat the reasoning state as an **opaque blob you carry**, never something you summarize, truncate or reconstruct; the summarizing you would do to save tokens is precisely what destroys the signature, the cache hit, and the 3%.
 
 ---
 
@@ -736,6 +800,22 @@ marked otherwise — quote them with their split and scaffold or they mislead.
   together reached 4/6 and **28/42 points — silver-medal standard**
   (the gold cutoff that year was 29). Neither system solved the two combinatorics
   problems
+
+### IMO 2025: Natural-Language Gold
+- Google DeepMind's advanced Gemini Deep Think (announced July 21, 2025) scored **35/42**,
+  solving 5 of 6 problems perfectly: gold-medal standard, graded by IMO coordinators
+- It worked end to end in natural language from the official problem statements, inside the
+  4.5-hour competition limit. The 2024 system needed experts to translate problems into Lean
+  and ran for two to three days
+- Training used RL on multi-step reasoning and theorem-proving data, a curated corpus of
+  high-quality solutions, and general IMO hints in the instructions; inference used parallel
+  thinking (§4.9)
+- OpenAI announced an experimental general reasoning model at the same 35/42, also in natural
+  language. DeepSeek reported gold-level IMO 2025 results for the open DeepSeek-V3.2-Speciale
+  (December 1, 2025)
+- What changed from 2024: a formal verifier is no longer required to reach gold, which moves
+  the hard problem from search over Lean tactics to grading a natural-language proof. A
+  natural-language proof has no compiler, so its correctness rests on human graders
 
 ---
 
@@ -787,11 +867,13 @@ prompt**, not a vendor-published ratio; latency bands are order-of-magnitude.
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **OpenAI GPT-5.6 series** (`sol` / `terra` / `luna`) | Top-tier reasoning | OpenAI's reasoning line; `reasoning.effort` (`minimal`…`high`) defaults to `medium` |
+| **OpenAI GPT-6 family** (`gpt-6-astra` / `gpt-6.1-sol` / `gpt-6-sol` / `gpt-6-luna`) | Top-tier reasoning | OpenAI's reasoning line; `reasoning.effort` takes `low`, `medium`, `high`, `xhigh` and `max` (`gpt-6-sol` and `gpt-6-luna` also `none`; `gpt-6-astra` adds mid-conversation effort changes, async tool calling and mid-turn steering). GPT-5.6 `sol` / `terra` / `luna` are still served |
 | **DeepSeek-R1** | Open-weights reasoning | Matched o1 on published benchmarks; free to self-host |
+| **DeepSeek V3.2** | Open-weights hybrid reasoner | One checkpoint, thinking and non-thinking modes; thinking during tool calls |
+| **gpt-oss-120b / gpt-oss-20b** | Open-weights reasoning (Apache 2.0) | `Reasoning: low/medium/high` in the system prompt; harmony format required; 120b fits one 80 GB GPU |
 | **Qwen3** | Open reasoning | Qwen3-30B-A3B beats QwQ-32B with ~1/10 the active parameters. Instruct and Thinking ship as separately trained checkpoints |
 | **Gemini 3.x** (3.1 / 3.5 / 3.6) | Google reasoning | Depth is set with the `thinking_level` enum (`minimal`…`high`) |
-| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Summarized thinking blocks returned; thinking tokens billed as output. Adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`) on Fable 5 / Opus 5 / Sonnet 5; extended thinking (`thinking.budget_tokens`) on Haiku 4.5 |
+| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Thinking tokens billed as output; on Claude 5.x the thinking text is omitted unless you set `display: "summarized"`. Adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`) is on by default on every Claude 5.x model: Fable 5.1 and Opus 5.5 reject `disabled`, Sonnet 5.5 turns off up-front thinking only with `between_tools`, and Haiku 5.5 accepts `disabled` at `high` effort or below. Default effort is `high` on Fable 5.1 and Sonnet 5.5, `medium` on Opus 5.5 and Haiku 5.5. Extended thinking (`thinking.budget_tokens`) is deprecated on Opus 4.6 and Sonnet 4.6, returns 400 on Opus 4.7 and later, and is the only mode on Haiku 4.5 |
 | **Math-Shepherd** | PRM for math | Step-level reward signals |
 | **Lean 4** | Formal verification | Used by AlphaProof |
 | **OpenR** | MCTS for LLMs | Open-source MCTS implementation |
@@ -828,6 +910,10 @@ A: Yes on both major APIs, and dropping it is a silent quality regression rather
 **Short:** Reasoning models exhibit reward hacking, overthinking simple problems, confidently reasoning from a wrong premise, and failing to transfer RL gains outside math and code.
 A: Four main failure modes: (1) Reward hacking — model finds shortcuts to maximize reward without correct reasoning, e.g., outputting the right format with empty thinking blocks. Mitigation: PRM, diverse reward signals, held-out test cases. (2) Overthinking — generating thousands of unnecessary tokens on simple problems. Mitigation: difficulty routing, budget forcing with max_thinking_tokens. (3) Premise errors — reasoning flawlessly from an incorrect assumption. Mitigation: RAG + reasoning (facts from retrieval, logic from reasoning model). (4) Domain transfer failure — RL on math/code improves math/code but may not generalize to other domains. Mitigation: domain-specific RL fine-tuning or standard SFT for non-math/code tasks.
 
+**Q: What is a hybrid thinking model, and should you serve one checkpoint for both modes or two?**
+**Short:** A hybrid thinking model switches between a direct answer and a long reasoning trace from one set of weights via the chat template, trading a smaller fleet against per-mode quality.
+A hybrid thinking model serves both modes from the same weights, and the switch lives in the prompt: the chat template either opens a thinking block or emits an already closed, empty one. Claude 3.7 Sonnet (February 2025) toggled extended thinking per request, Qwen3 (April 2025) used `enable_thinking` and `/think` / `/no_think` soft switches, Gemini 2.5 Flash turns thinking off with a budget of 0, and DeepSeek V3.1 (August 2025) exposes the two modes of one checkpoint as `deepseek-chat` and `deepseek-reasoner`. The case for one checkpoint is operational: one fleet, one cache, and a router that changes depth per request without switching models. The case against: Qwen's July 2025 refresh went back to separate Instruct-2507 (non-thinking only) and Thinking-2507 (thinking only) checkpoints, because a single RL run has to trade one behavior against the other. The gotcha is assuming the non-thinking mode of a hybrid equals a dedicated instruct model; measure both modes on your own eval before routing traffic, and remember the mode flag is part of the prompt prefix, so flipping it misses the prefix cache.
+
 **Q: How would you design a system that uses reasoning models cost-effectively in production?**
 **Short:** Cost-effective reasoning routes queries by a difficulty classifier, sending most traffic to a cheap non-reasoning model and reserving the full tier for the hardest fraction.
 A: Route by difficulty. Use a small, fast classifier to categorize queries as easy/medium/hard. Route easy queries (conversational, simple factual) to a non-reasoning chat model — low cost, low latency. Route medium queries (single-step math, moderate debugging) to a mid-tier reasoning model at low effort. Route hard queries (multi-step proof, complex algorithmic design) to the top reasoning tier with an explicit thinking budget. Cache reasoning traces for repeated similar problems. Set hard token budget limits to prevent runaway costs, and price them at the OUTPUT rate — reasoning tokens are never returned to you but are billed as output, so a 50,000-token thinking chain on a $30/1M-output model costs $1.50 per query, not the input-rate figure people usually reach for. Result: 80-90% of queries served cheaply, 10-20% get full reasoning power.
@@ -841,12 +927,16 @@ A: Self-consistency generates N reasoning chains (N=10-40) with temperature > 0 
 A: Accuracy scales approximately log-linearly with test-time compute (thinking tokens) up to a task-specific ceiling. The ceiling varies: competition math (AIME 2024) is the furthest anyone has pushed it publicly, at 96.7% for o3 in OpenAI's December 2024 preview announcement and 91.6% for the o3 that shipped; general QA has a lower ceiling; formal verification with symbolic solvers can scale furthest. The ceiling is hit when the task difficulty exceeds the model's knowledge or reasoning capacity — you cannot think your way to facts you don't know, and you cannot reason through a problem whose structure exceeds your learned capabilities. In practice: easy problems reach their ceiling at 100-500 thinking tokens; olympiad math benefits from 5,000-20,000+ tokens. Beyond the task ceiling, additional thinking tokens produce diminishing or zero improvement.
 
 **Q: How was DeepSeek-R1 trained to produce visible reasoning traces, while hosted APIs hide their thinking?**
-**Short:** DeepSeek-R1 earned a format reward for wrapping reasoning in visible think tags, while hosted APIs run thinking server-side and return only a summary.
-A: DeepSeek-R1 used a format reward: the model earned a small bonus if it structured its response as `<think>...</think><answer>...</answer>`. The `<think>` content is part of the model's visible output — users and developers can inspect the reasoning. Hosted reasoning APIs (OpenAI's GPT-5.6 tiers, Anthropic's adaptive thinking) run the thinking sequence server-side and return only the answer plus a summary. R1's approach is more transparent (users can debug reasoning errors, verify thought process) but raises concerns about reasoning being performative rather than functional. Both approaches produce similar accuracy improvements on benchmarks; the tradeoff is transparency and debuggability (R1) vs. IP protection and reduced prompt-injection risk via thinking manipulation (hosted).
+**Short:** DeepSeek-R1 earned a format reward for wrapping reasoning in visible think tags, while hosted APIs run thinking server-side and return at most a summary.
+A: DeepSeek-R1 used a format reward: the model earned a small bonus if it structured its response as `<think>...</think><answer>...</answer>`. The `<think>` content is part of the model's visible output, so users and developers can inspect the reasoning. Hosted reasoning APIs (OpenAI's GPT-6 family, Anthropic's adaptive thinking) run the thinking sequence server-side and return the answer plus, at most, a summary. R1's approach is more transparent (users can debug reasoning errors, verify thought process) but raises concerns about reasoning being performative rather than functional. Both approaches produce similar accuracy improvements on benchmarks; the tradeoff is transparency and debuggability (R1) vs. IP protection and reduced prompt-injection risk via thinking manipulation (hosted).
 
 **Q: What is MCTS applied to LLM reasoning and what are its practical limitations?**
 **Short:** MCTS scores partial reasoning paths with a reward model and backpropagates values across rollouts, but each rollout is a full forward pass costing 100x base inference at 100 rollouts.
 A: MCTS treats each reasoning step as a node in a tree. UCB (Upper Confidence Bound) balances exploration of new branches vs. exploitation of promising ones. Each rollout runs a complete reasoning chain from a node and scores it with a reward model (PRM or outcome checker). Node values are backpropagated: if a partial path leads to correct answers in 7 of 10 rollouts, that path gets a high value. Practical limitations: (1) each rollout is a full LLM forward pass — MCTS with 100 rollouts costs 100× base inference; (2) requires a reliable reward or verification signal — without a PRM or test-case checker, node values are noisy; (3) high implementation complexity. Used in AlphaProof, which pairs a language model with AlphaZero-style RL and proof search in Lean and contributed 3 of the 4 problems DeepMind solved at IMO 2024, but not in general-purpose commercial APIs because the compute cost is prohibitive at scale. AlphaCode 2 is frequently miscited as an MCTS system; it is massive sampling plus filtering, clustering and a learned scorer, with no tree search.
+
+**Q: What changed between the IMO 2024 silver and the IMO 2025 gold results?**
+**Short:** In 2024 AlphaProof needed problems hand-translated into Lean and days of search for silver; in 2025 Gemini Deep Think wrote natural-language proofs within 4.5 hours for gold.
+The 2024 result was formal; the 2025 result was natural language. In 2024, AlphaProof and AlphaGeometry 2 reached 28/42, silver, after experts translated the problems into Lean and other domain languages and the systems ran for two to three days, with the Lean checker guaranteeing every accepted proof. In July 2025, an advanced Gemini Deep Think scored 35/42, gold, working end to end in natural language from the official statements within the 4.5-hour limit, and OpenAI announced an experimental reasoning model at the same score; DeepSeek later reported gold-level IMO 2025 results for the open DeepSeek-V3.2-Speciale. The ingredients were RL on multi-step reasoning and theorem-proving data, curated solutions, and parallel thinking at inference. The engineering consequence is that the verifier moved: with Lean, correctness is mechanical; with natural-language proofs, correctness rests on human graders, so for production math or code reasoning keep a mechanical check (tests, a proof assistant, a solver) wherever one exists.
 
 **Q: You're building a coding assistant that needs to solve hard algorithmic problems. How do you choose between reasoning models, self-consistency, and standard LLM + CoT?**
 **Short:** Choosing among reasoning approaches for a coding assistant should scale with difficulty: standard CoT for known patterns, self-consistency for medium, a top tier only for hard problems.
@@ -859,6 +949,10 @@ A: During pure RL training with no supervised reasoning data, DeepSeek-R1 sponta
 **Q: What is self-consistency and when is it worth the cost?**
 **Short:** Self-consistency's majority vote gives its biggest gains when single-chain accuracy sits between roughly 50-80%, with almost nothing left to win above 85%.
 A: Self-consistency generates N reasoning chains (N=10-40) and takes the majority vote. It improves accuracy by 5-15% on reasoning tasks. Worth the cost when: (1) the task has a single correct answer (math, factual); (2) accuracy is more important than latency; (3) you cannot afford a full reasoning model but need better reliability. Not worth it for: creative tasks, very hard problems where models consistently fail (all chains wrong, so majority is wrong), or latency-sensitive applications. Rule of thumb: if single-chain accuracy on your task is between 50-80%, self-consistency gives meaningful gains; above ~85% there is almost nothing left to win, and below 50% voting is worse than a single sample rather than merely marginal.
+
+**Q: How does parallel thinking, as in Gemini Deep Think, differ from self-consistency?**
+**Short:** Parallel thinking runs several reasoning chains at once and has the model read and merge their partial work into one answer, while self-consistency only votes on finished answers.
+Both sample several reasoning chains, but they differ in the merge. Self-consistency runs N chains to completion and takes a majority vote on the final answer, which only works when answers are short and comparable, such as a number. Parallel thinking, the mechanism behind Gemini Deep Think, explores several approaches at the same time and lets the model combine the partial chains before it writes one answer, so it works for open-ended outputs like a proof, where two chains may each hold half of the argument and no vote is possible. Deep Think used it to reach 35/42 at IMO 2025 in natural language. Cost scales with the number of chains, about N times the tokens of one chain, while wall-clock latency stays near one chain if the chains run concurrently, so capacity planning is about batch slots, not timeouts. Use self-consistency when you have a checkable final answer and no access to the model internals; use a parallel-thinking tier when the output is a long argument or design that has to be assembled.
 
 **Q: How do process reward models enable best-of-N reranking, and how is that different from self-consistency?**
 **Short:** PRM reranking scores each chain's reasoning steps to pick the best process rather than just the most common answer, and can prune partial chains early unlike voting.

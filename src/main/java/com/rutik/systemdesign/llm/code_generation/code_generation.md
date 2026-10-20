@@ -372,7 +372,7 @@ xychart-beta
     bar [1.7, 12, 13.8, 49, 71.7, 96.0]
 ```
 
-From 1.7% (raw GPT-4, 2023) to 96.0% (Claude Opus 5, 2026, on SWE-bench Verified) in three years — the jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. Today's frontier models (96.0% Claude Opus 5, 95.5% Mythos 5, 95.0% Fable 5, 88.6% Opus 4.8, 85.2% Sonnet 5) have pushed SWE-bench Verified itself toward saturation — the top three are within 1.0 point of each other — which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, best public-set score around 60% — is now the benchmark that actually discriminates between them.
+From 1.7% (raw GPT-4, 2023) to 96.0% (Claude Opus 5, 2026, on SWE-bench Verified) in three years. The jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. SWE-bench Verified is saturated and contaminated: the top three 2026 models (Opus 5, Mythos 5, Fable 5) sat within 1.0 point of each other, OpenAI stopped reporting it in February 2026, and the Claude Opus 5.5 launch (2026-09-22) reports no SWE-bench score at all. Treat the chart as history. To compare coding agents, use SWE-bench Pro (1,865 tasks across 41 actively maintained repos, best public-set score around 60%) and the agentic suites frontier launches now report, such as Terminal-Bench 4.0, where Opus 5.5 scores 66.4% against GPT-6 Astra's 57.9%. See [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md).
 
 **MBPP** (Mostly Basic Python Problems):
 - 500 simple Python functions from crowdsourcing

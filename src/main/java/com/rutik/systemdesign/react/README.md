@@ -31,7 +31,7 @@ This section covers:
 - **Application engineering** — styling and design systems, testing and front-end CI, and
   architecture including micro-frontends
 
-**Primary target: React 19.2.** Meta-frameworks (Next.js 16, React Router v8, TanStack
+**Primary target: React 19.3.** Meta-frameworks (Next.js 16, React Router v8, TanStack
 Start, Astro 7) are covered **inside this section** rather than split out, because in 2026
 you cannot teach Server Components honestly without the framework that implements them.
 
@@ -60,7 +60,7 @@ you cannot teach Server Components honestly without the framework that implement
 | 17 | [rendering_strategies_hydration_and_seo](rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md) | 4 — Server React | Advanced | CSR/SSR/SSG/ISR/PPR on numbers, client hydration and mismatches, selective hydration, Cache Components, SEO and metadata |
 | 18 | [meta_frameworks_and_routing](meta_frameworks_and_routing/meta_frameworks_and_routing.md) | 4 — Server React | Advanced | Next.js 16 App Router, React Router v8, TanStack Start, Astro 7, file-based routing, nested layouts, i18n routing |
 | 19 | [styling_and_design_systems](styling_and_design_systems/styling_and_design_systems.md) | 5 — Application Engineering | Intermediate | Tailwind v4, CSS Modules, vanilla-extract, Panda, why runtime CSS-in-JS struggles with RSC, shadcn and Base UI, tokens |
-| 20 | [testing_and_frontend_ci](testing_and_frontend_ci/testing_and_frontend_ci.md) | 5 — Application Engineering | Intermediate | React Testing Library, role queries, `act()`, Vitest browser mode, Playwright, MSW v2, Storybook 10, visual regression |
+| 20 | [testing_and_frontend_ci](testing_and_frontend_ci/testing_and_frontend_ci.md) | 5 — Application Engineering | Intermediate | React Testing Library, role queries, `act()`, Vitest browser mode, Playwright, MSW 3, Storybook 10, visual regression |
 | 21 | [react_architecture_and_antipatterns](react_architecture_and_antipatterns/react_architecture_and_antipatterns.md) | 5 — Application Engineering | Advanced | Feature-sliced structure, the client/server seam, micro-frontends and Module Federation, migration, the antipattern catalogue |
 
 ---
@@ -206,12 +206,13 @@ Principal is the smaller list, and roughly half of it is material Senior never s
 
 ## 4. Version Notes
 
-**Primary target: React 19.2** (released 2025-10-01). **There is no React 20.** Latest
-patches are **19.2.8 / 19.1.9 / 19.0.8** (2026-07-21). Verified 2026-09-02 — re-check
+**Primary target: React 19.3** (released 2026-09-09). **There is no React 20.** Latest
+patches are **19.3.1 / 19.2.9 / 19.1.10 / 19.0.9** (2026-10-14). Verified 2026-10-20 — re-check
 `react.dev/versions` before writing a version number into prose.
 
 | Tag | What it gates |
 |-----|---------------|
+| `[19.3]` | A Server Component renders a `"use client"` context directly (`<UserContext value={...}>`), `use(browser())` for client-only subtrees, unrelated concurrent transitions render independently, StrictMode double-invokes effects on `hydrateRoot` roots |
 | `[19.2]` | `<Activity>`, `useEffectEvent`, `cacheSignal`, React Performance Tracks, `useId` prefix changed to `_r_` for View Transitions compatibility |
 | `[19]` | Actions and `useActionState`, `useFormStatus`, `useOptimistic`, `use()`, ref as an ordinary prop, `<Context>` as provider, document metadata hoisting, `preload`/`preinit`, stable Server Components |
 
@@ -230,30 +231,31 @@ the primary optimization story.
 **React Foundation** under the Linux Foundation (platinum founders include Amazon,
 Callstack, Expo, Huawei, Meta, Microsoft, Software Mansion and Vercel).
 
-**Security:** the `react-server-dom-*` packages carry **three** separate advisories, routinely
-conflated. Source exposure: **CVE-2025-55183** (CVSS 5.3, 2025-12-11), patched 19.0.2 /
-19.1.3 / 19.2.2. Denial of service: **CVE-2026-23864** (CVSS 7.5, 2026-01-26), patched
-19.0.4 / 19.1.5 / 19.2.4. A second denial of service: **CVE-2026-23869** (CVSS 7.5,
-2026-04-08), patched **19.0.5 / 19.1.6 / 19.2.5** — which is the recommended floor. Never
-quote 19.2.4 as safe, and never merge the DoS and source-exposure issues into one advisory. This
-belongs in a §10 pitfall, not a footnote.
+**Security:** the `react-server-dom-*` packages carried **ten** separate advisories between
+2025-12-03 and 2026-10-14, routinely conflated. Two are remote code execution:
+**CVE-2025-55182** (CVSS 10.0, 2025-12-03) and **GHSA-xqc2-xf4c-x3h3** (CVSS 4.0 score 9.5,
+2026-10-14, no CVE). The rest are source exposure (CVE-2025-55183) and denial of service.
+Each patch line supersedes the last; the floor is **19.3.1 / 19.2.9 / 19.1.10 / 19.0.9**
+(2026-10-14). Next.js ships its own compiled copy, so its floor is **16.4.1** (or **15.5.28**
+on 15.5). Never merge the advisories into one, and never quote an older patch as safe. The
+full table is in [Server Components and Server Functions](server_components_and_server_functions/server_components_and_server_functions.md).
 
-### Ecosystem pins — verified 2026-09-02
+### Ecosystem pins — verified 2026-10-20
 
 | Area | Pin | Note |
 |------|-----|------|
-| Next.js | **16** (2025-10-21), current **16.3.x** | Turbopack is default; Cache Components and `"use cache"` replace `experimental.ppr`/`dynamicIO`; `middleware.ts` is now **`proxy.ts`** on the Node runtime |
-| React Router | **v8** (2026-06-17) | v7 was the Remix merge — "framework mode" is the former Remix |
+| Next.js | **16** (2025-10-21), current **16.4.x** (security floor 16.4.1) | Turbopack is default; Cache Components and `"use cache"` replace `experimental.ppr`/`dynamicIO`; `middleware.ts` is now **`proxy.ts`** on the Node runtime |
+| React Router | **v8** (2026-06-17), current 8.5 | v7 was the Remix merge — "framework mode" is the former Remix |
 | Remix v3 | **not React** | a separate framework on a Preact fork; **beta preview 2026-04-30** (the July press coverage is not the release date). Never present it as a React upgrade path |
-| TanStack Start | **Release Candidate** | not 1.0 — say so |
-| Astro | **7** (2026-06-22) | Rust compiler, on Vite 8 |
+| TanStack Start | **1.0**, stable since 2026-10-13 | Vite plus Nitro; RSC opt-in |
+| Astro | **7** (2026-06-22), current 7.4 | Rust compiler, on Vite 8 |
 | RSC outside Next | `@vitejs/plugin-rsc`, Waku, Parcel | a framework-agnostic Vite RSC story now exists |
 | TanStack Query / Zustand | **v5** / **v5** | Zustand v5 uses native `useSyncExternalStore` |
 | Tailwind CSS | **v4** | Oxide engine, CSS-first `@theme`; no `tailwind.config.js` required |
 | shadcn/ui | defaults to **Base UI** since 2026-07 | Radix is not deprecated; `radix-ui` is now a single package. React Aria is also a first-class option |
 | styled-components | **maintenance mode** (since Jan 2024) | its runtime injection model is fundamentally incompatible with RSC |
-| MUI | **v9** (2026-04-08), current 9.4 — **still defaults to Emotion** | There is no v8: v7 jumped to v9 to re-align with MUI X. Pigment CSS is opt-in since v6 and its repo is alpha/on-hold. Do **not** write that MUI "moved to" Pigment |
-| Testing | RTL **16.3.3**, Vitest **4.1.11**, Jest **30.4.2**, MSW **v2**, Storybook **10** (ESM-only) | |
+| MUI | **v9** (2026-04-08), current 9.5 — **still defaults to Emotion** | There is no v8: v7 jumped to v9 to re-align with MUI X. Pigment CSS is opt-in since v6 and its repo is alpha/on-hold. Do **not** write that MUI "moved to" Pigment |
+| Testing | RTL **16.3.3**, Vitest **5.0.5**, Jest **30.5.2**, MSW **3.0.3**, Storybook **10** (ESM-only) | Vitest 5 (2026-09-03) needs Node 22.12+ and Vite 6.4+ |
 
 **REPLACE, DO NOT ANNOTATE.** An answer names the current API, never "`foo()` is
 deprecated, use `bar()`". The three exceptions are in root `CLAUDE.md`.

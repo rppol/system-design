@@ -16,7 +16,7 @@ Four independent axes moved, and each breaks a different part of your build:
 | Axis | What changed | What it breaks |
 |---|---|---|
 | **Modularization** | `spring-boot-autoconfigure` split into per-technology `spring-boot-<technology>` modules, each rooted at package `org.springframework.boot.<technology>`; starters split to match | Imports, `spring.autoconfigure.exclude` strings, and any dependency you were getting transitively |
-| **Jakarta EE 11** | Servlet 6.1, Jakarta Persistence 3.2, Jakarta Validation 3.1, Tomcat 11.0, Hibernate 7.1 | Undertow (incompatible with Servlet 6.1) and anything pinned to an older Jakarta artifact |
+| **Jakarta EE 11** | Servlet 6.1, Jakarta Persistence 3.2, Jakarta Validation 3.1, Tomcat 11.0, Hibernate 7.4 | Undertow (incompatible with Servlet 6.1) and anything pinned to an older Jakarta artifact |
 | **Jackson 3** | `com.fasterxml.jackson` becomes `tools.jackson`; annotations, mixins and JSON properties renamed | Every custom serializer, `@JsonComponent`, and `spring.jackson.*` key you own |
 | **Null-safety** | JSpecify annotations applied throughout the codebase | A strict null checker or Kotlin compiles your existing, working code into errors |
 
@@ -113,7 +113,7 @@ migrations ran. A migration that compiles is roughly halfway done.
 | **Big bang** | Every service upgraded in one release window | < 10 services, one team, shared release train | High risk, one rollback point, cheapest coordination |
 | **Strangler / rolling** | Service by service, oldest-and-simplest to newest-and-hardest | 20–500 services, many teams | Months of a mixed estate; needs a compatibility policy |
 | **OpenRewrite-assisted rolling** | The recipe runs in CI as a PR per service; humans review only the non-mechanical diff | Any estate above ~30 services | Recipe tuning up front, then near-linear scaling |
-| **Fork-and-freeze** | New services on Boot 4; existing ones stay on 3.5 until forced | An estate with no capacity | 3.5 leaves OSS support and you migrate under pressure later |
+| **Fork-and-freeze** | New services on Boot 4; existing ones stay on 3.5 until forced | An estate with no capacity | 3.5 OSS support ended 2026-06-30; you pay for commercial support or migrate under pressure |
 
 **The default for a real estate is OpenRewrite-assisted rolling.** The recipe does the
 relocations and renames uniformly, which is exactly the part that is both high-volume and
@@ -276,6 +276,13 @@ surfaces at runtime as `NoSuchMethodError` or `NoClassDefFoundError` the first t
 Cloud code path calls an API shape the forced Boot version changed. Verify the combination in
 an integration test that actually exercises your gateway or config-client paths; do not infer
 support from a green build.
+
+Patch timing is one train for the whole portfolio. Since the September 2026 release change,
+every Spring project ships its patches on one day, the Thursday after the third Monday of each
+month, in place of the old two-week window where each layer of the dependency tree released on
+a different day. The first regular train under this model is 2026-10-22. Plan BOM bumps around
+that date, and check which CVEs a train fixes by id, severity and project at
+`spring.io/security`.
 
 ### 6.2 Broken → Fixed: The Starter You Were Getting by Accident
 
@@ -587,7 +594,9 @@ bill.
 **A team that stopped at Boot 4.0 because of Spock.** They had a substantial Spock test suite,
 found Spock support removed in 4.0, and paused the migration for two months. Spock support was
 restored in 4.1. Reading the 4.1 release notes alongside the 4.0 migration guide would have
-turned a two-month pause into a decision to skip 4.0 entirely and go straight to 4.1.
+turned a two-month pause into a decision to skip 4.0 entirely and go straight to 4.1. The
+support dates make the same case: 4.0.x OSS support ends 2026-12-31, so a team landing on 4.0
+in October 2026 gets about two months of OSS patches, while 4.1.x runs to 2027-07-31.
 
 ---
 
@@ -597,9 +606,9 @@ turned a two-month pause into a decision to skip 4.0 entirely and go straight to
 
 | Dimension | Boot 4.1 | Boot 3.5 |
 |---|---|---|
-| OSS support | Current | Ends; commercial support then required |
+| OSS support | 4.1.x until 2027-07-31, commercial to 2028-07-31. 4.0.x OSS ends 2026-12-31, commercial 2027-12-31 | Ended 2026-06-30 (last OSS patch 3.5.16); commercial support to 2032-06-30 |
 | Java | 17–26, JDK 25 recommended | 17–24 |
-| Jakarta EE | 11 (Servlet 6.1, JPA 3.2, Hibernate 7.1) | 10 |
+| Jakarta EE | 11 (Servlet 6.1, JPA 3.2, Hibernate 7.4) | 10 |
 | Jackson | 3 (`tools.jackson`) | 2 (`com.fasterxml.jackson`) |
 | Null safety | JSpecify throughout | Spring's own `@Nullable` |
 | Spring AI 2.0 | Supported | **Not supported** — requires Boot 4.0/4.1 |
@@ -652,11 +661,11 @@ starters dominate, and neither is automatable.
 
 ### Migrate to Boot 4 when
 
-- **You are on Boot 3.5 and want to stay on supported open-source releases.** This is the
-  default reason and it needs no other justification.
+- **You are on Boot 3.5 and want supported open-source releases.** 3.5 OSS support ended on
+  June 30, 2026, with 3.5.16 the last OSS patch. This is the default reason and it needs no other justification.
 - **You want Spring AI 2.0.** It requires Boot 4.0 or 4.1; there is no path on 3.5.
-- **You want first-class gRPC**, the `spring-boot-starter-opentelemetry` starter, automatic
-  Micrometer context propagation to `@Async`, or Framework 7's API versioning.
+- **You want first-class gRPC**, the `spring-boot-starter-opentelemetry` starter, or
+  Framework 7's API versioning.
 - **You are on JDK 25 and want the JDK AOT cache.** Boot 4's packaging support is built around
   it. See [`spring_performance`](../spring_performance/spring_performance.md).
 - **You are starting a new service.** Start on 4.1; there is no migration to do.
@@ -677,8 +686,8 @@ starters dominate, and neither is automatable.
   service's dependency graph. It needs a quiet window.
 - **You cannot afford the JSpecify review on a large Kotlin codebase this quarter.** Suppressing
   it converts a bounded project into permanent debt; deferring it keeps the option.
-- **The only motivation is "4 is bigger than 3."** Boot 3.5 is still supported today. Migrate
-  for a capability or for the support horizon, not for the number.
+- **The only motivation is "4 is bigger than 3."** Boot 3.5 has commercial support until
+  June 30, 2032. Migrate for a capability or for the support horizon, not for the number.
 
 ---
 
@@ -830,9 +839,9 @@ Because Boot 4.0 "adds JSpecify nullability annotations. If you are using a null
 The class moved and the property is a string. Boot 4 split `spring-boot-autoconfigure` into per-technology `spring-boot-<technology>` modules, each rooted at `org.springframework.boot.<technology>`, so every auto-configuration class has a new fully-qualified name. `spring.autoconfigure.exclude` has no compile-time check, so an entry that no longer matches anything is ignored in silence and the auto-configuration you were suppressing comes back on. A service that excluded `DataSourceAutoConfiguration` to manage its own pooling now gets a Boot-managed `DataSource` with no warning. The durable fix is `@SpringBootApplication(exclude = SomeAutoConfiguration.class)`, whose `Class<?>` attribute fails to compile when the class relocates — which is the whole reason to prefer the typed form over the string one.
 
 **Q: Can you run Spring Cloud on Spring Boot 4.1 today?**
-**Short:** Yes — the official compatibility matrix lists the 2025.1 train against Boot 4.0.x and 4.1.x from 2025.1.2 onward, though the release wiki's table is stale and says otherwise.
+**Short:** Yes. The official matrix supports the 2025.1 train on Boot 4.1.x from 2025.1.2 onward; the release wiki's table is stale, and holding at 4.0 leaves OSS patches only until 2026-12-31.
 
-Yes, and the interesting part is that two official sources disagree. The `spring-cloud-release` wiki's supported-versions table lists the 2025.1 "Oakwood" train against Boot 4.0.x only, while the project's own compatibility matrix says "Spring Boot Generation 4.0.x, 4.1.x (Starting with 2025.1.2)" and the 2025.1.2 announcement states it "introduces compatibility for Spring Boot 4.1.0". The wiki is the stale one. What remains true is that each patch is *built against* a specific Boot version — 2025.1.3 is based on Boot 4.0.8 — so importing `spring-cloud-dependencies` manages that Boot version unless your own BOM is declared first. Forcing the Boot BOM ahead of the train is never a compile error; it surfaces at runtime as `NoSuchMethodError` when a Spring Cloud path calls an API shape the newer Boot changed. Settle it with an integration test, not with a green build.
+Yes, and the interesting part is that two official sources disagree. The `spring-cloud-release` wiki's supported-versions table lists the 2025.1 "Oakwood" train against Boot 4.0.x only, while the project's own compatibility matrix says "Spring Boot Generation 4.0.x, 4.1.x (Starting with 2025.1.2)" and the 2025.1.2 announcement states it "introduces compatibility for Spring Boot 4.1.0". The wiki is the stale one. What remains true is that each patch is *built against* a specific Boot version (2025.1.3 is based on Boot 4.0.8), so importing `spring-cloud-dependencies` manages that Boot version unless your own BOM is declared first. Forcing the Boot BOM ahead of the train is never a compile error; it surfaces at runtime as `NoSuchMethodError` when a Spring Cloud path calls an API shape the newer Boot changed. Settle it with an integration test, not with a green build. Do not stay on Boot 4.0 to match the train's base patch: 4.0.x OSS support ends 2026-12-31 against 2027-07-31 for 4.1.x, so a team that stops at 4.0 has about two months of OSS patches left.
 
 **Q: What was removed from Boot 4, and what came back?**
 **Short:** Undertow, Spring Session Hazelcast and Spring Session MongoDB are gone; Spock was removed in 4.0 and restored in 4.1.
@@ -880,19 +889,19 @@ Clearing the backlog of failed job instances. The job-parameter serialization fo
 No, on both counts, and it is a useful example of how upgrade write-ups drift. JSR-352 support was removed in Spring Batch **5.0**, back in 2022, so attributing it to 6.0 misdates it by a whole major. The XML namespace configuration (`batch:` and `batch-integration:`) is *deprecated* in 6.0 with removal scheduled for v7, which means a Batch 5 XML codebase still runs on 6.0, with warnings. The same applies to `CommandLineJobRunner`, deprecated in favour of `CommandLineJobOperator`, and to `@EnableBatchProcessing(modular = true)`. The pattern is worth internalising for any migration: "deprecated" and "removed" are one word apart, they invert the plan, and secondary write-ups conflate them constantly.
 
 **Q: What is the Java and Jakarta EE baseline for Boot 4.1, and what does it force?**
-**Short:** Java 17 minimum through Java 26, Jakarta EE 11 with Servlet 6.1, Tomcat 11 and Hibernate 7.1 — and Servlet 6.1 is what removed Undertow.
+**Short:** Java 17 minimum through Java 26, Jakarta EE 11 with Servlet 6.1, Tomcat 11 and Hibernate 7.4; Servlet 6.1 is what removed Undertow.
 
-Boot 4.1 requires at least Java 17 and is compatible up to and including Java 26, with JDK 25 the recommended target. The platform baseline is Jakarta EE 11: Servlet 6.1, Jakarta Persistence 3.2, Jakarta Validation 3.1, Jakarta Annotation 3.0, on Tomcat 11.0 and Hibernate 7.1. The consequential item is Servlet 6.1, because that is precisely what removed Undertow — Boot 4 requires the 6.1 baseline "with which Undertow is not yet compatible." So if you run Undertow, moving to Tomcat 11 or Jetty is a prerequisite you complete before the migration starts, not a step inside it. Boot 4 also requires GraalVM native-image 25 or later if you build native images.
+Boot 4.1 requires at least Java 17 and is compatible up to and including Java 26, with JDK 25 the recommended target. The platform baseline is Jakarta EE 11: Servlet 6.1, Jakarta Persistence 3.2, Jakarta Validation 3.1, Jakarta Annotation 3.0, on Tomcat 11.0 and Hibernate 7.4 (Boot 4.1.1 manages 7.4.5.Final; Boot 4.0.x shipped 7.1 and 7.2). The consequential item is Servlet 6.1, because that is precisely what removed Undertow: Boot 4 requires the 6.1 baseline "with which Undertow is not yet compatible." So if you run Undertow, moving to Tomcat 11 or Jetty is a prerequisite you complete before the migration starts, not a step inside it. Boot 4 also requires GraalVM native-image 25 or later if you build native images.
 
 **Q: How would you sequence the work, and where does the effort actually go?**
 **Short:** Do the compiler-visible changes first because the build finds them, then hunt the silent ones deliberately — lost starters and renamed properties.
 
 Sequence by failure mode rather than by module. First the loud half, because the build does the finding: bump the BOM, run the OpenRewrite recipes for relocations and renames, work through the JSpecify errors, and finish Jackson 3. Then the quiet half, which only surfaces because you go looking: diff the dependency tree for starters you lost transitively, run `spring-boot-properties-migrator` to catch renamed keys, and fix the tests that now fail at runtime because `@SpringBootTest` no longer provides `MockMvc`. The effort distribution surprises people — package relocations are the change everyone budgets for and the cheapest item on the list, because a tool does all of it, while JSpecify and the hunt for lost starters dominate and neither is automatable.
 
-**Q: You are on Boot 3.5 with a healthy service and no new-feature pressure. Make the case for not migrating yet.**
+**Q: You are on Boot 3.5 with a healthy service and no new-feature pressure. What is the case for not migrating yet?**
 **Short:** Wait when a critical starter has no Boot 4 build, you still run Undertow, or you have unresolved failed Batch v5 job instances.
 
-There are three good reasons and one bad one. Wait if a critical third-party starter has no Boot 4 build — forking it or hand-pinning transitives is worse than one quarter of patience. Wait if you depend on Undertow and cannot yet move to Tomcat 11 or Jetty, because that is a prerequisite rather than a migration step. Wait if you have unresolved failed Spring Batch v5 job instances, since they must be cleared first. And wait if a large Kotlin codebase's JSpecify review genuinely cannot fit this quarter, because suppressing it converts a bounded project into permanent debt. The bad reason to migrate is that four is bigger than three: Boot 3.5 is still supported today, so the real drivers are the support horizon and specific capabilities — Spring AI 2.0, native gRPC, the OpenTelemetry starter, JDK 25 and the AOT cache — not the version number.
+There are three good reasons and one bad one. Wait if a critical third-party starter has no Boot 4 build, because forking it or hand-pinning transitives is worse than one quarter of patience. Wait if you depend on Undertow and cannot yet move to Tomcat 11 or Jetty, because that is a prerequisite rather than a migration step. Wait if you have unresolved failed Spring Batch v5 job instances, since they must be cleared first. And wait if a large Kotlin codebase's JSpecify review genuinely cannot fit this quarter, because suppressing it converts a bounded project into permanent debt. The bad reason to migrate is that four is bigger than three: Boot 3.5 OSS support ended on June 30, 2026 but commercial support runs to June 30, 2032, so the real drivers are the support horizon and specific capabilities (Spring AI 2.0, native gRPC, the OpenTelemetry starter, JDK 25 and the AOT cache), not the version number.
 
 ---
 
@@ -926,8 +935,8 @@ There are three good reasons and one bad one. Wait if a critical third-party sta
    nullability, and this is the only moment anything will ever force you to answer it.
 
 9. **Go straight to 4.1, not 4.0.** 4.1 restores Spock support, adds
-   `spring-boot-starter-opentelemetry`, auto-configures gRPC, and propagates Micrometer context
-   to `@Async` automatically.
+   `spring-boot-starter-opentelemetry`, and auto-configures gRPC. Context propagation to
+   `@Async` still needs `spring.task.execution.propagate-context=true` (default `false`).
 
 10. **Verify Spring Cloud compatibility with an integration test, not a compatibility table.**
     Two official sources currently disagree, and a BOM mismatch fails at runtime rather than at

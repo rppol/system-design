@@ -19,7 +19,7 @@ Generative recommenders — TIGER (Google, 2023) and HSTU (Meta, 2024) are the t
 
 This module is the generative half of the recommender-systems module: it assumes the two-tower, DLRM, and SASRec material from `deep_learning_recommenders.md` as background and goes deep on what changes when items stop being atomic IDs — the RQ-VAE tokenizer, HSTU's modified attention, beam search as retrieval, and why this is the one place in classical recsys where LLM-style scaling laws start to apply.
 
-**Production adoption signal**: This is no longer a research-only idea. Meta reports HSTU running in production ranking and retrieval; Shopify has rebuilt its commerce recommendation engine on HSTU; Google's TIGER established the RQ-VAE-plus-decoder recipe on public benchmarks; and Snap has published its own production semantic-ID design (Section 7 gives the numbers for each). What every one of these deployments shares is caution about the migration path — none of them describes a clean-cut replacement of an existing retrieval stack, and Section 4.4 and Section 13 explain why that caution is structural, not just conservatism.
+**Production adoption signal**: This is no longer a research-only idea. Meta reports HSTU running in production ranking and retrieval; Shopify has rebuilt its commerce recommendation engine on HSTU; Google's TIGER established the RQ-VAE-plus-decoder recipe on public benchmarks; Snap has published its own production semantic-ID design; and Kuaishou's OneRec replaced the whole retrieve-then-rank cascade with one generative model for 25% of its main-feed traffic (Section 7 gives the numbers for each). Meta, Shopify and Snap ship generative retrieval beside the incumbent stack; OneRec is the one published full replacement, and it reached parity with the cascade before alignment produced the gains (Section 4.6). Section 4.4 and Section 13 explain why the additive path stays the default.
 
 **Scope of this module** relative to the parent:
 
@@ -115,11 +115,11 @@ Retrieval-as-decoding replaces the index with a generative model and beam search
 
 ### 4.4 The Hybrid: Generative Retrieval as an Additional Candidate Source
 
-Neither of the above is usually a day-one replacement. The strategy every production deployment in Section 7 actually follows is additive: ship generative retrieval as an *extra* candidate source merged alongside the incumbent two-tower's ANN output, not instead of it. The downstream ranker keeps seeing the familiar candidate mix it was trained on, plus a smaller injected fraction from the generative path; only after the ranker is retrained or fine-tuned on the blended distribution, and an online A/B test — not an offline recall number — confirms a real win, does a team consider narrowing or retiring the incumbent path (Sections 9, 10 Pitfall 3, and 13 all converge on this same migration shape).
+Neither of the above is usually a day-one replacement. The strategy most production deployments in Section 7 follow is additive: ship generative retrieval as an *extra* candidate source merged alongside the incumbent two-tower's ANN output, not instead of it. The downstream ranker keeps seeing the familiar candidate mix it was trained on, plus a smaller injected fraction from the generative path; only after the ranker is retrained or fine-tuned on the blended distribution, and an online A/B test, not an offline recall number, confirms a real win, does a team consider narrowing or retiring the incumbent path (Sections 9, 10 Pitfall 3, and 13 all converge on this same migration shape).
 
 ### 4.5 Operational Shape of the Hybrid
 
-Running the additive strategy in 4.4 in production means two retrieval paths coexist behind one merge step, and each has its own operational surface: the incumbent two-tower needs its ANN index rebuilt or incrementally updated as items change, while the generative path needs its tokenizer and decoder versioned together (Section 3) and its invalid-decode rate monitored (Section 10, Pitfall 5). The merge itself is typically a simple weighted union — take the incumbent's top candidates plus a smaller fixed count or percentage from the generative path — with the injection fraction itself treated as a tunable rollout knob, starting near zero in shadow mode and increasing only as each phase gate is cleared (Section 14 works through a concrete phased rollout). The one thing every one of these deployments avoids is a single switchover date: the hybrid is not a transitional state on the way to full replacement, it is frequently the durable end state, because the two paths cover different failure modes (stable catalogue depth vs. cold-start coverage) that neither one alone handles well.
+Running the additive strategy in 4.4 in production means two retrieval paths coexist behind one merge step, and each has its own operational surface: the incumbent two-tower needs its ANN index rebuilt or incrementally updated as items change, while the generative path needs its tokenizer and decoder versioned together (Section 3) and its invalid-decode rate monitored (Section 10, Pitfall 5). The merge itself is typically a simple weighted union (the incumbent's top candidates plus a smaller fixed count or percentage from the generative path), with the injection fraction itself treated as a tunable rollout knob, starting near zero in shadow mode and increasing only as each phase gate is cleared (Section 14 works through a concrete phased rollout). The one thing every one of these hybrid deployments avoids is a single switchover date: the hybrid is not a transitional state on the way to full replacement, it is frequently the durable end state, because the two paths cover different failure modes (stable catalogue depth vs. cold-start coverage) that neither one alone handles well.
 
 **One request, end to end, through the hybrid architecture**:
 
@@ -130,6 +130,34 @@ Running the additive strategy in 4.4 in production means two retrieval paths coe
 5. The two candidate lists are merged — the incumbent's full list plus the generative path's smaller injected fraction (Section 4.5 above).
 6. The merged list goes to the downstream ranker, which has been retrained or fine-tuned on exactly this blended distribution (Section 10, Pitfall 3).
 7. The ranker's top-K is what the user sees; both paths' contributions are logged separately so the generative path's own click-through can be measured (Section 12's A/B-fairness question).
+
+### 4.6 End-to-End Replacement: OneRec (Kuaishou)
+
+OneRec is the published case of a generative model replacing the cascade rather than feeding it.
+The first paper (arXiv:2502.18965, February 2025) unified retrieval and ranking in one
+encoder-decoder with sparse MoE layers and session-wise generation, aligned with DPO against a
+reward model. The OneRec Technical Report (arXiv:2506.13695, June 2025) describes the production
+system:
+
+- **Tokenizer**: RQ-Kmeans, residual K-means instead of a trained RQ-VAE, 3 levels of 8,192 codes.
+  Item inputs are captions, tags, ASR and OCR text, the cover image and 5 sampled frames, encoded by
+  a multimodal LLM and compressed to 4 tokens per video. An item-to-item contrastive loss over
+  co-engaged pairs puts collaborative signal into the codes, not only content similarity.
+- **Encoder**: four user pathways: static profile, the last 20 interactions, 256 high-engagement
+  interactions, and a lifelong history of up to 100,000 videos compressed by hierarchical
+  clustering to 128 query tokens.
+- **Decoder**: MoE, generating each item as a BOS token plus 3 semantic-ID tokens. Variants range
+  from 0.015B dense to 2.633B MoE (24 experts, 4 active).
+- **Post-training**: reinforcement learning with ECPO (Early Clipped GRPO), which clips the policy
+  ratio for negative-advantage samples and drops the KL term. Rewards: a learned personalized
+  preference score (P-Score), a format reward for IDs that map to real items, and industrial
+  rewards (one cut viral-content exposure by 9.59%).
+- **Serving**: 512 items generated per request on NVIDIA L20 GPUs with TensorRT, followed by an
+  optional reward-model selection step.
+
+The report states that over 50% of the cascade's serving resources went to communication and
+storage between stages rather than model computation; collapsing it to one model is what lets OneRec run 10x the model FLOPs at
+10.6% of the cascade's operating cost (Section 6).
 
 ---
 
@@ -293,6 +321,43 @@ exact number Section 6 derives — while the RQ-VAE codebook line is flat at 24,
 regardless of catalogue size, because the codebooks are shared across every item. A per-item
 integer ID table still grows with catalogue size in the generative design, but integers are far
 cheaper than a 32-float embedding row per item.
+
+### 5.5 Cascade vs OneRec End-to-End Generation
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    subgraph cascade["Cascade: separate models, separate objectives"]
+        u1(["Request"]) --> ret["Retrieval<br/>several sources"]
+        ret --> pre["Pre-rank"]
+        pre --> rk["Rank"]
+        rk --> rr["Re-rank"]
+        rr --> o1(["Feed"])
+    end
+
+    subgraph onerec["OneRec: one encoder-decoder"]
+        u2(["Request"]) --> enc["Encoder<br/>4 user pathways"]
+        enc --> dec["MoE decoder<br/>BOS + 3 semantic IDs"]
+        dec --> gen(["512 generated items"])
+        gen --> sel["Reward-model<br/>selection"]
+        sel --> o2(["Feed"])
+        rm["Reward system<br/>P-Score, format, industrial"] -. "ECPO post-training" .-> dec
+    end
+
+    class u1,u2,o1,o2,gen io
+    class ret,pre,rk,rr,enc,dec train
+    class sel mathOp
+    class rm lossN
+```
+
+Each cascade stage is trained on its own objective and only sees what the stage before it passed
+on. OneRec generates the final list from one model and feeds the same reward signal back into that
+model through RL, so there is no stage boundary for objectives to drift across.
 
 ---
 
@@ -499,6 +564,77 @@ for each new collision. `detokenize` above returns `None` on an ID with no entry
 candidate and falls through to the next-ranked one, exactly the failure mode Section 10 Pitfall 1
 covers at scale.
 
+### RQ-Kmeans: the OneRec Tokenizer
+
+OneRec replaces the trained RQ-VAE with residual K-means: no encoder, no decoder, no straight-through
+gradient, just K-means fit on whatever residual the previous level left.
+
+```python
+from __future__ import annotations
+
+import numpy as np
+
+
+def kmeans(x: np.ndarray, k: int, iters: int = 20, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    centroids = x[rng.choice(len(x), size=k, replace=False)].copy()
+    for _ in range(iters):
+        d = (x**2).sum(1, keepdims=True) - 2 * x @ centroids.T + (centroids**2).sum(1)
+        assign = d.argmin(1)
+        for j in range(k):
+            members = x[assign == j]
+            if len(members):
+                centroids[j] = members.mean(0)
+    return centroids
+
+
+def fit_rq_kmeans(emb: np.ndarray, n_levels: int, k: int) -> list[np.ndarray]:
+    """Residual K-means: each level clusters what the previous levels left unexplained."""
+    codebooks, residual = [], emb.copy()
+    for level in range(n_levels):
+        c = kmeans(residual, k, seed=level)
+        ids = ((residual[:, None, :] - c[None]) ** 2).sum(-1).argmin(1)
+        residual = residual - c[ids]
+        codebooks.append(c)
+    return codebooks
+
+
+def encode(emb: np.ndarray, codebooks: list[np.ndarray]) -> np.ndarray:
+    residual, out = emb.copy(), []
+    for c in codebooks:
+        ids = ((residual[:, None, :] - c[None]) ** 2).sum(-1).argmin(1)
+        residual = residual - c[ids]
+        out.append(ids)
+    return np.stack(out, axis=1)  # (n_items, n_levels) semantic IDs
+
+
+items = np.random.default_rng(1).normal(size=(5000, 32)).astype(np.float32)
+sids = encode(items, fit_rq_kmeans(items, n_levels=3, k=64))
+# every level uses all 64 codes; 4,947 of 5,000 items get a unique 3-token ID
+```
+
+K-means assigns every point to its nearest centroid and moves each centroid to its members' mean, so
+centroids follow the data and an empty cluster can be re-seeded directly, while an RQ-VAE codebook
+entry goes dead when the encoder stops routing to it and no gradient brings it back.
+The OneRec report measures this at 3 levels of 8,192 codes: reconstruction loss 0.0410 against
+0.0548 for RQ-VAE (25% lower), codebook utilization 1.0 at every level against 0.9963 and 0.9958 at
+RQ-VAE's levels 2 and 3, and higher token entropy at every level. The 53 collisions in the toy run
+above are what the uniqueness token, or a wider last level, exists for.
+
+**Decoding OneRec's serving economics.** The report's numbers, cascade against OneRec:
+
+| Quantity | Cascade | OneRec |
+|----------|---------|--------|
+| Training MFU on flagship GPUs | 4.6% | 23.7% (5.2x) |
+| Inference MFU | 11.2% | 28.8% (2.6x) |
+| Model FLOPs per request | 1x | 10x |
+| Operating cost (OPEX) | 100% | 10.6% |
+| Items produced per request | multi-stage funnel | 512 generated, then reward-model selection |
+
+The cascade is cheap per FLOP but spends over half its serving resources moving features and
+candidates between stages. One dense encoder-decoder pass keeps GPUs busy with matrix math, so 10x
+the FLOPs still costs about a tenth as much to run.
+
 ---
 
 ## 7. Real-World Examples
@@ -511,6 +647,8 @@ covers at scale.
 
 **Snapchat semantic IDs**: Snap published its production semantic-ID design for content recommendation, building on TIGER and RQ-VAE: a 3-level residual codebook (widths 1024/512/256, giving a theoretical ~134M-ID space) over multimodal video-text embeddings, extended with a Personalized-PageRank co-engagement contrastive loss so frequently co-engaged videos cluster in ID space rather than relying on content similarity alone. Snap reported 49.1% code utilization and 32.1% of videos receiving unique semantic IDs after this supervision, materializing generated IDs to videos via a lookup table rather than real-time retrieval. Source: [arXiv:2607.28895](https://arxiv.org/html/2607.28895).
 
+**Kuaishou OneRec**: OneRec (arXiv:2502.18965, February 2025; OneRec Technical Report, arXiv:2506.13695, June 2025) is an encoder-decoder generative recommender with an MoE decoder, RQ-Kmeans semantic IDs (3 levels of 8,192 codes) and RL post-training with ECPO, deployed as an end-to-end replacement of the retrieve-then-rank cascade. It handles about 25% of total QPS in the Kuaishou and Kuaishou Lite apps, with App Stay Time +0.54% and +1.24% and Watch Time +1.98% and +3.28% respectively, at 10.6% of the cascade's operating cost. The pure generative model without reward-model selection reported only +0.01% and +0.06% Stay Time, so the first milestone was parity, and preference alignment produced the measured gains. In Kuaishou's Local Life Service it serves 100% of traffic, with GMV +21.01% and orders +17.89%. Source: [OneRec Technical Report (arXiv:2506.13695)](https://arxiv.org/abs/2506.13695).
+
 ### Production Numbers At a Glance
 
 | Company | Architecture | Headline reported number |
@@ -519,8 +657,9 @@ covers at scale.
 | Shopify | HSTU | +0.94% Shop orders, +5% high-quality CTR, +0.71% conversion, +4.8% served-product recall@2, 7.3x training-pipeline speedup |
 | Google | TIGER (RQ-VAE + seq2seq) | Up to 29% NDCG@5 improvement over SASRec on Amazon Beauty; 21% NDCG@5 / 15% NDCG@10 on Amazon Toys and Games |
 | Snap | Semantic IDs (RQ-VAE + PPR co-engagement loss) | 49.1% code utilization; 32.1% of videos assigned unique semantic IDs |
+| Kuaishou | OneRec (RQ-Kmeans + MoE encoder-decoder + ECPO) | 25% of QPS; Stay Time +0.54% / +1.24%; OPEX 10.6% of cascade; MFU 23.7% train / 28.8% inference |
 
-Every number above is specific to its own benchmark or production surface — they are not directly comparable across rows — but the pattern across all four is the same one Section 3 predicts: validation loss or ranking quality keeps improving as capacity or supervision increases, rather than saturating the way a per-item embedding table does.
+Every number above is specific to its own benchmark or production surface (they are not directly comparable across rows), but the pattern across all five is the same one Section 3 predicts: validation loss or ranking quality keeps improving as capacity or supervision increases, rather than saturating the way a per-item embedding table does.
 
 ---
 
@@ -534,6 +673,16 @@ Every number above is specific to its own benchmark or production surface — th
 | Interpretability | A dot product in an opaque embedding space | An ID prefix is a legible semantic cluster — two items sharing a prefix are cluster-mates by construction |
 | Scaling behavior | More parameters mostly means a wider per-item embedding row; benefit saturates | Shared vocabulary means more model capacity improves the fit for the whole catalogue at once (Section 3, Shopify's validation-loss result) |
 | Migration cost | N/A (incumbent) | Incremental: ship as an added candidate source beside the existing tower before replacing it (Section 13) |
+
+### Additive Hybrid vs End-to-End Replacement
+
+| Dimension | Additive candidate source (Meta, Shopify, Snap) | End-to-end replacement (OneRec) |
+|-----------|--------------------------------------------------|-----------------------------------|
+| What changes in serving | One more retrieval path merged before the existing ranker | Retrieval, pre-rank and rank collapse into one generator plus a reward-model selection pass |
+| Rollback | Drop the injected fraction to zero | Route traffic back to the cascade, which must stay deployed and fed during the ramp |
+| Objective alignment | Each stage still trains on its own objective | One model, with rewards fed back through RL (ECPO) |
+| Compute profile | Adds decode cost on top of the cascade | 10x model FLOPs at 10.6% of cascade OPEX, from far higher MFU |
+| Main risk | Ranker trained on the old candidate mix (Pitfall 3) | Generative model alone only matching the cascade; gains depend on the reward system (Pitfall 7) |
 
 ### Migration Risk — What Breaks When Each Piece Changes
 
@@ -567,6 +716,7 @@ Recall gains from widening the beam taper off well before latency does — the m
 - You can afford sequential decode latency per request rather than a sub-5ms ANN lookup
 - You have (or can generate) good content embeddings to tokenize, and enough interaction volume to train the sequence decoder well
 - You want retrieval and ranking's roles to converge into a shared, scalable sequence model rather than maintaining two separately-trained systems
+- Consider a OneRec-style end-to-end replacement only when the cascade's serving cost is dominated by inter-stage communication and storage, you can build a reward system (learned preference score plus business rewards) for RL post-training, and you can run the cascade in parallel through a traffic ramp
 
 **Do NOT use generative retrieval to replace a well-tuned ranker when:**
 - The catalogue is small and stable (tens of thousands of items, low churn) — a mature two-tower or DLRM ranker will already be well-calibrated and an ANN index is cheaper to operate than a tokenizer-plus-decoder pipeline
@@ -603,6 +753,8 @@ Recall gains from widening the beam taper off well before latency does — the m
 
 **Pitfall 6 — Evaluating against ground truth logged by the incumbent retriever**: A team measured recall@100 for a new generative retriever against "ground truth" positives drawn from click logs — but those logs were generated by users who could only click on what the incumbent two-tower + ANN system had surfaced to them in the first place. Items the generative retriever newly surfaced, which the old ANN system structurally could never have shown, had no chance of appearing as a logged positive, so the metric was mechanically biased toward crediting only the overlap between the two systems and blind to the generative retriever's actual novel contribution. The offline number looked like a wash; the team nearly shelved the project on a metric that could not, by construction, see its main advantage. **Fix**: pair offline recall against historical logs with either an online interleaving experiment or a full A/B test where the generative retriever gets its own exposure, so its novel candidates get a real chance to be clicked and counted — never trust an offline metric whose ground truth was generated exclusively by the system being replaced.
 
+**Pitfall 7 - Expecting the end-to-end generator alone to beat the cascade**: Kuaishou's OneRec Technical Report gives the reference numbers. With generation alone, OneRec moved App Stay Time by +0.01% on Kuaishou and +0.06% on Kuaishou Lite, a statistical tie with a cascade that years of tuning had built. The significant gains (+0.54% and +1.24%) arrived only with the reward-model selection step over the 512 generated items and RL post-training against a preference reward. A team that ramps a generative replacement and judges it on the SFT model alone will either cancel a project that is on track, or ship parity and call it a win. **Fix**: set parity with the cascade as the first gate, budget the reward system (learned preference score, format reward for valid IDs, business rewards) as part of the project rather than a follow-up, and keep the cascade serving through the ramp.
+
 ### Pitfall Summary — Signal to Watch, Fix in One Line
 
 | # | Pitfall | Signal that catches it | Fix in one line |
@@ -613,6 +765,7 @@ Recall gains from widening the beam taper off well before latency does — the m
 | 4 | No uniqueness token | A listing silently disappears from retrieval | Always append a learned-free collision counter token |
 | 5 | Unmonitored invalid decodes | Invalid-decode rate never instrumented | Log and alert on the `detokenize`-failure fraction |
 | 6 | Ground-truth-logged-by-incumbent bias | Offline recall flat despite a real online win | Give new candidates real exposure via interleaving or A/B |
+| 7 | Judging an end-to-end generator before alignment | Online metrics flat at parity with the cascade | Gate on parity first; build the reward system and RL post-training in scope |
 
 ---
 
@@ -650,6 +803,11 @@ A semantic ID's addressable space (`codebook_size^n_levels`) can still be smalle
 
 The RQ-VAE is trained to quantize embeddings from one specific content-embedding model; if that upstream encoder is retrained or replaced and the RQ-VAE is not retrained alongside it, every existing semantic ID is computed against embeddings that no longer match the space the codebooks were fit to, and IDs silently stop corresponding to meaningful clusters. Treat the tokenizer and its upstream encoder as one versioned artifact — bump both together, re-tokenize the full catalogue, and invalidate the old ID-to-item lookup on either one's release — rather than versioning them independently. The practical trigger to build is an alert on the encoder's own retraining event, because the tokenizer's own metrics can look normal for weeks while drift accumulates underneath it.
 
+**Q: Why did OneRec's generative model alone only tie the cascade it replaced?**
+**Short:** Supervised next-item generation imitates what the cascade already served; OneRec's online gains came from reward-model selection and RL post-training.
+
+Trained only to predict logged next items, a generator learns the distribution the cascade already produced, so parity is the expected result. Kuaishou's OneRec Technical Report shows exactly that: the pure generative model moved App Stay Time +0.01% and +0.06% on its two apps, while the version with a reward-model selection pass over 512 generated items reached +0.54% and +1.24%. RL post-training with ECPO pushes the generator toward a learned preference score (P-Score), a format reward that penalizes IDs mapping to no real item, and business rewards, which is the signal imitation alone cannot supply. The practical rule: gate the first ramp on parity, and scope the reward system into the project from the start.
+
 **Q: How do you A/B a generative retriever against an incumbent two-tower fairly?**
 **Short:** Give the new candidates real exposure online — an offline metric against old logs cannot credit them.
 
@@ -679,6 +837,11 @@ A semantic ID is the tuple of codebook indices an RQ-VAE assigns to an item's co
 **Short:** RQ-VAE chains several small codebooks over successive residuals instead of one large codebook in one shot.
 
 A plain VQ-VAE quantizes an embedding against a single codebook in one step, so distinguishing a large catalogue requires a codebook as large as the catalogue itself, which defeats the point of compression. RQ-VAE instead applies several small codebooks in sequence: quantize against codebook 0, subtract that codebook entry to get a residual, quantize the residual against codebook 1, and repeat — each level explains only what the previous level missed. The residual step is what turns three small codebooks into a combinatorial address space (3 levels of 256 gives 256^3 ~= 16.7M IDs from just 768 codebook rows) instead of three redundant approximations of the same vector, and it is also what makes the ID hierarchical: early tokens are coarse clusters, later tokens are fine distinctions within them.
+
+**Q: How does OneRec's RQ-Kmeans tokenizer differ from TIGER's RQ-VAE?**
+**Short:** RQ-Kmeans fits plain K-means on each level's residual with no learned encoder, which in OneRec's report gave 25% lower reconstruction loss and full codebook use.
+
+Both are residual quantizers: each level encodes what the levels before it left unexplained. RQ-VAE learns an encoder, decoder and codebooks jointly with a straight-through gradient and a commitment loss, and codebook entries can go unused when the encoder stops routing to them. RQ-Kmeans skips the network: fit K-means on the item embeddings, subtract each item's centroid, fit K-means on the residual, repeat. Each centroid is the mean of the points assigned to it, so codes follow the data density and an empty one can be re-seeded directly, with no gradient involved. At 3 levels of 8,192 codes, OneRec measured reconstruction loss 0.0410 against 0.0548 for RQ-VAE, utilization 1.0 at all levels, and higher token entropy per level. OneRec also builds the item embedding with a contrastive loss over co-engaged item pairs, so the codes carry collaborative signal and not only content similarity.
 
 **Q: Why does generative retrieval use residual quantization instead of one large flat codebook sized to the catalogue?**
 **Short:** A flat codebook must grow with catalogue size; residual quantization keeps the vocabulary small and shared.
@@ -714,6 +877,11 @@ The moment a new item's content embedding is computed — from its title, descri
 **Short:** Add generative retrieval as an extra candidate source beside the two-tower before ever replacing it.
 
 Train the RQ-VAE tokenizer on item content embeddings and the sequence decoder on existing interaction logs, then deploy it as an *additional* candidate source merged with the incumbent two-tower's ANN output, not a replacement — the ranker keeps seeing the same familiar candidate mix plus a smaller injected fraction from generative retrieval. Validate offline recall lift, then run an online A/B test measuring engagement, not just recall, because generative retrieval shifts the candidate distribution the ranker was trained on (Section 10 Pitfall 3) and that shift only shows up online. Only after the ranker has been retrained or fine-tuned on the blended distribution, and the online metric confirms a real win, consider narrowing or retiring the two-tower path.
+
+**Q: How did Kuaishou's OneRec replace the retrieve-then-rank cascade, and why is it cheaper to run?**
+**Short:** One encoder-decoder generates the feed as semantic IDs and a reward model selects from 512 outputs; higher GPU utilization gave 10x the FLOPs at 10.6% of cascade OPEX.
+
+The encoder reads four user pathways (profile, last 20 interactions, 256 high-engagement interactions, and up to 100,000 lifelong videos compressed to 128 tokens); an MoE decoder emits each item as 3 semantic-ID tokens. The cascade ran ranking models at 4.6% training and 11.2% inference MFU and spent over half its serving resources on communication and storage between stages. One large model pass reached 23.7% and 28.8% MFU, so 10x the model FLOPs ran at 10.6% of the cascade's operating cost. It serves about 25% of QPS in the Kuaishou apps and 100% of Local Life Service traffic. The cascade stays deployed through the ramp as the rollback path, which is the part of the additive strategy a full replacement keeps.
 
 **Q: When is a two-tower plus ANN simply the right answer in 2026, rather than a generative retriever?**
 **Short:** When the catalogue is small, stable, and latency-sensitive — the classical stack is cheaper to build and operate.

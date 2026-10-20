@@ -24,7 +24,7 @@ For using eval sets as pass or fail gates in a release pipeline, see [Evaluation
 
 ## 3. Core Principles
 
-- **No single benchmark captures everything**: MMLU measures knowledge; HumanEval measures coding; TruthfulQA measures honesty. No benchmark measures all.
+- **No single benchmark captures everything**: MMLU measures knowledge; HumanEval measures coding; TruthfulQA measures honesty; SimpleQA measures whether a model answers short factual questions correctly or abstains. No benchmark measures all.
 - **Benchmark contamination is pervasive**: If a model trains on data containing benchmark answers, scores are inflated. New benchmarks become contaminated within months.
 - **Human evaluation is gold but expensive**: Human judgments are the ground truth but don't scale.
 - **LLM-as-judge is useful but biased**: a strong model can judge responses but carries systematic biases (position, verbosity, self-preference — all measured in Zheng et al. 2023, arXiv 2306.05685).
@@ -94,6 +94,49 @@ expert baseline since 2024, so check a live leaderboard before quoting a "SOTA"
 Requires multi-step reasoning, spatial understanding, logical deduction
 Current SOTA: ~90%+ with CoT
 ```
+
+**SimpleQA (short-form factuality)**:
+```
+4,326 fact-seeking questions, each with one indisputable, time-stable answer
+  (Wei et al., OpenAI, arXiv 2411.04368, November 2024)
+Collected adversarially: a question was kept only if at least one of four
+  model completions (mostly GPT-4) got it wrong
+Two independent trainers agreed on every answer; a third trainer's re-check of
+  1,000 questions put the label error rate at about 3%
+
+Grader (a prompted LLM) puts every answer in ONE of three buckets:
+  correct | incorrect | not attempted ("I don't know" or a hedge with no answer)
+
+Metrics:
+  overall correct         = correct / all questions
+  correct given attempted = correct / (correct + incorrect)
+  F-score                 = harmonic mean of the two
+
+Paper results (%):        correct  not attempted  incorrect  F-score
+  o1-preview                42.7        9.2          48.1      44.8
+  GPT-4o                    38.2        1.0          60.8      38.4
+  Claude-3.5-sonnet         28.9       35.0          36.1      35.0
+  GPT-4o-mini                8.6        0.9          90.5       8.6
+
+SimpleQA Verified (Haas et al., Google DeepMind, arXiv 2509.07968, Sept 2025):
+  1,000-prompt subset, de-duplicated, topic-balanced, labels reconciled
+  against sources, with a revised autorater prompt.
+  Gemini 2.5 Pro F1 = 55.6 at release
+```
+
+What SimpleQA measures that MMLU does not: whether the model *knows that it
+does not know*. Claude-3.5-sonnet answered about 10 points fewer questions
+correctly than GPT-4o but declined 35% of them, so it made 36.1% wrong claims
+against GPT-4o's 60.8%, and the two F-scores land within 3.4 points. A
+product that pays more for a wrong answer than for a refusal should read the
+incorrect column, not overall correct. The paper also asked each model the
+same question 100 times: answer frequency tracked accuracy, so self-consistency
+is a usable confidence signal, while stated confidence ran consistently above
+real accuracy.
+
+What it does not measure: long-form factuality (a 500-word answer with one
+wrong date), retrieval-grounded answers (run it with search and it becomes a
+search-quality benchmark), or facts after its December 31, 2023 cutoff.
 
 ### 4.2 Code Evaluation
 
@@ -1468,6 +1511,7 @@ labels are ordinal (1-5 rubric scores) rather than categorical.
 7. **Treating LLM evaluation as deterministic**: Same prompt with temperature=0 can still vary across runs due to floating-point non-associativity, GPU batching differences, and provider-side model updates. *Illustrative:* a team's "deterministic" suite swings several points on the same unchanged model across consecutive runs, and launch decisions get made on that noise. Mitigation: run each evaluation 3-5 times, report mean and 95% confidence intervals, and only flag changes that exceed the confidence interval.
 8. **Trusting single-run LLM-as-judge scores**: Judges are not self-consistent — Zheng et al. 2023 measured GPT-4 returning the same pairwise verdict after a position swap only 65% of the time, so a single run's score carries real variance. *Illustrative:* an "improved" prompt turns out to be indistinguishable from the baseline once the judge evaluation is repeated three times. Mitigation: use majority voting with 3+ independent judge evaluations per sample, and report the agreement rate alongside quality scores. If inter-judge agreement is low, the evaluation rubric needs refinement, not more samples.
 9. **Ignoring evaluation prompt sensitivity**: Rewording an LLM-as-judge prompt shifts aggregate scores even when model, test set and judge are unchanged — the rubric wording is part of the metric. *Illustrative:* "Rate the helpfulness of this response" versus "How helpful is this response?" moving a mean rubric score by a few tenths of a point. Best practice: version-lock evaluation prompts, judge models, and all parameters (temperature, max_tokens, system prompt). Treat evaluation infrastructure as production code with the same rigor around versioning, testing, and change management.
+10. **Reading a factuality score as one number**: On SimpleQA, "overall correct" rewards guessing and "correct given attempted" rewards refusing everything except the easiest questions. A model that answers 38.2% correctly with 60.8% wrong and one that answers 28.9% correctly with 36.1% wrong are different products. Report correct, incorrect and not-attempted together, and weight incorrect by the real cost of a confident wrong answer in your application.
 
 ---
 
@@ -1505,6 +1549,14 @@ A: Because temperature=0 does not make LLM inference deterministic — floating-
 **Q: Model A scores 71% and model B 67% on GPQA Diamond — is A actually better?**
 **Short:** A 4-point GPQA Diamond gap sits inside the noise on 198 questions unless the paired per-question correlation shrinks the interval enough to be significant.
 A: Not from those two numbers alone — GPQA Diamond has only 198 questions, so each score carries about 3.3 points of standard error and a 4-point gap sits inside the noise. Concretely, `SE = sqrt(0.70 x 0.30 / 198) = 0.033`, the 95% interval on a single score is roughly plus or minus 6.4 points, and the unpaired difference of two such scores has a 95% interval of about 9 points. The gap becomes decidable only if you keep the per-question results: because both models answered the same 198 questions, the paired standard error is `sqrt(SE_A^2 + SE_B^2 - 2 SE_A SE_B Corr)`, which at a plausible per-question correlation of 0.9 shrinks the interval to about 2.9 points and makes the 4-point lead significant. Two further corrections: clustered questions (MMLU's 57 subjects, several questions per passage) inflate the true standard error well above the naive one, and small suites like MT-Bench's 80 prompts are noisier still. Ask for `n`, the standard error, and the pairwise correlation before believing any leaderboard delta.
+
+**Q: On SimpleQA, GPT-4o answers 38.2% correctly and Claude-3.5-sonnet 28.9%. Is GPT-4o the more factual model?**
+**Short:** Not by that column: Claude-3.5-sonnet abstained on 35% and made 36.1% wrong claims to GPT-4o's 60.8%, so overall-correct rewards guessing.
+A: Not on that number alone. SimpleQA grades each answer as correct, incorrect or not attempted, and overall-correct counts abstentions as failures, so a model that guesses on everything is never penalised for being wrong. In the paper's table GPT-4o abstained on 1.0% of the 4,326 questions and was wrong on 60.8%; Claude-3.5-sonnet abstained on 35.0% and was wrong on 36.1%. Its correct-given-attempted was 44.5% against GPT-4o's 38.6%, and the F-scores (harmonic mean of the two) were 35.0 and 38.4. Which model is better depends on what a confident wrong answer costs you: for a medical or legal assistant the incorrect column is the one that matters, for trivia autocomplete it is overall-correct. Report all three columns, and note that the F-score itself still rewards guessing once a model is at least 50% confident.
+
+**Q: What does SimpleQA measure, and why is it built from questions that GPT-4 got wrong?**
+**Short:** It measures short-form factual recall plus abstention on 4,326 single-answer questions, kept only if a GPT-4-era model missed them, so it stays unsaturated.
+A: SimpleQA (Wei et al., OpenAI, November 2024) is 4,326 fact-seeking questions with one indisputable, time-stable answer, each agreed by two independent trainers; a third trainer's re-check of 1,000 questions estimated a 3% label error rate. A question stayed in only if at least one of four model completions, mostly GPT-4, answered it wrong, so the set starts hard: no model in the paper passed 50% correct. A prompted LLM grader buckets each answer as correct, incorrect or not attempted, which makes it a test of calibration as well as recall. The design choices limit what it covers: it says nothing about long-form factuality, nothing about retrieval-grounded answers (with search enabled it measures the search stack), and nothing past its December 31, 2023 cutoff. Google DeepMind's SimpleQA Verified (September 2025) trims it to 1,000 de-duplicated, topic-balanced prompts with reconciled labels, and is the version to quote when comparing frontier models.
 
 **Q: Why can an aggregate A/B test metric hide a real regression?**
 **Short:** An aggregate A/B metric can average a real regression in one category against a gain in another, so LLM tests must report stratified per-category win rates.

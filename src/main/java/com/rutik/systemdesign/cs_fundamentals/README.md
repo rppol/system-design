@@ -4,8 +4,8 @@ The language-agnostic computer-science spine that every senior-engineer intervie
 
 > **No runtime application** — all content is Markdown with executable-shaped Python / pseudocode blocks.
 
-> **Audited and complete (2026-08-04).** The factual audit covered all 24 modules and all 26
-> `dsa_patterns/` files — roughly 2,500 claims verified and ~170 code blocks hand-executed —
+> **Audited and complete (2026-08-04).** The factual audit covered the 24 modules and 26
+> `dsa_patterns/` files that existed on that date — roughly 2,500 claims verified and ~170 code blocks hand-executed —
 > and every one of the section's **704 quiz Q&As carries an authored `**Short:**` MCQ
 > summary**. The 6 case studies were audited twice, the second pass by executing every code
 > block. Details, including what the audit found and where this section's defects
@@ -90,7 +90,9 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 | 22 | [discrete_math_for_engineers](discrete_math_for_engineers/discrete_math_for_engineers.md) | 1 — Complexity & Computation | Intermediate | Propositional/predicate logic, sets/relations/functions, induction & strong induction, combinatorics, recurrences (Master Theorem), probability (linearity of expectation), modular arithmetic |
 | 23 | [theory_of_computation](theory_of_computation/theory_of_computation.md) | 5 — Systems & Security | Advanced | Finite automata (DFA/NFA), regular languages & the pumping lemma, CFG/PDA, Turing machines, the halting problem, P vs NP, NP-completeness (Cook-Levin, SAT) |
 | 24 | [information_theory_and_compression](information_theory_and_compression/information_theory_and_compression.md) | 5 — Systems & Security | Advanced | Entropy and self-information, source and channel coding theorems, KL/cross-entropy, Kolmogorov complexity, entropy/dictionary/transform/lossy coding, erasure coding |
-| 24 | [how_code_runs_compilers_and_interpreters](how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md) | 5 — Systems & Security | Advanced | Lexer/parser/AST, symbol tables, IR & optimization, codegen, compiler vs interpreter, JIT vs AOT, linker/loader, ELF |
+| 25 | [how_code_runs_compilers_and_interpreters](how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md) | 5 — Systems & Security | Advanced | Lexer/parser/AST, symbol tables, IR & optimization, codegen, compiler vs interpreter, JIT vs AOT, linker/loader, ELF |
+| 26 | [probabilistic_and_streaming_structures](probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | 2 — Data Structures | Advanced | Bloom, cuckoo and quotient filters, Count-Min Sketch, HyperLogLog, MinHash, reservoir sampling (Algorithm R), consistent and rendezvous (HRW) hashing, sketch merging and seed mismatch |
+| 27 | [memory_models_and_concurrency_theory](memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | 4 — Operating Systems | Advanced | Compiler and CPU reordering, happens-before, DRF-SC, TSO vs ARM/POWER, store-buffer litmus test, release/acquire publication, linearizability vs sequential consistency, progress guarantees, consensus numbers, ABA |
 
 ---
 
@@ -107,12 +109,12 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     p1("Phase 1 - Complexity and Computation Foundations<br/>complexity_analysis_and_big_o, discrete_math_for_engineers<br/>number_systems_and_bit_manipulation<br/>character_encoding_deep_dive<br/>recursion_and_problem_solving_patterns")
-    p2("Phase 2 - Data Structures, builds on Phase 1 vocabulary<br/>arrays_strings_and_hashing, linked_lists_stacks_and_queues<br/>trees_and_binary_search_trees, heaps_and_priority_queues<br/>graphs_tries_and_advanced_structures")
+    p2("Phase 2 - Data Structures, builds on Phase 1 vocabulary<br/>arrays_strings_and_hashing, linked_lists_stacks_and_queues<br/>trees_and_binary_search_trees, heaps_and_priority_queues<br/>graphs_tries_and_advanced_structures<br/>probabilistic_and_streaming_structures")
     p3("Phase 3 - Algorithms, builds on Phase 2 structures<br/>sorting_and_searching, dynamic_programming<br/>greedy_and_divide_and_conquer<br/>graph_and_string_algorithms")
-    p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>deadlocks_and_synchronization")
-    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>theory_of_computation<br/>how_code_runs_compilers_and_interpreters")
+    p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>deadlocks_and_synchronization<br/>memory_models_and_concurrency_theory")
+    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>theory_of_computation<br/>information_theory_and_compression<br/>how_code_runs_compilers_and_interpreters")
     cs("Case Studies, all phases<br/>design_lru_cache, top_k_and_streaming_problems<br/>dynamic_programming_patterns, graph_traversal_and_shortest_path<br/>autocomplete_and_string_search, interval_and_scheduling_problems")
-    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/dsa_patterns.md - recognition engine:<br/>decision tree + cue-pattern table<br/>25 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - the problem-list canon")
+    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/dsa_patterns.md - recognition engine:<br/>decision tree + cue-pattern table<br/>26 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - the problem-list canon")
 
     p1 --> p2 --> p3
     p3 --> p4
@@ -242,9 +244,9 @@ information_theory_and_compression
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 24 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Senior** level filter (Full is the default).
+This section is exhaustive by design — 27 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Senior** level filter (Full is the default).
 
-### Full Path (24 modules + DSA pattern playbooks)
+### Full Path (27 modules + DSA pattern playbooks)
 
 The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped. In the game's Study path the DSA pattern playbooks topic (`dsa_patterns`) follows Phase 3 (right after Graph & String Algorithms), where the recognition engine over Phases 1–3 becomes useful.
 
@@ -285,7 +287,7 @@ A ruthless cut to what a **senior software engineering interview** actually prob
 | Trees, Heaps & Graph Structures | BST invariants, heap extract-min/max, and graph representation tradeoffs are the second-most-probed structure family; trie and union-find variants separate senior from mid candidates |
 | Core Algorithms | Sorting/searching complexity and the DP-vs-greedy fork are asked directly ("why quicksort over merge sort", "DP or greedy here") more than almost any other algorithmic decision |
 | Graph & String Algorithms | BFS/Dijkstra/topological sort anchor "design a route or dependency system" prompts; KMP/Rabin-Karp separate candidates who can only brute-force string matching from those who know the O(n+m) trick |
-| DSA Pattern Recognition | The recognition engine over Phases 1–3: cue→pattern tables and 25 playbooks are the coding-round strategy layer |
+| DSA Pattern Recognition | The recognition engine over Phases 1–3: cue→pattern tables and 26 playbooks are the coding-round strategy layer |
 | Operating Systems Core | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops |
 
 ---
@@ -399,9 +401,10 @@ The full description, templates, and problem banks live in [dsa_patterns/dsa_pat
 
 | File | Purpose |
 |------|---------|
-| [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) | Master recognition engine: UMPIRE method, constraints→complexity table, cue→pattern table, decision tree, complexity cheat sheet, pattern index (25 patterns) |
+| [dsa_patterns/dsa_patterns.md](dsa_patterns/dsa_patterns.md) | Master recognition engine: UMPIRE method, constraints→complexity table, cue→pattern table, decision tree, complexity cheat sheet, pattern index (26 patterns) |
 | [dsa_patterns/interview_execution_playbook.md](dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
 | [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) | The problem-list canon mapped to patterns — which list to work at which stage, with LeetCode links and a suggested order |
+| [dsa_patterns/ai_assisted_round_playbook.md](dsa_patterns/ai_assisted_round_playbook.md) | The AI-assisted coding round: what the format grades, how to drive the assistant, and how to verify its output |
 | [dsa_patterns/two_pointers.md](dsa_patterns/two_pointers.md) | Two-pointer template, 3Sum walkthrough, 12+ problems |
 | [dsa_patterns/sliding_window.md](dsa_patterns/sliding_window.md) | Fixed and variable window templates, Minimum Window Substring walkthrough |
 | [dsa_patterns/fast_and_slow_pointers.md](dsa_patterns/fast_and_slow_pointers.md) | Floyd cycle detection, linked list patterns |
@@ -427,6 +430,7 @@ The full description, templates, and problem banks live in [dsa_patterns/dsa_pat
 | [dsa_patterns/greedy.md](dsa_patterns/greedy.md) | Exchange argument, interval scheduling, jump game |
 | [dsa_patterns/bit_manipulation.md](dsa_patterns/bit_manipulation.md) | XOR tricks, bitmask enumeration, set-bit counting |
 | [dsa_patterns/matrix_traversal.md](dsa_patterns/matrix_traversal.md) | Spiral, rotate, diagonal, set-zeroes, in-place grid transforms |
+| [dsa_patterns/sweep_line.md](dsa_patterns/sweep_line.md) | Event-queue sweep and difference array: meeting rooms, skyline, range-add counting |
 
 The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **worked-example companions** to the pattern playbooks: each case study implements one high-frequency pattern end-to-end at depth (900–1100 lines), whereas the pattern files are the reusable template library (~350–800 lines each — the harder patterns earn the upper end).
 
@@ -532,6 +536,8 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 | `dsa_patterns/greedy.md` | P4 | done |
 | `dsa_patterns/bit_manipulation.md` | P4 | done |
 | `dsa_patterns/matrix_traversal.md` | P6 | done |
+| `dsa_patterns/sweep_line.md` | - | done |
+| `dsa_patterns/ai_assisted_round_playbook.md` | - | done |
 | `dsa_patterns/interview_execution_playbook.md` | P5 | done |
 | `dsa_patterns/study_plans.md` | P5 | done |
 

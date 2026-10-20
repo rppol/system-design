@@ -1,7 +1,7 @@
 # FAISS Deep Dive
 
-> **Version anchor (2026-08-04).** FAISS **1.15.0** — changelog dated 2026-07-31, wheels
-> published 2026-08-03. **MIT licensed**, authored by Meta's Fundamental AI Research group
+> **Version anchor (2026-10-19).** FAISS **1.15.1**: changelog dated 2026-09-15, GitHub release
+> and PyPI wheels 2026-09-16. **MIT licensed**, authored by Meta's Fundamental AI Research group
 > (FAIR). Two papers define it: *Billion-scale similarity search with GPUs*
 > ([arXiv:1702.08734](https://arxiv.org/abs/1702.08734), 2017) and *The Faiss library*
 > ([arXiv:2401.08281](https://arxiv.org/abs/2401.08281), 2024) — read the second one, it is
@@ -64,9 +64,9 @@ Four distributions exist and they are not interchangeable:
 
 | Distribution | Latest | Notes |
 |---|---|---|
-| `faiss-cpu` | **1.15.0** (2026-08-03) | The default. Requires **Python >= 3.10**; wheels through 3.14 |
-| `faiss-gpu` | **1.15.0** (2026-08-03) | Classic CUDA backend. Version list: 1.7.2 (Jan 2022) -> **1.14.3** (2026-06-12) -> 1.15.0 |
-| `faiss-gpu-cuvs` | **1.15.0** (2026-08-03) | GPU backend delegating to NVIDIA cuVS, which is where `CAGRA` lives. Only 1.14.1.post1 and 1.15.0 on PyPI; requires Python >= 3.11 and CUDA 13 |
+| `faiss-cpu` | **1.15.1** (2026-09-16) | The default. Requires **Python >= 3.10**; wheels through 3.14 |
+| `faiss-gpu` | **1.15.1** (2026-09-16) | Classic CUDA backend. Version list: 1.7.2 (Jan 2022) -> **1.14.3** (2026-06-12) -> 1.15.0 -> 1.15.1 |
+| `faiss-gpu-cuvs` | **1.15.1** (2026-09-16) | GPU backend delegating to NVIDIA cuVS, which is where `CAGRA` lives. Only 1.14.1.post1, 1.15.0 and 1.15.1 on PyPI; requires Python >= 3.11 and CUDA 13 |
 | conda `pytorch/faiss-*` | tracks releases | The channel Meta has published continuously; the historical answer for GPU builds |
 
 **The five-year gap is worth understanding rather than working around.** Between January 2022
@@ -77,9 +77,9 @@ same one, with the same maintainer set (`facebook`, plus two FAIR engineers), au
 Meta AI Research; what changed is that Meta resumed publishing wheels, having spent the gap
 shipping GPU builds only through conda. The practical consequence for you: **pin the
 distribution, not just the version.** A `requirements.txt` that says `faiss-gpu` and resolves
-to 1.7.2 on one machine and 1.15.0 on another is two different libraries — 1.7.2 predates
+to 1.7.2 on one machine and 1.15.1 on another is two different libraries — 1.7.2 predates
 cuVS, RaBitQ, AVX-512 dispatch, and the mmap deserializers, and its index files are readable
-by 1.15.0 but not the reverse.
+by 1.15.1 but not the reverse.
 
 ### Feature landing points
 
@@ -97,6 +97,7 @@ Do not describe any of these as "FAISS supports X" without the version:
 | PEP 561 type stubs (`py.typed`); ARM **SVE** distance functions | `[1.14.0]` |
 | `faiss-gpu-cuvs` pip wheel packaging | `[1.14.3]` |
 | mmap I/O for Flat and static Vamana/SVS; **EDEN** quantizer; RISC-V RVV kernels | `[1.15.0]` |
+| cuVS dispatch opt-in (`use_cuvs` defaults to `False`); deterministic lock-free HNSW build as the only build; staged RaBitQ storage in HNSW; `IDSelectorWithContext` scan hook | `[1.15.1]` |
 
 For building, snapshotting, rebuilding, and rolling back FAISS and other vector indexes in production, see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md).
 
@@ -770,6 +771,11 @@ Three FAISS-specific facts on top of the general HNSW story (derived in
 - **`efSearch` must be at least `k`.** FAISS does not raise if it is not; it returns fewer
   than `k` useful results and pads with `-1` ids and sentinel distances. Code that does not
   check for `-1` will happily look up document `-1`.
+- **The multi-threaded build is reproducible from `[1.15.1]`.** The lock-based build let thread
+  scheduling decide neighbour lists, so the same vectors built on 32 threads gave a different
+  graph, and slightly different recall, on every run. 1.15.1 replaced it with a deterministic
+  lock-free build modelled on ParlayANN (#5486, #5611); there is no flag to turn it off. A
+  recall number measured on a rebuilt index can now be compared run to run.
 - **`IndexHNSWFlat` has no `remove_ids`** — it raises. There is no tombstone mechanism either.
   A corpus with deletions cannot use HNSW in FAISS without a full rebuild, which is by itself
   the reason most production FAISS deployments are IVF-based even though HNSW has the better
@@ -870,6 +876,13 @@ Passed through `SearchParametersIVF(sel=...)`, this is a **genuine pre-filter fo
 selector is tested inside the list scan, so non-matching vectors never enter the heap and you
 get a full `k` results drawn from the matching subset.
 
+`[1.15.1]` added `IDSelectorWithContext`, a sub-interface whose `is_member_with_context(id,
+ctx)` also receives an `IDScanContext` holding the id block being scanned (`ids`, `list_size`)
+and the position `j` of the tested id in it. The
+IVF scan (including IVFPQ, multi-bit RaBitQ and Panorama scanners) calls it instead of
+`is_member` when the selector implements it, so a custom selector can prefetch its metadata for
+the ids it is about to be asked about. Existing selectors take the plain `is_member` path.
+
 ```python
 tenant_ids = faiss.IDSelectorBatch(np.asarray(ids_for_tenant, dtype="int64"))
 params = faiss.SearchParametersIVF(sel=tenant_ids, nprobe=64)
@@ -952,10 +965,56 @@ Step 1 is load-bearing: shards can only merge if they share the same coarse quan
 codebooks, which means one training run whose output every shard starts from.
 
 **Versioning.** Index files are a serialised C++ object graph, not a documented format. A file
-written by 1.15.0 will generally be readable by 1.15.0; forward compatibility across major
+written by 1.15.0 will generally be readable by 1.15.1; forward compatibility across major
 feature releases is not guaranteed and backward compatibility (new file, old library) is not
 offered at all. Store the FAISS version in your index metadata and rebuild rather than
 upgrade-in-place across a release boundary.
+
+**Index files are untrusted input.** `read_index` and `deserialize_index` parse a C++ object
+graph whose header fields (`ntotal`, `code_size`, `nlist`, sub-index type codes, vector
+lengths) drive allocations, loops and pointer arithmetic before anything checks them against
+each other. A file you did not write is therefore a memory-safety attack surface, not a data
+file: the realistic outcomes are a crash or an OOM-kill (denial of service), an out-of-bounds
+read, and, for archive-shaped payloads, a write outside the intended directory. The changelog
+shows how much of this surface was open until recently:
+
+| Release | Deserialization fixes |
+|---|---|
+| `[1.15.0]` (2026-07-31) | Heap-buffer-overflow in `ResidualCoarseQuantizer` reads; recursion depth bounded (CWE-674); IVFPQ precomputed-table allocation bounded; FastScan `ksub == 16` enforced; `nbits == 0` PQ and `code_size == 0` PQ rejected; integer overflow in storage-size checks guarded |
+| `[1.15.1]` (2026-09-15) | OOB read in `Panorama::reconstruct` via `IndexPreTransform` (#5562); leak and unbounded `lists[]` in OnDisk invlist reads (#5560); SVS `DirectoryArchiver` entries contained within the extraction root (#5561); deserialization byte limit applied to SVS IVF (#5568); `IndexScalarQuantizer` codes buffer size validated (#5540) |
+
+The `DirectoryArchiver` fix is the one that changes the threat class. An `ISVF` (SVS) payload
+carries an archive that the vendored SVS library unpacks into a temp directory, reading each
+entry's name length, name and size straight from the stream. Before 1.15.1 an absolute entry
+name made `root / filename` collapse to `filename`, so loading an index could write a file
+anywhere the process could write.
+
+Two process-wide knobs bound what a hostile file can make the reader do. Both are global and
+not thread-safe, so set them once at startup, before any load:
+
+```python
+import faiss
+
+# Largest single vector a READVECTOR may allocate. Default 1 << 40 (1 TB), i.e. no real bound.
+faiss.set_deserialization_vector_byte_limit(4 << 30)      # 4 GB: above your largest real field
+# Cap on loop-driving fields (nlist, VT chain length, nhash ...). Default 0 = unlimited.
+faiss.set_deserialization_loop_limit(1 << 20)
+# Nesting depth is fixed at 50 inside index_read.cpp; there is no setter.
+```
+
+The bigger hole is usually one layer up. LangChain's `FAISS.save_local` writes the docstore and
+id map with `pickle`, and `FAISS.load_local` refuses to read it unless you pass
+`allow_dangerous_deserialization=True`, because unpickling a file runs whatever code it names.
+That flag turns a shared "vector index" download into arbitrary code execution, with no FAISS
+bug involved. The safe shape for an index from outside your build pipeline:
+
+1. Rebuild from source embeddings stored as `.npy` (loaded with `allow_pickle=False`) or
+   Parquet, when the corpus is small enough to rebuild. Trust the vectors, not the index.
+2. If you must load a prebuilt file, pin it by SHA-256 from a source you trust, on FAISS
+   1.15.1 or later.
+3. Set both limits above, and load in a separate process with a memory rlimit, so a hostile
+   file kills a worker instead of the server.
+4. Never pass `allow_dangerous_deserialization=True` for a file your own pipeline did not write.
 
 ### 6.10 Removal, updates, and the renumbering that corrupts your ids
 
@@ -1030,6 +1089,13 @@ one-query-at-a-time RAG endpoint is usually the wrong workload for it.
 `CAGRA`, NVIDIA's GPU graph index, is reachable through the cuVS backend
 (`faiss-gpu-cuvs`) and is the answer to "I want HNSW-class recall on a GPU", since
 `IndexHNSW` itself has no GPU implementation.
+
+**Installing `faiss-gpu-cuvs` does not route the classic GPU indexes through cuVS.** From
+`[1.15.1]` (#5529), `GpuIndexConfig.use_cuvs`, `GpuClonerOptions.use_cuvs` and
+`GpuDistanceParams.use_cuvs` default to `False` in every build; before that they defaulted to
+`True` in a cuVS-enabled build, so linking a different wheel silently changed the backend and
+its numerics. Set `use_cuvs = True` on the config or cloner options where you want cuVS.
+`GpuIndexCagra` is always cuVS-backed and ignores the flag.
 
 ### 6.12 Benchmarking honestly
 
@@ -1297,6 +1363,11 @@ or more, use the database, and use FAISS only in your eval harness.**
     before the index family, not after.
 15. **Concurrent `add` and `search` on one index object.** Data races, occasionally a crash,
     usually just wrong results. **Fix:** build offline, swap a read-only index atomically.
+16. **Loading a downloaded index as if it were data.** `read_index` trusts header fields that
+    size allocations, and LangChain's `load_local` unpickles a docstore beside it. A shared
+    "prebuilt index" is a crash, an OOB read or, through pickle, code execution. **Fix:**
+    rebuild from `.npy` embeddings, or hash-pin the file, run 1.15.1+, set the deserialization
+    limits, and load in a memory-capped worker (§6.9).
 
 ---
 
@@ -1304,7 +1375,7 @@ or more, use the database, and use FAISS only in your eval harness.**
 
 ### 11.1 The library and its distributions
 
-- **FAISS** — the library itself: MIT licensed, C++ core with SWIG-generated Python bindings, maintained by Meta FAIR, pinned in this module at 1.15.0 and documented by the 2024 paper *The Faiss library*.
+- **FAISS** — the library itself: MIT licensed, C++ core with SWIG-generated Python bindings, maintained by Meta FAIR, pinned in this module at 1.15.1 and documented by the 2024 paper *The Faiss library*.
 - **Distributions:** **faiss-cpu**, **faiss-gpu**, **faiss-gpu-cuvs** — three separate PyPI projects, not extras of one. The CPU wheel needs Python 3.10+, the cuVS wheel needs Python 3.11+ and CUDA 13, and the classic GPU wheel has a five-year publishing gap between 1.7.2 and 1.14.3 that a loose version pin will happily resolve into.
 
 ### 11.2 The index classes you will actually type
@@ -1428,6 +1499,21 @@ bytes) with `m >= 56` requiring `useFloat16LookupTables`, and **HNSW has no GPU
 implementation at all** — `CAGRA` via the cuVS backend is the graph index that does. Also
 remember the GPU is a batch device: a single query is often slower than the CPU path once
 kernel launch and PCIe transfer are counted.
+
+**Q: A partner sends you a prebuilt FAISS index plus LangChain's index.pkl to skip a 6-hour build. What is the risk in loading them?**
+**Short:** The .pkl is pickle, so loading it runs arbitrary code; the .faiss file is parsed by C++ that trusts its header fields, a crash or OOB-read surface.
+Two different risks, one per file. `index.pkl` holds LangChain's docstore and id map written
+with `pickle`, and `FAISS.load_local` will not read it unless you pass
+`allow_dangerous_deserialization=True`, because unpickling executes whatever callables the file
+names. Setting that flag for a partner's file is handing them code execution on your host. The
+`.faiss` file executes no code by design, but `read_index` builds a C++ object graph from header
+fields that size allocations and drive loops; 1.15.0 and 1.15.1 alone fixed a heap-buffer-overflow,
+unbounded recursion, an OOB read via `IndexPreTransform`, unbounded OnDisk list reads, and an
+SVS archive path escape that could write files outside the temp directory. The safe path is to
+ask for the embeddings as `.npy` or Parquet and rebuild. If you must load the index, pin its
+SHA-256, run FAISS 1.15.1 or later, set `faiss.set_deserialization_vector_byte_limit` and
+`set_deserialization_loop_limit` (defaults are 1 TB and unlimited), and load it in a
+memory-capped worker process.
 
 **Q: A colleague reports 12,000 QPS from their new FAISS index. What is missing?**
 **Short:** The recall it achieved — QPS without recall is a point on an unnamed curve, since any index gets faster by lowering nprobe.
@@ -1647,12 +1733,14 @@ and you have one less thing that can silently disagree.
 
 `faiss-cpu` is the default and needs Python 3.10+. `faiss-gpu` is the classic CUDA backend.
 `faiss-gpu-cuvs` delegates to NVIDIA's cuVS and is where `CAGRA` lives; it needs Python 3.11+
-and CUDA 13 and exists on PyPI only as 1.14.1.post1 and 1.15.0. The trap is the five-year hole
+and CUDA 13 and exists on PyPI only as 1.14.1.post1, 1.15.0 and 1.15.1. The trap is the five-year hole
 in `faiss-gpu`: between January 2022 and June 2026 Meta published GPU builds only through
-conda, so a loose `faiss-gpu` requirement can resolve to 1.7.2 on one machine and 1.15.0 on
+conda, so a loose `faiss-gpu` requirement can resolve to 1.7.2 on one machine and 1.15.1 on
 another — two libraries that differ by cuVS, RaBitQ, AVX-512 dispatch and the mmap
 deserializers. These are the official Meta-maintained projects, not community rebuilds, so the
-answer is to pin the exact distribution and version rather than to avoid them.
+answer is to pin the exact distribution and version rather than to avoid them. A second trap:
+installing `faiss-gpu-cuvs` does not make `GpuIndexIVFFlat` and friends use cuVS; from 1.15.1
+`use_cuvs` defaults to `False` and must be set on the config or cloner options.
 
 **Q: How do you compute ground truth for a recall measurement on a 100M-vector corpus?**
 **Short:** Exhaustive search with IndexFlat over the same vectors and metric, batched on a GPU, on a held-out query set of a few thousand.
@@ -1775,13 +1863,17 @@ share a coarse quantizer, which means one training run every shard started from.
 13. **Emit index age, index version, per-list skew and recall-on-a-golden-set as metrics.** A
     build job that silently stopped is otherwise invisible: every query still returns `k`
     results.
-14. **Pin the distribution and the version** (`faiss-cpu==1.15.0`, not `faiss-gpu`), and record
+14. **Pin the distribution and the version** (`faiss-cpu==1.15.1`, not `faiss-gpu`), and record
     the writing version alongside every index file.
 15. **Keep the source embeddings in durable storage.** The index can always be rebuilt from
     them; it can never be recovered from itself, and its file format has no compatibility
     contract.
 16. **Re-measure recall on a schedule, not just at launch.** Frozen centroids plus a drifting
     corpus is the failure that arrives with no code change (§6.3).
+17. **Treat any index file your pipeline did not write as untrusted.** Set
+    `set_deserialization_vector_byte_limit` and `set_deserialization_loop_limit` at startup,
+    hash-pin external files, and never enable LangChain's `allow_dangerous_deserialization`
+    for them (§6.9).
 
 ---
 

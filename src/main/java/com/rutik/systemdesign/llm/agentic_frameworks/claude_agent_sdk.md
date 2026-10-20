@@ -8,7 +8,7 @@ The Anthropic API exposes a native tool use loop that is the canonical way to bu
 
 The pattern: you send a message, Claude responds with either text or one-or-more `tool_use` content blocks, you execute the tools, append `tool_result` blocks to the conversation, and repeat until Claude stops requesting tools. This loop, combined with prompt caching, parallel tool execution, extended thinking, and subagent spawning, is the foundation under Claude Code, Anthropic's own Claude.ai agentic features, and many production agents.
 
-**Do not confuse this page's subject with the Claude Agent SDK, which is a real shipped package.** `claude-agent-sdk` on PyPI and `@anthropic-ai/claude-agent-sdk` on npm are Claude Code packaged as a library — renamed from "Claude Code SDK" on 2025-09-29, and currently on the 0.2.x line. That package hands you the whole Claude Code harness: built-in Read/Write/Edit/Bash/Glob/Grep/WebSearch tools, the agent loop, context compaction, hooks, permissions, subagents and sessions, all behind a single `query(prompt, options)` call. If that is what you want, reach for it — it is documented at `code.claude.com/docs/en/agent-sdk`.
+**Do not confuse this page's subject with the Claude Agent SDK, which is a real shipped package.** `claude-agent-sdk` on PyPI and `@anthropic-ai/claude-agent-sdk` on npm are Claude Code packaged as a library — renamed from "Claude Code SDK" on 2025-09-29, on 0.2.168 as of 2026-10-15. That package hands you the whole Claude Code harness: built-in Read/Write/Edit/Bash/Glob/Grep/WebSearch tools, the agent loop, context compaction, hooks, permissions, subagents and sessions, all behind a single `query(prompt, options)` call. If that is what you want, reach for it — it is documented at `code.claude.com/docs/en/agent-sdk`.
 
 **This page is about the layer underneath it**: the raw `anthropic` / `@anthropic-ai/sdk` client plus the API's tool use, prompt caching, and extended thinking features, with the loop written by hand. Read it to understand what the Agent SDK (and every framework in this section) is doing on your behalf, and to build an agent whose tool surface is entirely your own rather than a filesystem-and-shell harness. A middle option exists too — the SDK's own `client.beta.messages.tool_runner`, which drives the loop for tools *you* define without giving you built-in tools.
 
@@ -54,9 +54,9 @@ For UX-sensitive applications — stream tool decisions and arguments as they ar
 
 ### 4.4 Extended Thinking + Tool Use
 
-Available on Claude Opus 5, Sonnet 5, Fable 5 and the 4.6/4.7/4.8 family. Claude produces `thinking` content blocks before deciding to call tools. Enable for hard reasoning tasks; the thinking tokens are billed but typically improve tool selection quality significantly.
+Available on every current Claude model (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5); on Fable 5.1 and Opus 5.5 adaptive thinking is always on and cannot be disabled. Claude produces `thinking` content blocks before deciding to call tools. Enable for hard reasoning tasks; the thinking tokens are billed but typically improve tool selection quality significantly.
 
-**Configure it with `thinking={"type": "adaptive"}` plus `output_config={"effort": ...}`, not a token budget.** The fixed-budget form `thinking={"type": "enabled", "budget_tokens": N}` is *removed* on Opus 5, Opus 4.8, Opus 4.7, Sonnet 5 and Fable 5 — sending it returns HTTP 400, it does not silently degrade. It remains valid on Haiku 4.5 and other pre-4.6 models, so this is a model-conditional API, not a blanket rename: code that must run across both lines has to branch on the model id.
+**Configure it with `thinking={"type": "adaptive"}` plus `output_config={"effort": ...}`, not a token budget.** The fixed-budget form `thinking={"type": "enabled", "budget_tokens": N}` is deprecated on Opus 4.6 and Sonnet 4.6 and rejected on every later model, including the whole current lineup: sending it returns HTTP 400, it does not silently degrade. It remains valid on Haiku 4.5 and other pre-4.6 models, so this is a model-conditional API, not a blanket rename: code that must run across both lines has to branch on the model id.
 
 ### 4.5 Subagent Pattern
 
@@ -65,6 +65,10 @@ Parent agent has a `dispatch_subagent(task, tools)` tool. When called, parent sp
 ### 4.6 Computer Use
 
 The `computer` tool gives Claude `screenshot`, `mouse_move`, `left_click`, `type`, and `key` actions. Requires a VM or container with a display. The `computer_use_demo` reference implementation runs in Docker with Xvfb. See [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the full deep dive.
+
+### 4.7 Claude Managed Agents (Hosted Loop)
+
+The hosted counterpart to a hand-written loop. Claude Managed Agents (beta header `managed-agents-2026-04-01`, set by the SDK) runs the agent loop, tool execution, prompt caching, and compaction on Anthropic's infrastructure. You create an agent (model, system prompt, tools, MCP servers, skills) once, an environment (Anthropic cloud sandbox or a self-hosted sandbox), then start sessions and exchange events over SSE; the event history is stored server-side and can be fetched in full. Built-in tools are Bash, file read/write/edit/glob/grep, web search and fetch, and MCP servers. Additions in 2026: session budgets that pause with `budget_reached` and advisor models (2026-08-07), skills loaded from a GitHub repository's `.claude/skills` directory (2026-08-07), an `auto` permission policy (2026-09-10), dynamic workflows through the agent's `multiagent` field (2026-10-09), and OpenTelemetry export of session spans (2026-10-14). It is not eligible for Zero Data Retention or HIPAA BAA coverage. Pick the hand-written loop on this page when you need ZDR, your own tool surface only, or per-call control; see [Durable Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md) for the build-vs-hosted tradeoff.
 
 ---
 
@@ -259,14 +263,14 @@ async def run_agent(user_query: str, max_iterations: int = 10) -> str:
     
     for iteration in range(max_iterations):
         response = await client.messages.create(
-            model="claude-sonnet-5",
+            model="claude-sonnet-5-5",
             max_tokens=4096,
             system=system,
             tools=TOOLS,
             messages=messages,
         )
         
-        # Log cost — cache_read is 0.1x base price
+        # Log cost: on Sonnet 5.5 a cache read bills at 0.05x base input
         print(
             f"Iter {iteration}: in={response.usage.input_tokens} "
             f"out={response.usage.output_tokens} "
@@ -317,14 +321,14 @@ if __name__ == "__main__":
     print(answer)
 ```
 
-### Extended Thinking + Tool Use (Opus 5)
+### Extended Thinking + Tool Use (Opus 5.5)
 
 ```python
 response = await client.messages.create(
-    model="claude-opus-5",
+    model="claude-opus-5-5",
     max_tokens=8192,
     # Adaptive thinking: Claude decides how much to think. `budget_tokens` is
-    # REMOVED on Opus 5 / 4.8 / 4.7, Sonnet 5 and Fable 5 — sending it is a 400.
+    # removed on Opus 4.7 and every later model; sending it is a 400.
     thinking={"type": "adaptive", "display": "summarized"},
     output_config={"effort": "high"},  # low | medium | high | xhigh | max
     tools=TOOLS,
@@ -341,16 +345,16 @@ for block in response.content:
         print(f"[Answer]: {block.text}")
 ```
 
-### Cost Math for a 5-Step Agent (Sonnet 5)
+### Cost Math for a 5-Step Agent (Sonnet 5.5)
 
 | Step | Input toks | Output toks | Cache writes | Cache reads | Cost |
 |---|---|---|---|---|---|
 | 1 | 4000 (3500 written to cache) | 800 | 3500 | 0 | 500×$2 + 3500×$2.50 + 800×$10 = $0.018 |
-| 2 | 5200 (3500 cache hit) | 750 | 0 | 3500 | 1700×$2 + 3500×$0.20 + 750×$10 = $0.012 |
-| 3 | 6100 (3500 cache hit) | 600 | 0 | 3500 | 2600×$2 + 3500×$0.20 + 600×$10 = $0.012 |
-| 4 | 6800 (3500 cache hit) | 500 | 0 | 3500 | 3300×$2 + 3500×$0.20 + 500×$10 = $0.012 |
-| 5 | 7400 (3500 cache hit) | 1200 | 0 | 3500 | 3900×$2 + 3500×$0.20 + 1200×$10 = $0.021 |
-| **Total** | | | | | **$0.074** |
+| 2 | 5200 (3500 cache hit) | 750 | 0 | 3500 | 1700×$2 + 3500×$0.10 + 750×$10 = $0.011 |
+| 3 | 6100 (3500 cache hit) | 600 | 0 | 3500 | 2600×$2 + 3500×$0.10 + 600×$10 = $0.012 |
+| 4 | 6800 (3500 cache hit) | 500 | 0 | 3500 | 3300×$2 + 3500×$0.10 + 500×$10 = $0.012 |
+| 5 | 7400 (3500 cache hit) | 1200 | 0 | 3500 | 3900×$2 + 3500×$0.10 + 1200×$10 = $0.020 |
+| **Total** | | | | | **$0.073** |
 
 Without caching: the same task costs ~$0.098 (1.3× more).
 
@@ -358,13 +362,13 @@ Without caching: the same task costs ~$0.098 (1.3× more).
 
 Note that each token lands in exactly **one** bucket. On step 1 the 4000-token request is 3500 cache-write tokens plus 500 fresh ones — it is not 4000 fresh tokens *and* a 3500-token write on top. Billing a cached prefix twice is the most common way a hand-rolled cost model overstates an agent's spend.
 
-The `×$2`, `×$2.50`, `×$0.20` and `×$10` in that table are **dollars per million tokens**, so each product is `tokens / 1,000,000 × price`. Read them as raw multiplications and every row comes out a thousand times too large.
+The `×$2`, `×$2.50`, `×$0.10` and `×$10` in that table are **dollars per million tokens**, so each product is `tokens / 1,000,000 × price`. Read them as raw multiplications and every row comes out a thousand times too large.
 
 | Symbol | What it is |
 |--------|------------|
 | `$2 / M` | Base input price — what an uncached prompt token costs |
 | `$2.50 / M` | Cache **write**: 1.25× base. The one-time premium for storing a prefix |
-| `$0.20 / M` | Cache **read**: 0.1× base. What that same prefix costs on every later step |
+| `$0.10 / M` | Cache **read**: 0.05× base on Sonnet 5.5 (0.1× on most older models). What that same prefix costs on every later step |
 | `$10 / M` | Output price — 5× base input, and never cacheable |
 | `3500` | The static prefix (system prompt + tool defs) that repeats on all 5 steps |
 
@@ -379,30 +383,30 @@ The `×$2`, `×$2.50`, `×$0.20` and `×$10` in that table are **dollars per mil
                                             $0.017750   -> table's $0.018
 
   the 3500-token prefix, per later step
-    as cache read   3500 x $0.20 / 1e6 =  $0.00070
+    as cache read   3500 x $0.10 / 1e6 =  $0.00035
     as fresh input  3500 x $2.00 / 1e6 =  $0.00700
-    saved per step                     =  $0.00630
-    saved over steps 2-5   4 x $0.00630 =  $0.02520
+    saved per step                     =  $0.00665
+    saved over steps 2-5   4 x $0.00665 =  $0.02660
 ```
 
 The write premium was only `3500 x ($2.50 - $2.00) / 1e6 = $0.00175`, and the very first
-read returns $0.0063 — so the bet pays for itself on the second call and everything after
-is profit. Scaled to the whole run, $0.098 uncached against $0.074 cached is
-`0.098 / 0.074 = 1.3x`.
+read returns $0.00665, so the bet pays for itself on the second call and everything after
+is profit. Scaled to the whole run, $0.098 uncached against $0.073 cached is
+`0.098 / 0.073 = 1.3x`.
 
 **Why only 1.3× and not the 5-10× caching sometimes gets credited with?** Because the
 cached prefix here is 3500 tokens against 3,850 output tokens across the run, and output
 is never cacheable — the ceiling on any caching win is the share of spend that input
 represents in the first place. Push the system prompt and tool definitions to 30K tokens
 (a realistic figure for an agent with 15 tools and a long policy preamble) and the same
-five steps go from ~$0.36 uncached to ~$0.16 cached, a 2.2× win. Caching pays in
+five steps go from ~$0.36 uncached to ~$0.15 cached, a 2.4× win. Caching pays in
 proportion to how heavy and how repeated your prefix is, not as a flat discount.
 
 **Why a cache *write* costs more than plain input.** Without the 1.25× surcharge the
 provider would be storing your prefix for free, and every caller would mark everything
 ephemeral. The surcharge makes caching a bet: you pay 25% extra once, wagering that the
-prefix will be re-read at least a couple of times. The bet is cheap to win — one read at
-0.1× recovers far more than the 0.25× you staked, which is why the next section's
+prefix will be re-read at least a couple of times. The bet is cheap to win: one read at
+0.05× (Sonnet 5.5) recovers far more than the 0.25× you staked, which is why the next section's
 break-even lands on the second call.
 
 ---
@@ -417,7 +421,7 @@ break-even lands on the second call.
 
 **Anthropic Research Multi-Agent System**: Parent Claude Opus agent dispatches Sonnet subagents in parallel for research tasks. Each subagent has a narrow tool subset (web only, or file only). Documented in Anthropic engineering blog as the pattern behind their research feature.
 
-**Production customer support agent at scale**: Sonnet 5 with 5 tools (CRM lookup, KB search, refund issue, escalate, send_email). Handles 50K conversations/day. Average 3.2 tool calls per conversation, $0.018/conversation cost with caching.
+**Production customer support agent at scale**: Sonnet 5.5 with 5 tools (CRM lookup, KB search, refund issue, escalate, send_email). Handles 50K conversations/day. Average 3.2 tool calls per conversation, $0.018/conversation cost with caching.
 
 ---
 
@@ -576,6 +580,7 @@ the precondition that makes the arithmetic work.
 | `@anthropic-ai/sdk` (TS) | Official TypeScript SDK | npm install; same API surface |
 | MCP servers | Pre-built tools | Connect via stdio/HTTP, expose as Claude tools — see [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) |
 | Computer use docker reference | Sandbox for computer tool | `ghcr.io/anthropics/anthropic-quickstarts` |
+| Claude Managed Agents | Hosted agent loop and sandbox | Beta `managed-agents-2026-04-01`; sessions, events, server-side history; not ZDR eligible |
 | `aiohttp` / `httpx` | Async HTTP in tools | For parallel external API calls |
 | OpenTelemetry | Manual tracing | Wrap LLM calls to send to Jaeger/Honeycomb |
 | Prompt caching dashboard | Cost monitoring | Use `usage.cache_*` fields in responses |
@@ -597,12 +602,12 @@ Use `asyncio.gather()` over the tool_use blocks: `results = await asyncio.gather
 The Anthropic API enforces this — if you send a follow-up user message missing a tool_result for a previously returned tool_use_id, you get a 400 error. The model needs to see the outcome of every tool it called to update its reasoning. Always produce a tool_result, even on tool errors (use `is_error=True` so the model can self-correct).
 
 **Q: How does prompt caching work for agents and what does it save?**
-**Short:** Prompt caching keys a prefix by exact content for 5 minutes; cache reads cost 0.1x and cache writes cost 1.25x base input price.
-Prompt caching marks a prefix of the prompt (system prompt + tool definitions + early conversation turns) as cacheable with `cache_control: {"type": "ephemeral"}`. The cache is keyed by the exact prefix content and lives for 5 minutes. Cache writes cost 1.25× base input price; cache reads cost 0.1× base price. For agents with 2-3K token system prompts called 5-20 times in a session, caching saves 60-80% of input token cost.
+**Short:** Caching keys a prefix by exact content for 5 minutes; writes cost 1.25x base input, reads 0.05x on Opus/Sonnet 5.5 and 0.1x on most older models.
+Prompt caching marks a prefix of the prompt (system prompt + tool definitions + early conversation turns) as cacheable with `cache_control: {"type": "ephemeral"}`. The cache is keyed by the exact prefix content and lives for 5 minutes. Cache writes cost 1.25× base input price. Cache reads cost 0.05× base on Opus 5.5 and Sonnet 5.5, 0.025× on Fable 5.1, and 0.1× on Haiku 5.5 and most earlier models. For agents with 2-3K token system prompts called 5-20 times in a session, caching saves 60-80% of input token cost.
 
 **Q: What is the difference between standard mode and extended thinking mode?**
 **Short:** Extended thinking mode adds a billed internal-reasoning phase before the response, useful when reasoning quality matters more than latency.
-Standard mode returns content as text or tool_use blocks immediately. Extended thinking mode adds a "thinking" phase before the response — Claude produces internal reasoning content blocks before deciding on tools or final answer. Thinking tokens are billed at output token price. Enable it with `thinking={"type": "adaptive"}` and set the depth with `output_config={"effort": "low"|"medium"|"high"|"xhigh"|"max"}`; the older fixed-budget form `thinking={"type": "enabled", "budget_tokens": N}` is removed on Opus 5 / 4.8 / 4.7, Sonnet 5 and Fable 5 and returns HTTP 400 there, though it is still the correct call on Haiku 4.5. On Opus 5 thinking is on by default, so omitting the parameter entirely runs adaptive. Use it for complex problems where reasoning quality matters more than latency.
+Standard mode returns content as text or tool_use blocks immediately. Extended thinking mode adds a "thinking" phase before the response — Claude produces internal reasoning content blocks before deciding on tools or final answer. Thinking tokens are billed at output token price. Enable it with `thinking={"type": "adaptive"}` and set the depth with `output_config={"effort": "low"|"medium"|"high"|"xhigh"|"max"}`; the older fixed-budget form `thinking={"type": "enabled", "budget_tokens": N}` is removed on Opus 4.7 and every later model, including Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5, and returns HTTP 400 there; it is still the correct call on legacy Haiku 4.5. On Fable 5.1 and Opus 5.5 adaptive thinking is always on, so omitting the parameter still runs adaptive. Use it for complex problems where reasoning quality matters more than latency.
 
 **Q: How do you implement subagent spawning with the native API?**
 **Short:** A `dispatch_subagent` tool starts a fresh `run_agent()` call with its own system prompt and tool subset, returning its final text as the result.
@@ -617,8 +622,8 @@ Define a `dispatch_subagent` tool with parameters {task, allowed_tools}. When th
 Truncate at the tool execution layer, not at the API layer. Cap at 50KB-100KB max, and add a marker like "[Truncated: 500000 chars total]" so Claude knows the data was cut off. If the tool is something like `read_file`, prefer adding a grep/extract parameter so Claude can request specific sections instead of dumping the whole file.
 
 **Q: What is the cost difference between Haiku, Sonnet, and Opus for the same agent task?**
-**Short:** Roughly 2-2.5x per tier on the current lineup — Haiku 4.5 $1/$5, Sonnet 5 $2/$10, Opus 5 $5/$25 — with Sonnet the usual sweet spot.
-The tier gaps are much narrower than the folklore 5× per step. Haiku 4.5: $1/M input, $5/M output. Sonnet 5: $2/M input, $10/M output (2× Haiku). Opus 5: $5/M input, $25/M output (2.5× Sonnet). Claude Fable 5 sits above all three at $10/M input, $50/M output. So the whole ladder from Haiku to Opus is a 5× spread, not the 25× it used to be — which changes the cascading calculus: routing a marginal query down to Haiku now saves 2×, not 5×, and is often not worth the extra hop's latency and the risk of a wrong-tier answer. For tool-heavy agents where reasoning quality matters, Sonnet is the typical sweet spot. Use Opus for the hardest reasoning steps, Haiku for routing/classification.
+**Short:** Opus 5.5 ($4/$20) is 2x Sonnet 5.5 ($2/$10), while Haiku 5.5 is 20x cheaper than Sonnet on prompts under 100K tokens ($0.10/$0.50).
+The Opus-to-Sonnet step is narrow: Sonnet 5.5 is $2/M input and $10/M output, Opus 5.5 is $4/M input and $20/M output (2x). Claude Fable 5.1 sits above both at $10/M input, $50/M output. The Sonnet-to-Haiku step is wide and depends on prompt length: Haiku 5.5 bills $0.10/$0.50 for prompts up to 100K tokens (20x below Sonnet) and $0.50/$2.50 above 100K (4x below Sonnet), because the whole request moves to the higher tier once the prompt crosses the threshold. That shapes the cascading calculus: routing short classification or extraction calls to Haiku saves an order of magnitude, while routing a 150K-token agent turn there saves only 4x and may not be worth the risk of a wrong-tier answer. Keep agent prompts under 100K tokens on Haiku, for example by compacting history, to stay on the cheap tier. For tool-heavy agents where reasoning quality matters, Sonnet is the typical sweet spot. Use Opus for the hardest reasoning steps, Haiku for routing/classification.
 
 **Q: How do you stream tool use to the user?**
 **Short:** Watch the `content_block_start`, `content_block_delta`, and `content_block_stop` stream events to progressively reveal tool calls to users.
@@ -642,7 +647,7 @@ The SDK auto-retries on 429 with exponential backoff (configurable via `max_retr
 
 **Q: What is the right way to handle conversation history that exceeds the context window?**
 **Short:** Track token usage per response and compact near 70% of the context window, summarizing early turns while keeping recent tool results verbatim.
-Every current Claude model except Haiku 4.5 has a 1M token context window (Haiku 4.5 is 200K), so read the ceiling from the model you actually run rather than assuming the old 200K figure. Track conversation token count after each response (`usage.input_tokens` tells you the full conversation size). When approaching 700K on a 1M-context model (70% of window), trigger compaction: summarize the early conversation turns with a separate LLM call and replace them with the summary. Keep the last N (typically 5-10) tool result pairs verbatim since they're often the most relevant. The API also offers server-side compaction as a beta, which does this for you at a default 150K-token trigger — but a 70%-of-window rule written against the wrong window number is the classic way an agent starts silently dropping history it still needed, so pin the threshold to the model's real ceiling either way.
+Every current Claude model (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5) has a 1M token context window, while legacy Haiku 4.5 and the pre-4.6 models stop at 200K, so read the ceiling from the model you actually run. Track conversation token count after each response (`usage.input_tokens` tells you the full conversation size). When approaching 700K on a 1M-context model (70% of window), trigger compaction: summarize the early conversation turns with a separate LLM call and replace them with the summary. Keep the last N (typically 5-10) tool result pairs verbatim since they're often the most relevant. The API also offers server-side compaction as a beta, which does this for you at a default 150K-token trigger — but a 70%-of-window rule written against the wrong window number is the classic way an agent starts silently dropping history it still needed, so pin the threshold to the model's real ceiling either way.
 
 **Q: Why is parallel tool execution often a 2-3× speedup vs sequential?**
 **Short:** Tool calls are I/O-bound, so running them in parallel overlaps their waits and collapses total latency versus running them sequentially.
@@ -660,7 +665,7 @@ Tools spend most of their time waiting on I/O (HTTP requests, database queries, 
 6. Log `usage` fields after every API call — input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens — for cost attribution.
 7. Truncate tool outputs at 50KB max before adding to tool_result content.
 8. For complex reasoning, enable extended thinking on Opus/Sonnet — typical 10-20% quality improvement on hard tasks.
-9. Pin model version in production (`claude-sonnet-5` not `claude-sonnet-latest`) — model updates can change behavior.
+9. Pin model version in production (`claude-sonnet-5-5` not `claude-sonnet-latest`) — model updates can change behavior.
 10. Write tool descriptions like API documentation — describe what it does, when to call it, what it returns, with example inputs.
 
 ---
@@ -683,10 +688,10 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    P["Parent Agent (Opus 5,\nadaptive thinking enabled)"] --> D["dispatch_subagent\n(parallel for each competitor)"]
-    D --> SA["Sub A — Sonnet 5\nTools: web_search,\nread_url, read_rss"]
-    D --> SB["Sub B — Sonnet 5\nTools: web_search,\nread_url, read_rss"]
-    D --> SC["Sub C — Sonnet 5\nTools: web_search,\nread_url, read_rss"]
+    P["Parent Agent (Opus 5.5,\nadaptive thinking enabled)"] --> D["dispatch_subagent\n(parallel for each competitor)"]
+    D --> SA["Sub A — Sonnet 5.5\nTools: web_search,\nread_url, read_rss"]
+    D --> SB["Sub B — Sonnet 5.5\nTools: web_search,\nread_url, read_rss"]
+    D --> SC["Sub C — Sonnet 5.5\nTools: web_search,\nread_url, read_rss"]
     D --> SN["... (20 subagents)"]
     SA --> R(["Returns (competitor, summary,\nkey_changes, sources)"])
     SB --> R

@@ -172,13 +172,13 @@ client = anthropic.AsyncAnthropic()
 async def stream_agent(user_request: str):
     """Yield SSE events as the agent runs."""
     
-    # Current models (Opus 5 / Sonnet 5 / Fable 5) think by default and take
+    # Current models (Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5) take
     # thinking={"type": "adaptive", ...}; `display` defaults to "omitted", so you
     # must opt into "summarized" or no thinking_delta events are emitted at all.
     # The older thinking={"type": "enabled", "budget_tokens": N} form applies only
-    # to extended-thinking-only models such as Sonnet 4.5 / Haiku 4.5 / Opus 4.5.
+    # to legacy extended-thinking models such as Sonnet 4.5 / Haiku 4.5 / Opus 4.5.
     async with client.messages.stream(
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         max_tokens=4096,
         thinking={"type": "adaptive", "display": "summarized"},
         messages=[{"role": "user", "content": user_request}],
@@ -210,6 +210,18 @@ async def stream_agent(user_request: str):
 async def agent_endpoint(query: str):
     return StreamingResponse(stream_agent(query), media_type="text/event-stream")
 ```
+
+### Progress Text Between Tool Calls (Claude Opus 5.5, Sonnet 5.5, Fable 5.1)
+
+On Claude Opus 5 and earlier, the short notes a model writes between tool calls ("Found 3 failing tests, reading the first one") arrive as `text` blocks, so the handler above streams them as `answer` events. On Claude Opus 5.5 (released 2026-09-22), Claude Sonnet 5.5 (2026-09-28), and Claude Fable 5.1, that narration arrives as progress-update `thinking` blocks, at most one before each tool call. At the default `thinking.display` of `"omitted"` their `thinking` field is empty. No request fails; the UI just goes quiet between tool calls.
+
+| `thinking.display` | Progress updates | Reasoning | Header |
+|---|---|---|---|
+| `"omitted"` (default) | Empty | Empty | None |
+| `"updates"` | Returned as text | Hidden | Beta `thinking-display-updates-2026-08-18` (added 2026-09-01) |
+| `"summarized"` | Returned | Returned as a summary, mixed with the updates | None |
+
+The fix is to request `"updates"` (or `"summarized"`), route each non-empty `thinking` block to the progress channel ahead of the `tool_use` block it precedes, and pass every `thinking` block back unchanged with the rest of the assistant turn. Select blocks by `type`, never by position, because any response can now start with one or more `thinking` blocks.
 
 ### Approval Gate Pattern
 
@@ -429,6 +441,24 @@ The `~80%` working figure from Section 2 and this war story's timeline are check
 
 Two things explain the gap, and both are worth naming. First, the `~80%` figure is an average across all irreversible actions, while this deployment gated a narrow, high-signal category — git destructive operations matched by explicit regex — where detection is near-perfect. Second, and easy to miss: gates change user behaviour, not just outcomes. The war story reports usage *increased* after gating, which means the denominator grew while the numerator went to zero. A gate that catches 80% of mistakes on a fixed workload is a different thing from a gate that makes users trust the agent enough to hand it more work and still see none — the second is the result worth quoting in an interview.
 
+### Pitfall 3: Agent UI goes silent after a model upgrade
+
+```python
+# BROKEN: progress channel reads only text blocks; after moving to claude-opus-5-5
+# the between-tool narration arrives as thinking blocks with empty text
+if block.type == "text":
+    emit_progress(block.text)
+
+# FIXED: ask for the updates and render non-empty thinking blocks as progress
+thinking = {"type": "adaptive", "display": "updates"}   # beta thinking-display-updates-2026-08-18
+if block.type == "thinking" and block.thinking:
+    emit_progress(block.thinking)
+elif block.type == "text":
+    emit_answer(block.text)
+```
+
+The model ID swap passes every functional test because no request errors and the final answer is unchanged. Only the user sees the difference: a spinner with no narration for the whole tool loop. Add a UI test that asserts at least one progress event per tool call, and read the provider's migration guide for response-shape changes, not only breaking request changes.
+
 ---
 
 ## 11. Technologies & Tools
@@ -450,6 +480,10 @@ Two things explain the gap, and both are worth naming. First, the `~80%` figure 
 **Q: Why is streaming thoughts important for agent UX?**
 **Short:** Streaming reasoning keeps users engaged during long agent processing instead of showing a blank screen.
 Without streaming, users see a blank screen for the duration of the agent's processing (often 5-30+ seconds). User attention drops sharply after 3-5 seconds of unexplained wait. Streaming the agent's reasoning (or even a "thinking..." indicator) keeps users engaged and lets them estimate completion time. Teams commonly report abandonment falling by roughly 3× on tasks longer than 5 seconds — a widely used planning rule of thumb rather than a published benchmark, so measure it on your own funnel.
+
+**Q: After upgrading to Claude Opus 5.5, your agent UI stops showing progress between tool calls, with no errors. Why?**
+**Short:** Opus 5.5 returns between-tool narration as thinking blocks that are empty at the default display; set thinking.display to "updates" and render them.
+On Claude Opus 5 the notes the model writes between tool calls came back as `text` blocks. On Claude Opus 5.5, Sonnet 5.5, and Fable 5.1 they come back as progress-update `thinking` blocks, and the default `thinking.display: "omitted"` returns them with an empty `thinking` field. A progress channel that reads only `text` blocks therefore receives nothing until the final answer. Set `display: "updates"` (beta header `thinking-display-updates-2026-08-18`) to get the updates as text with reasoning still hidden, or `"summarized"` to get both mixed. Render each non-empty `thinking` block before the `tool_use` it precedes, and pass the blocks back unchanged in the next request. The lesson for any upgrade: test the streamed event sequence, because a response-shape change fails no request.
 
 **Q: Which actions warrant an approval gate?**
 **Short:** Gate irreversible, expensive, and sensitive actions, with stricter thresholds in production than in dev.

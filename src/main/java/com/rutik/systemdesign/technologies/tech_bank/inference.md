@@ -898,7 +898,7 @@ Benchmark rather than quoting a speedup: the gain over eager PyTorch depends hea
 **Lang:** *
 **Roles:** inference/inference-engine @1, inference/quantization-and-compression @2, inference/compiler-and-runtime-optimization @2, inference/model-format-and-edge @3
 
-You compile the model into a TensorRT engine ahead of time, targeting a specific GPU, batch size and sequence-length profile; the build fuses attention and GEMM kernels, wires in paged KV cache and in-flight batching, and applies FP8 or INT8 quantization from a calibration pass. In production it is usually served through Triton's TensorRT-LLM backend rather than on its own.
+You compile the model into a TensorRT engine ahead of time, targeting a specific GPU, batch size and sequence-length profile; the build fuses attention and GEMM kernels, wires in paged KV cache and in-flight batching, and applies FP8 or INT8 quantization from a calibration pass. It is served through `trtllm-serve`, its own OpenAI-compatible server, or through Dynamo; the Triton 26.08 and 26.09 releases do not include the TensorRT-LLM backend container image.
 
 Reach for it when you own NVIDIA hardware and need the last increment of tokens per second per GPU. The costs are real: builds are slow, an engine is not portable across GPU generations or config, and support for a newly released architecture lags -- vLLM gives most of the throughput for a fraction of the operational effort.
 

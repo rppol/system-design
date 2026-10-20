@@ -6,7 +6,7 @@ Build manifest / status tracker: `README.md` §7 — check Batch Plan before sta
 
 ---
 
-## Module List — 24 Modules
+## Module List — 25 Modules
 
 | Module Directory | Phase | Key Concepts |
 |-----------------|-------|-------------|
@@ -33,24 +33,28 @@ Build manifest / status tracker: `README.md` §7 — check Batch Plan before sta
 | `design_patterns_in_python/` | 3 | Pythonic GoF patterns, anti-patterns — cross-links `lld/` |
 | `stdlib_datetime_and_logging/` | 3 | `datetime`/`zoneinfo`, structured logging, `argparse`, `subprocess` |
 | `testing_with_pytest/` | 3 | pytest, fixtures, `parametrize`, `monkeypatch`, `hypothesis`, `pytest-asyncio` |
+| `debugging_and_introspection/` | 3 | `pdb`/`breakpoint()`, `faulthandler`, `inspect`, `sys.monitoring`, live-process attach with `sys.remote_exec` and py-spy |
 | `packaging_and_project_tooling/` | 3 | `pyproject.toml`, `uv`/poetry/pip, `ruff`/mypy, wheels, dependency resolution |
 
 ---
 
-## Sub-Files (4 total — 14-section template, 15+ Q&As each)
+## Sub-Files (6 total — 14-section template, 15+ Q&As each)
 
 | File | Parent Module |
 |------|--------------|
 | `asyncio_and_event_loop/event_loop_internals.md` | asyncio_and_event_loop/ |
 | `asyncio_and_event_loop/structured_concurrency.md` | asyncio_and_event_loop/ |
 | `the_type_system_and_typing/protocols_and_structural_typing.md` | the_type_system_and_typing/ |
+| `the_gil_and_free_threading/subinterpreters_and_interpreter_pools.md` | the_gil_and_free_threading/ |
+| `performance_and_profiling/the_modern_cpython_runtime.md` | performance_and_profiling/ |
+| `packaging_and_project_tooling/supply_chain_and_publishing.md` | packaging_and_project_tooling/ |
 
 ---
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 21 modules = "3-Phase Learning Path") plus
-two curated tiers: **Senior** (16 modules) and **Principal** (7). They are different
+`README.md` documents the **Full Path** (all 25 modules = "3-Phase Learning Path") plus
+two curated tiers: **Senior** (20 modules) and **Principal** (8). They are different
 cuts, not nested depths — senior is the craft, principal is the judgment (which runtime
 model at what cost, what you tell a team *not* to do), so principal is the far smaller
 list here and much of it is material senior never sees. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
@@ -61,8 +65,8 @@ in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 `questions/paths.json`, which the game fetches at boot. The tier tables in `README.md`
 sit between `<!-- study-path-table <tier> -->` markers and are **generated** — regenerate
 with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
-`extract.py --strict` and the Pages deploy. This section has no case studies, so there is
-no Case Studies track. The README also carries a Knowledge-Question Map and a 3-week
+`extract.py --strict` and the Pages deploy. The 6 case studies in `case_studies/` are tiered
+in the same block under `case_studies` and drive the Case Studies tab. The README also carries a Knowledge-Question Map and a 3-week
 Study Plan (prose; no path impact).
 
 ---
@@ -71,8 +75,9 @@ Study Plan (prose; no path impact).
 
 FastAPI (previously modules 22-40 of this section, back when it was "Python + FastAPI")
 is now its own section — see [`../fastapi/CLAUDE.md`](../fastapi/CLAUDE.md) and
-[`../fastapi/README.md`](../fastapi/README.md). This section has 0 case studies of its
-own; all 6 former case studies moved to `fastapi/case_studies/`.
+[`../fastapi/README.md`](../fastapi/README.md). The 6 FastAPI-era case studies moved to
+`fastapi/case_studies/`; `python/case_studies/` holds 6 pure-Python case studies plus 2
+cross-cutting guides in `case_studies/cross_cutting/`.
 
 ---
 
@@ -86,12 +91,13 @@ When covering a feature, include the version it was introduced:
 - Python 3.12: `type` statement (PEP 695), `@override`, `f-string` improvements
 - Python 3.13: free-threading build introduced (PEP 703, experimental), experimental copy-and-patch JIT (PEP 744), `ReadOnly` for TypedDict (PEP 705), `@deprecated` (PEP 702), TypeVar defaults (PEP 696), `Path.full_match()`
 - Python 3.14: free-threading **officially supported** (PEP 779; single-thread overhead ~1% on macOS aarch64 to ~8% on x86-64 Linux), deferred annotation evaluation (PEP 649/749) + `annotationlib`, t-strings (PEP 750), `concurrent.interpreters` (PEP 734) + `InterpreterPoolExecutor`, `multiprocessing` default start method → `forkserver` on Unix other than macOS, `SyntaxWarning` for `return` in `finally` (PEP 765), tail-call interpreter (`--with-tail-call-interp`, Clang 19+, 3-5%), `Path.copy()`/`Path.move()`, `tarfile` extraction defaults to `filter='data'` (PEP 706), pickle protocol 5 becomes the default, `compression.zstd` (PEP 784), `sys.remote_exec` debugger attach (PEP 768)
-- Python 3.15 (rc1 2026-08-04, final due 2026-10-01 — tag `[3.15]` and write it as "ships in 3.15", never as current): UTF-8 mode on by default (PEP 686), explicit lazy imports (PEP 810), stdlib `profiling` package (PEP 799)
+- Python 3.15 (3.15.0 released 2026-10-09): UTF-8 mode on by default (PEP 686), explicit lazy imports (PEP 810), stdlib `profiling` package with the Tachyon sampler (PEP 799), `frozendict` (PEP 814), `sentinel` (PEP 661), frame pointers on by default (PEP 831)
 
 Format: `[3.11]` inline or `Added in Python 3.11`.
 
-**Primary target is Python 3.14.** Python 3.10 reaches end-of-life on 2026-10-31, so 3.11 is
-the oldest version an example should target.
+**Python 3.15 is the current stable release; examples run on 3.14 and later.** Tag a
+3.15-only feature `[3.15]`. Python 3.10 reaches end-of-life on 2026-10-31, so 3.11 is the
+oldest version an example should target.
 
 **On speedup claims:** CPython publishes an official cumulative pyperformance figure only for
 **3.11 (25% faster than 3.10)**. There is no official cumulative geomean for 3.12 through
@@ -112,7 +118,7 @@ module, adding a Q&A for material you just introduced is expected.
 ## Adding a New Python Module
 
 1. Create `<module_name>/<module_name>.md` — 14-section clean template
-2. All code in Python 3.14 with type hints (`X | None`, never `Optional[X]`)
+2. All code runs on Python 3.14+ with type hints (`X | None`, never `Optional[X]`)
 3. Add version tags for features introduced in specific Python versions
 4. Meet the Q&A minimum for the module's depth level
 5. Flip the module's Status from `pending` → `done` in `README.md` §7 tracker

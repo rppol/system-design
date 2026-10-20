@@ -18,7 +18,7 @@ Ordinary cloud FinOps assumes the resource is divisible, the waste is visible, a
 
 **The utilization number everyone reports is the wrong one.** `DCGM_FI_DEV_GPU_UTIL` measures whether *any* kernel was resident, so a GPU running one small stalled kernel in a loop reports near 100%. Fleets get defended in budget meetings with a number that does not measure work. The honest metrics are `DCGM_FI_PROF_SM_ACTIVE` and, for tensor workloads, `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`.
 
-**The commitment ladder has a rung the parent does not cover.** EC2 Capacity Blocks for ML are neither a discount nor On-Demand: they are a **reservation product priced per accelerator-hour**, bought for a future window. They can price *below* On-Demand while also guaranteeing contiguous placement, which makes the parent's break-even identity insufficient on its own — a Block has no break-even because there is no prepayment to amortise, only an unused-capacity risk.
+**The commitment ladder has a rung the parent does not cover.** EC2 Capacity Blocks for ML are neither a discount nor On-Demand: they are a **reservation product priced per accelerator-hour**, bought for a future window. They price close to On-Demand (the us-east-1 P6-B200 Block is 0.2% under list) and buy guaranteed contiguous placement, which makes the parent's break-even identity insufficient on its own: a Block has no break-even because there is no prepayment to amortise, only an unused-capacity risk.
 
 **A large share of AI spend is not compute.** Managed inference — Bedrock and its peers — is billed per token, with its own optimisation levers (batch, prompt caching, provisioned throughput) that have nothing to do with instances. A FinOps practice built entirely around EC2 will not see it, and the FinOps Foundation's 2026 framework recognises this by making **AI its own Technology Category**, driven by an observed ~15x GPU-to-CPU cost differential.
 
@@ -69,7 +69,7 @@ Cost per token and per request as a product metric is covered in [AI Cost Engine
 
 **Savings Plans do cover P6-B200** — coverage was extended in June 2025, alongside list-price reductions of up to 45% on P5, 26% on P5en and 33% on P4d/P4de. This is worth stating because a persistent belief holds that the newest GPU generation is commitment-ineligible, which leads teams to run large steady GPU fleets entirely On-Demand.
 
-**Capacity Blocks priced per accelerator-hour** (from AWS's Capacity Blocks pricing page, checked 2026-08-26; AWS states the next scheduled price update is **October 2026**): P5 $5.191, P5e $5.97, P5en $6.241–$6.865 by region, **P6-B200 $12.355**, P6-B300 $14.04, P6e-GB200 $10.582. Compare P6-B200's Block rate of $12.355/GPU-hr against On-Demand's $113.9328 ÷ 8 = **$14.2416/GPU-hr** — the Block is roughly 13% *cheaper* while also guaranteeing contiguous placement. The cost is flexibility: you pay for the booked window whether you use it or not, and the purchase is non-cancelable and non-modifiable.
+**Capacity Blocks priced per accelerator-hour** (us-east-1, from AWS's Capacity Blocks pricing page, read 2026-10-18; AWS states the next scheduled price update is **January 2027**): P4d $1.696, P4de $2.546, P5 $5.970, P5en $7.895, **P6-B200 $14.208**, P6-B300 $16.146; P5e has no us-east-1 Block listing. Compare P6-B200's Block rate of $14.208/GPU-hr against On-Demand's $113.9328 ÷ 8 = **$14.2416/GPU-hr**: the Block is about 0.2% cheaper, so what it buys is guaranteed contiguous placement, not a discount. The cost is flexibility: you pay for the booked window whether you use it or not, and the purchase is non-cancelable and non-modifiable.
 
 ### Why the parent's break-even identity does not cover Blocks
 
@@ -81,16 +81,16 @@ The parent module's commitment arithmetic — an all-upfront commitment at disco
     booked         = instances x GPUs x hours in the block
     effective rate = block rate / fraction of booked hours actually used
 
-    P6-B200 Block at $12.355/GPU-hr:
-      100% used  ->  $12.355 per useful GPU-hour   (13% under On-Demand)
-       80% used  ->  $15.44                        ( 8% over  On-Demand)
-       50% used  ->  $24.71                        (73% over  On-Demand)
+    P6-B200 Block at $14.208/GPU-hr:
+      100% used  ->  $14.208 per useful GPU-hour   (0.2% under On-Demand)
+       80% used  ->  $17.76                        ( 25% over On-Demand)
+       50% used  ->  $28.42                        (100% over On-Demand)
 
     break-even against On-Demand at $14.2416/GPU-hr:
-      12.355 / 14.2416 = 0.868  ->  you must use ~87% of the booked hours
+      14.208 / 14.2416 = 0.998  ->  you must use ~99.8% of the booked hours
 ```
 
-**Eighty-seven percent is a demanding number** for a training schedule with any slack in it, which is the honest reason to be cautious with Blocks: the headline rate is genuinely below On-Demand, and the realised rate usually is not.
+**A 99.8% break-even means a Block does not win on price.** Any slack in the training schedule pushes the realised rate above On-Demand. The reason to buy one is the capacity guarantee, since P6 capacity is not reliably available On-Demand.
 
 ### What managed inference costs, and its levers
 
@@ -100,7 +100,7 @@ The parent module's commitment arithmetic — an all-upfront commitment at disco
 | **Prompt caching** | Cache reads priced far below the input rate | Applies to repeated prefixes |
 | **Provisioned Throughput** | Model units at a committed rate | **No commitment / 1 month / 6 months** — deeper discount with longer term |
 
-A concrete price point, from the Bedrock pricing page (Claude 3.5 Sonnet, standard tier, effective 2025-12-01, checked 2026-08-26): **input $6.00 / 1M tokens, output $30.00 / 1M**, cache write $7.50 / 1M, **cache read $0.60 / 1M**. Batch halves the first two to $3.00 and $15.00. Note the cache-read rate is **10x below the input rate** — for a workload with a long shared system prompt, caching is the single largest lever available and it requires no commitment at all.
+A concrete price point, from the AWS Price List for Bedrock foundation models (Claude Sonnet 4.6, us-east-1, global cross-Region inference, publication 2026-10-12): **input $3.00 / 1M tokens, output $15.00 / 1M**, cache write $3.75 / 1M, **cache read $0.30 / 1M**. Batch halves the first two to $1.50 and $7.50. The US-only cross-Region profile costs 10% more ($3.30 input, $16.50 output). Note the cache-read rate is **10x below the input rate**. For a workload with a long shared system prompt, caching is the single largest lever available and it requires no commitment at all.
 
 **Provisioned Throughput per-model-unit pricing is not published for most models** — AWS directs you to your account manager. Any model of committed inference spend has to be built on a quote, not on a public rate card.
 
@@ -286,7 +286,7 @@ The practical reading: **Compute Optimizer finds abandoned GPUs; the Prometheus 
 
 | Decision | Option A | Option B | How to choose |
 |---|---|---|---|
-| Training capacity | Spot + checkpoints | Capacity Block | Spot unless there is a deadline. Blocks need ~87% booked-hour utilization to beat On-Demand |
+| Training capacity | Spot + checkpoints | Capacity Block | Spot unless there is a deadline. Blocks need ~99.8% booked-hour utilization to match On-Demand |
 | Serving capacity | On-Demand | Savings Plan | Savings Plan once the baseline is genuinely steady — and note P6-B200 **is** covered |
 | Serving hardware | `p6-b200.48xlarge` | `g6e.12xlarge` | The B200 wins per token only above a **5.43x** measured throughput ratio |
 | Managed vs self-hosted | Bedrock per token | vLLM on EC2 | Bedrock below the crossover volume and for spiky traffic; self-host once utilization is sustainably high |
@@ -304,7 +304,7 @@ The practical reading: **Compute Optimizer finds abandoned GPUs; the Prometheus 
 
 **Do NOT start with commitments.** Discounts multiply with efficiency and efficiency is free, so the first pass is always the reconciliation query and the idle-card alert. Committing to a fleet running at 20% SM-active locks in the waste for one to three years.
 
-**Use Capacity Blocks when** the training schedule is firm enough to fill roughly 87% of the booked window and the deadline is real. **Do not use them** for exploratory work, where slack in the schedule turns a below-list rate into an above-list one.
+**Use Capacity Blocks when** the deadline is real, the schedule is firm enough to fill nearly the whole booked window, and On-Demand cannot supply the contiguous capacity. **Do not use them** for exploratory work, where slack in the schedule turns a near-list rate into an above-list one.
 
 **Self-host inference when** utilization is sustainably high and predictable. **Use managed per-token inference when** traffic is spiky, when the workload is early enough that utilization is unknown, or when the operational cost of running an inference platform exceeds the margin — which for small volumes it usually does.
 
@@ -333,7 +333,7 @@ avg(DCGM_FI_DEV_GPU_UTIL)                 # shown only for contrast
 
 **2. Optimising the numerator while the denominator sits at 20%.** Chasing a 15% discount on a fleet at 20% SM-active is worth a fraction of what moving to 60% is worth — and unlike the discount, the efficiency gain compounds with any discount you later negotiate. Efficiency first, commitment second.
 
-**3. Assuming Capacity Blocks are cheap because the rate is below On-Demand.** At $12.355/GPU-hr against On-Demand's $14.2416, a P6-B200 Block undercuts list by 13% — but only if you use roughly **87%** of the booked hours. At 50% utilization the effective rate is $24.71, which is 73% *above* On-Demand. The instrument is a bet on your own scheduling discipline.
+**3. Assuming Capacity Blocks are cheap because the rate is below On-Demand.** At $14.208/GPU-hr against On-Demand's $14.2416, a P6-B200 Block undercuts list by 0.2%, and only if you use **99.8%** of the booked hours. At 80% utilization the effective rate is $17.76, 25% above On-Demand; at 50% it is $28.42, about double. The instrument buys capacity, not price.
 
 **4. Believing the newest GPUs are commitment-ineligible.** **Savings Plans cover P6-B200**, extended in June 2025 alongside list-price cuts of up to 45% on P5, 26% on P5en and 33% on P4d/P4de. Teams that assume otherwise run large steady GPU fleets entirely On-Demand and leave a substantial discount on the table.
 
@@ -361,7 +361,7 @@ avg(DCGM_FI_DEV_GPU_UTIL)                 # shown only for contrast
 | **AWS Data Exports** | Billing | FOCUS 1.2 export, GA 2025-11-19 | Not yet 1.3 or 1.4 |
 | **Compute Optimizer** | Rightsizing | GPU idle and under-utilization classification | Idle threshold is >99% inactive over 14 days |
 | **Cost Optimization Hub** | Rightsizing | Consolidated, commitment-aware estimates | Pairs with Compute Optimizer |
-| **EC2 Capacity Blocks** | Capacity | Per-accelerator-hour reservation | P6-B200 $12.355/GPU-hr as of 2026-07-01 |
+| **EC2 Capacity Blocks** | Capacity | Per-accelerator-hour reservation | P6-B200 $14.208/GPU-hr in us-east-1, read 2026-10-18 |
 | **AWS Sustainability console** | Carbon | Replaces CCFT | CCFT retires **2026-06-30** |
 | **GSF SCI** | Carbon standard | Software carbon intensity | **ISO/IEC 21031:2024** |
 | **Kepler** | Carbon telemetry | Per-workload energy attribution | CNCF **Sandbox**; rearchitected in 2026 |
@@ -382,9 +382,9 @@ avg(DCGM_FI_DEV_GPU_UTIL)                 # shown only for contrast
 Allocation says a Pod holds the card, and that is the number that reaches finance. The first gap is allocated-but-not-running: idle notebooks, Pods that finished but linger, and under DRA, leaked `ResourceClaim` objects holding an allocation with no consumer — detectable as `DCGM_FI_DEV_FB_USED` near zero on an allocated card, and fixable with idle reaping. The second gap is running-but-not-working: processes that are genuinely alive but host-bound or badly batched, visible as low `SM_ACTIVE` on a card with framebuffer in use, and fixable with batching, data-pipeline work, or MIG for the small tenants. Collapsing all three into one "GPU utilization" figure is what makes the problem invisible, because each gap is separately actionable and the single number moves for reasons you cannot attribute.
 
 **Q: Are EC2 Capacity Blocks a discount?**
-**Short:** No — they are a reservation priced per accelerator-hour, and they only beat On-Demand if you actually use about 87% of the booked window.
+**Short:** No. They are a reservation priced per accelerator-hour; the us-east-1 P6-B200 Block is only 0.2% under On-Demand, so any unused booked hour makes it cost more than On-Demand.
 
-The headline rate is genuinely attractive: P6-B200 Capacity Blocks were $12.355 per GPU-hour as of 2026-07-01, against On-Demand's $113.9328 ÷ 8 = $14.2416 per GPU-hour, so the Block undercuts list by roughly 13% while also guaranteeing contiguous placement — which is often the real reason to buy one, since P6 capacity is not reliably available on demand. But you pay for the booked window whether you use it or not, and the purchase is non-cancelable and non-modifiable, so the effective rate is the block rate divided by your realised utilization. The break-even is 12.355 ÷ 14.2416 = 0.868, meaning about 87% of booked hours must be productive. At 50% utilization the effective rate is $24.71 — 73% *above* On-Demand. It is a bet on your own scheduling discipline, not a discount.
+In us-east-1 a P6-B200 Capacity Block is $14.208 per GPU-hour (AWS Capacity Blocks pricing page, read 2026-10-18), against On-Demand's $113.9328 ÷ 8 = $14.2416 per GPU-hour, so the Block undercuts list by about 0.2%. What it does buy is guaranteed contiguous placement, which is the real reason to buy one, since P6 capacity is not reliably available On-Demand. You pay for the booked window whether you use it or not, and the purchase is non-cancelable and non-modifiable, so the effective rate is the block rate divided by your realised utilization. The break-even is 14.208 ÷ 14.2416 = 0.998, meaning almost every booked hour must be productive. At 80% utilization the effective rate is $17.76, 25% above On-Demand; at 50% it is $28.42, about double. It is a capacity guarantee, not a discount.
 
 **Q: What is the single largest cost lever on a GPU fleet, and why is it not the discount?**
 **Short:** Utilization — moving from 20% to 60% SM-active is a 3x cost reduction, comparable to the deepest commitment discount AWS sells, and it is free.
@@ -404,7 +404,7 @@ FOCUS 1.4 was ratified 2026-06-04 and 1.3 on 2025-12-05, but AWS Data Exports GA
 **Q: What are the levers on managed per-token inference spend?**
 **Short:** Batch inference at 50% off, prompt caching with cache reads about 10x below the input rate, and Provisioned Throughput on 1- or 6-month commitments.
 
-Batch inference runs asynchronously with no latency guarantee and prices at 50% below On-Demand for eligible models — for Claude 3.5 Sonnet that takes input from $6.00 to $3.00 and output from $30.00 to $15.00 per million tokens. Prompt caching is often larger: cache reads at $0.60 per million against an input rate of $6.00 is a 10x reduction on the cached portion, and it applies to any workload with a long shared prefix such as a system prompt or a RAG context, requiring no commitment at all. Provisioned Throughput buys model units at a committed rate with terms of no-commitment, one month, or six months. One honest caveat for planning: **per-model-unit pricing is not published for most models** — AWS directs you to your account manager — so any committed-inference model has to be built on a quote rather than a public rate card.
+Batch inference runs asynchronously with no latency guarantee and prices at 50% below On-Demand for eligible models: for Claude Sonnet 4.6 (global cross-Region inference, us-east-1) that takes input from $3.00 to $1.50 and output from $15.00 to $7.50 per million tokens. Prompt caching is often larger: cache reads at $0.30 per million against an input rate of $3.00 is a 10x reduction on the cached portion, and it applies to any workload with a long shared prefix such as a system prompt or a RAG context, requiring no commitment at all. Provisioned Throughput buys model units at a committed rate with terms of no-commitment, one month, or six months. One honest caveat for planning: **per-model-unit pricing is not published for most models**; AWS directs you to your account manager, so any committed-inference model has to be built on a quote rather than a public rate card.
 
 **Q: Why does the parent module's commitment break-even formula not apply to Capacity Blocks?**
 **Short:** That identity amortises a prepayment across a term; a Block has no prepayment to amortise, only unused-hour risk inside a window you already bought.
@@ -455,7 +455,7 @@ Everything else follows from the shape of those three numbers, and the gaps loca
 - **Alert on allocated-but-idle** — framebuffer under 512 MiB with SM-active under 2% for an hour is money on the floor.
 - **Efficiency before commitment.** Committing to a fleet at 20% SM-active locks in the waste for the term.
 - **Derive cost per token from production throughput**, and publish the conditions with the number.
-- **Model Capacity Blocks on utilization, not on break-even** — the bar is roughly 87% of booked hours.
+- **Model Capacity Blocks on utilization, not on break-even**: at a 0.2% discount the bar is roughly 99.8% of booked hours, so buy them for capacity, not price.
 - **Size commitments against the post-optimisation baseline**, and leave the variable portion on Spot or On-Demand.
 - **Use batch inference and prompt caching before negotiating anything.** Both are larger than most compute discounts and need no commitment.
 - **Allocate shared GPU cost in Kubernetes, not in the billing export**, until AWS ships FOCUS 1.3.
@@ -575,6 +575,6 @@ The queue shortening is the counter-intuitive part and the most useful thing to 
 ### Discussion questions
 
 1. The team nearly bought a three-year commitment on 128 cards. What in their reporting made that look like the obvious move, and what would have caught it earlier?
-2. Fixing batching on two services moved SM-active from 34% to 54% — the largest single gain. Why is that work usually done last, and who should own it?
+2. Fixing batching on two services moved SM-active from 23% to 54%, the largest single gain. Why is that work usually done last, and who should own it?
 3. The 13 idle notebooks were the easiest win and the most politically difficult. How would you introduce a 4-hour idle reap without the platform team becoming the enemy?
 4. After these fixes the fleet sits at 54% SM-active. What would you go after next, and at what point does further optimisation stop being worth the engineering time?

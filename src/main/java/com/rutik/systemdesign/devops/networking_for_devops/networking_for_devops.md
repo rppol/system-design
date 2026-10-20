@@ -2,6 +2,8 @@
 
 > Phase 1 — Foundations · Difficulty: Intermediate
 
+> **Version anchor (2026-10-19).** Kubernetes **1.37.1** (2026-09-23) is the current patch release. Cluster DNS and certificate tools named on this page: **CoreDNS v1.14.7** (2026-08-19) and **cert-manager v1.21.2** (2026-09-11). Public TLS certificate limits follow CA/Browser Forum ballot SC-081v3 (passed 2025-04-11): maximum validity 200 days for certificates issued from 2026-03-15, 100 days from 2027-03-15 and 47 days from 2029-03-15. Let's Encrypt's default `classic` profile moves to 64-day certificates on 2027-02-10 and 45-day certificates on 2028-02-16. ACME Renewal Information (ARI) is RFC 9773 (June 2025).
+
 Networking is where "it works locally" goes to die. DNS resolution, CIDR planning, NAT, firewall rules, load-balancer health checks, and TLS termination are the layers a DevOps engineer debugs daily. This module covers the operational networking knowledge that underpins VPCs, Kubernetes Services, ingress, and service mesh — focused on *what breaks and how to find it*.
 
 > For the protocol theory (TCP handshake, congestion control, HTTP/2 vs 3), see [`../../backend/tcp_ip_deep_dive`](../../backend/tcp_ip_deep_dive/tcp_ip_deep_dive.md) and [`../../backend/osi_model_and_networking`](../../backend/osi_model_and_networking/osi_model_and_networking.md). This module is the *operations* view.
@@ -144,6 +146,39 @@ flowchart TD
 ```
 
 Only edge termination leaves a plaintext hop (red) inside the network — every other strategy keeps the LB-to-backend leg encrypted, which is exactly the "plaintext inside the network" con called out in the table above.
+
+### Certificate lifetime limits and ACME renewal
+
+Every publicly trusted TLS server certificate is bound by the CA/Browser Forum Baseline Requirements, and ballot SC-081v3 cuts both the certificate validity and how long a CA may reuse a past domain-control check (DCV):
+
+| Issued on or after | Max validity | Max DCV reuse | Renewals per year at 2/3 of lifetime |
+|---|---|---|---|
+| before 2026-03-15 | 398 days | 398 days | about 1.4 |
+| 2026-03-15 | 200 days | 200 days | about 2.7 |
+| 2027-03-15 | 100 days | 100 days | about 5.5 |
+| 2029-03-15 | 47 days | 10 days | about 11.6 |
+
+The last column is the operational point: at 47 days a certificate renews about once a month, and with 10-day DCV reuse nearly every renewal needs a fresh HTTP-01 or DNS-01 challenge. A manual renewal process that worked once a year now has to work twelve times a year per name, so the only workable answer is ACME (RFC 8555) end to end. Internal PKI is not covered: certificates from a private CA, service-mesh mTLS certificates and Kubernetes client certificates keep whatever lifetime you set.
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: api-tls, namespace: prod}
+spec:
+  secretName: api-tls
+  dnsNames: [api.example.com]
+  issuerRef: {name: letsencrypt-dns01, kind: ClusterIssuer}
+  renewBeforePercentage: 33     # renew with a third of the lifetime left, whatever the CA issues
+```
+
+Hard-coded intervals are the failure mode. A cron job that renews every 60 days worked for 90-day certificates, leaves 4 days of margin on Let's Encrypt's 64-day certificates from 2027-02-10, and lets every 45-day certificate expire from 2028-02-16. A fixed cert-manager `renewBefore: 720h` (30 days) renews a 45-day certificate after 15 days, and on a certificate of 30 days or less cert-manager ignores it and falls back to the two-thirds default without warning. Use a percentage (cert-manager defaults to renewing two-thirds of the way through the duration) or ARI (RFC 9773), where the CA tells the client its renewal window and can pull it forward before a mass revocation. Alert on renewal that did not happen, not on a fixed day count:
+
+```promql
+# cert-manager: the planned renewal time passed more than a day ago and no new cert was issued
+time() > certmanager_certificate_renewal_timestamp_seconds + 86400
+# blackbox exporter: what the public endpoint actually serves, in case the LB never reloaded
+probe_ssl_earliest_cert_expiry - time() < 7 * 86400
+```
 
 ### DNS record types you operate
 
@@ -355,7 +390,7 @@ flowchart LR
     class naclDrop lossN
 ```
 
-This is exactly where the "request reaches the server but the client times out" bug (Q4) hides: a security group auto-allows the return leg, but a NACL silently drops it unless you add the explicit outbound ephemeral-port rule.
+This is exactly where the "request reaches the server but the client times out" bug from section 12 hides: a security group auto-allows the return leg, but a NACL silently drops it unless you add the explicit outbound ephemeral-port rule.
 
 ---
 
@@ -391,7 +426,7 @@ flowchart LR
     class ok train
 ```
 
-Four wasted NXDOMAIN round trips (red) precede the one query that actually succeeds — the exact "several failed lookups before the real one" cost Q9 asks about, fixed by a trailing-dot FQDN that skips straight to the last node.
+Four wasted NXDOMAIN round trips (red) precede the one query that actually succeeds — the exact "several failed lookups before the real one" cost the `ndots:5` question in section 12 asks about, fixed by a trailing-dot FQDN that skips straight to the last node.
 
 ---
 
@@ -401,6 +436,7 @@ Four wasted NXDOMAIN round trips (red) precede the one query that actually succe
 |----------|----------|----------|-----------|
 | LB layer | L4 (speed, any protocol) | L7 (content routing, WAF) | Need HTTP-aware routing? |
 | TLS termination | Edge (simple, fast) | End-to-end/mTLS (secure) | Data sensitivity, compliance |
+| ACME challenge | HTTP-01 (no DNS credentials) | DNS-01 (wildcards, private hosts) | Wildcard or non-public name needs DNS-01; HTTP-01 needs port 80 reachable from the CA |
 | Egress to AWS services | NAT gateway (simple) | VPC endpoint (cheaper, no port exhaustion) | Volume + cost |
 | DNS TTL | Low (fast failover) | High (fewer queries, cheaper) | Failover speed vs query load |
 | Subnet sizing | Large /16 (room) | Tight /24 (conservation) | Pod density, future growth |
@@ -436,7 +472,7 @@ HealthyThresholdCount: 2
 UnhealthyThresholdCount: 3   # tolerate transient blips before draining
 ```
 
-**Pitfall 2 — Expired TLS certificate.** Manual certs expire silently; the site goes hard-down at midnight UTC. FIX: automate issuance/renewal (ACM auto-renews; cert-manager + Let's Encrypt in Kubernetes) and **alert on days-to-expiry < 21**.
+**Pitfall 2: Expired TLS certificate.** Manual certs expire silently; the site goes hard-down at midnight UTC. Shrinking public lifetimes (200 days from 2026-03-15, 47 days from 2029-03-15) multiply the number of renewals that can fail. FIX: automate issuance/renewal (ACM renews the certificates it issues, not imported ones; cert-manager + an ACME issuer in Kubernetes), renew by percentage of lifetime or ARI instead of a fixed interval, and **alert when a renewal time passes without reissue**. A fixed "< 21 days to expiry" alert fires on every healthy 47-day certificate, which renews with about 16 days left.
 
 **Pitfall 3 — NACL asymmetry.** Someone adds a stateless NACL allowing inbound `:443` but forgets outbound on ephemeral ports; responses are dropped and connections hang with no log. FIX: prefer stateful security groups; if NACLs are required, always allow the ephemeral return range.
 
@@ -461,67 +497,79 @@ UnhealthyThresholdCount: 3   # tolerate transient blips before draining
 
 ## 12. Interview Questions with Answers
 
-**Q1: A service is intermittently unreachable. Walk through your diagnosis.**
+**Q: A team renews its public TLS certificates with a job that runs every 60 days. Why will that cause outages?**
+**Short:** Public lifetimes shrink to 100 days in 2027 and 47 days in 2029, and Let's Encrypt moves to 64- then 45-day certificates, so a 60-day interval outlives the certificate.
+CA/Browser Forum ballot SC-081v3 caps public TLS certificates at 200 days from 2026-03-15, 100 days from 2027-03-15 and 47 days from 2029-03-15. Let's Encrypt moves its default profile to 64 days on 2027-02-10, leaving a 60-day job 4 days of margin, and to 45 days on 2028-02-16, after which every certificate expires 15 days before the job runs. Renewal has to follow the certificate, not the calendar: renew at a fixed fraction of the actual lifetime (cert-manager's `renewBeforePercentage`, default two-thirds through) or use ARI (RFC 9773), where the CA publishes the renewal window per certificate.
+
+**Q: Which certificates do the CA/Browser Forum lifetime limits apply to, and what does the DCV reuse cut change?**
+**Short:** Only publicly trusted TLS server certificates; private-CA, mesh and client certs are unaffected. DCV reuse falls to 10 days in 2029, so nearly every renewal needs a fresh ACME challenge.
+The Baseline Requirements bind CAs that browsers trust, so they cover certificates for public names served to browsers and public clients. Certificates from a private CA (AWS Private CA, Vault PKI, cert-manager CA issuer), Istio or Linkerd workload certificates and Kubernetes client certificates are outside them. The second change is domain-control validation reuse: a CA could reuse a successful challenge for 398 days, falling to 200, 100 and finally 10 days on 2029-03-15. With 47-day certificates and 10-day reuse, almost every issuance requires a live HTTP-01 or DNS-01 challenge, so the challenge path (port 80 reachable from the CA, or DNS API credentials for DNS-01) becomes a production dependency that must be monitored like the certificate itself.
+
+**Q: How should certificate-expiry alerting change as lifetimes shrink?**
+**Short:** Alert on a missed renewal or on the fraction of lifetime used, not a fixed day count; a "< 21 days left" rule fires on every healthy 47-day cert, which renews with about 16 days left.
+A fixed threshold encodes an assumption about lifetime. Renewing at two-thirds of a 47-day certificate leaves about 16 days, so a 21-day alert pages on every healthy certificate, while a 7-day alert on a 398-day certificate gives too little time. Alert instead when the planned renewal time has passed and the certificate was not reissued (`certmanager_certificate_renewal_timestamp_seconds` in the past by more than a day), or when a certificate passes 75% of its lifetime. Keep an external probe (`openssl s_client`, a blackbox exporter `probe_ssl_earliest_cert_expiry`) on the public endpoint too, because a renewed Secret that the load balancer never reloaded still serves the old certificate.
+
+**Q: A service is intermittently unreachable. Walk through your diagnosis.**
 **Short:** Diagnose hop by hop — DNS resolution, port reachability, LB health, security group/NACL rules, then TLS — since intermittent failures often mean unhealthy targets.
 Go hop by hop: `dig` the name (is DNS resolving, is the TTL caching a dead IP?), `nc -zv host port` (is the port reachable?), check the LB's healthy target count (is a failing health check draining the pool?), check security groups/NACLs (is the port and return path allowed?), and `curl -v`/`openssl s_client` for TLS/cert issues. "Intermittent" often means a load balancer with *some* unhealthy targets, or DNS round-robin including a dead endpoint.
 
-**Q2: L4 vs L7 load balancer — when each?**
+**Q: L4 vs L7 load balancer — when each?**
 **Short:** L4 load balancers route on IP:port with lowest latency for TCP/gRPC, while L7 parses HTTP for path/host routing, WAF, and sticky sessions.
 L4 (NLB) routes on IP:port, is protocol-agnostic, lowest latency, gives a static IP — use for gRPC/TCP, non-HTTP, or ultra-low-latency. L7 (ALB) parses HTTP, enabling path/host routing, header-based rules, WAF, redirects, and sticky sessions — use for web APIs and microservice routing. You often have both: NLB for raw ingress, L7 (ingress controller) inside.
 
-**Q3: Explain CIDR `/24` vs `/16` and a Kubernetes implication.**
+**Q: Explain CIDR `/24` vs `/16` and a Kubernetes implication.**
 **Short:** A `/N` CIDR gives `2^(32-N)` addresses, so a `/24` supports far fewer pod IPs than a `/16` under the AWS VPC CNI, making subnet sizing a one-way door.
 `/N` means N network bits, so `2^(32-N)` addresses: `/24` = 256, `/16` = 65,536. With the AWS VPC CNI, each pod takes a real subnet IP, so a `/24` subnet supports ~250 pods. Large clusters exhaust subnet space — you size subnets for peak pod count, and subnet sizing is hard to change later (a one-way door).
 
-**Q4: Why does "the request reaches the server but the client times out"?**
+**Q: Why does "the request reaches the server but the client times out"?**
 **Short:** The inbound path is allowed but the return path isn't, often from a stateless NACL missing outbound ephemeral-port rules or asymmetric routing.
 Asymmetric connectivity: the inbound path is allowed but the return path isn't. Common causes — a stateless NACL allowing inbound but not outbound ephemeral ports, a missing egress rule, or asymmetric routing where responses take a path with no return route. Security groups avoid this because they're stateful (return traffic is auto-allowed).
 
-**Q5: Stateful security group vs stateless NACL?**
+**Q: Stateful security group vs stateless NACL?**
 **Short:** A security group is stateful, auto-allowing return traffic, while a NACL is stateless and requires explicit rules for both inbound and outbound.
 A security group is stateful: allow inbound on a port and the response is automatically permitted. A NACL is stateless and subnet-wide: you must explicitly allow both inbound *and* the outbound ephemeral-port return traffic. NACLs are coarse-grained guardrails; SGs are the primary instance-level control.
 
-**Q6: Where should you terminate TLS, and what are the tradeoffs?**
+**Q: Where should you terminate TLS, and what are the tradeoffs?**
 **Short:** Edge TLS termination is simplest but leaves internal traffic plaintext, while end-to-end mTLS encrypts the whole path at the cost of certificate lifecycle complexity.
 Edge termination (at the LB) is simplest, offloads crypto, and centralizes cert management, but traffic is plaintext inside the network. End-to-end/mTLS encrypts the whole path and provides identity (zero-trust) at the cost of cert lifecycle complexity. Re-encryption terminates at the edge for inspection/routing then re-encrypts to the backend — the compliance-friendly middle ground.
 
-**Q7: What is NAT source-port exhaustion and how do you fix it?**
+**Q: What is NAT source-port exhaustion and how do you fix it?**
 **Short:** A NAT gateway's 55,000-connection-per-destination limit per IP gets exhausted by many connections to one endpoint, fixed with VPC endpoints or connection pooling.
 A NAT gateway SNATs many hosts behind one IP, and each of its IPv4 addresses supports only 55,000 simultaneous connections to a given unique destination (destination IP + port + protocol). Thousands of connections to the *same* endpoint exhaust that pool — and because Linux holds each closed socket in `TIME_WAIT` for 60 s, sustained churn never lets it refill — so new egress connections time out while bandwidth is unused; `ErrorPortAllocation` on the NAT gateway is the giveaway. Fixes: VPC endpoints (PrivateLink) to reach AWS services without NAT, connection pooling/reuse, secondary IPv4 addresses on the gateway (up to 8), or a NAT gateway per AZ with clients split across them.
 
-**Q8: How does DNS TTL affect failover, and what's the tradeoff?**
+**Q: How does DNS TTL affect failover, and what's the tradeoff?**
 **Short:** Low TTL propagates failover quickly but raises query volume, while high TTL reduces load but leaves clients hitting a dead IP longer after a change.
 TTL is how long resolvers cache a record. Low TTL (e.g., 30–60s) means failover/changes propagate quickly but generates more queries (and cost); high TTL reduces query load but means clients keep hitting a dead/old IP after a change. For failover-critical records, keep TTL low; for stable records, keep it higher.
 
-**Q9: What's the `ndots:5` problem in Kubernetes?**
+**Q: What's the `ndots:5` problem in Kubernetes?**
 **Short:** `ndots:5` retries any name with fewer than 5 dots against every search domain first, so external names trigger several wasted lookups before the real one.
 CoreDNS injects a `search` list and `ndots:5` into pod `/etc/resolv.conf`. A name with fewer than 5 dots and no trailing dot is tried against each search domain first, so `api.example.com` triggers several failed lookups (`api.example.com.ns.svc.cluster.local`, …) before the real one — adding latency and DNS load. Fix: use FQDNs (trailing dot) for external names or tune `ndots`.
 
-**Q10: How do you debug a TLS handshake failure?**
+**Q: How do you debug a TLS handshake failure?**
 **Short:** `openssl s_client -connect host:443 -servername host` reveals the certificate chain, protocol, and expiry, exposing failures like an expired cert or SNI mismatch.
 `openssl s_client -connect host:443 -servername host` shows the presented chain, negotiated protocol/cipher, and validity dates; `openssl x509 -noout -dates` checks expiry. Common failures: expired cert, missing intermediate (incomplete chain), SNI mismatch (`-servername` matters), or protocol/cipher mismatch (old client vs TLS 1.3-only server).
 
-**Q11: What does a health check actually control, and what's a safe configuration?**
+**Q: What does a health check actually control, and what's a safe configuration?**
 **Short:** A health check controls which targets the LB routes to, and a too-strict check can drain the whole pool into a self-inflicted outage.
 The LB only routes to targets passing the health check; a failing check removes a target from rotation. A too-strict check (auth-required path, 1 failure = drain) can empty the whole pool and cause a self-inflicted outage. Safe config: a dedicated unauthenticated `/healthz` that reflects real readiness, a sane interval (10–15s), and an unhealthy threshold > 1 to tolerate transient blips.
 
-**Q12: Why prefer VPC endpoints over routing AWS traffic through a NAT gateway?**
+**Q: Why prefer VPC endpoints over routing AWS traffic through a NAT gateway?**
 **Short:** VPC endpoints keep AWS traffic on the AWS backbone without the NAT gateway, avoiding its data-processing cost and source-port exhaustion.
 VPC endpoints (Gateway for S3/DynamoDB, Interface/PrivateLink for others) keep traffic on the AWS network without traversing the NAT gateway. Benefits: lower cost (NAT data-processing charges avoided), no source-port exhaustion against high-volume AWS endpoints, and traffic that never leaves the AWS backbone (security/compliance).
 
-**Q13: Why can't you put a CNAME record at a zone's apex (e.g., example.com itself), and how do cloud DNS providers work around it?**
+**Q: Why can't you put a CNAME record at a zone's apex (e.g., example.com itself), and how do cloud DNS providers work around it?**
 **Short:** DNS specs forbid a CNAME from coexisting with the NS/SOA records the apex must hold, so providers use a proprietary ALIAS or ANAME type instead.
 DNS specs forbid a CNAME from coexisting with other record types at the same name, but the zone apex must also hold NS and SOA records, so a bare CNAME there is invalid. Cloud providers solve this with a proprietary apex-safe alias — AWS's ALIAS, or an ANAME-equivalent — which behaves like a CNAME to the resolver's client but is resolved server-side by the DNS provider, letting you point the naked domain at an ALB or CloudFront distribution. Using a real CNAME at the apex instead breaks under strict resolvers or during zone validation, a classic "works until it doesn't" DNS trap. Reserve CNAME for subdomains and use your provider's ALIAS/ANAME type whenever you need to alias the zone apex itself.
 
-**Q14: What is the 4-tuple, and how does each networking hop act on it?**
+**Q: What is the 4-tuple, and how does each networking hop act on it?**
 **Short:** The 4-tuple of source/destination IP and port uniquely identifies a connection, and each networking hop either rewrites, inspects, or terminates it.
 The 4-tuple — source IP, source port, destination IP, destination port — uniquely identifies a connection, and every hop either rewrites it, inspects it, or terminates it. NAT rewrites the source IP/port (SNAT) so a private host appears as the gateway's public IP; a load balancer rewrites the destination by routing to a backend; a firewall or security group inspects the tuple against allow/deny rules without changing it; and TLS/L7 termination ends the connection entirely and starts a new one to the backend. Framing a network bug as "which hop touched the tuple, and did it break in a way I can see" turns a vague timeout into a specific, checkable hypothesis at each layer. Use this framing before reaching for tcpdump, since most connectivity bugs resolve to one hop mishandling the tuple.
 
-**Q15: When do you reach for tcpdump/Wireshark instead of curl -v or dig?**
+**Q: When do you reach for tcpdump/Wireshark instead of curl -v or dig?**
 **Short:** Reach for tcpdump only after curl, dig, and openssl fail to explain a symptom, since it shows ground-truth wire bytes but needs more setup to interpret.
 Reach for tcpdump only after application-level tools (curl -v, dig, openssl s_client) fail to explain the symptom — it shows ground-truth bytes on the wire but needs more setup to interpret. curl -v tells you what your own client saw (DNS answer, TLS handshake, headers), which covers most failures; tcpdump is needed when something between client and server is silently mangling packets — asymmetric routing, a misbehaving NAT, or a device dropping specific flags — that no single endpoint's own logs would reveal. It's also the only tool that can prove a packet left the host at all, which matters when a firewall drop looks identical to an application timeout from the client's point of view. Treat tcpdump as the last-resort, ground-truth layer, not the first diagnostic step.
 
-**Q16: In the payments-API case study, why did switching to a pooled HTTP client reduce exposure to the stale DNS entries?**
+**Q: In the payments-API case study, why did switching to a pooled HTTP client reduce exposure to the stale DNS entries?**
 **Short:** A pooled client reuses warm connections instead of re-resolving DNS every call, structurally reducing how often a request re-samples the stale round-robin set.
 A pooled client resolves DNS once and reuses warm, already-connected sockets, so once a request lands on one of the two healthy IPs it keeps reusing that connection instead of re-rolling the DNS dice on every call. The broken code created a new client per request, forcing a fresh DNS lookup and TCP connect each time, so roughly half of all calls had an even chance of landing on one of the two stale IPs and paying the full ~3s timeout. Pooling doesn't fix the underlying stale-DNS problem, but it structurally reduces how often a request re-samples the round-robin set, and the added explicit 1s connect timeout capped the worst case regardless. Pair connection reuse with a short connect timeout, since pooling alone still leaves the first connection per pool member exposed to a stale IP.
 
@@ -530,7 +578,7 @@ A pooled client resolves DNS once and reuses warm, already-connected sockets, so
 ## 13. Best Practices
 
 - Use a dedicated, unauthenticated `/healthz` for LB health checks; threshold > 1.
-- Automate TLS (ACM / cert-manager); alert on `< 21 days` to expiry.
+- Automate TLS with ACME (ACM / cert-manager); renew by percentage of lifetime or ARI, and alert on a missed renewal rather than a fixed day count, since public lifetimes fall to 47 days by 2029-03-15.
 - Prefer stateful security groups; if NACLs are needed, allow return ephemeral ports.
 - Size subnets for peak pod/host count up front; avoid overlapping CIDRs across VPCs you may peer.
 - Use VPC endpoints for AWS-service egress to dodge NAT cost and port exhaustion.

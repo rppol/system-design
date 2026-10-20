@@ -96,7 +96,7 @@ When an operation does not exist in ATen (PyTorch's operator library) and cannot
 
 ### 4.5 `torch.compile` / TorchInductor — Automatic Kernel Generation
 
-`torch.compile` traces a model's operations into an FX graph, and its default GPU backend, **TorchInductor**, generates fused kernels for the traced graph — for elementwise and reduction chains, this typically means emitting a **Triton** kernel (see `../triton_and_kernel_dsls/`) that fuses what would otherwise be several separate ATen kernel launches into one. This automates a large fraction of the manual-fusion work that used to be the sole justification for writing a custom CUDA extension; it does not, however, invent genuinely novel algorithms (a new attention variant, a custom Tensor Core data layout) — those remain a hand-written-kernel problem.
+`torch.compile` traces a model's operations into an FX graph, and its default GPU backend, **TorchInductor**, generates fused kernels for the traced graph. For elementwise and reduction chains, this typically means emitting a **Triton** kernel (see `../triton_and_kernel_dsls/`) that fuses what would otherwise be several separate ATen kernel launches into one. Inductor also has a second GPU codegen path: PyTorch 2.13 added a CuTeDSL "Native DSL" backend (marked API Unstable) for GEMM and RMSNorm, and PyTorch 2.14 added **NVGEMM**, which brings CuTeDSL-generated CUTLASS GEMM kernels (with epilogue fusion, scaled GEMM, and NVFP4 GEMM) into Inductor and autotunes them against Triton and ATen. Fused pointwise and reduction chains still come out as Triton; a GEMM can come out as either. This automates a large fraction of the manual-fusion work that used to be the sole justification for writing a custom CUDA extension; it does not, however, invent genuinely novel algorithms (a new attention variant, a custom Tensor Core data layout), which remain a hand-written-kernel problem.
 
 ### 4.6 DLPack — Zero-Copy Tensor Interchange
 
@@ -395,6 +395,7 @@ timeline
     2023 : torch.compile / TorchInductor ships (PyTorch 2.0) : Triton is Inductor's default GPU codegen target
     2024 : __dlpack__ dunder protocol widely adopted
     2025 : Numba's CUDA target moves to NVIDIA's numba-cuda package
+    2026 : cuda.core 1.0 with a stable API (CUDA 13.3) : PyTorch 2.13 adds a CuTeDSL backend to Inductor : PyTorch 2.14 adds NVGEMM CuTeDSL GEMMs and an sm_107 target
 ```
 
 Each milestone raises the escape-hatch bar rather than replacing what came before — PyCUDA and hand-written extensions are still in daily use in 2026, but `torch.compile`/Triton mean far fewer workloads ever need to reach them.
@@ -723,7 +724,7 @@ The protocol is symmetric by design: whichever framework calls `from_dlpack` on 
 - **PyTorch 2.x training loops with `torch.compile`** — enabled by default in many training recipes; Inductor's auto-generated Triton kernels routinely fuse normalization, activation, and residual-add chains that used to require dedicated fused kernels.
 - **Numba in scientific computing** — astrophysics N-body codes and Anaconda-accelerated pandas UDFs use `@cuda.jit` to GPU-accelerate custom per-element or per-row logic without leaving the Python/NumPy ecosystem.
 - **PyCUDA in legacy HPC and research codebases** — pre-dating CuPy, still found in academic simulation code that needs explicit CUDA context/stream control PyCUDA exposes directly.
-- **`cuda-python` / driver-level Python bindings** — NVIDIA's own low-level Python bindings occupy the same niche as PyCUDA for teams that want an NVIDIA-maintained package rather than a community one, without giving up driver-level control. `cuda-python` is a metapackage over `cuda.bindings` (thin one-to-one wrappers around the driver, runtime, and NVRTC APIs), `cuda.core` (a Pythonic layer over them), and `cuda.pathfinder` (locates the CUDA components at runtime). `numba-cuda` is itself built on these, which is how the Python stack now reaches the driver without a system CUDA install.
+- **`cuda-python` / driver-level Python bindings**: NVIDIA's own low-level Python bindings occupy the same niche as PyCUDA for teams that want an NVIDIA-maintained package rather than a community one, without giving up driver-level control. `cuda-python` is a metapackage over `cuda.bindings` (thin one-to-one wrappers around the driver, runtime, and NVRTC APIs), `cuda.core` (a Pythonic layer over them), and `cuda.pathfinder` (locates the CUDA components at runtime). `numba-cuda` is itself built on these, which is how the Python stack now reaches the driver without a system CUDA install. `cuda.core` reached 1.0 with CUDA 13.3: a stable API, green contexts (SM partitions with their own streams), process checkpointing (Linux only), and IPC memory sharing between Python processes. Separately, NVIDIA publishes `numba-cuda-mlir`, an MLIR-based compiler evolved from `numba-cuda` that is intended to be compatible with Numba-CUDA kernels (v0.3.0 in May 2026, v0.5.4 in September 2026).
 
 ---
 
@@ -917,11 +918,12 @@ The diagnostic recipe is two commands, in order: `TORCH_LOGS="graph_breaks"` to 
 | **`numba-cuda`** (provides `numba.cuda`) | NVIDIA-maintained package supplying Numba's CUDA target; JIT-compiles Python functions decorated `@cuda.jit` through LLVM/NVVM straight to PTX; manual memory-hierarchy control. Installed separately from `numba` (`pip install numba-cuda[cu13]`) |
 | **PyCUDA** | Thin Python bindings onto the CUDA driver API; `SourceModule` compiles inline CUDA C via NVRTC; explicit context/memory management |
 | **`torch.utils.cpp_extension`** | JIT (`load()`) or ahead-of-time (`CUDAExtension`/`setup.py`) compilation of hand-written `.cu`/`.cpp` sources into a PyTorch-callable, `pybind11`-bound op |
-| **TorchInductor** (`torch.compile`) | PyTorch 2.x's default GPU compiler backend; traces the FX graph and emits fused Triton (or C++) kernels automatically |
+| **TorchInductor** (`torch.compile`) | PyTorch 2.x's default GPU compiler backend; traces the FX graph and emits fused Triton (or C++) kernels automatically. PyTorch 2.14 adds NVGEMM (CuTeDSL-generated CUTLASS GEMMs, autotuned against Triton and ATen) and an `sm_107` (Rubin) target with CUDA 13.4+ |
 | **`torch.library`** (`custom_op`, `register_fake`, `register_autograd`) | Registers a hand-written kernel (from `torch.utils.cpp_extension` or elsewhere) under a schema Dynamo can trace through, so it participates in a `torch.compile`d graph instead of forcing a graph break |
 | **Triton** | Python-embedded kernel DSL that both hand-authored kernels and Inductor's codegen increasingly target instead of raw CUDA C++ — full treatment in `../triton_and_kernel_dsls/` |
 | **DLPack** (`__dlpack__`/`__dlpack_device__`, `to_dlpack`/`from_dlpack`) | Cross-framework zero-copy tensor-interchange protocol shared by CuPy, PyTorch, JAX, TensorFlow |
 | **`__cuda_array_interface__`** | An older, simpler zero-copy interchange protocol (numba/CuPy/RAPIDS) predating widespread DLPack adoption; still seen in RAPIDS interop code |
+| **`cuda.core`** | NVIDIA's Pythonic layer over `cuda.bindings`; 1.0 (CUDA 13.3) has a stable API, green contexts, process checkpointing (Linux), and IPC memory sharing |
 | **NVRTC** | The runtime CUDA C++ compiler that backs CuPy's `RawKernel` and PyCUDA's `SourceModule` — compiles source strings to PTX at runtime, no `nvcc` invocation needed |
 | **Nsight Systems** | Profiles Python-level GPU code exactly like CUDA C++ — the kernel-launch-count anti-pattern in §10 shows up directly as a wall of tiny, back-to-back kernel launches on the timeline (`../profiling_and_performance_analysis/`) |
 
@@ -974,8 +976,8 @@ It is a hand-written `.cu` kernel plus a `pybind11`-bound C++ launcher, compiled
 It JIT-compiles the given `.cpp`/`.cu` sources with the system C++ compiler and `nvcc`, orchestrated via `ninja`. It content-hash-caches the resulting shared library and returns a Python module exposing the `pybind11`-bound function, with no manual `setup.py` build step required.
 
 **Q: What does `torch.compile`/TorchInductor actually generate under the hood on GPU?**
-**Short:** It traces operations into an FX graph and its GPU codegen backend emits fused kernels, typically Triton, combining pointwise/reduction chains into fewer launches.
-It traces the model's operations into an FX graph and its GPU codegen backend emits fused kernels, typically Triton kernels. These combine chains of pointwise and reduction operations into fewer kernel launches than unfused eager-mode execution would issue.
+**Short:** It traces ops into an FX graph and emits fused Triton kernels for pointwise/reduction chains; GEMMs can also come from CuTeDSL-generated CUTLASS kernels (2.13+, NVGEMM in 2.14).
+It traces the model's operations into an FX graph and its GPU codegen backend emits fused kernels, typically Triton kernels. These combine chains of pointwise and reduction operations into fewer kernel launches than unfused eager-mode execution would issue. Matmuls have more than one source: Inductor autotunes ATen (cuBLAS) calls and Triton templates, and since PyTorch 2.14 also NVGEMM, CuTeDSL-generated CUTLASS kernels with fused epilogues (PyTorch 2.13 added the CuTeDSL backend it builds on). So a profile of a compiled model can show Triton kernels for the fusions and CUTLASS kernels for the GEMMs.
 
 **Q: If `torch.compile` already auto-fuses kernels, why would an engineer still write a custom CUDA extension?**
 **Short:** Inductor's automatic fusion covers pointwise/reduction chains well but invents no novel algorithms — a custom attention variant still needs a hand-written extension.

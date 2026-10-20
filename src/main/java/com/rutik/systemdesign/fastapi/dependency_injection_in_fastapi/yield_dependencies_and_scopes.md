@@ -1020,8 +1020,8 @@ def client(app: FastAPI, db_session: AsyncSession):
 ```
 
 **Q: Can a yield dependency be synchronous? What are the implications?**
-**Short:** A synchronous yield dependency works but its blocking I/O stalls the event loop, so async generators are preferred for async apps.
-Yes. A sync generator function (`def get_db(): yield session`) works with FastAPI. FastAPI wraps it in a `contextmanager` instead of `asynccontextmanager`. The limitation is that blocking I/O in the sync generator (e.g., opening a psycopg2 connection) blocks the event loop. For async apps, prefer async generator functions.
+**Short:** Yes. FastAPI runs setup and teardown in worker threads, so the loop stays free, but setup takes one of the 40 anyio thread tokens shared with sync routes.
+Yes. A sync generator function (`def get_db(): yield session`) works with FastAPI. FastAPI wraps it in `contextmanager` and enters it through `contextmanager_in_threadpool` (`fastapi/concurrency.py`, called from `fastapi/dependencies/utils.py`), so the code before and after `yield` runs in a worker thread, not on the event loop. Blocking I/O there (e.g., opening a psycopg2 connection) does not stall the loop. The cost is the anyio limiter: setup runs through `run_in_threadpool`, which takes one of the 40 default tokens shared with sync routes and other sync dependencies. Teardown runs under its own one-slot `CapacityLimiter`, so a slow commit after `yield` cannot deadlock waiting for a shared token, but it still occupies a thread. Under load the shared pool, not the loop, is what saturates. For async apps with async drivers, prefer async generator functions, which skip the thread hop.
 
 **Q: What is `use_cache=False` and when would you use it?**
 **Short:** use_cache=False bypasses the per-request cache so a route can obtain two genuinely independent instances of a dependency.

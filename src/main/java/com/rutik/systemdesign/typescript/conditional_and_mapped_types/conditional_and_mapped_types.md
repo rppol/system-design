@@ -637,7 +637,7 @@ model.
 | tsc6 | The 6.0 binary shipped as `@typescript/typescript6` | The only stable Compiler API until 7.1 |
 | type-fest | A library of derived types | `SetRequired`, `Simplify`, `CamelCasedProperties` |
 | Vitest | Test runner exposing `expectTypeOf` | Asserts a derived type equals what you meant |
-| typescript-eslint | Type-aware linting (8.69.0) | Flags redundant `Exclude` and `any` inside a conditional |
+| typescript-eslint | Type-aware linting (8.71.2) | Flags redundant `Exclude` and `any` inside a conditional |
 | Zod | Runtime schema parsing | `z.infer` is exactly this machinery over a schema value |
 | Prisma | Database client generator | Emits real `.ts` types instead of deriving them at check time |
 

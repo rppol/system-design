@@ -2,7 +2,7 @@
 
 > Phase 1 — Foundations · Difficulty: Intermediate
 
-> **Version anchor (2026-08-25).** **Linux kernel mainline v7.2** (2026-08-16), with **6.18.x the current LTS line** (shipped late 2025, supported through December 2028); **cgroup v2 is what a current cluster requires** — Kubernetes 1.35's kubelet refuses to start on a cgroup v1 node by default (KEP-5573); **systemd v261** (2026-06-19); **RHEL 10** (GA 2025-05-20); **Ubuntu 26.04 LTS "Resolute Raccoon"** (2026-04-23, current LTS; 24.04 remains supported).
+> **Version anchor (2026-10-19).** **Linux kernel mainline v7.3** (2026-10-18), with **6.18.x the current LTS line** (shipped late 2025, supported through December 2028); **cgroup v2 is what a current cluster requires**: Kubernetes 1.35's kubelet refuses to start on a cgroup v1 node by default (KEP-5573); **Memory QoS** (KEP-2570) is **Beta and on by default in Kubernetes 1.37** but writes no `memory.high`, `memory.min` or `memory.low` until the kubelet config asks for them; **systemd v261** (2026-06-19); **RHEL 10** (GA 2025-05-20); **Ubuntu 26.04 LTS "Resolute Raccoon"** (2026-04-23, current LTS; 24.04 remains supported). **PSI** (pressure stall information) has been in the kernel since 4.20, and the kubelet's `KubeletPSI` gate is stable and locked on from Kubernetes 1.36. **sched_ext** (BPF-defined schedulers, `CONFIG_SCHED_CLASS_EXT`) is mainline since Linux 6.12; the `sched-ext/scx` scheduler collection is at **v1.1.4** (2026-10-15).
 
 The operating system is the substrate every container, pod, and cloud VM runs on. A senior DevOps engineer who understands processes, signals, file descriptors, cgroups, and namespaces can explain *why* a pod gets OOMKilled, *why* a graceful shutdown hangs, and *why* a "container" is just a process with a restricted view of the kernel — not a virtual machine.
 
@@ -241,6 +241,38 @@ The request burned 120 ms of CPU but took 220 ms to answer — the extra 100 ms 
 
 The section 14 case study's fix leans on the same arithmetic: `-XX:MaxRAMPercentage=75.0` against a `1Gi` limit gives a max heap of `1073741824 x 0.75 = 805,306,368` bytes = **768 Mi**, deliberately leaving `1024 - 768 = 256 Mi` for metaspace, thread stacks, and native allocations — all of which count against `memory.max` but live outside the heap the JVM is capping.
 
+### Pressure stall information (PSI): contention before it becomes OOM or throttling
+
+Utilization says how busy a resource is; PSI says how much time work spent **waiting** for it. The kernel exports it per resource in `/proc/pressure/{cpu,memory,io}` and, on cgroup v2, per cgroup in `cpu.pressure`, `memory.pressure` and `io.pressure`:
+
+```bash
+cat /sys/fs/cgroup/kubepods.slice/.../memory.pressure
+some avg10=23.00 avg60=9.41 avg300=2.10 total=48211904
+full avg10=4.00 avg60=1.32 avg300=0.30 total=7702133
+```
+
+| Field | Meaning |
+|---|---|
+| `some` | Share of wall time in which at least one task was stalled on the resource |
+| `full` | Share of wall time in which all non-idle tasks were stalled at once; no useful work on that resource. CPU `full` at system level is always 0 |
+| `avg10` / `avg60` / `avg300` | Those shares, in percent, over 10 s, 60 s and 300 s windows |
+| `total` | Cumulative stall time in microseconds, for custom windows and short spikes the averages hide |
+
+**Walk one example.** The output above comes from a container with `memory.max` at 1 Gi whose working set is 1.1 Gi. In the last 10 s some task waited 2.3 s on page reclaim and refaults (`some avg10=23.00`), and for 0.4 s every task waited (`full avg10=4.00`). `memory.events` shows `oom_kill 0`, CPU utilization looks normal, and p99 latency has doubled. Only PSI shows that the limit is already costing time, before the OOM killer ever runs.
+
+Three consumers act on it. The kubelet (`KubeletPSI`, stable from 1.36, needs cgroup v2 and `CONFIG_PSI=y`) exports `container_pressure_{cpu,memory,io}_waiting_seconds_total` (the `some` total) and `..._stalled_seconds_total` (the `full` total) on `/metrics/cadvisor`. **systemd-oomd** kills the cgroup with the most reclaim when its memory `full` pressure stays above 60% for 30 s (the `DefaultMemoryPressureLimit` and `DefaultMemoryPressureDurationSec` defaults), which acts before the kernel OOM killer would. A program can also register a trigger and `poll()` for it, for example `some 150000 1000000` (150 ms of stall in any 1 s window); windows must be 500 ms to 10 s, and unprivileged users must use multiples of 2 s.
+
+```promql
+# Fraction of the last 5 minutes in which some task in the container waited for memory
+rate(container_pressure_memory_waiting_seconds_total{container="api"}[5m]) > 0.10
+```
+
+### sched_ext: BPF-defined CPU schedulers
+
+Since Linux 6.12, `CONFIG_SCHED_CLASS_EXT` adds a scheduler class whose policy is a set of BPF programs implementing `struct sched_ext_ops`, loaded at runtime like any BPF program. Loading one moves all `SCHED_NORMAL`, `SCHED_BATCH`, `SCHED_IDLE` and `SCHED_EXT` tasks onto it, unless the scheduler sets `SCX_OPS_SWITCH_PARTIAL`, in which case only `SCHED_EXT` tasks move. The safety model is the reason it can run in production: if the BPF scheduler errors, leaves a runnable task unscheduled past its watchdog timeout (30 s at most), or an operator presses `SysRq-S`, the kernel unloads it and returns every task to the fair scheduler. `/sys/kernel/sched_ext/state` and `/sys/kernel/sched_ext/root/ops` show what is loaded.
+
+The `sched-ext/scx` repository ships ready schedulers such as `scx_rusty` (load balancing across LLC domains), `scx_lavd` (latency-critical interactive work), `scx_bpfland` and `scx_layered`, the last of which Meta uses to give classes of a service their own CPU policy. For DevOps the practical use is narrow: a tuned scheduler can be tried on one node pool without a kernel rebuild, and backed out by stopping a process. It is not a substitute for CPU requests and limits, which still act through cgroups.
+
 ### The OOM killer
 
 When memory cannot be reclaimed, the kernel computes an `oom_score` per process (roughly proportional to memory used, adjusted by `oom_score_adj` in `-1000..1000`) and kills the highest. In a cgroup-limited container, hitting `memory.max` triggers a **cgroup-local** OOM kill even if the node has free RAM:
@@ -342,10 +374,12 @@ Only two outcomes exist: the app traps SIGTERM and exits cleanly, or the grace p
 | Decision | Option A | Option B | Key factor |
 |----------|----------|----------|-----------|
 | Init in containers | App as PID 1 (simple) | `tini`/`dumb-init` (reaps zombies, forwards signals) | Does the app spawn children / handle SIGTERM? |
-| Memory control | `memory.max` hard limit (OOM on breach) | `memory.high` throttle (reclaim pressure) | Tolerate latency vs tolerate kills |
+| Memory control | `memory.max` hard limit (OOM on breach) | `memory.high` throttle (reclaim pressure); on Kubernetes the kubelet writes it only when `memoryThrottlingFactor` is set | Tolerate latency vs tolerate kills |
 | CPU control | CPU limits (throttling) | CPU requests only (no cap) | Latency-sensitive vs throughput batch |
 | Isolation strength | Namespaces (shared kernel, fast) | microVM/gVisor (stronger, overhead) | Trust level of workload |
 | Swap | kubelet `NoSwap` (default) | kubelet `LimitedSwap` (`memory.swap.max` per container) | Predictability vs memory headroom |
+| Contention signal | Utilization (`memory.current`, CPU %) | PSI (`*.pressure`, `container_pressure_*`) | How full vs how much time work lost waiting |
+| CPU scheduling policy | In-kernel fair scheduler (EEVDF) | sched_ext BPF scheduler (6.12+) | Default for all vs workload-specific policy tested without a kernel rebuild |
 
 ---
 
@@ -435,76 +469,91 @@ The proxy stops at `(1024 - 20) / 2 = 502` brokered connections, not 5000, becau
 | `systemctl` | Service management | Start/stop/status on VMs |
 | `nsenter` | Enter a process's namespaces | Debug a container from the host |
 | `vmstat` / `iostat` / `mpstat` | Memory / I/O / per-CPU stats | Saturation triage |
+| `/proc/pressure/*`, `*.pressure` | PSI stall time per resource, node and cgroup | Contention before OOM or visible throttling |
+| systemd-oomd | Kills by cgroup memory pressure (default 60% `full` for 30 s) | Desktop and VM hosts that should act before the kernel OOM killer |
+| `sched-ext/scx` (`scx_rusty`, `scx_lavd`, `scx_layered`) | BPF CPU schedulers loaded at runtime | Testing a scheduling policy on Linux 6.12+ |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: What actually is a container at the kernel level?**
+**Q: A container's p99 latency doubled, it has had no OOM kill, and CPU utilization looks normal. What signal tells you memory is the cause?**
+**Short:** Its cgroup `memory.pressure` (PSI): a rising `some` value means tasks are stalled on reclaim and refaults near `memory.max`, a cost that shows up long before any OOM kill.
+Near its limit the kernel keeps the cgroup alive by reclaiming page cache and anonymous memory, and tasks wait for that reclaim and for refaults of pages it just evicted. Utilization metrics show a steady `memory.current` just under `memory.max`, and `memory.events` shows `oom_kill 0`, so nothing looks wrong. PSI measures the waiting directly: `some avg10=23.00` means some task was stalled on memory for 23% of the last 10 s. On Kubernetes 1.36+ the same data is `container_pressure_memory_waiting_seconds_total`, so alert on its rate rather than on percent-of-limit. The fix is a larger limit or a smaller working set (heap, cache size), not more CPU.
+
+**Q: What is the difference between PSI `some` and `full`?**
+**Short:** `some` is the share of time at least one task was stalled on the resource; `full` is the share in which every non-idle task was stalled at once, so no useful work happened.
+Both are percentages over 10, 60 and 300 second windows plus a cumulative `total` in microseconds. `some` rises first and measures added latency for some of the work. `full` measures lost throughput: during that time the resource was the only thing anyone was doing. A memory `full` value that stays high means thrashing, which is what systemd-oomd acts on by default (60% for 30 s). CPU `full` is undefined at system level and reported as 0, but it is meaningful per cgroup. For alerting, `some` catches latency problems early and `full` catches the cases where the workload has effectively stopped.
+
+**Q: What is sched_ext, and what happens if a BPF scheduler misbehaves?**
+**Short:** A Linux 6.12+ scheduler class whose policy is a loaded BPF program; on an error, a stalled runnable task or `SysRq-S` the kernel unloads it and returns all tasks to the fair scheduler.
+`CONFIG_SCHED_CLASS_EXT` lets a userspace loader attach BPF programs that implement `struct sched_ext_ops` (task enqueue, CPU selection, dispatch). Once loaded, normal tasks run under it, or only `SCHED_EXT` tasks if it sets `SCX_OPS_SWITCH_PARTIAL`. The kernel keeps the right to take control back: a BPF error, a runnable task not scheduled within the watchdog timeout (30 s at most), or `SysRq-S` aborts the scheduler and reverts every task to the fair class, so a buggy policy degrades to the default instead of hanging the machine. That makes it practical to test schedulers such as `scx_lavd` or `scx_layered` on one node pool, and to back them out by stopping a process rather than rebooting into another kernel.
+
+**Q: What actually is a container at the kernel level?**
 **Short:** A container is an ordinary process placed into its own namespaces and constrained by cgroups, with no separate "container" kernel object at all.
 A container is an ordinary Linux process placed into its own set of namespaces and constrained by cgroups, optionally with reduced capabilities and a pivoted root filesystem. There is no "container" object in the kernel — `docker run` calls `clone()` with `CLONE_NEW*` flags, writes cgroup limits, and `execve()`s the entrypoint. This is why containers share the host kernel and start in milliseconds, unlike VMs.
 
-**Q2: A pod is OOMKilled but `kubectl top node` shows free memory. Why?**
+**Q: A pod is OOMKilled but `kubectl top node` shows free memory. Why?**
 **Short:** The container exceeded its cgroup `memory.max`, triggering a local OOM kill independent of node-level free memory.
 The container exceeded its cgroup `memory.max` (its `resources.limits.memory`), triggering a *cgroup-local* OOM kill independent of node-level free memory. Requests affect scheduling and QoS; limits are a hard ceiling enforced per cgroup. Check `dmesg` for "Memory cgroup out of memory" and `memory.events` `oom_kill` count.
 
-**Q3: Difference between a process's requests and limits, and how do they map to the kernel?**
+**Q: Difference between a process's requests and limits, and how do they map to the kernel?**
 **Short:** Requests are a scheduling guarantee mapped to `cpu.weight` or reserved memory, while limits enforce via `cpu.max` throttling or `memory.max` OOM kill.
 Requests are a scheduling guarantee (`cpu.weight` / reserved memory used by the scheduler to place the pod); limits are enforcement — `cpu.max` (CFS quota, causes throttling) and `memory.max` (causes OOM kill on breach). Requests never throttle or kill; limits do.
 
-**Q4: SIGTERM vs SIGKILL — why does graceful shutdown sometimes fail?**
+**Q: SIGTERM vs SIGKILL — why does graceful shutdown sometimes fail?**
 **Short:** SIGTERM is catchable so a well-behaved app drains gracefully, while SIGKILL is uncatchable, and shutdown drops requests when SIGTERM is ignored or too slow.
 SIGTERM (15) is catchable: a well-behaved app traps it, stops accepting new work, drains in-flight requests, then exits. SIGKILL (9) is uncatchable — the kernel destroys the process immediately. Shutdown "fails" (drops requests) when the app ignores SIGTERM or takes longer than `terminationGracePeriodSeconds`, after which Kubernetes escalates to SIGKILL.
 
-**Q5: What does the OOM killer use to choose a victim?**
+**Q: What does the OOM killer use to choose a victim?**
 **Short:** It computes an `oom_score` roughly proportional to memory footprint, adjusted by `oom_score_adj`, and kills the highest scorer under pressure.
 It computes `oom_score` per process, roughly proportional to memory footprint, adjusted by `oom_score_adj` (`-1000` = never kill, `+1000` = kill first). Under whole-node pressure it kills the highest scorer; under cgroup pressure it kills within the offending cgroup. Kubernetes sets `oom_score_adj` so BestEffort pods die before Guaranteed ones.
 
-**Q6: Why might a process show 100% CPU but the service is slow, vs low CPU but slow?**
+**Q: Why might a process show 100% CPU but the service is slow, vs low CPU but slow?**
 **Short:** High CPU with slowness is genuinely CPU-bound, rising `throttled_usec` means CFS bandwidth throttling, and high iowait means blocked disk or network I/O.
 High CPU + slow = genuinely CPU-bound (profile the hot path). Low CPU + slow + a rising `nr_throttled`/`throttled_usec` in the cgroup's `cpu.stat` = CFS bandwidth throttling against a CPU limit. Low CPU + slow + high iowait (`vmstat`/`iostat`) = blocked on disk/network I/O. The metrics distinguish the three.
 
-**Q7: What is a zombie process and how does it arise in containers?**
+**Q: What is a zombie process and how does it arise in containers?**
 **Short:** A zombie is a terminated child whose exit status hasn't been reaped by its parent, accumulating when a container's PID 1 spawns children but never reaps them.
 A zombie (`<defunct>`) is a terminated child whose exit status hasn't been reaped by its parent via `wait()`. In containers, if PID 1 is a shell or an app that spawns children but never reaps them, zombies accumulate and can exhaust the PID table. Fix: use an init like `tini`/`dumb-init` as PID 1, or `shareProcessNamespace` with a proper init.
 
-**Q8: How do you debug a running container from the host without a shell inside it?**
+**Q: How do you debug a running container from the host without a shell inside it?**
 **Short:** Use `nsenter` to enter the container's namespaces with host tools, or `kubectl debug` ephemeral containers, since distroless images have no shell.
 Use `nsenter --target <host-pid> --mount --net --pid` to enter the container's namespaces with host tools, or `kubectl debug` ephemeral containers. Distroless/scratch images have no shell, so host-side `nsenter`, `crictl`, `strace -p`, and `/proc/<pid>/` inspection are essential.
 
-**Q9: What are Linux capabilities and why drop them?**
+**Q: What are Linux capabilities and why drop them?**
 **Short:** Capabilities split root's powers into narrow units, and dropping all and adding back only what's needed shrinks the blast radius of a compromise.
 Capabilities split root's powers into ~40 units (`CAP_NET_BIND_SERVICE`, `CAP_SYS_ADMIN`, etc.). Dropping all and adding back only what's needed shrinks the blast radius of a compromise — a container that only needs to bind port 80 gets `CAP_NET_BIND_SERVICE` and nothing else. `securityContext.capabilities.drop: ["ALL"]` is the hardened default.
 
-**Q10: cgroups v1 vs v2 — why does it matter for Kubernetes?**
+**Q: cgroups v1 vs v2 — why does it matter for Kubernetes?**
 **Short:** cgroups v2 gives better memory pressure control and, since Kubernetes 1.35, is what the kubelet requires — it won't start on a cgroup v1 node by default.
 v2 is a single unified hierarchy with better memory pressure control (`memory.high` throttles before `memory.max` OOMs) and accurate accounting. Kubernetes added GA cgroup v2 support in 1.25, and starting in 1.35 the kubelet refuses to start on a cgroup v1 node by default (override with `failCgroupV1: false`, though the KEP sets no removal date before 1.38) — cgroup v2 is no longer just the modern option, it's what a current cluster requires. Mismatches between the runtime's expectation and the node's cgroup version cause subtle resource-enforcement bugs.
 
-**Q11: What does `ulimit -n` control and where does it bite in production?**
+**Q: What does `ulimit -n` control and where does it bite in production?**
 **Short:** It's the per-process soft limit on open file descriptors, so high-connection servers hit `EMFILE` and stop accepting connections once it's exhausted.
 It's the per-process soft limit on open file descriptors (default often 1024). Sockets are FDs, so high-connection servers (proxies, brokers, DB pools) hit `EMFILE` ("too many open files") and stop accepting connections while CPU/memory look fine. Raise it via systemd `LimitNOFILE` or pod limits, and monitor open FDs against the ceiling.
 
-**Q12: How does the page cache affect "memory usage" readings?**
+**Q: How does the page cache affect "memory usage" readings?**
 **Short:** Linux uses free RAM as reclaimable page cache, so "used" memory readings that include cache look alarming even though the cache is reclaimable.
 Linux uses free RAM as page cache for file I/O; tools that report "used" memory including cache look alarming but the cache is reclaimable. `free -m` distinguishes `used` from `buff/cache` and `available`. In cgroups, page cache counts toward `memory.current`, which is why a file-heavy container can approach `memory.max` from cache alone and trigger reclaim.
 
-**Q13: What does the USER namespace isolate, and why is it a key container security boundary?**
+**Q: What does the USER namespace isolate, and why is it a key container security boundary?**
 **Short:** The USER namespace remaps UID/GID so a process can be root inside its container while mapping to an unprivileged host UID, so root in a container isn't root on the host.
-The USER namespace remaps UID/GID numbers so a process can be root (UID 0) inside its own namespace while mapping to an unprivileged UID on the host, meaning root in a container is not root on the host. This is what lets rootless container runtimes (Podman, rootless Docker) run without host root privileges at all, shrinking the blast radius if the container is compromised. Without a USER namespace mapping, a container running as UID 0 that escapes its namespace (via a kernel exploit or a misconfigured volume mount) has genuine host root. Combine USER namespace remapping with capability dropping (Q9) for defense in depth rather than relying on either alone.
+The USER namespace remaps UID/GID numbers so a process can be root (UID 0) inside its own namespace while mapping to an unprivileged UID on the host, meaning root in a container is not root on the host. This is what lets rootless container runtimes (Podman, rootless Docker) run without host root privileges at all, shrinking the blast radius if the container is compromised. Without a USER namespace mapping, a container running as UID 0 that escapes its namespace (via a kernel exploit or a misconfigured volume mount) has genuine host root. Combine USER namespace remapping with capability dropping (see the Linux capabilities question in section 12) for defense in depth rather than relying on either alone.
 
-**Q14: What's the difference between cgroup v2's memory.max and memory.high, and when do you use each?**
+**Q: What's the difference between cgroup v2's memory.max and memory.high, and when do you use each?**
 **Short:** `memory.max` is a hard ceiling that OOM-kills on breach, while `memory.high` is a soft throttle applying reclaim pressure before any kill happens.
-memory.max is a hard ceiling that triggers an OOM kill the instant it's breached, while memory.high is a soft throttle that applies reclaim pressure before any kill happens. Setting memory.high below memory.max gives a workload room to shed cache and slow down gracefully instead of being SIGKILLed the moment it spikes, which is valuable for bursty or GC-heavy workloads like the JVM. Kubernetes maps a pod's memory limit to memory.max by default, so relying on memory.high requires deliberate cgroup-level configuration outside the standard resources.limits field. Use memory.max when you need a hard, predictable ceiling, and layer memory.high underneath it when you can tolerate throttling over killing.
+memory.max is a hard ceiling that triggers an OOM kill the instant it's breached, while memory.high is a soft throttle that applies reclaim pressure before any kill happens. Setting memory.high below memory.max gives a workload room to shed cache and slow down gracefully instead of being SIGKILLed the moment it spikes, which is valuable for bursty or GC-heavy workloads like the JVM. Kubernetes maps a container's memory limit to memory.max. Since 1.37 Memory QoS (Beta) is on by default, but the kubelet writes memory.high for Burstable and BestEffort containers only when the node's KubeletConfiguration sets `memoryThrottlingFactor` (for example 0.9; the default is null), and writes memory.min (Guaranteed) and memory.low (Burstable) only with `memoryReservationPolicy: TieredReservation` (default None). Both are node-wide settings: no Pod can opt in or out on its own. Use memory.max when you need a hard, predictable ceiling, and layer memory.high underneath it when you can tolerate throttling over killing.
 
-**Q15: In the JVM OOMKill case study, why must -XX:MaxRAMPercentage leave headroom below 100%?**
+**Q: In the JVM OOMKill case study, why must -XX:MaxRAMPercentage leave headroom below 100%?**
 **Short:** Heap is only part of a JVM's footprint — metaspace, thread stacks, and native buffers consume memory outside it that MaxRAMPercentage must leave room for.
 Heap is only part of a JVM container's memory footprint — metaspace, thread stacks, JIT-compiled code, and native/off-heap buffers all consume memory outside the heap that MaxRAMPercentage sizes. At 75% of a 1Gi limit the heap caps around 768Mi, leaving roughly 256Mi for those non-heap consumers so the container doesn't hit memory.max and get cgroup-OOM-killed even though the heap itself never overflows. Setting MaxRAMPercentage close to 100 reproduces the original bug in a different form, since enough headroom disappears that a modest rise in thread count or metaspace still triggers exit 137. Size MaxRAMPercentage with an explicit non-heap budget in mind — thread count x stack size, expected metaspace — not just as "leave some margin."
 
-**Q16: When would you choose gVisor or Kata Containers over standard namespace-based containers?**
+**Q: When would you choose gVisor or Kata Containers over standard namespace-based containers?**
 **Short:** Choose gVisor or Kata for untrusted multi-tenant workloads needing stronger isolation than a shared kernel, at the cost of extra syscall or virtualization overhead.
 Choose gVisor or Kata Containers when running untrusted, multi-tenant workloads that need stronger isolation than a shared kernel provides. gVisor interposes a user-space kernel that intercepts syscalls, and Kata runs each container in a lightweight VM with its own kernel, so a container escape no longer hands an attacker the host kernel directly, at the cost of added syscall-interception or virtualization overhead versus native namespaces/cgroups. This tradeoff matters for platforms like serverless multi-tenant sandboxes or CI runners executing arbitrary customer code, where the isolation strength justifies the performance hit. For trusted, single-tenant workloads such as your own microservices, standard namespace isolation is faster and sufficient.
 
-**Q17: A node still on cgroup v1 fails to join a freshly upgraded Kubernetes 1.35 cluster. Why, and what are the options?**
+**Q: A node still on cgroup v1 fails to join a freshly upgraded Kubernetes 1.35 cluster. Why, and what are the options?**
 **Short:** Kubernetes 1.35 sets `failCgroupV1` to true by default, so the kubelet refuses to start on a cgroup v1 node unless that flag is explicitly overridden.
 Kubernetes 1.35 flips the kubelet's `FailCgroupV1` setting from `false` to `true` by default, so a kubelet that detects cgroup v1 on startup exits instead of running in a degraded state — this is a hard failure, not a warning buried in the logs. The supported fix is migrating the node to a cgroup-v2 distro (RHEL 10 and Ubuntu 24.04+ ship it by default); the escape hatch is setting `failCgroupV1: false` in the kubelet config, which is explicitly a stopgap since the removal KEP commits to eventually deleting the cgroup v1 code path entirely, with no removal date set before 1.38. Treat the override as a migration deadline you're borrowing time against, not a setting to leave in place.
 
@@ -518,6 +567,8 @@ Kubernetes 1.35 flips the kubelet's `FailCgroupV1` setting from `false` to `true
 - **Set memory limits = requests** for predictable QoS (Guaranteed class); be cautious with CPU limits on latency-sensitive paths.
 - **Raise `LimitNOFILE`** for connection-heavy services and alert on FD usage approaching the ceiling.
 - **Read `/proc` and `/sys/fs/cgroup` first** during resource incidents — they are ground truth, not the application logs.
+- **Alert on pressure, not only on utilization:** the rate of `container_pressure_memory_waiting_seconds_total` and `..._cpu_waiting_...` shows contention before OOM kills and throttling incidents.
+- **Treat a sched_ext scheduler as a node-pool experiment:** run it on Linux 6.12+, watch `/sys/kernel/sched_ext/state`, and keep the fair scheduler as the fallback.
 - **Leave the kubelet in `NoSwap` mode** for predictable OOM behavior; opt into `LimitedSwap` only deliberately, for workloads whose cold pages you genuinely want paged out.
 
 ---

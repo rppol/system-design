@@ -297,6 +297,66 @@ round-trip between every stage; the megakernel pays a launch once and keeps
 all three stages' data resident, at the cost of the register pressure and
 occupancy loss discussed in Section 8.
 
+### 4.6 Cluster Launch Control (Blackwell, compute capability 10.0+)
+
+A classic persistent kernel sizes its grid to `numSMs * blocksPerSM` and
+assumes that capacity is all its own. Two things break that assumption: a
+second kernel (or a green context, MPS client, or higher-priority stream)
+holding some SMs, and a block that cannot be preempted because it never
+exits until the queue drains. The CUDA Programming Guide (13.4) rates the
+three scheduling styles this way:
+
+| Property | Fixed work per block (one block per item) | Fixed number of blocks (persistent) | Cluster Launch Control |
+|----------|------------------------------------------|-------------------------------------|------------------------|
+| Low per-item overhead | No | Yes | Yes |
+| Preemptible | Yes | No | Yes |
+| Load-balances around busy SMs | Yes | No | Yes |
+
+Cluster Launch Control (CLC) keeps a **problem-sized grid** (one block or
+cluster per tile, like a non-persistent kernel) but lets a running block
+**cancel a not-yet-launched block and take its index** with
+`clusterlaunchcontrol.try_cancel`. The hardware scheduler answers
+asynchronously into a 16-byte `__shared__` slot tracked by an `mbarrier`.
+Every block index is processed exactly once: either it launches as a normal
+block when an SM frees up, or a running block steals it. When no
+unlaunched indices remain, the request fails and the block exits. Because
+blocks do exit, the scheduler can slot a higher-priority kernel in and resume
+the remaining blocks later, which a fixed-grid persistent kernel cannot allow.
+
+```
+Grid = 12 tiles, 4 SMs, SM3 busy with another kernel
+
+Persistent (grid = 4, static stride):    CLC (grid = 12, steal on demand):
+SM0  t0  t4  t8                          SM0  t0  t4  t7  t10
+SM1  t1  t5  t9                          SM1  t1  t5  t8  t11
+SM2  t2  t6  t10                         SM2  t2  t6  t9
+SM3  [busy....] t3  t7  t11  <- tail     SM3  [busy....] t3
+     finish waits on SM3                      tiles flow to free SMs
+```
+
+Static persistence pins t3, t7 and t11 to SM3, so the kernel's finish time
+is set by the one SM another tenant was holding. With CLC, SMs 0-2 steal
+those indices while SM3 is busy.
+
+Rules from the Programming Guide that bite:
+
+- Issue the request from **one thread** (the guide wraps it in
+  `cg::invoke_one`); issuing from several threads cancels several blocks.
+- After a request **fails**, submitting another one is undefined behavior,
+  and so is reading the block index out of a failed response. Exit the loop.
+- In the cluster case all of the cluster's blocks must already exist before
+  the cancel (a `cg::cluster_group::sync()` guarantees it), one thread issues
+  `clusterlaunchcontrol_try_cancel_multicast`, and each block adds its local
+  rank in the cluster to the returned first block index.
+- Each query consumes a whole cluster of indices, so a 2x2 cluster takes
+  four block indices per steal (CUTLASS documentation).
+
+CUTLASS's Blackwell GEMMs use this as their dynamic persistent scheduler
+(`PersistentTileSchedulerSm100`): the grid has one cluster per output tile,
+the scheduler warp (warp 1) of the cluster's first CTA produces a 3-deep CLC
+response pipeline, and the MMA, load and epilogue warps consume tile
+coordinates from it.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -575,6 +635,57 @@ launching *more* means some blocks cannot start until earlier ones retire,
 breaking any pattern (Section 6.4) that assumes every launched block is
 concurrently resident.
 
+**The same worker with Cluster Launch Control (cc 10.0+).** The grid is
+sized to the work, not to occupancy, and a block steals the next unlaunched
+block index while it processes its current one. Calls follow the libcu++
+`cuda::ptx` wrappers used in the CUDA Programming Guide (13.4):
+
+```cpp
+#include <cuda/ptx>
+#include <cooperative_groups.h>
+namespace ptx = cuda::ptx;
+namespace cg  = cooperative_groups;
+
+__global__ void clcWorker(const WorkItem* queue, int numItems, Result* results) {
+    __shared__ uint4    clcResponse;     // opaque 16-byte scheduler reply
+    __shared__ uint64_t bar;
+    int tile  = blockIdx.x;              // first tile = own launch index
+    int phase = 0;
+    if (threadIdx.x == 0) ptx::mbarrier_init(&bar, 1);
+    __syncthreads();
+
+    while (true) {
+        __syncthreads();                 // nobody still reads the last reply
+        if (threadIdx.x == 0) {
+            ptx::fence_proxy_async_generic_sync_restrict(
+                ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
+            ptx::clusterlaunchcontrol_try_cancel(&clcResponse, &bar);
+            ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cta,
+                                           ptx::space_shared, &bar, sizeof(uint4));
+        }
+
+        int idx = tile * blockDim.x + threadIdx.x;   // work overlaps the request
+        if (idx < numItems) results[idx] = processItem(queue[idx]);
+
+        while (!ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+        phase ^= 1;
+        if (!ptx::clusterlaunchcontrol_query_cancel_is_canceled(clcResponse))
+            break;                       // nothing left to steal: exit, never retry
+        tile = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(clcResponse);
+        ptx::fence_proxy_async_generic_sync_restrict(
+            ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
+    }
+}
+
+// Host: an ordinary problem-sized launch, no occupancy query needed.
+// clcWorker<<<(numItems + 255) / 256, 256>>>(d_queue, numItems, d_results);
+```
+
+Compared with `persistentWorkerChunked`: no global `atomicAdd` counter to
+reset between launches, no occupancy calculation on the host, and blocks
+that never start because SMs were busy are not lost, they simply launch
+later or get stolen.
+
 ### 6.3 Producer-consumer with a ring buffer and explicit fences (C++)
 
 ```cpp
@@ -709,6 +820,7 @@ kernel((num_sms * blocks_per_sm,), (256,), (queue_gpu, num_items, results_gpu))
 | Flat grid (worst-case sized) | 1 (host) | Regular, predictable work | Lowest overhead; wastes threads on no-op cases | Low |
 | Dynamic parallelism (CDP2) | 1 (host) + N (device, per irregular unit) | Coarse-grained, deeply irregular work (AMR, recursive partitioning) | Each child launch costs several microseconds of device-runtime bookkeeping; dominates when N is large and per-child work is small | Medium — natural recursive code shape, but hard to profile and nesting-depth bounded |
 | Persistent kernel + work queue | 1 (host), zero thereafter | Irregular work of any size, known or unknown ahead of time | Near-zero marginal cost per work item (an atomicAdd plus a loop iteration) | Medium-high — must size to occupancy exactly; busy-wait/fencing bugs are easy to introduce |
+| Cluster Launch Control (cc 10.0+) | 1 (host), problem-sized grid | Persistent-style tile loops that must share the GPU or be preemptible | One scheduler query per item, overlapped with the current item's work | Medium: `mbarrier` + async-proxy fences; undefined behavior if a failed request is retried |
 | Producer-consumer | 1 (host) | Work that is *generated* at runtime by some blocks and consumed by others | Same as persistent kernel, plus queue-management (ring buffer, fences) overhead | High — concurrent data structure correctness on top of persistent-kernel sizing |
 | Megakernel / fusion | 1 (host) | Many small logical stages better run as one long kernel | Eliminates per-stage launch + HBM round-trip cost entirely | High — register pressure hurts occupancy; internal branching complicates every profile |
 | [CUDA graphs](../cuda_graphs/cuda_graphs.md) | 1 (capture) + 1 (replay, one launch's worth of host overhead regardless of node count) | A *static*, known sequence of kernels, even with irregular argument values | Lowest possible overhead for a fixed, predictable launch sequence | Low-medium — no code restructuring, but the sequence itself must be fixed |
@@ -932,6 +1044,7 @@ __global__ void producerConsumerFixed(float* data, float* out) {
 | `cudaOccupancyMaxActiveBlocksPerMultiprocessor` | Computes exactly how many blocks of a given kernel fit resident per SM — the persistent-kernel sizing input |
 | `cudaDeviceGetAttribute(..., cudaDevAttrMultiProcessorCount, ...)` | Reads SM count, the other half of persistent-kernel sizing |
 | `cudaLaunchCooperativeKernel` | Required launch entry point for kernels that call `grid.sync()` |
+| `cuda::ptx::clusterlaunchcontrol_try_cancel` / `_query_cancel_is_canceled` / `_query_cancel_get_first_ctaid_x` | Cluster Launch Control work stealing on cc 10.0+; the response lands in a 16-byte `__shared__` slot tracked by an `mbarrier` |
 | `cooperative_groups::grid_group::sync()` | True grid-wide barrier across all resident blocks |
 | `__threadfence()` | Orders a thread's prior global-memory writes to be visible to all SMs before later writes — required for cross-block hand-offs |
 | `atomicAdd` / `atomicExch` / `atomicCAS` | Building blocks for work-queue counters and ring-buffer ready flags |
@@ -987,6 +1100,35 @@ A persistent kernel's blocks never complete on their own
 the device can run simultaneously, the excess blocks queue forever behind a
 resident set that never yields, deadlocking any grid-wide assumption
 (busy-wait signaling, `grid.sync()`).
+
+**Q: Why does a fixed-grid persistent kernel finish late when another kernel holds some SMs, and what does Cluster Launch Control change?**
+**Short:** Its static work split pins each block's share to an SM it may not get; CLC launches a problem-sized grid and lets running blocks steal unlaunched block indices instead.
+A persistent kernel sized to `numSMs * blocksPerSM` divides the work among
+blocks it assumes are all resident, so if another kernel, an MPS client, or a
+green context holds part of the device, the blocks waiting on those SMs carry
+their share late and set the kernel's finish time; the resident blocks also
+never exit, so the scheduler cannot preempt them for higher-priority work.
+Cluster Launch Control on compute capability 10.0+ (Blackwell) keeps one
+block or cluster per tile, and a running block calls
+`clusterlaunchcontrol.try_cancel` to cancel a block that has not launched yet
+and take its index. Every index is processed exactly once, either by its own
+launch or by a thief, and blocks exit when a request fails, which keeps the
+kernel load-balanced and preemptible. CUTLASS's `PersistentTileSchedulerSm100`
+is built on it; reach for it whenever a persistent GEMM or attention kernel
+runs next to other work on Blackwell.
+
+**Q: In a Cluster Launch Control loop, what must a block do when a `try_cancel` request fails?**
+**Short:** Exit the work loop. Issuing another request after a failed one, or reading the block index out of the failed response, is undefined behavior per the CUDA Programming Guide.
+Exit. A failed request means no unlaunched block indices remain (or the
+scheduler declined for another listed reason), and the CUDA Programming
+Guide makes both follow-ups undefined: "Submitting another cancellation
+request after observing a previously failed request is undefined behavior",
+and so is retrieving the block index of a failed response. Two related
+rules: issue each request from exactly one thread (the guide wraps it in
+`cg::invoke_one`), because every request that succeeds cancels one more
+block; and in a cluster, make sure all of the cluster's blocks exist
+(`cg::cluster_group::sync()`) before the first cancel. Structure the loop as
+request, do current work, wait on the `mbarrier`, then break on failure.
 
 **Q: What is the status of CDP1 versus CDP2, and what build flags does
 dynamic parallelism require?**

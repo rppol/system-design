@@ -60,6 +60,7 @@ This module covers:
 | `dict` | Open-addressing hash table (compact, 3.6+) | Yes (insertion, guaranteed 3.7+) |
 | `set` | Open-addressing hash table (keys only) | No |
 | `frozenset` | Immutable hash table | No |
+| `frozendict` `[3.15]` | Immutable dict, not a `dict` subclass | Yes (insertion), but `==` ignores order |
 
 ### `collections` Module
 
@@ -375,7 +376,7 @@ and returns `None`, which is exactly why chaining it is a common bug.
 
 ---
 
-### 6.3 `set` and `frozenset`
+### 6.3 `set`, `frozenset`, and `frozendict`
 
 ```python
 # set uses the same hash table as dict, storing only keys.
@@ -403,6 +404,26 @@ print(f"set:  {(time.perf_counter()-t0)*1e6:.1f} µs")   # ~0.03 µs — indepen
 fs: frozenset[int] = frozenset([1, 2, 3])
 lookup: dict[frozenset[int], str] = {fs: "triangle"}
 ```
+
+`frozendict` `[3.15]` (PEP 814) is the mapping counterpart of `frozenset`. It inherits from
+`object`, not `dict`, so `isinstance(x, dict)` is `False` for it; check
+`isinstance(x, collections.abc.Mapping)` to accept both. It keeps insertion order for iteration,
+but `==` and `hash()` ignore order, and `hash()` raises `TypeError` if any key or value is
+unhashable.
+
+```python
+cfg: frozendict[str, int] = frozendict(port=5432, pool=10)
+cfg["port"] = 5433        # TypeError: 'frozendict' object does not support item assignment
+frozendict(a=1, b=2) == frozendict(b=2, a=1)   # True, and the hashes match too
+routes: dict[frozendict[str, int], str] = {cfg: "primary"}   # usable as a key
+
+merged = cfg | {"pool": 20}   # | and |= build a new frozendict, never mutate
+hash(frozendict(tags=["a"]))  # TypeError: the list value is unhashable
+```
+
+Before 3.15 the two options were `types.MappingProxyType`, a read-only view that is not
+hashable and whose underlying dict can still be mutated, and `frozenset(d.items())` or
+`tuple(sorted(d.items()))`, which are hashable but no longer mappings.
 
 ---
 
@@ -458,6 +479,7 @@ print(a + b)   # Counter({'c': 5, 'a': 4, 'b': 3})   — union, keeps positives
 print(a - b)   # Counter({'a': 2})                    — subtract, drop non-positives
 print(a & b)   # Counter({'a': 1, 'b': 1})            — intersection (min counts)
 print(a | b)   # Counter({'c': 5, 'a': 3, 'b': 2})   — union (max counts)
+print(a ^ b)   # Counter({'c': 5, 'a': 2, 'b': 1})   [3.15] symmetric difference: max - min
 
 # Counter is a dict subclass — all dict methods available.
 print(freq["missing_key"])   # 0, not KeyError — overrides __missing__
@@ -1058,6 +1080,11 @@ Accessing `d[key]` on a `defaultdict` when `key` is missing triggers `default_fa
 **Short:** frozenset is an immutable, hashable set usable as a dict key, unlike a regular mutable set.
 
 `frozenset` is an immutable, hashable version of `set`. Because it is immutable, Python can compute its hash once and cache it. Use `frozenset` as a dict key when your key represents a group of items where order does not matter — for example, caching results of a query over a set of user IDs: `cache[frozenset(user_ids)] = result`. You cannot add or remove elements from a `frozenset` after creation. `frozenset` supports all set read operations: `in`, `issubset`, `union`, `intersection`, but not `add`, `remove`, or `discard`.
+
+**Q: How do you use a dict as a dict key or set member?**
+**Short:** A dict is unhashable; convert it to frozendict (3.15+, hashable when keys and values are) or, before 3.15, to frozenset(d.items()).
+
+`dict` is mutable, so it has no `__hash__` and `{ {"a": 1}: x }` raises `TypeError: unhashable type: 'dict'`. On 3.15+ wrap it: `frozendict(d)` (PEP 814) is immutable, keeps the mapping API, and hashes as `hash(frozenset(items))`, so two frozendicts with the same items in a different insertion order are equal and hash the same. The hash only works when every key and value is hashable; `frozendict(tags=["a"])` builds fine but `hash()` on it raises. Before 3.15, `frozenset(d.items())` gives the same order-insensitive key but loses the mapping API, and `tuple(sorted(d.items()))` needs sortable keys. `types.MappingProxyType` is not an answer: it is a read-only view, not hashable, and the dict behind it can still change. Nested dicts need converting at every level, or the inner dict makes the outer hash fail.
 
 **Q8: What is the difference between `bisect_left` and `bisect_right`?**
 **Short:** bisect_left inserts before equal elements while bisect_right inserts after all equal elements.

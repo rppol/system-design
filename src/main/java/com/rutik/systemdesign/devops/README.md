@@ -439,7 +439,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | Block storage | EBS | Persistent Disk | Managed Disks |
 | VM compute | EC2 | Compute Engine | Virtual Machines |
 | Serverless functions | Lambda | Cloud Functions | Azure Functions |
-| Serverless containers | Fargate / App Runner | Cloud Run | Container Apps |
+| Serverless containers | Fargate / ECS Express Mode | Cloud Run | Container Apps |
 | Identity & access | IAM | Cloud IAM | Entra ID + RBAC |
 | Virtual network | VPC | VPC | VNet |
 | L7 load balancer | ALB | Global HTTP(S) LB | Application Gateway |
@@ -503,21 +503,24 @@ Recorded 2026-09-04 from a verified gap review of all 51 files. Every entry belo
 briefable on its own — pick one, read the entry, start. Nothing here is a blocker for the
 section shipping; it is the ordered backlog of what would make it better.
 
-### A. Version-anchor backfill — 33 of 51 files lack the dated anchor `CLAUDE.md` mandates
+### A. Version-anchor backfill — 11 of 52 module and sub-files lack the dated anchor `CLAUDE.md` mandates
 
 `CLAUDE.md` requires a `> **Version anchor (YYYY-MM-DD).**` blockquote on every
-version-exposed page. Eighteen files carry one; thirty-three do not. The seven below are
-the most version-exposed and should be done first, in this order.
+version-exposed page. Checked 2026-10-19 over the module pages and sub-files (case studies
+excluded): 41 carry one. The three below are the most version-exposed of the 11 that do
+not, and should be done first, in this order.
 
 | # | File | Why it is urgent |
 |---|------|------------------|
-| 1 | `devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` | Covers SLSA, Sigstore (Fulcio/Rekor), cosign and GitHub OIDC attestations with **zero version pins on any tool**. Its own sibling `regulated_supply_chain.md:5` has an exemplary anchor — copy that pattern down into the parent. |
-| 2 | `helm_and_package_management/helm_and_package_management.md` | Asserts "Helm 4 is current" and the `--atomic` → `--rollback-on-failure` rename in six places, all unpinned. **Note while anchoring:** the rename is asymmetric — `--atomic` still works on `helm upgrade` with a deprecation warning, but the binding was *removed* from `helm install`, which now errors. The page reads as if both behave the same. |
-| 3 | `configuration_management/configuration_management.md:21-31` | The densest licence/ownership block in the section — Ansible/Red Hat, Puppet/Perforce plus the OpenVox fork, Chef/Progress plus Cinc, Salt/Broadcom. Ownership claims rot faster than APIs and there is no check date. |
-| 4 | `terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md:51-56, 508, 566-568` | BUSL/MPL licensing, CDKTF archived, tfsec absorbed into Trivy. All three are the kind of claim a reader will act on. |
-| 5 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | Pins the Bicep resource version `Microsoft.ContainerService/managedClusters@2024-02-01` twice; near-certainly stale, and a stale ARM API version is a copy-paste failure, not a stylistic one. |
-| 6 | `containers_and_docker/containers_and_docker.md` | Pins `node:24-slim` and `gcr.io/distroless/nodejs24-debian13` in examples readers copy verbatim. |
-| 7 | `ci_cd_fundamentals/ci_cd_fundamentals.md` and `ci_cd_platforms/ci_cd_platforms.md` | GitHub Actions version pins throughout, none dated. |
+| 1 | `configuration_management/configuration_management.md:21-31` | The densest licence/ownership block in the section — Ansible/Red Hat, Puppet/Perforce plus the OpenVox fork, Chef/Progress plus Cinc, Salt/Broadcom. Ownership claims rot faster than APIs and there is no check date. |
+| 2 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | Pins the Bicep resource version `Microsoft.ContainerService/managedClusters@2024-02-01` twice; near-certainly stale, and a stale ARM API version is a copy-paste failure, not a stylistic one. |
+| 3 | `containers_and_docker/containers_and_docker.md` | Pins `node:24-slim` and `gcr.io/distroless/nodejs24-debian13` in examples readers copy verbatim. |
+
+The other eight: `artifact_and_registry_management`, `cloud_cost_optimization_finops`,
+`cloud_networking_and_cdn`, `deployment_strategies`, `disaster_recovery_and_resilience`,
+`incident_management_and_oncall`, `kubernetes_operators_and_crds` (module pages), and
+`devsecops_and_supply_chain_security/regulated_supply_chain.md`, which carries a dated
+`Regulatory anchor` and `Tooling anchor` but not the `Version anchor` label.
 
 ### B. Thin modules — 32 of 41 sit under the section's own 700-line bar (median 567)
 

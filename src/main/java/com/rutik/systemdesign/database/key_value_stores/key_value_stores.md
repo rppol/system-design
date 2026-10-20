@@ -3,15 +3,15 @@
 > **Boundary.** This page teaches the **category** — what a key-value store is for, and the ideas
 > that survive swapping Redis for DynamoDB, etcd or Valkey: data-model choice, the HyperLogLog
 > error/memory trade, expiration versus eviction, the fixed-slot layer, Redlock and its critique.
-> The **product internals** — SDS and listpack layouts, `dict` rehashing, the eight
+> The **product internals** (SDS and listpack layouts, `dict` rehashing, the ten
 > `maxmemory-policy` values and the LRU/LFU algorithms behind them, multi-part AOF, `latest_fork_usec`
 > and copy-on-write, `PSYNC` and the replication backlog, live slot migration with `ASK`/`ASKING`,
-> Functions versus `EVALSHA`, and the Redis-vs-Valkey licence split — live in
+> Functions versus `EVALSHA`, and the Redis-vs-Valkey licence split) live in
 > [Redis Internals](../redis_internals/redis_internals.md). Read this page first.
 
 ## 1. Concept Overview
 
-Key-value stores are the simplest NoSQL data model: a distributed hash map mapping keys to values. Redis is the dominant in-memory key-value store, combining sub-millisecond latency with rich data structures, persistence, pub/sub, Lua scripting, and clustering. Understanding Redis data structures and their internal encodings is critical for building efficient caching, session, rate limiting, and real-time systems.
+Key-value stores are the simplest NoSQL data model: a distributed hash map mapping keys to values. Redis is the dominant in-memory key-value store, combining sub-millisecond latency with rich data structures, persistence, pub/sub, Lua scripting, and clustering. Amazon DynamoDB is the dominant managed, disk-backed one: a partitioned table with no size limit, priced per request, where the partition key decides both data placement and the throughput ceiling of each key. Understanding Redis data structures and their internal encodings is critical for building efficient caching, session, rate limiting, and real-time systems.
 
 ---
 
@@ -269,7 +269,7 @@ expire). Recency suits sessions and sliding windows; frequency suits a Zipfian c
 one that survives a nightly full scan; and refusing to evict at all is the right answer for a job
 queue, where losing an entry is a correctness bug rather than a cache miss.
 
-Redis's eight exact policy names, the fact that its shipped default refuses to evict, and the
+Redis's ten exact policy names (8.6.0 added `allkeys-lrm` and `volatile-lrm`), the fact that its shipped default refuses to evict, and the
 approximated-LRU and logarithmic-LFU algorithms behind them are in
 [Redis Internals §6.3](../redis_internals/redis_internals.md).
 
@@ -369,6 +369,86 @@ sequenceDiagram
 ```
 
 Unlike a plain Redis List (`BRPOP` for a blocking pop, no acknowledgment), a Stream supports consumer groups, acknowledgment, message replay, and multiple independent consumers off the same log.
+
+### DynamoDB: Disk-Backed, Partitioned Key-Value at Scale
+
+Redis keeps the dataset in RAM on nodes you size. Amazon DynamoDB is the other end of the category: a managed, SSD-backed store where AWS splits the table into partitions and you pay per request (on-demand) or per provisioned capacity unit. There is no practical table size limit, a single item is capped at 400 KB, and every access is designed around the key, so the data model is decided by the queries, not by the entities.
+
+#### Partition key, sort key, and item collections
+
+The primary key is either a partition key alone or a partition key plus a sort key. DynamoDB hashes the partition key to pick a partition; within a partition, items with the same partition key form an *item collection* stored in sort-key order. `GetItem` reads one item by full key. `Query` reads a contiguous range of one item collection (`begins_with`, `between`, `<`, `>` on the sort key) and returns up to 1 MB per page. `Scan` reads the whole table and is the one to avoid on a hot path.
+
+Capacity units are the billing and throttling currency:
+
+| Unit | Covers |
+|------|--------|
+| 1 RCU | 1 strongly consistent read/s, or 2 eventually consistent reads/s, of an item up to 4 KB |
+| 1 WCU | 1 write/s of an item up to 1 KB |
+| Per partition | at most 3,000 RCU and 1,000 WCU, whatever the table total |
+| Per table default | 40,000 RCU and 40,000 WCU (adjustable quota) |
+
+Item size multiplies cost: a 20 KB item costs 5 RCU per strongly consistent read, so one item can take only 3,000 / 5 = 600 such reads per second before its partition throttles.
+
+#### Single-table design
+
+Because there are no joins, related entities that are read together are stored in one item collection, distinguished by a typed sort-key prefix. One `Query` on `PK = CUSTOMER#42` returns the customer, their orders, and the order lines in one round trip:
+
+```
+  PK              SK                          other attributes        GSI1PK          GSI1SK
+  -------------   -------------------------   ---------------------   -------------   ----------
+  CUSTOMER#42     PROFILE                     name, email, tier
+  CUSTOMER#42     ORDER#2026-10-01#9001       total, status           STATUS#OPEN     2026-10-01
+  CUSTOMER#42     ORDER#2026-10-14#9017       total, status           STATUS#SHIPPED  2026-10-14
+  CUSTOMER#42     ORDER#2026-10-14#9017#L1    sku, qty, price
+  PRODUCT#77      PROFILE                     title, price
+
+  Query PK = CUSTOMER#42 AND begins_with(SK, "ORDER#2026-10")   -> both October orders + lines
+  Query GSI1 PK = STATUS#OPEN                                    -> open orders across customers
+```
+
+The base table answers "everything about customer 42"; the overloaded GSI (`GSI1PK`, `GSI1SK` hold different meanings per item type) answers a second access pattern without a second table. The model is fixed by the list of access patterns written down first, and a new pattern later usually means a new GSI or a backfill. Single-table design pays off when access patterns are known and latency-critical; a team that needs ad hoc queries or analytics is better served by multiple tables plus an export to S3 for analysis.
+
+#### GSI vs LSI
+
+| | Global secondary index (GSI) | Local secondary index (LSI) |
+|---|---|---|
+| Key | Any partition key and sort key | Same partition key as the table, different sort key |
+| When created | Any time, backfilled online | Only at `CreateTable`; cannot be added later |
+| Read consistency | Eventually consistent only | Strongly consistent available |
+| Capacity | Its own RCU/WCU | Shares the table's capacity |
+| Size limit | None per key | 10 GB per partition key value (table plus all LSIs) |
+| Count | 20 per table (default quota) | 5 per table |
+
+A GSI is a separate, asynchronously maintained table. If its write capacity is too low, writes to the base table that touch the index are throttled too, so an under-provisioned GSI throttles the whole table. An LSI caps each item collection at 10 GB (writes fail with `ItemCollectionSizeLimitExceededException`), and a table with an LSI cannot split an item collection across partitions. Prefer GSIs unless strongly consistent reads on the alternate sort order are a hard requirement.
+
+#### Burst, adaptive capacity, and split for heat
+
+Uneven traffic is the normal state, and DynamoDB has three mechanisms for it:
+
+1. **Burst capacity**: up to 300 seconds of unused read and write capacity is banked and spent on short spikes.
+2. **Adaptive capacity**: instantly raises the share of a hot partition, as long as table total and the 3,000 RCU / 1,000 WCU per-partition maximum are not exceeded. In the AWS example, a 400 WCU table over 4 partitions gives each 100 WCU; one partition taking 150 WCU/s is allowed to keep it.
+3. **Split for heat**: DynamoDB moves frequently accessed items apart, down to a partition holding one item. It cannot split one item, it will not split by sort key when traffic follows a monotonically increasing sort key (every write goes to the newest end), and it does not split item collections on a table with an LSI.
+
+So adaptive capacity removes throttling from moderately skewed traffic, but one key above 1,000 writes/s still throttles. The fix is write sharding: append a suffix `#0..#N-1` to the partition key, write to a random or hashed shard, and read all N in parallel.
+
+#### Transactions
+
+`TransactWriteItems` and `TransactGetItems` group up to 100 actions on distinct items, 4 MB in total, across tables in one account and Region. Each item costs two reads or writes (prepare and commit), and a cancelled transaction still pays. A `ClientRequestToken` makes a retried write idempotent for 10 minutes. Conflicts fail with `TransactionCanceledException`, and the SDK does not retry them. Transactions are serializable against single-item operations but read-committed against `Query`, `Scan`, and `BatchGetItem`, and GSIs and Streams see the transaction's writes gradually, not atomically.
+
+#### Global Tables
+
+Global Tables (version 2019.11.21) replicate a table across Regions, with a 99.999% availability SLA against 99.99% for a single-Region table. The consistency mode is chosen at creation and cannot change:
+
+| | MREC (default) | MRSC |
+|---|---|---|
+| Replication | Asynchronous, typically 1 s or less | Synchronous to at least one other Region before the write returns |
+| Conflicts | Per-item last writer wins on an internal timestamp | Concurrent write to the same item fails with `ReplicatedWriteConflictException` |
+| Strongly consistent read | Latest only if the last write was in this Region | Latest from any replica |
+| RPO | Replication delay, usually seconds | Zero |
+| Topology | Any number of Regions | Exactly 3 Regions: 3 replicas, or 2 replicas plus a witness |
+| Limits | Transactions are atomic only in the calling Region | No transactions, TTL, or LSIs |
+
+MREC is the right default for user-partitioned data written from one home Region. MRSC fits data where two Regions must never accept conflicting writes, such as balances or inventory, and pays for it with cross-Region latency on every write and strongly consistent read.
 
 ---
 
@@ -551,6 +631,16 @@ EXEC
 | Multi-threading | Commands single-threaded; `io-threads` offloads socket read/write and protocol parsing | Multi-threaded |
 | Best for | Complex use cases, sessions, queues, Streams | Simple cache (highest throughput/core) |
 
+| Feature | Redis | DynamoDB |
+|---------|-------|----------|
+| Storage | RAM, dataset must fit | SSD, no table size limit; 400 KB per item |
+| Latency | Sub-millisecond | Single-digit milliseconds |
+| Scaling unit | Node you size and reshard | Partition AWS splits; 3,000 RCU / 1,000 WCU each |
+| Secondary access | None built in (manual index keys) | GSIs (up to 20) and LSIs (up to 5) |
+| Transactions | `MULTI`/`EXEC`, Lua, one node or slot | Up to 100 items, 4 MB, serializable per item |
+| Multi-Region | Replicas are active-passive; active-active needs Redis Cloud or Redis Software (CRDT-based) | Global Tables, MREC or MRSC |
+| Cost shape | Pay for provisioned memory, busy or idle | Pay per request (on-demand) or per capacity unit |
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -637,6 +727,9 @@ EXEC
 ```
 MULTI/EXEC queues commands but doesn't execute them until EXEC — you cannot read a value mid-transaction and use it. Fix: use Lua scripting (reads and writes in one atomic script) or WATCH + MULTI/EXEC (optimistic locking).
 
+**Pitfall 6: A DynamoDB GSI throttling the base table**
+A team adds a GSI on `status` to a provisioned 5,000 WCU orders table and gives the index 500 WCU because "it is only read by a dashboard". A bulk status update then drives 3,000 index writes/s. The GSI cannot absorb them, and DynamoDB throttles the writes to the base table that touch the index, so checkout starts failing with `ProvisionedThroughputExceededException` while the table's own metrics show headroom. A low-cardinality key makes it worse: every `status = OPEN` write lands on one GSI partition key, and with a date sort key (a monotonic pattern split for heat will not split) that key throttles near the 1,000 WCU per-partition limit no matter how much is provisioned. Fix: give the GSI write capacity at least equal to the share of base writes it receives (or use on-demand), and shard low-cardinality index keys (`STATUS#OPEN#0..9`).
+
 ---
 
 ## 11. Technologies & Tools
@@ -650,6 +743,9 @@ MULTI/EXEC queues commands but doesn't execute them until EXEC — you cannot re
 | `MONITOR` | Real-time command stream (never in production — single-threaded bottleneck) |
 | `redis-memory-analyzer` | Analyze key distribution and memory usage |
 | `RedisInsight` | Official Redis GUI — keyspace browser, profiler, slowlog |
+| Amazon DynamoDB | Managed, partitioned key-value and document store; GSIs, transactions, Global Tables (MREC/MRSC) |
+| NoSQL Workbench | AWS desktop tool for modeling DynamoDB single-table designs and access patterns |
+| CloudWatch Contributor Insights | Shows the most accessed and most throttled DynamoDB partition keys |
 | `Valkey` | BSD-licensed Linux Foundation fork of Redis 7.2.4; wire-compatible, and the default engine on AWS ElastiCache and MemoryDB |
 | `Dragonfly` | Redis-compatible, multi-threaded, higher memory efficiency |
 | `valkey-cli` / `valkey-benchmark` | The Valkey-side equivalents of `redis-cli` and `redis-benchmark`; command-compatible |
@@ -692,6 +788,11 @@ Pub/Sub: PUBLISH channel message sends to all SUBSCRIBE'd clients. Fire-and-forg
 **Short:** A hot key in Redis Cluster overwhelms its single owning shard, so mitigation relies on local caching, replica reads, or key duplication across slots.
 
 In Redis Cluster, each slot is owned by one primary shard. A "hot key" — a key accessed by thousands of requests per second — sends all traffic to one shard, saturating it while others are idle. Redis is single-threaded for commands: one shard can handle ~100K-500K simple ops/second. A viral product key receiving 1M GETs/second from 100 application servers would saturate that shard. Solutions: (1) Local in-process cache: use Caffeine/Guava with a short TTL (1-5s) in the application. Hot key GETs hit local cache, not Redis. Best for read-only data with acceptable staleness. (2) Read from replicas: configure client to route GET commands to replicas for hot keys. (3) Key duplication with random suffix: `product:42:replica:{0..9}` — 10 copies across different slots, read a random one. Write all copies on update. (4) Add a Redis shard specifically for hot keys.
+
+**Q: Why does a DynamoDB table throttle when its consumed capacity is far below what is provisioned?**
+**Short:** Throughput is enforced per partition, at most 3,000 RCU and 1,000 WCU each, so one hot partition key throttles even when the table total has headroom.
+
+DynamoDB spreads a table over partitions by hashing the partition key, and each partition serves at most 3,000 read units and 1,000 write units per second regardless of the table's provisioned or on-demand total. A key that takes most of the traffic (a celebrity user, today's date, a `status = OPEN` GSI key) hits that ceiling while CloudWatch shows the table at 20% of capacity. Three mechanisms soften this: burst capacity banks up to 300 seconds of unused capacity, adaptive capacity instantly gives a hot partition more of the table's share, and split for heat moves busy items onto their own partitions, down to one item per partition. None of them lifts one key above 1,000 WCU, and split for heat does not help when writes follow a monotonically increasing sort key or the table has an LSI. Item size also counts: a 20 KB item costs 5 RCU per strongly consistent read, so that item alone throttles at 600 reads per second. Find the key with CloudWatch Contributor Insights, then write-shard it (`KEY#0..KEY#9`, read all shards in parallel) or cache reads in DAX or an application cache.
 
 **Q: How does Redis actually expire keys, and why do replicas not do it themselves?**
 **Short:** Redis expires keys both lazily on access and via an active sampling cycle, and only the primary issues the DEL that replicas apply.
@@ -751,6 +852,16 @@ Token bucket: more complex — the read-refill-write cycle has to be one atomic 
 **Short:** Redis Sentinel provides HA failover for a single unsharded dataset, while Redis Cluster adds horizontal scaling across multiple sharded primaries.
 
 Redis Sentinel: HA solution for a single-primary/multi-replica setup. Sentinel processes (minimum 3) monitor the primary; if a majority agrees it's down, they promote a replica to primary. No horizontal scale — all data on one shard. Use for: datasets that fit on one server, simple HA, maximum key compatibility. Redis Cluster: horizontal scaling — data split across multiple shards (each a primary + replicas). Provides both HA (replica promotion) and scale. Limitations: multi-key operations require all keys on same slot (use key tags), no databases 1-15 (only db0), some commands not supported in cluster mode. Use for: datasets exceeding single-server capacity, write throughput beyond single-server limits.
+
+**Q: When do you use a GSI instead of an LSI in DynamoDB?**
+**Short:** Use a GSI for any new key, added any time with its own capacity but only eventual consistency; an LSI keeps the partition key, must exist at table creation, and caps each key at 10 GB.
+
+A global secondary index is a separate table that DynamoDB maintains asynchronously: it can have a different partition key and sort key, can be created or dropped on a live table, has its own RCU and WCU, and only supports eventually consistent reads. A local secondary index keeps the table's partition key and adds an alternate sort key; it supports strongly consistent reads and shares the table's capacity, but it can only be defined in `CreateTable`, a table can have at most 5 (against a default quota of 20 GSIs), and every item collection (all items with one partition key value, table plus LSIs) is capped at 10 GB, beyond which writes fail with `ItemCollectionSizeLimitExceededException`. An LSI also stops DynamoDB from splitting an item collection across partitions for heat. Default to GSIs. Two GSI traps: an under-provisioned GSI throttles writes to the base table, and a low-cardinality GSI partition key (a status flag) concentrates all index writes on one partition.
+
+**Q: What do DynamoDB Global Tables guarantee in MREC versus MRSC mode?**
+**Short:** MREC replicates asynchronously with per-item last-writer-wins and an RPO of seconds; MRSC writes synchronously across exactly three Regions for RPO zero but drops transactions, TTL, and LSIs.
+
+Multi-Region eventual consistency (MREC) is the default: a write commits in one Region and replicates to the others, typically within a second. Concurrent writes to the same item in two Regions are resolved per item by last writer wins on an internal timestamp, so one write is silently discarded, and a strongly consistent read returns the latest value only if the last write happened in the reading Region. Transactions are atomic only in the Region that ran them; other Regions may briefly see part of one. Multi-Region strong consistency (MRSC) replicates every write synchronously to at least one other Region before acknowledging, so strongly consistent reads in any Region see the latest value and RPO is zero. It requires exactly three Regions (three replicas, or two plus a DynamoDB-managed witness), returns `ReplicatedWriteConflictException` instead of resolving conflicts, and does not support transactions, TTL, or LSIs; the mode is fixed at creation and an existing table must be empty to convert. Use MREC for data written from a home Region per user; use MRSC for balances, inventory, or anything where two Regions must never accept conflicting writes, and budget the cross-Region round trip on every write.
 
 **Q: How do you monitor Redis for production issues?**
 **Short:** Production Redis monitoring tracks memory usage and fragmentation, eviction and hit-rate counters, replication lag, and slow-command logs.

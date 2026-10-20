@@ -100,6 +100,47 @@ objective, scaling laws for recommendation, a runnable tokenizer with beam-searc
 memory arithmetic, and the migration path -- is in
 **[Generative Recommenders](generative_recommenders.md)**.
 
+### 4.8 DCN-V2 (Deep & Cross Network V2, Google)
+
+Explicit, bounded-degree feature crosses learned without manual cross engineering. Wang et al.,
+WWW 2021, deployed across Google's web-scale ranking systems.
+Cross layer: `x_{l+1} = x_0 * (W_l x_l + b_l) + x_l`, with `*` the element-wise product and `W_l`
+a full `d x d` matrix. Layer `l` models crosses up to polynomial degree `l + 1`.
+DCN (V1, 2017) used a vector `w_l` in place of `W_l`, so each layer only rescales `x_0` by one
+scalar; V2's matrix gives every output dimension its own weighted mix of `x_l`.
+Low-rank variant: `W_l = U_l V_l^T` with rank `r`, cutting a layer from `d^2` to `2dr` parameters.
+DCN-Mix routes over several low-rank experts with a gate, the same idea as MoE.
+Structures: **stacked** (cross net feeds the deep net) or **parallel** (both read `x_0`, outputs
+concatenated before the head).
+
+### 4.9 DIN and DIEN (Target Attention over User Behaviour, Alibaba)
+
+**DIN** (Zhou et al., KDD 2018): pooling the last N behaviours into one fixed user vector throws away
+which part of the history matters for *this* ad. DIN scores each behaviour against the candidate
+with a small MLP over `[e_i, e_t, e_i - e_t, e_i * e_t]` and sums the behaviours with those weights,
+so the user vector changes per candidate. The weights are deliberately **not** softmax-normalized,
+so the magnitude keeps the intensity of the interest. Also introduced Dice activation and
+mini-batch aware L2 regularization (only the embedding rows present in the batch are penalized).
+**DIEN** (Zhou et al., AAAI 2019): a GRU interest extractor with an auxiliary next-behaviour loss,
+then an interest-evolving layer, AUGRU, in which the target-attention score scales the GRU update
+gate so irrelevant behaviours barely move the hidden state.
+
+### 4.10 Lifelong Sequences: SIM and TWIN (Two-Stage Search)
+
+Target attention over every behaviour costs `O(K * L * d)` per request for `K` candidates and
+history length `L`, which caps DIN-style models near `L = 10^2` to `10^3`.
+**SIM** (Pi et al., CIKM 2020, Alibaba): a **General Search Unit (GSU)** cuts the lifelong history
+to the behaviours relevant to the candidate (hard search by category, or soft search by embedding
+inner product), then an **Exact Search Unit (ESU)** runs full target attention on that short list.
+Sequences up to 54,000 behaviours. **TWIN** (Chang et al., KDD 2023, Kuaishou) fixes SIM's main
+weakness: GSU and ESU used different relevance functions, so the GSU dropped behaviours the ESU
+would have weighted highly. TWIN's GSU runs the same multi-head target attention as the ESU, made
+affordable by splitting features into item-only ones (projections precomputed and cached per item)
+and user-item cross features (folded into a cheap per-head bias). It handles `10^4` to `10^5`
+behaviours; TWIN V2 (CIKM 2024) clusters the history hierarchically offline to reach about `10^6`.
+How these models sit in an ads ranking stack is covered in
+**[ML System Design Interview, ch. 8: Ad Click Prediction](../../book/machine_learning_system_design_interview/08_ad_click_prediction_on_social_platforms/08_ad_click_prediction_on_social_platforms.md)**.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -273,6 +314,37 @@ a more interpretable, hardware-friendly interaction than the learned crosses in 
 The side-by-side flow of the classical two-stage funnel against the generative one -- and what the
 generative path buys in index simplicity versus what it spends in decode latency -- is diagrammed in
 **[Generative Recommenders](generative_recommenders.md)**, Section 5.
+
+### 5.6 Lifelong Behaviour Modeling: GSU then ESU
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    hist(["Lifelong history<br/>10^4 to 10^5 behaviours"]) --> gsu["GSU<br/>SIM: category or embedding search<br/>TWIN: same attention as ESU"]
+    cand(["Candidate item"]) --> gsu
+    gsu --> topk(["top-k relevant behaviours"])
+    topk --> esu["ESU<br/>multi-head target attention"]
+    cand --> esu
+    short(["Short-term sequence<br/>last 50 behaviours"]) --> din["DIN-style target attention"]
+    cand --> din
+    esu --> cat(("concat"))
+    din --> cat
+    cat --> rank["Ranking MLP / DCN-V2 head"]
+    rank --> out(["pCTR / pWatch"])
+
+    class hist,cand,short,topk,out io
+    class esu,din,rank train
+    class gsu base
+    class cat mathOp
+```
+
+The GSU decides which behaviours the ESU ever sees, so any behaviour the GSU drops is lost no matter
+how good the ESU is. That is why TWIN makes the GSU score relevance with the ESU's own attention.
 
 ---
 
@@ -745,6 +817,91 @@ is worth. Keeping them separate is more expressive and far more hardware-friendl
 batched matrix multiply — but it is also why the interaction output width, and therefore the top
 MLP's first layer, grows quadratically with the feature count.
 
+### DCN-V2 Cross Layer and DIN Target Attention
+
+```python
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+
+class CrossLayerV2(nn.Module):
+    """x_{l+1} = x0 * (W x_l + b) + x_l. With rank set, W = U V^T."""
+
+    def __init__(self, dim: int, rank: int | None = None) -> None:
+        super().__init__()
+        if rank is None:
+            self.proj: nn.Module = nn.Linear(dim, dim)
+        else:
+            self.proj = nn.Sequential(nn.Linear(dim, rank, bias=False), nn.Linear(rank, dim))
+
+    def forward(self, x0: torch.Tensor, xl: torch.Tensor) -> torch.Tensor:
+        return x0 * self.proj(xl) + xl
+
+
+class DCNv2(nn.Module):
+    """Parallel structure: cross net and deep net both read x0."""
+
+    def __init__(self, dim: int, n_cross: int = 3, rank: int | None = None) -> None:
+        super().__init__()
+        self.cross = nn.ModuleList(CrossLayerV2(dim, rank) for _ in range(n_cross))
+        self.deep = nn.Sequential(nn.Linear(dim, 512), nn.ReLU(), nn.Linear(512, 256), nn.ReLU())
+        self.head = nn.Linear(dim + 256, 1)
+
+    def forward(self, x0: torch.Tensor) -> torch.Tensor:
+        xl = x0
+        for layer in self.cross:
+            xl = layer(x0, xl)
+        return self.head(torch.cat([xl, self.deep(x0)], dim=-1)).squeeze(-1)
+
+
+class TargetAttention(nn.Module):
+    """DIN local activation unit: per-candidate weights over the behaviour sequence."""
+
+    def __init__(self, dim: int, hidden: int = 64) -> None:
+        super().__init__()
+        self.mlp = nn.Sequential(nn.Linear(4 * dim, hidden), nn.PReLU(), nn.Linear(hidden, 1))
+
+    def forward(
+        self, hist: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        # hist (B, L, d), target (B, d), mask (B, L) with True for real behaviours
+        t = target.unsqueeze(1).expand_as(hist)
+        w = self.mlp(torch.cat([hist, t, hist - t, hist * t], dim=-1)).squeeze(-1)
+        w = w.masked_fill(~mask, 0.0)  # no softmax: weight magnitude carries interest strength
+        return (w.unsqueeze(-1) * hist).sum(dim=1)  # (B, d), differs for every candidate
+```
+
+**Decoding the cross-layer parameter cost.** Take 26 sparse features with 32-dim embeddings, so
+`d = 832`:
+
+```
+DCN V1 cross layer   w, b vectors          2 * 832           =       1,664 params
+DCN-V2 full rank     W (832 x 832) + b     832^2 + 832       =     693,056 params
+DCN-V2 rank r = 208  U, V (832 x 208) + b  2 * 832 * 208 + 832 =   346,944 params
+3 full-rank layers                         3 * 693,056       =   2,079,168 params
+```
+
+Three full-rank layers add about 2.1M parameters, small next to embedding tables measured in
+billions, but the `d^2` matmul runs once per candidate. At 1,000 candidates per request that is
+`1000 * 692,224 = 0.69` billion multiply-adds per layer, which is why the low-rank form exists:
+`r = d/4` halves both parameters and compute.
+
+**Decoding why lifelong sequences need a GSU.** Target attention costs `K * L * d` multiply-adds
+for `K` candidates, history length `L`, width `d`:
+
+```
+full attention   K = 1,000   L = 54,000   d = 64   ->  1000 * 54000 * 64 = 3.46e9 per request
+GSU + ESU        K = 1,000   L =    200   d = 64   ->  1000 *   200 * 64 = 1.28e7 per request
+                                                       ratio = 270x less ESU work
+```
+
+The GSU is cheap only if its relevance score is cheap. SIM's hard search reads a precomputed
+per-user, per-category index, so it costs a key lookup. TWIN keeps GSU cost down by caching the
+item-side key projections offline, so the online part of the GSU is one query projection and a dot
+product per behaviour.
+
 ### Generative Retrieval: RQ-VAE Tokenizer and Beam-Search Decoding
 
 A runnable RQ-VAE tokenizer (straight-through estimator, commitment loss, residual chain) and the
@@ -764,6 +921,20 @@ codebook rows address 16.7M items where an atomic-ID table for 50M items costs 1
 
 **Sequential Modeling for Session Context**: Streaming services use sequential models to capture "session context" — the series you are currently watching matters more than your 5-year watch history. A self-attention model over the last N watched items improves same-session next-episode recommendations compared to static user embeddings; the specific window and gain are internal numbers that platforms rarely publish, so tune N on your own data.
 
+**Alibaba DIN, DIEN and SIM (2018-2020)**: DIN serves the main traffic of Alibaba's display
+advertising system and reported up to +10.0% CTR and +3.8% RPM online. DIEN, deployed in Taobao
+display advertising, reported +20.7% CTR. SIM has run in the same system since 2019, modelling
+behaviour sequences up to 54,000 long, with +7.1% CTR and +4.4% RPM online.
+
+**Kuaishou TWIN (2023) and TWIN V2 (2024)**: Kuaishou's short-video ranking uses TWIN to put
+`10^4` to `10^5` lifelong behaviours through a GSU that shares the ESU's attention. TWIN V2 compresses
+life-cycle histories of about `10^6` items by offline hierarchical clustering and serves the primary
+traffic for hundreds of millions of daily active users.
+
+**Google DCN-V2 (2021)**: deployed in many of Google's web-scale learning-to-rank systems, trained on
+billions of examples; the paper's practical lessons (low-rank cross matrices, mixture of low-rank
+experts) came from those deployments.
+
 **Generative recommenders in production**: Meta's HSTU, Shopify's 2026 commerce engine, Google's
 TIGER and Snapchat's semantic-ID design are covered with their published numbers and sources in
 **[Generative Recommenders](generative_recommenders.md)**, Section 7.
@@ -780,6 +951,9 @@ TIGER and Snapchat's semantic-ID design are covered with their published numbers
 | DeepFM | High | Low | All feature types | OK | Low |
 | SASRec | High | Medium | Sequential | OK (content init) | Low |
 | DLRM | Very High | High | All + interaction | OK | Very Low |
+| DCN-V2 | High | Low to Medium (`d^2` per cross layer per candidate) | All + explicit bounded-degree crosses | OK | Low (cross weights inspectable) |
+| DIN / DIEN | High | Medium (attention over `L` per candidate) | Sequences + target item | OK | Medium (attention weights per behaviour) |
+| SIM / TWIN | Very High | Medium (GSU index + ESU on top-k) | Lifelong sequences `10^4`+ | OK | Medium |
 
 | Design Choice | Benefit | Cost |
 |--------------|---------|------|
@@ -806,6 +980,22 @@ cold start, serving cost, interpretability, scaling behaviour and migration cost
 - You have both sparse (categorical) and dense (numerical) features
 - Feature crosses are important (e.g., location × category)
 - You are building a ranking model (not retrieval) — scoring 100s of candidates
+
+**Use DCN-V2 when:**
+- The ranker's input is a wide concatenation of embeddings and dense features, and DeepFM's
+  pairwise-only crosses underfit
+- You want explicit crosses of known maximum degree (number of cross layers + 1) without hand-written
+  crosses; use the low-rank form when `d` is above a few hundred
+
+**Use DIN-style target attention when:**
+- Users have diverse interests and the candidate decides which part of the history matters
+  (e-commerce, ads, short video)
+- You rank hundreds to low thousands of candidates per request; the attention runs once per candidate
+
+**Use SIM / TWIN (two-stage search) when:**
+- Histories run to `10^4` behaviours or more and long-term interests carry signal the last 50
+  behaviours miss
+- You can maintain an offline per-user behaviour index (SIM) or a per-item projection cache (TWIN)
 
 **Use SASRec when:**
 - User interaction sequence is informative (e-commerce, video streaming, music)
@@ -840,6 +1030,20 @@ team can operate the tokenizer as its own versioned artifact. Full lists in
 
 **Pitfall 5 — Sequence padding causing attention leakage**: SASRec was deployed with right-padding (padding tokens at the end of sequences). The causal mask was applied based on position, but padding tokens at end positions were attended to by real tokens at earlier positions (padding appearing at "future" positions violated the causal assumption). Fix: use left-padding for causal sequence models (padding at the beginning, real items at the end), and apply attention masking to ignore padding tokens.
 
+**Pitfall 6 - Softmax-normalizing DIN attention weights**: A team re-implemented DIN with a softmax
+over behaviour scores, as in a Transformer. A user with one relevant behaviour among 300 and a user
+with 40 relevant behaviours produced user vectors of similar magnitude, so the ranker lost the
+strength-of-interest signal and heavy category buyers ranked no higher than casual browsers. Fix:
+keep the raw MLP scores as weights (the DIN paper drops softmax for this reason), and mask padding
+to zero rather than to `-inf`.
+
+**Pitfall 7 - GSU and ESU disagree on relevance**: A SIM-style two-stage model used category hard
+search in the GSU. Users who watched cooking videos tagged under "lifestyle" never had those
+behaviours retrieved for a "food" candidate, so the ESU never saw the strongest evidence. Offline AUC
+improved only marginally as history length grew from `10^3` to `10^4`. Fix: score GSU relevance with
+the ESU's own attention (TWIN), or at least a soft embedding search trained jointly, and on a sample of requests
+run full attention offline to check how many of its highest-weight behaviours the GSU retrieved.
+
 **Pitfalls specific to generative retrieval** -- tokenizer collapse when codebooks are undersized,
 tokenizer drift after the content-embedding model is retrained, and offline recall wins that do not
 survive an A/B test because the downstream ranker was trained on the old candidate distribution --
@@ -858,6 +1062,8 @@ are written up with their incidents and fixes in
 | FAISS | ANN index for two-tower retrieval |
 | PyTorch Geometric | Graph-based models (PinSage) |
 | Merlin (NVIDIA) | GPU-accelerated recommendation training (DLRM at scale) |
+| TorchRec (PyTorch) | Sharded embedding tables; `CrossNet`, `LowRankCrossNet`, `LowRankMixtureCrossNet` in `torchrec.modules.crossnet` for DCN-V2 |
+| TFRS `tfrs.layers.dcn.Cross` | DCN-V2 cross layer; `projection_dim` sets the low-rank size (docs note `d/4` kept accuracy) |
 | Triton Inference Server | Serving deep models at low latency |
 | Feast / Tecton | Feature stores for user and item dense features |
 | Weights & Biases | Experiment tracking for hyperparameter search |
@@ -880,6 +1086,21 @@ In-batch negatives use all other items in the training batch as negative example
 **Short:** DeepFM replaces Wide & Deep's manual feature crosses with an automatically learned Factorization Machine component.
 
 Both combine a component for feature interactions with a deep MLP. Wide & Deep uses a manually crafted linear model for the "wide" part, requiring feature engineering (explicitly defining feature crosses). DeepFM replaces the wide linear model with a Factorization Machine that automatically models all pairwise feature interactions via learned embeddings — no manual cross feature specification. DeepFM is generally preferred when the team cannot enumerate all relevant feature crosses manually. Wide & Deep is preferred when domain knowledge can specify a small set of high-impact crosses.
+
+**Q: Why does DIN not softmax-normalize its attention weights over user behaviours?**
+**Short:** Softmax forces weights to sum to 1, which erases how strongly a user is interested; DIN keeps raw scores so many relevant behaviours give a larger vector.
+
+DIN keeps the raw scores from its local activation unit so the pooled vector's magnitude reflects interest intensity. With softmax, a user with one relevant behaviour among 300 and a user with 40 relevant behaviours both get weights summing to 1, so the pooled vectors look alike and the ranker cannot tell a heavy buyer of the category from a casual one. The unit is a small MLP over `[e_i, e_t, e_i - e_t, e_i * e_t]` for behaviour `e_i` and target `e_t`, so the same history yields a different user vector for every candidate. Practical note: padding must be masked to weight 0, not `-inf`, because there is no softmax to absorb it.
+
+**Q: What does a DCN-V2 cross layer compute, and how does it differ from DCN V1 and DeepFM?**
+**Short:** It computes x_{l+1} = x0 * (W x_l + b) + x_l with a full matrix W, giving explicit crosses whose degree grows by one per layer; V1 used a vector, DeepFM only pairwise.
+
+The DCN-V2 layer is `x_{l+1} = x_0 * (W_l x_l + b_l) + x_l`, element-wise product with the input, plus a residual. Stacking `L` layers gives explicit polynomial crosses up to degree `L + 1`. DCN V1 used a vector `w_l`, so `x_l^T w_l` is a single scalar and each layer only rescales `x_0`, which is a rank-1 cross and too weak in practice. DeepFM's FM part models only degree-2 crosses through embedding inner products. A full `W` costs `d^2` per layer, about 692K parameters at `d = 832`, and the same multiply-adds per candidate, so production uses the low-rank form `W = U V^T` (`2dr` parameters) or the mixture of low-rank experts. Pick the number of cross layers from the crossing degree you need, typically 2 to 4.
+
+**Q: How do SIM and TWIN model user histories of tens of thousands of behaviours?**
+**Short:** A General Search Unit cuts the lifelong history to the top-k behaviours relevant to the candidate, then an Exact Search Unit runs full target attention on that short list.
+
+Full target attention over `L` behaviours for `K` candidates costs `K * L * d`, about 3.5e9 multiply-adds at `K = 1,000`, `L = 54,000`, `d = 64`, so it cannot run online. SIM (Alibaba, CIKM 2020) splits it: the GSU retrieves behaviours by category (hard search) or embedding similarity (soft search), and the ESU applies DIN-style attention to the few hundred that survive, a 270x cut at `k = 200`. The weakness is that the GSU and ESU use different relevance functions, so the GSU can drop behaviours the ESU would weight highly. TWIN (Kuaishou, KDD 2023) makes the GSU use the ESU's own multi-head target attention, kept cheap by caching item-side projections offline and folding user-item cross features into a per-head bias. To measure the consistency gap, run full attention offline on a sample of requests and check what fraction of its top-weighted behaviours the GSU retrieved.
 
 **Q: How does SASRec differ from BERT4Rec for sequential recommendation?**
 **Short:** SASRec uses causal attention for fast single-pass next-item inference; BERT4Rec uses bidirectional masked prediction.
@@ -971,8 +1192,8 @@ The two towers never interact until the final dot product, so the model cannot l
 8. Cache item vectors with TTL matching catalog update frequency — stale item vectors cause silent recommendation quality degradation.
 9. Evaluate recall@100 (retrieval quality) separately from NDCG@10 (ranking quality) — they require different optimizations.
 10. For sequences, left-pad rather than right-pad — causal attention models should have real items at the rightmost positions.
-11. Ship generative retrieval (semantic IDs) as an *additional* candidate source merged alongside the incumbent two-tower, never as a day-one replacement — this is the migration that actually works, because it lets the ranker and the online metrics adapt to the new candidate distribution (Section 10 Pitfall 8) before the incumbent is retired.
-12. Version the item tokenizer as its own artifact tied to the content-embedding model that feeds it, and re-tokenize the catalogue whenever either changes — an untracked tokenizer drifts silently (Section 10 Pitfall 7).
+11. Ship generative retrieval (semantic IDs) as an *additional* candidate source merged alongside the incumbent two-tower, never as a day-one replacement; this is the migration that actually works, because it lets the ranker and the online metrics adapt to the new candidate distribution ([Generative Recommenders](generative_recommenders.md) Pitfall 3) before the incumbent is retired.
+12. Version the item tokenizer as its own artifact tied to the content-embedding model that feeds it, and re-tokenize the catalogue whenever either changes; an untracked tokenizer drifts silently ([Generative Recommenders](generative_recommenders.md) Pitfall 2).
 
 ---
 

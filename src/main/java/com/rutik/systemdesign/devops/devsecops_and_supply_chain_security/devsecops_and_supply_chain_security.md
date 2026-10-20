@@ -2,6 +2,8 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
+> **Version anchor (2026-10-19).** **cosign v3.1.3** (2026-08-06). **Rekor v2** reached GA on 2025-10-10 (tile-backed, sharded by year); signing clients do not switch to it automatically and **Rekor v1 still runs in parallel**. **SLSA v1.2** is the approved specification, with a Build track (L0 to L3, no L4) and a Source track. Fulcio certificates are valid for 10 minutes. The CRA reporting and SBOM obligations are in [regulated_supply_chain](regulated_supply_chain.md).
+
 ---
 
 ## 1. Concept Overview
@@ -225,6 +227,8 @@ permissions:
 
 **Dependency pinning** closes the typosquat and dependency-confusion gap. Lockfiles must pin to a digest or exact version with an integrity hash, never a floating range. A `package.json` entry of `"left-pad": "^1.0.0"` lets a hijacked 1.9.9 land silently; the `package-lock.json` integrity hash (`sha512-...`) is what actually protects you, so the lockfile must be committed and CI must run `npm ci` (lockfile-strict), not `npm install`.
 
+**Trusted publishing** removes the long-lived registry token from the publishing side. The package registry (npm, PyPI) trusts one named CI workflow through OIDC: the CI run presents its identity token, and the registry returns a short-lived publish credential bound to that repo and workflow, so no npm or PyPI token exists on a maintainer laptop or in CI secrets to steal. npm needs CLI 11.5.1+ and Node 22.14.0+, accepts GitHub Actions, GitLab CI/CD, and CircleCI cloud runners, and attaches Sigstore provenance automatically when publishing a public package from a public repo on GitHub Actions or GitLab. After enabling it, set the package's publishing access to "Require two-factor authentication and disallow tokens" so a stolen token cannot publish at all.
+
 ---
 
 ## 7. Real-World Examples
@@ -233,6 +237,7 @@ permissions:
 - **Google's Binary Authorization** (GKE) enforces an admission policy requiring attestations from named attestors; a deploy of an unattested image is rejected at the API server.
 - **Chainguard Images** ship with SBOMs and signatures by default and are rebuilt nightly to keep CVE counts near zero — a direct response to the cost of patching long-lived base images.
 - **The npm `ua-parser-js` hijack (2021)**: a maintainer account takeover pushed crypto-mining payloads to a package with 8 million weekly downloads. Provenance signing (npm now supports Sigstore attestations) is the structural fix.
+- **The Shai-Hulud npm worm (September 2025)**: malware in a compromised package searched developer and CI machines for GitHub tokens and AWS, GCP, and Azure keys, then used the victim's npm token to inject itself into the other packages that maintainer could publish, reaching more than 500 packages (CISA alert, 2025-09-23). It spread because a stolen long-lived publish token was enough to release a new version. GitHub's response on 2025-09-22: deprecate classic npm tokens, limit granular publish tokens to seven days, replace TOTP with FIDO-based 2FA for local publishing, and move publishers to OIDC trusted publishing.
 - **GitHub's own artifact attestations** GA in 2024 let any repo produce SLSA provenance with one workflow step, verified by `gh attestation verify`.
 
 ---
@@ -356,6 +361,10 @@ Rekor is an append-only transparency log that provides tamper-evident, publicly 
 **Q: How does GitHub Actions OIDC remove the need for stored cloud credentials?**
 **Short:** GitHub Actions requests an OIDC token that the cloud exchanges for short-lived, role-scoped credentials, eliminating long-lived stored secrets and binding trust to a specific repo or branch.
 The workflow requests an OIDC token from GitHub's identity provider, and the cloud (e.g., AWS via an IAM OIDC trust) exchanges it for temporary credentials scoped to a specific role, typically valid ~1 hour. There is no long-lived `AWS_SECRET_ACCESS_KEY` in repo secrets to leak, and the trust policy can restrict which repo, branch, or environment may assume the role. This same OIDC identity also feeds Fulcio, binding signatures to the exact workflow that produced them.
+
+**Q: How does trusted publishing change the blast radius of a compromised maintainer machine?**
+**Short:** With OIDC trusted publishing and token publishing disallowed, no reusable publish token exists to steal; an attacker must get code merged into the trusted workflow, which also leaves signed provenance.
+Under token-based publishing, a long-lived npm or PyPI token on a laptop or in CI secrets is the whole key: whoever steals it can publish any version of every package it covers, from anywhere. That is how the Shai-Hulud worm (September 2025) moved from one infected maintainer to more than 500 packages. With trusted publishing, the registry accepts a publish only from a named CI workflow, which proves itself with an OIDC token and receives a short-lived credential scoped to that workflow. Once the package also disallows token publishing, malware on the maintainer's machine finds nothing it can reuse. The attacker now has to change the trusted workflow's source, which goes through branch protection and review, and any version it does publish carries Sigstore provenance naming the commit and workflow, so consumers and incident responders can trace it. Trusted publishing does not stop a malicious change that gets merged, so keep reviews and least-privilege CI tokens.
 
 **Q: Why must admission verification fail closed?**
 **Short:** Failing closed denies a pod when verification cannot confirm a signature, since failing open would let compromised images through silently during exactly the outage an attacker would exploit.

@@ -498,7 +498,7 @@ async def test_fetch_user_async() -> None:
 
 ```python
 # pyproject.toml
-# [tool.pytest.ini_options]
+# [tool.pytest]
 # asyncio_mode = "auto"    ← auto-detects async test functions; no @mark needed
 
 from collections.abc import AsyncIterator
@@ -537,6 +537,40 @@ async def test_protected_route(auth_client: AsyncClient) -> None:
     response = await auth_client.get("/admin/dashboard")
     assert response.status_code == 200
 ```
+
+**Event loop scope.** pytest-asyncio gives each collector level (session, package, module,
+class, function) its own event loop, and a test runs in the function-level loop unless its
+mark says otherwise. An async fixture runs in the loop named by its `loop_scope`; when that is
+unset, `asyncio_default_fixture_loop_scope` decides, and when that is unset too, the fixture's
+own `scope` does. So a `scope="session"` connection pool is created in the session loop while
+the tests that use it run in fresh per-test loops:
+
+```python
+# BROKEN: pool lives in the session loop, the test awaits it from a per-test loop
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def pool() -> AsyncIterator[asyncpg.Pool]:
+    async with asyncpg.create_pool(DSN) as p:
+        yield p
+
+async def test_count(pool: asyncpg.Pool) -> None:   # runs in the function loop
+    assert await pool.fetchval("select 1") == 1
+# RuntimeError: Task <...test_count...> got Future <Future pending> attached to a different loop
+```
+
+```python
+# FIX: run every test in the session loop (pyproject.toml)
+# [tool.pytest]
+# asyncio_default_fixture_loop_scope = "session"
+# asyncio_default_test_loop_scope = "session"
+#
+# or per test / per module:
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+```
+
+Sharing one loop trades isolation for setup cost: a task leaked by one test keeps running into
+the next. pytest-asyncio 1.0 (2025-05-26) removed the `event_loop` fixture, so a `conftest.py`
+that overrides `event_loop` with `scope="session"` to share a loop now has no effect on the
+loop; `loop_scope` and the two config options above are the only way to choose it.
 
 ### 6.6 hypothesis for Property-Based Testing
 
@@ -657,6 +691,60 @@ mutation, so a suite that runs in 2 minutes and produces 500 mutants takes on th
 hours to finish a full run. Schedule it as a nightly or weekly CI job judged on mutation
 score, not as a gate on every commit — running it like a fast unit-test check makes the
 pipeline too slow to use.
+
+### 6.10 pytest 9 configuration: native TOML, `strict`, and subtests `[pytest 9.0]`
+
+pytest 9.0 (2025-11-05) reads a native TOML table, `[tool.pytest]`, where options take real
+TOML types. The older `[tool.pytest.ini_options]` table still works with INI-style strings,
+but a `pyproject.toml` may contain only one of the two; with both, pytest exits with "Cannot
+use both [tool.pytest] ... and [tool.pytest.ini_options]". pytest 9 also reads `pytest.toml`
+and `.pytest.toml`, which use a `[pytest]` table and take precedence over every other config
+file, even when empty.
+
+```toml
+# pyproject.toml
+[tool.pytest]
+minversion = "9.0"
+strict = true
+addopts = ["-ra", "--tb=short"]     # a list; a string here raises TypeError at startup
+testpaths = ["tests"]
+markers = ["slow: takes more than 1 s"]
+filterwarnings = ["error"]
+asyncio_mode = "auto"               # plugin options are read from the same table
+```
+
+Renaming `ini_options` to `pytest` without converting values is the common migration bug:
+`addopts = "-q --tb=short"` fails with `TypeError: ... config option 'addopts' expects a list
+for type 'args', got str`.
+
+`strict = true` turns on four checks, and any strictness option pytest adds later:
+
+| Option | Fails on |
+|--------|----------|
+| `strict_config` | Unknown or malformed keys in the pytest config section |
+| `strict_markers` | A marker not registered under `markers` (a typo like `@pytest.mark.slwo`) |
+| `strict_parametrization_ids` | Duplicate parameter IDs, which pytest otherwise renames to `a0`, `a1` |
+| `strict_xfail` | An `xfail` test that passes (renamed from `xfail_strict` in 9.0, old name still accepted) |
+
+An option set explicitly overrides `strict`. `strict_parametrization_ids` fails at collection,
+so one duplicate ID in a module stops every test in that module from running.
+
+**Subtests.** pytest 9.0 builds in the `subtests` fixture (formerly the `pytest-subtests`
+plugin):
+
+```python
+def test_every_route_needs_auth(client: TestClient, subtests: pytest.Subtests) -> None:
+    for route in app.routes:
+        with subtests.test(msg="auth", path=route.path):
+            assert client.get(route.path).status_code == 401
+```
+
+Each failing block is reported on its own (`SUBFAILED[auth] (path='/admin') ...`) and the loop
+keeps going, then the parent test fails once with "contains 1 failed subtest". The difference from
+`parametrize` is when cases exist: parametrized cases are separate test items created at
+collection, so `-k`, `--lf`, and `pytest-xdist` can select and distribute them, while subtests
+are created at run time inside one item, which suits cases you only know after setup (routes
+of a built app, rows of a fetched fixture file). The pytest docs mark subtests experimental.
 
 ---
 
@@ -886,9 +974,11 @@ def test_send(mock_send): ...
 
 ```toml
 # pyproject.toml
-[tool.pytest.ini_options]
+[tool.pytest]
+strict         = true
 asyncio_mode   = "auto"
-addopts        = "-ra -q --tb=short --cov=app --cov-report=term-missing"
+asyncio_default_fixture_loop_scope = "function"
+addopts        = ["-ra", "-q", "--tb=short", "--cov=app", "--cov-report=term-missing"]
 testpaths      = ["tests"]
 filterwarnings = ["error"]           # treat warnings as errors in CI
 
@@ -954,6 +1044,55 @@ A single test — `apply_discount(100.0, True)` — executes every *line* in thi
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: Why does a test fail with "got Future attached to a different loop" when it uses a session-scoped async fixture?**
+**Short:** The fixture was created in pytest-asyncio's session loop but the test runs in a fresh per-test loop; give the test loop_scope="session" or set the default test loop scope.
+
+pytest-asyncio runs one event loop per collector level. A fixture declared `scope="session"`
+runs in the session loop (its `loop_scope`, or the fixture scope when no loop scope is
+configured), while a test runs in the function-level loop by default. Objects bound to the
+fixture's loop, such as an `asyncpg` pool, an `httpx.AsyncClient`'s connections, or a pending
+`Future`, cannot be awaited from the test's loop, so asyncio raises `RuntimeError: Task ... got
+Future ... attached to a different loop`. Fix it with `@pytest.mark.asyncio(loop_scope="session")`
+(or `pytestmark` for a module), or set `asyncio_default_test_loop_scope = "session"` next to
+`asyncio_default_fixture_loop_scope`. Overriding the `event_loop` fixture was the old way to do
+this and stopped working when pytest-asyncio 1.0 (2025-05-26) removed that fixture.
+
+**Q: You renamed `[tool.pytest.ini_options]` to `[tool.pytest]` and pytest now crashes at startup. Why?**
+**Short:** The native [tool.pytest] table in pytest 9 expects real TOML types, so a string addopts must become a list; the two tables also cannot coexist in one file.
+
+pytest 9.0 (2025-11-05) added `[tool.pytest]`, where each option has a TOML type: `addopts`,
+`testpaths`, `markers`, and `filterwarnings` are arrays of strings. The legacy
+`[tool.pytest.ini_options]` table keeps the INI convention where `addopts = "-ra -q"` is one
+space-separated string. Moving that string into the native table raises `TypeError: config
+option 'addopts' expects a list for type 'args', got str`. Keeping both tables in one
+`pyproject.toml` is also an error. Convert the values (`addopts = ["-ra", "-q"]`), delete the
+old table, and pin `pytest>=9.0` in the test dependency group, because pytest 8 does not read
+`[tool.pytest]` at all and would run with no configuration.
+
+**Q: What does `strict = true` enable in pytest 9, and what is the trap with `strict_parametrization_ids`?**
+**Short:** It enables strict_config, strict_markers, strict_parametrization_ids, and strict_xfail; duplicate parametrize IDs then fail at collection and block the whole module.
+
+`strict = true` (pytest 9.0) turns on `strict_config` (unknown config keys error),
+`strict_markers` (unregistered markers error), `strict_parametrization_ids` (duplicate
+parameter-set IDs error instead of being renamed `a0`, `a1`), and `strict_xfail` (an `xfail`
+test that passes fails the run; the option was `xfail_strict` before 9.0 and the old name is an
+alias). It also opts into any strictness option a later pytest adds, and an individually set
+option overrides it. The trap: `@pytest.mark.parametrize("v", ["a", "a"])` now raises at
+collection, which reports one error and runs none of the tests in that module. Give such cases
+explicit `ids=` or `pytest.param(..., id=...)`.
+
+**Q: When do you use pytest 9's built-in `subtests` instead of `@pytest.mark.parametrize`?**
+**Short:** Use subtests when the cases are only known at run time inside one test; use parametrize when cases are known at collection and must be selectable or parallelized.
+
+`parametrize` creates one test item per case at collection, so each case has an ID you can run
+with `-k`, rerun with `--lf`, and spread across workers with `pytest-xdist`. The `subtests`
+fixture, built into pytest 9.0, creates cases while the test runs: `with subtests.test(path=p):`
+catches a failing assertion, reports it as `SUBFAILED[msg] (path=...)`, and continues the loop, and
+the parent test then fails once. That fits cases discovered after setup, such as every route of
+a constructed app or every row of a file a fixture downloads. Individual subtests cannot be
+selected from the command line, and the pytest docs mark the feature experimental, so keep
+parametrize as the default.
 
 **Q1: What is the difference between `scope="function"` and `scope="session"` for a fixture, and when would you choose each?**
 **Short:** Function scope creates a fresh fixture per test, while session scope creates it once for the whole run.
@@ -1068,6 +1207,10 @@ Use a real dependency, via `testcontainers`, when the behavior under test lives 
 **9. Run `pytest --tb=short` locally and `--tb=long` in CI.** Short tracebacks are faster to read during development; long tracebacks in CI give enough context to debug without re-running.
 
 **10. Gate merges on coverage delta, not only absolute coverage.** A PR that adds 200 lines of code with 0 tests should fail even if overall coverage stays above the floor. Use tools like `diff-cover` to enforce per-PR coverage.
+
+**11. Set `strict = true` in `[tool.pytest]`.** It catches misspelled config keys and markers, duplicate parametrize IDs, and `xfail` tests that started passing, and it picks up strictness checks added in later pytest releases.
+
+**12. Pin the event loop scope.** Set `asyncio_default_fixture_loop_scope` (and `asyncio_default_test_loop_scope` when fixtures share a loop) so a session-scoped async fixture and the tests that use it run in the same loop.
 
 ---
 

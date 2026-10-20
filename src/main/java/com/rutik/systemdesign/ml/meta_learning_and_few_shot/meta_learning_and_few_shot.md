@@ -650,7 +650,7 @@ Reptile's competitiveness with MAML despite computing no second derivative at al
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| learn2learn | MAML, ANIL, MetaSGD, Reptile, ProtoNets in PyTorch | Most actively maintained general meta-learning library |
+| learn2learn | MAML, ANIL, MetaSGD, Reptile, ProtoNets in PyTorch | Low maintenance: last GitHub release v0.2.1 (2023-06-27), last PyPI release 0.2.0 (2023-06-03). Read it as reference code; build new MAML work on `torch.func` |
 | higher | Differentiable, "functional" copies of `nn.Module` for second-order meta-gradients | Predecessor pattern to `torch.func`; still widely referenced in papers |
 | torch.func (functorch) | `functional_call`, `grad`, `vmap` for parameter-as-argument training | Modern (PyTorch 2.x) way to implement MAML without external libraries |
 | Torchmeta | Episodic dataloaders for Omniglot, miniImageNet, tieredImageNet | Convenient N-way K-shot samplers; lower recent maintenance activity |

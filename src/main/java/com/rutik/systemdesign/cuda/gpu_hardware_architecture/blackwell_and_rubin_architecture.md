@@ -10,7 +10,7 @@ This is a deep dive off [gpu_hardware_architecture](gpu_hardware_architecture.md
 
 **Blackwell** is NVIDIA's GPU architecture generation after Hopper, spanning data-center parts (B100, B200, B300/Blackwell Ultra, and the GB200/GB300 superchips that pair a Blackwell GPU with a Grace CPU), workstation and server parts (the RTX PRO Blackwell line), consumer parts (GeForce RTX 50-series), and an edge/robotics SoC (Jetson Thor / DRIVE Thor). All of them share the same underlying Blackwell Streaming Multiprocessor design, but they do **not** share one compute capability — the family spans four distinct compute-capability numbers, each with different per-SM resource limits, which is the single most consequential fact for a kernel author targeting "Blackwell" as if it were one target.
 
-**Rubin** is the architecture generation after Blackwell — the "R" in NVIDIA's now-annual cadence — first previewed publicly at GTC and CES 2026 and represented by the Vera Rubin NVL72 rack-scale platform. As of this file's check date, Rubin is in an early, explicitly preliminary state: NVIDIA's own product page carries the words "Preliminary information. All values are up to and subject to change," and no CUDA compute capability number for Rubin has yet appeared in NVIDIA's published compute-capability references. This module documents what is confirmed, flags what is not, and treats the distinction between "announced," "shipping to customers as early samples," and "generally available" as the load-bearing one it is for anything Rubin-related.
+**Rubin** is the architecture generation after Blackwell (the "R" in NVIDIA's annual cadence), first previewed publicly at GTC and CES 2026 and represented by the Vera Rubin NVL72 rack-scale platform. NVIDIA's product page still carries the words "Preliminary information. All values are up to and subject to change." CUDA 13.4 (GA build 13.4.1) assigns Rubin compute capability 10.7 (`sm_107`) and ships Vera Rubin platform support as a developer preview, not for benchmarking or production deployment. This module documents what is confirmed, flags what is not, and treats the distinction between "announced," "shipping to customers as early samples," and "generally available" as the load-bearing one it is for anything Rubin-related.
 
 ---
 
@@ -32,8 +32,8 @@ This is a deep dive off [gpu_hardware_architecture](gpu_hardware_architecture.md
 - **"Blackwell" is a marketing umbrella over four compute capabilities, not one.** 10.0 (B100/B200/GB200), 10.3 (B300/GB300, "Blackwell Ultra"), 11.0 (Jetson Thor / DRIVE Thor, the edge/robotics SoC), and 12.x (12.0 for RTX 50 GeForce and RTX PRO Blackwell; 12.1 for GB10/DGX Spark) — code that queries `cudaDeviceProp.major/minor` and branches only on `major == 10` silently mishandles every 11.x and 12.x Blackwell device it will ever see.
 - **Data-center and consumer/workstation-tier Blackwell inherit different per-SM resource ceilings, exactly like Ampere's 8.0/8.6 split before it.** Compute capability 10.0 carries a larger per-SM shared-memory carveout and higher resident-warp ceiling than 12.0 — the same "data-center vs. consumer tier" split the parent module's §4.3 table already documents for 8.0/8.6/8.9/12.x, now repeated one generation later.
 - **NVLink generation is tied to architecture, not to which die-count tier a part sits in.** Every Blackwell data-center part — B100 through B300/GB300 — uses 5th-generation NVLink; NVLink 6 is a **Rubin-generation** feature, not a Blackwell Ultra one, and confusing "Ultra" (a mid-generation memory/clock refresh) with "next generation" (a new NVLink and compute-capability number) is a common and easy mistake.
-- **Rubin's numbers are a moving target until general availability, and NVIDIA says so explicitly.** The Vera Rubin NVL72 product page is marked preliminary; treat any Rubin figure — HBM4 capacity, bandwidth, NVLink 6 throughput — as the current best public estimate, not a locked spec, and never state a Rubin compute-capability number, because none has been published.
-- **"Samples shipped" is not "generally available," and "in full production" is not "shipping in volume."** Rubin crossed the first of these milestones (early customer samples) before this file's check date; the second (volume availability) was targeted for the second half of 2026 as of NVIDIA's own CES announcement — both facts belong in an answer, never collapsed into "Rubin is out."
+- **Rubin's numbers are a moving target until general availability, and NVIDIA says so explicitly.** The Vera Rubin NVL72 product page is marked preliminary; treat any Rubin figure (HBM4 capacity, bandwidth, NVLink 6 throughput) as the best public estimate, not a locked spec. The compute capability is the exception: CUDA 13.4 publishes it as 10.7 (`sm_107`).
+- **"Samples shipped" is not "generally available," and "in full production" is not "shipping in volume."** Early VR200 samples reached select customers first; NVIDIA's May 31, 2026 press release says Vera Rubin is ramping into full production with production shipments "set to begin starting this fall." Each is a separate dated milestone, never collapsed into "Rubin is out."
 
 ---
 
@@ -64,12 +64,13 @@ The parent module's §4.2 already states the headline: 5th-generation Tensor Cor
 | **11.0** | Jetson Thor, DRIVE Thor | Edge / robotics / automotive SoC | — (edge-tier limits, not covered by the data-center/consumer tables above) | — | — |
 | **12.0** | GeForce RTX 50-series, RTX PRO Blackwell (workstation and server editions) | Consumer / workstation | 48 | 128 KB | 99 KB |
 | **12.1** | GB10 (DGX Spark) | Compact/desktop superchip | — (12.x tier limits as above, per NVIDIA's Blackwell Tuning Guide) | — | — |
+| **10.7** | Rubin GPU (Vera Rubin NVL72); next generation, not Blackwell | Data center | 32 (16 blocks, 1024 threads per SM) | 328 KB (needs the oversized shared-memory mode) | 327 KB (needs the oversized shared-memory mode) |
 
 The 10.0/12.0 warp and shared-memory figures above come directly from NVIDIA's Blackwell Tuning Guide and match the parent module's already-stated 2048-vs-1536-resident-thread split (64 warps x 32 = 2048; 48 warps x 32 = 1536) for the data-center-vs-consumer tier boundary the parent's §4.3 table generalizes across every generation since Ampere.
 
 **11.0 is worth naming precisely because the parent module's audit trail flagged it as a known gap.** Jetson Thor's compute capability was **renamed from `sm_101` to `sm_110`** in CUDA Toolkit 13.0 — code built against the pre-13.0 naming (`sm_101`/`compute_101`) must be rebuilt against `sm_110`/`compute_110` under CUDA 13.0 and later toolkits. This is not a new architecture arriving late; it is the same Thor silicon whose compute-capability designation NVIDIA renumbered.
 
-**Rubin's compute capability is not yet published.** No NVIDIA compute-capability reference — the Programming Guide's appendix, the `developer.nvidia.com/cuda-gpus` list, or any Rubin-specific documentation — assigns Rubin a `major.minor` number as of this file's check date. Do not guess one; when it is published, this table gets a fifth row.
+**Rubin is compute capability 10.7 (`sm_107`)**, added in CUDA 13.4 as a developer preview. It is not a Blackwell part, but it sits in this table because its major version is 10: code that tests `major == 10` to mean "Blackwell data center" also matches Rubin. The Programming Guide's compute-capabilities appendix gives 10.7 328 KB of shared memory per SM and 327 KB per block, against 228 KB and 227 KB on 10.0/10.3, plus a 336 KB unified data cache against 256 KB. A footnote in that appendix makes the extra 100 KB opt-in: a kernel that uses the 328 KB configuration must set `cudaSharedMemoryModeAllowOversizedSharedMemory` through the `cudaFuncAttributeSharedMemoryMode` function attribute or the `cudaLaunchAttributeSharedMemoryMode` launch attribute; a kernel that does not set it cannot use the 328 KB configuration. The same appendix halves the resident-thread limits against 10.0: 32 warps (1024 threads) and 16 blocks per SM instead of 64 warps and 32 blocks, so an occupancy calculation copied from B200 can overstate Rubin's resident warps by up to 2x.
 
 ### 4.4 NVLink 5 and the GB200/GB300 NVL72 domain
 
@@ -92,11 +93,22 @@ Blackwell Ultra (B300, and the GB300 superchip pairing it with Grace) is a **mid
 | NVLink-C2C bandwidth (per Vera-Rubin Superchip pairing) | 1.8 TB/s | NVIDIA product page, marked preliminary |
 | GPUs per NVL72 rack | 72 | NVIDIA product page, marked preliminary |
 | Total rack HBM4 | ~20.7 TB | NVIDIA product page, marked preliminary |
-| Compute capability | **not yet published** | — |
+| Compute capability | **10.7 (`sm_107`)** | CUDA 13.4 release notes and Programming Guide appendix; developer preview |
 
 Rubin's HBM4 figure has already moved once in public reporting during 2026: earlier press coverage cited a higher target bandwidth before memory suppliers reportedly could not hit it, and NVIDIA's own current product page states 22 TB/s. That revision history is itself the argument for treating every number in this section as provisional rather than final — the shape of the change (a target revised down to match what suppliers could actually deliver) is exactly what "preliminary, subject to change" means in practice, not a one-time disclaimer.
 
-**Status as of this file's check date**: NVIDIA announced Vera Rubin NVL72 as "in full production" at CES in January 2026, with volume availability targeted for the second half of 2026; independent reporting describes early Rubin (VR200) samples having shipped to select customers ahead of that volume ramp. Do not compress "samples shipped to early customers" and "generally available" into one claim — they describe different points on the same rollout, and only the first had clearly happened as of the check date.
+**What changes for a kernel author on `sm_107`.** CUTLASS 4.8 (released September 22, 2026) added the first Rubin GEMM support in CuTe C++ and CuTe DSL, and its release notes list the hardware deltas a Blackwell kernel has to adapt to:
+
+- **Tensor Memory grows from 512 to 576 columns per SM** (256 KB to 288 KB). CUTLASS updated its 1-SM and 2-SM TMEM allocators for Rubin's exclusive allocation path, so a Blackwell TMEM budget compiles but leaves 64 columns unused.
+- **Higher-throughput MMA shapes:** FP8 Tensor Core MMA with `MMA_K=64` and FP4 with `MMA_K=128`.
+- **A new UE5M3 scale-factor type** for block-scaled GEMM with 32-element blocks, beside the E4M3 per-16-element scale that NVFP4 uses on Blackwell.
+- **B collector reuse** (called B-buffer reuse in the CUTLASS Operator API notes), used by CUTLASS's dense, grouped, and grouped block-scaled GEMMs.
+- **328 KB shared memory** behind the oversized-mode opt-in above; CUTLASS sets its SM107 shared-memory capacity to 327 KiB and adds launch support for that mode.
+- **Driver floor:** running `sm_107` kernels needs the R615 driver from CUDA 13.4 GA. The R610 driver from the 13.4 developer preview is not enough.
+
+Existing SM100 GEMM and convolution kernels build for the `sm_107a` and `sm_107f` targets without these features, so a Blackwell kernel runs on Rubin before it is tuned for it.
+
+**Status**: NVIDIA announced Vera Rubin NVL72 as "in full production" at CES in January 2026, and independent reporting describes early Rubin (VR200) samples shipped to select customers after that. NVIDIA's May 31, 2026 press release says Vera Rubin is ramping into full production, with server makers "manufacturing Vera Rubin-based systems at scale" and production shipments "set to begin starting this fall." On the software side, CUDA 13.4 ships Rubin support as a developer preview. Do not compress samples, full production, and production shipments into one claim: they are separate dated points on the same rollout.
 
 ---
 
@@ -169,14 +181,14 @@ flowchart LR
     T1 -->|"Blackwell: NV-HBI 10 TB/s<br/>Rubin: unpublished at check date"| T1R(["stable design,<br/>Rubin detail unpublished"])
     T2 -->|"Blackwell: NVLink 5, 1.8 TB/s<br/>Rubin: NVLink 6, 3.6 TB/s (preliminary)"| T2R(["changes every<br/>generation"])
     T3 -->|"Blackwell: HBM3e, up to 288 GB<br/>Rubin: HBM4, 288 GB @ 22 TB/s (preliminary)"| T3R(["changes every<br/>generation"])
-    T4 -->|"Blackwell: 10.0/10.3/11.0/12.x<br/>Rubin: not yet published"| T4R(["unknown until GA"])
+    T4 -->|"Blackwell: 10.0/10.3/11.0/12.x<br/>Rubin: 10.7 (sm_107)"| T4R(["changes every<br/>generation"])
 
     class T1,T2,T3,T4 stable
-    class T2R,T3R change
-    class T1R,T4R prelim
+    class T2R,T3R,T4R change
+    class T1R prelim
 ```
 
-NVLink generation and HBM generation are the two specs that reliably change every architecture generation and are worth checking fresh each time; compute capability is the one number that gates whether *code* needs to change at all, which is exactly why "not yet published" is the most important row in this diagram, not the least.
+NVLink generation and HBM generation are the two specs that reliably change every architecture generation and are worth checking fresh each time; compute capability is the one number that gates whether *code* needs to change at all. Rubin's 10.7 shares major version 10 with data-center Blackwell, so a `major == 10` check cannot tell the two generations apart.
 
 ---
 
@@ -228,7 +240,7 @@ NVLink generation      4             5              5                  6
 NVLink BW/GPU       ~900 GB/s     ~1.8 TB/s      ~1.8 TB/s          ~3.6 TB/s
 Memory type            HBM3       HBM3/HBM3e       HBM3e               HBM4
 Memory/GPU            80 GB      up to 180 GB      288 GB              288 GB
-Compute capability     9.0           10.0           10.3           not published
+Compute capability     9.0           10.0           10.3               10.7
 ```
 
 Read down the NVLink row: bandwidth roughly doubles Hopper->Blackwell and doubles again Blackwell->Rubin, while the *generation number* increments by exactly one each time — a reminder that "NVLink N" is a name for a bandwidth tier, not a fixed multiplier, and the actual TB/s figure is the number worth quoting, not the generation number alone.
@@ -242,7 +254,7 @@ Read down the NVLink row: bandwidth roughly doubles Hopper->Blackwell and double
 - **NVIDIA B300 / GB300 (Blackwell Ultra)**: same two-die design, 288 GB HBM3e/GPU, compute capability 10.3 — the memory-capacity-driven refresh aimed at larger KV-caches and MoE expert counts per GPU.
 - **NVIDIA GeForce RTX 5090 (GB202, consumer Blackwell)**: single-die, 170 SMs, 21,760 CUDA cores, 32 GB GDDR7 (not HBM — consumer Blackwell uses GDDR7, a materially different memory technology from the data-center tier's HBM3e), compute capability 12.0.
 - **Jetson Thor / DRIVE Thor (edge Blackwell)**: compute capability 11.0 (renamed from `sm_101` to `sm_110` in CUDA 13.0) — the robotics/automotive SoC tier, a different resource-limit profile from both the data-center and consumer tables in §4.3.
-- **Vera Rubin NVL72 (Rubin, preliminary)**: 72-GPU rack, 288 GB HBM4/GPU at up to 22 TB/s, NVLink 6 at 3.6 TB/s/GPU — the generation succeeding Blackwell, with early samples shipped to select customers and volume availability targeted for the second half of 2026 as of NVIDIA's own CES 2026 announcement.
+- **Vera Rubin NVL72 (Rubin, preliminary)**: 72-GPU rack, 288 GB HBM4/GPU at up to 22 TB/s, NVLink 6 at 3.6 TB/s/GPU, compute capability 10.7; the generation succeeding Blackwell. Early samples reached select customers; NVIDIA's May 31, 2026 press release puts the start of production shipments in fall 2026.
 
 ---
 
@@ -330,7 +342,7 @@ Read down the NVLink row: bandwidth roughly doubles Hopper->Blackwell and double
 | NVIDIA Blackwell Architecture Technical Overview (nvidia.com) | Primary source for die design, transistor count, NVLink generation/bandwidth | Marketing-adjacent but carries the concrete architecture-level numbers this file cites |
 | NVIDIA Blackwell Tuning Guide (docs.nvidia.com, part of the CUDA Toolkit docs) | Primary source for per-compute-capability SM resource limits (warps/SM, shared memory/SM) | The authoritative source for the §4.3 table's 10.0/12.0 rows |
 | NVIDIA Vera Rubin NVL72 product page (nvidia.com) | Primary, explicitly preliminary source for Rubin/VR200 specs | Re-check before citing any Rubin figure in new work — the page itself says values are subject to change |
-| `developer.nvidia.com/cuda-gpus` | NVIDIA's per-product compute-capability listing | Confirms 12.0/12.1 assignments; does not yet list a Rubin compute capability |
+| `developer.nvidia.com/cuda-gpus` | NVIDIA's per-product compute-capability listing | Confirms 12.0/12.1 assignments; for Rubin's 10.7, check the Programming Guide compute-capabilities appendix and the CUDA 13.4 release notes |
 | `nvcc -arch=` / `-gencode` flags | Target a specific compute capability (or several, via a fat binary) at build time | See [cuda_toolkit_and_compilation](../cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md) for the full compilation-pipeline treatment this file does not repeat |
 | Nsight Compute | Per-die L2 hit-rate and cross-die traffic counters on two-die Blackwell parts | The tool that makes §6.2's cross-die L2 effect visible instead of theoretical |
 
@@ -363,8 +375,8 @@ Compute capability moved to 10.3, per-GPU HBM3e capacity grew to 288 GB (from up
 No. Every Blackwell data-center part — B100 through B300/GB300 — implements 5th-generation NVLink at roughly 1.8 TB/s bidirectional per GPU. NVLink 6, at roughly 3.6 TB/s per GPU, is a Rubin-generation feature, not a Blackwell Ultra one; conflating "Ultra" with "next NVLink generation" is a common mistake because both sound like upgrades of the same kind.
 
 **Q: What compute capability does NVIDIA's Rubin architecture use?**
-**Short:** Not yet published — no NVIDIA compute-capability reference assigns Rubin a major.minor number as of this file's check date.
-As of this file's check date, none has been published. NVIDIA's compute-capability references (the CUDA Programming Guide appendix, `developer.nvidia.com/cuda-gpus`) do not yet list a Rubin entry. Stating a specific number for Rubin today would be a guess, not a fact — the honest answer is that it is unknown until NVIDIA publishes it, likely alongside Rubin's general availability.
+**Short:** 10.7 (sm_107), a CUDA 13.4 developer preview; major 10 matches Blackwell, and its 328 KB SMEM and 576-column TMEM need code changes to use.
+Compute capability 10.7, compiled as `sm_107`. CUDA 13.4 (GA build 13.4.1) adds it, and the release notes state that Vera Rubin platform support is a developer preview, not meant for benchmarking or production deployment. The trap is the major version: Rubin is 10.x like B200 (10.0) and B300 (10.3), so a `major == 10` test silently treats Rubin as Blackwell. A Blackwell kernel still runs, but leaves Rubin's gains unused: the Programming Guide gives 10.7 328 KB of shared memory per SM, reachable only after the kernel sets `cudaSharedMemoryModeAllowOversizedSharedMemory`, and CUTLASS 4.8 lists Tensor Memory growing from 512 to 576 columns, FP8 MMA at `MMA_K=64`, FP4 at `MMA_K=128`, UE5M3 block-32 scale factors, and B collector reuse. Occupancy math changes too: the appendix allows 32 resident warps and 16 blocks per SM on 10.7, half of 10.0's 64 warps and 32 blocks.
 
 **Q: What is the memory technology and capacity difference between Blackwell and Rubin's data-center GPUs?**
 **Short:** Blackwell data-center parts use HBM3e (up to 180-288 GB per GPU depending on tier); Rubin (preliminary) targets HBM4 at 288 GB and up to 22 TB/s per GPU.
@@ -375,8 +387,8 @@ Blackwell data-center GPUs use HBM3/HBM3e, topping out at up to 180 GB per GPU o
 Yes. Public reporting during 2026 described NVIDIA revising the HBM4 bandwidth target for Rubin (VR200) downward after memory suppliers could not hit the originally cited figure, landing on the 22 TB/s currently stated on NVIDIA's own product page. That revision is itself the concrete illustration of why NVIDIA's "preliminary, subject to change" language on the Rubin product page should be taken literally rather than as boilerplate.
 
 **Q: What is the difference between Rubin "samples shipped" and Rubin "generally available"?**
-**Short:** Samples shipped means early units reached select customers for validation; general/volume availability is the separate, later milestone NVIDIA targeted for the second half of 2026.
-Sample shipment means early production units reached select customers — cloud providers and partners — for validation and integration work ahead of a wider launch; it is not the same claim as general or volume availability. NVIDIA announced Vera Rubin NVL72 as "in full production" at CES in January 2026 with volume availability targeted for the second half of 2026, and independent reporting separately described early VR200 samples reaching customers ahead of that volume ramp. An answer that says "Rubin is out" without distinguishing these two milestones is overclaiming.
+**Short:** Samples shipped means early units reached select customers for validation; production shipments are the separate, later milestone, which NVIDIA said in May 2026 would begin in fall 2026.
+Sample shipment means early production units reached select customers (cloud providers and partners) for validation and integration work ahead of a wider launch; it is not the same claim as general or volume availability. NVIDIA announced Vera Rubin NVL72 as "in full production" at CES in January 2026, independent reporting described early VR200 samples reaching customers after that, and NVIDIA's May 31, 2026 press release says Vera Rubin is ramping into full production with production shipments "set to begin starting this fall." An answer that says "Rubin is out" without naming which of these dated milestones it means is overclaiming.
 
 **Q: Are RTX 50-series consumer GPUs and B200 data-center GPUs the same silicon?**
 **Short:** No — RTX 50-series is a single-die GB202-class chip on GDDR7; B200 is a two-die package on HBM3/HBM3e, and they carry different compute capabilities (12.0 vs 10.0).
@@ -395,8 +407,8 @@ Only compute-capability 10.0 devices — B100, B200, and GB200. B300/GB300 (10.3
 Because the resource ceilings a kernel's launch configuration must respect — shared memory per SM, maximum resident warps, maximum shared memory per block — are documented per compute capability, not per architecture marketing name. Compute capability 10.0 and 12.0 are both "Blackwell," but 10.0 carries a 228 KB shared-memory-per-SM ceiling against 12.0's 128 KB, and a tile size tuned against the larger budget can simply fail to launch, or silently under-occupy, on the smaller one.
 
 **Q: What evidence would tell you NVIDIA had assigned Rubin a compute capability, versus a rumor or estimate?**
-**Short:** A listing in NVIDIA's own compute-capability references — the CUDA Programming Guide appendix or the developer.nvidia.com/cuda-gpus page — not a third-party estimate or leak.
-An entry in NVIDIA's own primary compute-capability references — the CUDA C Programming Guide's compute-capabilities appendix, or the `developer.nvidia.com/cuda-gpus` listing — rather than a third-party estimate, leak, or extrapolation from the compute-capability numbering pattern of prior generations. Extrapolating "Rubin will probably be 13.0 because Blackwell was 10.x/11.x/12.x" is a plausible guess, not a fact, and this module deliberately does not state one.
+**Short:** A listing in NVIDIA's own references, such as the CUDA Programming Guide compute-capabilities appendix or the CUDA Toolkit release notes, not a third-party estimate or leak.
+An entry in NVIDIA's own primary references (the CUDA Programming Guide's compute-capabilities appendix, the CUDA Toolkit release notes, or the `developer.nvidia.com/cuda-gpus` listing) rather than a third-party estimate, leak, or extrapolation from the numbering pattern of prior generations. Rubin shows why: extrapolating "Rubin will probably be 13.0 because Blackwell was 10.x/11.x/12.x" was a plausible guess, and it was wrong. The CUDA 13.4 release notes and the appendix's 10.7 column are the evidence that settled it.
 
 **Q: Why might a kernel show a lower L2 hit rate on a Blackwell B200 than on an equivalent-generation single-die GPU, for the identical access pattern?**
 **Short:** Blackwell data-center GPUs partition L2 cache per die; a block's working set can be resident in the other die's L2 partition, forcing a cross-die NV-HBI hop a single-die GPU never incurs.

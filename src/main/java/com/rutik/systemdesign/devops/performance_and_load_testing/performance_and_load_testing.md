@@ -2,6 +2,8 @@
 
 > Phase 8 — Specialized Platforms & Performance · Difficulty: Intermediate · Q&A floor: 15
 
+> **Version anchor (2026-10-19).** Current releases: **k6 v2.3.0** (2026-09-21; the v1 line gets maintenance releases, v1.8.2 on 2026-10-12), **Locust 2.46.7** (2026-10-04), **Gatling v3.16.0** (2026-09-29) and **Apache JMeter 5.6.3** (2024-01-09).
+
 Validating that a system meets its performance and reliability targets *before* real users do: load, stress, spike, soak, and capacity tests with k6 and Locust; distributed load generation; percentile-correct latency measurement; and wiring performance gates into CI/CD so regressions fail the build. This module closes the SRE loop — it proves the SLOs from [sre_principles_and_slos](../sre_principles_and_slos/sre_principles_and_slos.md) hold under load and feeds the capacity numbers used in [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) and [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md). For the *service-level* view of the same discipline — designing the test suite around a single API's SLOs — see [`../../backend/load_and_performance_testing/`](../../backend/load_and_performance_testing/load_and_performance_testing.md). For *application-level profiling* (flame graphs, code hot paths) cross-reference [`../../java/performance_and_tuning/`](../../java/performance_and_tuning/performance_and_tuning.md) and [`../../python/performance_and_profiling/`](../../python/performance_and_profiling/performance_and_profiling.md); this module is about *system-level* black-box load.
 
 ---

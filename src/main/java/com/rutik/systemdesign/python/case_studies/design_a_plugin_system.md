@@ -866,7 +866,7 @@ around.
 **Q: Why can't the classic `try: import fast_lib / except ImportError: import slow_lib` pattern be made lazy with PEP 810?**
 **Short:** PEP 810's lazy import is legal only at module top level, explicitly excluded from try blocks.
 
-PEP 810 (Final, ships in Python 3.15) restricts the `lazy` soft keyword to the global
+PEP 810 (Final, available since Python 3.15.0) restricts the `lazy` soft keyword to the global
 (module) level — not inside functions, class bodies, `try` blocks, or `import *`
 (`the_import_system.md` §6.6). The optional-dependency fallback idiom is structurally a
 `try`/`except` around an import, so there is no syntactic position to put `lazy` in it; the

@@ -13,6 +13,9 @@ LLD describes how individual components are implemented — class relationships,
 
 | File/Directory | Topic |
 |----------------|-------|
+| `oop_and_uml_foundations/` | Objects, association vs aggregation vs composition, UML class and sequence diagrams |
+| `design_principles/` | DRY, KISS, YAGNI, Composition over Inheritance, Program to Interface, Law of Demeter, GRASP and connascence (`GRASP.md`) |
+| `architecture_patterns/` | Layered, hexagonal, clean and onion architecture; the dependency rule |
 | `solid_principles/` | SRP, OCP, LSP, ISP, DIP — with violation examples and fixes |
 | `dependency_injection_and_testability/` | Constructor injection, seams, test doubles, designing for substitution without a framework |
 | `anti_patterns/` | God Object, Blob, Golden Hammer, Spaghetti Code, Copy-Paste, Magic Numbers, etc. |
@@ -56,10 +59,21 @@ LLD describes how individual components are implemented — class relationships,
 | `behavioral/template_method/` | Fixed algorithm skeleton with overridable steps |
 | `behavioral/visitor/` | New operations without modifying elements; AST traversal |
 | `behavioral/interpreter/` | Grammar interpreter; expression parser; SQL WHERE clause |
+| `behavioral/null_object/` | Do-nothing implementation in place of null checks |
+| `behavioral/specification/` | Composable business rules with and/or/not combinators |
+
+### Concurrency Patterns
+
+| File | Topic |
+|------|-------|
+| `concurrency_patterns/concurrency_patterns.md` | Category page: thread safety, the four classic patterns |
+| `concurrency_patterns/ThreadSafeSingleton.md`, `ProducerConsumer.md`, `ReadWriteLock.md`, `ThreadPool.md` | The four classic patterns, each with a runnable `.java` companion |
+| `concurrency_patterns/modern_java_concurrency.md` | Virtual threads, structured concurrency, scoped values |
+| `concurrency_patterns/CoordinationPatterns.md` | Monitor Object, Guarded Suspension, Balking, Two-Phase Termination, Active Object, Reactor, Proactor, Actor |
 
 ### LLD Interview Problems
 
-15 problems, each with a `<Name>.md` (problem statement, Mermaid `classDiagram`, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`. **Every `<Name>.md` must link its `<Name>.java` and say what the code demonstrates** — the implementations are longer than the pages that present them and were invisible until 2026-08-25. The same rule holds for the four `concurrency_patterns/<Name>.java` companions.
+22 problems, each with a `<Name>.md` (problem statement, Mermaid `classDiagram`, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`. **Every `<Name>.md` must link its `<Name>.java` and say what the code demonstrates** — the implementations are longer than the pages that present them and were invisible until 2026-08-25. The same rule holds for the four `concurrency_patterns/<Name>.java` companions.
 
 | Problem | Key Patterns | File |
 |---------|-------------|------|
@@ -75,6 +89,16 @@ LLD describes how individual components are implemented — class relationships,
 | Design a rate limiter (LLD angle) | Strategy, Factory | [RateLimiter](system_design_problems/RateLimiter.md) |
 | Design tic-tac-toe | Strategy, State | [TicTacToe](system_design_problems/TicTacToe.md) |
 | Design Splitwise / expense sharing | Strategy, Factory | [Splitwise](system_design_problems/Splitwise.md) |
+| Design a logging framework | Chain of Responsibility, Strategy, Decorator, Singleton registry | [LoggingFramework](system_design_problems/LoggingFramework.md) |
+| Design a notification service | Strategy, Factory, Observer, Builder, Decorator, Chain of Responsibility | [NotificationService](system_design_problems/NotificationService.md) |
+| Design an in-process task scheduler | Command, Strategy, Producer-Consumer, Observer, Factory | [TaskScheduler](system_design_problems/TaskScheduler.md) |
+| Design snake and ladder | Strategy, Observer, Factory | [SnakeAndLadder](system_design_problems/SnakeAndLadder.md) |
+| Design food delivery | State, Strategy, Decorator, Observer | [FoodDelivery](system_design_problems/FoodDelivery.md) |
+| Design an order matching engine | State (order lifecycle), Strategy (time-in-force) | [OrderMatchingEngine](system_design_problems/OrderMatchingEngine.md) |
+| Design a key-value store with transactions and TTL | Unit of Work, Memento-like layer stack, Strategy (clock) | [KeyValueStore](system_design_problems/KeyValueStore.md) |
+| Design a pub-sub / message queue | Observer (pull-based), Strategy (partitioner), Mediator (consumer group) | [PubSub](system_design_problems/PubSub.md) |
+| Design an in-memory file system | Composite, Iterator, Visitor | [FileSystem](system_design_problems/FileSystem.md) |
+| Design a meeting room scheduler | Strategy (room selection), Observer | [MeetingScheduler](system_design_problems/MeetingScheduler.md) |
 
 ---
 
@@ -174,11 +198,11 @@ count, and `lld` should go up by exactly what you wrote.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 9 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (8 modules) and **Principal** (8). They are different
+`README.md` documents the **Full Path** (all 13 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (12 modules) and **Principal** (9). They are different
 cuts, not nested depths — senior is the craft (write the pattern, spot the misuse),
 principal is the judgment (which decomposition at what cost, what you tell a team *not*
-to do), so equal module counts here hide genuinely different *file* lists. Membership is
+to do), so overlapping module lists here hide genuinely different *file* lists. Membership is
 ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — and in `lld` that file list is the whole point: a
 category module holds dozens of nested pattern pages, each named for its own folder
 (`singleton/singleton.md`, `factory_method/factory_method.md`, …), and before the markers existed a tiered category dragged
@@ -195,7 +219,7 @@ below). The README also carries a Knowledge-Question Map and a 6-week Study Plan
 no path impact). The Study Plan pairs each week with a practice problem from
 `system_design_problems/` rather than a `case_studies/` file — LLD's `case_studies/`
 holds only a learning-path index (`case_studies/case_studies.md`: pattern-dependency map +
-interview shortcuts) over the same 15 problems, not separate case-study write-ups.
+interview shortcuts) over 12 of the 22 problems, not separate case-study write-ups.
 
 ## Adding a New LLD Pattern
 
@@ -209,9 +233,9 @@ interview shortcuts) over the same 15 problems, not separate case-study write-up
 6. Add to the `pattern_comparisons/` file if it overlaps with other patterns
 7. **No `STUDY_ORDER` entry** — a nested `<category>/<pattern>/<pattern>.md` folds into its
    parent category module (ids stay 2 segments; a 3-segment key is fatal under `--strict`).
-   If a tier should carry the pattern, add `<pattern_name>/<pattern_name>.md` to that tier's line
-   in the CATEGORY page's (`<category>/<category>.md`) `<!-- study-paths -->` block; naming no tier leaves it
-   Full-path only, which is the right call for most patterns. Then run
+   Add `<pattern_name>/<pattern_name>.md` under its category in `README.md`'s
+   `<!-- study-paths -->` block with its tiers; `-` leaves it Full-path only, which is the
+   right call for most patterns. Then run
    `python3 game/extract.py --write-paths` to regenerate the master README's tier tables.
 
 ---

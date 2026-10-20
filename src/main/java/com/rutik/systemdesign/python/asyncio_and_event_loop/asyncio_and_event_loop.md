@@ -22,7 +22,7 @@ Key abstractions:
 
 Python version scope: the APIs used here are 3.11+ (`TaskGroup`, `asyncio.timeout()`, `except*`)
 and all examples use `X | None` union syntax. Runtime behaviour, defaults and deprecations are
-stated for **3.14**, the current stable release.
+stated for **3.14**.
 
 ---
 

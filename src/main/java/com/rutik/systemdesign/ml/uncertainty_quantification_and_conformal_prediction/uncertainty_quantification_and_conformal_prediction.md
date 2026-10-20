@@ -59,6 +59,8 @@ Key insight: you can get a rigorous coverage guarantee for free, post-hoc, on a 
 | Deep ensembles | Epistemic (best practical) | Nx / Nx | Approximate, strong empirically |
 | Bayesian NN (VI/SWAG) | Epistemic (principled) | higher / sampling | Approximate posterior |
 | Conformal prediction | Distribution-free coverage | post-hoc / ~1x | Finite-sample, exact |
+| SNGP (spectral-normalized neural GP) | Epistemic via distance to training data | ~1x / 1x | Approximate; distance-aware |
+| DUQ (deterministic UQ, RBF centroids) | Epistemic via distance to class centroids | ~1x / 1x | Approximate; OOD detection |
 
 ### 4.2 Calibration metrics
 
@@ -75,7 +77,22 @@ Key insight: you can get a rigorous coverage guarantee for free, post-hoc, on a 
 | RAPS | Classification | Label set | APS + regularization for smaller sets |
 | Conformalized Quantile Regression (CQR) | Regression | Interval | Adapts width to local noise |
 | Mondrian / class-conditional | Any | Set | Coverage guaranteed per group/class |
+| Conditional conformal (Gibbs, Cherian & Candès, 2023) | Any | Set / interval | Coverage over a chosen finite-dimensional class of groups or covariate shifts, including overlapping groups that Mondrian cannot split |
 | Adaptive (ACI) | Streaming | Interval | Maintains coverage under drift |
+| Conformal risk control (CRC; Angelopoulos, Bates, Fisch, Lei, Schuster) | Any with a monotone bounded loss | Set / threshold | Bounds the *expected* loss (FNR, 1 - recall, graph distance), not only miscoverage |
+| Learn then Test (LTT; Angelopoulos, Bates, Candès, Jordan, Lei) | Any risk, monotone or not, several at once | Set of valid parameters | Holds with probability `1 - delta` via multiple hypothesis testing; controls precision, FDR, IoU |
+| RCPS (risk-controlling prediction sets; Bates et al.) | Monotone risk | Set | High-probability bound from an upper confidence bound on the risk |
+
+### 4.4 Risk control beyond coverage
+
+Coverage is one loss: `1[y not in C(x)]`. Many products care about a different one. A multi-label tagger cares about the fraction of true tags it missed (false-negative rate); a tumour segmenter cares about missed pixels; a fraud filter cares about precision of what it blocks. **Conformal risk control** keeps split conformal's recipe (one calibration set, one scan over a threshold `lambda`) but bounds `E[L(C_lambda(X), Y)] <= alpha` for any loss that is bounded by `B` and non-increasing in `lambda`. **Learn then Test** drops the monotonicity requirement and gives a stronger, high-probability statement, `P(R(lambda_hat) <= alpha) >= 1 - delta`, by testing the null `R(lambda) > alpha` at every candidate `lambda` and keeping those rejected under family-wise error control. That is what makes precision controllable: precision is not monotone in the threshold.
+
+### 4.5 Single-pass deterministic uncertainty (SNGP, DUQ)
+
+Ensembles and MC dropout pay N forward passes. Deterministic methods aim for epistemic uncertainty in one pass by making the network **distance-aware**: an input far from the training data should get high uncertainty. A plain network cannot do this, because its hidden layers can collapse far-away inputs onto the same features as training points (feature collapse).
+
+- **SNGP** (Liu et al., 2020): spectral normalization on the residual hidden layers bounds each layer's Lipschitz constant, so input distances survive into feature space, and the dense output layer becomes a Gaussian process approximated with random Fourier features, with a Laplace posterior covariance. Predictive variance grows with distance from the training features. The paper reports it competitive with deep ensembles and ahead of other single-model methods on Wide-ResNet and BERT.
+- **DUQ** (van Amersfoort et al., 2020): one learned centroid per class and an RBF kernel between the feature vector and each centroid; centroids move by exponential moving average of their class's features, and a two-sided gradient penalty keeps features sensitive to input changes. Low kernel value to every centroid flags out-of-distribution input. Matches or beats deep ensembles on FashionMNIST vs MNIST and CIFAR-10 vs SVHN OOD detection, in one forward pass.
 
 ---
 
@@ -218,6 +235,22 @@ xychart-beta
 Realized coverage sits on the target line whatever alpha you pick — that validity is the
 contract. Model quality does not change this curve; a weaker model still lands on it, paying
 instead with larger prediction sets (the efficiency the chart deliberately does not show).
+
+### Conformal risk control: scanning lambda against a risk target
+
+```mermaid
+xychart-beta
+    title "Calibration FNR vs lambda (multi-label, n = 1000, alpha = 0.10)"
+    x-axis "lambda (include label k if p_k >= 1 - lambda)" [0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+    y-axis "Empirical false-negative rate" 0 --> 0.3
+    line "R_hat(lambda)" [0.284, 0.214, 0.149, 0.073, 0.0, 0.0]
+    line "CRC bar: (0.1 x 1001 - 1) / 1000 = 0.0991" [0.0991, 0.0991, 0.0991, 0.0991, 0.0991, 0.0991]
+```
+
+Larger `lambda` admits more labels, so the false-negative rate only falls. CRC picks the first
+`lambda` where the curve drops under the corrected bar (`0.582` on this calibration set); Learn
+then Test needs the curve far enough below `alpha` for a Hoeffding test to reject `R > alpha`, so it
+stops later (`0.61`). Section 6 runs both and measures what each buys on held-out data.
 
 ---
 
@@ -636,6 +669,182 @@ final interval stays narrow in easy regions and wide in hard ones. Conformalizin
 point regressor instead gives every input the same width, which satisfies the same coverage
 guarantee while being far less useful.
 
+### Conformal risk control and Learn then Test (controlling FNR, not coverage)
+
+```python
+from __future__ import annotations
+
+import numpy as np
+
+
+def fnr_loss(probs: np.ndarray, labels: np.ndarray, lam: float) -> np.ndarray:
+    """Per-example false-negative rate of the set {k : p_k >= 1 - lam}. Non-increasing in lam."""
+    in_set = probs >= 1 - lam
+    n_true = labels.sum(axis=1)
+    hits = (in_set & labels).sum(axis=1)
+    return np.where(n_true > 0, 1 - hits / np.maximum(n_true, 1), 0.0)
+
+
+def conformal_risk_control(
+    probs: np.ndarray, labels: np.ndarray, alpha: float, bound: float = 1.0
+) -> float:
+    """Smallest lam with (n/(n+1)) * R_hat(lam) + B/(n+1) <= alpha  ->  E[loss] <= alpha."""
+    n = len(probs)
+    for lam in np.linspace(0, 1, 1001):
+        r_hat = fnr_loss(probs, labels, lam).mean()
+        if n / (n + 1) * r_hat + bound / (n + 1) <= alpha:
+            return float(lam)
+    return 1.0
+
+
+def hoeffding_p_value(r_hat: float, alpha: float, n: int) -> float:
+    return float(np.exp(-2 * n * max(alpha - r_hat, 0.0) ** 2))
+
+
+def learn_then_test(
+    risks: np.ndarray, lambdas: np.ndarray, alpha: float, delta: float
+) -> list[float]:
+    """Fixed-sequence testing from the safest lam; each valid lam has P(R(lam) <= alpha) >= 1 - delta."""
+    n = risks.shape[1]
+    valid = []
+    for j in np.argsort(-lambdas):  # most conservative first
+        if hoeffding_p_value(risks[j].mean(), alpha, n) > delta:
+            break
+        valid.append(float(lambdas[j]))
+    return valid
+
+
+rng = np.random.default_rng(0)
+labels = rng.random((2000, 20)) < 0.15                       # 20 tags, ~3 true per item
+probs = np.clip(labels * 0.35 + rng.random((2000, 20)) * 0.65, 0, 1)
+cal, test = slice(0, 1000), slice(1000, 2000)
+lam_crc = conformal_risk_control(probs[cal], labels[cal], alpha=0.1)       # 0.582
+lams = np.linspace(0, 1, 101)
+risks = np.stack([fnr_loss(probs[cal], labels[cal], l) for l in lams])
+lam_ltt = min(learn_then_test(risks, lams, alpha=0.1, delta=0.1))           # 0.61
+```
+
+**Decoding the CRC bar.** With losses in `[0, B]`, CRC needs
+`(n / (n+1)) * R_hat(lambda) + B / (n+1) <= alpha`, which rearranges to
+`R_hat(lambda) <= (alpha * (n+1) - B) / n`:
+
+```
+n = 1000, alpha = 0.10, B = 1     R_hat <= (0.1 x 1001 - 1) / 1000 = 0.0991
+n =  100, alpha = 0.10, B = 1     R_hat <= (0.1 x  101 - 1) /  100 = 0.0910
+n =    9, alpha = 0.10, B = 1     R_hat <= (0.1 x   10 - 1) /    9 = 0.0000
+```
+
+With `B = 1` and the miscoverage loss `1[y not in C]`, this is exactly split conformal's
+`ceil((n+1)(1-alpha))` quantile rule; CRC is its generalization to any bounded monotone loss.
+
+**Decoding the LTT p-value.** Hoeffding gives `p = exp(-2 n (alpha - R_hat)^2)` for the null
+`R(lambda) > alpha`:
+
+```
+n = 1000, alpha = 0.10, R_hat = 0.07   p = exp(-2 x 1000 x 0.03^2) = exp(-1.8) = 0.165   keep null
+n = 1000, alpha = 0.10, R_hat = 0.05   p = exp(-2 x 1000 x 0.05^2) = exp(-5.0) = 0.0067  reject
+```
+
+At `delta = 0.1`, an empirical FNR of 0.07 is not low enough evidence; 0.05 is. That margin is the
+price of the high-probability statement. Fixed-sequence testing spends the whole `delta` on each
+test because it stops at the first failure; Bonferroni over `m = 100` candidate thresholds would
+need `p <= 0.001` per test.
+
+**What each guarantee buys, measured.** Re-splitting the same 2,000 items 200 times
+(1,000 calibration, 1,000 test):
+
+| Method | Mean test FNR | Splits with test FNR > 0.10 |
+|--------|---------------|------------------------------|
+| CRC, `alpha = 0.1` | 0.098 | 39.5% |
+| LTT, `alpha = 0.1`, `delta = 0.1`, Hoeffding + fixed sequence | 0.060 | 0% |
+
+CRC hits its target *on average over calibration draws*, so on any one deployment the realized FNR
+lands above 0.10 often. LTT guarantees that at most 10% of calibration draws produce a `lambda`
+whose true risk exceeds 0.10; in this run none did, at the cost of larger tag sets. Pick CRC when
+the product cares about the long-run average, LTT when a single deployment's risk must be bounded.
+
+**The same in MAPIE 1.6.** `mapie.risk_control` ships both:
+
+```python
+from mapie.risk_control import BinaryClassificationController, MultiLabelClassificationController
+
+# Multi-label recall >= 0.9 in expectation via conformal risk control ("rcps" also accepted).
+tagger = MultiLabelClassificationController(
+    predict_function=clf.predict_proba, risk="recall", method="crc", target_level=0.9
+).calibrate(X_calib, Y_calib)
+tag_sets = tagger.predict(X_test)
+
+# Binary precision >= 0.8 with 90% confidence via Learn then Test (FWER: Bonferroni-Holm default).
+blocker = BinaryClassificationController(
+    predict_function=fraud_clf.predict_proba, risk="precision",
+    target_level=0.8, confidence_level=0.9,
+).calibrate(X_calib, y_calib)
+blocked = blocker.predict(X_test)  # raises ValueError if no threshold qualified (best_predict_param is None)
+```
+
+`MultiLabelClassificationController` forces `method="ltt"` when `risk="precision"`, since precision
+is not monotone in the threshold, and `calibrate` raises `ValueError` if any calibration row has no
+true label, because recall is undefined there. `BinaryClassificationController` also accepts a list of risks
+with a list of targets for joint control, and `fwer_method` of `"bonferroni"`, `"bonferroni_holm"`,
+`"fixed_sequence"` or `"split_fixed_sequence"`.
+
+### SNGP: single-pass distance-aware uncertainty
+
+```python
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn as nn
+from torch.nn.utils.parametrizations import spectral_norm
+
+
+class SNGP(nn.Module):
+    """Spectral-normalized residual body + random-Fourier-feature GP output layer."""
+
+    def __init__(self, d_in: int, hidden: int, n_classes: int, n_rff: int = 1024) -> None:
+        super().__init__()
+        self.inp = nn.Linear(d_in, hidden)
+        self.blocks = nn.ModuleList(spectral_norm(nn.Linear(hidden, hidden)) for _ in range(3))
+        self.register_buffer("rff_w", torch.randn(n_rff, hidden))
+        self.register_buffer("rff_b", torch.rand(n_rff) * 2 * math.pi)
+        self.beta = nn.Linear(n_rff, n_classes, bias=False)
+        self.register_buffer("precision", torch.eye(n_rff))
+        self.n_rff = n_rff
+
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.inp(x)
+        for block in self.blocks:
+            h = h + torch.relu(block(h))  # residual + bounded Lipschitz keeps input distances
+        return math.sqrt(2 / self.n_rff) * torch.cos(h @ self.rff_w.T + self.rff_b)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.beta(self.features(x))
+
+    @torch.no_grad()
+    def update_precision(self, x: torch.Tensor) -> None:
+        """Laplace posterior over beta, accumulated over the last training epoch."""
+        phi = self.features(x)
+        p = torch.softmax(self.beta(phi), dim=-1).max(dim=-1).values
+        self.precision += (phi * (p * (1 - p)).unsqueeze(-1)).T @ phi
+
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        phi = self.features(x)
+        var = (phi @ torch.linalg.solve(self.precision, phi.T)).diagonal()
+        logits = self.beta(phi) / torch.sqrt(1 + math.pi / 8 * var).unsqueeze(-1)  # mean-field
+        return torch.softmax(logits, dim=-1), var
+```
+
+The residual blocks with spectral norm keep `||h(x1) - h(x2)||` within constant factors of
+`||x1 - x2||`, so a far-away input lands far from training features. The GP variance
+`phi^T Sigma phi` is then large exactly there, and the mean-field step divides the logits by
+`sqrt(1 + pi/8 * var)`, flattening the softmax toward uniform. Cost: one forward pass plus a
+`1024 x 1024` solve that can be precomputed once (store `Sigma = precision^-1`), against N full
+passes for an N-member ensemble. Reset `precision` to the identity at the start of the final epoch,
+or it keeps stale features from earlier epochs.
+
 ---
 
 ## 7. Real-World Examples
@@ -647,6 +856,12 @@ guarantee while being far less useful.
 **Weather and energy forecasting:** prediction intervals (not point forecasts) are the product. Conformalized quantile regression produces calibrated intervals that widen in volatile conditions and tighten in stable ones, which downstream optimization (grid balancing, inventory) depends on.
 
 **Drug/material screening:** when scoring millions of candidates, epistemic uncertainty flags promising-but-unexplored regions for active learning, focusing expensive lab validation where the model is both optimistic and unsure.
+
+**Multi-label tagging and segmentation with a recall target:** Conformal risk control's own worked examples bound the false-negative rate of multi-label image classification and of tumour segmentation, graph distance in hierarchical classification, and token-level F1 in open-domain question answering. The pattern is the same each time: pick the loss the product owner states in words ("miss at most 10% of true tags"), then let calibration pick the threshold.
+
+**Precision-gated automation:** Learn then Test's examples include false-discovery-rate control in multi-label classification, IoU control in instance segmentation, and joint control of outlier-detection type-1 error with set coverage. MAPIE's `BinaryClassificationController` packages the binary form: a fraud or moderation filter that auto-acts only above a threshold certified to keep precision at or above a target with stated confidence, and returns no threshold when the calibration data cannot support the claim.
+
+**Single-pass OOD flags:** SNGP was evaluated on Wide-ResNet image classifiers and BERT intent classifiers, where a single deterministic model matched deep-ensemble uncertainty quality at one model's serving cost; that cost profile is why it suits latency-bound services that cannot run 5 ensemble members.
 
 **LLM hallucination signals:** token-level and answer-level uncertainty (e.g. semantic-entropy over sampled generations) is an active research direction for deciding when an LLM should abstain or retrieve. The aleatoric/epistemic framing here carries over; see `../../llm/evaluation_and_benchmarks/`.
 
@@ -661,6 +876,13 @@ guarantee while being far less useful.
 | Epistemic capture | None | Approx. | Best practical | N/A (wraps any) |
 | Coverage guarantee | None | None | None | Yes (finite-sample) |
 | Code complexity | Trivial | Low | Low | Low |
+
+| Dimension | Split conformal | Conformal risk control | Learn then Test | SNGP / DUQ |
+|-----------|-----------------|------------------------|-----------------|------------|
+| What is bounded | Miscoverage | Expected value of any bounded loss non-increasing in `lambda` | Any risk, monotone or not, several jointly | Nothing formally; distance-aware variance |
+| Statement | `P(y in C) >= 1 - alpha` | `E[L] <= alpha` over calibration draws | `P(R(lambda_hat) <= alpha) >= 1 - delta` | Heuristic OOD score |
+| Conservatism | Tight up to `1/(n+1)` | Tight up to `O(1/n)` | Needs `R_hat` well below `alpha` (Hoeffding margin) | N/A |
+| Cost | Post-hoc, one scan | Post-hoc, one scan | Post-hoc, one test per candidate `lambda` | Retrain with spectral norm + GP head; 1 pass at inference |
 
 | Conformal: what you control | Effect |
 |------------------------------|--------|
@@ -684,6 +906,16 @@ guarantee while being far less useful.
 
 - You need a *guarantee*, not just a heuristic confidence, and cannot retrain the model.
 - You already have a trained model and a held-out calibration set — it is the cheapest path to validity.
+
+### Use conformal risk control or Learn then Test when
+
+- The requirement is stated in a metric other than coverage: false-negative rate, recall, precision, FDR, IoU.
+- Use CRC when an average-case bound is enough and the loss falls monotonically as the set grows; use LTT when the risk is not monotone (precision) or a single deployment must meet the target with stated confidence.
+
+### Use SNGP or DUQ when
+
+- You need epistemic or OOD signals but can afford only one forward pass, and you can retrain the model with spectral normalization and a GP or RBF head.
+- Do NOT treat their variance as a guarantee; wrap the model in conformal prediction if you need one.
 
 ### It may be unnecessary when
 
@@ -743,7 +975,11 @@ The coverage guarantee assumes calibration and test data are exchangeable. Under
 
 ### Pitfall 6: Confusing marginal and conditional coverage
 
-Standard conformal guarantees *marginal* coverage (averaged over all inputs), not *per-group* coverage. A model can hit 90% overall while covering only 70% for a minority subgroup. If per-group validity matters (fairness, safety), use class-conditional/Mondrian conformal.
+Standard conformal guarantees *marginal* coverage (averaged over all inputs), not *per-group* coverage. A model can hit 90% overall while covering only 70% for a minority subgroup. If per-group validity matters (fairness, safety), use class-conditional/Mondrian conformal for disjoint groups, or conditional conformal (Gibbs, Cherian & Candès, 2023; MAPIE `ConditionalSplitConformalRegressor` / `ConditionalSplitConformalClassifier`) when the groups overlap, such as age band and region at once.
+
+### Pitfall 7: Reading a CRC bound as a per-deployment guarantee
+
+A team calibrated a multi-label tagger with conformal risk control at `alpha = 0.1` false-negative rate and promised the client that each monthly release would miss at most 10% of tags. Two of the first five releases measured above 10% on the client's audit sample. Nothing was broken: CRC bounds the expectation over calibration draws, and in a 200-split simulation of the same setup 39.5% of single calibration draws produced a test FNR above 0.10 while the average was 0.098. Fix: when a contract applies to each release, use Learn then Test with `delta` (zero violations at `delta = 0.1` in the same simulation, at the cost of larger tag sets), or state the CRC guarantee as a long-run average.
 
 ---
 
@@ -751,8 +987,10 @@ Standard conformal guarantees *marginal* coverage (averaged over all inputs), no
 
 | Tool | Use Case | Notes |
 |------|----------|-------|
-| MAPIE | Conformal prediction (classification + regression) | sklearn-compatible, batteries-included |
+| MAPIE | Conformal prediction (classification + regression) | sklearn-compatible; v1 classes `SplitConformalRegressor`, `CrossConformalRegressor`, `JackknifeAfterBootstrapRegressor`, `ConformalizedQuantileRegressor`, `TimeSeriesRegressor`, `SplitConformalClassifier`, `CrossConformalClassifier` (`confidence_level` replaces `alpha`); `ConditionalSplitConformalRegressor`/`Classifier`, `CrossConformalizedQuantileRegressor` and `ConditionalExpectedRiskController` since 1.5.0, the conditional ones through `pip install mapie[conditional]` (cvxpy for the split classes, torch for the controller); release 1.6.0 (2026-10-19) |
+| MAPIE `mapie.risk_control` | Conformal risk control and Learn then Test | `MultiLabelClassificationController` (recall via `crc`/`rcps`, precision via `ltt`), `SemanticSegmentationController`, `BinaryClassificationController` (LTT, multi-risk, `fwer_method`), `MultiClassificationLTTController` (one-vs-rest per-class risks, 1.6.0), FWER procedures `FWERBonferroniCorrection`, `FWERBonferroniHolm`, `FWERFixedSequenceTesting` |
 | crepes | Conformal classifiers/regressors + Venn-Abers | Lightweight, research-friendly |
+| TF Models `RandomFeatureGaussianProcess` | SNGP output layer (random Fourier features + Laplace covariance) | `official.nlp.modeling.layers`; PyTorch users pair `torch.nn.utils.parametrizations.spectral_norm` with a hand-written RFF head |
 | TorchUQ / Uncertainty Toolbox | UQ metrics, calibration, plots | Evaluation and visualization |
 | Laplace (laplace-torch) | Post-hoc Bayesian (Laplace approx.) | Cheap epistemic on a trained net |
 | Pyro / NumPyro | Bayesian neural networks (VI/MCMC) | Principled but heavier |
@@ -844,9 +1082,19 @@ Yes — an empty set means no label scored below the threshold (an out-of-distri
 Exchangeability of the calibration and test data — roughly, that they are drawn i.i.d. from the same distribution (order doesn't matter). Distribution shift breaks it: under covariate shift or temporal drift, realized coverage falls below the target. Remedies include weighted conformal prediction (reweight calibration scores by likelihood ratio under known covariate shift) and adaptive conformal inference (ACI), which adjusts the threshold online to maintain long-run coverage in streaming/drifting settings.
 
 **Q: What is the difference between marginal and conditional coverage?**
-**Short:** Marginal coverage holds only on average, while conditional coverage holds within every subgroup or region.
+**Short:** Marginal coverage holds only on average over all inputs; conditional coverage holds within each subgroup, which needs Mondrian or Gibbs-Cherian-Candès conformal.
 
-Marginal coverage holds on average across all inputs; conditional coverage holds within every subgroup or region (e.g. per class, per demographic). Standard split conformal gives only marginal coverage, so it can systematically under-cover a minority subgroup while looking fine overall. When per-group validity matters, use class-conditional (Mondrian) conformal, which calibrates separately within each group to guarantee coverage in each.
+Marginal coverage holds on average across all inputs; conditional coverage holds within every subgroup or region (e.g. per class, per demographic). Standard split conformal gives only marginal coverage, so it can systematically under-cover a minority subgroup while looking fine overall. When per-group validity matters, use class-conditional (Mondrian) conformal, which calibrates separately within each disjoint group to guarantee coverage in each. When groups overlap, use conditional conformal (Gibbs, Cherian & Candès, 2023), which guarantees coverage over every group in a chosen finite-dimensional class at once; MAPIE has shipped it since 1.5.0 as `ConditionalSplitConformalRegressor` and `ConditionalSplitConformalClassifier`. Exact coverage conditional on every single input is impossible distribution-free, so you always pick the class of groups up front.
+
+**Q: A conformal risk control guarantee says FNR <= 10%. Why can one deployment still miss 11% of labels?**
+**Short:** CRC bounds the expected loss averaged over calibration draws, not the risk of the threshold from one draw; use Learn then Test for a 1 - delta per-deployment bound.
+
+Conformal risk control picks the smallest `lambda` with `(n/(n+1)) R_hat(lambda) + B/(n+1) <= alpha`, and the theorem is `E[L(C_lambda_hat(X), Y)] <= alpha` where the expectation also runs over the calibration set. A single calibration set yields a single `lambda_hat` whose true risk can sit above `alpha`. In a 200-split simulation of a 20-tag classifier at `alpha = 0.1`, mean test FNR was 0.098 but 39.5% of splits exceeded 0.10. Learn then Test instead tests `H: R(lambda) > alpha` at each candidate with a concentration p-value and family-wise error control, giving `P(R(lambda_hat) <= alpha) >= 1 - delta`; at `delta = 0.1` the same simulation had no violating split, with a mean FNR of 0.060 and larger sets. Use CRC for long-run averages and LTT when each release carries a contract.
+
+**Q: How does conformal risk control generalize split conformal prediction?**
+**Short:** It replaces the miscoverage indicator with any bounded loss that falls as the set grows, and picks the threshold where the corrected empirical loss is at most alpha.
+
+Split conformal bounds one loss, `1[y not in C(x)]`. Conformal risk control (Angelopoulos, Bates, Fisch, Lei, Schuster) takes any loss `L(C_lambda(x), y)` in `[0, B]` that is non-increasing in `lambda`, such as the fraction of true tags missed or of tumour pixels missed, and chooses `lambda_hat = inf{lambda : (n/(n+1)) R_hat(lambda) + B/(n+1) <= alpha}`. Plugging in the miscoverage indicator with `B = 1` gives exactly the split-conformal quantile rule, and the bound is tight up to `O(1/n)`. At `n = 1000`, `alpha = 0.1`, the empirical risk must be at most 0.0991. It cannot control precision, because precision is not monotone in the threshold; that needs Learn then Test.
 
 **Q: How would you turn uncertainty into a production decision policy?**
 **Short:** Map uncertainty to thresholds that automate confident cases, defer ambiguous ones, and reject out-of-distribution inputs.
@@ -857,6 +1105,11 @@ Define thresholds that map uncertainty to actions: confident/singleton conformal
 **Short:** Choose conformal for a cheap post-hoc coverage guarantee, and a Bayesian network for full uncertainty decomposition.
 
 Choose conformal when you need a rigorous, distribution-free coverage guarantee cheaply on a model you already have — it is post-hoc, single-pass at inference, and assumption-light. Choose a Bayesian NN (or ensemble) when you specifically need a full predictive distribution, decomposition into aleatoric/epistemic components, or epistemic estimates for active learning and OOD detection. They are complementary: a common pattern is an ensemble for rich uncertainty plus conformal on top for the guarantee.
+
+**Q: How does SNGP produce useful uncertainty from a single deterministic forward pass?**
+**Short:** Spectral normalization keeps input distances in the hidden features, and a random-Fourier-feature GP output layer turns distance from training data into predictive variance.
+
+A plain network can map an out-of-distribution input onto the same features as training data (feature collapse), so no head on top can know it is far away. SNGP (Liu et al., 2020) puts spectral normalization on residual hidden layers, bounding each layer's Lipschitz constant so distances in input space survive into feature space. The output layer is a Gaussian process approximated with about 1,024 random Fourier features, with a Laplace posterior precision accumulated over the last epoch; predictive variance `phi^T Sigma phi` grows with distance from training features, and the mean-field step divides logits by `sqrt(1 + pi/8 * var)`. The paper reports it competitive with deep ensembles on Wide-ResNet and BERT at one model's cost. DUQ reaches a similar effect with per-class RBF centroids and a gradient penalty. Neither gives a coverage guarantee, so wrap it in conformal prediction when one is needed.
 
 **Q: How do you produce a calibrated prediction interval for a regression model?**
 **Short:** Conformalized quantile regression widens predicted quantile intervals by a calibrated correction to guarantee coverage.

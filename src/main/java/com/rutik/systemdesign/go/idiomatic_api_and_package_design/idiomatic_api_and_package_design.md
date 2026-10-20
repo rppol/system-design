@@ -572,7 +572,7 @@ read your own package that way before you tag a version.
 | `bytes.Buffer` | Zero value ready | `var b bytes.Buffer` needs no constructor and no error path; the highest form of Go API design |
 | `net/http.Server` | Config struct with zero-value defaults | Eight optional fields, all meaningful at zero, constructed as a struct literal rather than with options |
 | `net/http.Handler` | One method, plus `HandlerFunc` adapter | The func-adapter pattern turns any function into an implementation without a type declaration |
-| `google.golang.org/grpc` | Functional options | `grpc.Dial(addr, grpc.WithTransportCredentials(...))` — dozens of options added over a decade without a `v2` |
+| `google.golang.org/grpc` | Functional options | `grpc.NewClient(target, grpc.WithTransportCredentials(...))`: dozens of options added over a decade without a `v2` |
 | `log/slog` `[1.21]` | Consumer-facing `Handler` interface, concrete `*Logger` | Accept the interface for output, return the struct for use — the rule in the standard library |
 | `github.com/go-chi/chi/v5` | Package name in the call site | `chi.NewRouter()` reads as English; `chirouter.New()` does not. Also a live `/v5` example |
 | `database/sql` | Interfaces in `database/sql/driver`, concrete `*sql.DB` for users | The two-package split when several implementations genuinely exist |

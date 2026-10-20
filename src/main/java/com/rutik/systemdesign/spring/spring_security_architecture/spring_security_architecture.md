@@ -424,10 +424,16 @@ the relying party and a credential registered under one `rpId` will not authenti
 against another, so an `app.example.com` / `example.com` inconsistency across
 environments locks users out of their own passkeys.
 
-The WebAuthn specification itself is still moving: Level 3 is a **W3C Candidate
-Recommendation Snapshot dated 26 May 2026**, not yet a Recommendation. That is not a
-reason to avoid passkeys — browser and platform support is broad — but it is worth
-knowing when someone asks whether this is a finished standard.
+Sharing that session has its own trap. Spring Security 7.1.0 and earlier compared the
+`UserVerificationRequirement` by object identity, and a session restored from Redis, JDBC
+or Hazelcast holds a new instance, not the `REQUIRED` constant. The check failed open: a
+relying party that demanded user verification silently stopped asking for the PIN or
+biometric, so a stolen authenticator was enough to sign in (CVE-2026-47841, 2026-08-20).
+The default `PREFERRED` is not affected. Passkeys with user verification set to `REQUIRED`
+on a distributed session store need Spring Security 7.1.1 (Boot 4.1.1) or 7.0.7 (Boot 4.0.8).
+
+WebAuthn Level 3 is a **W3C Recommendation dated 25 August 2026**, so the passkey
+flows Spring Security implements rest on a finished standard.
 
 **One-time token login.** The magic-link pattern, without the hand-rolled token table:
 
@@ -945,7 +951,7 @@ http.authorizeHttpRequests(auth -> auth
 | Technology | Role | Notes |
 |---|---|---|
 | `spring-boot-starter-security` | Auto-configures Spring Security with sensible defaults | Enables HTTP Basic, generates random password on startup if no config |
-| Spring Security 7.x | Core framework | Ships with Spring Boot 4.x (Boot 4.1 → Security 7.1); Java 17 minimum |
+| Spring Security 7.x | Core framework | Ships with Spring Boot 4.x; Java 17 minimum; floor is 7.1.1 (Boot 4.1.1) or 7.0.7 (Boot 4.0.8) for the August 2026 WebAuthn, DPoP and `AesBytesEncryptor` fixes |
 | `spring-security-oauth2-resource-server` | JWT/opaque token validation for APIs | `http.oauth2ResourceServer(...)` |
 | `spring-security-oauth2-client` | OAuth2 login (social login, SSO) | Handles authorization code flow |
 | `spring-security-test` | `@WithMockUser`, `@WithUserDetails`, `MockMvc` security testing | `SecurityMockMvcRequestPostProcessors.csrf()` |
@@ -957,6 +963,7 @@ http.authorizeHttpRequests(auth -> auth
 | `AuthorizationManagerFactories.multiFactor()` | Programmatic MFA rules | `requireFactors`, `when`, per-factor `validDuration` for step-up |
 | `AllRequiredFactorsAuthorizationManager.anyOf(...)` | Alternative factor combinations | "Passkey alone, or password plus one-time token" |
 | Nimbus JOSE + JWT | JWT parsing and validation | Used internally by Spring Security OAuth2 Resource Server |
+| `AesGcmBytesEncryptor` / `AesCbcBytesEncryptor` | Field-level encryption in `spring-security-crypto` | `AesGcmBytesEncryptor.withSecretKey(key).build()`; replace the deprecated `AesBytesEncryptor` and `Encryptors` factory methods (CVE-2026-47842: the two-argument `AesBytesEncryptor` constructor used an all-zero CBC IV) |
 | Argon2 | Memory-hard password hashing (OWASP recommended) | `spring-security-crypto`; requires Bouncy Castle |
 | BCrypt | Default password hashing; cost factor 10–12 | ~100ms–300ms encode time intentionally |
 | Redisson / Spring Session | Distributed session storage | Enables horizontal scaling without sticky sessions |
@@ -1126,7 +1133,7 @@ You can define several `SecurityFilterChain` beans, each with its own `securityM
 **Q: What is the single most likely way a passkey rollout breaks in production?**
 **Short:** The credential repositories default to in-memory, so passkeys work on one instance and vanish on the next deploy or the second pod.
 
-Persistence, and it fails silently. The `webAuthn()` DSL gives you registration and assertion for free, but the two SPIs that hold the credentials — `PublicKeyCredentialUserEntityRepository` and `UserCredentialRepository` — default to in-memory implementations. Everything passes locally and in a single-instance test, then you scale to two pods and roughly half of all assertions fail because the credential was registered against the other one, and every deploy wipes the estate's passkeys entirely. Wire `JdbcPublicKeyCredentialUserEntityRepository` and `JdbcUserCredentialRepository` before you ship. The near miss is the third repository, `PublicKeyCredentialCreationOptionsRepository`, which holds the in-flight challenge and defaults to the `HttpSession` — correct if your session is shared through Spring Session, broken if it is per-JVM. The other classic is `rpId` drift: a credential registered under `app.example.com` will not authenticate against `example.com`, so an inconsistency between environments locks users out of their own passkeys with no useful error.
+Persistence, and it fails silently. The `webAuthn()` DSL gives you registration and assertion for free, but the two SPIs that hold the credentials, `PublicKeyCredentialUserEntityRepository` and `UserCredentialRepository`, default to in-memory implementations. Everything passes locally and in a single-instance test, then you scale to two pods and roughly half of all assertions fail because the credential was registered against the other one, and every deploy wipes the estate's passkeys entirely. Wire `JdbcPublicKeyCredentialUserEntityRepository` and `JdbcUserCredentialRepository` before you ship. The near miss is the third repository, `PublicKeyCredentialCreationOptionsRepository`, which holds the in-flight challenge and defaults to the `HttpSession`: correct if your session is shared through Spring Session, broken if it is per-JVM. Sharing it has a version floor too: before Spring Security 7.1.1 / 7.0.7, a session restored from Redis, JDBC or Hazelcast silently dropped a `REQUIRED` user-verification setting, because the check compared `UserVerificationRequirement` by object identity (CVE-2026-47841). The other classic is `rpId` drift: a credential registered under `app.example.com` will not authenticate against `example.com`, so an inconsistency between environments locks users out of their own passkeys with no useful error.
 
 **Q: How does Spring Security 7 express "require a second factor" as authorization rather than as another filter?**
 **Short:** It records each mechanism as a FactorGrantedAuthority on the Authentication, so you require factors the way you require roles.
@@ -1171,6 +1178,8 @@ Because delivery is the one part of the flow that is entirely your infrastructur
 
 12. **Validate JWT `iss` and `aud` claims.** Accepting a JWT signed by a trusted key is insufficient — a token issued to one service must not be accepted by another. Configure `JwtDecoder` with issuer validation and audience validation.
 
+13. **Encrypt fields with `AesGcmBytesEncryptor`.** `AesBytesEncryptor` and `Encryptors.standard()`, `stronger()`, `text()` and `delux()` are deprecated from 7.1.1 / 7.0.7 (CVE-2026-47842): with the two-argument constructor, or CBC with a null IV generator, `AesBytesEncryptor` used an all-zero IV, so equal plaintexts gave equal ciphertext. `AesCbcBytesEncryptor` is the CBC replacement (`Encryptors.standard()` maps to `AesCbcBytesEncryptor.withPassword`), and the new encryptors return raw bytes, so code that stored the hex strings from `text()` or `delux()` must hex-encode itself. Data written through the password-based `Encryptors` API must be re-encrypted, since the new encryptors derive keys with PBKDF2-HMAC-SHA256 at 600,000 iterations instead of PBKDF2-HMAC-SHA1 at 1,024; data encrypted with your own `SecretKey` and a real IV generator needs no migration.
+
 ---
 
 ## 14. Case Study
@@ -1196,7 +1205,7 @@ Three SecurityFilterChain beans with @Order:
     - Form login, session-based
     - SessionCreationPolicy.IF_REQUIRED
     - CSRF enabled
-    - MFA enforced via custom AuthenticationProvider
+    - MFA: password + one-time token, required per chain
 
   Order 2: /partner/v1/**
     - Custom ApiKeyAuthenticationFilter
@@ -1217,20 +1226,24 @@ Three SecurityFilterChain beans with @Order:
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
+@EnableMultiFactorAuthentication(authorities = {})   // MFA rules are set per chain below
 public class MultiChainSecurityConfig {
 
     @Bean
     @Order(1)
-    public SecurityFilterChain adminChain(HttpSecurity http, MfaAuthenticationProvider mfaProvider)
-            throws Exception {
+    public SecurityFilterChain adminChain(HttpSecurity http) throws Exception {
+        var mfa = AuthorizationManagerFactories.multiFactor()
+                .requireFactors(FactorGrantedAuthority.PASSWORD_AUTHORITY,
+                                FactorGrantedAuthority.OTT_AUTHORITY)
+                .build();
         http
             .securityMatcher("/admin/**")
-            .authenticationProvider(mfaProvider)
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/admin/login").permitAll()
-                .anyRequest().hasRole("ADMIN")
+                .anyRequest().access(mfa.hasRole("ADMIN"))
             )
             .formLogin(form -> form.loginPage("/admin/login").defaultSuccessUrl("/admin/dashboard"))
+            .oneTimeTokenLogin(Customizer.withDefaults())
             .sessionManagement(sm -> sm
                 .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
                 .sessionFixation().newSession()

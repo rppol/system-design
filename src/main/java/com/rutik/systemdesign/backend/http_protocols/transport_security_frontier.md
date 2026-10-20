@@ -74,6 +74,16 @@ CA/Browser Forum **Ballot SC-081v3** passed April 2025 (29 in favor, 0 opposed; 
 
 Verify the exact intermediate DCV-reuse values against the live ballot text at cabforum.org before quoting them in a design doc — the table above reproduces the certificate-validity column faithfully; the DCV reuse column tightens on the same schedule but the source page's public summary did not spell out every intermediate figure at time of writing.
 
+Let's Encrypt runs ahead of the ballot's caps on its own schedule (ISRG, "From 90 to 45", December 2, 2025):
+
+| Date | Let's Encrypt profile | Certificate lifetime | Authorization reuse |
+|---|---|---|---|
+| May 13, 2026 | `tlsserver` (opt-in) | 45 days | per profile |
+| February 10, 2027 | `classic` (default) | 64 days | 10 days |
+| February 16, 2028 | `classic` (default) | 45 days | 7 hours |
+
+At these lifetimes a client renewing on a fixed timer leaves little margin, so ISRG recommends **ACME Renewal Information (ARI, RFC 9773)**: the CA publishes a suggested renewal window per certificate, and the client polls it and renews inside that window. ARI also lets the CA pull the window forward to force early renewal after a mass revocation, which a timer-based client never sees.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -170,6 +180,8 @@ Typical deployment:
   Certificate lifetime:       point the TERMINATOR's cert renewal at an ACME client — the
                                app is unaffected as long as the terminator's cert stays valid.
 ```
+
+The exception is a JVM service that terminates or originates TLS itself through `javax.net.ssl` (embedded Tomcat or Netty with JSSE, `java.net.http.HttpClient`). JDK 27 (GA September 15, 2026) ships JEP 527, which puts `X25519MLKEM768` first in JSSE's default named-group list, so those services negotiate hybrid PQ key exchange after the runtime upgrade with no code change; `jdk.tls.namedGroups` overrides the list. JDK 25 LTS does not have JEP 527, so services held on the LTS line still get PQ only from a terminator in front of them (or from a non-JSSE provider such as BoringSSL through Netty's `netty-tcnative`).
 
 The one place application code is affected: **certificate-pinning code** (mobile apps, service-to-service mTLS clients) that hard-codes a certificate or public key hash now has to tolerate rotation on a much shorter cycle (§4.5) — pinning logic written assuming a year of stability will start breaking on the new 47-day cadence unless it already handles rotation gracefully.
 
@@ -268,8 +280,9 @@ openssl s_client -connect lb.example.com:443 -groups X25519MLKEM768 -tls1_3 </de
 | Cloudflare's PQ test endpoint (`pq.cloudflareresearch.com`) | Quick browser/curl check of whether a client negotiates post-quantum |
 | Cloudflare Radar | Live, dated adoption statistics for PQ TLS and ECH across Cloudflare's network — the primary source to cite for a current percentage, not a cached blog post |
 | tldr.fail | Public tracker of middlebox/server incompatibilities with oversized (PQ) ClientHellos, with vendor names and patch dates |
+| JDK 27 JSSE (JEP 527) | `X25519MLKEM768` first in the default named groups for `javax.net.ssl`; JDK 25 LTS lacks it |
 | OpenSSL 3.2+ / BoringSSL | TLS libraries with ML-KEM / hybrid group support; the terminator's library is almost always what needs upgrading |
-| ACME clients (Certbot, `acme.sh`, cloud-native ACME integrations) | Automated certificate issuance/renewal — mandatory, not optional, once the CA/Browser Forum's shorter-lifetime schedule lands |
+| ACME clients (Certbot, `acme.sh`, cloud-native ACME integrations) with ARI (RFC 9773) | Automated certificate issuance and renewal, with the renewal time taken from the CA's ARI window instead of a fixed timer |
 | `dig HTTPS <hostname>` / `dig SVCB <hostname>` | Inspect the DNS record type (RFC 9460) that carries an ECH config |
 
 ---
@@ -322,14 +335,14 @@ QUIC's connection IDs (RFC 9000, already standardized) decouple a connection's i
 Ballot SC-081v3, passed by the CA/Browser Forum in April 2025 with unanimous support from Apple, Google, Mozilla, and Microsoft, sets a phased schedule reducing the maximum validity period of a publicly trusted TLS certificate: 200 days starting March 15, 2026; 100 days starting March 15, 2027; and 47 days starting March 15, 2029, alongside a matching reduction in how long domain-control validation can be reused before it must be repeated. This is a CA/Browser Forum governance decision, not a TLS protocol RFC — it changes an operational deadline every publicly trusted certificate is subject to, not the wire format.
 
 **Q: Why does the shortening certificate-lifetime schedule make ACME automation mandatory rather than merely convenient?**
-**Short:** At 47 days per certificate, manual renewal cannot keep pace at any meaningful scale without near-certain outages.
+**Short:** At 45 to 47 days per certificate, manual renewal fails at any scale; ACME with ARI renews inside a window the CA publishes per certificate.
 
-A team manually renewing certificates on a roughly annual cadence has enough slack to survive occasional lapses in process discipline. At a 47-day maximum lifetime, a single missed renewal window causes an outage within weeks rather than months, and any fleet larger than a handful of hosts makes tracking renewal dates by hand infeasible. ACME (the protocol behind Let's Encrypt and most modern CAs' automated issuance) turns renewal into a scheduled, unattended job — the practical response to the ballot's schedule is standing up or verifying an ACME pipeline well before the 2029 deadline, not scaling up a manual process that is already fragile at today's 200-day maximum.
+A team manually renewing certificates on a roughly annual cadence has enough slack to survive occasional lapses in process discipline. At a 47-day maximum lifetime, a single missed renewal window causes an outage within weeks rather than months, and any fleet larger than a handful of hosts makes tracking renewal dates by hand infeasible. ACME (the protocol behind Let's Encrypt and most modern CAs' automated issuance) turns renewal into a scheduled, unattended job — the practical response to the ballot's schedule is standing up or verifying an ACME pipeline well before the 2029 deadline, not scaling up a manual process that is already fragile at the 200-day maximum in force since March 15, 2026. Let's Encrypt moves faster than the ballot: its default `classic` profile drops to 64 days on February 10, 2027 and to 45 days on February 16, 2028. At those lifetimes the client should take its renewal time from ACME Renewal Information (RFC 9773) rather than a fixed "renew at day N" timer, because ARI lets the CA spread load and pull renewals forward ahead of a mass revocation.
 
 **Q: A backend engineer says "we need to add post-quantum key exchange to our microservice's HTTP client code." Is that usually correct?**
-**Short:** Usually no — PQ key exchange lives in the TLS library at the terminator, not in application code.
+**Short:** Usually no. PQ key exchange lives in the TLS library at the terminator; a JVM terminating TLS itself gets it from the JDK 27 upgrade, not code.
 
-Post-quantum key exchange is a TLS handshake concern, handled entirely by the TLS library the terminating component (load balancer, CDN edge, or the service's own TLS termination) uses — OpenSSL 3.2+, BoringSSL, or a managed CDN's stack. An application's HTTP client code doesn't select key-exchange groups; it calls into whatever TLS stack is configured underneath it. The one place application-level code is genuinely affected is certificate-pinning logic that hard-codes an expected certificate or public key, which needs to tolerate the certificate's now much shorter rotation cycle (§4.5) — that is a real application change; PQ key exchange itself is not.
+Post-quantum key exchange is a TLS handshake concern, handled entirely by the TLS library the terminating component (load balancer, CDN edge, or the service's own TLS termination) uses — OpenSSL 3.2+, BoringSSL, or a managed CDN's stack. An application's HTTP client code doesn't select key-exchange groups; it calls into whatever TLS stack is configured underneath it. For a JVM service whose own JSSE stack does the TLS, the change is the runtime version: JDK 27's JEP 527 offers `X25519MLKEM768` first by default, while JDK 25 LTS has no hybrid group, so an LTS fleet relies on the terminator. The one place application-level code is genuinely affected is certificate-pinning logic that hard-codes an expected certificate or public key, which needs to tolerate the certificate's now much shorter rotation cycle (§4.5) — that is a real application change; PQ key exchange itself is not.
 
 **Q: How would you verify whether a given server actually negotiates post-quantum key exchange, without trusting a vendor's marketing claim?**
 **Short:** Force the group with openssl s_client -groups and read the negotiated key back from the handshake output.

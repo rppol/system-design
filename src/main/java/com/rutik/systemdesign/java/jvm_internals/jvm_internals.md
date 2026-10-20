@@ -399,8 +399,8 @@ void process() {
 ### Vector API — Explicit SIMD, Still Incubating
 
 `jdk.incubator.vector` lets code request SIMD execution explicitly instead of hoping C2's
-auto-vectorizer finds it in a loop. It has now incubated **twelve times**: JEP 489 (Ninth
-Incubator, Release 24), JEP 508 (Tenth Incubator, Release 25), and **JEP 537 (Twelfth
+auto-vectorizer finds it in a loop. It has now incubated **twelve times**: JEP 508 (Tenth
+Incubator, Release 25), JEP 529 (Eleventh Incubator, Release 26), and **JEP 537 (Twelfth
 Incubator, Release 27)** are the three most recent, all `Closed / Delivered` as incubating
 features — none of them GA. The repeated incubation is not stalled design, it is a genuine
 dependency: the API represents a vector as a value holding N lanes, and without Valhalla's
@@ -698,7 +698,7 @@ For G1 (if ZGC not available):
 ```
 -XX:+UseG1GC -XX:MaxGCPauseMillis=50
 -XX:G1HeapRegionSize=16m        # For large heaps
--XX:InitiatingHeapOccupancyPercent=35  # Start marking earlier
+-XX:InitiatingHeapOccupancyPercent=35  # Start marking earlier (-XX:G1IHOP on JDK 27+)
 ```
 
 **Q13: How does the JVM class loader hierarchy work?**
@@ -739,7 +739,7 @@ Deoptimization is the JVM discarding compiled (C2) code and falling back to the 
 **Q20: Why has the Vector API (`jdk.incubator.vector`) incubated twelve times without reaching GA?**
 **Short:** It is blocked on Valhalla: without value types a vector either boxes on the heap or needs escape analysis to avoid it.
 
-The Vector API represents a SIMD vector as an object holding N lanes, and Java has no way today to give that object heap-free, identity-free semantics — it either allocates and boxes like any other object (destroying the performance the API exists to deliver) or the JIT must prove via escape analysis that every instance never escapes, call site by call site, which is an optimization guarantee, not a language guarantee. JEP 489 (Ninth Incubator, Java 24), JEP 508 (Tenth Incubator, Java 25), and JEP 537 (Twelfth Incubator, Java 27) are all `Closed / Delivered` as *incubating*, not GA — the repeated incubation is OpenJDK declining to lock in a boxed-by-default API while Project Valhalla's value types are still in progress (Valhalla's own JEP 401 only integrated to mainline as a preview in July 2026, targeting Java 28). Once value types land, a `Vector` can be a true flat, identity-free value with no header and no boxing, which is the carrier type the API was designed for from the start. Until then, the API is fully usable behind `--add-modules jdk.incubator.vector` and delivers real speedups on hardware with wide SIMD registers — it is the finalization, not the functionality, that is waiting on Valhalla.
+The Vector API represents a SIMD vector as an object holding N lanes, and Java has no way today to give that object heap-free, identity-free semantics: it either allocates and boxes like any other object (destroying the performance the API exists to deliver) or the JIT must prove via escape analysis that every instance never escapes, call site by call site, which is an optimization guarantee, not a language guarantee. JEP 508 (Tenth Incubator, Java 25), JEP 529 (Eleventh Incubator, Java 26), and JEP 537 (Twelfth Incubator, Java 27) are all `Closed / Delivered` as *incubating*, not GA. The repeated incubation is OpenJDK declining to lock in a boxed-by-default API while Project Valhalla's value types are still in progress (Valhalla's own JEP 401 only integrated to mainline as a preview in July 2026, targeting Java 28). Once value types land, a `Vector` can be a true flat, identity-free value with no header and no boxing, which is the carrier type the API was designed for from the start. Until then, the API is fully usable behind `--add-modules jdk.incubator.vector` and delivers real speedups on hardware with wide SIMD registers; it is the finalization, not the functionality, that is waiting on Valhalla.
 
 ---
 
@@ -762,7 +762,7 @@ The Vector API represents a SIMD vector as an object holding N lanes, and Java h
 
 ### Diagnosing a G1GC Mixed-GC Pause Storm in a 32GB-Heap Service (Java 17 LTS)
 
-**Scenario.** A config-aggregation service on Java 25 (LTS) runs with `-Xmx32g` using G1GC. After ~6 hours of uptime, it enters a **mixed-GC pause storm**: 2-second stop-the-world pauses every ~5 minutes, blowing the 200ms pause target and tripping the load balancer's health timeout. Restarts clear it for another 6 hours — the signature of a slow leak filling the old generation until G1 thrashes trying to reclaim it. The service handles ~3,000 config lookups/sec; each lookup parses and *caches* a config object in a `static Map` that is never evicted.
+**Scenario.** A config-aggregation service on Java 17 (LTS) runs with `-Xmx32g` using G1GC. After ~6 hours of uptime, it enters a **mixed-GC pause storm**: 2-second stop-the-world pauses every ~5 minutes, blowing the 200ms pause target and tripping the load balancer's health timeout. Restarts clear it for another 6 hours: the signature of a slow leak filling the old generation until G1 thrashes trying to reclaim it. The service handles ~3,000 config lookups/sec; each lookup parses and *caches* a config object in a `static Map` that is never evicted.
 
 ```
   heap (32GB)
@@ -839,7 +839,7 @@ After deploying the bounded cache, old-gen occupancy plateaued, mixed GCs return
 -XX:MaxGCPauseMillis=200        # G1's soft pause goal (default 200ms)
 -XX:+UseG1GC                    # default since Java 9, explicit for clarity
 -XX:+DisableExplicitGC          # neutralize stray System.gc() calls
--XX:InitiatingHeapOccupancyPercent=35  # below the 45 default: start concurrent mark earlier
+-XX:InitiatingHeapOccupancyPercent=35  # below the 45 default: start concurrent mark earlier (-XX:G1IHOP on JDK 27+)
 -Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=20m
 
 # Heap and GC headroom math for this node:
@@ -911,6 +911,8 @@ The success criterion is not "no GC" but "old-gen occupancy is flat over the soa
 
 **What is the difference between `OutOfMemoryError: Java heap space` and `: Metaspace`?** Heap-space OOM means live objects exceed `-Xmx` (a data leak like our cache). Metaspace OOM means class metadata exceeds the Metaspace limit, almost always a ClassLoader leak where loaded classes can never unload. They have different root causes and different diagnostics (`jcmd GC.class_histogram` vs `jcmd VM.classloader_stats`).
 
+**Why is `InitiatingHeapOccupancyPercent` relevant to a pause storm?** IHOP controls when G1 starts the concurrent marking cycle. If it starts too late, the old gen fills before marking completes and G1 falls back to a costly full GC (evacuation failure). Lowering it starts reclamation earlier, smoothing pauses while the leak is being fixed. JDK 27 renamed the flag to `-XX:G1IHOP` (JDK-8227106); the old name still starts the JVM there but prints a deprecation warning.
+
 ---
 
 ## Related / See Also
@@ -920,5 +922,3 @@ The success criterion is not "no GC" but "old-gen occupancy is flat over the soa
 - [Foreign Function & Memory API](../foreign_function_and_memory_api/foreign_function_and_memory_api.md) — MemorySegment, off-heap allocation, replacing Unsafe
 - [Memory Management & Virtual Memory](../../cs_fundamentals/memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) — paging, virtual address translation, and OS-level memory concepts beneath heap/Metaspace
 - [Performance Profiling](../../backend/performance_profiling/performance_profiling.md) — async-profiler, flame graphs, and JFR methodology for diagnosing the GC/JIT issues in this module
-
-**Why is `InitiatingHeapOccupancyPercent` relevant to a pause storm?** IHOP controls when G1 starts the concurrent marking cycle. If it starts too late, the old gen fills before marking completes and G1 falls back to a costly full GC (evacuation failure). Lowering it starts reclamation earlier, smoothing pauses while the leak is being fixed.

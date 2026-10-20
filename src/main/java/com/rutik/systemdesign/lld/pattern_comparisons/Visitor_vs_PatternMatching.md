@@ -10,8 +10,9 @@
 | Sealed Classes | [JEP 409](https://openjdk.org/jeps/409) | Java 17 |
 | Record Patterns | [JEP 440](https://openjdk.org/jeps/440) | Java 21 |
 | Pattern Matching for `switch` | [JEP 441](https://openjdk.org/jeps/441) | Java 21 |
+| Primitive types in patterns, `instanceof`, and `switch` | [JEP 532](https://openjdk.org/jeps/532) | Not final: preview since JDK 23 (JEP 455), fifth preview in JDK 27 |
 
-All three are final language features, not previews, as of Java 21.
+The first three are final in Java 21. The Java 21 floor covers reference types only: a `switch` on a `long`, `float`, `double`, or `boolean` selector, or a primitive type pattern that tests a narrowing conversion such as `case int i` on a `double`, still needs `--enable-preview` in JDK 27.
 
 ---
 
@@ -220,6 +221,11 @@ Sealed classes and interfaces, which let a type declare a fixed, compiler-checke
 **Short:** JEP 440 (record patterns) and JEP 441 (pattern matching for switch) both finalized in Java 21.
 
 Record Patterns (JEP 440) let a `switch` case deconstruct a record's components directly, as in `case Add(Expr left, Expr right) -> ...`. Pattern Matching for `switch` (JEP 441) is the broader feature enabling type patterns and exhaustiveness checking as `case` labels in `switch` statements and expressions. Both went from preview through several JDK releases and were finalized together in Java 21, which is why "Java 21+" is the practical version floor for the full sealed-plus-pattern-matching style shown in this file.
+
+**Q: Can a Java 21 `switch` match on a `long` or `double` value, or narrow a `double` record component to `int` in a pattern?**
+**Short:** No. Primitive selectors beyond int-like types and converting primitive patterns are JEP 532, still a preview (fifth, JDK 27).
+
+JEP 441 limits `switch` selectors to `byte`, `short`, `char`, `int`, their boxes, `String`, enums, and reference types, and JEP 440 lets a nested pattern on a primitive record component use only the exact component type. JEP 455 (JDK 23) first previewed primitive type patterns in every pattern context and `switch` on `boolean`, `long`, `float`, and `double`. A pattern such as `case int i` on a `double` matches only when the conversion loses no information. JEP 532 previews it a fifth time in JDK 27 with no change from JEP 530 (JDK 26), so the sealed-plus-switch style in this file is GA on reference hierarchies only.
 
 **Q: What specifically does "exhaustiveness checking" mean for a switch over a sealed type, and what error does the compiler give if it fails?**
 **Short:** The compiler proves every permitted subtype has a case, and refuses to compile a switch expression missing one.

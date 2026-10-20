@@ -641,7 +641,7 @@ accumulator's initial value last and pays for it with an annotation on almost ev
 |------|------|----------------------|
 | TypeScript | The compiler and checker (7.0, native Go binary) | Owns inference, variance and overload resolution |
 | tsc6 | The 6.0 binary shipped as `@typescript/typescript6` | The only stable Compiler API until 7.1 |
-| typescript-eslint | Type-aware linting (8.69.0) | `no-unnecessary-type-parameters` finds single-use parameters |
+| typescript-eslint | Type-aware linting (8.71.2) | `no-unnecessary-type-parameters` finds single-use parameters |
 | Vitest | Test runner exposing `expectTypeOf` | Asserts an inferred instantiation is what you expected |
 | tsd | Type-level assertion runner | `expectType` on a published generic signature |
 | ts-morph | Compiler-API wrapper for codemods | Rewriting overload sets to union parameters at scale |

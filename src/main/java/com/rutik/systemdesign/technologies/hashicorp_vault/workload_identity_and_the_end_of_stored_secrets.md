@@ -1,8 +1,7 @@
 # Workload Identity and the End of Stored Secrets
 
-> **Version anchor (2026-08-26).** HashiCorp Vault **2.0.4** (2026-08-04) — the same release
-> [the parent module](hashicorp_vault.md) pins. **OpenBao 2.6.2** (2026-08-18, security-fix
-> release over 2.6.1). GitHub Actions OIDC token claims per `docs.github.com`'s current
+> **Version anchor (2026-10-19).** HashiCorp Vault **2.2.0** (2026-10-15), the same release
+> [the parent module](hashicorp_vault.md) pins. **OpenBao 2.7.1** (2026-10-01). GitHub Actions OIDC token claims per `docs.github.com`'s current
 > reference, including the **immutable `sub` format** GitHub started issuing for
 > repositories created after **2026-07-15**. Kubernetes bound, audience-scoped projected
 > service-account tokens — GA behind `BoundServiceAccountTokenVolume` since **1.22**, the
@@ -284,7 +283,37 @@ policy change, is what actually revokes" property those sections describe applie
 trigger. The fix is the same one §6.10 already gives for any credential you must revoke on
 demand: `vault token revoke -accessor` for the entity's known tokens, or a short enough
 `token_max_ttl` on the auth mount that a SCIM delete is never the *only* thing standing
-between an offboarded identity and continued access.
+between an offboarded identity and continued access. From `[2.2]` the SCIM v2 endpoints need
+no activation flag; they are available as soon as the Enterprise licence covers SCIM.
+
+### 6.1a Agent Registry and the OAuth resource server `[2.2]` (Enterprise)
+
+Vault 2.2.0 made first-class AI agent support GA. Two pieces work together:
+
+- **Agent Registry.** An agent is registered as its own Vault entity, with policies, aliases
+  and a status, and the UI lists registered agents under **Agentic Security**. A registration
+  with `local=true` is not replicated to performance-replication secondaries.
+- **OAuth resource server.** Vault accepts an OAuth 2.0 JWT from an external authorization
+  server and authorizes the request directly, with **no Vault token**. A profile under
+  `sys/config/oauth-resource-server` names the issuer and the claim that identifies the
+  caller; `issuer_id` and `unique_id_claim` are immutable once the profile exists, so a
+  change means delete and recreate. Entity aliases bind to a profile with `profile_name` or
+  `config_id`. From `[2.2]` the feature needs no `sys/activation-flags` call.
+
+```
+agent  --(OAuth 2.0 access token, typ at+jwt, from Okta/Entra/...)-->  Vault
+  Vault: match iss to a resource-server profile -> map unique_id_claim to an agent entity
+       -> optional authorization_details (vault:path_access) narrow the paths
+       -> entity policies decide; no Vault token is minted or stored
+```
+
+`authorization_details` (RFC 9396 rich authorization requests) let the token itself carry
+the paths an agent may touch; Vault matches `vault:path_access` entries like ACL policy
+paths, in the namespace of the profile that validated the token, and the entity's policies
+still apply. For on-behalf-of flows the profile maps an actor claim alongside the subject,
+so the audit log records which agent acted for which user. This is the same
+exchange-an-identity pattern as the rest of this page: the agent never holds a Vault
+credential, only a short-lived token its own authorization server issued.
 
 ### 6.2 The JWT/OIDC trap, applied to GitHub Actions specifically
 
@@ -668,6 +697,10 @@ No, it is Enterprise-only, confirmed against HashiCorp's own Vault Enterprise 2.
 **Q: A user was deprovisioned via SCIM and their Vault entity disappeared — why can they still access secrets an hour later?**
 **Short:** SCIM deletion removes the entity and aliases but never revokes tokens already issued, which stay valid until their own TTL.
 Because SCIM's `DELETE` operation removes the identity record — the entity, its aliases, its group memberships — but has no relationship to the token lifecycle machinery: any token already issued to that entity keeps working exactly as it did before, right up to its own `token_ttl`/`token_max_ttl` expiry, since token validity is checked against the token's own lease, not against whether its originating entity still exists. The fix is pairing SCIM-driven deprovisioning with a short `token_max_ttl` on the auth mounts serving human users, so the worst case is bounded by the token ceiling rather than by whatever TTL happened to be issued that morning. Treat "the entity is gone" as necessary but not sufficient for "access is gone" — the same lesson the parent module's lease-revocation material teaches for dynamic secrets, applied to sessions instead.
+
+**Q: How does an AI agent call Vault 2.2 without ever holding a Vault token?**
+**Short:** Vault 2.2 Enterprise acts as an OAuth resource server: it validates the agent's OAuth 2.0 JWT, maps it to a registered agent entity, and applies that entity's policies.
+The agent is registered in the Agent Registry as a Vault entity. A resource-server profile under `sys/config/oauth-resource-server` names the trusted issuer and the claim that identifies the caller, and an entity alias bound to that profile links the claim value to the agent entity. The agent sends the access token its own authorization server issued (Okta, Entra ID, any issuer with a JWKS), and Vault authorizes the request directly; no Vault token is minted, stored or renewed. `authorization_details` in the token can narrow access to specific `vault:path_access` paths, and an actor claim records which agent acted for which user in delegated flows. The profile's `issuer_id` and `unique_id_claim` cannot be changed after creation, so plan them before rollout. This is Enterprise-only and GA from 2.2.0.
 
 **Q: What's the difference between a Kubernetes pod's legacy ServiceAccount token and a projected ServiceAccount token?**
 **Short:** The legacy token is a non-expiring Secret mounted into every pod on the SA; the projected token is time-bound, audience-bound, and per-pod.

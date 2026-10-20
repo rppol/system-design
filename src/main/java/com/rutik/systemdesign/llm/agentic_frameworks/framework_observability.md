@@ -363,11 +363,12 @@ metrics = langfuse.get_usage(
 )
 
 # Manual cost calculation if not using built-in pricing
-# Prices are per token (dollars-per-1M / 1e6), checked 2026-09-04.
+# Prices are per token (dollars-per-1M / 1e6). Claude rows checked 2026-10-19;
+# Haiku 5.5 is the up-to-100K-token prompt rate ($0.50/$2.50 above that).
 MODEL_PRICES = {
-    "claude-opus-5":    {"input": 5e-6,   "output": 25e-6},
-    "claude-sonnet-5":  {"input": 2e-6,   "output": 10e-6},
-    "claude-haiku-4-5": {"input": 1e-6,   "output": 5e-6},
+    "claude-opus-5-5":   {"input": 4e-6,   "output": 20e-6},
+    "claude-sonnet-5-5": {"input": 2e-6,   "output": 10e-6},
+    "claude-haiku-5-5":  {"input": 0.1e-6, "output": 0.5e-6},
     "gpt-5.6-terra":    {"input": 2e-6,   "output": 12e-6},
     "gpt-5.4-nano":     {"input": 0.2e-6, "output": 1.25e-6},
 }

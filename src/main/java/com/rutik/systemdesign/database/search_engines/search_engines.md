@@ -2,6 +2,11 @@
 
 ## 1. Concept Overview
 
+> **Version anchor.** Release numbers for Elasticsearch, OpenSearch and Apache Lucene, and the
+> features tied to each release, are kept in the version anchor of
+> [Elasticsearch Internals](../elasticsearch_internals/elasticsearch_internals.md). This page
+> covers behaviour common to all Lucene-based engines and names a version only where it matters.
+
 Search engine databases (Elasticsearch, OpenSearch, Solr) are built on top of Apache Lucene and provide full-text search, relevance ranking, aggregations, and near-real-time indexing at scale. They are not general-purpose databases — they excel at text search, log analytics, and faceted navigation use cases where precision recall and relevance matter more than ACID compliance.
 
 ---

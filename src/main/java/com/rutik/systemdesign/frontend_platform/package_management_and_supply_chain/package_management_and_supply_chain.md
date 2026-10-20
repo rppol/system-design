@@ -124,9 +124,9 @@ a promise from a stranger — a patch release can and does break you.
 
 | Tool | Version | Model | Cache key |
 |------|---------|-------|-----------|
-| **Turborepo** | 2.10.12 | task graph from `dependsOn`, `^build` meaning "upstream first" | hashed inputs, declared `env`, task config, upstream hashes |
-| **Nx** | 23.2.0 | project graph inferred from imports plus explicit targets | same shape plus inferred and named input sets |
-| **plain workspaces** | npm 12, pnpm 11.25, Yarn 4.18 | `--workspaces --if-present`, topological order only | none |
+| **Turborepo** | 2.11.9 | task graph from `dependsOn`, `^build` meaning "upstream first" | hashed inputs, declared `env`, task config, upstream hashes |
+| **Nx** | 23.3.0 | project graph inferred from imports plus explicit targets | same shape plus inferred and named input sets |
+| **plain workspaces** | npm 12, pnpm 12, Yarn 4.18 | `--workspaces --if-present`, topological order only | none |
 
 ---
 
@@ -192,7 +192,7 @@ flowchart LR
     E1(["NPM_TOKEN<br/>GITHUB_TOKEN"])
     E2(["cloud creds<br/>from OIDC"])
     X(["exfiltrate,<br/>then publish<br/>itself onward"])
-    G(["ignore-scripts<br/>plus an explicit<br/>build allowlist"])
+    G(["default-deny scripts<br/>plus an explicit<br/>build allowlist"])
     D --> H
     H --> E1 --> X
     H --> E2 --> X
@@ -284,9 +284,9 @@ and nothing else**; the real trees live under `node_modules/.pnpm/<name>@<versio
 hard-linked from a global content-addressed store, so twelve checkouts share one copy of every
 file. Packages relying on phantom resolution genuinely break, which is why `.npmrc` keeps escape
 hatches — `public-hoist-pattern[]=*eslint*`, or the bluntly named `shamefully-hoist=true`. Note
-which pnpm you get: `pnpm@latest` is **11.25.0**, while **pnpm 12**, the Rust rewrite, went
-stable on **2026-08-26** under the **`next-12`** dist-tag. Pin it in `packageManager` so Corepack
-gives every developer and CI runner the same binary.
+which pnpm you get: `pnpm@latest` is **12.14.0** (2026-10-15), the Rust rewrite that went
+stable on **2026-08-26**; the 11.x line moved to the **`latest-11`** dist-tag. Pin it in
+`packageManager` so Corepack gives every developer and CI runner the same binary.
 
 Yarn Berry's **Plug'n'Play** deletes `node_modules` altogether. Packages stay zipped in
 `.yarn/cache/` and a generated `.pnp.cjs` maps *(importer, specifier)* to a location inside a
@@ -421,7 +421,7 @@ moment it is deployed alone. pnpm's layout prevents it; under npm or Yarn worksp
 each app from a fresh isolated install in CI is the only reliable detector.
 
 **Task orchestration.** `pnpm -r build` runs in topological order and nothing more. Turborepo
-2.10.12 and Nx 23.2.0 add the two things that matter at 40 packages: a **task graph** and
+2.11.9 and Nx 23.3.0 add the two things that matter at 40 packages: a **task graph** and
 **content-addressed caching**.
 
 ```json
@@ -476,16 +476,19 @@ defeated.
 ### 6.6 Defences, in order of leverage
 
 **1. Do not run install scripts.** Most front-end dependencies do not need them; the ones that do
-are native builds you can enumerate. **pnpm 10 and later blocks lifecycle scripts by default**
-and demands an explicit allowlist — adding a name to that list is a reviewable event, whereas
-adding a package with a `postinstall` under npm's defaults is not.
+are native builds you can enumerate. **npm 12 (2026-07-08) and pnpm 10 and later block
+dependency lifecycle scripts by default** and run only what an explicit allowlist names. Adding
+a name to that list is a reviewable event in a diff.
 
 ```
-# .npmrc — removes the postinstall execution path entirely
-ignore-scripts=true
+# package.json under npm 12, written by `npm install-scripts approve esbuild`,
+# then `npm rebuild esbuild` runs the newly approved script
+#   { "allowScripts": { "esbuild@0.28.2": true } }
 
-# package.json under pnpm — the allowlist of builds you actually need
-#   { "pnpm": { "onlyBuiltDependencies": ["esbuild", "sharp"] } }
+# pnpm-workspace.yaml under pnpm 11 and later
+#   allowBuilds:
+#     esbuild: true
+#     core-js: false
 ```
 
 **2. Scope private packages and claim the scope.** Dependency confusion needs an internal name
@@ -501,7 +504,8 @@ npm so the name cannot be taken, and confirm your proxy does not fall through to
 
 **3. Delay adoption of brand-new versions.** Nearly every incident above was unpublished within
 hours to days, so a cooling-off window turns most into a non-event: `minimumReleaseAge: 4320` in
-`pnpm-workspace.yaml` refuses anything published less than three days ago.
+`pnpm-workspace.yaml` (minutes; pnpm 11 and later default to 1440) or `min-release-age=3` in
+`.npmrc` (days; npm 11.10.0 and later) refuses anything published less than three days ago.
 
 **4. Verify provenance.** `npm publish --provenance` from a GitHub Actions or GitLab CI workflow
 produces a **Sigstore**-signed attestation, recorded in a public transparency log, binding the
@@ -654,12 +658,12 @@ scope. This is the configuration that would have stopped every case in Birsan's 
 
 | Tool | Role | Relevance |
 |------|------|-----------|
-| npm | Package manager | 12.0.2, flat `node_modules`, `overrides`, provenance publishing |
-| pnpm | Package manager | 11.25.0 latest, 12 on `next-12`; content-addressed store, strict |
-| Yarn Berry | Package manager | 4.18.0, Plug'n'Play, `resolutions`, zero-install |
+| npm | Package manager | 12.2.0, flat `node_modules`, `overrides`, default-deny `allowScripts`, provenance |
+| pnpm | Package manager | 12.14.0 on `latest`, 11.x on `latest-11`; content-addressed store, strict |
+| Yarn Berry | Package manager | 4.18.1, Plug'n'Play, `resolutions`, zero-install |
 | Corepack | Version pinning | Pins the manager itself via `packageManager` |
-| Turborepo | Task orchestration | 2.10.12, task graph and content-addressed cache |
-| Nx | Task orchestration | 23.2.0, inferred project graph, distributed cache |
+| Turborepo | Task orchestration | 2.11.9, task graph and content-addressed cache |
+| Nx | Task orchestration | 23.3.0, inferred project graph, distributed cache |
 | Sigstore | Signing | Keyless signing and transparency log behind npm provenance |
 | Renovate | Update automation | Grouped PRs, scheduling, cooling-off windows |
 | Socket | Supply-chain analysis | Flags install scripts, network use and obfuscation in a PR |
@@ -726,12 +730,22 @@ an install ignoring it is the reproducibility bug. And a patch release can and d
 semver is a promise from a stranger, not a guarantee.
 
 **Q: What actually runs during `npm install`, and what should you do about it?**
-**Short:** Install scripts execute arbitrary code as your user before any test runs, so every transitive package holds whatever credentials are present in your CI environment.
+**Short:** An allowed install script executes arbitrary code as your user before any test runs, so it holds whatever credentials are present in your CI environment.
 
 `preinstall`, `install` and `postinstall` hooks reach `NPM_TOKEN`, `GITHUB_TOKEN`, OIDC cloud
 credentials and your source tree — exactly the path the Shai-Hulud worm used in September 2025 to
-steal tokens and republish itself across roughly 500 packages. Set `ignore-scripts=true` and
-allowlist the native builds you need; pnpm 10 and later already blocks scripts by default.
+steal tokens and republish itself across roughly 500 packages. Keep the allowlist to the native
+builds you need: npm 12 `allowScripts` in `package.json`, pnpm `allowBuilds` in
+`pnpm-workspace.yaml`, each entry reviewed like code.
+
+**Q: After moving to npm 12, a native dependency installs cleanly and then fails at runtime. Why?**
+**Short:** npm 12 skips every dependency install script that package.json allowScripts does not approve, so an addon that compiles its binary in install ships without it.
+
+npm 12.0.0 (2026-07-08) made dependency scripts default-deny and only lists the skipped packages
+at the end of the install, so `sqlite3`, whose `install` runs `prebuild-install` or
+`node-gyp rebuild`, lands with no `.node` file. Run `npm install-scripts approve sqlite3`, then
+`npm rebuild sqlite3`. pnpm fails earlier: with `strictDepBuilds` on by default it
+exits with `ERR_PNPM_IGNORED_BUILDS` until `allowBuilds` names the package.
 
 **Q: What is a peer dependency and how do the managers differ on it?**
 **Short:** Peer dependencies declare a package the consumer must supply rather than one the library installs, which is how a plugin shares a single instance with its host.
@@ -755,8 +769,8 @@ forced each one and delete it when that dependency updates.
 The real trees live under `node_modules/.pnpm/<name>@<version>/`, hard-linked from a global
 content-addressed store, so twelve checkouts share one copy of each file — roughly 340 MB against
 3.6 GB. What breaks is anything relying on phantom resolution; `public-hoist-pattern[]` and
-`shamefully-hoist` are the escape hatches. Note `pnpm@latest` is 11.25.0 while the Rust rewrite,
-pnpm 12, ships under the `next-12` tag.
+`shamefully-hoist` are the escape hatches. `pnpm@latest` resolves to pnpm 12, the Rust rewrite,
+so pin the version in `packageManager`.
 
 **Q: What does Yarn Plug'n'Play remove, and what does that cost?**
 **Short:** Resolution through a generated manifest replaces the directory walk entirely, leaving packages zipped in a cache with Node's resolver patched to read a lookup table.
@@ -821,7 +835,7 @@ removes most of them — could this be twenty lines of your own code? A date for
 1. **Install with `ci`, `--frozen-lockfile` or `--immutable` in CI.** Never `npm install`.
 2. **Commit the lockfile for applications, never for published libraries.**
 3. **Pin the package manager** in `packageManager` so every machine runs the same binary.
-4. **Set `ignore-scripts=true`** and allowlist the native builds you actually need.
+4. **Keep dependency install scripts default-deny** and approve only the native builds you need.
 5. **Scope private packages to an internal registry** and claim the scope on public npm.
 6. **Regenerate lockfile conflicts**, never hand-merge them.
 7. **Publish with `--provenance` from CI** and verify with `npm audit signatures`.
@@ -853,12 +867,12 @@ had briefly resolved a public package carrying their internal name.
 ```json
 // FIX — the scope is bound internally and claimed on public npm, the workspace protocol fails
 // rather than falling through, the build-time dependency is pinned exactly, and the install is
-// frozen with scripts off and the one native build named explicitly.
+// frozen with only the one approved native build allowed to run a script.
 //   .npmrc     @acme:registry=https://npm.acme.internal/
 //              registry=https://registry.npmjs.org/
-//              ignore-scripts=true
-//   ci steps   npm ci --ignore-scripts | npm rebuild esbuild | npm audit signatures
-{ "dependencies": { "@acme/analytics-sdk": "workspace:*", "esbuild": "0.28.2" } }
+//   ci steps   npm ci | npm audit signatures
+{ "dependencies": { "@acme/analytics-sdk": "workspace:*", "esbuild": "0.28.2" },
+  "allowScripts": { "esbuild@0.28.2": true } }
 ```
 
 **What the audit found once the tree was visible.** `npm ls` surfaced **two copies of React**

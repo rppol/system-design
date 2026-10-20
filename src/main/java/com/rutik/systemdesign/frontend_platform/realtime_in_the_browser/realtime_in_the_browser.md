@@ -60,9 +60,9 @@ server restart does not turn your own users into a denial-of-service attack.
 4. **Delivery is at-most-once until you build otherwise.** The browser gives you no ack, no
    sequence, no replay — if a message matters, number it. And **a reconnect replays**, so
    every handler must be safe running twice.
-6. **Ephemeral and durable traffic must not share a channel.** Cursors at 60 Hz and an
+5. **Ephemeral and durable traffic must not share a channel.** Cursors at 60 Hz and an
    invoice-paid event want opposite things from loss, ordering and buffering.
-7. **The tab is not always in front.** Hidden tabs are throttled, radios switch networks,
+6. **The tab is not always in front.** Hidden tabs are throttled, radios switch networks,
    bfcache freezes pages, and a SPA that never closes a socket leaks one per route change.
 
 ---
@@ -286,8 +286,9 @@ const res = await fetch("/api/stream", {
   headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
   signal: controller.signal,
 });
-const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
-// You now own reconnect, Last-Event-ID and buffering — everything EventSource did for free.
+for await (const chunk of res.body!.pipeThrough(new TextDecoderStream())) {
+  // You now own event parsing, reconnect, Last-Event-ID and buffering: everything EventSource did for free.
+}
 ```
 
 Never put a long-lived token in the query string — it lands in access logs, proxy logs and
@@ -319,7 +320,7 @@ than any other code, and it carries no diagnostic information at all.
 Use `wss://` always: plaintext `ws://` is blocked outright on an HTTPS page, and unencrypted
 `Upgrade` traffic is what intermediaries mangle most.
 
-### 6.5 `bufferedAmount` is the only backpressure you get
+### 6.5 `bufferedAmount` is the only backpressure `WebSocket` gives you
 
 ```ts
 const HIGH_WATER = 1 << 20;           // 1 MiB queued is already far too much
@@ -337,6 +338,39 @@ in `bufferedAmount`, which on a stalled link grows without limit until the OS ki
 for memory, and there is no `drain` event — you poll. The rule for high-rate ephemeral data:
 above one megabyte, **drop the message**, because the newest cursor position makes the rest
 worthless.
+
+The receive side is worse: `onmessage` fires for every frame the browser reads, whether or not
+the page can keep up, so a slow consumer turns into an unbounded queue of pending events. The
+socket API has no way to tell the server to slow down.
+
+**`WebSocketStream` is the streams-based client that fixes both directions.** It speaks the same
+wire protocol, so the server does not change, and it exposes the connection as a
+`ReadableStream` and a `WritableStream`:
+
+```ts
+const wss = new WebSocketStream("wss://api.example.test/socket", {
+  protocols: ["v2"],
+  signal: AbortSignal.timeout(5_000),        // aborts the handshake only
+});
+const { readable, writable } = await wss.opened;
+const writer = writable.getWriter();
+
+for await (const msg of readable) {          // the next frame is read only when this loop asks
+  await render(msg);                         // fragment: a slow render slows the sender
+  await writer.write(ack(msg));              // resolves when the frame is handed off
+}
+const { closeCode, reason } = await wss.closed;   // rejects on an unclean close
+```
+
+On the read side the browser stops pulling frames off the TCP socket once the stream's queue is
+full, the kernel receive window fills, and TCP flow control pushes back on the server. That is
+real end-to-end backpressure, which `onmessage` cannot express. On the write side
+`await writer.write()` (or `await writer.ready`) waits instead of growing a hidden buffer, so the
+1 MiB polling guard becomes an `await`. `wss.close({ closeCode: 1000, reason: "done" })` closes
+it. Chrome and Edge 124 ship it; Firefox and Safari do not, and it is not yet in a standard, so
+feature-detect `"WebSocketStream" in self` and keep the `WebSocket` path above as the fallback.
+Reconnect, heartbeats and resumption are still yours: it changes flow control, not delivery
+guarantees.
 
 ### 6.6 Reconnect: backoff, jitter, cap, stability
 
@@ -546,6 +580,7 @@ turned the silent failure into a 35-second reconnect.
 | WebSocket over SSE | bidirectional; binary; lowest per-message overhead | you write reconnect, heartbeat, ordering, backpressure | client sends more than once every few seconds |
 | WebTransport | independent streams, unreliable mode, no head-of-line blocking | HTTP/3 required end to end; UDP often blocked | games and media with a fallback |
 | At-least-once + acks | no silent message loss | duplicates, so every handler must be idempotent | anything a user would notice losing |
+| `WebSocketStream` over `WebSocket` | read and write backpressure that reaches the server through TCP | Chromium only, not standardized, so a fallback path is mandatory | bulk or bursty streams a slow client must not buffer unboundedly |
 
 ---
 
@@ -682,6 +717,7 @@ explaining a cross-origin failure would leak network topology. Diagnose from the
 |------|---------------|-------------------|
 | EventSource | The built-in SSE client with reconnect and resume | `new EventSource(url)` |
 | WebSocket | The bidirectional browser socket | `new WebSocket("wss://...")` |
+| WebSocketStream | A WebSocket exposed as readable and writable streams | `await new WebSocketStream(url).opened` |
 | WebTransport | HTTP/3 multi-stream transport | `new WebTransport(url)` |
 | BroadcastChannel | Share one connection's messages across tabs | `new BroadcastChannel("rt")` |
 | Socket.IO | Reconnect, rooms, acks and fallbacks over a socket | `io(url)` client plus its server |
@@ -727,6 +763,16 @@ deadline — 25-second interval, 10-second timeout, then force `close()` and rec
 is killed for memory — and there is no `drain` event, so you poll. Set a high-water mark near
 1 MiB: above it drop ephemeral messages such as cursor positions, whose newest value makes
 older ones worthless, and queue only what a user would notice losing. Cap that queue too.
+
+**Q: How does `WebSocketStream` fix the backpressure problem of `WebSocket`?**
+**Short:** It exposes the socket as streams, so the browser stops reading frames when the consumer falls behind and TCP slows the server, and writes are awaited instead of buffered without limit.
+
+With `WebSocket`, `onmessage` fires for every frame regardless of how fast the page handles
+them and `send()` queues silently. `WebSocketStream` hands back a `ReadableStream` that pulls a
+frame only when the reader asks, so a full queue closes the TCP receive window and the server
+blocks; `await writer.write()` paces the sender. The wire protocol is unchanged, so no server
+work is needed. It ships in Chrome and Edge 124 only and is not standardized, so feature-detect
+it, keep the `bufferedAmount` path as the fallback, and still write reconnect and resume.
 
 **Q: How does `Last-Event-ID` work, and what does the server have to provide?**
 **Short:** The browser replays the last id it saw as a request header on reconnect, so the server can resume the stream from exactly that point.

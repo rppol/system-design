@@ -146,6 +146,20 @@ This ordering resolves conflicts: a request that requires being unhelpful to be 
 
 IAA = inter-annotator agreement.
 
+### 4.5 Deliberative Alignment: the Reasoning-Model Successor
+
+CAI uses the constitution only at training time to produce critiques and preference labels; the trained model never sees the principles. Deliberative alignment (Guan et al., OpenAI, arXiv:2412.16339, December 2024, used for o1 and o3-mini) keeps the same idea of a written spec but trains the model to recall the relevant policy text and reason over it in its chain of thought before answering.
+
+```
+CAI                                   Deliberative alignment
+spec -> critique/revise -> labels     spec in context -> (prompt, CoT citing spec, answer)
+labels -> SFT + RLAIF                 judge with spec filters samples, spec removed
+model never sees spec                 SFT teaches recall of spec in CoT
+                                      RL: spec-aware judge scores answer, CoT hidden from judge
+```
+
+Two differences matter in practice. The policy is applied per request by reasoning, so edge cases the labels never covered still get a reasoned decision, and OpenAI reports o1 improving jailbreak robustness and over-refusal at the same time instead of trading one for the other. The RL judge never sees the chain of thought, which avoids training the model to write a CoT that looks compliant. Full mechanics live in [Alignment and RLHF](../alignment_and_rlhf/alignment_and_rlhf.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -391,10 +405,12 @@ style where the disagreement is the thing you are trying to measure.
 
 ## 7. Real-World Examples
 
-**Anthropic Claude (all versions):** Every Claude model (Claude Fable 5, Opus 5, Sonnet 5,
-Haiku 4.5) is trained using Constitutional AI. The HHH framework (Helpful, Harmless, Honest)
-maps directly to constitutional principles at different priority levels. Anthropic has
-published the general approach; specific constitution contents are not fully public.
+**Anthropic Claude (all versions):** Every Claude model (Claude Fable 5.1, Opus 5.5,
+Sonnet 5.5, Haiku 5.5) is trained using Constitutional AI. In January 2026 Anthropic
+published Claude's full constitution under a CC0 1.0 license at anthropic.com/constitution.
+Its priority order is broadly safe, then broadly ethical, then compliant with Anthropic's
+guidelines, then genuinely helpful, and it lists hard constraints that no instruction
+overrides, for example never giving serious uplift toward a bioweapons attack.
 
 **Meta Llama Guard (2023-2024):** Llama Guard is a safety classifier trained to detect
 harmful content using constitutional-style harm categories: violence/crime, hate speech,
@@ -519,6 +535,10 @@ DPO, reward hacking, and preference learning in depth.
 
 ## 12. Interview Questions with Answers
 
+**Q: Why not just put the constitution in a reasoning model's system prompt instead of training on it?**
+**Short:** A prompted spec costs tokens on every call and a user prompt can argue around it; deliberative alignment trains the model to recall the spec itself, so it holds with an empty system prompt.
+A: Prompting with the full spec works for a demo but fails three ways in production. The spec runs to thousands of tokens and is paid on every request. It sits in the same context as the attacker's text, so jailbreaks that reframe the request compete with it on equal terms. And a deployment that changes or drops the system prompt loses the policy. Deliberative alignment (arXiv:2412.16339) uses the spec in context only while generating training data, removes it, and fine-tunes so the model quotes the relevant policy in its chain of thought unprompted; RL with a spec-aware judge then reinforces correct application. CAI also bakes the policy in, but as label preferences rather than explicit recall, so the model cannot reason about which clause applies to a new edge case.
+
 **Q: What is Constitutional AI and how does it differ from RLHF?**
 **Short:** Constitutional AI replaces human preference raters with an AI evaluator guided by written principles, while RLHF's reward model learns from human labels.
 Constitutional AI uses a written set of principles (a constitution) to guide AI-generated
@@ -638,8 +658,8 @@ Both are explicit value specifications. The key differences: (1) CAI uses the co
 directly in training (as RLAIF prompts); OpenAI's Model Spec is primarily used to guide
 human annotator training. (2) CAI replaces some human labeling with AI labeling guided
 by the spec; OpenAI's approach uses the spec to make human labeling more consistent.
-(3) Anthropic's constitution is partially public; OpenAI published a more detailed Model
-Spec document in 2024.
+(3) Both are public: OpenAI published its Model Spec in 2024, and Anthropic published
+Claude's full constitution under CC0 in January 2026.
 
 **Q: If building a domain-specific AI assistant, how would you write a constitution for it?**
 **Short:** A domain constitution starts from a domain-specific harm taxonomy, adds cross-cutting honesty principles, and orders priorities like safety over helpfulness.

@@ -25,7 +25,7 @@ For running the router as part of a gateway service in production, see [AI Gatew
 
 **Mental model**: Think of model capability as a ladder. Every rung costs more than the one below it. The router's job is to find the lowest rung that still gets the patient safely discharged.
 
-**Why it matters**: Frontier models cost more per token than small models, though by less than the folklore suggests as of July 2026 — Claude Opus 5 ($5/$25 per MTok) is 5x Claude Haiku 4.5 ($1/$5), and GPT-5.6-sol ($5/$30) is 5x GPT-5.6-luna ($1/$6). Reach down a generation to a nano tier and the ratio widens sharply: GPT-5.4-nano at $0.20/$1.25 sits 25x below Opus 5 on input and 20x on output, and Gemini 2.5 Flash-Lite at $0.10/$0.40 sits 50x below on input and 60x on output. At 10M queries/day, routing the bottom 70% of queries to cheap models still saves millions of dollars per year with no user-visible quality drop.
+**Why it matters**: Frontier models cost far more per token than small models. At list prices on 2026-10-19, Claude Opus 5.5 ($4/$20 per MTok) is 40x Claude Haiku 5.5 ($0.10/$0.50 for prompts up to 100K tokens), and Claude Fable 5.1 ($10/$50) is 100x. OpenAI's ladder spans the same 100x: GPT-6 Astra ($10/$50) against GPT-6 Luna ($0.10/$0.50). At 10M queries/day, routing the bottom 70% of queries to cheap models still saves millions of dollars per year with no user-visible quality drop.
 
 **Key insight**: Query difficulty is long-tailed, so a large share of traffic does not need the frontier model — RouteLLM's 3.66x cost saving at 95% of GPT-4 quality on MT Bench is only achievable if most of that benchmark's queries were answerable by the weak model. But the share is workload-specific: the same routers save only 1.41x on MMLU. Measure the share on your own traffic rather than importing a "70–80%" figure. The challenge is classifying queries accurately before spending tokens on the expensive model.
 
@@ -35,7 +35,7 @@ For running the router as part of a gateway service in production, see [AI Gatew
 
 **Query complexity varies enormously in production workloads.** A customer-support chatbot receives everything from "What are your business hours?" to "Explain why my API integration returns a 401 despite a valid token." These require radically different model capabilities.
 
-**Model quality follows diminishing returns above task requirements.** Sending a simple FAQ question to Claude Opus 5 is not better than sending it to Claude Haiku 4.5 — the marginal quality gain is zero while the cost is 5x higher ($5/$25 vs $1/$5 per MTok, July 2026 list prices). The cheapest adequate model wins.
+**Model quality follows diminishing returns above task requirements.** Sending a simple FAQ question to Claude Opus 5.5 is not better than sending it to Claude Haiku 5.5. The marginal quality gain is zero while the cost is 40x higher ($4/$20 vs $0.10/$0.50 per MTok, list prices on 2026-10-19). The cheapest adequate model wins.
 
 **Routing decisions must be fast.** A router that adds 200ms of latency defeats the purpose for time-sensitive applications. Target under 50ms overhead for the routing decision itself.
 
@@ -167,7 +167,9 @@ up-front becomes cheaper than the cascade.
   an effort level on one, a token budget on another, adaptive-by-default on a third — and the
   parameter names and value ranges do not correspond. Encode the decision as your own internal mode
   (`off` / `low` / `high`) and translate at the provider adapter, or a provider swap silently changes
-  every routing decision you made. This is the routing-layer instance of the portability problem in
+  every routing decision you made. The ranges differ within one vendor too: GPT-6 Astra rejects the
+  `none` effort level (OpenAI changelog, 2026-09-03), so the adapter must route an `off` request to a
+  model that accepts `none`, or map it to Astra's lowest supported level. This is the routing-layer instance of the portability problem in
   [Prompt Engineering](../prompt_engineering/prompt_engineering.md).
 
 ---
@@ -188,9 +190,9 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([Incoming Query]) --> Router["Router"]
-    Router --> T1["Tier 1\nHaiku 4.5 / GPT-5.6-luna"]
-    Router --> T2["Tier 2\nSonnet 5 / GPT-5.6-terra"]
-    Router --> T3["Tier 3\nOpus 5 / GPT-5.6-sol"]
+    Router --> T1["Tier 1\nHaiku 5.5 / GPT-6 Luna"]
+    Router --> T2["Tier 2\nSonnet 5.5 / GPT-6.1 Sol"]
+    Router --> T3["Tier 3\nOpus 5.5 / GPT-6 Astra"]
     T1 & T2 & T3 --> Response([Response])
 
     class Q,Response io
@@ -411,7 +413,31 @@ Accuracy figures below are illustrative planning numbers for a three-tier routin
 | Logistic regression on TF-IDF | <1ms | ~75% | Good baseline |
 | DistilBERT fine-tuned | 5–15ms | ~85% | Best accuracy/latency tradeoff |
 | Full BERT fine-tuned | 20–50ms | ~87% | Marginal gain over DistilBERT |
-| Small hosted LLM as router (e.g. GPT-5.4-nano) | 300–800ms | ~90% | Too slow; adds its own cost |
+| Small hosted LLM as router (e.g. GPT-6 Luna) | 300-800ms | ~90% | Too slow; adds its own cost |
+| Hosted typed-decision endpoint (OpenAI Decisions API, beta since 2026-10-06) | No absolute figure published; OpenAI states about 10x faster than the Responses API | Measure on your set | No labels to start; bills input only at $0.10/1M; `gpt-6-luna` is the only model |
+
+The Decisions API (`POST /v1/decisions`) returns a typed answer instead of generated text, so a `choice` question is a router with no output tokens to pay for or parse. The answer carries per-choice `probabilities` and a `confidence`; thresholds are yours to set from labeled examples:
+
+```python
+resp = httpx.post("https://api.openai.com/v1/decisions", headers=auth, json={
+    "model": "gpt-6-luna",
+    "input": query,
+    "questions": [{
+        "type": "choice",
+        "name": "tier",
+        "instructions": "Which model tier can answer this query correctly?",
+        "choices": [
+            {"value": "cheap",    "description": "FAQ, greeting, short lookup or rewrite."},
+            {"value": "mid",      "description": "Multi-step answer, code debugging, summarization."},
+            {"value": "frontier", "description": "Legal, medical or long multi-step reasoning."},
+        ],
+    }],
+})
+answer = resp.json()["answers"][0]
+tier = answer["choice"] if answer["confidence"] >= 0.8 else "mid"   # unsure -> mid tier
+```
+
+At 500 input tokens per query the router costs $0.00005 per call, or $500/day at 10M queries/day, about 2% of the $24,430/day the §14 router saves. Put only independent questions in one request; a decision that depends on another answer needs a second request.
 
 ### 6.3 Cost-Quality Optimization
 
@@ -419,38 +445,38 @@ Define quality threshold Q_min per task type (e.g., ROUGE-L >= 0.7 for summariza
 
 For each model tier, measure empirical quality on a representative test set. Select the cheapest model that meets Q_min.
 
-**Concrete cost example (Anthropic prices as of 2026-09-04):**
+**Concrete cost example (Anthropic list prices on 2026-10-19):**
 
 ```
-Claude Haiku 4.5:  $1.00 / 1M input tokens,  $5.00 / 1M output tokens
-Claude Sonnet 5:   $2.00 / 1M input tokens,  $10.00 / 1M output tokens
-Claude Opus 5:     $5.00 / 1M input tokens,  $25.00 / 1M output tokens
+Claude Haiku 5.5:   $0.10 / 1M input tokens,  $0.50 / 1M output tokens  (prompts <= 100K tokens)
+Claude Sonnet 5.5:  $2.00 / 1M input tokens,  $10.00 / 1M output tokens
+Claude Opus 5.5:    $4.00 / 1M input tokens,  $20.00 / 1M output tokens
 
 Workload: 10M queries/day, avg 500 input + 300 output tokens each
-No routing (all Sonnet 5): 10M * (500*$2 + 300*$10) / 1M = 10M * (0.0010 + 0.0030) = $40,000/day
+No routing (all Sonnet 5.5): 10M * (500*$2 + 300*$10) / 1M = 10M * (0.0010 + 0.0030) = $40,000/day
 With routing (70% Haiku, 25% Sonnet, 5% Opus):
-  Haiku:  7M * (500*$1 + 300*$5) / 1M      = 7M * $0.00200   = $14,000/day
-  Sonnet: 2.5M * $0.00400/query            = $10,000/day
-  Opus:   0.5M * (500*$5 + 300*$25) / 1M   = 0.5M * $0.01000 = $5,000/day
-  Total:  ~$29,000/day
-Savings: ~28% cost reduction
+  Haiku:  7M * (500*$0.10 + 300*$0.50) / 1M = 7M * $0.00020   = $1,400/day
+  Sonnet: 2.5M * $0.00400/query              = $10,000/day
+  Opus:   0.5M * (500*$4 + 300*$20) / 1M     = 0.5M * $0.00800 = $4,000/day
+  Total:  ~$15,400/day
+Savings: ~62% cost reduction
 ```
 
-Sonnet 5's $2/$10 launched as introductory pricing through 2026-08-31 and is now the standard price
-— the increase to $3/$15 scheduled for 2026-09-01 was cancelled. That matters to this module more
-than to any other: at $3/$15 the Haiku-to-Sonnet step was 3x, and it is now 2x, which halves what
-down-routing off Sonnet is worth and moves the cascade break-even from 67% to 50%.
+Haiku 5.5 is priced by prompt length. A request whose prompt (including cache reads and writes) is
+over 100,000 tokens pays $0.50/$2.50 for the whole request, 5x the short-prompt rate. A router that
+sends long-context work to the cheap tier should price that tier at the long rate, which is still
+4x below Sonnet 5.5.
 
 **Stated plainly.** "Work out what one query costs at each tier, then multiply each of
 those by the share of traffic that actually lands there and add them up — the routed bill is a
 weighted sum, not an average of the price list."
 
-The reason to lay it out this way rather than trust the 28% headline is that the weighted sum
+The reason to lay it out this way rather than trust the 62% headline is that the weighted sum
 immediately exposes where the money really goes, which is not always where the traffic goes.
 
 | Symbol | What it is |
 |--------|------------|
-| `$1.00 / 1M` | A tier's unit price. Divide by 1,000,000 for the price of one token |
+| `$2.00 / 1M` | A tier's unit price. Divide by 1,000,000 for the price of one token |
 | `C_i` | Cost of one query at tier i: `(in_tok x r_in + out_tok x r_out) / 1M` |
 | `w_i` | Fraction of traffic routed to tier i. The weights sum to 1.0 |
 | `N` | Total query volume. `10M/day` here |
@@ -462,52 +488,50 @@ immediately exposes where the money really goes, which is not always where the t
 ```
 Step 1 -- cost of ONE query at each tier:
 
-  Haiku    input   500 x $1.00 / 1M  = $0.000500
-           output  300 x $5.00 / 1M  = $0.001500
+  Haiku    input   500 x $0.10 / 1M  = $0.000050
+           output  300 x $0.50 / 1M  = $0.000150
                                        ---------
-                                       $0.00200 / query
+                                       $0.00020 / query
 
   Sonnet   input   500 x $2.00 / 1M  = $0.001000
            output  300 x $10.00 / 1M = $0.003000
                                        ---------
-                                       $0.00400 / query      (2x Haiku)
+                                       $0.00400 / query      (20x Haiku)
 
-  Opus     input   500 x $5.00 / 1M  = $0.002500
-           output  300 x $25.00 / 1M = $0.007500
+  Opus     input   500 x $4.00 / 1M  = $0.002000
+           output  300 x $20.00 / 1M = $0.006000
                                        ---------
-                                       $0.01000 / query      (5x Haiku)
+                                       $0.00800 / query      (40x Haiku)
 
 Step 2 -- weight each by its traffic share and sum:
 
   tier     share    queries/day    x cost/query    daily cost    share of bill
   ------   -----    -----------    ------------    ----------    -------------
-  Haiku     70%      7.00M          $0.00200       $14,000          48.3%
-  Sonnet    25%      2.50M          $0.00400       $10,000          34.5%
-  Opus       5%      0.50M          $0.01000       $ 5,000          17.2%
+  Haiku     70%      7.00M          $0.00020       $ 1,400           9.1%
+  Sonnet    25%      2.50M          $0.00400       $10,000          64.9%
+  Opus       5%      0.50M          $0.00800       $ 4,000          26.0%
                                                    -------
-  routed total                                     $29,000 / day
+  routed total                                     $15,400 / day
 
   baseline (all Sonnet)   10M x $0.00400         = $40,000 / day
-  saving   = 1 - ($29,000 / $40,000)             = 28%
+  saving   = 1 - ($15,400 / $40,000)             = 62%
 
 Step 3 -- the number the headline hides:
 
-  70% of traffic (Haiku) still carries 48% of the bill, while 5% of
-  traffic (Opus) carries only 17%. On the compressed 2026 price ladder
-  -- 5x from Haiku to Opus, not the 60x of the 2024 lineup -- the bulk
-  sets the bill, not the tail.
+  70% of traffic (Haiku) carries only 9% of the bill, while the 30% on
+  Sonnet and Opus carries 91%. With Haiku 5.5 at 1/20 of Sonnet 5.5,
+  the cheap tier is close to free and the upper tiers set the bill.
 ```
 
-Step 3 is the actionable finding, and it is a closer call than it looks. Shaving the Opus share from
-5% to 3% saves `$1,200/day` (0.2M queries x the `$0.00600` Opus-Sonnet gap), while moving another 10
-points of traffic from Sonnet down to Haiku saves `$2,000/day` (1M queries x the `$0.00200`
-Sonnet-Haiku gap). The bulk still wins, but only by 1.7x — because the ladder is no longer evenly
-spaced: with Sonnet 5 at $2/$10 the top step is 3x the size of the bottom one, so 5x the volume buys
-you less than 2x the saving. Recompute which end of your ladder pays before optimizing either — the
-answer changes every time a vendor reprices, and this particular repricing moved it.
+Step 3 is the actionable finding. Shaving the Opus share from 5% to 3% saves `$800/day` (0.2M
+queries x the `$0.00400` Opus-Sonnet gap), while moving another 10 points of traffic from Sonnet
+down to Haiku saves `$3,800/day` (1M queries x the `$0.00380` Sonnet-Haiku gap). The two steps cost
+almost the same per query, so the saving tracks how many points of traffic you can move, and the
+Sonnet share is the larger pool. Recompute which end of your ladder pays before optimizing either:
+the answer changes every time a vendor reprices.
 
-**Why the weights and not an average of the three prices.** Averaging `$0.00200`, `$0.00400` and
-`$0.01000` gives `$0.00533/query` and a projected `$53,333/day` — *above* the `$40,000/day`
+**Why the weights and not an average of the three prices.** Averaging `$0.00020`, `$0.00400` and
+`$0.00800` gives `$0.00407/query` and a projected `$40,667/day`, *above* the `$40,000/day`
 unrouted baseline, so the routing appears to lose money. The weights are what make the calculation about
 your traffic instead of the provider's catalogue.
 
@@ -528,51 +552,49 @@ number to check before choosing a cascade at all.
 | `E[C]` | `C_cheap + P_esc x C_exp`. Average cost per query across the whole distribution |
 | break-even `P_esc` | The `P_esc` at which `E[C]` equals just calling the expensive model directly |
 
-**Walk one example.** Haiku `$0.00200` and Sonnet `$0.00400` from Step 1 above:
+**Walk one example.** Haiku `$0.00020` and Sonnet `$0.00400` from Step 1 above:
 
 ```
   E[C] = C_cheap + P_esc x C_exp
-       = $0.00200 + P_esc x $0.00400
+       = $0.00020 + P_esc x $0.00400
 
   P_esc    cheap leg     escalation leg                E[C]/query   vs all-Sonnet
   -----    ----------    --------------------------    ----------   -------------
-    0%     $0.00200      0.00 x $0.00400 = $0.00000     $0.00200        -50%
-   10%     $0.00200      0.10 x $0.00400 = $0.00040     $0.00240        -40%
-   20%     $0.00200      0.20 x $0.00400 = $0.00080     $0.00280        -30%
-   30%     $0.00200      0.30 x $0.00400 = $0.00120     $0.00320        -20%
-   40%     $0.00200      0.40 x $0.00400 = $0.00160     $0.00360        -10%
-   50%     $0.00200      0.50 x $0.00400 = $0.00200     $0.00400         +0%   <- break-even
+    0%     $0.00020      0.00 x $0.00400 = $0.00000     $0.00020        -95%
+   10%     $0.00020      0.10 x $0.00400 = $0.00040     $0.00060        -85%
+   20%     $0.00020      0.20 x $0.00400 = $0.00080     $0.00100        -75%
+   30%     $0.00020      0.30 x $0.00400 = $0.00120     $0.00140        -65%
+   40%     $0.00020      0.40 x $0.00400 = $0.00160     $0.00180        -55%
+   50%     $0.00020      0.50 x $0.00400 = $0.00200     $0.00220        -45%
+   95%     $0.00020      0.95 x $0.00400 = $0.00380     $0.00400         +0%   <- break-even
 
   Break-even algebra:
-    $0.00200 + P x $0.00400 = $0.00400
-    P = ($0.00400 - $0.00200) / $0.00400 = 0.500  -> 50%
+    $0.00020 + P x $0.00400 = $0.00400
+    P = ($0.00400 - $0.00020) / $0.00400 = 0.950  -> 95%
 
-Why the break-even sits at 50% and not higher:
+Why the break-even sits at 95%:
 
-  at P_esc = 20%, the escalated fifth of traffic carries only 29% of
-  the cascade's own bill ($0.00080 of $0.00280); the always-paid cheap
-  leg is the other 71%. The total is 70% of the all-Sonnet price
-  ($0.00280 / $0.00400 = 0.700).
+  at P_esc = 20%, the escalated fifth of traffic carries 80% of the
+  cascade's own bill ($0.00080 of $0.00100); the always-paid cheap
+  leg is the other 20%. The total is 25% of the all-Sonnet price
+  ($0.00100 / $0.00400 = 0.250).
 
-  The gap between tiers is only 2x on the 2026 ladder, so the cheap
-  leg is not a rounding error -- it alone is HALF the all-Sonnet price
-  before a single escalation. Savings decay linearly in P_esc and hit
-  zero once P_esc passes 50%.
+  The gap between tiers is 20x on this ladder, so the cheap leg is
+  5% of the all-Sonnet price. Savings decay linearly in P_esc and
+  only hit zero once P_esc passes 95%.
 ```
 
 The practical reading: cascade savings degrade linearly, not catastrophically, when the confidence
-check is badly calibrated. Doubling the escalation rate from 20% to 40% moves you from -30% to -10%
-— worse, and on a 2x tier gap there is not much headroom left to lose. Compare that to the latency picture, where the same change is
-catastrophic (Pitfall 4), and the tradeoff becomes clear: cascades fail gracefully on cost and
-abruptly on tail latency. Note also that on this compressed ladder the cascade's floor (-67%,
-reached only if nothing ever escalates) is barely better than classifier routing's, so the extra
-latency has to earn its place.
+check is badly calibrated. Doubling the escalation rate from 20% to 40% moves you from -75% to -55%.
+With a 20x tier gap there is wide cost headroom, so cost rarely decides whether a cascade is viable.
+Compare that to the latency picture, where the same change is catastrophic (Pitfall 4): cascades
+fail gracefully on cost and abruptly on tail latency, and tail latency is the limit to design for.
 
 **Why `C_cheap` sits outside the `P_esc` term.** It is tempting to write
 `E[C] = (1 - P_esc) x C_cheap + P_esc x C_exp`, treating the two as alternatives. That is the
 *classifier* formula, and using it for a cascade understates the true cost by `P_esc x C_cheap` —
-the wasted cheap call on every escalated query. At `P_esc = 50%` that error is `$0.00100/query`,
-`$10,000/day` at 10M queries, silently missing from the forecast.
+the wasted cheap call on every escalated query. At `P_esc = 50%` that error is `$0.00010/query`,
+`$1,000/day` at 10M queries, silently missing from the forecast.
 
 ### 6.4 Semantic Router Implementation
 
@@ -628,7 +650,8 @@ Sections 6.3 and 6.5 price a routed request as though the model were the only va
 provider prompt caches are **per model**, and Anthropic documents that changing the model
 invalidates the cache, because different models render the same prompt differently. A router that
 moves a request from Sonnet to Haiku does not carry the cached prefix with it — the request lands on
-a cold cache and pays a cache *write* (1.25x input) where it would have paid a cache *read* (0.1x).
+a cold cache and pays a cache *write* (1.25x input) where it would have paid a cache *read* (0.1x on
+Haiku 5.5, 0.05x on Sonnet 5.5 and Opus 5.5).
 
 That makes the shared system prompt a per-tier cost, and the tail tiers are where it bites, because
 an entry only survives if that tier sees another request for the same prefix inside the 5-minute TTL:
@@ -641,16 +664,16 @@ an entry only survives if that tier sees another request for the same prefix ins
   TTL             300s by default on Anthropic; every read refreshes it
 
   One tenant sending 1 request/minute against a 4,000-token system prompt,
-  routed 70 / 25 / 5 across Haiku 4.5 / Sonnet 5 / Opus 5:
+  routed 70 / 25 / 5 across Haiku 5.5 / Sonnet 5.5 / Opus 5.5:
 
     tier      w_i     arrivals on that tier     inside a 300s TTL?
-    Haiku     0.70    one per     86s           yes       -> reads at $0.10/1M
+    Haiku     0.70    one per     86s           yes       -> reads at $0.01/1M
     Sonnet    0.25    one per    240s           marginal
-    Opus      0.05    one per     20 min        no        -> writes at $6.25/1M
+    Opus      0.05    one per     20 min        no        -> writes at $5.00/1M
 
     the Opus leg, on its prefix alone:
-      cold write   4,000 x $6.25/1M  =  $0.0250
-      warm read    4,000 x $0.50/1M  =  $0.0020      12.5x cheaper
+      cold write   4,000 x $5.00/1M  =  $0.0200
+      warm read    4,000 x $0.20/1M  =  $0.0008      25x cheaper
 ```
 
 Three consequences for the strategies above. A **cascade** is the worst case: an escalated query
@@ -684,7 +707,7 @@ Open-source library providing a unified OpenAI-format interface over 100+ LLMs. 
 
 ### Anthropic Model Tiers
 
-Anthropic's own product line is designed with routing in mind. As of 2026-09-04 the ladder is Haiku 4.5 ($1/$5 per MTok) → Sonnet 5 ($2/$10) → Opus 5 ($5/$25) → Fable 5 ($10/$50). Haiku handles simple tasks at low cost; Sonnet balances quality and cost; Opus targets complex agentic coding and enterprise work; Fable is the top capability tier for long-running agents. The intent is that product teams route based on task type rather than always using the most capable model. Note that the whole ladder spans only 10x — a routing design that assumes a 50x spread between the cheapest and most capable model no longer matches the price list.
+Anthropic's own product line is designed with routing in mind. At list prices on 2026-10-19 the ladder is Haiku 5.5 ($0.10/$0.50 per MTok for prompts up to 100K tokens, $0.50/$2.50 above) → Sonnet 5.5 ($2/$10) → Opus 5.5 ($4/$20) → Fable 5.1 ($10/$50). Haiku targets high-volume, latency-sensitive tasks; Sonnet balances speed and intelligence; Opus targets long-running agentic coding and knowledge work; Fable targets demanding reasoning and long-horizon agentic work. The intent is that product teams route based on task type rather than always using the most capable model. The ladder spans 100x on input and the steps are uneven: Haiku to Sonnet is 20x, Sonnet to Opus 2x, and Opus to Fable 2.5x, so most of the money a router can save sits on the bottom step.
 
 ### Custom Enterprise Routers
 
@@ -721,8 +744,8 @@ quadrantChart
     quadrant-2 Ideal but rare
     quadrant-3 Budget tier
     quadrant-4 Overpaying
-    Haiku: [0.15, 0.40]
-    Sonnet: [0.50, 0.72]
+    Haiku: [0.05, 0.40]
+    Sonnet: [0.45, 0.72]
     Opus: [0.85, 0.90]
 ```
 
@@ -733,8 +756,8 @@ unit of goodness — then look at the *steps between* tiers, because that is whe
 next increment of quality is actually set."
 
 The frontier chart shows that all three tiers are defensible choices. The arithmetic below shows
-that the gaps between them are priced differently — the top step costs over five times as much per
-quality point as the bottom one — and that unevenness is the fact routing exploits.
+that the gaps between them are priced differently: the top step costs nearly twice as much per
+quality point as the bottom one, and that unevenness is the fact routing exploits.
 
 | Symbol | What it is |
 |--------|------------|
@@ -749,24 +772,24 @@ quality point as the bottom one — and that unevenness is the fact routing expl
 ```
   tier      Q        C / query     C / Q         (average price per quality point)
   ------   -----    ----------    ---------
-  Haiku     0.40     $0.00200      $0.00500
+  Haiku     0.40     $0.00020      $0.00050
   Sonnet    0.72     $0.00400      $0.00556
-  Opus      0.90     $0.01000      $0.01111
+  Opus      0.90     $0.00800      $0.00889
 
   Now the marginal steps, which is what you actually buy:
 
-    Haiku  -> Sonnet    +0.32 Q for +$0.00200    $0.00200 / 0.32 = $0.00625 per Q point
-    Sonnet -> Opus      +0.18 Q for +$0.00600    $0.00600 / 0.18 = $0.03333 per Q point
+    Haiku  -> Sonnet    +0.32 Q for +$0.00380    $0.00380 / 0.32 = $0.01188 per Q point
+    Sonnet -> Opus      +0.18 Q for +$0.00400    $0.00400 / 0.18 = $0.02222 per Q point
 
-    The second step costs 3x as much AND buys barely half the quality,
-    so it costs 5.3x as much per quality point
-    ($0.03333 / $0.00625 = 5.33).
+    The second step costs about the same in dollars AND buys barely
+    half the quality, so it costs 1.9x as much per quality point
+    ($0.02222 / $0.01188 = 1.87).
 
   Apply a threshold:
 
     Q_min = 0.70 (summarization)   Sonnet clears it at 0.72.
-                                   Opus is pure overpayment: 2.5x the price
-                                   ($0.01000 / $0.00400) for quality you
+                                   Opus is pure overpayment: 2x the price
+                                   ($0.00800 / $0.00400) for quality you
                                    already agreed you do not need.
 
     Q_min = 0.85 (code generation) Sonnet fails at 0.72. Opus is the only
@@ -776,7 +799,7 @@ quality point as the bottom one — and that unevenness is the fact routing expl
 ```
 
 **Why `Q_min` is a gate and not a term in an optimization.** It is tempting to maximize `Q / C` and
-route everything to Haiku, which wins that ratio outright at `200 Q points per dollar`. But a
+route everything to Haiku, which wins that ratio outright at `2,000 Q points per dollar`. But a
 summary scoring 0.40 when the task needs 0.70 is not cheap quality — it is a failed request that
 gets retried, escalated, or complained about. Quality below `Q_min` has value zero, which is why the
 rule is "cheapest model above the line", never "best ratio".
@@ -850,7 +873,7 @@ lean, and the aggressive cheap-routing target is what decides that lean.
 | `r_cheap` | Target share of traffic routed to the cheap model. `0.90` here — the aggressive setting |
 | downward misroute | Complex query sent to the weak model. Costs quality. **Unbounded** — you cannot price a lost user |
 | upward misroute | Simple query sent to the frontier model. Costs money. **Bounded** — exactly the tier price gap |
-| `C_exp - C_cheap` | Dollars wasted per upward misroute. `$0.00400 - $0.00200 = $0.00200` |
+| `C_exp - C_cheap` | Dollars wasted per upward misroute. `$0.00400 - $0.00020 = $0.00380` |
 
 **Walk one example.** 10M queries/day, classifier accuracy 75%, cheap-routing target 90%:
 
@@ -862,10 +885,10 @@ Step 1 -- split the errors by direction:
       downward misroutes  ~ 15% of all traffic   = 1.5M queries/day
       upward misroutes    ~ 10% of all traffic   = 1.0M queries/day
 
-Step 2 -- price each direction (Haiku $0.00200, Sonnet $0.00400):
+Step 2 -- price each direction (Haiku $0.00020, Sonnet $0.00400):
 
-    upward misroute   waste per query = $0.00400 - $0.00200 = $0.00200
-                      1.0M/day x $0.00200                   = $2,000/day burned
+    upward misroute   waste per query = $0.00400 - $0.00020 = $0.00380
+                      1.0M/day x $0.00380                   = $3,800/day burned
 
     downward misroute waste per query = a degraded answer, not dollars
                       1.5M/day users get the weak model     -> -12 CSAT points
@@ -874,15 +897,15 @@ Step 3 -- retune to the conservative 60% cheap-routing target:
 
     downward misroutes fall to ~6%   = 0.6M/day    (-900K/day)
     upward misroutes rise to ~19%    = 1.9M/day
-                      1.9M x $0.00200                       = $3,800/day burned
+                      1.9M x $0.00380                       = $7,220/day burned
 
-    incremental spend = $3,800 - $2,000                     = $1,800/day
+    incremental spend = $7,220 - $3,800                     = $3,420/day
 
 Step 4 -- price the trade:
 
-    $1,800/day  /  900,000 rescued users/day  =  $0.0020 per rescued user
+    $3,420/day  /  900,000 rescued users/day  =  $0.0038 per rescued user
 
-    Two-tenths of a cent to turn a degraded answer into a correct one.
+    Under four-tenths of a cent to turn a degraded answer into a correct one.
     This is exactly the tier gap from Step 2 -- rescuing a user IS buying
     them the upgrade, so the price can never be anything else.
 ```
@@ -928,6 +951,7 @@ A team's rule-based router sent all short queries (<500 tokens) to the cheap mod
 | RouteLLM | Open-source | Preference-trained strong/weak routers + benchmarks | Free (self-hosted) | Research-grade binary routing |
 | Portkey | Managed SaaS | Gateway, routing, observability | Subscription tiers priced by logs/month (free tier 10k logs) | Observability + routing combo |
 | Custom DistilBERT | DIY | Full control, lowest latency | Engineering time | High-volume, latency-sensitive |
+| OpenAI Decisions API (beta) | Hosted typed classifier | `choice` / `predicate` / `score` answers with probabilities on `gpt-6-luna` | Input only, $0.10/1M tokens | Router with no labeled data yet |
 | Amazon Bedrock Intelligent Prompt Routing | Managed | Predicts per-request response quality and routes between two models *within one family* (Claude, Llama or Nova) | Per-token | AWS-native deployments |
 
 ### Supporting Infrastructure
@@ -942,8 +966,8 @@ A team's rule-based router sent all short queries (<500 tokens) to the cheap mod
 ## 12. Interview Questions with Answers
 
 **Q: What is LLM routing and why does it matter in production?**
-**Short:** It dynamically picks the cheapest model tier that still meets quality needs per query, since frontier tiers cost 5-25x more per token than cheap tiers.
-LLM routing is a system that dynamically selects the optimal model for each query based on its complexity, task type, and quality requirements. It matters because the frontier tier costs several times more per token than the cheap tier — 5x within Anthropic's 2026 ladder (Opus 5 $5/$25 vs Haiku 4.5 $1/$5), and 20–25x if you reach down to a previous-generation nano model (GPT-5.4-nano at $0.20/$1.25) — while much production traffic is simple enough for the cheap tier. Savings are workload-dependent and should be quoted with the workload attached: RouteLLM measured a 3.66x cost saving on MT Bench at 95% of GPT-4 quality but only 1.41x on MMLU, and the Section 6.3 worked example lands at 28% on a mixed workload.
+**Short:** It picks the cheapest model tier that still meets quality needs per query, since frontier tiers cost 40-100x more per token than cheap tiers.
+LLM routing is a system that dynamically selects the optimal model for each query based on its complexity, task type, and quality requirements. It matters because the frontier tier costs far more per token than the cheap tier: 40x within Anthropic's ladder (Opus 5.5 at $4/$20 vs Haiku 5.5 at $0.10/$0.50, list prices on 2026-10-19) and 100x from GPT-6 Luna ($0.10/$0.50) to GPT-6 Astra ($10/$50), while much production traffic is simple enough for the cheap tier. Savings are workload-dependent and should be quoted with the workload attached: RouteLLM measured a 3.66x cost saving on MT Bench at 95% of GPT-4 quality but only 1.41x on MMLU, and the Section 6.3 worked example lands at 62% on a mixed workload.
 
 **Q: What is the difference between cascade routing and classifier-based routing?**
 **Short:** Cascade routing escalates after seeing the cheap model's output and confidence, while classifier routing picks the target model upfront from query features.
@@ -951,7 +975,11 @@ Cascade routing sends the query to the cheapest model first and escalates only i
 
 **Q: Why is using an LLM as the router usually a net loss, even though it is the most accurate option?**
 **Short:** The LLM router's latency and token cost is paid on every request, even the majority a cheap rule or DistilBERT classifier would route identically.
-Because the router's overhead is paid on 100% of traffic while savings only materialize on correctly down-routed queries. An LLM router (a small hosted model classifying each query) is the most accurate option available but adds 300–800ms of latency and its own token cost to every request — including the large majority of queries a <1ms rule or a 5–15ms DistilBERT classifier would have routed identically. At 10M queries/day, even a fraction of a cent of router cost per query adds thousands of dollars daily before any inference savings, and the latency alone can blow a sub-second SLA. Use LLM-based routing offline — to label training data for a cheap classifier — never in the request path.
+Because the router's overhead is paid on 100% of traffic while savings only materialize on correctly down-routed queries. An LLM router (a small hosted model classifying each query) is the most accurate option available but adds 300-800ms of latency and its own token cost to every request, including the large majority of queries a <1ms rule or a 5-15ms DistilBERT classifier would have routed identically. At 10M queries/day, even a fraction of a cent of router cost per query adds thousands of dollars daily before any inference savings, and the latency alone can blow a sub-second SLA. Use a generative LLM router offline, to label training data for a cheap classifier, and never in the request path.
+
+**Q: When would you pick a hosted typed-decision endpoint such as OpenAI's Decisions API over a fine-tuned DistilBERT router?**
+**Short:** Pick the hosted endpoint when you have no labeled routing data yet; DistilBERT wins on latency and marginal cost once you have the labels, and only it lets you decide when the model changes.
+Compare them on latency, cost and drift. Latency: DistilBERT runs in-process at 5-15ms on CPU, while the Decisions API is a network call for which OpenAI publishes only "about 10x faster than the Responses API", not an absolute figure, so measure its p99 against the router budget before it goes in the request path (the Pitfall 1 failure). Cost: the endpoint bills input only at $0.10/1M tokens, so 500-token queries at 10M/day cost $500/day; DistilBERT costs almost nothing per query but needs the shadow-mode pipeline (10,000 labels per tier) and monthly retraining. Drift: DistilBERT drifts with your traffic and you own the retrain; the endpoint drifts when OpenAI updates `gpt-6-luna`, its only model in beta, which moves your confidence thresholds with no change on your side, so rerun a labeled regression set on every vendor update. Every routed query also leaves your network (ZDR is available to eligible customers). A practical path: start on the endpoint, log its answers with outcome scores as labels, train DistilBERT once you have the labeled set, and keep the endpoint for queries where DistilBERT's confidence is low.
 
 **Q: A cascade's cheap model passes the logprob confidence check but the answer is factually wrong — why, and what do you do about it?**
 **Short:** Logprob confidence measures the model's fluency-level certainty, not factual correctness, so a confidently wrong answer sails past a mean-logprob threshold.
@@ -963,7 +991,7 @@ Three approaches work without logprobs. First, self-assessment prompting: append
 
 **Q: How does model routing interact with provider prompt caching, and what does that do to the cost model?**
 **Short:** Prompt caches are keyed per model, so every route switch lands on a cold cache and pays a costly cache write instead of a cheap cache read.
-Provider prompt caches are per model, so every route switch lands on a cold cache and pays a cache write (1.25x input) where a stable route would have paid a cache read (0.1x). Anthropic documents this directly — changing the model invalidates the cache because different models render the same prompt differently — and the damage concentrates in the tail tiers: a tier receiving 5% of one tenant's traffic may not see a second request for that prefix inside the 5-minute TTL, so it writes every time and never reads. On a 4,000-token system prompt that is $0.025 per request on Opus 5 (write at $6.25/1M) against $0.002 warm (read at $0.50/1M) — 12.5x. Cascades are the worst case, because an escalated query prefills the same prefix on both tiers. Practical guidance: route per conversation rather than per request, keep the shared prefix pinned to one model where the quality budget allows, and add the prefix write into the escalation term before quoting a routing saving.
+Provider prompt caches are per model, so every route switch lands on a cold cache and pays a cache write (1.25x input) where a stable route would have paid a cache read (0.05x on Opus 5.5 and Sonnet 5.5, 0.1x on Haiku 5.5). Anthropic documents this directly: changing the model invalidates the cache because different models render the same prompt differently, and the damage concentrates in the tail tiers: a tier receiving 5% of one tenant's traffic may not see a second request for that prefix inside the 5-minute TTL, so it writes every time and never reads. On a 4,000-token system prompt that is $0.020 per request on Opus 5.5 (write at $5.00/1M) against $0.0008 warm (read at $0.20/1M), a 25x gap. Cascades are the worst case, because an escalated query prefills the same prefix on both tiers. Practical guidance: route per conversation rather than per request, keep the shared prefix pinned to one model where the quality budget allows, and add the prefix write into the escalation term before quoting a routing saving.
 
 **Q: How do you collect training data for a routing classifier?**
 **Short:** Shadow-run each query against both tiers, label it with the cheapest model that met the quality threshold, and gather 10,000+ real production examples per tier.
@@ -1027,7 +1055,7 @@ The reasoning-depth knob is provider-specific in both name and semantics: one ex
 
 **Implement per-task-type quality thresholds.** A single global quality threshold is too coarse. Code generation requires a higher threshold (a wrong answer is a bug) than creative writing (a mediocre answer is still acceptable). Define Q_min per task type and calibrate routing thresholds independently.
 
-**Abstract model names behind a registry.** Never hard-code `claude-sonnet-5`, `gpt-5.6-terra`, or similar version strings in routing logic — `claude-3-5-sonnet-20241022` was a perfectly reasonable thing to hard-code in 2024 and was retired on 2025-10-28. Use logical names (`tier-cheap`, `tier-frontier`) mapped to concrete model IDs in configuration. This makes model upgrades and deprecations operational changes, not code changes.
+**Abstract model names behind a registry.** Never hard-code `claude-sonnet-5-5`, `gpt-6.1-sol`, or similar version strings in routing logic. `claude-3-5-sonnet-20241022` was a perfectly reasonable thing to hard-code in 2024 and was retired on 2025-10-28. Use logical names (`tier-cheap`, `tier-frontier`) mapped to concrete model IDs in configuration. This makes model upgrades and deprecations operational changes, not code changes.
 
 **Retrain classifiers at least quarterly.** Query distributions drift as products evolve, new user segments arrive, and model behaviors change after provider updates. A classifier trained six months ago may be operating on stale assumptions.
 
@@ -1045,7 +1073,7 @@ The reasoning-depth knob is provider-specific in both name and semantics: one ex
 
 **Problem Statement**
 
-A B2B SaaS company offers three AI-powered product features: a customer support chatbot, a content generation tool (blog posts, email drafts), and an AI code assistant. Total query volume is 10M queries/day. The current architecture sends all queries to a single mid-tier model (Claude Sonnet 5 at $2/$10 per MTok, as of 2026-09-04), costing approximately $40,000/day at 500 input + 300 output tokens per query. The engineering team is tasked with reducing LLM spend by at least 25% while maintaining current quality SLAs — a target that was set at 50% against the older $3/$15 rate and had to be revised down when the baseline itself got cheaper.
+A B2B SaaS company offers three AI-powered product features: a customer support chatbot, a content generation tool (blog posts, email drafts), and an AI code assistant. Total query volume is 10M queries/day. The current architecture sends all queries to a single mid-tier model (Claude Sonnet 5.5 at $2/$10 per MTok, list price on 2026-10-19), costing approximately $40,000/day at 500 input + 300 output tokens per query. The engineering team is tasked with reducing LLM spend by at least 50% while maintaining current quality SLAs.
 
 Query distribution:
 - Customer support: 6M queries/day (60%) — mostly simple FAQ, status checks, policy lookups
@@ -1073,9 +1101,9 @@ flowchart TD
         CF["Cascade Fallback\nfor low-confidence classifier outputs"]
     end
 
-    PA["Model Pool A\nClaude Haiku 4.5 · GPT-5.6-luna\n(Tier 1 - cheap)"]
-    PB["Model Pool B\nClaude Sonnet 5 · GPT-5.6-terra\n(Tier 2 - mid)"]
-    PC["Model Pool C\nClaude Opus 5 · GPT-5.6-sol\n(Tier 3 - front)"]
+    PA["Model Pool A\nClaude Haiku 5.5 · GPT-6 Luna\n(Tier 1 - cheap)"]
+    PB["Model Pool B\nClaude Sonnet 5.5 · GPT-6.1 Sol\n(Tier 2 - mid)"]
+    PC["Model Pool C\nClaude Opus 5.5 · GPT-6 Astra\n(Tier 3 - front)"]
     RH["Response Handler"]
     QS["Quality Sampler\nsamples 2% for LLM-as-judge scoring"]
     MS[("Metrics Store\nper-route quality, cost, latency dashboards")]
@@ -1140,22 +1168,22 @@ Code Assistance (1M/day):
   Cascade escalates to Tier 3:    10%  = 0.10M queries
 ```
 
-**Cost Projection (Anthropic prices as of 2026-09-04)**
+**Cost Projection (Anthropic list prices on 2026-10-19)**
 
 ```
-Tier 1 (Haiku 4.5): (4.8M + 1.65M + 1.00M) = 7.45M calls  @ ~$0.00200/call  = $14,900/day
-Tier 2 (Sonnet 5):  (1.08M + 1.20M + 0.50M) = 2.78M calls  @ ~$0.00400/call  = $11,120/day
-Tier 3 (Opus 5):    (0.12M + 0.15M + 0.10M) = 0.37M calls  @ ~$0.01000/call  = $3,700/day
-Total:              ~$29,720/day
+Tier 1 (Haiku 5.5):  (4.8M + 1.65M + 1.00M) = 7.45M calls  @ ~$0.00020/call  = $1,490/day
+Tier 2 (Sonnet 5.5): (1.08M + 1.20M + 0.50M) = 2.78M calls  @ ~$0.00400/call  = $11,120/day
+Tier 3 (Opus 5.5):   (0.12M + 0.15M + 0.10M) = 0.37M calls  @ ~$0.00800/call  = $2,960/day
+Total:               ~$15,570/day
 
-Baseline (all Sonnet 5): 10M * $0.004 = $40,000/day
-Savings: ~$10,280/day (~26% reduction)
+Baseline (all Sonnet 5.5): 10M * $0.004 = $40,000/day
+Savings: ~$24,430/day (~61% reduction)
 ```
 
 The Tier 1 line counts **calls, not queries**: code assistance is a cascade, so all 1.0M code
 queries pay a Haiku call first — including the 0.50M that then escalate to Tier 2 and the 0.10M
 that reach Tier 3. Counting only the 0.40M that passed the confidence check would understate the
-bill by 0.60M x $0.00200 = $1,200/day, which is the `P_esc x C_cheap` error from Section 6.3.
+bill by 0.60M x $0.00020 = $120/day, which is the `P_esc x C_cheap` error from Section 6.3.
 The Tier 2 and Tier 3 lines, by contrast, count terminal destinations only: the intermediate legs
 of the queries that pass *through* Tier 2 on their way to Tier 3 (0.10M code + 0.12M support) are
 omitted, understating the projection by a further 0.22M x $0.00400 = $880/day.
@@ -1179,13 +1207,14 @@ IF avg_quality_score[tier=2, task=content_generation] < 4.0 for 30-minute window
 Provider fallback chain per tier:
 
 ```
-Tier 1: Claude Haiku 4.5 (primary) -> GPT-5.6-luna (secondary) -> Gemini 3.5 Flash (tertiary)
-        $1 / $5                       $1 / $6                     $1.50 / $9.00
-Tier 2: Claude Sonnet 5 (primary) -> GPT-5.6-terra (secondary) -> Gemini 3.1 Pro Preview
-        $2 / $10                      $2.50 in                    $2 / $12  (<=200k)
-                                                                  $4 / $18  (>200k)
-Tier 3: Claude Opus 5 (primary) -> GPT-5.6-sol (secondary)
-        $5 / $25                     $5 / $30
+Tier 1: Claude Haiku 5.5 (primary) -> GPT-6 Luna (secondary) -> Gemini 3.8 Flash (tertiary)
+        $0.10 / $0.50 (<=100K)        $0.10 / $0.50 (<=272K)    $0.75 / $3.75 (to 2026-12-31)
+        $0.50 / $2.50 (>100K)         $0.20 / $0.75 (>272K)     $1.50 / $7.50 (from 2027-01-01)
+Tier 2: Claude Sonnet 5.5 (primary) -> GPT-6.1 Sol (secondary) -> Gemini 4 Argon (tertiary)
+        $2 / $10                       $2 / $10  (<=272K)        $2 / $10 (to 2026-11-30)
+                                       $4 / $15  (>272K)         $4 / $20 (from 2026-12-01)
+Tier 3: Claude Opus 5.5 (primary) -> GPT-6 Astra (secondary)
+        $4 / $20                      $10 / $50
 ```
 
 Circuit breaker: trip when error rate > 5% over 30 seconds. Half-open after 60 seconds. Log provider-level availability metrics to SRE dashboard.
@@ -1193,27 +1222,28 @@ Circuit breaker: trip when error rate > 5% over 30 seconds. Half-open after 60 s
 **Price the fallback legs, not just the primaries.** Two things in that chain are deliberate and
 worth arguing about in an interview:
 
-- **The Tier 1 tertiary costs more than the tier it backs up.** Gemini 3.5 Flash at $1.50/$9.00 is
-  1.5x the input and 1.5-1.8x the output of the Haiku 4.5 and luna legs above it, so a Tier 1
-  outage does not just degrade availability, it inflates the bill on the exact traffic you chose
-  the cheap tier for. Google's genuinely price-matched option is a Flash-Lite (3.5 Flash-Lite at
-  $0.30/$2.50, or 2.5 Flash-Lite at $0.10/$0.40) — pick it if the fallback must hold the cost
-  envelope, and keep 3.5 Flash only if you would rather hold quality and eat the step. State
-  which one you chose; a fallback chain that silently changes the unit economics is a defect.
-- **Every Tier 2 fallback costs more than the primary, and the tertiary has a length cliff on top.**
-  With Sonnet 5 at $2/$10 the whole Tier 2 chain is now an upgrade in price, not a sidestep:
-  gpt-5.6-terra is $2.50 in against Sonnet 5's $2, and Gemini 3.1 Pro Preview matches on input but
-  is 20% more on output ($12 vs $10) below 200k — then doubles on input and jumps 50% on output
-  above it. A fallback chain is exactly where oversized prompts land, because the requests that fail
-  over are disproportionately the long, slow ones, so budget the >200k rate rather than the
-  headline. This bullet used to read that the tertiary was *cheaper* than Sonnet 5; it stopped being
-  true when Sonnet 5 settled at $2/$10, which is the standing argument for pricing a fallback chain
-  on every repricing rather than once at design time. Re-check the model name at GA too, since the
-  `Preview` suffix will drop.
+- **The Tier 1 tertiary costs more than the tier it backs up.** Gemini 3.8 Flash at $0.75/$3.75 is
+  7.5x the input and output of the Haiku 5.5 and GPT-6 Luna legs above it, and its price doubles on
+  2027-01-01, so a Tier 1 outage does not just degrade availability, it inflates the bill on the
+  exact traffic you chose the cheap tier for. Google's price-matched option is Gemini 2.5
+  Flash-Lite at $0.10/$0.40 (same input, 20% cheaper output, no shutdown date announced), but it is
+  several generations older; 3.1 Flash-Lite at $0.25/$1.50 is 2.5x the input and 3x the output.
+  Pick a Flash-Lite if the fallback must hold the cost envelope, and keep 3.8 Flash only if you
+  would rather hold quality and pay the step. State which one you chose; a fallback chain that silently changes
+  the unit economics is a defect.
+- **The Tier 2 chain matches on headline price and splits on the cliffs.** All three legs list at
+  $2/$10, but GPT-6.1 Sol rises to $4/$15 above 272K input tokens, and Gemini 4 Argon doubles to
+  $4/$20 on 2026-12-01. A fallback chain is exactly where oversized prompts land, because the
+  requests that fail over are disproportionately the long, slow ones, so budget the long-context
+  rate rather than the headline, and price the chain again on every dated price change rather than
+  once at design time.
+- **The Tier 3 secondary is 2.5x the primary.** GPT-6 Astra at $10/$50 against Opus 5.5 at $4/$20
+  means a Tier 3 outage multiplies the cost of the most expensive traffic. Cap the failover share
+  or fall back to Sonnet 5.5 for queries whose `Q_min` it clears.
 
 **Interview Discussion Points**
 
-The 26% cost reduction is far below the headline figures quoted for routing benchmarks (RouteLLM's 3.66x on MT Bench is a 73% saving) for three structural reasons: the code assistance workload is inherently high-complexity and resists cheap-model routing; the 2026 Anthropic price ladder spans only 5x from Haiku to Opus, so down-routing buys less than it did when the spread was 60x; and the ladder's bottom step narrowed to 2x when Sonnet 5 settled at $2/$10 instead of the $3/$15 once scheduled for 2026-09-01, which is where most of this workload's traffic moves. The same routing design scored 41% against the $3/$15 baseline — the design did not get worse, the thing it was beating got cheaper. Real-world savings depend heavily on workload composition and on the current price ladder — re-run this arithmetic after every vendor repricing. The team should track actual savings weekly and recalibrate routing thresholds as the DistilBERT classifier improves with more labeled data. The key risk is quality regression in the code assistance path — code errors have high user impact (bugs in production code), so the cascade confidence threshold should be tuned conservatively and monitored daily.
+The 61% cost reduction sits below the headline figures quoted for routing benchmarks (RouteLLM's 3.66x on MT Bench is a 73% saving) for two structural reasons: the code assistance workload is inherently high-complexity and resists cheap-model routing, and with Haiku 5.5 at 1/20 of Sonnet 5.5 the Tier 1 calls are close to free, so the remaining bill is set by the 2.78M Tier 2 calls ($11,120 of $15,570, 71%). The next saving comes from moving traffic off Tier 2, not from squeezing Tier 1. Real-world savings depend heavily on workload composition and on the current price ladder, so re-run this arithmetic after every vendor repricing. The team should track actual savings weekly and recalibrate routing thresholds as the DistilBERT classifier improves with more labeled data. The key risk is quality regression in the code assistance path: code errors have high user impact (bugs in production code), so the cascade confidence threshold should be tuned conservatively and monitored daily.
 
 ---
 
@@ -1230,7 +1260,7 @@ class CascadeRouter:
 
     def route(self, query: str) -> str:
         score = self.classifier.predict_complexity(query)
-        return "gpt-5.6-terra" if score >= self.threshold else "gpt-5.6-luna"
+        return "gpt-6.1-sol" if score >= self.threshold else "gpt-6-luna"
 
 # FIX: adaptive threshold with routing distribution monitoring + recalibration trigger
 import statistics
@@ -1253,7 +1283,7 @@ class AdaptiveCascadeRouter:
         score = self.classifier.predict_complexity(query)
         self.score_window.append(score)
         self._maybe_recalibrate()
-        return "gpt-5.6-terra" if score >= self.threshold else "gpt-5.6-luna"
+        return "gpt-6.1-sol" if score >= self.threshold else "gpt-6-luna"
 
     def _maybe_recalibrate(self) -> None:
         if len(self.score_window) < 1000:

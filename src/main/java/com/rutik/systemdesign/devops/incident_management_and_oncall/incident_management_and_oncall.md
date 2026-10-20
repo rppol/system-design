@@ -14,7 +14,7 @@ When a service degrades, an organization needs three things working together:
 
 2. **Response** — a defined **incident management process** kicks in: declare an incident, assign a **severity** (SEV1–SEV4), establish **incident command** roles, open a communication channel (war room / Slack / bridge), diagnose using runbooks and observability, mitigate, then resolve. MTTR measures problem-starts (or detected) to resolved.
 
-3. **Learning** — after resolution, a **blameless postmortem** documents the timeline, root cause(s), what went well/poorly, and produces tracked **action items** so the same failure can't recur the same way.
+3. **Learning**: after resolution, a **blameless postmortem** documents the timeline, the contributing factors, what went well/poorly, and produces tracked **action items** so the same failure can't recur the same way.
 
 The **Incident Command System (ICS)**, borrowed from emergency services, defines roles so nobody steps on each other under pressure: an **Incident Commander (IC)** owns coordination and decisions (not the fix); **Operations/Subject-Matter Experts (SMEs)** do the technical work; a **Communications Lead** keeps stakeholders/status-page updated; a **Scribe** records the timeline. The IC's job is explicitly *not* to fix the problem — it's to keep the response organized, prevent duplicate or conflicting actions, and make decisions (declare, escalate, page more people, communicate externally).
 
@@ -174,7 +174,7 @@ flowchart LR
     commsLead -.-> mitigate
     scribe -.-> mitigate
     mitigate -->|"MTTR"| restored("Service restored,<br/>resolve & downgrade SEV")
-    restored --> postmortem("Blameless postmortem<br/>timeline, root cause, action items")
+    restored --> postmortem("Blameless postmortem<br/>timeline, contributing factors, action items")
     postmortem --> actionItems(["Action items<br/>tracked to done"])
     actionItems -.->|"raises MTBF"| alertFires
 
@@ -354,9 +354,11 @@ Every alert annotation should link to its runbook (see the `runbook:` field in [
   14:11 acked; 14:14 declared SEV1, IC assigned
   14:21 identified deploy correlation; 14:23 rollback issued (mitigated, MTTR-to-mitigate 21m)
   14:40 5xx back under 1%; incident resolved
-## Root cause (5 whys — systemic)
-  v2.7.0 introduced a config that exhausted the DB connection pool under peak load;
-  the canary stage ran at off-peak traffic so the pool exhaustion never triggered.
+## Contributing factors (systemic; no single root cause)
+  - v2.7.0 lowered the DB pool's max size; the pool exhausted under peak load
+  - the canary stage ran at off-peak traffic, so the exhaustion never triggered there
+  - no pool-saturation SLI: the first signal was the burn-rate page 7 min in
+  - the rollout had no automatic rollback on burn rate; mitigation waited for a human
 ## What went well / poorly
   + rollback was fast once correlation found.   - canary didn't exercise peak load.
 ## Action items (owner, due date, tracked)
@@ -365,6 +367,31 @@ Every alert annotation should link to its runbook (see the `runbook:` field in [
   - [ ] Auto-rollback on burn-rate page during a rollout             (owner: C, due 06/30)
 ## NO names assigned to "who caused it" — the SYSTEM allowed it.
 ```
+
+### Contributing factors instead of a single root cause
+
+The 5 whys walks one causal chain backward from the failure and stops at whatever the investigator decides is the bottom, often "engineer X changed the config". Three problems follow. It finds one chain when outages in complex systems need several conditions at once: the payments outage above needed the pool change, an off-peak canary, a missing saturation signal, and no automatic rollback, and removing any one would have stopped or shortened it. The stopping point depends on who asks, so two teams analysing the same incident produce different "root causes". And the chain usually ends at a person, which turns a blameless template into a blameful conclusion. Richard Cook's "How Complex Systems Fail" (1998) states it directly: post-accident attribution to a root cause is fundamentally wrong, because overt failure requires multiple faults.
+
+The learning-from-incidents practice (John Allspaw, Etsy's 2016 Debriefing Facilitation Guide, and the Learning from Incidents community) replaces the chain with a list of **contributing factors** and asks a different question: not "why did it fail" but "how did it make sense at the time". The engineer who shipped v2.7.0 had a green canary and a passing review; finding out why those signals said "safe" is where the fixes are.
+
+```mermaid
+flowchart LR
+    subgraph W["5 whys: one chain, one stop"]
+        direction TB
+        w1["5xx spike"] --> w2["pool exhausted"] --> w3["v2.7.0 lowered max pool"] --> w4["engineer changed config"]
+    end
+    subgraph C["Contributing factors: every condition that had to hold"]
+        direction TB
+        o["38 min SEV1"]
+        f1["pool max lowered in v2.7.0"] --> o
+        f2["canary at off-peak load"] --> o
+        f3["no pool-saturation SLI"] --> o
+        f4["no auto-rollback on burn rate"] --> o
+        f5["review checklist has no capacity check"] --> o
+    end
+```
+
+Practical changes to the postmortem: interview responders one at a time before the group meeting and record what they saw, knew, and expected at each decision; tag each factor by type (change, detection, mitigation, process) so action items cover more than the trigger; and keep a "what made this hard" section for things that slowed diagnosis even though they did not cause the outage, such as a dashboard that hid the pool metric.
 
 ### MTTD / MTTR math
 
@@ -434,7 +461,9 @@ xychart-beta
 | IC model | Dedicated IC role | Whoever's on-call does everything | Coordination vs overhead for small incidents |
 | On-call rotation | Follow-the-sun | Single-region with night pages | Sustainability vs staffing cost/complexity |
 | Postmortem | Blameless | Accountability-focused | Learning/safety vs (illusory) deterrence |
+| Causal analysis | Single root cause via 5 whys | Contributing factors + responder interviews | Speed and a tidy ticket vs fixes that cover detection, mitigation, and process too |
 | Automation | Auto-remediate (auto-rollback) | Human-in-the-loop | Speed vs control/safety |
+| AI investigation | Agent drafts hypotheses, timeline, and suggested fix | Humans gather all evidence by hand | Faster triage vs wrong-but-confident hypotheses; the IC keeps decision rights either way |
 | Comms | Over-communicate | Minimal updates | Trust/transparency vs noise |
 
 ---
@@ -484,73 +513,86 @@ kubectl rollout undo deployment/payments      # service restored in ~30s
 | Jira / Linear | Track postmortem action items |
 | Confluence | Diagnosis/mitigation guides linked from alerts; keep them as runbooks-as-code in Git when they have to version with the service |
 | PagerDuty Post-Incident Reviews | Postmortem authoring + learning analytics |
+| AWS DevOps Agent | AI investigation agent (GA 2026-03-31): connects to observability tools, runbooks, code repos, and CI/CD, correlates telemetry with code and deployment changes to triage incidents and recommend fixes; investigates AWS, Azure, and on-prem workloads |
 | Alertmanager | Feeds alerts into the on-call/escalation flow (see [visualization_and_alerting](../visualization_and_alerting/visualization_and_alerting.md)) |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: Why mitigate before diagnosing root cause?**
+**Q: Why mitigate before diagnosing root cause?**
 **Short:** Restoring service is almost always faster than fully understanding why it broke, so you mitigate first and do root-cause analysis calmly in the postmortem.
 Because the first goal during an incident is to stop user impact, and you can almost always restore service faster than you can fully understand why it broke — a 30-second rollback that ends customer-facing errors beats a 40-minute investigation while the site is down. Root-cause analysis is calmer and more accurate once the pressure of an active outage is gone, so you do it in the postmortem. The discipline "mitigate first, diagnose later" directly protects MTTR and the error budget.
 
-**Q2: What is the role of an Incident Commander, and what should they NOT do?**
+**Q: Your postmortem's 5 whys ends at "the engineer set the wrong pool size". What is wrong with that conclusion?**
+**Short:** The 5 whys follows one chain and stops wherever the asker stops, usually at a person; the outage needed several conditions, so list every contributing factor and fix detection and mitigation too.
+The 5 whys assumes one linear chain from failure to cause, but the outage needed several things at once: the pool change, a canary at off-peak load, no saturation signal, and no automatic rollback. Stopping at the engineer fixes none of the other three and teaches people to hide their part next time, which is the opposite of a blameless review. The depth is also arbitrary; two facilitators asking "why" will stop at different layers and file different tickets. Richard Cook's "How Complex Systems Fail" (1998) puts it plainly: root-cause attribution is wrong because failure in complex systems requires multiple faults. Replace the section with a contributing-factors list, ask how each decision made sense with the information available at the time, and write action items for detection and mitigation, not only for the trigger.
+
+**Q: What is the role of an Incident Commander, and what should they NOT do?**
 **Short:** The IC owns coordination and decision-making — assigning roles, declaring severity, escalating — but should never personally fix the bug, which is delegated to SMEs.
 The IC owns coordination and decision-making during an incident — declaring severity, assigning roles, deciding to escalate or page more people, and keeping the response organized so SMEs don't duplicate or conflict. Critically, the IC should NOT personally fix the bug, because diving into debugging means no one is coordinating, comms go dark, and decisions stall. The IC stays at the high-level view and delegates the technical work to subject-matter experts.
 
-**Q3: How do severity levels work and why have them?**
+**Q: How do severity levels work and why have them?**
 **Short:** Severity maps impact to response intensity, so a SEV1 pages broadly with an IC immediately while a SEV3 is handled by on-call alone during business hours.
 Severity maps user/business impact to response intensity — a SEV1 (full outage/data-loss risk) pages broadly, demands an IC immediately, and triggers exec and status-page communication, while a SEV3 (minor, workaround exists) is handled by on-call alone in business hours. They exist so the response is proportionate: you don't activate a full incident command for a cosmetic bug, and you don't wing a major outage with one engineer. Consistent severity definitions also let you measure and compare incidents.
 
-**Q4: What makes a postmortem blameless, and why does it matter?**
+**Q: What makes a postmortem blameless, and why does it matter?**
 **Short:** It analyzes the systemic and process gaps that allowed a failure rather than blaming the person involved, since fear of punishment makes people hide what you need to learn.
 A blameless postmortem analyzes the systemic and process gaps that allowed the failure — why the canary didn't catch it, why there was no auto-rollback — rather than blaming the person who triggered it. It matters because the moment people fear punishment they hide mistakes and withhold the information you need to learn, which guarantees the failure recurs; psychological safety is what makes honest, complete analysis possible. The output is concrete, owned action items, not a scapegoat.
 
-**Q5: Explain MTTD vs MTTR and how you improve each.**
+**Q: Explain MTTD vs MTTR and how you improve each.**
 **Short:** MTTD (problem-start to detection) improves with better alerting; MTTR (detection to resolution) improves with runbooks, automation, and mitigate-first discipline.
 MTTD (mean time to detect) is from problem-start to someone-knowing, improved by better alerting — especially SLO burn-rate alerts that page on user-impacting symptoms quickly. MTTR (mean time to resolve) is from detection to service-restored, improved by good runbooks, clear roles, automation (auto-rollback), and mitigate-first discipline. Both directly affect availability: cutting MTTR via a fast rollback can turn a budget-incinerating 40-minute outage into a 5-minute blip.
 
-**Q6: What is a runbook and why is it the highest-leverage MTTR artifact?**
+**Q: What is a runbook and why is it the highest-leverage MTTR artifact?**
 **Short:** A runbook is a step-by-step diagnosis-and-mitigation guide that turns a stressful 3am scramble into following a checklist a prior responder already worked out.
 A runbook is a step-by-step guide for diagnosing and mitigating a specific alert — symptom, ordered diagnosis steps, mitigation actions, escalation criteria, and how to verify resolution. It's the highest-leverage MTTR artifact because it turns a stressful 3am scramble (where a tired engineer has to reason from scratch) into following a checklist that a previous responder already worked out. Linking every alert annotation to its runbook means the responder is one click from "here's exactly what to try first."
 
-**Q7: How should on-call rotations be structured to stay sustainable?**
+**Q: How should on-call rotations be structured to stay sustainable?**
 **Short:** Pair a primary and secondary with a roughly 10-minute escalation window, keep page volume low, rotate fairly, and use follow-the-sun scheduling across time zones.
 Use a primary plus secondary (the secondary is the escalation target and backup), with an escalation policy that pages the next responder if the primary doesn't ack within ~10 minutes, and a manager as the final tier. Keep page volume low (fight alert fatigue so on-call isn't woken for non-actionable noise), rotate fairly (commonly weekly) with adequate compensation/time-off, and use follow-the-sun scheduling across time zones so engineers are paged during their workday rather than overnight. Sustainable on-call is a retention and reliability issue, not just a logistics one.
 
-**Q8: What are the ICS roles and why separate them?**
+**Q: What are the ICS roles and why separate them?**
 **Short:** ICS separates Incident Commander, Operations/SMEs, Communications Lead, and Scribe so nobody under pressure ends up doing two jobs poorly.
 Incident Commander (coordination/decisions), Operations/SMEs (technical fix), Communications Lead (stakeholder and status-page updates), and Scribe (timeline and decisions log). You separate them so that under stress nobody is doing two jobs poorly — if the IC is also debugging, coordination collapses; if the engineer fixing the bug is also writing status updates, both suffer. For small incidents one person can hold multiple roles, but for SEV1/SEV2 the separation prevents the chaos of everyone doing everything.
 
-**Q9: How does incident management connect to SLOs and error budgets?**
+**Q: How does incident management connect to SLOs and error budgets?**
 **Short:** Incidents burn the SLO's error budget directly, so faster detection and resolution protect both reliability and the launch runway that budget funds.
 Incidents consume the error budget — a 38-minute SEV1 can burn most of a 99.9% service's 43.2-minute monthly budget — so fast detection and resolution directly protect the budget and thus feature velocity (see [sre_principles_and_slos](../sre_principles_and_slos/sre_principles_and_slos.md)). Burn-rate alerts are the detection trigger that starts the incident process, and the error-budget policy may freeze launches after a budget-burning incident. Postmortem action items raise MTBF and lower future MTTR, improving the SLI over time.
 
-**Q10: How do you decide what to communicate during an incident, and to whom?**
+**Q: How do you decide what to communicate during an incident, and to whom?**
 **Short:** Communication scales with severity — a SEV1 needs proactive status-page updates every 15-30 minutes, while a SEV3 may only need an internal channel note.
 Severity drives it: a SEV1 needs proactive, regular external communication (status page updates every 15–30 minutes) plus internal exec updates, while a SEV3 may only need an internal channel note. The Communications Lead owns this so the engineers fixing the problem aren't distracted, and the principle is to over-communicate during high-severity incidents — customers and stakeholders trust transparency far more than silence. Always communicate impact and ETA-to-update (not necessarily ETA-to-fix, which you often don't know).
 
-**Q11: What's the value of declaring an incident early versus waiting?**
+**Q: What's the value of declaring an incident early versus waiting?**
 **Short:** Declaring early stands up IC, channel, and roles while the problem is still small, since standing down a false alarm is cheaper than organizing under fire later.
 Declaring early spins up the structure — IC, channel, roles, comms — while the problem is still small, so if it escalates you already have coordination in place instead of scrambling mid-crisis. The cost of a "false alarm" declaration is low (you downgrade and close it), while the cost of declaring late is a disorganized response to a now-large incident. The guidance is to err toward declaring: it's cheaper to stand down an incident than to stand one up under fire.
 
-**Q12: How do you ensure postmortem action items actually reduce future incidents?**
+**Q: How do you run a post-incident review so it finds contributing factors instead of a scapegoat?**
+**Short:** Interview responders one by one before the meeting about what they saw and expected, rebuild the timeline from that, and ask how each decision made sense at the time rather than why someone erred.
+Before the group meeting, a facilitator who was not in the incident interviews each responder separately and records what they saw, what they knew, and what they expected at each decision point, because group settings pull everyone toward the first plausible story. The timeline is then built from those accounts plus logs, and the meeting walks it asking "what made this hard to detect, understand, or fix" and "how did this action make sense at the time", the local-rationality question from Sidney Dekker and Etsy's Debriefing Facilitation Guide. The output is a set of contributing factors tagged by type (change, detection, mitigation, process), each with an owned action item. Measure the review by whether the next similar incident was detected or mitigated faster, not by whether a single cause was named.
+
+**Q: How do you ensure postmortem action items actually reduce future incidents?**
 **Short:** Give every action item a named owner, a due date, and a tracked ticket, and review overdue ones in regular meetings so they don't silently rot.
 Give every action item a named owner, a due date, and a tracked ticket, and review overdue items in regular ops/SRE meetings so they don't silently rot — an untracked action item means the same incident recurs in months. Prioritize them against the roadmap (the error-budget policy can force this after a budget-burning incident), and measure the loop: are repeat incidents declining? A postmortem without followed-through action items is theater; the action items are the entire point of doing the postmortem.
 
-**Q13: What is the exact sequence an on-call engineer follows in the first five minutes after being paged, before real diagnosis starts?**
+**Q: What is the exact sequence an on-call engineer follows in the first five minutes after being paged, before real diagnosis starts?**
 **Short:** The engineer acknowledges within the escalation window, checks the runbook and dashboard, assigns severity, and declares before any real diagnosis starts.
 The on-call engineer acknowledges the page inside the escalation window, opens the runbook and RED/SLO-burn dashboard, and assigns a severity before touching anything else. For a SEV1 or SEV2, a single command like `/incident declare sev2 "payments 5xx spike"` spins up the Slack channel and bridge and assigns an IC, who then pages SMEs and assigns Comms and Scribe before the team starts mitigating. Fixing this order as a checklist matters because human judgment degrades at 3am, and jumping straight to debugging is exactly the coordination failure ICS exists to prevent. Treat the first five minutes as a scripted checklist, not an improvised decision.
 
-**Q14: What sections make up a blameless postmortem document, beyond the root-cause narrative?**
-**Short:** A postmortem covers impact, a facts-only timeline, root cause via five whys, what went well or poorly, and owned action items — with no name attached to blame.
-A postmortem template has five parts: impact, a facts-only UTC timeline, root cause via five whys, what went well or poorly, and owned action items. In the module's payments outage example, the impact section quantifies a 38-minute SEV1 as roughly 4.2% of checkout attempts failing and about $310k in delayed or lost revenue with 88% of the SLO budget burned, and the timeline logs each milestone in UTC — 14:09 paged (MTTD 7m), 14:14 declared, 14:23 rollback issued (MTTR-to-mitigate 21m) — with no names attached to "who caused it." Structuring the document this way keeps the analysis factual and systemic instead of a narrative that can drift toward blame. Fill in every section for a SEV1/SEV2 postmortem, not just the root-cause paragraph people default to writing.
+**Q: What sections make up a blameless postmortem document, beyond the causal analysis?**
+**Short:** A postmortem covers impact, a facts-only timeline, the systemic contributing factors, what went well or poorly, and owned action items, with no name attached to blame.
+A postmortem template has five parts: impact, a facts-only UTC timeline, the contributing factors, what went well or poorly, and owned action items. In the module's payments outage example, the impact section quantifies a 38-minute SEV1 as roughly 4.2% of checkout attempts failing and about $310k in delayed or lost revenue with 88% of the SLO budget burned, and the timeline logs each milestone in UTC: 14:09 paged (MTTD 7m), 14:14 declared, 14:23 rollback issued (MTTR-to-mitigate 21m), with no names attached to "who caused it." Structuring the document this way keeps the analysis factual and systemic instead of a narrative that can drift toward blame. Fill in every section for a SEV1/SEV2 postmortem, not just the causal paragraph people default to writing.
 
-**Q15: What's the tradeoff between auto-remediation (auto-rollback) and human-in-the-loop mitigation?**
+**Q: What's the tradeoff between auto-remediation (auto-rollback) and human-in-the-loop mitigation?**
 **Short:** Auto-remediation trades human oversight for speed by skipping manual diagnosis, while human-in-the-loop keeps a safety check for ambiguous, high-blast-radius actions.
 Auto-remediation trades human oversight for speed, while human-in-the-loop trades speed for a safety check before acting. An auto-rollback triggered directly off a burn-rate page can cut MTTR to near zero by skipping the manual diagnosis step entirely — exactly the action item the case study's postmortem tracked ("auto-rollback on burn-rate page during a rollout"). The risk is a bad automatic decision compounding an already-bad situation with no human check, such as auto-rolling-back a deploy that wasn't actually the cause of the alert. Reserve full automation for well-understood, low-risk mitigations like rollback-on-deploy-correlated-alerts, and keep a human in the loop for ambiguous or high-blast-radius actions.
 
-**Q16: Why are MTTD, MTTA, MTTR, and MTBF described as segments of one continuous timeline rather than four independent numbers?**
+**Q: Where does an AI investigation agent fit in the incident command structure?**
+**Short:** It is a support role under the IC, gathering evidence, ranking hypotheses, and drafting the timeline; it never holds IC decision rights, and its mitigations run only after a human approves them.
+Tools such as AWS DevOps Agent (GA March 2026) pull alerts, metrics, logs, recent deploys, and code changes together and propose a ranked list of likely causes within minutes, which is often the slowest part of the first half hour for a human on-call engineer. In ICS terms that is evidence gathering for the Operations SMEs plus a first draft of the Scribe's timeline. It does not replace the Incident Commander, because the IC role is about decisions with business context: severity, who to page, what to tell customers, and whether a risky mitigation is worth it. Keep three rules. The agent's output is a hypothesis that an SME confirms against the dashboards before acting. Any mitigation it suggests (rollback, scale-out, failover) goes through the same human approval or pre-approved runbook automation as a human's suggestion. Its findings go into the incident channel so the timeline shows what it proposed and who accepted it. The failure mode to watch is anchoring: a confident wrong hypothesis can send the whole room down one path, so the IC should still ask "what else could it be?".
+
+**Q: Why are MTTD, MTTA, MTTR, and MTBF described as segments of one continuous timeline rather than four independent numbers?**
 **Short:** They chain end-to-end on one incident's timeline, so a fast segment can't compensate for a slow one, and each points to a different fix to watch.
 They chain end-to-end across a single incident's life span, so each metric's endpoint is the next metric's starting point. MTTD ends when the page fires, MTTA ends when it's acknowledged, MTTR ends at resolution, and MTBF is the gap from that resolution until the next incident starts. Because the segments are sequential, a fast one can't compensate for a slow one — a 2-minute MTTA followed by a 90-minute MTTR still means 90-plus minutes of user impact, which is why teams track all four instead of a single blended "time to fix" number. Watch whichever segment is trending worst rather than an average, since each points at a different fix: alerting for MTTD, paging reliability for MTTA, runbooks for MTTR, and postmortem hardening for MTBF.
 
@@ -602,8 +644,9 @@ kubectl rollout undo deployment/payments          # ~30s to restore, before root
 
 ```markdown
 # FIX 3: blameless postmortem with tracked action items.
-Root cause (systemic): canary ran at off-peak load, so v2.7.0's connection-pool exhaustion
-  never triggered before full rollout. (NOT "engineer X pushed a bad deploy.")
+Contributing factors (systemic): canary ran at off-peak load, so v2.7.0's connection-pool
+  exhaustion never triggered before full rollout; no pool-saturation SLI; no auto-rollback.
+  (NOT "engineer X pushed a bad deploy.")
 Action items (owner, due, tracked):
   - [ ] Canary must hold through a peak window         (A, 06/16)
   - [ ] Connection-pool saturation SLI + alert         (B, 06/12)

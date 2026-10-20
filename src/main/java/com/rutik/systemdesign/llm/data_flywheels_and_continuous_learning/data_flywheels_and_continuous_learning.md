@@ -11,7 +11,7 @@ The key components of a data flywheel for LLM applications are:
 - **User feedback collection** — capturing both implicit signals (e.g., regeneration clicks, conversation abandonment) and explicit signals (thumbs up/down, corrections)
 - **Data curation pipeline** — filtering, deduplicating, and quality-checking production data before it enters training
 - **Active learning** — selecting the most informative examples from the unlabeled production stream for human annotation, minimizing cost while maximizing information gain
-- **Model improvement cycles** — periodic or continuous fine-tuning on curated production data (see [Fine-Tuning](../fine_tuning/fine_tuning.md) for LoRA/full-FT mechanics)
+- **Model improvement cycles**: what the loop changes. Four of the five targets leave the serving model's weights alone or retrain them without labels: the prompt or program (optimized from traces with DSPy's GEPA), the agent's memory store (consolidated from episodes), a reinforcement fine-tune scored by a grader instead of a label, and a small model distilled from logged frontier completions. Supervised fine-tuning on annotated production data is the fifth and slowest (see [Fine-Tuning](../fine_tuning/fine_tuning.md) for LoRA/full-FT mechanics)
 - **A/B testing and evaluation** — rigorous comparison of updated models against the baseline before deployment
 - **Drift detection and monitoring** — detecting distribution shift in queries or model behavior before it silently degrades quality
 
@@ -135,6 +135,28 @@ contains correct early steps worth keeping. See [Agents and Tool Use](../agents_
 for how to build this trajectory-with-verifiable-outcome format, and [Alignment & RLHF](../alignment_and_rlhf/grpo_and_rlvr.md)
 for GRPO/RLVR-style training on exactly this kind of verifiable, episode-level reward.
 
+### 4.6 Flywheels That Change Something Other Than Labeled-Data Weights
+
+The loop in 5.1 ends in a supervised fine-tune on annotated data, which is the slowest and most
+expensive thing a flywheel can change. Production traces can drive four other loops, and most
+teams should run them first:
+
+| Loop | What production data feeds it | What it changes | Cycle time | Rollback |
+|---|---|---|---|---|
+| Prompt / program optimization (DSPy GEPA, MIPROv2) | Traces plus a metric that returns a score and text feedback | Instructions and few-shot demos in each prompt | Hours | Revert a prompt version |
+| Memory consolidation | Agent episodes, user corrections, tool results | Facts and procedures in the agent's memory store | Nightly batch or per session | Delete or roll back memory entries |
+| Reinforcement fine-tuning with graders | Production prompts (no labels) plus a grader that scores any output | Model weights, via GRPO on grader reward | Days | Swap model version |
+| Distillation from frontier logs | Frontier-model completions that passed evals or user acceptance | A small student model's weights | Days to weeks | Swap model version |
+| SFT on annotated data (5.1) | Human corrections and labels | Model weights | Weeks | Swap model version |
+
+The order is the decision rule: a failure that a prompt edit or a memory entry fixes should never
+wait four weeks for a fine-tune, and a grader is cheaper to write than 2,000 labels. GEPA
+(Agrawal et al., arXiv:2507.19457, ICLR 2026) is the reason prompt optimization now belongs in a
+flywheel discussion: it reads full trajectories (reasoning, tool calls, tool outputs), writes
+natural-language reflections on what went wrong, and keeps a Pareto frontier of candidate
+prompts; it outperforms GRPO weight training by 6% on average and up to 20% while using up to 35x
+fewer rollouts, and beats MIPROv2 by over 10%.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -251,6 +273,53 @@ flowchart TD
     class EmbedProd,EmbedRef,Compare,Threshold mathOp
     class Alert lossN
 ```
+
+### 5.5 One Trace Store, Five Improvement Loops
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Traces[("Trace store<br/>prompt, trajectory,<br/>outcome, feedback")]
+    Metric("Metric / grader<br/>score + feedback")
+    GEPA("GEPA<br/>prompt rewrite")
+    Mem("Memory<br/>consolidation")
+    RFT("RFT<br/>GRPO on grader")
+    Distill("Distill<br/>frontier to small")
+    SFT("SFT on<br/>annotated data")
+    Gate{"Eval gate<br/>+ canary"}
+    Serve(["Serving system"])
+
+    Traces --> Metric
+    Metric --> GEPA
+    Metric --> RFT
+    Metric --> Distill
+    Traces --> Mem
+    Traces --> SFT
+    GEPA --> Gate
+    Mem --> Gate
+    RFT --> Gate
+    Distill --> Gate
+    SFT --> Gate
+    Gate --> Serve
+    Serve --> Traces
+
+    class Traces,Serve io
+    class Metric req
+    class GEPA,Mem base
+    class RFT,Distill,SFT train
+    class Gate mathOp
+```
+
+The metric (or grader) is the shared asset: the same function that scores a trace for GEPA is the
+reward for RFT and the filter that decides which frontier completions are clean enough to distill.
+Every loop still ends at the eval gate and canary from 5.3.
 
 ---
 
@@ -563,6 +632,90 @@ Section 6.5 covers covariate shift (input distribution changes). Concept drift i
 - For sudden drift (policy change), update the knowledge base or system prompt immediately; schedule retraining for next cycle
 - For gradual drift, increase the proportion of recent production data in the next fine-tuning mix
 
+### 6.9 Weight-Free and Label-Free Loops: Mechanics
+
+**Prompt optimization from production traces (DSPy GEPA).** Sample a few hundred traces, split
+them into a train and validation set, and write a metric that returns both a score and the reason
+for it; the text feedback is what GEPA's reflection step reads, so "wrong refund window: said 30
+days, policy is 14" is worth far more than a bare 0.
+
+```python
+import dspy
+
+def metric(gold: dspy.Example, pred: dspy.Prediction, trace=None,
+           pred_name: str | None = None, pred_trace=None) -> dspy.Prediction:
+    ok = pred.resolution == gold.resolution
+    feedback = "Correct." if ok else (
+        f"Expected resolution '{gold.resolution}', got '{pred.resolution}'. "
+        f"Customer said: {gold.complaint[:200]}")
+    return dspy.Prediction(score=float(ok), feedback=feedback)
+
+def optimize_from_traces(program: dspy.Module, traces: list[dict]) -> dspy.Module:
+    examples = [dspy.Example(complaint=t["input"], resolution=t["accepted_resolution"])
+                .with_inputs("complaint") for t in traces]
+    cut = int(len(examples) * 0.7)
+    gepa = dspy.GEPA(metric=metric, track_stats=True)
+    return gepa.compile(program, trainset=examples[:cut], valset=examples[cut:])
+```
+
+The output is a new prompt version, which goes through the same registry, eval gate and canary as
+a model version (see [Prompt Management](../prompt_management_and_promptops/prompt_management_and_promptops.md)
+and [DSPy](../agentic_frameworks/dspy.md)).
+
+**Memory consolidation.** An agent with long-term memory (see
+[Agent Memory](../agents_and_tool_use/agent_memory.md)) improves without any training run if a
+batch job turns raw episodes into curated memories: extract candidate facts and procedures from
+the day's sessions ("customer X's invoices go to their AP mailbox"), merge duplicates by embedding
+similarity, resolve contradictions in favour of the newest source with a timestamp, and expire
+entries nobody retrieved in N days. The failure mode is the flywheel's usual one, unfiltered input:
+a hallucinated "fact" written to memory is retrieved and repeated in every later session, so
+consolidation needs the same quality gate as training data and a delete path per entry.
+
+**Reinforcement fine-tuning with graders.** RFT needs prompts and a grader, not labeled answers.
+The trainer samples several responses per production prompt, the grader scores each, and GRPO
+pushes the policy toward the higher-scoring ones. Amazon Bedrock RFT runs exactly this loop on
+uploaded data or existing API invocation logs, with the reward written as an AWS Lambda function or
+a model-as-judge, for Nova 2 Lite, gpt-oss-20B and Qwen3 32B; AWS reports accuracy gains of up to
+66% on average over base models and recommends starting with 100-200 examples. OpenAI's RFT
+supports o4-mini with `string_check`, `text_similarity`, `score_model`, `python` and `multi`
+graders, but OpenAI's self-serve fine-tuning closed to organizations without prior fine-tuning on
+2026-05-07 and stops accepting new jobs from existing customers on 2027-01-06. Self-hosted, TRL's
+`GRPOTrainer` takes the same grader as a reward function.
+
+```python
+import json
+
+def grade_refund_reply(prompt: dict, output: str) -> float:
+    try:
+        reply = json.loads(output)
+    except json.JSONDecodeError:
+        return 0.0
+    score = 0.0
+    if reply.get("refund_days") == prompt["policy_refund_days"]:
+        score += 0.6
+    if reply.get("escalate") == prompt["needs_escalation"]:
+        score += 0.3
+    if len(reply.get("message", "")) <= 600:
+        score += 0.1
+    return score
+```
+
+The grader is now the attack surface: everything in [GRPO and RLVR](../alignment_and_rlhf/grpo_and_rlvr.md)
+on reward hacking applies. Check that baseline rewards are neither near 0 (the model cannot do the
+task yet; run SFT first) nor above 0.95 (nothing left to learn), which is the same screening rule
+AWS gives for Bedrock RFT.
+
+**Distillation from logged frontier completions.** Route a task to a frontier model, log every
+completion with its metadata, keep only those that passed the eval suite or were accepted by the
+user, and fine-tune a small model on them. The serving cost then falls to the student's price on
+the slice it handles, and a router (see [LLM Routing](../llm_routing_and_model_selection/llm_routing_and_model_selection.md))
+keeps the frontier model for the rest. Three constraints: logs must be retained long enough to
+build the set (OpenAI's Responses API stores responses for 30 days by default), the student needs a
+training platform that will still exist (for OpenAI students, not after 2027-01-06; open-weight
+students via TRL or Bedrock avoid that), and provider terms restrict using outputs to build
+competing models, so check them before distilling. Mechanics of the student training itself are in
+[Knowledge Distillation](../knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md).
+
 ---
 
 ## 7. Real-World Examples
@@ -596,6 +749,16 @@ Traditional search engines (Google, Bing) use click-through rate as an implicit 
 | Correction submission | Very high | Medium (user effort) | Low | Low volume; not all errors get corrections | Domain-specific fine-tuning |
 | Outcome tracking | High | Medium (integration cost) | High | Requires downstream system integration | Resolution-rate improvement |
 | Active learning + annotation | Very high | High (human annotators) | Controlled | Annotator inconsistency; concept drift in labels | Maximum model improvement per annotation dollar |
+
+### 8.1a Improvement Loop Comparison
+
+| Loop | Labels needed | Compute | Fixes | Does not fix |
+|---|---|---|---|---|
+| GEPA / prompt optimization | None (metric with feedback) | Hundreds to low thousands of rollouts | Instruction gaps, missing rules, bad demos | Missing knowledge or capability |
+| Memory consolidation | None (quality filter) | Batch LLM calls | Per-user and per-tenant facts, learned procedures | General skill; can spread a wrong fact |
+| RFT with graders | None (grader) | GPU training run | Skills a grader can score: format, policy, correctness | Tasks with no reliable grader |
+| Distillation | None (eval-filtered teacher output) | SFT run | Cost and latency on a stable slice | Anything the teacher also gets wrong |
+| SFT on annotations | Yes | SFT run | Domain style, corrections humans wrote | Fast-moving facts (use RAG) |
 
 ### 8.2 Update Frequency Tradeoffs
 
@@ -686,6 +849,10 @@ A team implemented daily fine-tuning on the previous day's feedback. After three
 | A/B testing | Optimizely | Traffic splitting and experiment assignment | Off-the-shelf assignment; most LLM teams instead hand-roll A/B routing at the inference gateway |
 | PII scrubbing | Microsoft Presidio | Open-source PII detection and anonymization | Supports 40+ entity types; customizable recognizers |
 | Annotation platform | Prodigy | Spacy-integrated annotation tool with built-in active learning | Efficient for NLP tasks; recipes for text classification, NER, ranking |
+| Prompt optimization | DSPy `GEPA`, `MIPROv2` | Optimize prompts and demos from traces and a metric | GEPA reads text feedback from the metric; needs the `gepa` package |
+| Reinforcement fine-tuning | Amazon Bedrock RFT | GRPO on uploaded data or API invocation logs with Lambda or model-judge rewards | Nova 2 Lite, gpt-oss-20B, Qwen3 32B |
+| Reinforcement fine-tuning | OpenAI RFT | Grader-based RL on o4-mini | Closed to new orgs since 2026-05-07; no new jobs after 2027-01-06 |
+| Reinforcement fine-tuning | TRL `GRPOTrainer` | Self-hosted GRPO with any Python reward function | Same grader code as the hosted options |
 
 ### Annotation Workflow Design
 
@@ -708,6 +875,18 @@ Production annotation workflows for data flywheels require more structure than a
 **Q: What is a data flywheel, and why is it considered a competitive moat for LLM applications?**
 **Short:** A data flywheel is a self-reinforcing loop where production usage improves the model, and it moats competitors because years of feedback can't be copied.
 A data flywheel is a self-reinforcing feedback loop where production usage generates training data that improves the model, which drives more usage and generates more data. It is a competitive moat because the data and the learned improvements from production are proprietary — a competitor can replicate your architecture but cannot replicate years of production feedback. The moat compounds over time: each improvement cycle makes the model better, which attracts more users, which generates more diverse and informative feedback.
+
+**Q: Your flywheel fine-tunes monthly, but most production failures are wrong policy statements. What should the loop change first?**
+**Short:** Fix what a prompt, retrieval, or memory update can fix (via GEPA-style optimization on traces) and keep weight training for skill gaps, since a fine-tune takes weeks and a prompt version takes hours.
+A: Classify the failures before choosing the loop. Wrong or stale facts belong in the knowledge base or memory store; missing rules and bad examples belong in the prompt, and DSPy's GEPA can rewrite it from a few hundred traces plus a metric that explains each failure, beating MIPROv2 by over 10% and GRPO weight training by 6% on average with up to 35x fewer rollouts. A prompt version rolls out and rolls back in hours through the same eval gate and canary as a model. Reserve RFT, distillation, or SFT for failures that survive those fixes, which are capability gaps rather than instruction gaps.
+
+**Q: How does reinforcement fine-tuning with graders turn production traffic into training signal without labels?**
+**Short:** The trainer samples several responses per production prompt, a grader scores each one, and GRPO moves the model toward higher-scoring responses, so only prompts and a scoring function are needed.
+A: Supervised fine-tuning needs the correct answer for every example; RFT needs a function that can score any answer. Production prompts (Bedrock RFT can read API invocation logs directly) are replayed, the model samples a group of responses, a grader (code in a Lambda or Python function, or a model judge) scores them, and GRPO uses the group-relative scores as advantages. Screen before training: if baseline reward is near 0 the model needs SFT first, and if it is above 0.95 RFT has nothing to teach. The grader becomes the attack surface, so test it against known-wrong outputs and watch for rewards that rise while held-out evals stay flat.
+
+**Q: What are the constraints on distilling a small model from logged frontier-model completions?**
+**Short:** Log retention, eval-filtering of the teacher outputs, a training platform that will still exist, and provider terms that restrict using outputs to build competing models.
+A: The recipe is simple: log frontier completions with metadata, keep those that passed evals or user acceptance, fine-tune a student, and route the stable slice to it. The constraints are where it fails. Logs must be retained long enough to collect the set (OpenAI's Responses API keeps responses 30 days by default). Unfiltered teacher outputs copy the teacher's errors into the student. OpenAI's self-serve fine-tuning closed to new organizations on 2026-05-07 and takes no new jobs after 2027-01-06, so a student trained there has no retraining path; open-weight students trained with TRL or Bedrock do. And provider terms limit using outputs to develop competing models, so legal review comes before the first training run.
 
 **Q: What is the difference between implicit and explicit feedback, and when would you rely on each?**
 **Short:** Implicit feedback like regeneration clicks is high-volume but noisy, while explicit feedback like thumbs-down is lower-volume but higher-signal.
@@ -792,6 +971,8 @@ Version everything an iteration consumed and produced, all recorded in one model
 **Separate the feedback signal from the training label.** A thumbs-down is a feedback signal, not a training label. It tells you something went wrong; it does not tell you what the correct response is. Never use raw feedback events as training labels. Use them to select candidates for annotation or as preference data for DPO; always have a human or high-quality automated system provide the actual training target.
 
 **Monitor the flywheel's own health metrics.** Track: annotation throughput (examples labeled per week), curation pass rate (percentage of raw feedback that survives quality filters), model update frequency, evaluation score trend over time, and feedback collection rate (percentage of conversations that yield at least one feedback signal). If any of these metrics degrades, the flywheel is losing momentum — investigate before the model quality degrades downstream.
+
+**Run the cheapest loop that fixes the failure.** Route each failure class to the loop that changes the least: knowledge base or memory for facts, GEPA or a prompt edit for rules, RFT or distillation for skills and cost, SFT on annotations last. Write the metric once with a score and a text reason, and reuse it as the GEPA metric, the RFT reward, and the distillation filter.
 
 **Allocate 10% of the annotation budget to random sampling.** Pure active learning (always selecting the highest-uncertainty or highest-error examples) creates a biased dataset that over-represents edge cases and under-represents common cases. Random sampling ensures coverage of the full query distribution and catches blind spots in the active learning selector itself.
 

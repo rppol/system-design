@@ -275,6 +275,55 @@ RBAC and ABAC (above) are not the whole picture once permissions vary **per obje
 
 The central operational tradeoff in a Zanzibar-style system is that **`Check` (is this specific access allowed?) is cheap and cacheable, while `ListObjects` (what may this user see, across all objects?) is expensive** — it is a graph walk that cannot be pushed into a SQL `WHERE` clause, because the permission may be derived through arbitrary relation composition rather than stored as a flat row. See §6 for both calls side by side. The consistency knob follows from the same graph model: a **new-enemy problem** arises when a `Check` reads a replica that has not caught up with a very recent revocation, letting a just-removed user through for a short window; Zanzibar's paper calls the consistency token that pins a read to at-least-this-recent state a **zookie**, and OpenFGA and SpiceDB both expose the same idea (SpiceDB calls it a **ZedToken**), trading latency for recency on a per-call basis.
 
+### AuthZEN Authorization API 1.0: the PEP-to-PDP Contract
+
+Every model above splits the job in two. A **policy enforcement point (PEP)**, such as an API gateway, a servlet filter, or a service method, asks a **policy decision point (PDP)**, such as OPA, OpenFGA, Cedar, or a vendor engine, whether a subject may perform an action on a resource. Each PDP used to define its own request shape: OPA takes an `input` document, OpenFGA takes a `user`/`relation`/`object` tuple, Cedar takes `principal`/`action`/`resource`. Swapping the engine meant rewriting every PEP. The **OpenID AuthZEN Authorization API 1.0**, approved as an OpenID Final Specification on January 12, 2026 (81 approve, 1 object, 25 abstain), fixes the wire contract between PEP and PDP and leaves the policy language to each engine.
+
+```
+  PEPs (ask)                      AuthZEN wire contract                 PDPs (decide)
+  +--------------------+                                             +-------------------+
+  | API gateway        |---+   POST /access/v1/evaluation       +--->| OPA (Rego)        |
+  +--------------------+   |   {subject, action, resource,      |    +-------------------+
+  | Spring filter      |---+-> context}                     ----+--->| OpenFGA (tuples)  |
+  +--------------------+   |   <- {"decision": true | false}   |    +-------------------+
+  | UI button renderer |---+                                    +--->| Cedar / AVP       |
+  +--------------------+                                             +-------------------+
+        one request shape in every PEP; changing the PDP changes a URL, not the PEP code
+```
+
+*The PEP side stays fixed while the PDP behind the contract changes; the policy language never crosses the wire.*
+
+A single access evaluation has four parts. `subject` and `resource` each need `type` and `id` with optional `properties`; `action` needs `name`; `context` carries environment attributes such as time or IP address. The response has one required field, the boolean `decision`, plus an optional `context` object the PDP can use for reasons or obligations.
+
+```json
+POST /access/v1/evaluation
+{
+  "subject":  { "type": "user", "id": "alice@acme.com", "properties": { "department": "sales" } },
+  "action":   { "name": "can_edit" },
+  "resource": { "type": "document", "id": "roadmap-2027", "properties": { "owner": "bob@acme.com" } },
+  "context":  { "time": "2026-10-19T09:30:00Z" }
+}
+
+200 OK
+{ "decision": false, "context": { "reason": "document is locked for review" } }
+```
+
+| Default path | Question it answers | Response body |
+|--------------|---------------------|---------------|
+| `/access/v1/evaluation` | May S do A on R? | `decision` (required boolean), `context` (optional) |
+| `/access/v1/evaluations` | Many such questions in one round trip; top-level `subject`, `action`, `resource`, and `context` act as defaults that each item in `evaluations` overrides | `evaluations` array of decisions, in request order |
+| `/access/v1/search/subject` | Which subjects may do A on R? | `results` array plus a `page` object |
+| `/access/v1/search/resource` | Which resources may S do A on? This is OpenFGA's `ListObjects` under a common name, with the same graph-walk cost | `results` array plus a `page` object |
+| `/access/v1/search/action` | Which actions may S do on R? | `results` array plus a `page` object |
+
+Three details decide whether an integration works:
+
+- **Batch semantics.** `options.evaluations_semantic` on the batch endpoint takes `execute_all` (the default: run every evaluation and return every result), `deny_on_first_deny` (stop at the first deny or failure), or `permit_on_first_permit` (stop at the first permit). A page that renders 50 edit buttons needs `execute_all`; a request that needs all of several permissions at once can use `deny_on_first_deny` to save PDP work.
+- **Search pagination.** A search request may carry `page.token` and `page.limit`; the response carries `page.next_token`. The PEP sends the previous `next_token` back as `token` with every other parameter unchanged, and iteration ends when `next_token` is an empty string.
+- **Discovery.** A PDP publishes metadata at `/.well-known/authzen-configuration`, inserted between the host and any path, so a tenant-scoped PDP at `https://pdp.example.com/tenant1` serves `https://pdp.example.com/.well-known/authzen-configuration/tenant1`. The metadata names each endpoint (`access_evaluation_endpoint`, `access_evaluations_endpoint`, `search_subject_endpoint`, `search_resource_endpoint`, `search_action_endpoint`), so a PEP reads the URLs from it instead of hard-coding paths.
+
+AuthZEN does not standardize the policy language, how the PDP fetches attributes it was not sent, decision caching, or what a PEP does when the PDP is unreachable. The AuthZEN interop results list PDPs including Open Policy Agent, OpenFGA, Cerbos, Topaz, Amazon Verified Permissions, Axiomatics, and PingAuthorize, and API gateway PEPs including Envoy, Kong, Tyk, AWS API Gateway, and Zuplo.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -910,6 +959,67 @@ List<String> visibleDocuments = listResponse.getObjects(); // e.g. ["document:ro
 
 Use `Check` on the hot path for a single access decision (rendering one page, gating one API call). Reserve `ListObjects` for building "what can this user see" views, and never approximate it with a loop of per-object `Check` calls — see §10 for what that costs at scale.
 
+### AuthZEN Access Evaluation from a Spring PEP
+
+The PEP below speaks only AuthZEN, so the PDP behind `authz.pdp-url` can be OPA, OpenFGA, or a vendor engine without a code change. It fails closed: a timeout, a 5xx, or an unparseable body all deny.
+
+```java
+public record AuthzEntity(String type, String id, Map<String, Object> properties) {}
+public record AuthzAction(String name) {}
+public record EvaluationRequest(AuthzEntity subject, AuthzAction action,
+                                AuthzEntity resource, Map<String, Object> context) {}
+public record Decision(boolean decision, Map<String, Object> context) {}
+
+@Component
+public class AuthzenClient {
+
+    private static final Logger log = LoggerFactory.getLogger(AuthzenClient.class);
+    private final RestClient pdp;
+
+    public AuthzenClient(RestClient.Builder builder, @Value("${authz.pdp-url}") String pdpUrl) {
+        var http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(200)).build();
+        var factory = new JdkClientHttpRequestFactory(http);
+        factory.setReadTimeout(Duration.ofMillis(150));
+        this.pdp = builder.baseUrl(pdpUrl).requestFactory(factory).build();
+    }
+
+    public boolean isAllowed(Jwt user, String action, String resourceType, String resourceId) {
+        var request = new EvaluationRequest(
+            new AuthzEntity("user", user.getSubject(), Map.of("tenant", user.getClaimAsString("tenant_id"))),
+            new AuthzAction(action),
+            new AuthzEntity(resourceType, resourceId, Map.of()),
+            Map.of("time", Instant.now().toString()));
+        try {
+            Decision d = pdp.post().uri("/access/v1/evaluation")
+                .body(request).retrieve().body(Decision.class);
+            return d != null && d.decision();
+        } catch (RestClientException e) {
+            log.warn("PDP unavailable, denying {} on {}:{}", action, resourceType, resourceId, e);
+            return false;
+        }
+    }
+}
+```
+
+A batch call for a list page asks every question at once and sets the semantic explicitly:
+
+```json
+POST /access/v1/evaluations
+{
+  "subject": { "type": "user", "id": "alice@acme.com" },
+  "action":  { "name": "can_edit" },
+  "evaluations": [
+    { "resource": { "type": "document", "id": "roadmap-2027" } },
+    { "resource": { "type": "document", "id": "budget-2027" } },
+    { "resource": { "type": "document", "id": "offsite-plan" } }
+  ],
+  "options": { "evaluations_semantic": "execute_all" }
+}
+
+200 OK
+{ "evaluations": [ { "decision": true }, { "decision": false }, { "decision": true } ] }
+```
+
 ---
 
 ## 7. Real-World Examples
@@ -998,6 +1108,8 @@ Use `Check` on the hot path for a single access decision (rendering one page, ga
 
 **Pitfall 9 — `ListObjects` approximated with a `Check` loop:** A team building a "documents shared with me" page implemented it by calling the authorization server's `Check` once per candidate document in the workspace. At 100 documents the page returned in 40 ms and nobody noticed the design. Once a large customer's workspace grew to 100,000 documents nested across a dozen folder levels, the same page fired 100,000 sequential `Check` calls, took upward of 90 seconds, and blew past the API gateway's 30-second timeout on every load. The fix was to replace the loop with a single `ListObjects` call, which the authorization server answers as one bounded graph traversal instead of N independent ones; the same page returned in roughly 280 ms at 100,000 documents after the change. The lesson: reach for `ListObjects` for "what can this user see" from day one — a `Check` loop does not degrade gracefully, it works fine until the object count crosses exactly the threshold where per-object permissions start to matter.
 
+**Pitfall 10 - PDP errors treated as permit:** A team moved authorization from in-process role checks to an external PDP behind an AuthZEN client and wrapped the call in a catch block that returned `true`, reasoning that a PDP outage should not take the product down. A bad policy bundle push made the PDP return 500 for 6 minutes; for those 6 minutes every request in the fleet was permitted, including cross-tenant reads that the policy existed to block. AuthZEN defines only the decision a PDP returns, so nothing in the protocol catches this. Fix: fail closed on every error, timeout, and unparseable body (the §6 client returns `false`), alert on the PDP error rate, and keep the PDP highly available with a sidecar or local replica instead of trading availability for an open door.
+
 ---
 
 ## 11. Technologies and Tools
@@ -1022,6 +1134,7 @@ Use `Check` on the hot path for a single access decision (rendering one page, ga
 | SpiceDB (Authzed)                 | gRPC-first open-source Zanzibar implementation; ZedToken consistency; used by OpenAI for ChatGPT Enterprise |
 | Permify                           | Open-source Zanzibar-style relationship-based authorization service |
 | AWS Cedar + Verified Permissions  | Policy language (ABAC-flavoured, not relation-tuple ReBAC) and its managed AWS evaluation service |
+| OpenID AuthZEN Authorization API 1.0 | Final standard (January 12, 2026) for the PEP-to-PDP call: `/access/v1/evaluation`, batch `evaluations`, and subject/resource/action search |
 
 ---
 
@@ -1146,6 +1259,21 @@ The new-enemy problem occurs when an authorization check reads from a replica th
 **Short:** Choose RBAC for a small fixed set of roles that do not vary per object; ReBAC once access is per-object.
 
 RBAC is the right default when the number of distinct permission levels is small and fixed and does not vary from one resource instance to the next — an admin/manager/viewer split on a SaaS product, where "manager" means the same thing everywhere in the system. It breaks down the moment access needs to vary per object: a document-sharing feature where any user can grant any other user viewer or editor access to any specific document, or a folder hierarchy where permission should flow to everything nested inside it. Modeling that in RBAC means minting a new role per document or per folder, which explodes the role count and becomes unmanageable to audit. That per-object, relationship-driven shape is exactly what Zanzibar-style ReBAC (OpenFGA, SpiceDB, Permify) was built for — do not deploy a full ReBAC system to model five fixed roles, and do not keep bolting per-object hacks onto RBAC once the object-level sharing requirement shows up.
+
+**Q: An AuthZEN PDP call times out. Should the PEP permit or deny, and does the spec decide that for you?**
+**Short:** Deny. AuthZEN defines only the decision a reachable PDP returns, so failing closed on timeouts and errors is code the PEP must write itself.
+
+The PEP should deny, and the spec does not make that choice for it. The AuthZEN Authorization API 1.0 defines the request (`subject`, `action`, `resource`, `context`) and the response (a required boolean `decision`), but a timeout, a connection refusal, or a 5xx produces no `decision` at all, and what happens next is whatever the PEP's error handling does. The common bug is a catch block that returns `true` to protect availability, which turns a PDP outage or a bad policy push into a window where every request is allowed (Pitfall 10). Set tight timeouts (150-200 ms is typical for an in-region PDP), return `false` on every error path, alert on the PDP error rate, and buy availability with a sidecar or local PDP replica rather than with fail-open logic.
+
+**Q: What does the OpenID AuthZEN Authorization API standardize, and what does it leave to the PDP?**
+**Short:** AuthZEN fixes the PEP-to-PDP wire format, subject, action, resource, and context in and a boolean decision out, but not the policy language, attribute fetching, or caching.
+
+AuthZEN 1.0, an OpenID Final Specification since January 12, 2026, standardizes the call a policy enforcement point makes to a policy decision point. A request carries `subject` and `resource` (each a `type`, an `id`, and optional `properties`), an `action` (`name`), and an optional `context`; the response is `{"decision": true|false}` with an optional `context` for reasons. It also defines a batch endpoint (`/access/v1/evaluations`), three search endpoints (subject, resource, and action search, with token pagination), and PDP metadata at `/.well-known/authzen-configuration`. It deliberately leaves out the policy language (Rego, OpenFGA models, and Cedar all sit behind it), how the PDP gets attributes the PEP did not send, decision caching, and fail-open versus fail-closed behavior. The practical value is that a gateway or service written against AuthZEN can change from OPA to OpenFGA to a vendor PDP by changing a URL, which the AuthZEN interop results show across engines such as OPA, OpenFGA, Cerbos, Topaz, and Amazon Verified Permissions.
+
+**Q: In an AuthZEN batch request, what does evaluations_semantic control, and which value fits a page that renders 50 edit buttons?**
+**Short:** It sets whether the PDP runs every evaluation (execute_all, the default) or stops at the first deny or permit; a page of buttons needs execute_all to get every answer.
+
+`options.evaluations_semantic` on `/access/v1/evaluations` tells the PDP how far to go through the `evaluations` array. `execute_all`, the default, runs every item and returns one decision per item in request order. `deny_on_first_deny` stops at the first deny or failure, which fits an operation that needs several permissions at once (move a document needs `can_delete` on the source folder and `can_create` on the target), because one deny already settles the answer. `permit_on_first_permit` stops at the first permit, which fits "is any of these grants enough". A page rendering 50 edit buttons needs a decision for each button, so it must use `execute_all`; a short-circuit semantic would leave later buttons with no decision. The batch call also cuts 50 round trips to one: at 3 ms per PDP round trip that is about 150 ms of serial latency removed from the page.
 
 ---
 

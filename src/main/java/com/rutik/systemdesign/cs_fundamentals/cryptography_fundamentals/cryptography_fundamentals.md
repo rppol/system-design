@@ -217,7 +217,7 @@ The `mod n` is what makes it one-way. Ordinary exponentiation is easy to invert 
 - 256-bit ECDSA key ≈ 3072-bit RSA key in security level
 - ECDH key exchange ~0.1 ms vs RSA ~10 ms — 100x faster
 - Curve25519 / X25519 is the modern recommendation for key exchange
-- NIST P-256 (secp256r1) widely used, NSA Suite B compliant
+- NIST P-256 (secp256r1) widely used in TLS and WebAuthn. For US national security systems, NSA's CNSA 1.0 (2015, the Suite B replacement) allows only P-384, and CNSA 2.0 (2022) moves to ML-KEM-1024 and ML-DSA-87
 
 ### 4.4 HMAC (Hash-based Message Authentication Code)
 
@@ -300,10 +300,55 @@ NIST published the first post-quantum standards in **August 2024** and selected 
 | **FIPS 204** | ML-DSA (Dilithium) | Module lattices | RSA / ECDSA signatures |
 | **FIPS 205** | SLH-DSA (SPHINCS+) | Hash functions only | Signatures where lattice hardness is too new an assumption |
 | draft ~2026, final 2027 | HQC (Hamming Quasi-Cyclic) | Error-correcting codes | Backup KEM for ML-KEM — a non-lattice hedge |
+| FIPS 206 (in development) | FN-DSA (Falcon) | NTRU lattices, FFT-based signing | Signatures where ML-DSA's size is too large |
 
 **Why a fifth algorithm, and why a code-based one.** Three of the four published standards rest on the same hardness assumption: ML-KEM and ML-DSA are both module-lattice schemes, so a structural break in lattices would take out key exchange and the primary signature scheme in one stroke. SLH-DSA hedges the signature side with nothing but hash functions; HQC hedges the *key-exchange* side with error-correcting codes, a family that has been studied in information security for decades. It is not a replacement — ML-KEM stays the primary recommendation and is the one in CNSA 2.0 — and it costs more: HQC's keys and ciphertexts are larger and it needs more compute than ML-KEM. You deploy ML-KEM now; HQC exists so that a lattice break is a migration rather than a catastrophe.
 
-The deployed pattern is **hybrid**: run a classical and a post-quantum key exchange and concatenate both shared secrets into the KDF, so the session stays safe if either one holds. TLS 1.3 does this today with the `X25519MLKEM768` group, shipped by default in Chrome and Firefox — an X25519 ECDH combined with ML-KEM-768. Signatures are migrating more slowly because certificate chains carry every signature in the path and an ML-DSA-44 signature is 2,420 bytes against Ed25519's 64.
+**FN-DSA (Falcon) and why it is a separate standard.** ML-DSA's weakness is size. FN-DSA, the
+Falcon-based scheme NIST is standardizing as FIPS 206, signs over NTRU lattices with a fast-Fourier
+sampler and produces much smaller output:
+
+| Scheme (NIST level 1-2) | Public key | Signature | Sign path |
+|-------------------------|------------|-----------|-----------|
+| Ed25519 (classical) | 32 B | 64 B | Integer |
+| FN-DSA-512 (Falcon-512) | 897 B | 666 B | Floating-point Gaussian sampling |
+| ML-DSA-44 | 1,312 B | 2,420 B | Integer |
+
+The cost is implementation risk on the signing side: Falcon's sampler uses double-precision floating
+point, which is hard to make constant-time and to run identically on every CPU, so a careless signer
+leaks key bits through timing. Verification is integer-only and simple. That profile suits
+certificate chains and firmware images, which are signed rarely in controlled environments and
+verified everywhere, where every byte counts.
+
+**Migration deadlines (NIST IR 8547).** The initial public draft of NIST IR 8547 (November 12, 2024)
+sets the schedule for retiring quantum-vulnerable algorithms in federal systems, and most compliance
+programs follow it:
+
+| Algorithm family | Security strength | Status |
+|------------------|-------------------|--------|
+| RSA, ECDSA signatures | 112-bit (RSA-2048, 224-bit curves) | Deprecated after 2030, disallowed after 2035 |
+| RSA, ECDSA, EdDSA signatures | 128-bit and above (RSA-3072, P-256, Ed25519) | Disallowed after 2035 |
+| ECDH, finite-field DH, RSA key establishment | 112-bit | Deprecated after 2030, disallowed after 2035 |
+| ECDH, finite-field DH, RSA key establishment | 128-bit and above | Disallowed after 2035 |
+
+*Deprecated* means still usable with accepted risk; *disallowed* means no longer allowed. The draft
+replaces SP 800-57's earlier plan to disallow 112-bit public-key schemes on January 1, 2031 with a
+deprecation, so organizations can move once, straight to post-quantum algorithms. The practical
+reading: RSA-2048 certificates and keys should be gone by the end of 2030, and every classical
+public-key primitive by 2035.
+
+The deployed pattern is **hybrid**: run a classical and a post-quantum key exchange and concatenate both shared secrets into the KDF, so the session stays safe if either one holds. RFC 10024 (Standards Track, August 2026) defines three TLS 1.3 hybrid groups: `X25519MLKEM768` (codepoint 0x11EC, the only one marked Recommended in the IANA registry), `SecP256r1MLKEM768`, and `SecP384r1MLKEM1024`. `X25519MLKEM768` pairs X25519 ECDH with ML-KEM-768, and the cost is bytes: the client key share is 1,216 bytes (1,184 B ML-KEM encapsulation key plus 32 B X25519) against 32 bytes for plain X25519, and the server share is 1,120 bytes (1,088 B ML-KEM ciphertext plus 32 B X25519).
+
+It is the default first choice on both ends of the connection, not only in browsers:
+
+| Stack | Default behaviour |
+|-------|-------------------|
+| Chrome, Firefox | offer `X25519MLKEM768` in every TLS 1.3 handshake |
+| OpenSSL 3.5+ (April 2025) | default client keyshares are `X25519MLKEM768` and `X25519`; hybrid groups preferred |
+| Go 1.24+ `crypto/tls` | `X25519MLKEM768` enabled when `Config.CurvePreferences` is nil; `GODEBUG=tlsmlkem=0` turns it off |
+| JDK 27 JSSE (JEP 527, GA 2026-09-15) | TLS 1.3 clients send `X25519MLKEM768` and `x25519` key shares unless `jdk.tls.namedGroups` or `SSLParameters.setNamedGroups` overrides the list |
+
+Signatures are migrating more slowly because certificate chains carry every signature in the path and an ML-DSA-44 signature is 2,420 bytes against Ed25519's 64. Library support lands ahead of the certificate ecosystem: Go 1.27 adds a `crypto/mldsa` package (FIPS 204), ML-DSA keys in `crypto/x509`, and the `MLDSA44`, `MLDSA65`, and `MLDSA87` signature schemes in TLS 1.3.
 
 Practical guidance: use AES-256 (not AES-128) and SHA-384 or better for anything with a long confidentiality horizon, prefer a hybrid TLS group where your stack offers one, and inventory where long-lived RSA/ECDSA keys are baked into firmware or root certificates — those are the migrations with multi-year lead times.
 
@@ -812,6 +857,26 @@ When your browser connects to https://example.com, in order:
 4. Client verifies the certificate chain, confirms the server's identity
 5. Subsequent data encrypted with AES-256-GCM (or ChaCha20-Poly1305 on mobile)
 
+### Certificate Lifetimes and Automated Renewal
+
+A certificate's validity period bounds how long a stolen or mis-issued key stays useful, because
+revocation checking fails open in most clients. The CA/Browser Forum's ballot SC-081 (passed April
+2025) cuts the maximum publicly trusted TLS certificate lifetime from 398 days to 47 days in steps
+from March 2026 to March 2029, and the reuse period for domain-validation data from 398 days to 10
+days. Let's Encrypt's published schedule goes further:
+
+| Date | Let's Encrypt profile | Certificate lifetime | Authorization reuse |
+|------|----------------------|---------------------|---------------------|
+| May 13, 2026 | `tlsserver` (opt-in) | 45 days | - |
+| February 10, 2027 | `classic` (default) | 64 days | 10 days |
+| February 16, 2028 | `classic` (default) | 45 days | 7 hours |
+| Available | `shortlived` (opt-in) | 6 days | - |
+
+At 45 days, a team that renews by hand once a quarter has expired certificates. Renewal must be an
+ACME client on a timer that renews at about two-thirds of the lifetime and alerts on failure. Shorter
+lifetimes also shorten the window in which a migration to a new key type, such as a post-quantum
+signature, takes effect across a fleet.
+
 ### JWT (JSON Web Tokens)
 A JWT = header.payload.signature
 - HS256 variant: `signature = HMAC-SHA256(secret, base64(header) + "." + base64(payload))`
@@ -1143,7 +1208,7 @@ def correct_mac(message: bytes) -> bytes:
 | libsodium / NaCl | C | Modern crypto primitives (Curve25519, XSalsa20, Poly1305) | High-level, hard-to-misuse API |
 | AWS KMS | Cloud | Key management, envelope encryption | Managed HSM; never see raw keys |
 | HashiCorp Vault | Infrastructure | Secrets management, key rotation, PKI | See `../../devops/secrets_management/` |
-| Let's Encrypt | Infrastructure | Free TLS certificates (ACME protocol) | Automated certificate lifecycle |
+| Let's Encrypt | Infrastructure | Free TLS certificates (ACME protocol) | `classic` profile default; `tlsserver` profile issues 45-day and `shortlived` 6-day certificates, so renewal must be automated |
 | GnuPG (GPG) | CLI | File encryption, signing, key management | Common for package signing |
 | Java `javax.crypto` | Java | AES, RSA, HMAC, KeyDerivation | Standard Java crypto API |
 
@@ -1217,11 +1282,27 @@ AEAD encrypts plaintext (for confidentiality) and also authenticates associated 
 
 **Q: Which of today's primitives survive a quantum computer, and what replaces the ones that don't?**
 **Short:** Symmetric crypto like AES-256 survives with its margin halved by Grover's algorithm, but Shor's algorithm breaks RSA/ECDH/ECDSA outright, replaced by NIST's ML-KEM and ML-DSA.
-Symmetric primitives survive with a doubled key size; every deployed asymmetric primitive does not. Grover's algorithm only square-roots a brute-force search, so AES-256 retains a 128-bit margin and SHA-384/512 retain theirs — that is why AES-256 is preferred over AES-128 for long-lived data. Shor's algorithm, by contrast, breaks RSA, ECDH, ECDSA and Ed25519 outright. NIST published the replacements in August 2024: FIPS 203 ML-KEM (key encapsulation), FIPS 204 ML-DSA and FIPS 205 SLH-DSA (signatures), and added a fifth algorithm on 11 March 2025 — HQC, a code-based KEM chosen as a non-lattice backup for ML-KEM, with a draft standard due around 2026 and a final one in 2027. Deployment is hybrid rather than a swap — TLS 1.3's `X25519MLKEM768` group feeds both an X25519 and an ML-KEM-768 shared secret into the KDF, so the session holds if either survives, and browsers negotiate it by default today.
+Symmetric primitives survive with a doubled key size; every deployed asymmetric primitive does not. Grover's algorithm only square-roots a brute-force search, so AES-256 retains a 128-bit margin and SHA-384/512 retain theirs — that is why AES-256 is preferred over AES-128 for long-lived data. Shor's algorithm, by contrast, breaks RSA, ECDH, ECDSA and Ed25519 outright. NIST published the replacements in August 2024: FIPS 203 ML-KEM (key encapsulation), FIPS 204 ML-DSA and FIPS 205 SLH-DSA (signatures), and added a fifth algorithm on 11 March 2025 — HQC, a code-based KEM chosen as a non-lattice backup for ML-KEM, with a draft standard due around 2026 and a final one in 2027. Deployment is hybrid rather than a swap — TLS 1.3's `X25519MLKEM768` group feeds both an X25519 and an ML-KEM-768 shared secret into the KDF, so the session holds if either survives. RFC 10024 (August 2026) standardizes the group, and Chrome, Firefox, OpenSSL 3.5+, Go 1.24+ and JDK 27 offer it by default.
 
 **Q: Why is "harvest now, decrypt later" a present-tense risk rather than a future one?**
 **Short:** An adversary can record encrypted traffic today and decrypt it once a quantum computer exists, so the exposure date is the recording date, not the decryption date.
 Because an adversary can record encrypted traffic today and decrypt it once a quantum computer exists, the exposure date is the recording date, not the decryption date. Any data whose confidentiality must outlast the 2030s — health records, state secrets, long-term contracts — is already at risk if it crosses the wire under a classical-only key exchange. This is why hybrid post-quantum key exchange shipped in browsers years ahead of post-quantum certificates: key exchange protects data retroactively, whereas a forged signature can only be used against a future connection, so signature migration can wait for the ecosystem.
+
+**Q: What does the hybrid post-quantum TLS 1.3 group cost on the wire, and do you have to turn it on?**
+**Short:** RFC 10024's X25519MLKEM768 grows the client key share from 32 to 1,216 bytes and the server share to 1,120 bytes; OpenSSL 3.5+, Go 1.24+ and JDK 27 offer it unprompted.
+The cost is handshake bytes, not CPU. RFC 10024 (August 2026) defines `X25519MLKEM768` as an X25519 share concatenated with an ML-KEM-768 share: the client sends 1,216 bytes (1,184 B encapsulation key plus 32 B X25519) and the server replies with 1,120 bytes (1,088 B ciphertext plus 32 B X25519), against 32 bytes each way for plain X25519. In most stacks it is already on: OpenSSL 3.5+ sends `X25519MLKEM768` and `X25519` key shares by default, Go 1.24+ enables it when `Config.CurvePreferences` is nil, and JDK 27 (JEP 527) puts it first in the JSSE named-group list. The way to lose it is to pin the group list yourself, for example with `jdk.tls.namedGroups` or an explicit `CurvePreferences`, which silently drops the hybrid group. The other two RFC 10024 groups, `SecP256r1MLKEM768` and `SecP384r1MLKEM1024`, use NIST P-256 and P-384 for deployments that need both shared secrets from FIPS-approved mechanisms, and JDK 27 leaves them off by default.
+
+**Q: Why does NIST standardize FN-DSA (Falcon) when it already has ML-DSA, and what is the catch?**
+**Short:** FN-DSA-512 signatures are 666 B against ML-DSA-44's 2,420 B, which matters in certificate chains, but its floating-point signer is hard to make constant-time.
+Both are lattice signatures, but they optimize different things. ML-DSA (FIPS 204) uses only integer arithmetic and is straightforward to implement safely, at 1,312-byte public keys and 2,420-byte signatures. FN-DSA, the Falcon-based scheme NIST is standardizing as FIPS 206, uses NTRU lattices and a fast-Fourier Gaussian sampler to reach 897-byte keys and 666-byte signatures. A TLS chain carries several signatures and keys per handshake, so the difference is kilobytes per connection. The catch is the signer: its double-precision floating-point sampler is difficult to run in constant time and bit-identically across CPUs, so a weak implementation leaks the key through timing. Use ML-DSA by default; consider FN-DSA where size dominates and signing happens in a controlled environment, such as a CA or a firmware build server.
+
+**Q: By when do RSA and ECC keys have to be gone under NIST's post-quantum transition plan?**
+**Short:** NIST IR 8547 (draft) deprecates 112-bit RSA and ECC after 2030 and disallows all quantum-vulnerable RSA, ECDSA, EdDSA and (EC)DH after 2035.
+The initial public draft of NIST IR 8547 (November 12, 2024) puts 112-bit-strength public-key schemes, such as RSA-2048 and 224-bit curves, at "deprecated after 2030, disallowed after 2035", and every quantum-vulnerable scheme at 128-bit strength or more, including P-256, RSA-3072 and Ed25519, at "disallowed after 2035". This applies to both signatures and key establishment. It replaces the older SP 800-57 plan to disallow 112-bit schemes in 2031, so that systems migrate once, directly to ML-KEM and ML-DSA, instead of first moving to larger classical keys. For planning, treat 2030 as the end of RSA-2048 and 2035 as the end of classical public-key cryptography, and start with long-lived keys in firmware and root certificates.
+
+**Q: Why are TLS certificate lifetimes being cut to 45-47 days, and what has to change operationally?**
+**Short:** Shorter lifetimes bound how long a stolen or mis-issued certificate stays usable because revocation checks fail open; renewal must become a fully automated ACME job with alerting.
+Revocation is unreliable in practice: most clients skip or soft-fail OCSP and CRL checks, so a compromised key stays usable until the certificate expires. CA/Browser Forum ballot SC-081 (passed April 2025) therefore reduces the maximum lifetime from 398 days to 47 days by March 2029, and domain-validation reuse to 10 days. Let's Encrypt offers 45-day certificates in its opt-in `tlsserver` profile since May 13, 2026, with its default `classic` profile scheduled for 64 days in February 2027 and 45 days in February 2028, and a 6-day `shortlived` profile. At those lifetimes, manual renewal causes outages: run an ACME client that renews at about two-thirds of the lifetime, monitor expiry from outside, and remove certificate pinning, which turns every renewal into a client release.
 
 ---
 

@@ -340,7 +340,47 @@ emoji.length();           // 8 (6 chars for "Hello " + 2 chars for surrogate pai
 emoji.codePointCount(0, emoji.length()); // 7 (6 + 1 emoji)
 ```
 
-### 6.8 Normalization: why two identical-looking strings are not `equals`
+### 6.8 Grapheme clusters: what a user calls one character
+
+Code points fix surrogate pairs, but a user-perceived character can still span several code points. Unicode calls that unit an **extended grapheme cluster** (UAX #29): a base character plus combining marks, a pair of regional indicators that renders as one flag, an emoji plus a skin-tone modifier, or several emoji joined by U+200D ZERO WIDTH JOINER. Java has three units of length, and only one of them matches what the user sees:
+
+```
+  text (as code points)                  length()   codePointCount   graphemes
+  e U+0301                (e + acute)        2              2              1
+  U+0928 U+093F           (Hindi "ni")       2              2              1
+  U+1F1EE U+1F1F3         (flag of India)    4              2              1
+  U+1F44D U+1F3FD         (thumbs up, tone)  4              2              1
+  U+1F468 ZWJ U+1F469 ZWJ U+1F467 (family)   8              5              1
+```
+
+Each row is one character on screen. `length()` counts UTF-16 code units and `codePointCount` counts code points; neither is the number a user sees, and for the family emoji they are 8 and 5. A "max 280 characters" rule enforced with either count rejects text the user sees as short, and a truncation at either boundary can cut a flag into one regional-indicator letter or leave a dangling ZWJ.
+
+Java has two grapheme-aware APIs:
+
+```java
+private static final Pattern GRAPHEME = Pattern.compile("\\X");   // [Java 9] extended grapheme cluster
+
+static long graphemeCount(String s) {
+    return GRAPHEME.matcher(s).results().count();
+}
+
+// Truncate to at most max user-visible characters without splitting one.
+static String truncate(String s, int max) {
+    BreakIterator it = BreakIterator.getCharacterInstance();     // grapheme rules since Java 20
+    it.setText(s);
+    int end = 0;
+    for (int i = 0; i < max; i++) {
+        int next = it.next();
+        if (next == BreakIterator.DONE) return s;
+        end = next;
+    }
+    return s.substring(0, end);
+}
+```
+
+`\X` matches one extended grapheme cluster and `\b{g}` matches a grapheme boundary; both have been in `java.util.regex` since Java 9. `BreakIterator.getCharacterInstance()` follows the UAX #29 extended grapheme rules since Java 20 (JDK-8291660). Before Java 20 it keeps surrogate pairs and most combining marks together but splits ZWJ emoji sequences, so on an older runtime use `\X` or ICU4J's `BreakIterator`. The grapheme rules change with each Unicode version, and the JDK follows the Unicode version it ships with, so a count can change by one on a JDK upgrade for newly added emoji sequences. Count graphemes for user-facing limits, and count bytes in the target encoding (`s.getBytes(UTF_8).length`) for storage limits such as a `VARCHAR(255)` measured in bytes, then cut at a grapheme boundary below that byte count.
+
+### 6.9 Normalization: why two identical-looking strings are not `equals`
 
 Surrogate pairs are the Unicode trap people know about. Normalization is the one that
 actually reaches production, because the two strings render **pixel-identically** and only
@@ -405,7 +445,7 @@ Two more rules worth stating outright:
   confusable policy; `equalsIgnoreCase` alone lets `admin` and `аdmin` (Cyrillic а,
   U+0430) coexist.
 
-### 6.9 String intrinsics: why Latin-1 is a performance decision
+### 6.10 String intrinsics: why Latin-1 is a performance decision
 
 Compact Strings (§4.1) are usually taught as a memory optimization — a Latin-1 string
 stores one byte per character instead of two. The half that gets left out is that the
@@ -443,7 +483,7 @@ What to do with that:
   *slower* than `indexOf`, because you have opted out of the intrinsic. The JDK method is
   the fast path.
 
-### 6.10 Zero-copy parsing: stop allocating substrings
+### 6.11 Zero-copy parsing: stop allocating substrings
 
 `String.substring()` has copied since Java 7 — the shared-`char[]` version that caused the
 Java 6 leak (Pitfall 4) is gone, and with it the free substring. Every `substring()` call
@@ -614,7 +654,10 @@ System.out.println(s.length());   // 4, not 3
 s.codePoints().forEach(cp -> System.out.print(new String(Character.toChars(cp))));
 ```
 
-### Pitfall 6: `String.format` in hot logging paths
+### Pitfall 6: Truncating notification text at a code-point boundary
+A push-notification service cut message previews to 100 code points with `s.offsetByCodePoints(0, 100)`, which fixed the earlier surrogate-pair bug. Previews then began ending in a lone regional-indicator letter where a flag had been cut in half, or in a different family emoji where a ZWJ sequence had been cut after its second person. The cause is that a code point is not a user-visible character. **Fix**: cut with `BreakIterator.getCharacterInstance()` (Java 20+) or the `\X` regex, and test with flag, skin-tone, ZWJ, and combining-mark inputs.
+
+### Pitfall 7: `String.format` in hot logging paths
 ```java
 // BROKEN: formats the string even if log level is INFO and debug is off
 logger.debug("Processing record: " + record.toString());  // Java 8 style, still builds String
@@ -638,6 +681,9 @@ logger.debug("Processing record: {}", record);
 | `jcmd VM.stringtable` | Java 7+ | Dumps string table stats (count, table size, histogram) |
 | `String.chars()` | Java 8 | Returns `IntStream` of `char` values (UTF-16 code units) |
 | `String.codePoints()` | Java 8 | Returns `IntStream` of Unicode code points (correct for emoji) |
+| `Pattern` `\X` / `\b{g}` | Java 9 | Match one extended grapheme cluster / a grapheme boundary |
+| `BreakIterator.getCharacterInstance()` | Java 20 (grapheme rules) | Iterates user-perceived characters per UAX #29 |
+| ICU4J (`com.ibm.icu`) | Library | Grapheme, word, and line breaking on any JDK, with its own Unicode version |
 | `String.isBlank()` | Java 11 | Returns `true` if empty or whitespace only (`Character.isWhitespace`) |
 | `String.strip()` | Java 11 | Unicode-aware trim; use over `trim()` which only handles `<= U+0020` |
 | `String.repeat(n)` | Java 11 | Repeats string n times; uses `Arrays.copyOf` internally |
@@ -691,8 +737,8 @@ Text blocks are a compile-time transformation (JEP 378). The compiler: (1) line-
 `chars()` returns an `IntStream` of UTF-16 code units (Java `char` values, 16-bit). For code points in the Basic Multilingual Plane (U+0000–U+FFFF), one code unit equals one code point. For supplementary characters (e.g., emoji, CJK Extension B), one code point spans two `char` values (a surrogate pair, U+D800–U+DFFF). `codePoints()` returns an `IntStream` of actual Unicode code points — it always gives one `int` per logical character. Use `codePoints()` whenever the input may contain emoji, symbols from supplementary planes, or when implementing Unicode-correct string length, reversal, or iteration.
 
 **Q11: How would you efficiently reverse a `String` that may contain emoji?**
-**Short:** Reversing a string that may contain emoji requires iterating Unicode code points instead of char values, so surrogate pairs stay intact.
-Iterate code points rather than `char` values, so a surrogate pair is moved as one unit instead of being split.
+**Short:** Reverse by grapheme cluster (the `\X` regex), not by char or code point, so surrogate pairs, flags, skin tones, and ZWJ sequences stay intact.
+Iterate code points rather than `char` values, so a surrogate pair is moved as one unit instead of being split. For user-visible text, go one step further and reverse grapheme clusters, because a code-point reversal still moves a combining accent in front of its base letter and reverses the people in a ZWJ family sequence.
 
 ```java
 // BROKEN: reverses char values, splits surrogate pairs
@@ -714,35 +760,43 @@ public static String reverseCPAware(String s) {
 // Note: StringBuilder.reverse() handles surrogate pairs correctly, but be explicit
 // in an interview to show you know *why*.
 ```
-`StringBuilder.reverse()` does handle surrogate pairs internally. Knowing this distinction is what separates correct Unicode handling from accidental correctness.
+`StringBuilder.reverse()` does handle surrogate pairs internally. Knowing this distinction is what separates correct Unicode handling from accidental correctness. For text a user will read, collect the `\X` matches (`GRAPHEME.matcher(s).results().map(MatchResult::group).toList()`), reverse that list, and join it.
 
-**Q12: What are the four String comparison methods and their correct use cases?**
+**Q12: How do you count the characters a user sees in a Java string?**
+**Short:** Count extended grapheme clusters with the `\X` regex or BreakIterator.getCharacterInstance() (UAX #29 rules since Java 20), not length() or code points.
+Count extended grapheme clusters (UAX #29), not `char` values or code points. A family emoji built from three people and two ZERO WIDTH JOINERs is `length()` 8, `codePointCount` 5, and one character on screen; a flag is two regional-indicator code points; `e` plus U+0301 is two code points. `Pattern.compile("\\X").matcher(s).results().count()` works since Java 9, and `BreakIterator.getCharacterInstance()` follows the extended grapheme rules since Java 20 (JDK-8291660), while older versions split ZWJ sequences. Use the grapheme count for user-facing limits and a UTF-8 byte count for storage limits.
+
+**Q13: Why does truncating at a code-point boundary still corrupt text?**
+**Short:** A code-point cut can split one grapheme: half a flag, a base letter without its accent, or a ZWJ emoji sequence cut after the joiner.
+A code-point boundary only avoids splitting a surrogate pair. One user-visible character can span several code points, so `s.substring(0, s.offsetByCodePoints(0, n))` can leave one regional-indicator letter of a flag, separate a letter from its combining accent, drop a skin-tone modifier, or end on a dangling ZERO WIDTH JOINER. Find the cut with `BreakIterator.getCharacterInstance()` on Java 20+ (call `next()` n times and cut at the last boundary) or with the `\X` regex, and cover the code with tests that use flags, skin tones, ZWJ families, and combining marks.
+
+**Q14: What are the four String comparison methods and their correct use cases?**
 **Short:** == compares object identity, equals() and equalsIgnoreCase() compare content, and compareTo() gives a lexicographic sort order.
 `==` compares object identity (reference equality) — use only when comparing interned strings or the exact same reference. `.equals()` compares content character by character — use for all user-facing equality. `.equalsIgnoreCase()` compares character by character using `Character.toUpperCase()` then `Character.toLowerCase()` and is **locale-independent**, so `"i".equalsIgnoreCase("I")` is `true` in every locale, Turkish included. The Turkish-I trap belongs to `toLowerCase()`/`toUpperCase()` *without* an explicit `Locale` argument, which do consult the default locale: in `tr-TR`, `"i".toUpperCase()` yields `"\u0130"` (dotted capital I), so a case-normalise-then-compare idiom breaks where `equalsIgnoreCase` would not. Pass `Locale.ROOT` whenever you case-fold for protocol purposes. `.compareTo()` / `.compareToIgnoreCase()` gives a lexicographic ordering — use for sorting. For locale-correct comparison (sorting names, user input), use `java.text.Collator` which honours locale-specific ordering rules (e.g., accented characters in French, ß in German).
 
-**Q13: How does `String.hashCode()` work, and why can a hash code be 0 for a non-empty string?**
+**Q15: How does `String.hashCode()` work, and why can a hash code be 0 for a non-empty string?**
 **Short:** String.hashCode() computes a polynomial hash with base 31 and caches it, with a Java 13 hashIsZero flag avoiding recomputation of a zero hash.
 `hashCode()` computes `s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]` modulo the `int` overflow boundary (31 is a small prime that reduces collisions). The result is cached in the `hash` field after first computation. Java 8 has a race (two threads compute it simultaneously) — both compute the same value, making the benign data race safe by the JMM's guarantee that `int` writes are atomic and the computation is deterministic. In Java 13+, a second field `hashIsZero` is added: if the hash computes to exactly 0, it is stored as 0 and `hashIsZero = true` prevents re-computation on every call (before Java 13 such a string re-hashed on every single call — `""` and the classic `"polygenelubricants"` are the well-known examples). Practical implication: never rely on `hash == 0` to mean "not computed."
 
-**Q14: How does `String.strip()` differ from `String.trim()`, and why should you prefer `strip()` in Java 11+?**
+**Q16: How does `String.strip()` differ from `String.trim()`, and why should you prefer `strip()` in Java 11+?**
 **Short:** strip() removes Unicode whitespace via Character.isWhitespace(), while trim() only strips characters at or below code point U+0020.
 `trim()` removes leading and trailing characters with code point ≤ U+0020 (space and ASCII control characters). `strip()` (Java 11) uses `Character.isWhitespace()`, which additionally removes Unicode whitespace like U+00A0 (no-break space), U+2009 (thin space), U+3000 (ideographic space), and others. Modern web and database content often includes these Unicode whitespace characters from copy-paste, rich-text editors, or non-English sources. `trim()` on such a string returns a string that still looks padded to the user. `stripLeading()` and `stripTrailing()` are available for asymmetric stripping. Prefer `strip()` for all new code on Java 11+.
 
-**Q15: Describe three places in the JDK where `String` interning or constant pooling provides a concrete performance benefit.**
+**Q17: Describe three places in the JDK where `String` interning or constant pooling provides a concrete performance benefit.**
 **Short:** Interned strings speed up class loading, Boolean.toString(), and enum name comparisons by letting == replace content equality checks.
 (1) **Class loading**: class and package names are interned during class loading. `Class.getName()` returns an interned string, allowing the class loader's internal hash maps to use `==` for key comparison. (2) **`Boolean.toString()`**: returns `"true"` or `"false"`, both compile-time literals that are already interned — no allocation occurs. The contrast is instructive: `Integer.toString(int)` has *no* such cache and allocates a fresh `byte[]` and `String` on every call, even for single digits, which is why logging an int in a hot loop allocates and logging a boolean does not. (3) **Enum name constants**: every enum's `.name()` field is initialised from a string literal interned at compile time. Two references to `Status.ACTIVE.name()` return the same `String` object, so `==` comparisons in switch expressions on enum names are safe (though `.equals()` is still safer for external input).
 
-**Q16: Two strings render identically in the UI but `equals()` returns `false`. What is going on and how do you fix it permanently?**
+**Q18: Two strings render identically in the UI but `equals()` returns `false`. What is going on and how do you fix it permanently?**
 **Short:** They differ in Unicode normalization form; normalize with Normalizer to NFC at the trust boundary, not at comparison time.
 
 They are the same text in two different Unicode **normalization forms** — almost always a composed (NFC) form against a decomposed (NFD) one. The character `é` is legally either the single code point U+00E9 or the pair `e` + U+0301 (a combining acute accent), so `"café"` can be 4 chars or 5. `String.equals` compares `byte[]` contents, so it reports them as different, and because `hashCode()` differs too they land in different `HashMap` buckets — which is how you end up with two "identical" entries in a `Set` and a "file not found" for a filename that is visibly right in the directory listing. Text originating on macOS arrives decomposed far more often than text from Linux or Windows, because Apple's filesystems store filenames in a decomposed form, so this reliably shows up at platform boundaries. The permanent fix is `Normalizer.normalize(input, Normalizer.Form.NFC)` applied **once at the trust boundary** — on ingestion, before storing, hashing, or signing — never scattered at each comparison site. Use NFC for storage and keys; use NFKC only for search and identifier matching, remembering it is lossy (`x²` becomes `x2`), so it is wrong for content you will render again. And do not mistake normalization for a security control: username uniqueness needs NFKC plus case folding plus an explicit confusable policy, since `admin` and `аdmin` with a Cyrillic а are distinct under every normalization form.
 
-**Q17: Why is a single non-ASCII character in a hot-path string a performance problem, not just a memory one?**
+**Q19: Why is a single non-ASCII character in a hot-path string a performance problem, not just a memory one?**
 **Short:** One non-Latin-1 char flips the whole string's coder to UTF-16, doubling its size and moving it off the widest SIMD intrinsic paths.
 
 Because the Compact Strings `coder` flag selects the machine code, not just the storage width. `String.equals`, `compareTo`, `indexOf`, and `hashCode` are HotSpot intrinsics — the JIT replaces the bytecode with hand-written assembly that compares 16 or 32 bytes per instruction using SIMD registers — and the Latin-1 (one byte per character) paths get the widest of those stubs, because twice as many characters fit in a vector register. A `coder` is a property of the whole string, so **one** non-Latin-1 character anywhere flips it: `"user-agent"` is 10 bytes on the wide path, and `"user-agentµ"` is 22 bytes on the narrower one. Nothing warns you; the string just costs more in both dimensions. The practical rule is to keep identifiers you control and compare millions of times a second — header names, protocol tokens, cache keys, log field names — ASCII. The corollary matters just as much: do not hand-write a `charAt()` loop to "optimize" a search, because that opts out of the intrinsic and is slower than `indexOf` [Effective Java Item 67: "Optimize judiciously"]. The JDK method is the fast path.
 
-**Q18: A CSV parser allocates 900,000 objects/second. How do you cut that without changing what it parses?**
+**Q20: A CSV parser allocates 900,000 objects/second. How do you cut that without changing what it parses?**
 **Short:** Parse in place with indexOf, regionMatches, and the range-taking parseLong overloads instead of materializing substrings.
 
 Stop creating the strings you never look at. `String.substring()` has copied since Java 7 — the shared-`char[]` version is gone — so splitting a line into 8 fields allocates 9 objects, and at 100,000 lines/second that is 900,000 allocations feeding the young generation. The fix is index arithmetic over the original line: `indexOf(',', from)` to walk the delimiters, `Long.parseLong(CharSequence, begin, end, radix)` (and the matching `Integer.parseInt` overload, both Java 9+) to parse a *range* without materializing a substring, and `String.regionMatches(int, String, int, int)` to compare a field against a constant without extracting either. That takes the per-line allocation to zero for the fields you only test. Where you need a read-only view rather than an index, `CharBuffer.wrap(seq, start, end)` gives a `CharSequence` over the original with no copy, usable anywhere an API takes `CharSequence` including `Matcher` — though `Matcher.group()` returns a fresh `String`, so a regex parser is zero-copy only up to the point you ask for a group. One thing not to "fix": `String.split` has a fast path that skips `Pattern` compilation when the argument is a single non-metacharacter, so `split(",")` compiles nothing while `split("\\s*,\\s*")` does — hoist a `static final Pattern` for the latter. Measure first and rewrite where the profiler points [Effective Java Item 67: "Optimize judiciously"]; index arithmetic is harder to read than `split`, and that cost is real everywhere it does not buy anything.
@@ -755,7 +809,7 @@ Stop creating the strings you never look at. `String.substring()` has copied sin
 2. **Use `"literal".equals(variable)` pattern** — avoids `NullPointerException`; `null.equals(...)` would throw, `"literal".equals(null)` returns `false`.
 3. **`String.strip()` over `String.trim()`** in Java 11+ — Unicode-correct whitespace removal.
 4. **`String.isBlank()` over `.isEmpty()`** when whitespace-only strings count as "empty" for your use case.
-5. **Use `codePoints()` for any Unicode iteration** that must be correct for emoji and supplementary characters.
+5. **Use `codePoints()` for any Unicode iteration** that must be correct for emoji and supplementary characters, and grapheme clusters (`\X`, `BreakIterator` on Java 20+) for anything user-visible: length limits, truncation, cursor movement, reversal.
 6. **Limit `intern()` to finite, controlled string sets**; monitor the table with `jcmd VM.stringtable`.
 7. **Enable String Deduplication** (`-XX:+UseStringDeduplication`) when heap analysis shows a meaningful share of live heap is duplicate string data (check with `jmap -histo` or JOL's `string-compress` mode); supported on every collector since Java 18.
 8. **Pre-size `StringBuilder`** when the final length is predictable: `new StringBuilder(expectedLength)` avoids resize copies.

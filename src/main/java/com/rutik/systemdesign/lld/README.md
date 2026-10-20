@@ -41,13 +41,20 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Category | Index File | Patterns / Topics |
 |----------|-----------|-------------------|
-| Design Principles | [design_principles/design_principles.md](design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
+| OOP and UML Foundations | [oop_and_uml_foundations/oop_and_uml_foundations.md](oop_and_uml_foundations/oop_and_uml_foundations.md) | Objects, class relationships, UML class and sequence notation |
+| Design Principles | [design_principles/design_principles.md](design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface, GRASP and connascence |
+| SOLID Principles | [solid_principles/solid_principles.md](solid_principles/solid_principles.md) | SRP, OCP, LSP, ISP, DIP |
+| Architecture Patterns | [architecture_patterns/architecture_patterns.md](architecture_patterns/architecture_patterns.md) | Layered, hexagonal (ports and adapters), clean and onion architecture |
+| Dependency Injection and Testability | [dependency_injection_and_testability/dependency_injection_and_testability.md](dependency_injection_and_testability/dependency_injection_and_testability.md) | Constructor injection, seams, test doubles, substitution without a framework |
 | Creational Patterns | [creational/creational.md](creational/creational.md) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
 | Structural Patterns | [structural/structural.md](structural/structural.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
-| Behavioral Patterns | [behavioral/behavioral.md](behavioral/behavioral.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
-| Concurrency Patterns | [concurrency_patterns/concurrency_patterns.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
-| System Design Problems | [system_design_problems/system_design_problems.md](system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
-| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 15 problems |
+| Behavioral Patterns | [behavioral/behavioral.md](behavioral/behavioral.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor, Null Object, Specification |
+| Pattern Comparisons | [pattern_comparisons/pattern_comparisons.md](pattern_comparisons/pattern_comparisons.md) | Head-to-head comparisons, decision flowchart, pattern combinations |
+| Anti-Patterns | [anti_patterns/anti_patterns.md](anti_patterns/anti_patterns.md) | God Object, Singleton Abuse, Service Locator, Anemic Domain Model, and 7 more |
+| Refactoring | [refactoring/refactoring.md](refactoring/refactoring.md) | Code smells, the refactoring catalogue, changing a design safely under test |
+| Concurrency Patterns | [concurrency_patterns/concurrency_patterns.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool, virtual threads and structured concurrency, coordination patterns (Guarded Suspension, Balking, Active Object, Reactor, Actor) |
+| System Design Problems | [system_design_problems/system_design_problems.md](system_design_problems/system_design_problems.md) | 22 problems: Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise, Logging Framework, Notification Service, Task Scheduler, Snake and Ladder, Food Delivery, Order Matching Engine, Key-Value Store, Pub-Sub, File System, Meeting Scheduler |
+| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 12 of the 22 problems |
 
 ---
 
@@ -64,6 +71,15 @@ category-level Q&As. Start with the category index before diving into individual
 | [Composition over Inheritance](design_principles/Composition_over_Inheritance.md) | Favor composition, flexibility, delegation | Intermediate |
 | [Law of Demeter](design_principles/LawOfDemeter.md) | Least knowledge, loose coupling, talk to friends | Intermediate |
 | [Program to Interface](design_principles/ProgramToInterface.md) | Abstractions, polymorphism, decoupling | Intermediate |
+| [GRASP and Connascence](design_principles/GRASP.md) | Information Expert, Creator, Controller, Low Coupling, High Cohesion; connascence as a coupling measure | Advanced |
+
+### Foundations and Architecture
+
+| Topic | Key Concepts | Difficulty |
+|-------|-------------|------------|
+| [OOP and UML Foundations](oop_and_uml_foundations/oop_and_uml_foundations.md) | Encapsulation, association vs aggregation vs composition, UML class and sequence diagrams | Beginner |
+| [Architecture Patterns](architecture_patterns/architecture_patterns.md) | Layered, hexagonal, clean and onion architecture; the dependency rule | Advanced |
+| [Dependency Injection and Testability](dependency_injection_and_testability/dependency_injection_and_testability.md) | Constructor injection, seams, test doubles | Intermediate |
 
 ### Creational Patterns
 
@@ -102,6 +118,8 @@ category-level Q&As. Start with the category index before diving into individual
 | [Memento](behavioral/memento/memento.md) | Capture and restore state, undo mechanism | Intermediate |
 | [Visitor](behavioral/visitor/visitor.md) | Separate algorithm from object structure, double dispatch | Advanced |
 | [Interpreter](behavioral/interpreter/interpreter.md) | Grammar, language interpreter, expression trees | Advanced |
+| [Null Object](behavioral/null_object/null_object.md) | Do-nothing implementation in place of null checks | Beginner |
+| [Specification](behavioral/specification/specification.md) | Composable business rules, and/or/not combinators | Intermediate |
 
 ### Anti-Patterns
 
@@ -118,6 +136,7 @@ category-level Q&As. Start with the category index before diving into individual
 | [Service Locator](anti_patterns/ServiceLocator.md) | Hidden dependencies, anti-DI, unclear contracts | Advanced |
 | [Lava Flow](anti_patterns/Lava_Flow.md) | Dead code, accidental architecture, cleanup | Intermediate |
 | [Circular Dependencies](anti_patterns/Circular_Dependencies.md) | Dependency cycles, tight coupling, restructuring | Intermediate |
+| [Magic Numbers](anti_patterns/Magic_Numbers.md) | Unnamed literals, named constants, enums | Beginner |
 
 ### Concurrency Patterns
 
@@ -127,6 +146,8 @@ category-level Q&As. Start with the category index before diving into individual
 | [Producer-Consumer](concurrency_patterns/ProducerConsumer.md) | Blocking queue, work queue, coordination | Intermediate |
 | [Read-Write Lock](concurrency_patterns/ReadWriteLock.md) | Concurrent reads, exclusive writes, ReentrantReadWriteLock | Intermediate |
 | [Thread Pool](concurrency_patterns/ThreadPool.md) | Executor service, task queue, bounded concurrency | Intermediate |
+| [Modern Java Concurrency](concurrency_patterns/modern_java_concurrency.md) | Virtual threads, structured concurrency, scoped values | Advanced |
+| [Coordination Patterns](concurrency_patterns/CoordinationPatterns.md) | Monitor Object, Guarded Suspension, Balking, Two-Phase Termination, Active Object, Reactor, Proactor, Actor | Advanced |
 
 ### Pattern Comparisons & Advanced
 
@@ -142,6 +163,8 @@ category-level Q&As. Start with the category index before diving into individual
 | [Template vs Strategy](pattern_comparisons/Template_vs_Strategy.md) | Inheritance vs composition for variability | Intermediate |
 | [Composite vs Decorator](pattern_comparisons/Composite_vs_Decorator.md) | Tree structure vs enhancement chain | Intermediate |
 | [ChainOfResponsibility vs Command](pattern_comparisons/ChainOfResponsibility_vs_Command.md) | Handler chain vs request object | Intermediate |
+| [Singleton vs DI Container](pattern_comparisons/Singleton_vs_DI_Container.md) | Global instance vs container-managed scope | Intermediate |
+| [Visitor vs Pattern Matching](pattern_comparisons/Visitor_vs_PatternMatching.md) | Double dispatch vs `switch` over a sealed hierarchy | Advanced |
 | [Decision Flowchart](pattern_comparisons/DecisionFlowchart.md) | Pattern selection guide | Intermediate |
 | [Pattern Combinations](pattern_comparisons/PatternCombinations.md) | Patterns working together | Advanced |
 | [Interview Questions](pattern_comparisons/InterviewQuestions.md) | Common LLD interview questions | Intermediate |
@@ -163,6 +186,16 @@ category-level Q&As. Start with the category index before diving into individual
 | [Rate Limiter](system_design_problems/RateLimiter.md) | Token bucket, sliding window, Strategy + Factory | Intermediate |
 | [Tic-Tac-Toe](system_design_problems/TicTacToe.md) | Incremental win detection, Strategy (AI move selection) | Beginner |
 | [Splitwise](system_design_problems/Splitwise.md) | Expense-sharing ledger, Strategy (split types), debt-graph simplification | Advanced |
+| [Logging Framework](system_design_problems/LoggingFramework.md) | Chain of Responsibility (logger hierarchy), Strategy (formatter), Decorator (async appender) | Intermediate |
+| [Notification Service](system_design_problems/NotificationService.md) | Strategy + Factory (channel), Decorator (retry), Chain of Responsibility (filters), Observer | Intermediate |
+| [Task Scheduler](system_design_problems/TaskScheduler.md) | Command (task), Strategy (retry policy), Producer-Consumer (delay queue) | Advanced |
+| [Snake and Ladder](system_design_problems/SnakeAndLadder.md) | Strategy (dice, win rule), Observer, Factory (board) | Beginner |
+| [Food Delivery](system_design_problems/FoodDelivery.md) | State (order lifecycle), Strategy (fee, partner assignment), Decorator (pricing), Observer | Advanced |
+| [Order Matching Engine](system_design_problems/OrderMatchingEngine.md) | Price-time priority order book, State (order lifecycle) | Advanced |
+| [Key-Value Store](system_design_problems/KeyValueStore.md) | Nested transactions as a layer stack, TTL expiry, optimistic versions | Advanced |
+| [Pub-Sub](system_design_problems/PubSub.md) | Pull-based Observer, Strategy (partitioner), Mediator (consumer group) | Advanced |
+| [File System](system_design_problems/FileSystem.md) | Composite (files and directories), Iterator (find), path resolution | Intermediate |
+| [Meeting Scheduler](system_design_problems/MeetingScheduler.md) | Half-open interval conflicts, Strategy (room selection), Observer | Intermediate |
 
 ---
 
@@ -178,6 +211,7 @@ Build your design vocabulary before patterns.
 5. [Composition over Inheritance](design_principles/Composition_over_Inheritance.md)
 6. [Program to Interface](design_principles/ProgramToInterface.md)
 7. [Law of Demeter](design_principles/LawOfDemeter.md)
+8. [GRASP and Connascence](design_principles/GRASP.md)
 
 ### Phase 2 — Creational Patterns
 Learn how to construct objects safely and flexibly.
@@ -213,6 +247,8 @@ Learn how objects communicate and distribute responsibility.
 9. [Memento](behavioral/memento/memento.md) — state capture/restore
 10. [Visitor](behavioral/visitor/visitor.md) — external operations
 11. [Interpreter](behavioral/interpreter/interpreter.md) — grammar/language
+12. [Null Object](behavioral/null_object/null_object.md) — do-nothing default
+13. [Specification](behavioral/specification/specification.md) — composable rules
 
 ### Phase 5 — Pattern Mastery
 Understand when to use which pattern and how they combine.
@@ -227,7 +263,7 @@ Understand when to use which pattern and how they combine.
 Know what to avoid and why.
 
 1. [Anti-Patterns Overview](anti_patterns/anti_patterns.md)
-2. Read all 10 individual anti-pattern files
+2. Read all 11 individual anti-pattern files
 3. Recognize them in existing codebases
 
 ### Phase 7 — Concurrency Patterns
@@ -237,6 +273,8 @@ Thread safety and parallel design.
 2. [Producer-Consumer](concurrency_patterns/ProducerConsumer.md)
 3. [Read-Write Lock](concurrency_patterns/ReadWriteLock.md)
 4. [Thread Pool](concurrency_patterns/ThreadPool.md)
+5. [Modern Java Concurrency](concurrency_patterns/modern_java_concurrency.md)
+6. [Coordination Patterns](concurrency_patterns/CoordinationPatterns.md)
 
 ### Phase 8 — Apply: System Design Problems
 Put it all together with end-to-end LLD exercises.
@@ -253,6 +291,16 @@ Put it all together with end-to-end LLD exercises.
 10. [Rate Limiter](system_design_problems/RateLimiter.md)
 11. [Tic-Tac-Toe](system_design_problems/TicTacToe.md)
 12. [Splitwise](system_design_problems/Splitwise.md)
+13. [Logging Framework](system_design_problems/LoggingFramework.md)
+14. [Notification Service](system_design_problems/NotificationService.md)
+15. [Task Scheduler](system_design_problems/TaskScheduler.md)
+16. [Snake and Ladder](system_design_problems/SnakeAndLadder.md)
+17. [Food Delivery](system_design_problems/FoodDelivery.md)
+18. [Order Matching Engine](system_design_problems/OrderMatchingEngine.md)
+19. [Key-Value Store](system_design_problems/KeyValueStore.md)
+20. [Pub-Sub](system_design_problems/PubSub.md)
+21. [File System](system_design_problems/FileSystem.md)
+22. [Meeting Scheduler](system_design_problems/MeetingScheduler.md)
 
 ---
 
@@ -273,6 +321,7 @@ design_principles
   Composition_over_Inheritance.md  principal
   ProgramToInterface.md            principal
   LawOfDemeter.md                  principal
+  GRASP.md                         principal
 solid_principles
   solid_principles.md      senior, principal
   SingleResponsibility.md  senior
@@ -309,6 +358,8 @@ behavioral
   mediator/mediator.md                                -
   memento/memento.md                                  -
   visitor/visitor.md                                  -
+  null_object/null_object.md                          -
+  specification/specification.md                      -
 pattern_comparisons
   pattern_comparisons.md                    senior, principal
   Strategy_vs_State.md                      senior, principal
@@ -345,6 +396,7 @@ concurrency_patterns
   ReadWriteLock.md         senior
   ThreadPool.md            senior
   modern_java_concurrency.md  senior
+  CoordinationPatterns.md  senior
 system_design_problems
   system_design_problems.md  senior, principal
   ParkingLot.md              senior
@@ -365,6 +417,10 @@ system_design_problems
   SnakeAndLadder.md  -
   FoodDelivery.md  -
   OrderMatchingEngine.md  -
+  KeyValueStore.md  senior
+  PubSub.md  senior
+  FileSystem.md  -
+  MeetingScheduler.md  senior
 oop_and_uml_foundations
   oop_and_uml_foundations.md  senior
 dependency_injection_and_testability
@@ -376,16 +432,16 @@ architecture_patterns
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 9 modules spanning design vocabulary, all
+This section is exhaustive by design — 13 modules spanning design vocabulary, all
 three GoF pattern families, pattern-selection judgment, anti-patterns, concurrency
-idioms, and 12 end-to-end system design problems. That is the right depth for a
+idioms, and 22 end-to-end system design problems. That is the right depth for a
 reference and the wrong shape for someone one week from an LLD round. So there are
-**two ways through it**; the browser learning game's **Study** view surfaces both as
-a **Full / Interview** toggle (Full is the default).
+**three ways through it**; the browser learning game's **Study** view surfaces them as
+a **Full / Senior / Principal** toggle (Full is the default).
 
-### Full Path (9 modules)
+### Full Path (13 modules)
 
-The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 15 System Design Problems. Nothing is dropped.
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 22 System Design Problems. Nothing is dropped.
 
 <!-- study-path-table senior -->
 ### Senior Path (12 modules)
@@ -402,8 +458,8 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 | 9 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
 | 10 | [anti_patterns](anti_patterns/anti_patterns.md) | 3 files |
 | 11 | [refactoring](refactoring/refactoring.md) | module page only |
-| 12 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 6 files |
-| 13 | [system_design_problems](system_design_problems/system_design_problems.md) | 10 files |
+| 12 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 7 files |
+| 13 | [system_design_problems](system_design_problems/system_design_problems.md) | 13 files |
 
 **Not in this path** (1 of 13, Full Path only): `design_principles`
 <!-- /study-path-table -->
@@ -425,7 +481,7 @@ A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocab
 
 | # | Module | Files |
 |---|--------|-------|
-| 2 | [design_principles](design_principles/design_principles.md) | 7 files |
+| 2 | [design_principles](design_principles/design_principles.md) | 8 files |
 | 3 | [solid_principles](solid_principles/solid_principles.md) | 4 files |
 | 4 | [architecture_patterns](architecture_patterns/architecture_patterns.md) | module page only |
 | 6 | [creational](creational/creational.md) | module page only |
@@ -473,7 +529,7 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 
 ## Study Plan
 
-A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the full pattern-dependency map and interview-prep shortcuts across all 15 problems.
+A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the pattern-dependency map and interview-prep shortcuts across 12 of the 22 problems.
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|

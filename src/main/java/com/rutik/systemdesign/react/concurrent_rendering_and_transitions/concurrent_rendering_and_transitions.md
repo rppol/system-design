@@ -10,7 +10,7 @@ Concurrent rendering removes that constraint by making the render phase **interr
 
 This is not multithreading. There is exactly one thread, one call stack, and one `document`. What React gained is the ability to **stop**, and what you gained is the ability to say which updates may be stopped. That is the entire API surface of this module: `startTransition` and `useTransition` mark an update you trigger as interruptible, `useDeferredValue` marks a value you received as safe to lag, and `<Activity>` `[19.2]` marks a whole subtree as still-alive-but-not-urgent.
 
-The work loop, the fiber pair and the lane bitmask that implement all of this belong to [Fiber and Reconciliation](../fiber_and_reconciliation/fiber_and_reconciliation.md) and are not re-derived here. This module is about the priority *decisions* layered on top of them, and about the two obligations concurrency puts on your code: render must be pure, because it may run and be discarded several times per visible update, and any external store you read during render must be subscribed through `useSyncExternalStore`, or a single tree can paint two different values of the same store. Target is React 19.2 (released 2025-10-01, latest patch 19.2.8 as of 2026-07-21).
+The work loop, the fiber pair and the lane bitmask that implement all of this belong to [Fiber and Reconciliation](../fiber_and_reconciliation/fiber_and_reconciliation.md) and are not re-derived here. This module is about the priority *decisions* layered on top of them, and about the two obligations concurrency puts on your code: render must be pure, because it may run and be discarded several times per visible update, and any external store you read during render must be subscribed through `useSyncExternalStore`, or a single tree can paint two different values of the same store. Target is React 19.3 (released 2026-09-09, patch 19.3.1 on 2026-10-14), which renders unrelated transitions independently and makes `<ViewTransition>` stable, so a transition now also decides what animates.
 
 ---
 
@@ -406,6 +406,47 @@ First, `useTransition` adds a commit when `isPending` turns true and another whe
 
 The threshold in practice: profile first, and mark an update as a transition when the render it triggers exceeds roughly 50 ms. [React Performance and Profiling](../react_performance_and_profiling/react_performance_and_profiling.md) owns the measurement, including the React Performance Tracks `[19.2]` that show transition renders and their interruptions directly in the Chrome performance panel.
 
+### 6.9 Independent transitions `[19.3]`
+
+Through React 19.2 the reconciler entangled concurrent transitions into one render. Start a 900 ms report filter, then 200 ms later switch a sidebar tab inside its own `startTransition`, and the tab switch waited for the filter: both committed together when the slower one finished. React 19.3 turns on `enableParallelTransitions` (PR #37290, merged 2026-08-14), so the tab switch commits as soon as its own render finishes while the filter is still working. A slow transition no longer holds up an unrelated one.
+
+The consequence for application code: two separate `startTransition` calls, for example one for a list and one for its count, can now commit at different times. Put both setters in one callback when they must land in the same commit. The lane mechanics behind this belong to [Fiber and Reconciliation](../fiber_and_reconciliation/fiber_and_reconciliation.md).
+
+### 6.10 `<ViewTransition>` and `addTransitionType` `[19.3]`
+
+`<ViewTransition>` is stable in React 19.3 and drives the browser View Transition API from React's commit. It animates only updates React already treats as non-urgent: a `setState` inside `startTransition`, a `<Suspense>` reveal, and the catch-up render of `useDeferredValue`. An urgent `setState` commits with no animation. The animation type comes from how the tree changed: **enter** when the `<ViewTransition>` mounts, **exit** when it unmounts, **update** when its children change, and **share** when a named `<ViewTransition>` unmounts in one place and mounts in another.
+
+```tsx
+import { ViewTransition, addTransitionType, startTransition, useState } from "react";
+
+function Slides({ slides }: { slides: Slide[] }) {
+  const [index, setIndex] = useState(0);
+
+  function go(step: 1 | -1) {
+    startTransition(() => {
+      addTransitionType(step === 1 ? "next" : "previous");   // why the update happened
+      setIndex((i) => i + step);
+    });
+  }
+
+  return (
+    <>
+      <ViewTransition
+        key={slides[index].id}
+        enter={{ next: "from-right", previous: "from-left" }}   // CSS view transition classes
+        exit={{ next: "to-left", previous: "to-right" }}
+      >
+        <SlideView slide={slides[index]} />
+      </ViewTransition>
+      <button onClick={() => go(-1)}>Back</button>
+      <button onClick={() => go(1)}>Next</button>
+    </>
+  );
+}
+```
+
+`addTransitionType` tags the cause of a transition so one state update can animate two ways. React also registers each type as a browser view transition type, so CSS can scope on `:active-view-transition-type(next)`. The default animation is a cross-fade, and `onEnter`, `onExit`, `onUpdate` and `onShare` hand you the Web Animations API when CSS is not enough. `<ViewTransition>` works only in the DOM renderer. The Suspense-reveal pattern, `update="auto" default="none"` around a boundary, belongs to [Suspense and Error Boundaries](../suspense_and_error_boundaries/suspense_and_error_boundaries.md).
+
 ---
 
 ## 7. Real-World Examples
@@ -508,7 +549,7 @@ function Search({ all }: { all: Product[] }) {
 
 | Tool | Purpose |
 |------|---------|
-| React | 19.2 ships `useTransition`, `useDeferredValue` with an initial value, and `Activity` |
+| React | 19.3 ships `useTransition`, `useDeferredValue` with an initial value, `Activity`, independent transitions and stable `ViewTransition` |
 | Scheduler | The `MessageChannel`-based package that implements the 5 ms yield |
 | React DevTools | Profiler flame chart shows which commits were transition-priority and which restarted |
 | React Performance Tracks | 19.2 Chrome performance-panel tracks for scheduler, render and commit phases |
@@ -545,6 +586,11 @@ Resuming would be incorrect, not merely complicated: the fibers already built re
 It flips true synchronously when `startTransition` is called and false when the resulting render commits. For a purely CPU-bound filter that is exactly the window you want to dim the stale rows over.
 
 The trap is a fetch fired inside the transition callback: unless you use the async form and `await` it, `isPending` clears the moment the render commits, long before the data arrives. For per-value staleness, comparing `query !== deferred` is sharper, because `isPending` is true for any transition in that component, not just the one you care about.
+
+**Q: Can a slow transition delay an unrelated transition?**
+**Short:** Through React 19.2 yes, because concurrent transitions were entangled into one render, but from 19.3 each transition renders independently and commits on its own.
+
+Before 19.3, a 900 ms filter transition and a tab switch started 200 ms later in a separate `startTransition` were batched into one render, so the tab switch waited for the filter and both committed together. React 19.3 enables `enableParallelTransitions` (PR #37290), so the tab switch commits when its own render finishes. The flip side is that two `startTransition` calls meant to update a list and its count together can now commit at different times; put both setters in one callback when they must land in the same commit.
 
 **Q: Does concurrent rendering mean React runs on multiple threads?**
 **Short:** Yielding on one thread, not parallelism — there is a single call stack, and React simply returns control to the browser between units of work instead of holding it.
@@ -643,6 +689,11 @@ Without it, the first render passes the real value straight through and pays ful
 An urgent update that suspends swaps the committed content for the boundary's fallback. The same update inside `startTransition` leaves the old UI mounted and commits only when the new content is ready, with `isPending` marking the interval.
 
 That is what makes a route change feel like a transition rather than a flash of skeletons. Boundary placement, `use()` and streaming belong to the Suspense and error boundaries module.
+
+**Q: Why does a ViewTransition not animate a plain setState?**
+**Short:** ViewTransition in React 19.3 animates only Transition updates, Suspense reveals and useDeferredValue catch-up renders, so an urgent setState commits with no animation.
+
+The rule ties animation to priority: work the user is aiming at, such as typing or a checkbox, must commit in the current frame, and a 250 ms cross-fade on it would read as lag. Wrap the update in `startTransition` and the same `setState` animates. Inside the transition, `addTransitionType("next")` tags the cause, and the `enter`/`exit` props map each type to a CSS view transition class, so one state change can slide left or right. The four animation types follow the tree change: enter on mount, exit on unmount, update when children change, share when a named `ViewTransition` moves between places.
 
 **Q: How do you verify a transition actually helped?**
 **Short:** Keystroke-to-paint latency under scripted typing is the number that moves, not total CPU, which usually rises because interrupted renders are re-executed.

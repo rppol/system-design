@@ -60,7 +60,7 @@ essentially nothing else — so the only package a scanner can find a CVE in is 
 | Symbol | What it is |
 |--------|------------|
 | `golang:1.27` | The full build image: compiler, git, C toolchain, ~1 GB |
-| `debian:bookworm-slim` | Minimal Debian: ~75 MB, has a shell and apt |
+| `debian:trixie-slim` | Minimal Debian: ~78 MB, has a shell and apt |
 | `alpine:3` | musl-based minimal distro: ~8 MB, has a shell and apk |
 | `distroless/static` | CA certs, tzdata, `/etc/passwd`, nonroot user: ~2 MB, no shell |
 | `scratch` | Literally empty: 0 bytes |
@@ -73,7 +73,7 @@ essentially nothing else — so the only package a scanner can find a CVE in is 
   binary, -ldflags="-s -w"                   8.9 MB   (28% smaller, DWARF + symtab gone)
 
   final image on golang:1.27                  ~1.0 GB  (build image kept as runtime — the bug)
-  final image on debian:bookworm-slim        ~84 MB   (75 MB base + 9 MB binary)
+  final image on debian:trixie-slim          ~87 MB   (78 MB base + 9 MB binary)
   final image on alpine:3                    ~17 MB   (8 MB base + 9 MB binary)
   final image on distroless/static           ~11 MB   (2 MB base + 9 MB binary)
   final image on scratch                      ~9 MB   (0 MB base + 9 MB binary)
@@ -148,6 +148,7 @@ the difference between absorbing a traffic spike and shedding it.
 | cgo, static libc | `CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"'` | Static, but glibc's static linking is partially unsupported (NSS) | Painful | Only when a C dep is mandatory and the target has no matching libc |
 | cgo, musl static | Build inside `golang:alpine`, `CGO_ENABLED=1` | Static against musl | Per-target build container | SQLite in a scratch image, the usual reason |
 | Plugin | `go build -buildmode=plugin` | `.so`, must match toolchain and flags exactly | No | Almost never. The version-lock rules make it fragile |
+| FIPS 140-3 | `GOFIPS140=v1.0.0 CGO_ENABLED=0 go build` | Static, links the frozen Go Cryptographic Module, FIPS mode on by default | One env var | FedRAMP and other regulated deployments (§6.16) |
 | WASM | `GOOS=wasip1 GOARCH=wasm go build` | `.wasm` module | Native | Edge runtimes and sandboxed plugins |
 
 ### 4.2 The base-image ladder
@@ -156,10 +157,10 @@ the difference between absorbing a traffic spike and shedding it.
 |------|------|-------|----------|--------|---------------|---------|
 | `golang:1.27` | ~1 GB | yes | yes | yes | no | Build stage only. Never a runtime stage |
 | `ubuntu:24.04` | ~78 MB | yes | yes | yes | no | Only if you need apt packages at runtime |
-| `debian:bookworm-slim` | ~75 MB | yes | yes | yes | no | The "I need `curl` in the image" answer. Usually a smell |
+| `debian:trixie-slim` | ~78 MB | yes | yes | yes | no | The "I need `curl` in the image" answer. Usually a smell |
 | `alpine:3` | ~8 MB | yes | via `apk add ca-certificates` | via `apk add tzdata` | no | Good when you genuinely want a shell |
-| `gcr.io/distroless/static-debian12` | ~2 MB | no | yes | yes | yes (`nonroot`, 65532) | **The default for a `CGO_ENABLED=0` binary** |
-| `gcr.io/distroless/base-debian12` | ~20 MB | no | yes | yes | yes | For a cgo binary needing glibc |
+| `gcr.io/distroless/static-debian13` | ~2 MB | no | yes | yes | yes (`nonroot`, 65532) | **The default for a `CGO_ENABLED=0` binary** |
+| `gcr.io/distroless/base-debian13` | ~20 MB | no | yes | yes | yes | For a cgo binary needing glibc |
 | `scratch` | 0 B | no | **no** | **no** | no | Only with deliberate hand-assembly |
 
 ### 4.3 Distribution channels for the same binary
@@ -419,7 +420,7 @@ trust. That last one bites in CI constantly, because `actions/checkout` defaults
 
 ```bash
 $ go version -m ./app
-./app: go1.27.1
+./app: go1.27.2
         path    github.com/acme/svc/cmd/app
         mod     github.com/acme/svc      v1.4.2   h1:0mXQ...=
         dep     github.com/jackc/pgx/v5  v5.7.6   h1:qLB2...=
@@ -445,7 +446,7 @@ external metadata store. It is also what `govulncheck -mode=binary` reads.
 
 A Go build is byte-for-byte reproducible when these are all fixed:
 
-1. **Toolchain version** — pin it with a `toolchain go1.27.1` line in `go.mod`, and let
+1. **Toolchain version**: pin it with a `toolchain go1.27.2` line in `go.mod`, and let
    `GOTOOLCHAIN` fetch exactly that. Two different patch releases produce different bytes.
 2. **Module content** — `go.sum` guarantees it. This is the part Go gives you for free.
 3. **`-trimpath`** — without it the binary embeds `/home/alice/src/...` and no two machines agree.
@@ -493,7 +494,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/app ./cmd/app
 
 # ---- runtime stage ----
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/app /app
 USER 65532:65532
 EXPOSE 8080
@@ -505,7 +506,7 @@ warm cache skips the network entirely. `/root/.cache/go-build` is the compiler c
 unchanged package is not recompiled — on a large service this takes an incremental CI build from
 90 s to 15 s.
 
-`distroless/static-debian12:nonroot` already contains `/etc/passwd` with UID 65532, a CA bundle at
+`distroless/static-debian13:nonroot` already contains `/etc/passwd` with UID 65532, a CA bundle at
 `/etc/ssl/certs/ca-certificates.crt`, and `/usr/share/zoneinfo`. That is why it is the default
 answer rather than `scratch`.
 
@@ -812,6 +813,60 @@ signatures, a multi-arch image manifest, and a GitHub release with notes. The re
 tractable in Go and painful elsewhere is §6.2: the six-platform matrix is six invocations of the
 same compiler with different environment variables, on one machine, in about 30 seconds.
 
+### 6.16 FIPS 140-3 with the native Go Cryptographic Module
+
+Since Go 1.24 the standard library carries its own FIPS 140-3 module: the packages under
+`crypto/internal/fips140/...`, which `crypto/ecdsa`, `crypto/tls`, `crypto/rand` and the rest
+call into. A regulated build needs no cgo, no OpenSSL and no source changes; it stays
+`CGO_ENABLED=0` and cross-compiles like any other binary. Two knobs control it.
+
+`GOFIPS140` is read by `go build`, `go install` and `go test`, and selects which copy of the
+module is linked in:
+
+| `GOFIPS140` | Module linked | FIPS mode by default | Status (go.dev/doc/security/fips140) |
+|-------------|---------------|----------------------|--------------------------------------|
+| `off` (default) | The in-tree packages of your toolchain | No | Not a validated module |
+| `latest` | The in-tree packages | Yes | Not a validated module |
+| `v1.0.0` | Frozen from Go 1.24, available in Go 1.24+ | Yes | CMVP certificate #5247, CAVP A6650 |
+| `v1.26.0` | Frozen from Go 1.26, adds ML-DSA and a CPU-jitter entropy source | Yes | CMVP Modules In Process, Pending Review as of 2026-04-28 |
+| `certified` / `inprocess` | Aliases for the newest version holding a certificate / on the In Process list | Yes | Resolved at build time |
+
+The `fips140` GODEBUG setting decides at run time whether the module operates in FIPS mode. It
+defaults to `off` unless `GOFIPS140` was set at build time, can be forced `on` in any binary, and
+cannot change after start. `only` additionally makes non-approved algorithms return an error or
+panic; the Go docs describe it as a best-effort testing mode, not for production.
+
+```bash
+# Build against the validated module; FIPS mode is on without any GODEBUG.
+GOFIPS140=certified CGO_ENABLED=0 go build -trimpath -o app ./cmd/app
+
+# The resolved module version, with a suffix naming the exact frozen copy, is in the build info.
+go version -m app | grep GOFIPS140
+```
+
+```go
+import "crypto/fips140"
+
+func init() {
+    if !fips140.Enabled() {
+        log.Fatal("refusing to start: FIPS 140-3 mode is off")
+    }
+    slog.Info("crypto module", "version", fips140.Version()) // "v1.0.0", or "latest" when not frozen
+}
+```
+
+In FIPS mode the module verifies its own object-file checksum at init, runs known-answer
+self-tests at init or first use, and runs a pairwise consistency test on every generated key,
+which the Go docs measure at up to 2x slower key generation for some key types (it matters for
+ephemeral ECDH keys on every TLS handshake). `crypto/rand.Reader` becomes an SP 800-90A DRBG,
+still mixing in platform CSPRNG bytes, and `crypto/tls` refuses to negotiate any non-approved
+version, cipher suite, signature algorithm or key exchange. In Go 1.27 that list
+(`crypto/tls/defaults_fips140.go`) excludes TLS 1.0 and 1.1, ChaCha20-Poly1305, plain X25519
+(the hybrid `X25519MLKEM768` stays) and RSA certificates under 2048 bits, so a peer that offers
+only those fails the handshake. FIPS mode is unsupported on OpenBSD, Wasm, AIX and
+32-bit Windows. `GOEXPERIMENT=boringcrypto` (Go+BoringCrypto, cgo-based) is a separate
+mechanism and cannot be combined with the native module.
+
 ---
 
 ## 7. Real-World Examples
@@ -965,7 +1020,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/app
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/app /app
 USER 65532:65532
 ENTRYPOINT ["/app"]
@@ -1060,6 +1115,7 @@ allowlisted by pattern-match during a release crunch. The gate had trained every
 | `slsa-github-generator` | SLSA Build L3 provenance for GitHub Actions | Provenance requirements |
 | `upx` | Compresses the binary further | Rarely. Breaks some scanners and adds startup cost |
 | `delve` | Source-level debugger | Requires a build without `-w` |
+| `crypto/fips140` | `Enabled()` and `Version()` of the native FIPS 140-3 module | Startup assertion in a regulated build |
 
 ---
 
@@ -1073,7 +1129,7 @@ Performance is essentially unaffected — the pure-Go DNS resolver and `os/user`
 **Q: Your `scratch`-based image cannot reach any HTTPS endpoint — what is wrong?**
 **Short:** The image has no CA certificate bundle, so every TLS handshake fails with an unknown-authority error until you copy one in.
 
-`FROM scratch` is literally empty: no `/etc/ssl/certs/ca-certificates.crt`, so Go's TLS stack has no root store to validate a server certificate against and every outbound HTTPS call fails with `x509: certificate signed by unknown authority`. The fix is either `COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/` or, better, switching the runtime base to `gcr.io/distroless/static-debian12`, which ships the bundle, the timezone database, and a nonroot user for about 2 MB. This bug is a classic CI escape because integration tests usually hit an `httptest` server over plain HTTP, so nothing exercises the certificate path until the first real production request.
+`FROM scratch` is literally empty: no `/etc/ssl/certs/ca-certificates.crt`, so Go's TLS stack has no root store to validate a server certificate against and every outbound HTTPS call fails with `x509: certificate signed by unknown authority`. The fix is either `COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/` or, better, switching the runtime base to `gcr.io/distroless/static-debian13`, which ships the bundle, the timezone database, and a nonroot user for about 2 MB. This bug is a classic CI escape because integration tests usually hit an `httptest` server over plain HTTP, so nothing exercises the certificate path until the first real production request.
 
 **Q: Does `-ldflags="-s -w"` make Go panic stack traces unreadable?**
 **Short:** No — Go frames stay fully symbolized because the runtime needs the pcln table to unwind, which the linker never strips.
@@ -1085,6 +1141,11 @@ The pcln (program counter to line) table maps instruction addresses to function 
 
 Docker invalidates a layer and everything below it when its inputs change. If the source tree is copied before the download step, every commit changes that layer, so the download reruns from scratch — on a repository with 180 dependencies that is around 70 seconds per build. The fix is a two-step copy: `COPY go.mod go.sum ./` then `RUN go mod download`, and only then `COPY . .`. The download layer now changes only when dependencies change. Add BuildKit cache mounts on `/go/pkg/mod` and `/root/.cache/go-build` and the incremental compile drops too — a large service typically goes from about 90 seconds to 15.
 
+**Q: Why should a production binary not run with GODEBUG=fips140=only?**
+**Short:** It makes every non-approved algorithm error or panic as a best-effort test aid, and the Go docs say it is not for production and can misfire both ways.
+
+`fips140=on` is the operating mode: approved algorithms run through the validated module with self-tests. `only` adds enforcement on top, so a call to a non-approved primitive (ChaCha20-Poly1305 or plain X25519 pulled in by a dependency) returns an error or panics. The Go FIPS page describes it as best-effort, for testing, assessment and debugging, not required by the Security Policy, introducing crashes and unhandled errors by design, with possible false positives and false negatives. Run the test suite and a staging soak with `GODEBUG=fips140=only` to find non-approved usage, fix or justify each hit, and ship with `GOFIPS140` set at build time so `on` is the default. The setting is read once; it cannot be toggled after the process starts.
+
 **Q: How do you stamp a version into a Go binary, and when should you not bother?**
 **Short:** Use `-ldflags="-X main.version=..."` only for the human-facing version string, because `debug.ReadBuildInfo` supplies commit, time and dependencies for free.
 
@@ -1093,7 +1154,7 @@ Docker invalidates a layer and everything below it when its inputs change. If th
 **Q: What makes a Go build reproducible, and how do you verify what shipped?**
 **Short:** Fix the toolchain version, keep cgo off, pass `-trimpath`, stamp nothing that varies, and let `go.sum` fix the module graph.
 
-Those five inputs are sufficient: two builds of the same commit on different machines then produce byte-identical output, verifiable with `sha256sum`. `-trimpath` is the one people forget — without it the binary embeds absolute build directories and no two workspaces agree. Pin the toolchain with a `toolchain go1.27.1` line in `go.mod`; a different patch release produces different bytes. To verify what shipped, `go version -m ./app` prints the module path, every dependency with its hash, the build settings including `CGO_ENABLED` and `-trimpath`, and the VCS revision. Reproducibility is a strictly stronger provenance claim than a signature, because a signature proves only that a key-holder produced those bytes, not that the bytes correspond to published source.
+Those five inputs are sufficient: two builds of the same commit on different machines then produce byte-identical output, verifiable with `sha256sum`. `-trimpath` is the one people forget: without it the binary embeds absolute build directories and no two workspaces agree. Pin the toolchain with a `toolchain go1.27.2` line in `go.mod`; a different patch release produces different bytes. To verify what shipped, `go version -m ./app` prints the module path, every dependency with its hash, the build settings including `CGO_ENABLED` and `-trimpath`, and the VCS revision. Reproducibility is a strictly stronger provenance claim than a signature, because a signature proves only that a key-holder produced those bytes, not that the bytes correspond to published source.
 
 **Q: Why does `govulncheck` report far fewer findings than a generic image scanner, and which do you believe?**
 **Short:** It reports only vulnerabilities whose vulnerable function is reachable from your `main`, which is why it can be a blocking gate and a generic scanner cannot.
@@ -1165,12 +1226,17 @@ Before `[1.25]` the runtime read the host's core count, so a pod limited to 2 CP
 
 `cosign sign` binds an identity to a digest, which is real but narrow. A bare `cosign verify` is narrower still and close to useless: without `--certificate-identity-regexp` and `--certificate-oidc-issuer` it accepts any image signed by any Sigstore identity, including one an attacker creates in thirty seconds. The layers above it are SLSA provenance, a signed statement naming the source commit, the builder and the build parameters, requiring a hosted non-falsifiable builder at Build Level 3; and a reproducible build, which lets any third party rebuild the commit and confirm the digest independently. Signature answers "who", provenance answers "from what", and reproducibility lets someone verify the answer rather than trust it.
 
+**Q: How do you ship a FIPS 140-3 compliant Go binary without cgo or OpenSSL?**
+**Short:** Build with GOFIPS140 set to a CMVP-validated Go Cryptographic Module version such as v1.0.0, which links that frozen module and turns FIPS mode on by default.
+
+Since Go 1.24 the standard library contains its own FIPS 140-3 module under `crypto/internal/fips140/...`, and the public `crypto/*` packages call into it, so application code does not change. `GOFIPS140=v1.0.0` (CMVP certificate #5247) or the alias `certified` links the frozen, validated copy; `latest` enables FIPS mode but links the in-tree code, which is not a validated module, and `v1.26.0` was still Pending Review on the CMVP In Process list as of 2026-04-28. The build stays `CGO_ENABLED=0`, static and cross-compilable, which is the whole difference from the older BoringCrypto route. At startup, assert `crypto/fips140.Enabled()` and log `fips140.Version()`, and check the `GOFIPS140` line in `go version -m` as part of release verification. Expect slower key generation (up to 2x for some key types, from per-key pairwise consistency tests) and TLS handshakes that refuse ChaCha20-Poly1305 and plain X25519.
+
 ---
 
 ## 13. Best Practices
 
 1. **Default every container build to `CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w"`.** Deviate only with a stated reason.
-2. **Use `gcr.io/distroless/static-debian12:nonroot` as the runtime base.** It is the right default; `scratch` needs three manual additions to reach parity and `alpine` costs 6 MB and a CVE surface.
+2. **Use `gcr.io/distroless/static-debian13:nonroot` as the runtime base.** It is the right default; `scratch` needs three manual additions to reach parity and `alpine` costs 6 MB and a CVE surface.
 3. **Copy `go.mod` and `go.sum` and run `go mod download` before copying source.** This one reordering is typically worth 40–70 s per CI run.
 4. **Add BuildKit cache mounts for `/go/pkg/mod` and `/root/.cache/go-build`.** Incremental compiles drop from roughly 90 s to 15 s on a large service.
 5. **Block CI on `govulncheck ./...`.** Run an image scanner too, but never gate on its Go findings.
@@ -1184,6 +1250,7 @@ Before `[1.25]` the runtime read the host's core count, so a pod limited to 2 CP
 13. **Set `GOFLAGS=-mod=readonly` in CI** so a build fails on an out-of-date `go.mod` instead of quietly rewriting it.
 14. **Keep the runtime filesystem read-only and drop all capabilities.** A static Go binary needs neither.
 15. **Do not reach for `upx`.** It saves a few MB, adds decompression to every cold start, and confuses scanners that read the ELF sections.
+16. **For a FIPS 140-3 requirement, build with `GOFIPS140` set to a certified module version and assert `fips140.Enabled()` at startup.** Keep `GODEBUG=fips140=only` in test environments.
 
 ---
 
@@ -1233,7 +1300,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
       -o /out/api ./cmd/api
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/api /api
 USER 65532:65532
 EXPOSE 8080
@@ -1313,7 +1380,7 @@ func serve(srv *http.Server, ready *atomic.Bool) error {
 **Step 5 — provenance.** `goreleaser` replaced 14 hand-written release scripts. Images are signed
 keylessly with cosign, SBOMs are attached as attestations, and a Kyverno admission policy verifies
 the signature with both `--certificate-identity-regexp` pinned to the org's workflow paths and
-`--certificate-oidc-issuer` pinned to GitHub. `-trimpath` plus the pinned `toolchain go1.27.1`
+`--certificate-oidc-issuer` pinned to GitHub. `-trimpath` plus the pinned `toolchain go1.27.2`
 directive made builds reproducible, which the team verified in CI by building twice into different
 directories and comparing SHA-256.
 

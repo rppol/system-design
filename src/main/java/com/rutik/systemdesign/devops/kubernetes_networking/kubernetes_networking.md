@@ -1,8 +1,8 @@
 # Kubernetes Networking
 
-> **Version anchor (2026-09-04).** **Kubernetes 1.37 "Garhwal"** (released 2026-08-26) is the current release; **1.36 "Haru"** (2026-04-22) is the prior minor. **Gateway API v1.6** (v1.6.2, 2026-09-03) is current on the Standard (GA) channel — TCPRoute/UDPRoute graduated to Standard in v1.6 — and the **Gateway API Inference Extension** is GA; conformant implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric. kube-proxy's **nftables** mode is the recommended Linux backend; **IPVS was marked deprecated in 1.35** (its feature gate is staged to default off in 1.40, with removal later still). **ingress-nginx was retired in March 2026** — the community controller is archived and read-only, though the Kubernetes `Ingress` API itself remains supported (feature-frozen).
-
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
+
+> **Version anchor (2026-09-04).** **Kubernetes 1.37 "Garhwal"** (released 2026-08-26) is the current release; **1.36 "Haru"** (2026-04-22) is the prior minor. **Gateway API v1.6** (v1.6.2, 2026-09-03) is current on the Standard (GA) channel (TCPRoute/UDPRoute graduated to Standard in v1.6), and the **Gateway API Inference Extension** is GA; conformant implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric. kube-proxy's **nftables** mode is the recommended Linux backend; **IPVS was marked deprecated in 1.35** (its feature gate is staged to default off in 1.40, with removal later still). **ingress-nginx was retired in March 2026**: the community controller is archived and read-only, though the Kubernetes `Ingress` API itself remains supported (feature-frozen).
 
 Kubernetes networking is where many engineers' understanding gets fuzzy — and where interviewers probe hardest. The model rests on a few rules (every Pod gets a routable IP; all Pods can reach each other without NAT) implemented by pluggable layers: the **CNI** (Pod IPs and connectivity), **Services + kube-proxy** (stable virtual IPs), **CoreDNS** (service discovery), **Ingress/Gateway API** (L7 entry), and **NetworkPolicy** (segmentation). This module traces a packet from the internet to a container and back.
 
@@ -69,6 +69,17 @@ On top of Pod networking:
 | iptables (default) | Sequential iptables chains, O(n) in Service count | Fine to ~1000s of Services; rule updates slow at high churn |
 | nftables (recommended on Linux) | Single nftables verdict map, O(1) dispatch | Constant per-packet latency into the tens of thousands of Services |
 | eBPF (Cilium, no kube-proxy) | eBPF programs | Best scale + observability |
+
+### Traffic locality controls on a Service
+
+By default kube-proxy spreads a Service's traffic evenly over every ready endpoint in the cluster, so in a 3-zone cluster about two thirds of calls leave the caller's zone. Four knobs change that, and they differ in whether locality is a preference or a hard rule.
+
+| Control | Where | Behavior | If the local topology has no endpoint |
+|---------|-------|----------|---------------------------------------|
+| `trafficDistribution: PreferSameZone` | Service spec; GA in 1.35 (`PreferClose` is its deprecated alias, GA since 1.33) | All traffic from a zone goes to that zone's endpoints | Falls back to cluster-wide |
+| `trafficDistribution: PreferSameNode` | Service spec; GA in 1.35 | Traffic goes to an endpoint on the caller's node | Falls back to same zone, then cluster-wide |
+| `service.kubernetes.io/topology-mode: Auto` | Annotation (topology-aware routing) | EndpointSlice controller hands out zone hints in proportion to each zone's allocatable CPU, with safeguards | Hints are dropped and traffic goes cluster-wide; takes precedence over `trafficDistribution` if both are set |
+| `internalTrafficPolicy: Local` / `externalTrafficPolicy: Local` | Service spec | Hard rule: node-local endpoints only | Traffic is dropped |
 
 ```mermaid
 flowchart LR
@@ -222,6 +233,30 @@ kubectl get svc orders                      # shows the ClusterIP (virtual)
 kubectl get endpointslices -l kubernetes.io/service-name=orders
 #  lists the READY Pod IPs:8080. EMPTY here = the #1 cause of "connection refused".
 ```
+
+### Keeping Service traffic in-zone with `trafficDistribution`
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: {name: orders}
+spec:
+  selector: {app: orders}
+  ports: [{port: 80, targetPort: 8080}]
+  trafficDistribution: PreferSameZone
+```
+
+The EndpointSlice controller writes a hint on each endpoint, and kube-proxy (or Cilium) on a node in `us-east-1a` programs only the endpoints hinted for `us-east-1a`:
+
+```yaml
+endpoints:
+  - addresses: ["10.1.2.3"]
+    zone: us-east-1a
+    hints:
+      forZones: [{name: us-east-1a}]
+```
+
+The cost case is plain arithmetic. AWS bills inter-AZ traffic at $0.01/GB in each direction, so every GB that crosses a zone costs $0.02. A service mesh moving 100,000 GB a month between pods in a 3-zone cluster sends about 66,667 GB across zones under even spreading, about $1,333 a month; with `PreferSameZone` and endpoints in every zone that drops to near zero. The price is load balance: the field ignores how many endpoints each zone has. If zone `a` has 6 replicas and gets 50% of client traffic while zone `c` has 1 replica, that one pod receives every request from zone `c` clients. Spread replicas with `topologySpreadConstraints` on `topology.kubernetes.io/zone` and scale each zone with its traffic before turning locality on. `topology-mode: Auto` handles skew for you by assigning hints by CPU share and dropping them when a zone would be overloaded, but it is less predictable and turns itself off with fewer endpoints than zones.
 
 ### Diagnosing in-cluster DNS
 
@@ -393,6 +428,7 @@ So a cluster that needs 1000 Pods cannot fit in a `/24` (251) or a `/23` (507) n
 | L7 routing API | Ingress (simple, feature-frozen) | Gateway API (richer, the successor) | Feature needs vs migration effort |
 | DNS | Cluster CoreDNS | + NodeLocal DNSCache | QPS scale |
 | Segmentation | No policy (flat, simple) | NetworkPolicy (zero-trust) | Security posture |
+| Traffic locality | Even spread (default) | `trafficDistribution: PreferSameZone` | Cross-AZ cost and latency vs per-zone overload risk |
 
 ---
 
@@ -430,7 +466,9 @@ egress:
     ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 ```
 
-**Pitfall 3 — `ndots:5` DNS amplification.** External hostnames in app config trigger 4–5 failed lookups each, overloading CoreDNS and adding latency. FIX: use FQDNs with trailing dots, deploy NodeLocal DNSCache, or set a lower `ndots` in the Pod's `dnsConfig`.
+**Pitfall 3: `PreferSameZone` on a Service with uneven replicas per zone.** A Deployment with 5 replicas over 3 zones can land 3, 1, and 1. With `trafficDistribution: PreferSameZone` and clients spread evenly, each lone pod takes all traffic from its zone's clients, about three times the load of each pod in the busy zone. FIX: add a `topologySpreadConstraints` entry with `topologyKey: topology.kubernetes.io/zone` and `maxSkew: 1`, keep at least 2 replicas per zone, and watch per-pod request rate after enabling.
+
+**Pitfall 4: `ndots:5` DNS amplification.** External hostnames in app config trigger 4 to 5 failed lookups each, overloading CoreDNS and adding latency. FIX: use FQDNs with trailing dots, deploy NodeLocal DNSCache, or set a lower `ndots` in the Pod's `dnsConfig`.
 
 ---
 
@@ -451,79 +489,87 @@ egress:
 
 ## 12. Interview Questions with Answers
 
-**Q1: What are the rules of the Kubernetes network model?**
+**Q: What are the rules of the Kubernetes network model?**
 **Short:** Every Pod gets its own IP and can reach every other Pod across nodes without NAT, and a Pod sees its own IP the same way others reach it.
 Every Pod gets its own IP; all Pods can communicate with all other Pods across nodes without NAT; nodes can reach all Pods without NAT; and a Pod sees its own IP as the same one others use to reach it. This flat model is implemented by the CNI plugin and is what lets Services and DNS work uniformly regardless of which node a Pod lands on.
 
-**Q2: What is a ClusterIP, and what's actually listening on it?**
+**Q: What is a ClusterIP, and what's actually listening on it?**
 **Short:** A ClusterIP is a virtual IP with nothing listening on it; kube-proxy DNATs packets destined for it to one of the Service's ready Pod IPs.
 A ClusterIP is a *virtual* IP for a Service — no machine or NIC holds it. kube-proxy installs iptables/nftables rules so packets destined for the ClusterIP are DNAT'd to one of the Service's ready Pod IPs. Nothing listens on the ClusterIP itself; the kernel rewrites the destination. Understanding this resolves most "I can't reach my Service" confusion.
 
-**Q3: What does the CNI do?**
+**Q: You set `trafficDistribution: PreferSameZone` to cut cross-AZ cost, and one pod's CPU pinned at 100%. Why?**
+**Short:** PreferSameZone sends all of a zone's traffic to that zone's endpoints regardless of how many there are, so a zone with one replica and many clients overloads that replica.
+`PreferSameZone` is a fixed rule: if a zone has any ready endpoint, every request from clients in that zone goes to endpoints in that zone, and only a zone with none falls back to cluster-wide. It does not weigh endpoint counts or client volume, so 5 replicas spread 3/1/1 with clients spread evenly give each lone replica about three times the load of the others. The older `service.kubernetes.io/topology-mode: Auto` annotation guards against this by assigning zone hints in proportion to allocatable CPU and dropping them when a zone would be overloaded, at the cost of less predictable routing. With `trafficDistribution`, balance the topology yourself: a zone `topologySpreadConstraint` with `maxSkew: 1`, per-zone replica counts that follow per-zone traffic, and an alert on per-pod request rate.
+
+**Q: What does the CNI do?**
 **Short:** It's invoked by the kubelet at Pod creation to allocate the Pod's IP and wire up routing so the flat Kubernetes network model holds.
 The Container Network Interface plugin is invoked by the kubelet when a Pod is created to allocate the Pod's IP and wire up connectivity (routes, overlay/VXLAN, or BGP) so the network-model rules hold. Different CNIs implement it differently — AWS VPC CNI hands out real VPC IPs, Calico uses BGP/overlay, Cilium uses eBPF — and some (Calico/Cilium) also enforce NetworkPolicy.
 
-**Q4: How does kube-proxy work, and what are its modes?**
+**Q: How does kube-proxy work, and what are its modes?**
 **Short:** kube-proxy programs the node dataplane from Services and EndpointSlices — sequential iptables chains, the O(1) nftables verdict map, or eBPF replacing it entirely.
-kube-proxy watches Services and EndpointSlices and programs the node's dataplane so Service VIPs route to ready Pod IPs. In iptables mode (the default) it installs chains the kernel evaluates sequentially, so per-packet cost grows with Service count; in nftables mode — the recommended mode on Linux — it installs a single verdict map, giving O(1) dispatch that stays flat into the tens of thousands of Services; with Cilium/eBPF, kube-proxy is replaced by eBPF programs entirely. In iptables/nftables modes it doesn't proxy bytes itself — the kernel forwards. The third historical mode, IPVS, was marked deprecated in 1.35 (see Q5).
+kube-proxy watches Services and EndpointSlices and programs the node's dataplane so Service VIPs route to ready Pod IPs. In iptables mode (the default) it installs chains the kernel evaluates sequentially, so per-packet cost grows with Service count; in nftables mode, the recommended mode on Linux, it installs a single verdict map, giving O(1) dispatch that stays flat into the tens of thousands of Services; with Cilium/eBPF, kube-proxy is replaced by eBPF programs entirely. In iptables/nftables modes it doesn't proxy bytes itself; the kernel forwards. The third historical mode, IPVS, was marked deprecated in 1.35 (see the IPVS question in §12).
 
-**Q5: Why was kube-proxy's IPVS mode deprecated, and what should a cluster running it migrate to?**
+**Q: Why was kube-proxy's IPVS mode deprecated, and what should a cluster running it migrate to?**
 **Short:** IPVS was marked deprecated in Kubernetes 1.35 because SIG Network wants one high-performance backend, and nftables is the migration target.
 Kubernetes marked the IPVS kube-proxy mode deprecated in 1.35 — not because it stopped working, but because maintaining three separate Linux dataplanes (iptables, IPVS, nftables) split a shrinking pool of backend-expert maintainers, and nftables already matches IPVS's near-O(1) scaling once past its own stabilization. The deprecation is staged rather than immediate: the `KubeProxyIPVS` feature gate is scheduled to default off starting in 1.40, with code removal even later, so an IPVS cluster keeps running today but is on a clock with no further investment coming. Migrate by switching a node pool at a time to `--proxy-mode=nftables` (or the equivalent `KubeProxyConfiguration` field) and validating Service connectivity before rolling the rest, since the two modes use different kernel primitives and a mid-migration node runs one or the other, never both.
 
-**Q6: Walk a packet from the internet to a container.**
+**Q: Walk a packet from the internet to a container.**
 **Short:** The cloud LB hands the packet to the ingress controller, kube-proxy DNATs it from the Service ClusterIP to a ready Pod IP, then the CNI routes it to the container.
 Client DNS resolves to a cloud LB; the LB forwards to the ingress controller Pod, which terminates TLS and routes by host/path to a Service ClusterIP; kube-proxy's rules DNAT the ClusterIP to a ready Pod IP; the CNI's routing delivers the packet to that Pod on its node; the container receives it on `targetPort`. The response retraces the path (with SNAT where needed).
 
-**Q7: How does service discovery / DNS work in Kubernetes?**
+**Q: How does service discovery / DNS work in Kubernetes?**
 **Short:** CoreDNS resolves names like `orders.default.svc.cluster.local` to a stable ClusterIP, decoupling clients from churning Pod IPs.
 CoreDNS runs as a Service and resolves names like `orders.default.svc.cluster.local` to the Service's ClusterIP (and headless Services to individual Pod IPs). Pods get `/etc/resolv.conf` pointing at CoreDNS with a `search` list and `ndots:5`. Apps call Services by name; CoreDNS returns the stable VIP, decoupling clients from churning Pod IPs.
 
-**Q8: Explain the `ndots:5` problem.**
+**Q: Explain the `ndots:5` problem.**
 **Short:** `ndots:5` retries any name with fewer than 5 dots against each search domain first, so an external name triggers several wasted lookups before the real one.
 `ndots:5` means any name with fewer than 5 dots is tried against each `search` domain before being queried as-is. So `api.vendor.com` (2 dots) triggers 4 lookups (3 failed search-domain attempts + the real one). Across many requests this multiplies CoreDNS load and adds latency. Fixes: trailing-dot FQDNs, NodeLocal DNSCache, or lowering `ndots` via Pod `dnsConfig`.
 
-**Q9: A Service exists but clients get "connection refused." How do you debug?**
+**Q: A Service exists but clients get "connection refused." How do you debug?**
 **Short:** Check whether the Service's EndpointSlices are empty — meaning the selector doesn't match Pod labels or no Pod is passing readiness — before suspecting anything else.
 Check the EndpointSlices: `kubectl get endpointslices -l kubernetes.io/service-name=<svc>`. If empty, either the Service selector doesn't match any Pod labels, or no Pod is passing its readiness probe (only ready Pods become endpoints). Verify Pod labels match the selector and that readiness succeeds. If endpoints exist but it still fails, check NetworkPolicy and the `targetPort`.
 
-**Q10: How does NetworkPolicy work and what's the default?**
+**Q: How does NetworkPolicy work and what's the default?**
 **Short:** All Pod traffic is allowed by default, but selecting a Pod in any direction makes that direction default-deny, and enforcement requires CNI support.
 By default all Pod-to-Pod traffic is allowed. The moment a NetworkPolicy selects a Pod for a direction (Ingress/Egress), that direction becomes default-deny for that Pod, and only the policy's explicit `from`/`to` rules are permitted. Policies are additive (union of allows). Crucially, NetworkPolicy is only enforced if the CNI supports it — Flannel doesn't, AWS VPC CNI needs an add-on.
 
-**Q11: Ingress vs LoadBalancer Service vs Gateway API?**
+**Q: Ingress vs LoadBalancer Service vs Gateway API?**
 **Short:** A LoadBalancer Service provisions one costly L4 LB per Service, Ingress routes many Services through one L7 controller but is feature-frozen, and Gateway API is its GA successor.
 A `LoadBalancer` Service provisions one cloud LB per Service (costly, L4). Ingress lets one ingress controller (behind a single LB) route HTTP by host/path to many Services with TLS termination — far cheaper and L7-aware, though the Ingress API itself is feature-frozen. Gateway API is its GA successor and the target for new work: role-separated `GatewayClass`/`Gateway`/`HTTPRoute`, with native traffic splitting and header matching instead of Ingress's per-controller annotations.
 
-**Q12: ingress-nginx was retired in March 2026 — what does that actually mean for a cluster running it today?**
+**Q: ingress-nginx was retired in March 2026: what does that actually mean for a cluster running it today?**
 **Short:** The community ingress-nginx project stopped shipping releases and security patches in March 2026, but a running cluster keeps working until the next unpatched CVE.
 The Kubernetes Steering and Security Response Committees retired the community `ingress-nginx` controller in March 2026: its repository is archived read-only, and no further releases, bug fixes, or security patches will ship from the project. This does not touch the Kubernetes `Ingress` API itself (still supported, though feature-frozen) or the NGINX web server — only that one community controller binary. A cluster running it doesn't break on the retirement date, but every day after is a day closer to an unpatched CVE with no fix coming, so the practical move is to migrate off it now: to Gateway API (the strategic target) or to a still-maintained Ingress controller such as F5/NGINX Inc.'s separate `kubernetes-ingress` project, HAProxy, or Traefik.
 
-**Q13: Why does AWS VPC CNI risk IP exhaustion?**
+**Q: Why does AWS VPC CNI risk IP exhaustion?**
 **Short:** It assigns each Pod a real VPC subnet IP via ENIs, so a small subnet caps Pod count regardless of node count and dense clusters exhaust it.
 It assigns each Pod a real IP from the VPC subnet (via ENIs), so Pod IPs consume subnet address space directly. A `/24` subnet (~250 usable IPs) supports only ~250 Pods regardless of node count, so dense clusters exhaust subnets and Pods get stuck Pending with IP-allocation errors. Mitigations: larger/secondary CIDRs, prefix delegation (assign /28 prefixes per ENI), or an overlay CNI.
 
-**Q14: How does AWS VPC CNI prefix delegation change the pod-density math, and what does it not fix?**
+**Q: How does AWS VPC CNI prefix delegation change the pod-density math, and what does it not fix?**
 **Short:** Prefix delegation hands each ENI a /28 of 16 addresses at once, raising pods-per-node density, but it does not add subnet capacity.
 Without prefix delegation, the VPC CNI assigns Pods one secondary IP per ENI slot at a time, capping Pods-per-node at roughly `ENIs x IPs-per-ENI` and making Pod startup wait on an EC2 API call per IP. Prefix delegation instead hands each ENI a whole `/28` (16 addresses) in a single allocation, so a node hosts far more Pods before running out of ENI slots and startup latency drops because IPs are pre-warmed in bulk. What it does not change is the subnet's total address ceiling: a `/24` still holds only 251 usable IPs, and now they're consumed in blocks of 16 rather than singly, so a lightly-populated prefix can strand up to 15 unused addresses. Use prefix delegation to fix node density and Pod-start latency; use a larger or secondary CIDR to fix subnet exhaustion — they solve different problems.
 
-**Q15: What happens to a Service's traffic during a rolling update?**
+**Q: What happens to a Service's traffic during a rolling update?**
 **Short:** New Pods' IPs join the Service's endpoints as they pass readiness and old Pods' IPs leave as they terminate, so with `maxUnavailable: 0` only ready Pods ever get traffic.
 As new Pods pass readiness, the EndpointSlice controller adds their IPs to the Service's endpoints; as old Pods are terminated and fail readiness/are deleted, their IPs are removed. kube-proxy updates the dataplane accordingly. With readiness probes and `maxUnavailable: 0`, only ready Pods ever receive traffic, so the Service load-balances seamlessly across the transition.
 
-**Q16: Why might in-cluster DNS suddenly get slow under load?**
+**Q: Why might in-cluster DNS suddenly get slow under load?**
 **Short:** High QPS, often amplified by `ndots:5` search-domain expansion and no client-side caching, saturates CoreDNS's CPU and shows up as app latency.
 CoreDNS is a finite, shared Service; high QPS — often amplified by `ndots:5` search-domain expansion and per-request lookups (no client caching/keep-alive) — saturates its CPU and causes slow or timed-out resolution, which then looks like app latency. NodeLocal DNSCache, autoscaling CoreDNS, FQDNs, and connection reuse address it.
 
-**Q17: What is a headless Service and when do you need it?**
+**Q: How do `trafficDistribution`, topology-aware routing, and `internalTrafficPolicy: Local` differ?**
+**Short:** `trafficDistribution` prefers same-zone or same-node endpoints and falls back, topology-mode splits by zone CPU with safeguards, and `internalTrafficPolicy: Local` is a hard node-local rule that drops traffic.
+`trafficDistribution: PreferSameZone` (GA in 1.35, with `PreferClose` as its deprecated alias) and `PreferSameNode` express a preference: route to the nearest topology that has an endpoint, then widen to the zone and the cluster. The `service.kubernetes.io/topology-mode: Auto` annotation is the older topology-aware routing; it sets zone hints in proportion to each zone's allocatable CPU and removes them when there are fewer endpoints than zones or a zone would be overloaded, and it wins if both are set. `internalTrafficPolicy: Local` and `externalTrafficPolicy: Local` are requirements, not preferences: only endpoints on the receiving node are used, and with none the packet is dropped, which is why they suit node-local agents (a log collector DaemonSet) rather than application Services. A traffic policy set to `Local` overrides `trafficDistribution` for that traffic type.
+
+**Q: What is a headless Service and when do you need it?**
 **Short:** A headless Service has no virtual IP and returns individual Pod IPs via DNS, letting StatefulSet members be addressed directly by stable per-Pod names.
 A headless Service (`clusterIP: None`) has no virtual IP; DNS returns the individual Pod IPs instead. It's used by StatefulSets so each Pod has a stable, directly-addressable DNS name (`db-0.db.ns.svc`), which clustered systems need to reach specific members (e.g., a database primary) rather than load-balancing blindly across all replicas.
 
-**Q18: How does eBPF (Cilium) change the dataplane?**
+**Q: How does eBPF (Cilium) change the dataplane?**
 **Short:** Cilium's eBPF programs implement Service load balancing, NetworkPolicy, and observability directly in the kernel, bypassing iptables and scaling far better.
 Cilium uses eBPF programs attached to kernel hooks to implement Service load balancing, NetworkPolicy, and observability directly in the kernel datapath — bypassing iptables entirely (it can replace kube-proxy). This scales far better at high Service/endpoint counts (no linear iptables chains), enables identity-based policy and L7 visibility (Hubble), and reduces latency from rule traversal.
 
-**Q19: What is the Gateway API Inference Extension, and what problem does it solve that plain Gateway API doesn't?**
+**Q: What is the Gateway API Inference Extension, and what problem does it solve that plain Gateway API doesn't?**
 **Short:** It adds LLM-aware routing — load-per-request and prefix-cache affinity across model replicas — that host/path routing can't express.
 The Gateway API Inference Extension is a GA Gateway API sub-project that adds an inference-specific routing resource — `InferencePool`, a pool of model-serving Pods (the alpha `InferenceObjective` was removed in v1.6.0 and migrated to `llm-d`) — layered on top of the base `Gateway`/`HTTPRoute` resources. Plain Gateway API routes on host/path/headers and treats every backend Pod as interchangeable, but LLM-serving Pods are not: request cost varies wildly by token count and queue depth, and a request whose prompt prefix is already cached in a replica's GPU memory is far cheaper to route there than to a cold one. An endpoint-picker extension consults live Pod metrics (queue length, KV-cache state) to choose the best replica per request instead of plain round-robin, which is what lets a Gateway API implementation front a fleet of vLLM/Triton Pods efficiently. Reach for it specifically for LLM/inference workloads behind Gateway API; ordinary HTTP services get nothing from it and should stay on standard `HTTPRoute` load balancing.
 

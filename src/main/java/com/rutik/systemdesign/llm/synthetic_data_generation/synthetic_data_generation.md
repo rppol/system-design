@@ -97,6 +97,24 @@ Result: naturally diverse vocabulary, complexity, and topic coverage
 
 Used in Cosmopedia (HuggingFace) to generate 30B tokens of synthetic educational text.
 
+**PersonaHub (Ge et al., Tencent AI Lab, June 28, 2024)** scales the idea from a handful of
+hand-written personas to 1 billion personas, about 13% of the world's population, curated
+automatically from web text:
+
+- **Text-to-Persona.** For any web document, ask an LLM "who is likely to read, write or like this
+  text?" A paper on lung-cancer immunotherapy yields a thoracic oncologist; a forum post about
+  fixing a carburetor yields a hobby mechanic.
+- **Persona-to-Persona.** Expand by relationships: for each persona, ask who it works with or
+  serves (the oncologist's patient, a hospital pharmacist), which reaches personas that rarely
+  write web text.
+- **Dedup.** MinHash and embedding similarity remove near-duplicate personas.
+
+Each persona is then prepended to a fixed generation prompt ("Create a challenging math problem
+with this persona"), so persona diversity becomes task diversity with one template. The paper
+synthesized 1.07M math problems this way; a 7B model fine-tuned on them reached 64.9% on MATH. The
+web is the persona source, so persona coverage inherits web skew; check the persona distribution
+before trusting it for a target user base.
+
 ### 4.4 Multi-Turn Conversation Synthesis
 
 Generate complete multi-turn dialogues:
@@ -199,6 +217,102 @@ Example:
 ```
 
 Effective when you have high-quality outputs (expert documentation, verified code solutions) but need diverse prompts to pair them with. Can generate 10-50x more training pairs from a small set of expert outputs.
+
+### 4.9 Agentic Trajectory and Environment Synthesis
+
+Training an agent needs more than (prompt, response) pairs. It needs **environments**: a task, a
+sandbox the agent can act in, and a check that says whether it succeeded. Real tasks are scarce
+because each one needs a human-written issue, a working build and a test that captures the fix.
+Before 2025, software-engineering agent datasets held at most a few thousand instances from 11 or
+fewer repositories, took hundreds of hours of human curation, and their per-task Docker images took
+several terabytes.
+
+**SWE-smith (Yang et al., April 30, 2025)** inverts the problem: start from a repository whose tests
+pass, and synthesize bugs that break them.
+
+```mermaid
+flowchart LR
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    repo(["Repo with<br/>passing tests"])
+    env("One Docker env<br/>per repo")
+    bugs("Make candidate bugs:<br/>LM rewrite, AST edit,<br/>combine, revert a PR")
+    check("Run tests")
+    drop(["Discard"])
+    task("Task = bug +<br/>failing tests +<br/>LM-written issue")
+    traj("Agent attempts<br/>with a strong model")
+    keep(["Keep resolved<br/>trajectories for SFT"])
+
+    repo --> env --> bugs --> check
+    check -->|"no test breaks"| drop
+    check -->|"tests break"| task --> traj --> keep
+
+    class repo io
+    class env req
+    class bugs mathOp
+    class check mathOp
+    class drop lossN
+    class task req
+    class traj mathOp
+    class keep train
+```
+
+The test suite is the verifier, so every task has a ground-truth check without a human. Because all
+tasks from one repository share one environment, storage scales with repositories, not tasks. The
+result: about 50k task instances from 128 Python repositories. Expert trajectories were collected by
+running SWE-agent with a strong model on them, keeping only resolved runs, and fine-tuning Qwen 2.5
+Coder 32B on them produced SWE-agent-LM-32B at 40.2% pass@1 on SWE-bench Verified.
+
+The same shape generalizes beyond code: generate the environment, generate the task, verify by
+execution, and keep successful trajectories (rejection sampling, §4.6, applied to multi-step
+episodes). DeepSeek reported synthesizing agent training data across 1,800+ environments and
+85k+ complex instructions for DeepSeek-V3.2 (December 2025).
+
+Failure modes specific to this method:
+
+- **Bug distribution skew.** Synthetic bugs are what an LM or an AST mutator finds easy to inject.
+  Compare the mix (one-line edits vs. multi-file changes) against real issues before training.
+- **Benchmark leakage.** Exclude every repository that appears in the evaluation set, or the agent
+  learns the test repository's code.
+- **Trajectory survivorship.** Keeping only resolved runs teaches the agent the paths a strong model
+  already finds; it says nothing about recovering from a wrong first step. Mix in corrected failures.
+
+### 4.10 Pretraining Data Rephrasing
+
+Instruction-tuning synthesis (§4.1 to §4.8) adds format. Pretraining synthesis must add tokens at
+trillion scale without losing the diversity of real text. Generating from scratch with a fixed set
+of topics collapses diversity; **rephrasing** keeps each real document as the source and changes only
+its form, so the content distribution of the web is preserved.
+
+- **WRAP (Maini et al., Apple and CMU, January 2024).** Prompt an instruction-tuned model to rewrite
+  web documents "like Wikipedia" or as question-answer pairs, and train on a mix of real and
+  rephrased text. Reported effect: roughly 3x faster pretraining to the same quality on C4-scale data.
+- **Nemotron-CC (NVIDIA, December 3, 2024).** A 6.3T-token English Common Crawl dataset, about 4.4T
+  unique real tokens and 1.9T synthetic. An ensemble of quality classifiers buckets documents.
+  Low-quality documents are rephrased into clean Wikipedia-style text, rescuing tokens a heuristic
+  filter would drop. High-quality documents are expanded into several new forms: diverse
+  question-answer pairs, a distilled concise version, extracted knowledge, and knowledge lists.
+  An 8B model trained for 15T tokens, 7.2T of them from Nemotron-CC, beat Llama 3.1 8B by 5 points on
+  MMLU and 3.1 on ARC-Challenge.
+
+```
+Classifier ensemble buckets each Common Crawl document:
+
+  low quality  ---> rephrase to Wikipedia style ---------------> 1 cleaner doc
+  medium       ---> keep as is
+  high quality ---> keep as is
+               +--> diverse QA pairs
+               +--> distilled concise version
+               +--> extracted knowledge             ---> several docs per source
+               +--> knowledge list
+```
+
+The asymmetry is the design: weak documents are fixed, strong documents are multiplied, and every
+synthetic token stays tied to a real source document, which limits the model-collapse risk in §10.
 
 ---
 
@@ -339,6 +453,17 @@ Implication: Spend effort on data quality, not scale. Better to annotate 1000 ex
 - Synthetic data quality evaluated by reward models
 - Demonstrated that LLMs can generate their own training data at scale
 
+### Nemotron-CC (NVIDIA, 2024)
+- 6.3T tokens from Common Crawl: about 4.4T unique real tokens plus 1.9T rephrased synthetic tokens
+- Classifier ensemble for quality; low-quality documents rephrased, high-quality documents expanded
+  into QA pairs, distilled text and knowledge lists (§4.10)
+- 8B model at 15T tokens beat Llama 3.1 8B by 5 MMLU points
+
+### SWE-smith (2025)
+- About 50k software-engineering tasks from 128 repositories, made by breaking passing tests (§4.9)
+- One execution environment per repository instead of per task
+- SWE-agent-LM-32B, trained on its trajectories, reached 40.2% pass@1 on SWE-bench Verified
+
 ### Phi-1/Phi-2 (Microsoft, 2023)
 - "Textbooks Are All You Need" — trained on high-quality synthetic textbook data
 - 7B model outperforming much larger models on reasoning tasks
@@ -399,7 +524,10 @@ Implication: Spend effort on data quality, not scale. Better to annotate 1000 ex
 | **Argilla** | Human annotation UI | Label synthetic data; quality filter |
 | **Ragas** | RAG data generation | Generate QA pairs from documents |
 | **Distilabel** | Synthetic pipeline toolkit | HuggingFace; modular pipeline |
-| **OpenAI API** | Teacher model | GPT-4 for high-quality generation |
+| **PersonaHub** | Persona source | Tencent; 1B web-derived personas, released subsets on Hugging Face (`proj-persona/PersonaHub`) |
+| **SWE-smith** | Agent environment synthesis | Bug injection plus per-repo Docker environments; dataset, environments and SWE-agent-LM-32B released |
+| **NeMo Curator** | Pretraining data curation | NVIDIA; quality classifiers and synthetic rephrasing pipelines of the kind used for Nemotron-CC |
+| **OpenAI / Anthropic APIs** | Teacher model | `gpt-6-astra` ($10/$50 per 1M), `gpt-6.1-sol` ($2/$10) or Claude Opus 5.5 ($4/$20) for generation |
 | **vLLM** | Local inference | Generate at scale from open models |
 | **LLaMA-Factory** | Fine-tuning framework | Easy pipeline from data to trained model |
 
@@ -427,6 +555,10 @@ A: Greedy decoding is deterministic, so similar prompts produce identical or nea
 **Short:** Code and math synthetic data can be executed and checked for correctness, filtering hallucinated solutions to reach near-100% accuracy versus 80-90% unverified.
 A: For code and math, you can execute the generated answer and check if it's correct. This filtering step removes hallucinated solutions — a major problem with LLM-generated data. The resulting training data has near-100% accuracy for verifiable steps, vs. 80-90% for unverified instruction data.
 
+**Q: How do you synthesize training environments for a coding agent when real issues with tests are scarce?**
+**Short:** Start from repositories whose tests pass, inject bugs that make tests fail, write the issue with an LM, and keep only agent trajectories that make the tests pass again, as SWE-smith does.
+Invert the usual direction: instead of mining rare real issues that come with a working build and a test, take a repository whose test suite passes and synthesize breakage. SWE-smith (April 2025) generates candidate bugs by LM rewrites of functions, AST-level mutations, combining bugs and reverting real PRs, runs the tests, discards candidates that break nothing, and has an LM write the issue text; the failing tests become the verifier, so no human labels any task. All tasks from one repository share one Docker environment, so storage grows with repositories rather than tasks, which is how it reached about 50k tasks from 128 repositories where earlier datasets had a few thousand from 11 or fewer. Running SWE-agent with a strong model and keeping resolved trajectories gave the SFT data for SWE-agent-LM-32B, 40.2% pass@1 on SWE-bench Verified. Three checks before training: exclude every repository in your evaluation set, compare the synthetic bug mix against real issues, and add corrected failed trajectories so the agent learns recovery, not only the happy path.
+
 **Q: How do you design a quality filtering pipeline for synthetic training data?**
 **Short:** A synthetic data quality pipeline stages format validation, deduplication, difficulty filtering, factual verification, and a small human spot-check before training.
 A quality filtering pipeline uses multiple stages to remove low-quality synthetic samples before they corrupt model training. Stage 1: format validation — check that outputs follow the requested structure (valid JSON, correct section headers). Stage 2: deduplication — MinHash or exact hash to remove duplicates and near-duplicates. Stage 3: difficulty filtering — remove trivially simple or impossibly complex examples using perplexity scoring or model-based difficulty estimation. Stage 4: factual verification — for knowledge-dependent tasks, verify key facts against a reference corpus or use a separate LLM as a fact-checker. Stage 5: human spot-check — sample 1-5% for manual review to calibrate automated filters. Alpaca's original 52K instructions had significant quality issues (~30% contained errors or were low-quality); proper filtering would have reduced this to 15-20K high-quality samples that produced better results, as demonstrated by LIMA (1K curated examples matching 52K unfiltered).
@@ -443,9 +575,17 @@ Evol-Instruct (WizardLM) iteratively increases instruction complexity by applyin
 **Short:** Assigning a different persona per generation batch shifts vocabulary, complexity, and topic selection at the distribution level, beyond what raising temperature alone can.
 Assigning a different persona per generation batch ("a PhD physicist", "a high school student struggling with algebra", "a non-native English speaker") shifts the generator's vocabulary, sentence complexity, topic selection, and error patterns — producing diversity that a single system prompt cannot, no matter how high the temperature. Cosmopedia (HuggingFace, 2024) used this at scale: 30B tokens of synthetic educational text generated by Mixtral 8x7B under diverse persona and audience framings, outperforming similarly sized datasets on knowledge-intensive tasks. Personas attack the diversity problem at the distribution level while temperature only adds local sampling noise; the two compose. Verify the effect with embedding-cluster balance and distinct-n metrics rather than assuming persona labels alone guarantee coverage.
 
+**Q: How does PersonaHub get a billion personas, and what is the catch?**
+**Short:** PersonaHub asks an LLM who would read or write each web document, then expands by related personas, yielding 1B deduplicated personas whose distribution inherits the web's skew.
+PersonaHub (Tencent AI Lab, June 2024) builds personas automatically rather than by hand. Text-to-Persona asks an LLM, for each web document, who is likely to read, write or like it; Persona-to-Persona expands each persona through its relationships (a doctor's patient, a pharmacist), reaching people who rarely write online; MinHash and embedding deduplication remove near-copies, leaving about 1B personas. Prepending a persona to one fixed prompt turns persona diversity into task diversity: 1.07M synthesized math problems took a 7B model to 64.9% on MATH. The catch is that the source is the web, so coverage follows who writes and is written about online, and personas that read like real people raise the risk of generating content that echoes their source text. Sample personas against your target user distribution, not uniformly, and run benchmark-contamination checks on the generated tasks, since persona prompts can steer generation straight back toward well-known problems.
+
 **Q: What is model collapse and how does training on synthetic data risk causing it?**
 **Short:** Model collapse is a model trained on its own or similar outputs progressively losing diversity across generations, mitigated by keeping at least 30% human data in the mix.
 Model collapse occurs when a model trained on its own outputs (or outputs from similar models) progressively loses diversity and degrades in quality across generations. Each generation amplifies the biases and errors of the previous one while losing tail distribution coverage — rare but valid outputs become increasingly unlikely. The risk is highest when: (1) synthetic data dominates the training mix (>50%); (2) no human-generated data anchors the distribution; (3) multiple generations of synthetic data are stacked (model A generates data for model B, which generates data for model C). Mitigation: (1) always mix synthetic with human-generated data (at least 30% human); (2) use diverse generator models (not just one model's outputs); (3) explicitly measure output diversity (unique n-grams, topic coverage); (4) include quality filtering that removes outputs too similar to each other. Shumailov et al. (2023) showed that after 5-10 generations of self-training, models can lose up to 50% of their vocabulary diversity.
+
+**Q: Why do pretraining pipelines rephrase real web documents instead of generating synthetic text from scratch?**
+**Short:** Rephrasing keeps each real document as the source and changes only its form, preserving the web's topic diversity and grounding while adding clean tokens, which from-scratch generation cannot do.
+Generation from scratch draws every token from the generator's own distribution, so topic and style diversity collapse toward what the model already favors, the mechanism behind model collapse. Rephrasing anchors each synthetic document to a real one: WRAP (Apple and CMU, 2024) rewrote web text in Wikipedia and question-answer styles and reported about 3x faster pretraining to the same quality. Nemotron-CC (NVIDIA, December 2024) applies it asymmetrically at 6.3T tokens: a classifier ensemble buckets Common Crawl documents, low-quality ones are rephrased into clean text instead of being discarded, and high-quality ones are expanded into QA pairs, distilled versions, extracted knowledge and knowledge lists, adding about 1.9T synthetic tokens to about 4.4T real; an 8B model trained for 15T tokens with 7.2T from it beat Llama 3.1 8B by 5 MMLU points. Keep real text in the mix, since rephrased text alone shifts style toward the rewriter, and track lineage so each synthetic document can be traced to its source for dedup and contamination checks.
 
 **Q: What did the LIMA paper demonstrate about data quality vs quantity for fine-tuning?**
 **Short:** LIMA fine-tuned on 1,000 curated pairs was preferred over Alpaca's 52K examples 78% of the time, showing alignment is mostly about format, not new knowledge.
@@ -657,11 +797,11 @@ Return JSON: {{"instruction": "...", "input_context": "...", "output": "..."}}""
 
     try:
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
+            model="claude-sonnet-5-5",
+            max_tokens=4096,  # adaptive thinking shares this budget with the JSON answer
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text
+        text = "".join(b.text for b in response.content if b.type == "text")
         data = json.loads(text)
         return EvolvedPair(
             instruction=data["instruction"],

@@ -712,14 +712,34 @@ to satisfy every caller — which `dependencyManagement`/`constraints` then
 makes deterministic and permanent, instead of leaving it to whichever rule
 the build tool happens to apply.
 
-### 6.10 Maven 4 (still RC) and mvnd: the daemon available today
+### 6.10 Maven 3.10 (GA), Maven 4 (RC), and mvnd
 
-Maven 4 has not reached general availability. The newest Maven 4 artifact is
-`4.0.0-rc-6` (released 2026-07-30) — still a release candidate after several
-years of development; the GA line remains Maven 3.9.x (newest `3.9.16`,
-2026-05-17), with a `3.10.0-rc-1` also out. Know what Maven 4 changes and why
-it has taken this long — do not treat it as shipped, and do not write a
-migration plan for a tool nobody runs in production yet.
+The GA line is Maven 3.10.x (`3.10.0`, 2026-09-27, runs on Java 8+); the Maven
+team supports `3.10.0` and `3.9.16` and no older release. 3.10 moves Maven 3
+onto Resolver 2.x (`2.0.24`), the same resolver lineage Maven 4 uses, so most
+of its changes sit in dependency resolution rather than in the POM model.
+Maven 4 has not reached general availability: the newest artifact is
+`4.0.0-rc-7` (2026-09-24, requires Java 17). Know what Maven 4 changes and why
+it has taken this long, but plan upgrades against 3.10.
+
+#### Upgrading 3.9 to 3.10
+
+| Change | Effect on an existing build | Escape hatch |
+|--------|-----------------------------|--------------|
+| Classpath order went from depth-first (pre-order) to breadth-first (level-order) | Two JARs that both contain a class can swap which copy loads first | `-Daether.system.dependencyVisitor=preOrder` |
+| Stricter POM validation (3.10 raises the validation level) | Duplicated plugin entries, invalid version characters, malformed snapshot versions and reserved repository ids fail the build; parent `relativePath` is validated too | `-Dmaven.resolver.validation=off` (or `mild`) |
+| Super POM sets `project.build.outputTimestamp` | Builds are reproducible by default; archive entries get a fixed timestamp | set your own `outputTimestamp` |
+| Super POM sets `sourceEncoding` and `reporting.outputEncoding` to UTF-8 | Platform-encoding builds stop depending on the host locale | set the property explicitly |
+| Super POM drops its `pluginManagement` and `release-profile` | A plugin whose version came only from the Super POM loses it, and `-P release-profile` no longer exists | pin every plugin and define a release profile in your own POM |
+| Server credentials scoped to repository origin (scheme, host, port) and exact id | A repository declared in an activated profile no longer receives credentials | list origins in `<server><repositoryOrigins>` |
+
+The classpath-order change does not change which version of an artifact wins:
+the level-order visitor sorts the resolved graph, and version mediation stays
+nearest-wins. What moves is the order of distinct artifacts on the classpath, which matters only
+when two artifacts carry the same fully qualified class. That build was
+already broken; 3.10 just picks a different winner. Run the Enforcer
+`banDuplicateClasses` rule (from `extra-enforcer-rules`) before upgrading
+rather than reaching for `preOrder`.
 
 **The problem Maven 4 exists to fix.** The POM has always served two
 audiences at once: the *build* (plugin configuration, profiles, source
@@ -800,7 +820,7 @@ the configuration cache is usually the bigger, more noticeable win of the
 two: it removes a fixed floor that sat underneath every build regardless of
 how good the build cache's hit rate already was.
 
-**Current default status (Gradle 9.7.1, verified against Gradle's own docs).**
+**Current default status (Gradle 9.8.1, 2026-10-07, verified against Gradle's own docs; 9.8.x runs the daemon and toolchains on Java 27).**
 The configuration cache is **not** enabled by default in the Gradle 9 line —
 it remains opt-in via `org.gradle.configuration-cache=true` in
 `gradle.properties` (or the `--configuration-cache` flag). Gradle's own
@@ -1072,6 +1092,18 @@ one side of the conflicting graph at all (§6.5, §14).
    *Fix:* do not treat `<modules>` order as meaningful; if build order needs
    documenting, document the actual dependency graph, not the listing.
 
+8. **A Maven 3.9 to 3.10 upgrade changes which duplicate class loads.** A
+   service pulled `javax.annotation` classes from both `jsr250-api` (direct
+   dependency of a library two levels down) and `javax.annotation-api` (one
+   level down). Under 3.9's depth-first order the deeper JAR came first on the
+   test classpath because its parent was declared first; 3.10's breadth-first
+   order put the shallower JAR first, and a test that called a method present
+   in only one copy began failing with `NoSuchMethodError`. No version changed,
+   and `dependency:tree` looked identical. *Fix:* exclude one of the two
+   artifacts and add Enforcer's `banDuplicateClasses` rule, rather than
+   pinning `-Daether.system.dependencyVisitor=preOrder`, which only restores
+   the old accident.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1119,6 +1151,19 @@ same artifact at the same depth, the branch whose root dependency appears
 earlier in `<dependencies>` wins, regardless of which version is newer. Do
 not assume "wins" means "newest" — it means "closest," which is exactly why
 an older transitive version can beat a newer one.
+
+**Q: After upgrading Maven 3.9 to 3.10, tests fail with `NoSuchMethodError` although no dependency version changed. What happened?**
+**Short:** Maven 3.10 orders the classpath breadth-first instead of depth-first, so when two JARs carry the same class a different copy now loads first.
+
+Maven 3.10 moved to Resolver 2.x and changed classpath ordering from
+pre-order (depth-first) to level-order (breadth-first), matching Maven 4.
+Version mediation is unchanged, so `dependency:tree` looks the same, but two
+different artifacts that both contain one fully qualified class can swap
+places on the classpath, and the JVM loads whichever comes first.
+`-Daether.system.dependencyVisitor=preOrder` restores the old order and is a
+stopgap only. The fix is to remove the duplicate: exclude one artifact and
+add Enforcer's `banDuplicateClasses` rule so the next duplicate fails the
+build instead of depending on ordering.
 
 **Q: How does Gradle's default conflict resolution differ from Maven's nearest-wins rule?**
 **Short:** Gradle keeps the highest version found anywhere in the graph, ignoring declaration order and tree depth.
@@ -1317,7 +1362,8 @@ not a quick fix for one collision.
 Because the JAR/ZIP format embeds file timestamps and file ordering by
 default, and both commonly vary between build machines even when the actual
 class content is identical. Maven's reproducible-builds support
-(`project.build.outputTimestamp`) and Gradle's Jar task options
+(`project.build.outputTimestamp`, which the Super POM sets by default from
+Maven 3.10) and Gradle's Jar task options
 (`preserveFileTimestamps = false`, `reproducibleFileOrder = true`) pin both to
 a fixed value so the same inputs always produce the same bytes. Turn these on
 for any artifact that gets hashed or signed downstream, such as for

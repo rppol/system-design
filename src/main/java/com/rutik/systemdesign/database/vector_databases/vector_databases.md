@@ -4,8 +4,10 @@
 > (0.8.0, November 2024, added **iterative index scans** — `hnsw.iterative_scan` /
 > `ivfflat.iterative_scan`, the fix for the classic overfiltering problem where a
 > filtered ANN query returns fewer rows than `LIMIT` asked for — plus the `sparsevec`
-> type for BM25/SPLADE-style embeddings; 0.8.2, February 2026, fixed a parallel-HNSW
-> buffer overflow, CVE-2026-3172, so anything older than 0.8.2 should be patched).
+> type for BM25/SPLADE-style embeddings). Patch to **0.8.7** (1 October 2026) or later:
+> 0.8.2 (February 2026) fixed a parallel-HNSW build buffer overflow, CVE-2026-3172; 0.8.3
+> (June 2026) fixed possible index corruption during HNSW vacuuming; 0.8.6 and 0.8.7 fixed
+> IVFFlat index-build buffer overflows.
 > **Redis 8** ships a native HNSW-backed **vector set** type (`VADD`/`VSIM`) with
 > attribute filtering applied during the graph walk — see
 > [`redis_internals`](../redis_internals/redis_internals.md). **Cassandra 5.0** has a
@@ -521,6 +523,44 @@ LIMIT 10;
 | Milvus | Distributed, open-source | Large-scale production | Tens of billions |
 | Chroma | Embedded, simple | Prototyping, small datasets | Millions |
 | Redis | Redis Query Engine + vector sets | Low-latency cache + vector | Millions |
+| Amazon S3 Vectors | Serverless, vectors stored in S3 vector buckets | Large, rarely queried corpora; RAG cold tier | 2B per index, 10,000 indexes per bucket |
+
+### Object-Storage Tier: Amazon S3 Vectors
+
+Amazon S3 Vectors (GA 2 December 2025, 14 Regions at launch) stores vectors in a new bucket type, a *vector bucket*, and answers similarity queries through `QueryVectors` without any cluster to size. AWS positions it at "up to 90%" lower total cost than in-memory vector stores, and the price for that is latency: under 1 second for infrequent queries, around 100 ms or less for frequently queried indexes, against single-digit milliseconds for an in-RAM HNSW graph.
+
+Limits from the S3 Vectors documentation:
+
+| Limit | Value |
+|-------|-------|
+| Vectors per index | 2 billion |
+| Indexes per vector bucket | 10,000 |
+| Dimensions | 1 to 4,096 (float32), cosine or Euclidean |
+| Metadata per vector | 40 KB total, 2 KB filterable, 50 keys |
+| Writes per index | 1,000 `PutVectors`/`DeleteVectors` requests/s, 2,500 vectors/s, 500 vectors per call |
+
+Pricing in us-east-1 has five parts: storage at $0.06 per GB-month, PUT at $0.20 per logical GB uploaded, $2.50 per million `QueryVectors` calls, a data-processed charge on every query, and $0.01 per GB of data returned (the first 512 KB per query is free). Data processed is the whole index size (vector data, key, and filterable metadata) on every query, billed in tiers: $0.004/TB for the first 100K vectors, $0.002/TB from 100K to 10M, and $0.0004/TB above 10M. That charge, not the per-call fee, dominates query cost on a large index:
+
+```
+corpus: 10M vectors x 1,024 dims x 4 B, plus a ~100 B key = ~4.1 KB per vector, ~40 GB
+
+in-memory HNSW (r7g.2xlarge, 64 GiB, $0.4284/hr on-demand)
+  instance             0.4284 x 730 h                         = ~$313 / month, idle or busy
+
+S3 Vectors, one 10M-vector index
+  storage              40 GB x $0.06                          =     $2.40 / month
+  data processed       100K x 4.1 KB x $0.004/TB
+                       + 9.9M x 4.1 KB x $0.002/TB            =    ~$77 per million queries
+  per-call fee                                                =     $2.50 per million queries
+  at 1 QPS             2.6M queries x ~$79.6 / 1M             =   ~$206 / month
+  at 100 QPS           259M queries x ~$79.6 / 1M             = ~$20,600 / month
+
+break-even with the instance: ~3.9M queries/month, about 1.5 sustained QPS
+```
+
+At a few hundred thousand queries a month the object tier costs a few dollars where the in-memory node costs hundreds. Above about 1.5 sustained queries per second on this 10M-vector index the in-memory node is cheaper, and at 100 QPS S3 Vectors costs about 65 times as much. Because data processed scales with the size of the index queried, many small indexes are far cheaper to query than one large one: a query against a 100K-vector tenant index costs about $1.53 per million in data processed. The latency also stays at around 100 ms at best. The pattern that follows is tiering: keep the hot tenants or the recent window in an in-memory index (OpenSearch, Qdrant, pgvector) and the long tail in S3 Vectors. AWS ships two wired versions of this: Bedrock Knowledge Bases can use an S3 vector index as its store, and OpenSearch Service can keep vector data in S3 Vectors and serve hybrid search over it.
+
+What it does not give you: no hybrid BM25 scoring inside S3 Vectors itself, no transactions with your relational rows, and a write ceiling of 2,500 vectors per second per index, so a 100M-vector backfill into one index takes at least 100M / 2,500 = 40,000 s, about 11 hours. Spread a large backfill across several indexes.
 
 ---
 
@@ -774,6 +814,12 @@ client.query_points(
 - Need advanced features (multi-modal, automatic embedding, graph+vector)
 - Performance is critical at scale
 
+**Use Amazon S3 Vectors when**:
+- The corpus is large (hundreds of millions to billions of vectors) and most of it is queried rarely
+- Sub-second latency is acceptable and 10 ms is not required
+- Query rate is low or bursty, so an always-on in-memory cluster would sit idle
+- It is the cold tier behind a smaller in-memory index for hot data
+
 **Avoid vector databases when**:
 - You just need keyword search (BM25 is better)
 - All queries use exact filters with no semantic component
@@ -826,6 +872,7 @@ Query embedded with model A, documents embedded with model B → completely diff
 | Qdrant | Rust-based, high-performance, rich filtering |
 | Milvus | Distributed vector database for billion-scale |
 | Chroma | Embedded vector DB for prototyping and development |
+| Amazon S3 Vectors | Vector buckets with `PutVectors`/`QueryVectors`; serverless object-storage tier, 2B vectors per index |
 | FAISS (Meta AI) | In-process ANN library (CPU + GPU) — the algorithms without the service; see [FAISS Deep Dive](../../llm/faiss_deep_dive/faiss_deep_dive.md) |
 | Annoy (Spotify) | Tree-based ANN, read-only index |
 | LangChain VectorStores | Abstraction layer over multiple vector DBs |
@@ -854,6 +901,11 @@ Three approaches: (1) Namespace/collection isolation: each tenant gets a separat
 **Short:** Use pgvector when vectors must join relational data transactionally; use a dedicated DB past roughly 100M vectors.
 
 Use pgvector when the vectors need to be queried alongside relational data that already lives in PostgreSQL. The decisive case is a query like "find similar products to X that are also in stock and available in the user's region" — one SQL statement in pgvector, versus a vector query plus a second lookup and an application-side intersection with a dedicated vector DB. In detail: (1) Vectors are joinable to relational data (products, users, documents). (2) Transactional writes: embedding a document and its metadata atomically. (3) Compliance requirements favor single database system. (4) Scale is under 10M vectors for HNSW (scalable to 100M+ with IVFFlat and tuning). (5) Team is PostgreSQL-only and doesn't want to operate another database. Use dedicated vector DB when: (1) > 100M vectors on a single node. (2) Need managed service, auto-scaling, zero-ops. (3) Need features like multi-modal search, automatic embedding, advanced similarity functions. (4) Performance at extreme scale is critical.
+
+**Q: Where does Amazon S3 Vectors fit next to an in-memory vector database, and where does it lose?**
+**Short:** S3 Vectors is a cheap object-storage tier for large, rarely queried corpora at 100 ms to 1 s per query; above a few sustained QPS on a large index, or for single-digit-ms targets, in-memory wins.
+
+S3 Vectors (GA 2 December 2025) keeps vectors in S3 vector buckets, up to 2 billion per index and 10,000 indexes per bucket, and serves `QueryVectors` with no cluster to provision. It bills storage at $0.06 per GB-month, $2.50 per million queries, and a data-processed charge that bills the whole index size on every query ($0.002/TB for the 100K-10M vector tier). For 10M 1,024-dimension vectors (40 GB) storage is $2.40 a month, against roughly $313 a month for a 64 GiB r7g.2xlarge that holds the same set in an HNSW graph. Queries reverse the comparison: data processed on that index is about $77 per million queries, so the two break even near 3.9M queries a month (about 1.5 sustained QPS), and at 100 QPS S3 Vectors costs about $20,600 a month. Latency is around 100 ms for frequent queries and under 1 s for infrequent ones, instead of a few milliseconds. Splitting the corpus into small per-tenant indexes cuts the data-processed charge, because each query bills only the index it hits. Writes are capped at 2,500 vectors per second per index, so bulk loads need to spread over several indexes. Use it as the cold tier: hot tenants or recent data in OpenSearch, Qdrant, or pgvector, the long tail in S3 Vectors, which Bedrock Knowledge Bases and OpenSearch Service can use directly.
 
 **Q: What is hybrid search and when is it necessary?**
 **Short:** Hybrid search combines dense vector similarity with sparse keyword matching because pure vector search misses exact terms.

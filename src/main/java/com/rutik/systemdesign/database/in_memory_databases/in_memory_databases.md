@@ -18,7 +18,7 @@ A disk-backed database is a library with books stored in a warehouse — every r
 
 **No disk I/O on critical path**: Data structures live in RAM. Reads bypass page cache, buffer pool, and disk I/O entirely. This eliminates the ~5ms disk seek and ~0.1ms SSD random read latency.
 
-**Specialized data structures**: IMDBs optimize their in-memory data structures differently from disk-optimized B+trees. Redis uses skip lists for sorted sets, hash tables for hashes, and listpacks for small collections. VoltDB uses hash-partitioned in-memory tables.
+**Specialized data structures**: IMDBs optimize their in-memory data structures differently from disk-optimized B+trees. Redis uses skip lists for sorted sets, hash tables for hashes, and listpacks for small collections. Volt Active Data uses hash-partitioned in-memory tables.
 
 **Durability spectrum**: Configurable tradeoff between durability and performance. RDB snapshots, AOF logs, synchronous replication, NVMe persistence, and hybrid approaches each provide different RPO/RTO characteristics.
 
@@ -40,7 +40,7 @@ quadrantChart
 
 Each point trades write-path latency for how much committed data can survive a crash: RDB risks losing the minutes since the last snapshot, AOF `everysec` risks one second, and AOF `always` or synchronous (K-safety) replication trade throughput for near-zero loss — see the RDB/AOF and K-safety discussion later in this module for the numbers behind each position.
 
-**Concurrency without lock overhead**: Many IMDBs (Redis, VoltDB single-threaded core) serialize access to eliminate lock contention. Redis's single-threaded command processing avoids mutex overhead entirely for most operations.
+**Concurrency without lock overhead**: Many IMDBs (Redis, Volt Active Data single-threaded core) serialize access to eliminate lock contention. Redis's single-threaded command processing avoids mutex overhead entirely for most operations.
 
 ---
 
@@ -49,7 +49,7 @@ Each point trades write-path latency for how much committed data can survive a c
 | Category | Systems | Use Case |
 |----------|---------|----------|
 | Key-Value Cache | Redis, Memcached | Session, cache, leaderboard |
-| In-Memory RDBMS | VoltDB, H-Store, SAP HANA | OLTP with ACID at microsecond speed |
+| In-Memory RDBMS | Volt Active Data, H-Store, SAP HANA | OLTP with ACID at microsecond speed |
 | Distributed Cache | Apache Ignite, Hazelcast | Distributed cache + compute grid |
 | In-Memory Analytics | Apache Arrow, DuckDB | Vectorized analytical queries in RAM |
 | Persistent Memory | pmem-based stores | NVMe DIMM, byte-addressable |
@@ -88,7 +88,7 @@ flowchart LR
 
 **Redis 6+ I/O threading**: network I/O became multi-threaded (reading and writing sockets), but command execution stays on the single thread shown above — no contention on data structures is introduced.
 
-**VoltDB Architecture** — every transaction runs as a stored procedure routed to its owning partition; each partition is single-threaded, so committed state is protected by synchronous K-safety replication before the (async) command log is written.
+**Volt Active Data Architecture:** every transaction runs as a stored procedure routed to its owning partition; each partition is single-threaded, so committed state is protected by synchronous K-safety replication before the (async) command log is written.
 
 ```mermaid
 flowchart LR
@@ -100,7 +100,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Client([Client]) --> Proc("VoltDB Stored Procedure<br/>all logic in stored procs")
+    Client([Client]) --> Proc("Volt Stored Procedure<br/>all logic in stored procs")
     Proc --> Router{"Partition Router"}
     Router --> P0("Partition 0<br/>single thread · RAM table")
     Router --> P1("Partition 1<br/>single thread · RAM table")
@@ -229,15 +229,15 @@ failed write. Alerting at `0.8 x 8 = 6.4 GB` buys the gap between "trending badl
 "rejecting writes". Under `allkeys-lru` that gap is when you add capacity before eviction
 starts silently dropping hot keys; under `noeviction` it is the only warning you get at all.
 
-### VoltDB Partitioned Execution Model
+### Volt Active Data Partitioned Execution Model
 
-VoltDB eliminates traditional locking by assigning each table partition to a single execution thread. Since only one thread ever touches partition N's data, there are no shared-memory data races or mutex overhead. All application logic runs as stored procedures — VoltDB executes the entire procedure as a single atomic unit on the relevant partition(s).
+Volt Active Data eliminates traditional locking by assigning each table partition to a single execution thread. Since only one thread ever touches partition N's data, there are no shared-memory data races or mutex overhead. All application logic runs as stored procedures; Volt Active Data executes the entire procedure as a single atomic unit on the relevant partition(s).
 
 **Single-partition transactions**: Execute entirely on one partition's thread. Zero coordination overhead. Latency ~100–300 microseconds.
 
 **Multi-partition transactions**: Require a coordinator and 2PC across partitions. Latency ~1–5ms. Multi-partition transactions block all partitions involved. Design schemas to minimize them.
 
-**Command logging**: VoltDB writes all stored procedure invocations (not data changes) to a command log. On restart, it replays procedures from the command log against an empty in-memory state. This is faster than WAL replay because procedures are higher-level operations. Typical restart recovery: 60 seconds for 100GB dataset.
+**Command logging**: Volt Active Data writes all stored procedure invocations (not data changes) to a command log. On restart, it replays procedures from the command log against an empty in-memory state. This is faster than WAL replay because procedures are higher-level operations. Typical restart recovery: 60 seconds for 100GB dataset.
 
 ### Apache Ignite: Distributed In-Memory Grid
 
@@ -438,7 +438,7 @@ acceptable — the same tension the caching module frames as TTL versus stalenes
 
 **Memcached multi-get amplification**: Application issues a `get_multi` for 1000 keys across 10 Memcached nodes. Each node receives a sub-request; the client waits for the slowest node. Under load, the slowest node determines p99 latency. Fix: limit batch size, use connection pooling, and monitor per-node latency independently.
 
-**VoltDB multi-partition transaction hotspot**: A schema design requires updating a global counter in every transaction (e.g., total_orders). Every transaction becomes multi-partition because the counter is on partition 0. Throughput collapses. Fix: shard counters across partitions (e.g., counter per partition), sum at read time.
+**Volt Active Data multi-partition transaction hotspot**: A schema design requires updating a global counter in every transaction (e.g., total_orders). Every transaction becomes multi-partition because the counter is on partition 0. Throughput collapses. Fix: shard counters across partitions (e.g., counter per partition), sum at read time.
 
 **Redis replica lag under heavy writes**: A Redis primary under 100K writes/second has replicas that lag 30–60 seconds. Reads from replicas return stale data. Applications using replicas for reads encounter cache inconsistency. Fix: monitor `master_repl_offset - slave_repl_offset` (replication lag bytes); route reads to primary for stale-sensitive data or accept the lag window explicitly.
 
@@ -451,10 +451,10 @@ acceptable — the same tension the caching module frames as TTL versus stalenes
 | Redis           | C        | RSALv2 / SSPLv1 / AGPLv3 (pick one) | Rich data structures, Cluster, AOF |
 | Valkey          | C        | BSD-3-Clause | Redis 7.2.4 fork, Linux Foundation |
 | Memcached       | C        | BSD          | Simple, multi-threaded, no persist |
-| VoltDB          | Java/C++ | AGPL/Commercial | ACID stored procedures, partitioned |
+| Volt Active Data | Java/C++ | Proprietary; free Developer Edition is non-production only | ACID stored procedures, partitioned |
 | Apache Ignite   | Java     | Apache 2.0   | Distributed cache + compute grid   |
 | Hazelcast       | Java     | Apache 2.0   | Distributed data grid, JCache API  |
-| Aerospike       | C        | BSL          | Hybrid DRAM/NVMe, high throughput  |
+| Aerospike       | C        | AGPLv3 (Community) / closed source (Enterprise) | Hybrid DRAM/NVMe, high throughput  |
 | Dragonfly       | C++      | BSL          | Redis-compatible, multi-threaded   |
 | KeyDB           | C++      | BSD          | Redis fork, multi-threaded         |
 
@@ -471,10 +471,10 @@ acceptable — the same tension the caching module frames as TTL versus stalenes
 
 Choose in-memory when sub-millisecond latency is required and the working dataset fits in RAM. Specific cases: session state where every request requires a lookup and the data is ephemeral; rate limiters where latency matters more than durability; leaderboards using sorted sets with microsecond rank lookups; distributed locks where lock acquisition must complete before a network timeout. Do not use in-memory as the primary store for financial records or any data where loss on restart is unacceptable unless you configure durable persistence (AOF fsync=always).
 
-**Q: How does VoltDB guarantee ACID without disk writes on the critical path?**
-**Short:** VoltDB gets ACID durability from synchronous K-safety replication to other nodes, keeping disk command logging off the commit critical path.
+**Q: How does Volt Active Data guarantee ACID without disk writes on the critical path?**
+**Short:** Volt Active Data gets ACID durability from synchronous K-safety replication to other nodes, keeping disk command logging off the commit critical path.
 
-VoltDB uses partitioned execution with a single thread per partition, eliminating locking overhead. Each stored procedure executes as an atomic unit on its target partition(s). Durability comes from synchronous K-safety replication: before returning success to the client, VoltDB ensures the transaction is committed on K+1 nodes. A node failure does not lose committed data because at least one replica has the committed state. Command logging writes to disk asynchronously after the replication acknowledgment, so the disk I/O is off the critical path.
+Volt Active Data uses partitioned execution with a single thread per partition, eliminating locking overhead. Each stored procedure executes as an atomic unit on its target partition(s). Durability comes from synchronous K-safety replication: before returning success to the client, Volt Active Data ensures the transaction is committed on K+1 nodes. A node failure does not lose committed data because at least one replica has the committed state. Command logging writes to disk asynchronously after the replication acknowledgment, so the disk I/O is off the critical path.
 
 **Q: What happens when a Redis node runs out of memory with the noeviction policy?**
 **Short:** With noeviction, Redis rejects writes with an OOM error once memory is full while reads keep working normally.
@@ -536,8 +536,8 @@ Aerospike uses a hybrid memory model: all indexes are kept in DRAM (for sub-mill
 
 Use allkeys-lru when every key is expendable cache data, and a volatile-* policy such as volatile-ttl only when the evictable keys reliably carry TTLs. The volatile-ttl trap: those policies can only evict keys that have a TTL set — if writers forget to set TTLs, the eligible pool is empty and Redis behaves exactly like noeviction, returning OOM errors on writes even though "an eviction policy is configured." The allkeys-lru trap is the mirror image: in an instance that mixes cache entries with durable-intent data (sessions, locks, counters), LRU will happily evict the durable keys once memory fills. Keep cache and persistent data in separate Redis instances, prefer allkeys-lfu for skewed cache access patterns, and audit that TTLs are actually being set before trusting any volatile-* policy.
 
-**Q: Why does VoltDB run each partition on a single thread, and what does that cost?**
-**Short:** Running one thread per partition removes all locking on VoltDB's single-partition transactions, but multi-partition transactions pay a two-phase-commit coordinator cost.
+**Q: Why does Volt Active Data run each partition on a single thread, and what does that cost?**
+**Short:** Running one thread per partition removes all locking on Volt Active Data's single-partition transactions, but multi-partition transactions pay a two-phase-commit coordinator cost.
 
 One thread per partition means no locks, latches, or data races are ever possible on that partition's data, so single-partition transactions complete in roughly 100-300 microseconds. Each stored procedure is routed to the partition owning its data and runs there serially to completion — the atomicity comes from the execution model itself rather than from lock managers or MVCC bookkeeping. The cost is multi-partition transactions: they need a coordinator and two-phase commit at 1-5ms latency, and they block every partition involved, so a schema where each transaction touches a global row (like a total_orders counter on partition 0) collapses throughput. Design the schema so the dominant transactions are single-partition — shard counters per partition and aggregate at read time.
 

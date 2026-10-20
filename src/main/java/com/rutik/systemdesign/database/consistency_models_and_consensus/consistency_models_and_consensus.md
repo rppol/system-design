@@ -272,6 +272,66 @@ Paxos rounds:  classic = 2 RTT (prepare + accept)
 
 The lesson placement engineers act on: keep `quorum` nodes close together and the rest wherever durability demands. A 5-node group with 3 nodes in one region commits at regional speed while the two distant replicas still hold full copies for disaster recovery — but note the flip side the example shows. The moment the two nearby followers are down, the far replicas *become* the quorum and latency jumps 38x. That cliff is not a bug; it is the system correctly choosing consistency over latency, and it is what a PC/EC system in Section 12's PACELC answer feels like in production.
 
+### Raft Membership Changes: Joint Consensus and Single-Server Steps
+
+Changing the voter set is the one place a correct Raft implementation can still elect two leaders in one term. If each node switches from the old configuration to the new one at the moment it learns about it, there is a window where some nodes count majorities over the old set and some over the new set, and those majorities need not overlap:
+
+```
+  grow 3 -> 5 by flipping config on each node independently
+
+  C_old = {A, B, C}            majority = 2
+  C_new = {A, B, C, D, E}      majority = 3
+
+  A, B still on C_old:  A votes A, B votes A          -> A wins 2 of 3
+  C, D, E on C_new:     C, D, E vote E                -> E wins 3 of 5
+
+  {A, B} and {C, D, E} share no node -> two leaders, same term, divergent logs
+```
+
+Raft closes the window in one of two ways:
+
+| Method | How it works | Used by |
+|--------|--------------|---------|
+| Joint consensus | The leader appends `C_old,new`. While it is in force, every election and every commit needs a majority of `C_old` AND a majority of `C_new`. Once `C_old,new` commits, the leader appends `C_new`; once that commits, removed nodes shut down. Any change of any size is safe | etcd raft (`ConfChangeV2`), CockroachDB atomic replication changes |
+| Single-server change | Add or remove exactly one voter per step. Any majority of `N` and any majority of `N+1` must overlap, so no joint phase is needed. Each change must commit before the next starts | Ongaro's dissertation; most smaller Raft libraries |
+
+Two operational details matter more than the choice between them:
+
+- **The single-server bug (2015).** Diego Ongaro reported that single-server changes can lose a committed change when leadership moves between two in-flight changes. The fix: a new leader must commit an entry from its own term (the no-op it writes on election) before it accepts a membership change. A library that skips the no-op is unsafe.
+- **Add as a learner first.** Adding an empty voter to a 3-node group makes `N = 4` and quorum 3, while the new node may need hours to stream the snapshot. Lose one old node in that window and the group cannot commit. etcd and CockroachDB add the node as a non-voting learner, let it catch up, then promote it.
+
+### PreVote and CheckQuorum
+
+A node cut off from the leader times out, increments its term, and starts an election it cannot win. When the partition heals, its higher term forces the healthy leader to step down, causing an election and a write stall for no reason. A node removed from the configuration does the same thing forever, because it never receives heartbeats.
+
+- **PreVote** (Ongaro's dissertation, section 9.6). Before incrementing its term, a would-be candidate asks peers whether they would vote for it. A peer says no if its log is more up to date or if it heard from a live leader within the minimum election timeout. Only a positive pre-vote majority lets the node start a real election, so an isolated node's term never inflates.
+- **CheckQuorum.** The leader steps down if it has not heard from a majority within one election timeout. Without it, a leader stranded in a minority partition keeps serving reads it believes are current, and leader-lease reads (a leader answering reads locally while its lease runs, instead of a ReadIndex round to a majority) are unsafe.
+
+etcd's raft library exposes both as configuration options. Enable them together: PreVote alone lets a minority-side leader linger, and CheckQuorum alone does not stop term inflation.
+
+### Flexible Paxos and Leaderless Consensus
+
+**Flexible Paxos** (Howard, Malkhi and Spiegelman, 2016) showed that majorities are stronger than needed. Paxos and Raft have two phases: phase 1 elects a leader (quorum `Q1`) and phase 2 replicates each entry (quorum `Q2`). Only quorums from different phases must intersect, so the requirement is `|Q1| + |Q2| > N`, not `2 x quorum > N`.
+
+```
+  N = 6
+  majority both phases   Q1 = 4, Q2 = 4      every write waits for 4 acks
+  flexible               Q1 = 5, Q2 = 2      every write waits for 2 acks
+                         check: 5 + 2 = 7 > 6
+  cost: electing a new leader needs 5 of 6 nodes up; more than 1 down blocks failover
+```
+
+Writes happen millions of times and elections rarely, so moving weight from `Q2` to `Q1` speeds the common path and pays only during failover.
+
+**Leaderless protocols** remove the single leader that every Raft write must reach. In a 5-region Raft group, a client in Sydney writing to a leader in Virginia pays the Sydney-Virginia round trip before replication even starts.
+
+| Protocol | Ordering | Fast path | When commands conflict |
+|----------|----------|-----------|------------------------|
+| EPaxos (Moraru, Andersen and Kaminsky, SOSP 2013) | Any replica coordinates; commands carry dependency sets | 1 round trip to a fast quorum of `F + floor((F + 1) / 2)` (3 of 5) when no conflicting command is in flight | A second round trip; execution orders the dependency graph, which gets expensive under contention |
+| Accord (Cassandra CEP-15) | Any replica coordinates; commands get hybrid-clock timestamps and execute in timestamp order | 1 WAN round trip when no conflict arrives within the clock-skew window | A second round trip to agree a later timestamp; no dependency-graph cycles to resolve |
+
+Accord is what Cassandra 6.0 (alpha) uses for multi-partition ACID transactions. Both protocols win when clients are spread across regions and keys rarely conflict. Under heavy contention on hot keys, a Raft leader that serializes everything is simpler and often faster.
+
 ### CRDTs — Conflict-Free Replicated Data Types
 
 CRDTs are data structures designed so that concurrent updates from multiple replicas can always be merged without conflict, achieving eventual consistency without coordination.
@@ -561,6 +621,7 @@ Row 2 versus row 4 is the reason etcd widened the range beyond the paper's sugge
 | Cassandra    | None/Paxos(LWT)| Eventual (tunable with CL)  |
 | DynamoDB     | Quorum-based | Eventual (ConsistentRead=false) or Strong |
 | Redis        | None (async) | Eventual (replica reads)     |
+| Cassandra 6.0 (alpha) | Accord (leaderless) | Strict serializable transactions |
 
 ---
 
@@ -575,6 +636,21 @@ Linearizability orders single-object operations in real time; serializability or
 **Short:** Raft commits log entries once a quorum acknowledges them, and a new leader is elected within one randomized election timeout after a failure.
 
 Raft maintains a replicated log. The leader receives all writes, appends them to its log, and sends AppendEntries RPCs to followers. An entry is committed once a quorum (N/2+1) acknowledges it. When the leader fails: followers stop receiving heartbeats, their election timeouts expire (randomized 150–300ms), and one becomes a candidate. The candidate increments its term and sends RequestVote RPCs. Other nodes grant votes only if the candidate's log is at least as up-to-date as theirs. The candidate with the most up-to-date log wins, ensuring no committed entries are lost. A new leader is elected within one election timeout period (150–300ms + network RTT).
+
+**Q: Why can't you grow a Raft cluster from 3 to 5 voters by pushing the new member list to every node?**
+**Short:** Nodes switch configs at different moments, so a majority of the old 3 and a majority of the new 5 can be disjoint and elect two leaders; Raft uses joint consensus or one-voter-at-a-time changes.
+
+Each node applies a configuration as soon as it sees it, so during the rollout A and B may still count majorities over `{A, B, C}` while C, D and E count over all five. A can win 2 of 3 and E can win 3 of 5 in the same term with no overlapping voter, and the two leaders commit conflicting entries. Raft prevents this with joint consensus (the leader commits `C_old,new`, during which every decision needs a majority of both sets, then commits `C_new`) or with single-server changes, since any majority of `N` and any majority of `N + 1` must share a node. With single-server changes, a new leader must first commit its own-term no-op before accepting a change, the fix for the 2015 bug Ongaro reported. In practice add each node as a non-voting learner, let it catch up on the snapshot, and only then promote it, so the larger quorum never waits on an empty node.
+
+**Q: What problems do Raft's PreVote and CheckQuorum solve?**
+**Short:** PreVote stops a partitioned or removed node from inflating its term and deposing a healthy leader; CheckQuorum makes a leader that cannot reach a majority step down instead of serving stale reads.
+
+A follower cut off from the leader keeps timing out and incrementing its term. When it reconnects, its higher term forces the healthy leader to step down, and the cluster stalls through an election it gained nothing from; a node removed from the configuration does this forever. With PreVote, a node first asks peers whether they would vote for it, and peers that heard from a live leader within the minimum election timeout say no, so the term never increases. CheckQuorum handles the opposite side: a leader that has not heard from a majority within an election timeout steps down, so a leader stranded in a minority partition does not keep answering lease-based reads with stale data. etcd's raft library exposes both options; enable them together, since each covers a failure the other leaves open.
+
+**Q: How do Flexible Paxos and leaderless protocols such as EPaxos and Accord relax Raft's design?**
+**Short:** Flexible Paxos only needs election and replication quorums to intersect, so writes can wait on fewer nodes; EPaxos and Accord let any replica coordinate, committing non-conflicting commands in one WAN round trip.
+
+Flexible Paxos (2016) proved that only quorums from different phases must overlap: `|Q1| + |Q2| > N`. With `N = 6`, replication can wait for 2 acks if leader election needs 5, which speeds every write and makes failover need nearly all nodes up. EPaxos (SOSP 2013) and Accord (Cassandra CEP-15, in the Cassandra 6.0 alpha) remove the single leader: the replica nearest the client coordinates, and a command that conflicts with nothing in flight commits after one round trip to a fast quorum (3 of 5 for EPaxos). On conflict both need a second round; EPaxos then orders a dependency graph at execution, while Accord agrees on a hybrid-clock timestamp. Choose them for clients spread across regions writing mostly disjoint keys; for hot-key contention a single Raft leader is simpler and often faster.
 
 **Q: What are CRDTs and when would you use them over a strongly consistent system?**
 **Short:** CRDTs merge conflict-free because their operations are commutative, associative, and idempotent, letting replicas write independently.

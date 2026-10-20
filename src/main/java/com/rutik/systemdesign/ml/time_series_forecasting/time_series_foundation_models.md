@@ -91,8 +91,10 @@ replace a multivariate model.
 | **Chronos-2** (`amazon/chronos-2`, 120M) | Amazon, Oct 2025 | past-only, known-future, categorical | Yes — group attention over arbitrary groups | Apache-2.0 | State of the art on fev-bench; first among pretrained models on GIFT-Eval, >90% head-to-head win rate over Chronos-Bolt |
 | **Chronos-Bolt** (`amazon/chronos-bolt-*`, 9M-205M) | Amazon | limited | No | Apache-2.0 | The fast, small predecessor; still the right pick when latency or footprint dominates |
 | **Chronos-T5** (`amazon/chronos-t5-*`, 8M-710M) | Amazon | no | No | Apache-2.0 | The original quantize-and-reuse-T5 line |
-| **TimesFM** | Google | limited | No | open weights | Runs in Google production; the "enterprise reliability" pick |
-| **Moirai-2** | Salesforce, Jan 2026 | yes | Yes | open weights | Positioned for complex multivariate data |
+| **TimesFM 3.0** (`google/timesfm-3.0-pytorch`, 330M) | Google, Aug 2026 | past-only and past-and-future | Yes, native multivariate | timesfm-non-commercial-license-v1.0 (commercial use only through Google Cloud) | Runs in BigQuery ML; ranks first on fev-bench per Google's README |
+| **TimesFM 2.5** (`google/timesfm-2.5-200m-*`, 200M) | Google, Sep 2025 | via XReg | No | Apache-2.0 | The last Apache-2.0 TimesFM checkpoint; 16,384-step context |
+| **Toto 2.0** (`Datadog/Toto-2.0-*`, 4M / 22M / 313M / 1B / 2.5B) | Datadog, Apr 2026 | No (2.0 takes no exogenous variables) | Yes, alternating time/variate attention | Apache-2.0 (code and weights) | Built for observability metrics; reports top scores on GIFT-Eval and Datadog's BOOM observability benchmark |
+| **Moirai-2** | Salesforce, Aug 2025 | yes | Yes | CC-BY-NC-4.0 (research only) | Positioned for complex multivariate data |
 | **Lag-Llama** | community | limited | No | open weights | Probabilistic-first, decoder-only |
 | **TimeGPT** | Nixtla | yes | limited | commercial API | No weights; you rent the endpoint |
 
@@ -117,9 +119,12 @@ Two specific checkpoint figures are worth pinning down because they get quoted l
 a reduction from the 500M-parameter TimesFM 2.0 that Google reports as its top zero-shot entry on
 GIFT-Eval for both MASE and CRPS — smaller and longer-context, not bigger, is what moved it up the
 leaderboard. **Chronos-2** (`amazon/chronos-2` on Hugging Face) is 120M parameters with an
-8,192-timestep context window, confirmed on its own model card. Both are current as of this writing;
-check the model card before quoting either number in an interview, since this family updates on a
-roughly six-month cadence.
+8,192-timestep context window, confirmed on its own model card. **TimesFM 3.0**
+(`google/timesfm-3.0-pytorch`, August 2026) is 330,710,976 parameters per its Hugging Face safetensors
+metadata, adds native multivariate forecasting with past-only and past-and-future covariates, and ships
+its weights under a non-commercial licence, so TimesFM 2.5 stays the TimesFM checkpoint you can
+self-host commercially. Check the model card before quoting any of these numbers in an interview,
+since this family updates on a roughly six-month cadence.
 
 ### 4.2 Three Deployment Strategies
 
@@ -402,13 +407,16 @@ the head/tail segmentation in Pitfall 1, applied along the time axis instead of 
 
 ## 7. Real-World Examples
 
-**Google — TimesFM in BigQuery, AlloyDB, and Vertex AI.** Google shipped `AI.FORECAST`/`AI.EVALUATE`
+**Google — TimesFM in BigQuery, AlloyDB, and Agent Platform.** Google shipped `AI.FORECAST`/`AI.EVALUATE`
 (BigQuery ML, generally available since November 2025) and `AI.FORECAST` (AlloyDB, public preview) on
-top of TimesFM, and lists it in the Vertex AI Model Garden — a zero-shot forecast is callable as SQL
-inside the warehouse with no separate training pipeline. The current checkpoint, TimesFM 2.5, is 200M
-parameters with a 16,384-timestep context window and is pretrained on more than 400 billion real-world
-time-points; Google reports it first among zero-shot models on GIFT-Eval for both point (MASE) and
-probabilistic (CRPS) accuracy. (Google Cloud Blog; Hugging Face model card.)
+top of TimesFM, and lists it in Model Garden on Agent Platform — a zero-shot forecast is callable as SQL
+inside the warehouse with no separate training pipeline. TimesFM 3.0 (August 2026, 330M parameters)
+adds native multivariate forecasting and covariates; its downloadable weights are non-commercial, so
+commercial use runs through BigQuery ML, where the multivariate TimesFM models are in Preview.
+TimesFM 2.5, the last Apache-2.0 checkpoint, is 200M parameters with a 16,384-timestep context window
+and is pretrained on more than 400 billion real-world time-points; Google reports it first among
+zero-shot models on GIFT-Eval for both point (MASE) and probabilistic (CRPS) accuracy. (Google Cloud
+Blog; BigQuery TimesFM documentation; `google-research/timesfm` README; Hugging Face model cards.)
 
 **Amazon — Chronos on SageMaker and AutoGluon-TimeSeries.** Chronos-2 (120M parameters, Apache-2.0,
 8,192-timestep context) ships through both SageMaker JumpStart and AutoGluon-TimeSeries/AutoGluon-Cloud,
@@ -429,7 +437,7 @@ looks like" is useful beyond the forecasting task this file focuses on. (Nixtla 
 
 **Deployment breadth as its own signal.** What is notable across all three vendors is not any single
 accuracy claim but how many *ways* each now offers to call a zero-shot forecast: SQL inside a warehouse
-(BigQuery `AI.FORECAST`), a managed notebook environment (SageMaker JumpStart, Vertex AI Model Garden), a
+(BigQuery `AI.FORECAST`), a managed notebook environment (SageMaker JumpStart, Model Garden on Agent Platform), a
 DataFrame-in-DataFrame-out library call (AutoGluon-TimeSeries), and a plain REST API (TimeGPT). That
 breadth is itself evidence the "no fitting step" property from §1 is being taken seriously as a product
 surface, not just a research result — each integration point exists specifically because zero-shot
@@ -597,7 +605,8 @@ directly against it.
 | GluonTS (Amazon) | DeepAR, Temporal Fusion Transformer | Global-model baseline to compare against a pretrained TSFM (Principle 9) |
 | Darts | Unified API for all model types | Wraps classical, deep-learning and several TSFM checkpoints behind one interface |
 | AutoGluon-TimeSeries | Ensembling TSFMs with statistical models | The production path used on SageMaker; ships Chronos-2 with a DataFrame-in/forecast-out API |
-| timesfm (Google) | TimesFM checkpoint loading and inference | Also reachable through BigQuery `AI.FORECAST` and Vertex AI Model Garden with no local install |
+| timesfm (Google) | TimesFM checkpoint loading and inference | Checkpoints `google/timesfm-2.5-200m-pytorch` (Apache-2.0) and `google/timesfm-3.0-pytorch` (non-commercial); also reachable through BigQuery `AI.FORECAST` and Model Garden on Agent Platform with no local install |
+| toto-models (Datadog) | Toto 2.0 inference | `pip install toto-models` (Python 3.12+); `Toto2Model.from_pretrained("Datadog/Toto-2.0-22m")` returns 9 quantiles per variate; no fine-tuning API in 2.0 |
 | nixtla (Python/R client) | Calling the TimeGPT hosted API | No local weights; requires an API key from `dashboard.nixtla.io` |
 
 ---
@@ -655,9 +664,9 @@ They reach a predictive distribution by two different mechanisms, and the differ
 Try them in that order because the cost triples at each step while the marginal benefit usually shrinks. Zero-shot costs one forward pass and tells you immediately whether the pretrained priors fit your domain — no data pipeline, nothing to own. Fine-tuning is justified only when zero-shot is directionally right but systematically off on your data, and it converts the TSFM from a free API call into a model you now version, monitor for drift, and retrain on a cadence, which is exactly the operational burden zero-shot was chosen to avoid. Training a TSFM-shaped model from scratch — your own pretraining run over a large multi-series corpus — is justified for only a handful of organizations with both the breadth of series and the compute budget to make that investment pay off; for nearly everyone else it is strictly dominated by fine-tuning an existing checkpoint. The decision rule a candidate should state out loud: never skip a step, and never take a step without first measuring that the previous one fell short on your own backtest.
 
 **Q: Why is a 120M-parameter TSFM not comparable to an LLM for capacity planning?**
-**Short:** At 120M-200M parameters these models are smaller than BERT-large and often run acceptably on CPU, unlike a multi-billion-parameter LLM.
+**Short:** At 120M-330M parameters these models are no bigger than BERT-large and often run acceptably on CPU, unlike a multi-billion-parameter LLM.
 
-Because the parameter count is two to three orders of magnitude smaller than the LLMs that capacity-planning intuition usually comes from. `amazon/chronos-2` is 120M parameters and `google/timesfm-2.5` is 200M — both smaller than BERT-large, and both able to run a useful forward pass on CPU rather than requiring a GPU fleet. A platform team that budgets GPU capacity for a TSFM the way it would for a 70B-parameter chat model will over-provision by a wide margin, because the two workloads share an architecture family (transformers) but not a scale. The right sizing exercise is a direct latency/throughput benchmark on the actual target hardware, including CPU, at the batch sizes and request rates the workload will see — not an analogy to a different model class. This is a genuine gotcha because "it's a transformer" primes people to reach for LLM-serving playbooks that simply do not apply at this parameter count.
+Because the parameter count is two to three orders of magnitude smaller than the LLMs that capacity-planning intuition usually comes from. `amazon/chronos-2` is 120M parameters, `google/timesfm-2.5` is 200M and `google/timesfm-3.0-pytorch` is 330M, all at or below BERT-large's 340M, and all able to run a useful forward pass on CPU rather than requiring a GPU fleet. A platform team that budgets GPU capacity for a TSFM the way it would for a 70B-parameter chat model will over-provision by a wide margin, because the two workloads share an architecture family (transformers) but not a scale. The right sizing exercise is a direct latency/throughput benchmark on the actual target hardware, including CPU, at the batch sizes and request rates the workload will see — not an analogy to a different model class. This is a genuine gotcha because "it's a transformer" primes people to reach for LLM-serving playbooks that simply do not apply at this parameter count.
 
 **Q: How do you pick a context length against a series' seasonal period?**
 **Short:** The context window must hold at least one, ideally several, full seasonal cycles at the frequency you choose, or the model never sees the pattern.
@@ -670,9 +679,9 @@ You need the context window, measured in observations, to comfortably contain th
 They exist to restore a fair comparison after the classical benchmark datasets stopped being usable for pretrained models. The M-competition series (M3, M4, M5) are now almost certainly inside the pretraining corpus of every major TSFM, so a model's score on them measures partial memorization rather than genuine generalization, and every model ends up looking similarly excellent — the benchmark stops discriminating. GIFT-Eval and fev-bench were built with this specific failure in mind: curated, more diverse collections of series, with attention paid to what is and is not likely to be inside common pretraining corpora, so that a leaderboard position is closer to evidence of real transfer. The practical lesson for a practitioner is not "trust these benchmarks blindly" but "understand why they exist" — the same contamination problem exists for your own public series relative to whatever corpus a vendor's checkpoint was trained on, and no public leaderboard, however well-constructed, substitutes for your own private backtest.
 
 **Q: How does the Apache-2.0-weights-vs-rented-API choice affect a forecasting system's design?**
-**Short:** Open weights let you self-host, fine-tune, and audit for leakage; a rented API trades that control for zero infrastructure.
+**Short:** Apache-2.0 weights such as Chronos-2 or TimesFM 2.5 let you self-host, fine-tune, and audit for leakage; a rented API trades that control for zero infrastructure.
 
-It is a real architecture decision, not a licensing footnote. Chronos-2, TimesFM and Moirai-2 ship as open weights (Apache-2.0 or similarly permissive), so you can self-host on your own hardware, fine-tune the checkpoint, run it fully offline, and audit exactly what data went into pretraining as far as the model card discloses — all of which matter when data residency, latency, or leakage auditing (Pitfall 3) are hard requirements. TimeGPT ships only as a hosted endpoint: no weights to download, so every forecast call leaves your network, you inherit the vendor's uptime and pricing, and you cannot fine-tune the base model yourself beyond whatever the API exposes. The tradeoff is genuinely symmetric rather than one option being strictly better — a rented API removes GPU provisioning and model-serving work entirely, which is a real operational win for a small team, at the cost of vendor lock-in and less control over exactly what the model saw during pretraining.
+It is a real architecture decision, not a licensing footnote. Chronos-2, Chronos-Bolt and TimesFM 2.5 ship Apache-2.0 weights, so you can self-host on your own hardware, fine-tune the checkpoint, run it fully offline, and audit exactly what data went into pretraining as far as the model card discloses — all of which matter when data residency, latency, or leakage auditing (Pitfall 3) are hard requirements. Read the licence per checkpoint, not per family: TimesFM 3.0 weights use timesfm-non-commercial-license-v1.0, with commercial use permitted only through Google Cloud services such as BigQuery ML, and Moirai 2.0 weights are CC-BY-NC-4.0 for research only, so neither can be self-hosted inside a commercial product. TimeGPT ships only as a hosted endpoint: no weights to download, so every forecast call leaves your network, you inherit the vendor's uptime and pricing, and you cannot fine-tune the base model yourself beyond whatever the API exposes. The tradeoff is genuinely symmetric rather than one option being strictly better — a rented API removes GPU provisioning and model-serving work entirely, which is a real operational win for a small team, at the cost of vendor lock-in and less control over exactly what the model saw during pretraining.
 
 **Q: How do time-series foundation models interact with hierarchical forecast reconciliation?**
 **Short:** A TSFM forecasts each level independently like any other model, so its outputs still need standard reconciliation (e.g. MinT) to make totals add up.

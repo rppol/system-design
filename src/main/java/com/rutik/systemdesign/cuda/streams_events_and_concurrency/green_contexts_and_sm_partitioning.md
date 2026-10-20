@@ -336,6 +336,12 @@ void report_partition(CUgreenCtx ctx, const char* label) {
 
 There is no driver call that answers "do green context A and green context B share any SMs" after the fact — the application is the only party that knows whether two `cuDevSmResourceSplitByCount` calls were carved from the same device resource with overlapping group indices or genuinely disjoint ones. Oversubscription is legal (§3), but it is the caller's bookkeeping, not the driver's, that determines whether it was intentional.
 
+### 6.6 Green contexts inside CUDA Graphs (CUDA 13.4)
+
+A serving loop that runs prefill and decode as captured graphs needs each graph node to keep its SM partition on replay. CUDA 13.4 lets a graph associate a green context with event-record, host, external-semaphore, and kernel nodes, and the release notes state that user-specified contexts on kernel nodes are now honored consistently. A decode graph's kernel nodes can therefore stay on the decode partition while a prefill graph's nodes run on another, with each replay a single `cudaGraphLaunch`.
+
+The same release adds topology queries for multi-chip GPUs: CUDA APIs expose the GPU's internal topology so an application can pick compute and memory resources by locality instead of treating the device as one uniform pool of SMs.
+
 ---
 
 ## 7. Real-World Examples
@@ -504,6 +510,9 @@ TierPool fixed_build_tier_pool(CUdevice device) {
 | `cuCtxFromGreenCtx` / `cuStreamGetGreenCtx` | Interop with ordinary `CUcontext`-based APIs / recover a stream's green context | Needed when a green-context stream flows into code expecting a classic context |
 | `cuGreenCtxRecordEvent` / `cuGreenCtxWaitEvent` | Cross-green-context event synchronization | Analog of `cudaStreamWaitEvent` from the parent module, scoped to green contexts |
 | `cudaGreenCtxCreate` / `cudaExecutionCtxStreamCreate` (CUDA 13.1+) | Runtime-API equivalents of the driver-API calls above | **NVIDIA's recommended surface going forward** |
+| CUDA Graphs (CUDA 13.4+) | Bind a green context to event-record, host, external-semaphore, and kernel nodes | Keeps per-node SM partitioning across graph replay; see §6.6 |
+| cuBLAS (CUDA 13.3+) | GEMMs on a green-context stream | cuBLAS 13.3 added green-context support, so library GEMMs respect the partition |
+| `cuda.core` 1.0 (CUDA 13.3) | Python surface for green contexts | Splits a GPU's SMs into disjoint partitions, each with its own context and streams, without writing driver-API bindings |
 | Nsight Systems | Confirm a green context's kernels only ever land on its granted SM subset | The definitive way to verify partitioning is real, not assumed |
 | MPS control daemon | Alternative multi-process spatial-sharing mechanism | Out of scope here — see §4.2 and [`devops/ml_platform_and_gpu_infrastructure`](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) |
 | MIG (via GPU Operator / Kubernetes device plugin) | Hardware-level multi-tenant partitioning (SMs + memory + L2) | Fully out of scope here — operator concern, not a kernel-author API |

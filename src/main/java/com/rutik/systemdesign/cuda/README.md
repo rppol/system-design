@@ -347,7 +347,7 @@ Worked examples target recent NVIDIA data-center GPUs; this is the quick referen
 | Ada Lovelace | L4, L40S, RTX 40xx | 8.9 | 4th-gen Tensor Cores + FP8; large L2 |
 | Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory |
 | Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; NVLink 5 at 1.8 TB/s bidirectional per GPU |
-| Rubin | VR200, Vera Rubin NVL72 | not yet published | 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
+| Rubin | VR200, Vera Rubin NVL72 | 10.7 (`sm_107`, CUDA 13.4 developer preview) | 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
 
 Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced global access moves data in **128-byte** transactions (32 threads × 4 bytes); shared memory has **32 banks** of 4 bytes; the register file is **64K 32-bit registers per SM** (256 KB); max **1024 threads/block**; a stall on global memory is **~400-800 cycles**; HBM3 bandwidth is **~3.35 TB/s** on H100 SXM5.
 

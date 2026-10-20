@@ -20,15 +20,15 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `model_evaluation_and_selection/` | 2 | Cross-validation, AUC-ROC/PR, calibration, bias-variance, Optuna | — |
 | `neural_network_fundamentals/` | 3 | MLPs, backprop, activations, weight init, batch norm, dropout | — |
 | `convolutional_neural_networks/` | 3 | Conv2D, pooling, ResNet, EfficientNet, transfer learning | — |
-| `recurrent_neural_networks/` | 3 | LSTM, GRU, vanishing gradients, seq2seq, teacher forcing | — |
+| `recurrent_neural_networks/` | 3 | LSTM, GRU, vanishing gradients, seq2seq, teacher forcing | state_space_models |
 | `training_deep_networks/` | 3 | LR warmup, gradient clipping, mixed precision, augmentation | — |
 | `pytorch_deep_dive/` | 3 | Storage/strides/views, autograd tape, caching allocator, torch.compile guards and recompilation, autocast policy, DataLoader workers, nn.Module internals, torch.export | — |
 | `generative_models/` | 3 | VAEs, GANs, Diffusion (DDPM), mode collapse, FID | — |
-| `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
+| `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision, open_vocabulary_and_vision_foundation |
 | `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf, text_classification, topic_modeling, language_modeling, syntactic_parsing |
-| `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
-| `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | — |
-| `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | — |
+| `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits, generative_recommenders |
+| `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | time_series_foundation_models |
+| `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | offline_rl |
 | `ml_system_design/` | 5 | 6-step framework, feature stores, A/B testing, latency | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization, classical_ml_vs_llm |
 | `data_pipelines_and_processing/` | 5 | PySpark, Great Expectations, DVC, schema evolution | — |
 | `distributed_training/` | 5 | DDP, FSDP, DeepSpeed ZeRO, gradient accumulation | — |
@@ -59,26 +59,29 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Sub-Files — 37 Topic Sub-Files
+## Sub-Files — 42 Topic Sub-Files
 
 | Module | Sub-files |
 |--------|-----------|
 | `supervised_learning/` | linear_models, support_vector_machines, decision_trees, bayesian_methods |
 | `ensemble_methods/` | random_forests, gradient_boosting, xgboost_lightgbm, stacking_and_blending |
-| `computer_vision/` | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
+| `computer_vision/` | object_detection, image_segmentation, vision_transformers, self_supervised_vision, open_vocabulary_and_vision_foundation |
 | `natural_language_processing/` | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf, text_classification, topic_modeling, language_modeling, syntactic_parsing |
-| `recommender_systems/` | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
+| `recommender_systems/` | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits, generative_recommenders |
 | `ml_system_design/` | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization, classical_ml_vs_llm |
 | `unsupervised_learning/` | gaussian_mixtures_and_em |
 | `model_evaluation_and_selection/` | automl_and_nas |
 | `active_learning_and_weak_supervision/` | semi_supervised_learning |
+| `recurrent_neural_networks/` | state_space_models |
+| `time_series_forecasting/` | time_series_foundation_models |
+| `reinforcement_learning/` | offline_rl |
 
 ---
 
 ## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 47 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (27 modules) and **Principal** (16). They are
+plus two curated tiers: **Senior** (28 modules) and **Principal** (16). They are
 different cuts, not nested depths — senior is the craft (train it, debug the leakage,
 ship the serving path), principal is the judgment (which modelling approach at what cost,
 what failure modes, what you tell a team *not* to do), so principal is the smaller list
@@ -113,13 +116,13 @@ on explicit request (each needs the full "Adding a New ML Module" procedure + ST
 
 ---
 
-## Case Studies — 24 Total
+## Case Studies — 27 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
 **Legacy 12-section (10):** design_recommendation_engine, design_fraud_detection, design_search_ranking, design_image_classification_pipeline, design_ads_click_prediction, design_anomaly_detection, design_demand_forecasting, design_content_feed_ranking, design_autonomous_driving_perception, design_ml_platform
 
-**Principal 11-section (14):** design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching, design_customer_ltv_prediction, design_multi_touch_attribution, design_dynamic_pricing, design_nlp_classification_pipeline, design_real_time_personalization, design_semantic_search_engine, design_ner_pipeline, design_question_answering_system, design_video_recommendation, design_harmful_content_detection
+**Principal 11-section (17):** design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching, design_customer_ltv_prediction, design_multi_touch_attribution, design_dynamic_pricing, design_nlp_classification_pipeline, design_real_time_personalization, design_semantic_search_engine, design_ner_pipeline, design_question_answering_system, design_video_recommendation, design_harmful_content_detection, design_document_ai_extraction, design_experimentation_platform, design_llm_hybrid_support_triage
 
 ---
 

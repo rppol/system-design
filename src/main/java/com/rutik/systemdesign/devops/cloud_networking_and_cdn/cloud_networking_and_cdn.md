@@ -53,6 +53,28 @@ Cloud networking layers on top of the single-VPC basics from [cloud_fundamentals
 | Transit Gateway | Hub-and-spoke | Yes (via TGW) | Many VPCs/VPN/DX | Thousands of attachments |
 | PrivateLink | Service endpoint | N/A | Expose one service privately | Per-service |
 | VPN / Direct Connect | On-prem link | Via TGW | Hybrid connectivity | Bandwidth tiers |
+| VPC Lattice | Service network (layer 7 proxy) | N/A, service-to-service | Many services across VPCs/accounts, IAM auth per request | Per service network; overlapping CIDRs allowed |
+| Cloud WAN | Global core network, one policy | Yes, per segment | Many Regions + branches, segments as global VRFs | Regions listed in the core network policy |
+
+### VPC Lattice and Cloud WAN
+
+Transit Gateway answers "which networks can reach which networks" one Region at a time. Two later services split that job further.
+
+**AWS Cloud WAN** (GA July 2022) is Transit Gateway run from a single declarative JSON **core network policy**. For each Region named in the policy, Cloud WAN creates a **core network edge** (CNE), which AWS describes as a Transit Gateway under the hood, and full-meshes all CNEs over the AWS backbone. **Segments** are global routing domains (a VRF that spans every Region); attachments with the tag `segment=prod` land in the prod segment automatically, and `segment-actions` in the policy share routes between segments or send them through a firewall (a **network function group**). The TGW equivalent is one TGW per Region, a peering mesh between them, and per-Region route tables kept in sync by hand or by Terraform. The cost is a fixed floor: $0.50 per CNE-hour in us-east-1, so three Regions cost about $1,095 a month before any attachment ($0.065 per VPC attachment-hour) or data ($0.02 per GB).
+
+**Amazon VPC Lattice** (GA March 2023) works one layer up. It connects **services**, not networks. A **service network** is a logical boundary; you associate VPCs (clients) and services (targets: EC2, IP, Lambda, ALB, ECS tasks, Kubernetes pods) with it. Clients resolve the service's DNS name, Route 53 Resolver sends the request to a Lattice endpoint in the client's own AZ, and Lattice proxies it to the target. Because nothing is routed between VPCs, **overlapping CIDRs are allowed**. Access has four layers: the VPC association, a security group on that association, an **auth policy** on the service network (coarse, for example "only principals in my AWS Organization"), and an auth policy on the service (fine, for example "only the `payments` role may call `POST /charge`"). Auth policies are IAM policy documents evaluated per request against a SigV4-signed caller identity, so Lattice gives the zero-trust check a service mesh gives, without sidecars. In us-east-1 it costs $0.025 per service-hour, $0.025 per GB, and $0.10 per million requests after the first 300,000 requests per hour, which are free.
+
+```mermaid
+flowchart TD
+    Q["What do you need to connect?"] --> N["Whole networks<br/>(any port, any host)"]
+    Q --> S["One service or API"]
+    N --> R1{"One Region or many?"}
+    R1 -->|"One Region"| TGW["Transit Gateway<br/>route tables per Region"]
+    R1 -->|"Many Regions + branches,<br/>global segments"| WAN["Cloud WAN<br/>one JSON policy"]
+    S --> P1{"Many services,<br/>many callers, L7 auth?"}
+    P1 -->|"One service,<br/>TCP, provider to consumer"| PL["PrivateLink<br/>NLB + interface endpoint"]
+    P1 -->|"Many HTTP/gRPC services,<br/>IAM auth per request"| LAT["VPC Lattice<br/>service network"]
+```
 
 ### Cross-cloud connectivity mapping
 
@@ -271,6 +293,43 @@ resource "aws_vpc_endpoint" "consume" {
 }
 ```
 
+### VPC Lattice service with an auth policy
+
+```hcl
+resource "aws_vpclattice_service_network" "core" {
+  name      = "core"
+  auth_type = "AWS_IAM"
+}
+resource "aws_vpclattice_service" "payments" {
+  name      = "payments"
+  auth_type = "AWS_IAM"
+}
+resource "aws_vpclattice_service_network_service_association" "payments" {
+  service_identifier         = aws_vpclattice_service.payments.id
+  service_network_identifier = aws_vpclattice_service_network.core.id
+}
+resource "aws_vpclattice_service_network_vpc_association" "checkout" {
+  vpc_identifier             = aws_vpc.checkout.id
+  service_network_identifier = aws_vpclattice_service_network.core.id
+  security_group_ids         = [aws_security_group.lattice_clients.id]
+}
+resource "aws_vpclattice_auth_policy" "payments" {
+  resource_identifier = aws_vpclattice_service.payments.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { AWS = "arn:aws:iam::111122223333:role/checkout" }
+      Action    = "vpc-lattice-svcs:Invoke"
+      Resource  = "*"
+      Condition = { StringEquals = { "vpc-lattice-svcs:RequestMethod" = "POST" } }
+    }]
+  })
+}
+```
+
+With `auth_type = "AWS_IAM"`, an unsigned request gets a 403 even from inside an associated VPC, so every client must sign with SigV4 (the AWS SDKs do this; a plain `curl` does not).
+
 ### CloudFront distribution with cache behavior
 
 ```hcl
@@ -423,6 +482,8 @@ Versioned URLs move you permanently into the first two rows: a new content hash 
 |----------|----------|----------|-----------|
 | Multi-VPC connectivity | Peering (simple) | Transit Gateway (hub) | Few VPCs vs many (mesh explosion) |
 | Service exposure | Peering (whole network) | PrivateLink (one service) | Least exposure vs simplicity |
+| Service-to-service across accounts | PrivateLink per service | VPC Lattice service network | One endpoint per service vs one association per VPC plus IAM auth per request |
+| Multi-Region backbone | TGW per Region + TGW peering | Cloud WAN core network | Hand-synced route tables vs one policy and a $0.50/hour floor per Region |
 | Global routing | DNS-based (Route 53) | Anycast (Global Accelerator) | TTL-bound failover vs near-instant |
 | CDN provider | CloudFront (AWS-native) | Cloudflare/Fastly (multi-origin) | Integration vs flexibility/features |
 | Cache strategy | Versioned URLs (cache forever) | Invalidation | Simplicity/hit ratio vs control |
@@ -584,6 +645,8 @@ Dropping the TTL from 3600s to 60s is a 60x improvement in the failover bound, w
 | Global Accelerator | Anycast global routing, near-instant failover |
 | Route 53 / Cloud DNS / Traffic Manager | DNS + routing policies + health checks |
 | Direct Connect / VPN | Hybrid on-prem connectivity |
+| VPC Lattice | Service-to-service networking with IAM auth policies across VPCs and accounts |
+| Cloud WAN | Policy-driven global WAN with segments across Regions and on-prem |
 | ACM / Let's Encrypt | TLS certificates |
 | AWS IPAM | Non-overlapping CIDR planning |
 
@@ -591,67 +654,75 @@ Dropping the TTL from 3600s to 60s is a 60x improvement in the failover bound, w
 
 ## 12. Interview Questions with Answers
 
-**Q1: Why isn't VPC peering transitive, and what do you use instead at scale?**
+**Q: Why isn't VPC peering transitive, and what do you use instead at scale?**
 **Short:** Peering is a direct one-to-one link that doesn't forward traffic through a third VPC, so a full mesh needs N(N-1)/2 connections; a Transit Gateway hub gives transitive routing instead.
 VPC peering is a direct one-to-one connection that doesn't forward traffic through an intermediate VPC, so peering A-B and B-C does not give A-C — by design, to keep routing explicit and secure. At scale, a full mesh requires N(N-1)/2 peerings (50 VPCs = 1225 connections), which is unmanageable. Use a Transit Gateway, a regional hub that provides transitive routing and centralized route segmentation across many VPCs, VPNs, and Direct Connect links.
 
-**Q2: What is PrivateLink and how does it differ from VPC peering?**
+**Q: Transit Gateway, Cloud WAN, PrivateLink, or VPC Lattice: how do you pick for a new multi-account platform?**
+**Short:** TGW routes networks in one Region, Cloud WAN routes networks across Regions from one policy, PrivateLink exposes one service, and VPC Lattice connects many services with IAM auth per request.
+Pick by what you connect. Transit Gateway connects whole networks inside one Region with route tables you maintain. Cloud WAN connects whole networks across Regions and on-prem sites from one JSON core network policy, with segments acting as global VRFs, at a floor of $0.50 per core-network-edge-hour (about $365 a month per Region in us-east-1). PrivateLink exposes a single TCP service behind an NLB to consumers, one interface endpoint per consumer VPC. VPC Lattice connects many HTTP, HTTPS, gRPC, or TCP services across VPCs and accounts through a service network, tolerates overlapping CIDRs because it proxies instead of routing, and checks an IAM auth policy on every request. A common layout uses Cloud WAN or TGW for the network baseline (shared services, egress, on-prem) and Lattice for east-west service calls, so application teams never edit a route table.
+
+**Q: What is PrivateLink and how does it differ from VPC peering?**
 **Short:** PrivateLink exposes a single service behind an NLB via interface endpoints without sharing networks, while peering connects entire networks and requires non-overlapping CIDRs.
 PrivateLink exposes a single service (behind an NLB) to consumer VPCs via interface endpoints with private IPs, without peering networks or sharing route tables — the consumer reaches only that service, never the whole provider VPC. Peering, by contrast, connects entire networks and requires non-overlapping CIDRs and route entries. Use PrivateLink for least-exposure service access (especially SaaS-to-customer), and peering/TGW when you genuinely need network-to-network routing.
 
-**Q3: How does a CDN reduce latency and origin load?**
+**Q: How does a CDN reduce latency and origin load?**
 **Short:** A CDN caches content at edge locations near users, serving requests from the nearest edge instead of a distant origin, cutting latency and offloading origin traffic by its cache hit ratio.
 A CDN caches content at edge locations geographically close to users, so requests are served from the nearest edge instead of traveling to a distant origin, cutting round-trip latency and offloading the origin (a high cache hit ratio means most requests never reach it). It also terminates TLS at the edge, can run edge compute, and absorbs DDoS. The key metric is cache hit ratio — the higher it is, the more latency and origin cost you save.
 
-**Q4: What is a cache key and why does getting it wrong destroy a CDN's value?**
+**Q: What is a cache key and why does getting it wrong destroy a CDN's value?**
 **Short:** The cache key is the request attributes the CDN matches against cached objects; too broad collapses the hit ratio toward zero, while too narrow on personalized content leaks one user's response to another.
 The cache key is the set of attributes (path, plus chosen headers/query strings/cookies) the CDN uses to decide whether a request matches a cached object. If the key is too broad — e.g., including `Authorization` or a unique session cookie — every request looks unique, the hit ratio collapses toward 0%, and traffic floods the origin. If too narrow on personalized content, one user could receive another's cached response, so you must cache only on attributes that genuinely vary the response and exclude per-user data.
 
-**Q5: Compare DNS-based global routing with anycast-based (Global Accelerator).**
+**Q: Compare DNS-based global routing with anycast-based (Global Accelerator).**
 **Short:** DNS-based routing returns the nearest healthy Region's IP but failover is bounded by DNS TTL, while anycast advertises one static IP and reroutes via BGP for near-instant failover.
 DNS-based routing (Route 53 latency/failover policies) returns the nearest/healthy Region's IP to the resolver, but failover is bounded by DNS TTL and resolver caching — clients can keep hitting a dead Region for the TTL duration. Anycast (Global Accelerator, Cloudflare, GCP Global LB) advertises a single static IP and uses BGP to route each user to the nearest healthy edge, so failover is near-instant with no DNS-cache delay. Use anycast when fast, reliable failover and stable IPs matter; DNS routing is simpler and often sufficient.
 
-**Q6: How do you choose between the Route 53 routing policies?**
+**Q: How do you choose between the Route 53 routing policies?**
 **Short:** Route 53 policies map to a goal — simple for one endpoint, weighted for gradual rollout, latency for performance, geolocation for compliance, failover for active-passive DR — paired with health checks.
 Use simple for one endpoint; weighted for canary/A-B/gradual migration; latency for routing global users to the lowest-latency Region; geolocation for compliance/localization by country; geoproximity when you want distance-based routing you can bias toward a Region; IP-based when you have the caller's CIDR ranges and want to override Route 53's geo inference for known ISP or corporate networks; failover for active-passive DR with health checks; and multivalue for simple health-checked client-side load balancing across up to eight records. The choice follows the goal — performance (latency), compliance (geolocation), resilience (failover), or rollout control (weighted). Pair them with health checks so unhealthy endpoints are removed from responses.
 
-**Q7: Why are overlapping CIDR ranges a problem, and how do you avoid them?**
+**Q: Why are overlapping CIDR ranges a problem, and how do you avoid them?**
 **Short:** Overlapping CIDRs prevent peering or a shared Transit Gateway since the router can't tell where an IP lives, so a non-overlapping scheme should be planned up front with an IPAM tool.
 Two VPCs with overlapping CIDRs (e.g., both `10.0.0.0/16`) can't be peered or share a Transit Gateway because the router can't unambiguously decide where a given IP lives. You avoid it by planning a non-overlapping address scheme up front — typically with an IPAM tool that allocates distinct ranges per VPC/account/Region — because renumbering a live, in-use VPC is disruptive. Treat IP planning as a foundational design step, not an afterthought.
 
-**Q8: How do you keep data-transfer costs under control in a multi-VPC/multi-Region setup?**
+**Q: Two VPCs both use `10.0.0.0/16` and must call each other's APIs. Why does VPC Lattice work when peering and Transit Gateway do not?**
+**Short:** Lattice proxies each request to a service DNS name instead of routing packets between VPCs, so neither side ever needs a route to the other side's CIDR.
+Peering and Transit Gateway forward packets by destination IP, so two VPCs with the same CIDR give the router two places for one address and the attachment is refused or the route is ambiguous. VPC Lattice never routes between the VPCs. The client resolves the service's Lattice DNS name, Route 53 Resolver points it at a Lattice endpoint in the client's own AZ, and Lattice opens a new connection to the target on the other side. Lattice traffic uses link-local and non-routable addresses from the managed prefix list `com.amazonaws.<region>.vpc-lattice`, so no route table changes; target security groups must allow that prefix list as the source, because the client's own security group never appears on the target side. The catch is scope: this works for named services (HTTP, HTTPS, gRPC, TLS, TCP), not for arbitrary host-to-host traffic such as SSH to any instance, and every call pays $0.025 per GB plus request charges.
+
+**Q: How do you keep data-transfer costs under control in a multi-VPC/multi-Region setup?**
 **Short:** Keep traffic in-AZ and in-Region, use free VPC Gateway Endpoints for S3/DynamoDB, and front traffic with a CDN, since Transit Gateway bills per attachment-hour plus per-GB unlike simple peering.
 Keep traffic in-AZ and in-Region where possible (cross-AZ and especially cross-Region/internet transfer are billed), use VPC Gateway Endpoints for S3/DynamoDB (free) and PrivateLink instead of internet egress, and front user traffic with a CDN to offload origin egress. Be aware that Transit Gateway charges per attachment-hour plus per-GB processed, so for just two VPCs, peering (no per-GB TGW fee within a Region) can be cheaper. Use Cost Explorer to find the largest transfer line items — see [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
 
-**Q9: How do you handle cache invalidation after a deploy?**
+**Q: How do you handle cache invalidation after a deploy?**
 **Short:** Versioning asset URLs with a content hash lets a deploy produce new URLs so old cached objects simply age out, avoiding invalidation, which is slower and costs per path.
 The cleanest approach is to avoid invalidation entirely by versioning asset URLs (e.g., `app.a1b2c3.js`) so a deploy produces new URLs and old cached objects simply age out — you can then cache assets for a year. When you must invalidate (e.g., a fixed path like `/index.html`), issue a CDN invalidation, but it's slower and, beyond the free tier, costs per path (~$0.005 on CloudFront). Prefer content-hashed filenames for static assets and short TTLs only for genuinely dynamic content.
 
-**Q10: When should you NOT put a CDN in front of your service?**
+**Q: When should you NOT put a CDN in front of your service?**
 **Short:** Skip a CDN when content is fully dynamic and per-user, since the hit ratio approaches zero and it adds a hop without latency savings, though edge TLS and DDoS protection may still justify it.
 When the content is fully dynamic and per-user (e.g., a personalized authenticated dashboard), the cache hit ratio approaches zero, so the CDN adds a hop and cost without latency savings on the cacheable dimension — though it may still be worth it for edge TLS termination, DDoS protection, and a single global entry point. For purely internal services not exposed to end users, a CDN is irrelevant. Evaluate based on cacheability and whether you need the edge security/DDoS benefits, not as a reflex.
 
-**Q11: What is a Transit Gateway route table used for?**
+**Q: What is a Transit Gateway route table used for?**
 **Short:** A TGW route table controls which attachments can route to which others, enabling segmentation like letting prod spokes reach shared services without reaching each other.
 A TGW route table controls which attachments (VPCs/VPNs) can route to which others, enabling network segmentation — for example, allowing prod spokes to reach a shared-services spoke but not each other, or isolating dev from prod. You associate attachments with route tables and propagate routes selectively, so the hub doesn't become a flat any-to-any network. This is how you enforce blast-radius boundaries in a hub-and-spoke topology.
 
-**Q12: How does global load balancing interact with health checks for failover?**
+**Q: How does global load balancing interact with health checks for failover?**
 **Short:** Both DNS-based and anycast global load balancers stop routing to a failed backend, with Route 53 bounded by TTL and anycast withdrawing its BGP route almost immediately.
 Both DNS-based and anycast global LBs continuously health-check each Regional backend and stop directing traffic to one that fails — Route 53 removes the unhealthy record from responses (subject to TTL), while anycast withdraws the BGP route from the failed edge/Region almost immediately. This automatic, health-driven steering is what turns multi-Region deployments into active-passive or active-active DR. Tune TTLs short for DNS-based failover, or use anycast when you need failover faster than DNS caching allows — see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md).
 
-**Q13: What is the difference between a Gateway VPC endpoint and an Interface VPC endpoint (PrivateLink)?**
+**Q: What is the difference between a Gateway VPC endpoint and an Interface VPC endpoint (PrivateLink)?**
 **Short:** A Gateway endpoint is a free route-table entry limited to S3 and DynamoDB, while an Interface endpoint is a billed, ENI-backed PrivateLink connection to nearly every other service.
 A Gateway endpoint is a free VPC route-table entry limited to S3 and DynamoDB; an Interface endpoint is a billed, ENI-backed PrivateLink connection to nearly everything else. Gateway endpoints add a prefix-list route to your subnet's route table — no ENI, no security group, no per-GB charge — making them the default fix for NAT-gateway cost on S3/DynamoDB traffic. Interface endpoints consume an ENI per subnet/AZ, can be locked down with security groups, and are what backs the custom-service PrivateLink pattern in section 4. Default to the gateway endpoint whenever only S3/DynamoDB access is the goal, since it is strictly cheaper.
 
-**Q14: In the case study, why did multi-hop traffic across the peering mesh fail 'silently' instead of raising a clear error?**
+**Q: In the case study, why did multi-hop traffic across the peering mesh fail 'silently' instead of raising a clear error?**
 **Short:** Non-transitive peering doesn't reject cross-hop traffic explicitly — packets are simply dropped because no route exists, producing a timeout that looks like a firewall block or packet loss.
 Non-transitive peering doesn't route or reject cross-hop traffic explicitly — packets from A destined for C are simply dropped because no route exists via B, producing a timeout rather than an error message. This looks identical to a firewall block, a dead target, or ordinary packet loss, so engineers often chase the wrong hypothesis before realizing the topology itself cannot forward the packet. The case study's fix was structural, not diagnostic: replacing the 30-VPC mesh with a Transit Gateway hub so every VPC could reach every other VPC by design. Treat an unexplained cross-VPC timeout as a topology question first — trace the actual peering/TGW attachments before chasing application-level causes.
 
-**Q15: Besides caching, what other capabilities does a CDN edge provide, and when do they matter even if cache hit ratio is low?**
+**Q: Besides caching, what other capabilities does a CDN edge provide, and when do they matter even if cache hit ratio is low?**
 **Short:** A CDN edge also terminates TLS, absorbs DDoS, runs a WAF, and executes edge compute, all protecting the origin regardless of cache hit ratio on fully dynamic traffic.
 A CDN edge also terminates TLS, absorbs DDoS traffic, runs a WAF, and can execute edge compute such as Cloudflare Workers close to the user. These matter even for fully dynamic, near-zero-hit-ratio traffic, since offloading TLS handshakes and filtering malicious requests across 330+ edge cities protects the origin regardless of whether content is cacheable. Netflix Open Connect goes further, placing CDN appliances inside ISP networks so streams barely cross the public backbone at all. Evaluate a CDN on its security and edge-compute value, not cache hit ratio alone, before ruling it out for personalized traffic.
 
-**Q16: How do AWS's Transit Gateway and PrivateLink map onto GCP and Azure?**
+**Q: How do AWS's Transit Gateway and PrivateLink map onto GCP and Azure?**
 **Short:** AWS Transit Gateway maps to GCP Network Connectivity Center and Azure Virtual WAN, while AWS PrivateLink maps to GCP Private Service Connect and Azure Private Link.
 AWS Transit Gateway maps to GCP Network Connectivity Center and Azure Virtual WAN; AWS PrivateLink maps to GCP Private Service Connect and Azure Private Link. Both hub concepts solve the same peering-mesh-explosion problem, and both private-service concepts expose a single service without network-level peering. All three clouds also mirror CloudFront and Route 53 with their own CDN and DNS-routing offerings — GCP Cloud CDN/Cloud DNS and Azure Front Door/Traffic Manager. Recognize the pattern behind the product name so you can translate an AWS-centric design onto another cloud without re-deriving the concepts from scratch.
 
@@ -716,8 +787,9 @@ resource "aws_cloudfront_distribution" "cdn" {
 resource "aws_route53_record" "app" {
   zone_id        = var.zone
   name           = "app.example.com"
-  type           = "A"
+  type           = "CNAME"
   ttl            = 60
+  records        = [aws_lb.primary.dns_name]
   set_identifier = "primary"
   failover_routing_policy { type = "PRIMARY" }
   health_check_id = aws_route53_health_check.primary.id

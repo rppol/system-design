@@ -99,9 +99,18 @@ latency, no scrape endpoint needed. Harder to debug — if the UDP sink is down,
 
 ### 4.3 Tracing propagation models
 
-**Auto-instrumentation.** `opentelemetry-instrumentation-fastapi` wraps the ASGI middleware layer,
-creating a span per request with attributes populated from the request. Zero code changes needed for
-standard HTTP/DB spans.
+**Native instrumentation [FastAPI 0.142+].** FastAPI records HTTP request spans, request metrics,
+and logs by default, plus a span per WebSocket connection. `opentelemetry-api` is a hard dependency
+of `fastapi`; the SDK and the OTLP HTTP exporter come with `fastapi[standard]`. Operation spans cover
+dependency resolution, the path operation function, response serialization, and each
+`BackgroundTasks` task (those spans stay in the request's trace but start after the response span
+ends). Settings go in `FastAPI(telemetry={...})`.
+
+**Contrib auto-instrumentation.** `opentelemetry-instrumentation-fastapi` (`FastAPIInstrumentor`)
+wraps the ASGI middleware layer, creating a span per request with attributes populated from the
+request. It is the path for FastAPI pins older than 0.142. When FastAPI finds contrib's
+`OpenTelemetryMiddleware` in the built middleware stack, it turns its own tracing, metrics, and
+logs off for that request, so the two do not double-record (`fastapi/telemetry/_asgi.py`).
 
 **Manual spans.** `with tracer.start_as_current_span("llm.call") as span: span.set_attribute(...)`.
 Necessary for business logic, LLM calls, external queue operations — anything the auto-instrumentor
@@ -582,6 +591,50 @@ per-event and multiply by nothing.
 
 ### 6.5 OpenTelemetry setup
 
+#### Native telemetry [FastAPI 0.142+]
+
+FastAPI uses OpenTelemetry's global providers, so configure them before the app starts and add
+no instrumentor. Since 0.143.0, FastAPI does not add exporters by itself: an app that set only
+`OTEL_EXPORTER_OTLP_ENDPOINT` must also set `FASTAPI_OTEL_AUTO_CONFIGURE=true` (or
+`telemetry={"auto_configure": True}`), or nothing leaves the process. An explicit
+`auto_configure` in code overrides the environment variable.
+
+```python
+from fastapi import FastAPI
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider(resource=Resource.create({"service.name": "order-service"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))  # reads OTEL_EXPORTER_OTLP_*
+trace.set_tracer_provider(provider)
+
+app = FastAPI(
+    telemetry={
+        "operation_spans": True,   # dependency, endpoint, serialization, BackgroundTasks spans
+        "exclude": lambda scope: scope["path"] in ("/health", "/ready"),
+    }
+)
+```
+
+| `telemetry` key | Records | Default |
+|---|---|---|
+| `tracing` | HTTP request and WebSocket connection spans | `True` |
+| `metrics` | HTTP request metrics (not WebSocket) | `True` |
+| `logs` | Unhandled exceptions (ERROR) and request validation failures (WARNING, no input body) | `True` |
+| `operation_spans` | Child spans for request operations | `True` |
+| `exclude` | Skip a request when `fn(scope)` returns `True` | `None` |
+| `auto_configure` | Add OTLP exporters from `OTEL_*` variables | `True` only if `FASTAPI_OTEL_AUTO_CONFIGURE=true` |
+
+Unhandled-exception logs are linked to the request's trace and are recorded even when that trace
+is not sampled. They carry the exception message and stack trace, so redact with a log processor
+or set `logs` to `False` if messages can hold secrets. `tracer_provider`, `meter_provider` and
+`logger_provider` keys pass a provider directly instead of using the global one.
+
+#### Contrib instrumentor (FastAPI pins before 0.142)
+
 ```python
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -937,7 +990,8 @@ async def send_confirmation_email(ctx: object) -> None:
 | `prometheus_client` | Metrics | Official Python client, pull model, histograms | In-memory only, no remote write built-in |
 | `prometheus-fastapi-instrumentator` | Metrics | Auto-instruments FastAPI ASGI | Limited customisation without subclassing |
 | `opentelemetry-sdk` | Tracing | Vendor-neutral, W3C TraceContext, rich ecosystem | Config verbosity |
-| `opentelemetry-instrumentation-fastapi` | Tracing | Zero-code HTTP spans | Requires patching at import time |
+| FastAPI native telemetry [0.142+] | Tracing, metrics, logs | On by default; spans for dependencies, serialization, `BackgroundTasks`; WebSocket spans | Exporter setup is opt-in since 0.143.0; global providers only, so mounted sub-apps cannot be configured apart |
+| `opentelemetry-instrumentation-fastapi` | Tracing | Zero-code HTTP spans on any FastAPI version | Requires patching at import time; when present, FastAPI turns its native telemetry off |
 | Jaeger | Trace backend | Open source, UI, adaptive sampling | Self-hosted ops burden |
 | Grafana Tempo | Trace backend | Integrates with Grafana, cheap storage (object store) | Less mature UI than Jaeger |
 | Loki | Log aggregation | Label-based like Prometheus, Grafana-native | Not full-text search; limited to label queries |
@@ -1085,7 +1139,22 @@ Because the client library's default buckets almost certainly have no boundary a
 
 A recording rule pre-computes a PromQL expression on a schedule and stores the result as a new time series. Dashboards and alerts then query the cheap pre-computed series instead of re-running the original aggregation every time a panel refreshes. `rate(http_requests_total[5m])` computed across 50 label combinations on every 15-second dashboard refresh means Prometheus repeats that aggregation constantly across every viewer and every panel; a recording rule named `job:http_requests_total:rate5m` runs the computation once on Prometheus's own evaluation interval and everyone reads the cached result. This matters most for expressions used in multiple dashboards or in alerting rules, where redundant computation directly increases Prometheus server load. Reach for a recording rule once you notice the same non-trivial `rate()`/`histogram_quantile()` expression appearing in more than one place.
 
-**Q17: You have OpenTelemetry tracing and structlog JSON logs, but cannot pivot from a log line to its trace. Why, and what fixes it?**
+**Q17: You upgraded FastAPI past 0.143 and traces stopped reaching the collector, or started arriving twice. Why?**
+**Short:** FastAPI 0.143 made its OTLP exporter setup opt-in, so OTEL_* variables alone export nothing; enabling it while another library also exports to that endpoint sends every span twice.
+
+FastAPI 0.142.0 added native OpenTelemetry: request spans, metrics, and logs are recorded by
+default through the global providers. In 0.142 FastAPI also attached an OTLP exporter whenever
+`OTEL_EXPORTER_OTLP_ENDPOINT` was set. 0.143.0 made that step opt-in: without
+`FASTAPI_OTEL_AUTO_CONFIGURE=true` or `FastAPI(telemetry={"auto_configure": True})`, spans are
+still created but no exporter is added, so a service that relied on the environment variables
+alone goes dark with no error. The duplicate case is the reverse: auto-configure is on, and an
+agent, distro, or vendor SDK has already put an exporter for the same endpoint on the provider,
+so each span is exported by both. Pick one owner for export. Contrib's `FastAPIInstrumentor`
+does not cause doubles, because FastAPI detects its `OpenTelemetryMiddleware` in the stack and
+switches its own telemetry off. After any upgrade, check one known request end to end in the
+backend before you trust the dashboards.
+
+**Q18: You have OpenTelemetry tracing and structlog JSON logs, but cannot pivot from a log line to its trace. Why, and what fixes it?**
 **Short:** A hand-rolled correlation id and OTel's trace_id are independent identifiers; a structlog processor must copy the span context into the log event.
 
 They are two unrelated ids for the same request: your middleware generates a `uuid4()`
@@ -1099,7 +1168,7 @@ what Tempo, Jaeger, Grafana and Datadog index and a raw integer joins to nothing
 `ctx.is_valid`, because outside a span the context is all-zero and writing that value poisons
 the index with an id shared by every non-traced line.
 
-**Q18: What does `OTEL_SEMCONV_STABILITY_OPT_IN` control, and why does it matter to a running service?**
+**Q19: What does `OTEL_SEMCONV_STABILITY_OPT_IN` control, and why does it matter to a running service?**
 **Short:** It selects old vs stable HTTP attribute names — flipping it without a dual-emit window silently empties every dashboard built on the old ones.
 
 It selects which HTTP semantic conventions the instrumentation emits. Unset gives the old
@@ -1230,7 +1299,6 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 
 # ── ContextVar for correlation ID ─────────────────────────────────────────────
@@ -1266,10 +1334,12 @@ trace.set_tracer_provider(_provider)
 tracer = trace.get_tracer("order-api")
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-app = FastAPI(title="Order API")
-
-# OTel auto-instrumentation must be called before app starts receiving requests
-FastAPIInstrumentor.instrument_app(app)
+# Native telemetry (FastAPI 0.142+) picks up the global provider set above.
+# On an older pin, drop `telemetry=` and call FastAPIInstrumentor.instrument_app(app) instead.
+app = FastAPI(
+    title="Order API",
+    telemetry={"exclude": lambda scope: scope["path"] in ("/health", "/ready", "/metrics")},
+)
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 class CorrelationIdMiddleware(BaseHTTPMiddleware):

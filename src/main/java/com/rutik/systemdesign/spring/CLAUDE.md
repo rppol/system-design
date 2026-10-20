@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 39 Modules
+## Module List — 40 Modules
 
 | Module Directory | Phase | Topic |
 |-----------------|-------|-------|
@@ -60,12 +60,12 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 39 modules = "8-Phase Learning Path") plus
-two curated tiers: **Senior** (25 modules) and **Principal** (18). They are different
+`README.md` documents the **Full Path** (all 40 modules = "8-Phase Learning Path") plus
+two curated tiers: **Senior** (25 modules) and **Principal** (19). They are different
 cuts, not nested depths — senior is the craft (wire it, debug the proxy that did not
 proxy), principal is the judgment (which abstraction at what cost, migration, what you
 tell a team *not* to do), so principal is usually the smaller list and much of it is
-material senior never sees. Membership is declared ONCE per module, in a
+material senior never sees. Membership is declared ONCE per section, in the
 `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file takes
 — which is also the only way to curate **deep-dive sub-files**, since they have no
 `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out,
@@ -75,8 +75,8 @@ and the module page (`<module>.md`) must always be listed. Order is never declar
 the gitignored `questions/paths.json`, which the game fetches at boot. The tier tables in
 `README.md` sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
 regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
-fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
-from a block in `case_studies/case_studies.md` (5 senior / 4 principal), driving the Level
+fails `extract.py --strict` and the Pages deploy. Case studies are tiered in the same README
+block under `case_studies` (5 senior / 5 principal), driving the Level
 filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
 and a 5-week Study Plan (prose; no path impact).
 
@@ -97,7 +97,7 @@ only on explicit request following the adding guide below):
 
 ---
 
-## Case Studies — 9 Total
+## Case Studies — 10 Total
 
 `case_studies/` directory — all use the 11-section principal template.
 
@@ -112,6 +112,7 @@ only on explicit request following the adding guide below):
 | `design_oauth2_authorization_server/` | Spring Authorization Server, PKCE, token introspection |
 | `design_idempotent_payment_api/` | Idempotency keys, saga, outbox, exactly-once |
 | `design_realtime_notification_service/` | WebSocket, SSE, Redis pub/sub, fan-out |
+| `design_mcp_tool_platform/` | Spring AI 2.0 MCP servers, tool catalogue design, tool authorization |
 
 Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
@@ -168,7 +169,7 @@ When covering a Spring feature, always note the version:
 - **Spring Boot 3.4+** — Structured logging (`ecs`/`gelf`/`logstash`), `spring.http.client.factory`, actuator access levels (`read-only`/`unrestricted`/`none`)
 - **Spring Boot 3.5+** — `@ServletRegistration`/`@FilterRegistration`, `env:` property imports, `WebClient` config properties, client-side SSL for service connections
 - **Spring Boot 4.0 / Spring Framework 7.0** — Jakarta EE 11 baseline (Servlet 6.1, Tomcat 11, JPA 3.2, Hibernate 7), JSpecify null-safety, first-class API versioning, `@Retryable`/`@ConcurrencyLimit`, `BeanRegistrar`, Jackson 3, Undertow support removed, `HttpHeaders` no longer a `MultiValueMap`
-- **Spring Boot 4.1+ (current)** — HTTP service client auto-configuration, `spring.mvc.apiversion.*` / `spring.webflux.apiversion.*`, `spring-boot-starter-opentelemetry`, native gRPC auto-configuration, automatic Micrometer context propagation to `@Async`, Gradle 9; runs on Java 17–26 (JDK 25 recommended). Ships Spring Framework 7.0.8, Spring Security 7.1.0, Spring Session 4.1.0, Spring Integration 7.1.0, Micrometer 1.17 / Tracing 1.7, Spring Data BOM 2026.0.0
+- **Spring Boot 4.1+ (current)** — HTTP service client auto-configuration, `spring.mvc.apiversion.*` / `spring.webflux.apiversion.*`, `spring-boot-starter-opentelemetry`, native gRPC auto-configuration, Micrometer context propagation to `@Async` on the auto-configured executor when `spring.task.execution.propagate-context=true` (a custom executor needs a `ContextPropagatingTaskDecorator`), Gradle 9; runs on Java 17–26 (JDK 25 recommended). Ships Spring Framework 7.0.8, Spring Security 7.1.0, Spring Session 4.1.0, Spring Integration 7.1.0, Micrometer 1.17 / Tracing 1.7, Spring Data BOM 2026.0.0
 - **Spring Cloud versions by train, and the train supports a range of Boot generations.** The 2025.1 "Oakwood" train supports Spring Boot **4.0.x and 4.1.x**, the latter from **2025.1.2** onward (2026-06-11: "compatible with Spring Boot 4.0.7 and introduces compatibility for Spring Boot 4.1.0"). Each patch is *built against* one Boot patch — 2025.1.3 (2026-08-20) is based on Boot 4.0.8 — so `spring-cloud-dependencies` manages that version unless `spring-boot-dependencies` is imported **first** (in Maven the first BOM to manage an artifact wins). Going outside the train's supported generations is never a compile error; it surfaces at runtime as `NoSuchMethodError`. Note that the `spring-cloud-release` wiki's supported-versions table is stale — the compatibility matrix on `spring.io/projects/spring-cloud` is authoritative
 
 ## Q&A Minimums (Spring-specific)
@@ -196,8 +197,8 @@ When covering a Spring feature, always note the version:
    from that array sorts to the end and fails `--strict`. (A new **sub-file**
    `<module>/<name>.md` needs no `STUDY_ORDER` entry; it groups under its parent
    module's topic and its Q&As merge into that module's bank — but if a tier should
-   carry it, add its filename to that tier's line in the parent's
-   `<!-- study-paths -->` block, which is the only place a sub-file is addressable.)
+   carry it, list its filename under the parent module in `README.md`'s
+   `<!-- study-paths -->` block with its tiers, which is the only place a sub-file is addressable.)
 9. Add the module and EVERY file it owns to the `<!-- study-paths -->` block in
    this section's `README.md`, tagging each file with the tiers it belongs to (`-` for
    Full path only; the module page must carry every tier the module is in). **Do NOT put

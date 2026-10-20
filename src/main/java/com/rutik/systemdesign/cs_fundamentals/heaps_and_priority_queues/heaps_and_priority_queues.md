@@ -92,7 +92,7 @@ Amortized O(1) decrease-key and O(log n) delete-min. Theoretically optimal for D
 Augments the heap with a `{value → index}` map so you can decrease-key in O(log n). Used in Dijkstra with lazy deletion or Prim's MST.
 
 ### Min-Heap vs Max-Heap
-Python's `heapq` is a min-heap only. Simulate a max-heap by negating values: `heapq.heappush(h, -val)`.
+Python's `heapq` functions are min-heap by default. Python 3.14 added max-heap variants: `heapify_max`, `heappush_max`, `heappop_max`, `heappushpop_max`, and `heapreplace_max`. On 3.13 and earlier, simulate a max-heap by negating values: `heapq.heappush(h, -val)`.
 
 ### Two-Heap Pattern (Median of Stream)
 Maintain a max-heap of the lower half and a min-heap of the upper half, kept balanced. Each heap's root = the median boundary.
@@ -638,7 +638,7 @@ On random input a pushed element is usually already larger than its parent, so i
 
 **The failure mode.** This is a latent, data-dependent cliff, which is the worst kind. The build passes load-testing on synthetic random data at 3x, ships, and then one day ingests a sorted file and runs 14x slower than it ever did in staging. Nothing throws; the batch job just misses its window. Using `heapify` removes the variance entirely — its `~n` cost is independent of input order, which is the real reason to prefer it, over and above the average-case speedup.
 
-### Pitfall 2: Max-heap in Python (forgetting to negate)
+### Pitfall 2: Max-heap in Python (using the min-heap functions)
 
 ```python
 # BROKEN: heapq is a MIN-heap; treating it as max-heap without negation
@@ -648,10 +648,15 @@ h = nums[:]
 heapq.heapify(h)
 print(heapq.heappop(h))  # prints 1 (minimum), not 5 (maximum)
 
-# FIX: negate values for max-heap behaviour
-h_max = [-x for x in nums]
-heapq.heapify(h_max)
-print(-heapq.heappop(h_max))  # prints 5 (correct maximum)
+# FIX (Python 3.14+): use the max-heap functions
+h_max = nums[:]
+heapq.heapify_max(h_max)
+print(heapq.heappop_max(h_max))  # prints 5
+
+# FIX (Python 3.13 and earlier): negate values
+h_neg = [-x for x in nums]
+heapq.heapify(h_neg)
+print(-heapq.heappop(h_neg))  # prints 5
 ```
 
 ### Pitfall 3: Heap iteration is NOT sorted order
@@ -823,7 +828,7 @@ A d-ary heap gives each node d children. Height = log_d(n) so sift-up takes O(lo
 
 ## 13. Best Practices
 
-- **Default to `heapq`** — it is a min-heap; negate values for max-heap semantics. Avoid custom heap classes in production unless you need decrease-key.
+- **Default to `heapq`**: min-heap by default; for a max-heap use `heappush_max`/`heappop_max` on Python 3.14+, or negate values on 3.13 and earlier. Avoid custom heap classes in production unless you need decrease-key.
 - **Use a counter tiebreaker** when heap entries contain non-comparable objects — prevents obscure `TypeError` in production.
 - **Prefer `heapify` over n pushes** when building from a known list — O(n) instead of O(n log n). Difference is visible at n > 10^5.
 - **Lazy deletion** is the standard way to handle "remove arbitrary element" without an indexed heap — acceptable for Dijkstra and Prim.

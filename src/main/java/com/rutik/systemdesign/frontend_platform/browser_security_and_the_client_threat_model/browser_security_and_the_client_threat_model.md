@@ -321,6 +321,44 @@ stored can never be re-audited, while sanitizing at render means a library upgra
 existing rows retroactively. Allowlist, never denylist. And never edit the string afterwards —
 mutation-XSS depends on the parser and the serializer disagreeing about the same bytes.
 
+**The native sanitizer.** The HTML Sanitizer API, specified in the WHATWG HTML standard,
+moves this job into the parser. `Element.setHTML(html, { sanitizer })` parses the string,
+applies the configuration, and inserts the result in one step, so there is no string left over
+to mutate. Its safe baseline cannot be configured away: `<script>`, `<iframe>`, `<object>`,
+`<embed>`, `<frame>`, SVG `<use>`, every `on*` attribute and `javascript:` URLs in navigating
+attributes are removed even when a custom allowlist names them. `setHTMLUnsafe()` and
+`Document.parseHTMLUnsafe()` apply only the configuration you pass, and with none they allow
+everything.
+
+| Browser | `setHTML()` / `Sanitizer` | Trusted Types |
+|---------|---------------------------|---------------|
+| Chrome / Edge | 146 | 83 |
+| Firefox | 148 | 148 |
+| Safari | not shipped | 26 |
+
+That table sets the pattern: feature-detect the native method, and fall back to DOMPurify behind
+the Trusted Types policy everywhere else.
+
+```ts
+const RICH = {
+  elements: ["p", "br", "strong", "em", "ul", "ol", "li", "a", "code", "pre"],
+  attributes: ["href", "title"],
+};
+
+export function renderRich(el: Element, html: string) {
+  if ("setHTML" in Element.prototype) {
+    el.setHTML(html, { sanitizer: RICH });           // safe sink, needs no policy
+  } else {
+    el.innerHTML = richPolicy.createHTML(html);      // DOMPurify inside the policy
+  }
+}
+```
+
+The two mechanisms meet at the sink. `setHTML()` takes a plain string and is not gated by
+`require-trusted-types-for 'script'`, because nothing it inserts can run script.
+`setHTMLUnsafe()` and `innerHTML` still demand a `TrustedHTML` value, so the policy remains
+the single audited door for the paths that can execute code.
+
 ### 6.5 Trusted Types: making the sink itself refuse a string
 
 Sanitization is only as good as the discipline of calling it. Trusted Types moves the
@@ -359,10 +397,11 @@ finite job.
 ### 6.6 CSP that is worth having
 
 ```
+Reporting-Endpoints: csp="https://app.example.com/csp-report"
 Content-Security-Policy:
   script-src 'nonce-r4nd0mPerResponse' 'strict-dynamic' 'unsafe-inline' https:;
   object-src 'none'; base-uri 'none'; frame-ancestors 'self';
-  require-trusted-types-for 'script'; report-uri /csp-report
+  require-trusted-types-for 'script'; report-to csp; report-uri /csp-report
 ```
 
 | Token | Why it is there |
@@ -371,6 +410,7 @@ Content-Security-Policy:
 | `'strict-dynamic'` | a script loaded by a nonced script inherits trust, so bundlers keep working without a host allowlist; `'unsafe-inline' https:` are inert fallbacks for browsers that ignore nonces |
 | `object-src 'none'` and `base-uri 'none'` | `<object>` and `<embed>` execute outside `script-src`, and an injected `<base href>` retargets every relative script URL |
 | `frame-ancestors 'self'` | the clickjacking control; supersedes `X-Frame-Options`, takes a list, applies at every nesting level |
+| `report-to csp` | sends violations to the `csp` endpoint named in `Reporting-Endpoints`; `report-uri` is the deprecated fallback, ignored by browsers that support `report-to` |
 
 A blocked inline script reports `Refused to execute inline script because it violates the
 following Content Security Policy directive`, naming the directive that rejected it.
@@ -479,6 +519,22 @@ script on a checkout page reads card fields on submit and beacons them out while
 completes normally. Checkout defences are in
 [`../../react/case_studies/design_a_checkout_and_payment_flow.md`](../../react/case_studies/design_a_checkout_and_payment_flow.md).
 
+**PCI DSS turns this into an audited control.** Two requirements of PCI DSS v4.0.1 became
+mandatory on 2025-03-31 and target exactly the Magecart pattern:
+
+| Requirement | What the assessor asks for | Browser mechanism that answers it |
+|-------------|----------------------------|-----------------------------------|
+| 6.4.3 | an inventory of every script that runs on the payment page, a written business or technical justification for each, a method to confirm each is authorized, and a method to assure its integrity | the script list in code review, CSP nonces plus `'strict-dynamic'` for authorization, SRI for versioned URLs |
+| 11.6.1 | a change- and tamper-detection mechanism that alerts on unauthorized changes to the payment page's script contents and its security-impacting HTTP headers *as the consumer's browser receives them*, run at least weekly or at a frequency set by a targeted risk analysis | CSP violation reports, plus a synthetic browser that loads the page and diffs scripts and headers |
+
+The phrase "as received by the browser" is the whole point: a server-side file-integrity
+monitor cannot see a script that a third-party loader injects at runtime. The requirements also
+reach scripts on a merchant page that embeds a provider's payment iframe, because a parent-page
+script can overlay or replace that iframe; the scripts *inside* the provider's frame are the
+provider's responsibility. Merchants filing SAQ A instead confirm, as an eligibility criterion
+added in January 2025, that their site is not susceptible to script attacks against the
+e-commerce system.
+
 ### 6.10 There are no secrets in a bundle
 
 ```ts
@@ -558,6 +614,7 @@ nonces plus `'strict-dynamic'`, at which point what the CDN hosted stopped matte
 |--------|-------|-------|---------|
 | Escape everything, render no HTML | no XSS surface from content | cannot support rich text | most product surfaces |
 | Sanitize with DOMPurify | rich text works | one configuration to audit; sanitizer CVEs | CMS, editors, Markdown |
+| Native `setHTML()` with a DOMPurify fallback | parser-level sanitizing, no mutation-XSS gap, no library bytes in Chrome and Firefox | two code paths until Safari ships it | rich text in an app that already enforces Trusted Types |
 | CSP nonce plus `strict-dynamic` | injection cannot execute | per-response nonce means the HTML cannot be a static cached file | any server-rendered app |
 | `sandbox` iframe for untrusted UI | real privilege separation | `postMessage` plumbing for everything | embeds, plugin systems, previews |
 
@@ -637,6 +694,7 @@ tracing sinks in the client code, and with a scanner that executes JavaScript.
 | Content Security Policy | Constraining what an injection can execute | response header |
 | Trusted Types | Making DOM sinks reject unreviewed strings | `require-trusted-types-for 'script'` |
 | DOMPurify | Allowlist HTML sanitization in the browser | `DOMPurify.sanitize(html, opts)` |
+| HTML Sanitizer API | Native parse-and-sanitize into an element | `el.setHTML(html, { sanitizer })` |
 | Subresource Integrity | Pinning a third-party file by hash | `integrity` attribute |
 | CSP Evaluator | Grading a policy and naming its bypasses | paste the header at the Google tool |
 | OWASP ZAP | Active scanning including DOM XSS | proxy plus AJAX spider |
@@ -723,6 +781,17 @@ Chromium-only measure — but it enforces provenance, not safety: it proves the 
 policy and says nothing about what the policy returned. The sanitizer is what the policy calls,
 and the win is that review moves from every sink to the two or three policies.
 
+**Q: How does `Element.setHTML()` fit alongside Trusted Types and DOMPurify?**
+**Short:** setHTML() parses and sanitizes natively with a baseline that always strips script, so it needs no Trusted Types policy, and DOMPurify stays as the fallback where it is missing.
+
+The HTML Sanitizer API removes `<script>`, `<iframe>`, `<object>`, `<embed>`, SVG `<use>`,
+every `on*` attribute and `javascript:` URLs even when a custom allowlist names them, and it
+inserts the result directly, so no sanitized string exists for later code to mutate. Because
+nothing it inserts can execute, `require-trusted-types-for 'script'` does not gate it, while
+`setHTMLUnsafe()` and `innerHTML` still require `TrustedHTML`. Chrome 146 and Firefox 148 ship
+it and Safari does not, so feature-detect `"setHTML" in Element.prototype` and route the
+fallback through a Trusted Types policy that calls DOMPurify.
+
 **Q: Why does Subresource Integrity not work for a tag manager or analytics loader?**
 **Short:** Subresource Integrity pins one exact byte sequence, so a script the vendor intends to update fails the check on its first legitimate release.
 
@@ -763,6 +832,18 @@ every input including card fields, read non-`HttpOnly` cookies and `localStorage
 it out while the payment completes normally. That is the Magecart pattern, invisible to users
 and tests. Defences are structural — an iframed payment field, `connect-src`, code review.
 
+**Q: What do PCI DSS v4.0.1 requirements 6.4.3 and 11.6.1 demand of a payment page?**
+**Short:** 6.4.3 requires an authorized, integrity-checked, justified inventory of every payment-page script; 11.6.1 requires alerting on unauthorized script and header changes as the browser receives them.
+
+Both became mandatory on 2025-03-31 as the standard's answer to Magecart skimming. 6.4.3 is
+satisfied with a reviewed script list, nonce-based CSP with `'strict-dynamic'` for
+authorization, and SRI where URLs are versioned. 11.6.1 must run at least weekly, or at a
+frequency set by a targeted risk analysis, and must observe what the *browser* received, so a
+server-side file checksum does not count; CSP violation reports plus a synthetic browser that
+diffs scripts and headers do. An embedded payment iframe moves the scripts inside the frame to
+the provider, but the merchant's parent page stays in scope, because its scripts can overlay or
+replace the frame.
+
 **Q: How do you defend against clickjacking, and why is `frame-ancestors` preferred?**
 **Short:** The CSP directive accepts a list of origins, applies at every nesting level, and is the form browsers implement consistently.
 
@@ -774,7 +855,8 @@ handles nesting differently. Note that `frame-ancestors` is ignored in a `<meta>
 **Q: How do you roll out a CSP on a large existing application without breaking it?**
 **Short:** Report-Only mode sends violation reports while blocking nothing, so you can measure what a policy would break before you enforce it.
 
-Ship `Content-Security-Policy-Report-Only` with the policy you intend plus `report-uri`, and
+Ship `Content-Security-Policy-Report-Only` with the policy you intend plus `report-to` (with
+`report-uri` as the fallback for older browsers), and
 collect for one to two weeks so weekly and monthly code paths appear. Expect noise from
 browser extensions, which you filter by scheme. Then fix your own violations and switch the
 header name. Keep reporting on afterwards; a rising rate signals an injection.
@@ -845,7 +927,8 @@ Nothing broke. `sendBeacon` fires during unload and is easy to miss in the netwo
 and the functional tests passed because the checkout worked perfectly.
 
 **Step 2 — why every existing control missed it.** TLS, a WAF, a PCI ASV scan and
-`X-Frame-Options` all defend the server or the transport. This was a same-origin script
+`X-Frame-Options` all defend the server or the transport. None of them is the browser-side
+script inventory and tamper detection that PCI DSS 6.4.3 and 11.6.1 require. This was a same-origin script
 reading a same-origin form, an anomaly to none of them, and with no CSP at all the
 exfiltration destination needed no approval.
 
@@ -865,6 +948,9 @@ https://analytics.example` — the one directive that would have stopped this at
 `sendBeacon` to an unlisted host is then blocked and reported. Third, tag-manager containers
 were frozen and every tag moved into the repository behind code review, with SRI on the four
 vendors whose URLs were versioned.
+
+The tag inventory, a written justification per remaining script, and the CSP report feed
+became the evidence for 6.4.3 and 11.6.1 at the next assessment.
 
 **Step 4 — what it cost.** Report-Only ran for 16 days and surfaced 41 distinct violations:
 12 the retailer's own inline scripts, 29 browser extensions, filtered out. Two vendors were

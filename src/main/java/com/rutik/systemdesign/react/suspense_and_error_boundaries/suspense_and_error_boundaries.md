@@ -453,6 +453,27 @@ function RetryCard({ error, resetErrorBoundary }: FallbackProps) {
 
 **Resetting is remounting, and the cache is the trap.** Clearing `failed` state re-renders the children, which read the same cache entry, which is still rejected — so the error boundary trips again instantly and the retry button looks broken. `onReset` must evict the entry, or the reset must change a `key` so the subtree remounts against fresh state. `react-error-boundary` (v6, ~1.4 kB gzipped) exists mostly because that reset plumbing plus `resetKeys` is more code than the boundary class itself.
 
+**A client reset cannot re-run a Server Component.** Everything above resets client state only. When the subtree that failed was rendered on the server, remounting it on the client replays the same failed RSC payload. Next.js 16.3 adds `catchError` from `next/error`, which wraps a fallback component and hands it a `retry()` that refetches the boundary's children from the server, Server Components included:
+
+```tsx
+"use client";
+import { catchError, type ErrorInfo } from "next/error";
+
+function WidgetError(props: { title: string }, { error, retry }: ErrorInfo) {
+  return (
+    <Card>
+      <h2>{props.title}</h2>
+      <p>{error.message}</p>
+      <button onClick={() => retry()}>Try again</button>   {/* refetches server children */}
+    </Card>
+  );
+}
+
+export default catchError(WidgetError);
+```
+
+A `catchError` boundary also lets `redirect()` and `notFound()` through. Both work by throwing a framework error, and a hand-written class boundary catches that throw as an ordinary failure and renders its fallback instead of redirecting. Since React 19.3 the Flight protocol carries `Error.cause` and `AggregateError.errors` from server to client, so a boundary that logs `error.cause` sees the underlying database or fetch error, not only the wrapper message.
+
 ### 6.8 Transitions and Suspense
 
 The most surprising interaction in the topic: **an update marked as a transition that suspends does not show the fallback.** React keeps the currently committed tree on screen and prepares the new one in the background, committing only when the new content is ready.
@@ -479,6 +500,18 @@ function Tabs() {
 The rule is coherent once stated as **the fallback is for content that has nothing to replace**. On the first render the boundary has never committed, so there is nothing to keep and the fallback appears. On a later transition there is committed content, and blanking it would be a regression — the user loses what they were reading in exchange for a spinner. `isPending` is how you signal the wait instead: a dimmed panel, a progress bar, a disabled tab.
 
 The consequence people report as a bug is the opposite direction: "my fallback stopped showing after I added `startTransition`". It did, deliberately. If a boundary genuinely must show its fallback on a transition — usually because the new content is unrelated to the old — change the boundary's `key` so React treats it as a fresh mount rather than a replacement. [Concurrent Rendering and Transitions](../concurrent_rendering_and_transitions/concurrent_rendering_and_transitions.md) owns lane priority and `useDeferredValue`, which produces the same keep-the-old-value effect at the value level rather than the subtree level.
+
+**Animating a reveal `[19.3]`.** A `<Suspense>` reveal is one of the updates `<ViewTransition>` animates, so the fallback-to-content swap can cross-fade instead of popping. The React 19.3 pattern wraps the boundary and turns off every animation except update:
+
+```tsx
+<ViewTransition update="auto" default="none">
+  <Suspense fallback={<TabSkeleton />}>
+    <TabBody tab={tab} />
+  </Suspense>
+</ViewTransition>
+```
+
+`default="none"` makes the fallback appear at once with no animation and keeps children that never suspended from animating in, while `update="auto"` cross-fades the fallback into the final content. Images and `<style href precedence>` font loads inside the wrapped boundary also suspend until loaded, so the reveal does not animate in a half-loaded image. `addTransitionType` and the enter, exit and share types belong to [Concurrent Rendering and Transitions](../concurrent_rendering_and_transitions/concurrent_rendering_and_transitions.md).
 
 ---
 
@@ -583,7 +616,7 @@ React 19 warns `A component was suspended by an uncached promise. Creating promi
 |------|---------|
 | React | 19.2 supplies `Suspense`, `use()`, and the three root error callbacks |
 | react-error-boundary | v6 boundary with `resetKeys`, `onReset` and a render-prop fallback |
-| Next.js | 16 maps `loading.tsx` and `error.tsx` onto boundaries per route segment |
+| Next.js | 16 maps `loading.tsx` and `error.tsx` onto boundaries per route segment, and 16.3 adds `catchError` with a server-refetching `retry()` |
 | TanStack Query | `useSuspenseQuery` throws the in-flight promise and owns the cache |
 | Sentry | Ships a boundary wrapper and captures the React component stack |
 | React DevTools | Suspends a boundary on demand to inspect the fallback tree |
@@ -670,6 +703,11 @@ Client error boundaries do not run on the server. `onError` fires per failing bo
 **Short:** Resetting means remounting the subtree — clearing the fallback state alone is not enough, because the children re-read the same rejected cache entry.
 
 The children re-render, hit the cached rejection, and throw in the same tick, so the retry button looks dead. Either evict the cache entry in `onReset`, or change a `key` on the subtree so it remounts against fresh state. `react-error-boundary` supplies `resetErrorBoundary` for the button, `onReset` for the cleanup, and `resetKeys` for automatic reset when an input changes — which is why most teams install it rather than hand-rolling. In one settings page, adding the eviction took retry success from 0% to 71%.
+
+**Q: Why does a hand-written error boundary break redirect() and notFound() in Next.js?**
+**Short:** Next.js implements redirect() and notFound() by throwing a framework error, and a plain class boundary catches that throw as a failure and shows its fallback instead.
+
+The framework expects that throw to travel up to its own route handling, which turns it into a redirect or the 404 page. A generic `getDerivedStateFromError` cannot tell it apart from a real crash, so the user sees "Something went wrong" where a redirect should happen. Next.js 16.3's `catchError` from `next/error` builds a boundary that lets those control-flow throws through, and its `retry()` refetches the failed children from the server, which a client-side reset cannot do for a Server Component. In a class boundary you would have to detect and rethrow the framework errors yourself.
 
 **Q: How do nested boundaries interact?**
 **Short:** The nearest enclosing boundary of the matching kind handles the signal, so nesting lets a widget load or fail without taking its parent's shell with it.

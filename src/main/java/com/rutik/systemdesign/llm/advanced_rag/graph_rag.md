@@ -41,6 +41,8 @@ cost from one to the other rather than reducing it outright.
 |----------|-----------------------|------------|----------|
 | Full LLM extraction (GraphRAG) | An LLM extracts typed entities and relationships per chunk, entities are deduplicated, Leiden clusters them, and an LLM writes a summary per community | Highest — LLM calls proportional to corpus tokens | The corpus is stable and queried heavily and thematically, so a reusable asset amortizes |
 | LazyGraphRAG | Classical NLP noun-phrase extraction plus co-occurrence; every LLM call is deferred to query time under a relevance-test budget | Comparable to plain vector RAG | Streaming corpora, one-off analysis, exploratory work — anything where the index would be rebuilt or under-queried |
+| HippoRAG | LLM OpenIE triples per passage plus embedding-similarity synonym edges; no communities, no summaries | One extraction call per passage; nothing to re-summarize | Multi-hop entity questions over a corpus that grows; the graph acts as associative memory |
+| LightRAG | LLM extracts entities and relations, each gets a key-value profile (key = retrieval phrase, value = summary paragraph) indexed in a vector store; no communities | One extraction pass; new documents merge in by graph union | Corpora that change daily and need both entity-level and theme-level questions |
 
 Community detection is hierarchical either way: Leiden produces levels, level 0 being a few
 broad communities and deeper levels progressively finer ones. The level you summarize and
@@ -54,6 +56,8 @@ search at is a first-class knob, not an implementation detail.
 | Global search (dynamic community selection) | Traverse the community hierarchy from the root, have a cheap model rate each report, prune irrelevant subtrees, map-reduce only the survivors | The same questions, from whatever granularity actually holds the answer | The rating pass, which runs on a mini tier and is nearly free relative to what it prunes |
 | Local search | Anchor on the entities named in the query, traverse `H` hops, and merge the subgraph with ordinary vector search | Specific entities, their attributes and immediate relationships | Traversal fan-out, which grows with average degree raised to the hop depth |
 | DRIFT search | Local search that folds community information in and generates follow-up questions | Queries that are neither purely local nor purely global | Between the two; a config choice in the `graphrag` library |
+| Personalized PageRank (HippoRAG) | Link query entities to graph nodes, run PPR seeded at them, score each passage by the PPR mass of the nodes it contains | Multi-hop questions answered in one retrieval step | One sparse PPR run per query; no LLM call beyond query NER |
+| Dual-level keys (LightRAG) | LLM pulls low-level (entity) and high-level (theme) keywords from the query; low-level match entity keys, high-level match relation keys, neighbours added | Both specific and broad questions from one index | One keyword-extraction call plus vector lookups; under 100 retrieval tokens |
 
 Two rules of thumb follow. First, **pick the query mode from the question, not the corpus** —
 running global search on an entity lookup burns the whole community layer for an answer one
@@ -363,6 +367,97 @@ Section 3's fifth principle — "pre-computation is the price" — is the assump
 
 Read those against 6.3's `$850` for 100M tokens. Full extraction buys a reusable asset and only pays back on a stable corpus that is queried heavily and thematically; on streaming data, one-off analysis or exploratory work, paying per query is strictly cheaper. The library's **DRIFT search** sits between the two paths — local search that folds community information in and generates follow-up questions — and is the built-in version of the hand-rolled hybrid described in Section 12.
 
+### 6.5 Cheaper Graphs: HippoRAG and LightRAG
+
+Both papers attack the two costs that make full GraphRAG hard to run: community summaries
+that must be regenerated when the graph changes, and global search that reads hundreds of
+reports per question. Neither builds communities at all.
+
+**HippoRAG** (Gutierrez et al., NeurIPS 2024, arXiv:2405.14831) models the graph as
+hippocampal memory. Offline, an LLM runs open information extraction on each passage
+(named entities first, then triples), and a retrieval encoder (Contriever or ColBERTv2)
+adds synonym edges between nodes whose embeddings have cosine similarity above 0.8. A
+node-by-passage count matrix records where each node came from. Online, the LLM extracts
+named entities from the question, each is linked to its nearest graph node, and
+Personalized PageRank runs from those seed nodes with damping 0.5 (half the probability
+mass restarts at the seeds each step, which keeps the walk local). Each seed is weighted by
+node specificity, 1 / (number of passages containing it), the graph version of IDF. Passage
+scores are the PPR vector multiplied by the node-by-passage matrix.
+
+```
+query: "Which Stanford professor works on the neuroscience of Alzheimer's?"
+seeds: [Stanford] (in 4,200 passages -> weight tiny)   [Alzheimer's] (in 37 -> weight large)
+
+PPR mass after convergence (damping 0.5)
+  Alzheimer's          ########################  0.31   seed
+  Prof. Thomas         ##############            0.18   1 hop from both seeds
+  Stanford             ######                    0.08   seed, down-weighted
+  hippocampus          #####                     0.06   1 hop
+  Prof. Lee            ##                        0.02   1 hop from Stanford only
+
+passage score = sum of PPR mass of the nodes it contains
+  -> the passage naming Prof. Thomas, Stanford and Alzheimer's ranks first
+```
+
+The answer node is two hops from the question text but one PPR step from both seeds, so a
+single retrieval call does what an iterative retrieve-reason loop does in several. Against
+IRCoT, HippoRAG's single step matches or beats it while costing 10-30x less and running
+6-13x faster, and it beats prior RAG methods on multi-hop QA by up to 20%. Recall@5 rises
+from 68.2 to 89.1 on 2WikiMultiHopQA and 49.2 to 51.9 on MuSiQue, but falls from 79.3 to
+77.7 on HotpotQA, where many questions need no entity chain. Adding a document is one
+extraction call plus new edges; there is nothing to re-summarize. HippoRAG 2
+(arXiv:2502.14802) adds deeper passage integration and an LLM filter on linked triples to
+recover the plain factual-QA accuracy that graph methods tend to lose, and reports a 7%
+gain on associative-memory tasks over a state-of-the-art embedding model.
+
+```python
+import networkx as nx
+import numpy as np
+
+def hipporag_rank(graph: nx.Graph, node_passage: dict[str, set[int]],
+                  seeds: list[str], n_passages: int, top_k: int = 5) -> list[int]:
+    weights = {n: 1.0 / max(1, len(node_passage.get(n, ()))) for n in seeds}
+    total = sum(weights.values())
+    personalization = {n: weights.get(n, 0.0) / total for n in graph.nodes}
+    # networkx alpha is the continue-walk probability; HippoRAG's damping 0.5 -> alpha 0.5
+    ppr = nx.pagerank(graph, alpha=0.5, personalization=personalization)
+    scores = np.zeros(n_passages)
+    for node, mass in ppr.items():
+        for pid in node_passage.get(node, ()):
+            scores[pid] += mass
+    return list(np.argsort(-scores)[:top_k])
+```
+
+**LightRAG** (Guo et al., arXiv:2410.05779) keeps the LLM extraction step but replaces
+communities with key-value profiles. Each entity node gets its name as key; each relation
+edge gets one or more keys, including global theme phrases drawn from its endpoints; each
+value is a paragraph summarizing the source snippets. Keys go into a vector index. At query
+time one LLM call extracts two keyword sets: low-level keywords are matched against entity
+keys (detail questions), high-level keywords against relation keys (theme questions), and
+one-hop neighbours of the matches are pulled in. New documents go through the same
+extraction and are merged by taking the union of node and edge sets, with no rebuild.
+
+| Cost item (paper's Legal corpus) | GraphRAG global search | LightRAG |
+|----------------------------------|-----------------------|----------|
+| Retrieval tokens per query | ~610 community reports x ~1,000 tokens = ~610,000 | Under 100 |
+| LLM calls for retrieval | Hundreds (one per community in map step) | 1 (keyword extraction) |
+| Adding a corpus of the same size | Regenerate community reports, ~1,399 x 2 x 5,000 tokens | Extract the new documents only; union into the graph |
+| LLM-judged overall win rate vs GraphRAG | baseline | 54.8% Agriculture, 52.0% CS, 52.8% Legal, 49.6% Mix |
+
+Read the win rates with care: they come from an LLM judge on generated questions, and the
+margins are 49.6-54.8%, close to a tie. The defensible claim is that LightRAG answers about
+as well as GraphRAG global search at a small fraction of the retrieval and update cost, not
+that it answers better.
+
+**Choosing among the four graph designs:**
+
+| Need | Pick |
+|------|------|
+| Corpus-wide themes on a stable corpus queried heavily | GraphRAG with dynamic community selection |
+| Corpus-wide themes on a corpus you query rarely | LazyGraphRAG |
+| Multi-hop entity chains, corpus grows continuously | HippoRAG (PPR) |
+| Mix of entity and theme questions, corpus changes daily, tight retrieval-token budget | LightRAG |
+
 ---
 
 ## 7. Real-World Examples
@@ -377,6 +472,10 @@ Read those against 6.3's `$850` for 100M tokens. Full extraction buys a reusable
 - Financial services: extract company-executive-investment relationships from 10K filings
 - Legal: extract case-precedent-statute relationships from legal corpus
 - Research: extract paper-author-concept-citation networks from academic literature
+
+### HippoRAG and LightRAG Open-Source Libraries
+- HippoRAG (OSU NLP group) ships as a Python package that indexes passages into an OpenIE graph and retrieves with Personalized PageRank; often used as long-term memory for agents
+- LightRAG (HKU Data Intelligence Lab) supports insert-only incremental indexing and pluggable graph and vector stores (NetworkX, Neo4j, PostgreSQL), which is why it is a common pick when GraphRAG's re-indexing cost is the blocker
 
 ### Neo4j + LLM Integration
 - GraphRAG toolkit using Neo4j for graph storage and Cypher for subgraph extraction
@@ -518,6 +617,8 @@ Every path summary now includes its destination node, which for an entity-chain 
 | **spaCy / GLiNER** | Entity extraction | Faster (non-LLM) entity extraction for large corpora |
 | **Leiden (leidenalg Python)** | Community detection | Official Python implementation |
 | **Gephi** | Graph visualization | Inspect and debug knowledge graph structure |
+| **HippoRAG** | OpenIE graph + Personalized PageRank retrieval | Single-step multi-hop retrieval; cheap incremental adds |
+| **LightRAG** | Dual-level (entity and theme) graph retrieval | Incremental union updates; under 100 retrieval tokens per query |
 
 ---
 
@@ -526,6 +627,14 @@ Every path summary now includes its destination node, which for an entity-chain 
 **Q: What is Graph RAG and what problem does it solve?**
 **Short:** It builds a knowledge graph, clusters it into communities via Leiden, and summarizes each so global corpus-wide theme queries get answers no single chunk contains.
 A: Graph RAG builds a knowledge graph from documents with entities and relationships, clusters it into communities using the Leiden algorithm, and generates LLM summaries for each community. It solves the "global query" problem: standard vector RAG completely fails at questions like "What are the major themes across all documents?" or "What relationships does Company X have?" — these have no single-chunk answer. Graph RAG's community summaries capture themes and relationships across the entire corpus, enabling accurate answers to these synthesis queries. The tradeoff is expensive indexing (10-100× standard RAG) and high query latency (5-30 seconds for global queries).
+
+**Q: GraphRAG's indexing bill is too high and the corpus changes daily. What graph-based alternatives exist?**
+**Short:** HippoRAG (OpenIE graph plus Personalized PageRank) and LightRAG (dual-level keys with union-merge updates) skip community summaries, so new documents need extraction only, not a rebuild.
+A: Full GraphRAG pays twice: LLM extraction over the whole corpus, then community summaries that go stale when the graph changes. HippoRAG keeps only the extraction: an LLM produces triples per passage, synonym edges join nodes with embedding similarity above 0.8, and queries run Personalized PageRank from the entities named in the question, which matches iterative IRCoT on multi-hop QA at 10-30x lower cost. LightRAG gives every entity and relation a key-value profile in a vector index and answers with low-level (entity) and high-level (theme) keywords; new documents are merged by union of nodes and edges, and retrieval uses under 100 tokens against roughly 610,000 for GraphRAG global search on the same corpus. Pick HippoRAG for multi-hop entity chains and LightRAG when theme questions also matter; keep GraphRAG for stable corpora queried heavily for themes.
+
+**Q: How does Personalized PageRank turn a knowledge graph into a multi-hop retriever in HippoRAG?**
+**Short:** PPR seeded at the question's entities spreads probability to nodes linked to several seeds, and passages are scored by the mass on their nodes, so bridge entities surface in one step.
+A: HippoRAG links each named entity in the question to its nearest graph node, weights each seed by node specificity (1 / number of passages containing it, so "Stanford" counts less than "Alzheimer's"), and runs PPR with damping 0.5, meaning half the mass returns to the seeds each step and the walk stays local. A bridge node adjacent to several seeds collects mass from all of them, which is how a two-hop answer surfaces without a second retrieval call. Multiplying the PPR vector by the node-by-passage matrix gives passage scores. The gain is largest where questions are entity chains (2Wiki Recall@5 68.2 to 89.1) and slightly negative where they are not (HotpotQA 79.3 to 77.7), so route plain factual lookups to dense retrieval.
 
 **Q: What is the Leiden algorithm and why does Graph RAG use it?**
 **Short:** Leiden partitions entities into hierarchical, modularity-maximizing communities with no disconnected subsets, unlike Louvain, giving Graph RAG coherent multi-level summaries.
@@ -600,7 +709,7 @@ A: Graph RAG becomes impractical when entity extraction yields too much noise to
 3. **Build a query router** — classify queries as global vs. local before invoking Graph RAG; don't use global (community summary) path for specific factual lookups.
 4. **Invest in entity deduplication** — graph quality is directly proportional to deduplication accuracy; test with 100 sampled entity pairs.
 5. **Evaluate at multiple community levels** — test level 0, 1, 2 on your query distribution; different query types benefit from different levels.
-6. **Plan for incremental updates** — design the indexing pipeline for incremental document addition from day one; full rebuild every update is unsustainable.
+6. **Plan for incremental updates**: design the indexing pipeline for incremental document addition from day one; full rebuild every update is unsustainable. If the corpus changes daily, evaluate HippoRAG or LightRAG, which add documents without re-summarizing communities.
 7. **Visualize the graph** — use Gephi or NetworkX visualization on a sample; manual inspection reveals deduplication failures, isolated nodes, and structural anomalies early.
 
 ---

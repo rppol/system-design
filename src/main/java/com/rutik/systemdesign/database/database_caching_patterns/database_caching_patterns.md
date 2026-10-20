@@ -428,6 +428,44 @@ at the cost of refreshing keys nobody will ask for. Jitter does not shrink any s
 it prevents a million keys from herding *simultaneously*, which is a different failure. In
 production you usually want jitter plus one of the other two.
 
+### Memcache Leases (Facebook, NSDI 2013)
+
+Facebook's "Scaling Memcache at Facebook" (Nishtala et al., NSDI 2013) fixes two look-aside cache bugs with one mechanism, the **lease**. A lease is a 64-bit token the cache server hands to a client on a miss, bound to that key.
+
+**Stale sets.** Client A misses, reads the database, and stalls. Meanwhile B updates the row and deletes the key. A then writes its old value into the cache, where it stays until TTL. With leases, A's `set` must carry its token. B's delete invalidates every outstanding token for that key, so the server rejects A's late `set` and the stale value never lands.
+
+```mermaid
+sequenceDiagram
+    participant A as Client A (reader)
+    participant MC as memcached
+    participant DB as Database
+    participant B as Client B (writer)
+
+    A->>MC: get user:42
+    MC-->>A: miss + lease token 7
+    A->>DB: SELECT user 42
+    DB-->>A: old row (A then stalls)
+    B->>DB: UPDATE user 42
+    B->>MC: delete user:42
+    Note over MC: token 7 invalidated
+    A->>MC: set user:42 old row, token 7
+    MC-->>A: rejected, token no longer valid
+    Note over A,MC: next reader misses, gets a new token, caches the new row
+```
+
+**Thundering herds.** The server issues a token for a given key at most once every 10 seconds. Any other client that misses on the key inside that window gets no token, only a notice to wait briefly and retry. The token holder usually refills the key within milliseconds, so the retries hit. Facebook reports this cut the peak database query rate from 17K/s to 1.3K/s.
+
+**Stale values.** When a key is deleted, memcached keeps the old value in a short-lived holding area. A client that can tolerate slightly stale data (a like count, a profile photo URL) can take that value instead of waiting for the lease holder, trading staleness for latency per call site.
+
+| Approach | Herd size | Stale-set race | Where the logic lives |
+|----------|-----------|----------------|-----------------------|
+| TTL jitter | Unchanged per key | Not addressed | Client |
+| Mutex key (`SET NX`) | 1 | Not addressed | Client, plus a second key |
+| Background refresh | 0 | Not addressed | Client or worker |
+| Lease | 1 per key per 10 s | Rejected by the server | Cache server |
+
+The lease is a mutex that the cache server owns and that a delete revokes, which is why it covers both bugs. Stock memcached and Redis do not issue leases; you build the equivalent with a token stored under the key (a version or a random value set on miss and checked with a Lua `SET`-if-token-matches script). For pushing invalidations to clients that keep a local copy, Redis 6+ offers server-assisted `CLIENT TRACKING`; see [Redis Internals](../redis_internals/redis_internals.md).
+
 ### Hot Key Problem
 
 A hot key is a cache key accessed at a rate far exceeding what a single Redis node can handle. Redis executes commands on one core, so the ceiling is per-node, not per-cluster: `redis-benchmark` on a modern Xeon reports around 180,000 SET/s without pipelining, but a real workload with larger values, TLS, and no pipelining lands far below that, so **100,000 ops/second per key is the number to plan against** — treat anything approaching it as a hot key.
@@ -514,6 +552,8 @@ the node limit.
 | CDC-based | DB change → Debezium → cache DEL | Accurate; infrastructure cost |
 | Version-based keys | key = "user:42:v7" (include version); version in DB, incremented on write | No invalidation needed; old versions naturally expire |
 | Two-level (L1+L2) | Caffeine (local) + Redis (shared) | High hit rate; stale risk |
+| Lease token | Cache issues a token on miss; a delete revokes it; `set` without a valid token is rejected | Closes the stale-set race; needs server support or a Lua check |
+| Server-assisted tracking | Redis `CLIENT TRACKING` remembers which keys a client read and pushes an invalidation on change | Keeps L1 copies fresh; server memory per tracked key |
 
 **Version-based key approach**:
 ```java
@@ -766,7 +806,7 @@ Primary metric: cache hit rate = hits / (hits + misses). Target: ≥ 95% for fre
 `stale-while-revalidate` is a Cache-Control directive telling the CDN to serve the expired copy immediately and fetch a fresh one in the background. The current request never waits on the origin; the next one gets the refreshed copy. This eliminates the latency spike that occurs when an entry expires and the CDN must wait for the origin server to respond before serving the request. The syntax: `Cache-Control: max-age=3600, stale-while-revalidate=60` means: fresh for 1 hour; after expiry, serve stale for up to 60 more seconds while revalidating. The user always gets a fast response; the stale-serving window is bounded to 60 seconds.
 
 **Q: How does Spring Cache abstraction simplify caching?**
-**Short:** Spring Cache's AOP annotations add declarative caching to methods, but it lacks stampede prevention and per-entry TTL control.
+**Short:** Spring Cache's AOP annotations add declarative caching to methods, with only per-JVM stampede protection via sync=true and no per-entry TTL control.
 
 Spring Cache (`@Cacheable`, `@CachePut`, `@CacheEvict`) provides declarative caching as an AOP-based abstraction. Annotate methods; Spring intercepts calls, checks the cache, and either returns cached results or calls the method and caches the result. The backing store (Redis, Caffeine, EhCache) is swappable via `CacheManager` configuration.
 
@@ -786,7 +826,7 @@ public Product createProduct(CreateProductRequest req) {
     return productRepository.save(new Product(req));
 }
 ```
-Limitation: Spring Cache does not handle distributed stampede prevention, TTL per-entry, or cache-aside logic for complex multi-key operations.
+Limitation: `@Cacheable(sync = true)` locks a key only inside one JVM, so Spring Cache does not handle cross-node stampede prevention, TTL per-entry, or cache-aside logic for complex multi-key operations.
 
 **Q: What is the N+1 caching problem and how do you fix it?**
 **Short:** The N+1 caching problem is fixed by replacing N separate lookups with one MGET plus a single batched database query for the misses.
@@ -878,6 +918,16 @@ A slow read that started before a write can finish after the write's cache delet
 **Short:** The cache key should be deleted after the database write, never before, since deleting first widens the stale-read window.
 
 Delete after the database write, never before, because the write is the event that makes the cached value wrong. Deleting first invalidates a value that is still correct and leaves a window in which a concurrent reader misses, reads the pre-update row, and re-caches it — stale until TTL. Deleting after narrows the exposure to one residual race: a read whose database query started before the write can still finish after the delete and repopulate with the old value. Close that with a delayed second delete ("double delete") sized to the longest plausible read-plus-repopulate, plus replication lag if the read path uses a replica; enqueue the second delete durably rather than sleeping in the request thread, so a crash between the two deletes cannot strand the stale entry. Version-based cache keys avoid the whole ordering question, because a stale writer populates a key nobody will look up again.
+
+**Q: How do memcache leases stop both the stale-set race and the thundering herd?**
+**Short:** On a miss the cache hands out a token, at most one per key every 10 seconds; a delete revokes it and a set without a valid token is rejected, so late stale writes fail and other misses wait instead of querying.
+
+In Facebook's design (NSDI 2013) a miss returns a 64-bit lease token bound to the key. The client must present the token with its `set`; if a delete for that key arrived after the token was issued, the token is void and the server rejects the `set`, so a slow reader can no longer write a pre-update value back after the writer's delete. For herds, the server issues a token for a key at most once every 10 seconds; other clients that miss in that window are told to wait briefly and retry, and by then the token holder has usually refilled the key. Facebook reports this cut peak database load from 17K to 1.3K queries per second. A stale-values option lets tolerant callers read the just-deleted value instead of waiting.
+
+**Q: Why is a lease better than a client-side mutex key for cache refills?**
+**Short:** A client mutex only limits concurrent refills, while a lease is owned by the cache server and revoked by deletes, so it also blocks a stale refill that finishes after a concurrent update.
+
+A `SET lock:key NX PX 5000` mutex lets one client refill and makes the rest wait, which solves the herd, but the cache does not connect the lock to the data: if the winner read the database before a concurrent update and writes after that update's delete, the stale value is cached anyway, and the lock key itself can expire or leak if the winner crashes. A lease ties the right to write to the key's state on the server: the delete revokes the token, so the late write is rejected without any client coordination, and an expired lease simply lets the next miss take a new one. Redis and stock memcached do not issue leases, so emulate one by storing a random token under the key on miss and writing with a Lua script that sets the value only if the token still matches, with the writer's invalidation deleting the token.
 
 **Q: What is write-around caching and when should you use it?**
 **Short:** Write-around sends writes straight to the database and skips the cache, trading a first-read miss for never caching unread data.

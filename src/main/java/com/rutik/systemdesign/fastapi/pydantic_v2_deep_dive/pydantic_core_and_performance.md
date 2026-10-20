@@ -409,6 +409,8 @@ stateDiagram-v2
 
 *With `defer_build=True`, the class skips compilation at import time; the first `model_validate()` call — or an explicit `model_rebuild()` (the fix for the forward-reference pitfall in Section 10) — triggers the one-time build (measured ~0.3 ms for a 50-field flat model on CPython 3.13 / pydantic 2.13.4), after which every subsequent call reuses the cached validator.*
 
+Pydantic 2.14 made the eager build itself cheaper: it moved schema gathering into `pydantic-core` and sped up `GenerateSchema` dispatch and `FieldInfo` construction. Re-measure import time after upgrading before adding `defer_build` to more models.
+
 Use `defer_build=True` when:
 - Your application has 200+ models at module level.
 - Import time matters (Lambda cold starts, test collection time).

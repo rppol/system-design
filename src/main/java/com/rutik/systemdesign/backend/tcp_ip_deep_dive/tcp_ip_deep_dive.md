@@ -53,8 +53,11 @@ This module covers TCP deeply: the complete state machine, flow and congestion c
 |-----------|------------|----------|----------|
 | TCP Reno | Packet loss | Additive increase / multiplicative decrease | Default on many older systems |
 | TCP CUBIC | Packet loss | Cubic function for cwnd growth | Linux default since kernel 2.6.19 |
-| TCP BBR | Bandwidth + RTT | Model-based, probes BDP | Google, high-latency/high-BDP links |
+| TCP BBR (v1, mainline Linux `tcp_bbr`) | Bandwidth + RTT; no direct reaction to loss | Model-based, probes BDP | Google, high-latency/high-BDP links |
+| BBRv3 (`draft-ietf-ccwg-bbr-06`, Experimental) | Bandwidth + RTT, plus loss above 2% per round trip and ECN CE marks | Model-based, caps inflight when loss or CE marks appear | Specified by Google and Meta authors; on Linux, a kernel built from the `google/bbr` v3 branch |
 | QUIC | Packet loss + ECN | Per-connection CC (NewReno-style by default, RFC 9002); per-stream flow control | HTTP/3 |
+
+BBR versions differ in behavior, not only in name. The mainline Linux `tcp_bbr` module is BBRv1, whose source states that "the core algorithm does not react directly to packet losses". The IETF CCWG draft `draft-ietf-ccwg-bbr-06` (July 2026, authors from Google and Meta) specifies BBRv3, which treats a per-round-trip loss rate above `BBR.LossThresh` = 2% and any ECN CE mark as congestion. `sysctl net.ipv4.tcp_congestion_control=bbr` on a stock kernel selects v1.
 
 ### 4.3 TCP State Machine
 
@@ -597,9 +600,9 @@ The receiver advertises its available buffer space as the window size (rwnd) in 
 TCP Keep-Alive sends probe packets on idle connections to detect if the other end is still alive. Configured via tcp_keepalive_time (default 7200s), tcp_keepalive_intvl (probe interval, default 75s), tcp_keepalive_probes (number of probes before declaring dead, default 9). Use it when connections must traverse stateful firewalls or NAT gateways that expire idle sessions, and when detecting half-open connections from crashed peers. Application-level heartbeats are more reliable and should be preferred.
 
 **Q: What is BBR and how does it differ from CUBIC?**
-**Short:** CUBIC treats packet loss as the congestion signal; BBR instead models bandwidth and RTT to size the send window.
+**Short:** CUBIC treats packet loss as the congestion signal; BBR models bandwidth and RTT to size the send window, and BBRv3 also backs off on heavy loss or ECN marks.
 
-CUBIC (Linux default) reacts to packet loss as a congestion signal — it reduces cwnd on each loss event. BBR (Bottleneck Bandwidth and RTT) probes for available bandwidth and RTT to model the network's operating point, then maintains cwnd at the bandwidth-delay product. BBR handles high-latency, high-bandwidth links better because it does not interpret every packet loss as congestion. On lossy wireless links, BBR can be too aggressive and crowd out loss-based algorithms.
+CUBIC (Linux default) reacts to packet loss as a congestion signal: it reduces cwnd on each loss event. BBR (Bottleneck Bandwidth and RTT) probes for available bandwidth and RTT to model the network's operating point, then maintains cwnd at the bandwidth-delay product. BBR handles high-latency, high-bandwidth links better because it does not interpret every packet loss as congestion. Version matters: BBRv1, which is what mainline Linux `tcp_bbr` ships, ignores loss in its core model, so on shallow-buffer paths it can sustain high retransmit rates and take more than its share from competing CUBIC flows. BBRv3, specified in the IETF draft `draft-ietf-ccwg-bbr-06` (Experimental, July 2026), keeps the model but backs off when per-round-trip loss exceeds 2% or ECN CE marks arrive, aimed at fewer retransmits and a fairer share against CUBIC. Running v3 on Linux means a kernel built from Google's `google/bbr` v3 branch.
 
 **Q: What is the difference between SO_REUSEADDR and SO_REUSEPORT?**
 **Short:** SO_REUSEADDR lets a socket rebind a TIME_WAIT port; SO_REUSEPORT lets many sockets share one port for load spreading.

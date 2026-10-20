@@ -912,7 +912,7 @@ which is exactly the race in the BROKEN example above.
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | Nsight Compute | Profiles shared-memory bank conflicts directly | "Shared Memory Bank Conflicts" metric in Memory Workload Analysis; the authoritative way to confirm a fix worked |
-| `cudaFuncSetAttribute` | Opts a kernel into a larger dynamic shared-memory carveout | Required above the default 48 KB/block cap on Ampere/Hopper |
+| `cudaFuncSetAttribute` | Opts a kernel into a larger dynamic shared-memory carveout | Required above the default 48 KB/block cap on Ampere/Hopper; Rubin (10.7) also needs `cudaFuncAttributeSharedMemoryMode` = `cudaSharedMemoryModeAllowOversizedSharedMemory` to reach 327 KB/block (328 KB/SM) |
 | CUTLASS | Templated GEMM library with pre-tuned, pre-padded shared-memory tiles | Reference implementation for production-grade tiling and double-buffering |
 | Numba CUDA (`cuda.shared.array`) | Python static and dynamic shared-memory allocation | `shape=(...)` for static, `shape=0` for dynamic (paired with a launch-time byte count) |
 | CuPy `RawKernel` | Write raw CUDA C++ (including `__shared__`) callable from Python | Useful when Numba's shared-memory API is too limiting for a hand-written kernel |

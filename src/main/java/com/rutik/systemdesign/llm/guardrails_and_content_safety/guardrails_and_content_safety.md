@@ -258,6 +258,26 @@ User Input
 Filtered Response
 ```
 
+**Two engines behind one API.** The Colang path above runs on `LLMRails`, which interprets
+dialogue flows and can call the LLM several times per turn. `IORails` (added in v0.21.0,
+2026-03-12) is a second engine for configurations that only use input and output rails: it
+runs those rails in parallel, without dialogue-flow interpretation, behind a bounded work queue
+that sheds load with an overload response (v0.24.1). In v0.24.0 it covers 59 of the library's
+67 action-backed input and output rail surfaces. The `Guardrails` wrapper picks the engine:
+`use_iorails=True` (the default) uses IORails when `IORails.unsupported_reason(config, llm)` finds
+nothing and otherwise falls back to `LLMRails` with a warning; `require_iorails=True` raises
+instead of falling back. A config with dialogue flows therefore lands on `LLMRails` silently
+unless you set `require_iorails`.
+
+**Custom rail actions return `RailOutcome`.** From v0.24.0 a rail action returns
+`RailOutcome.allow(...)`, `RailOutcome.block(...)` or `RailOutcome.transform([(target, text)])`,
+where the target is the user message, the bot message or the retrieved chunks, and both engines
+enforce the same result. `@action(output_mapping=...)` was removed and passing it raises
+`TypeError`, so a v0.23 action that returned `True` for "safe" must be rewritten to return an
+explicit decision. A transform applies only to non-streaming responses. The server's `/v1/checks`
+endpoint also runs output rails from v0.24.0 and selects a server-loaded configuration by
+`config_id`; it no longer accepts an inline configuration.
+
 ### 4.4 Llama Guard (Meta)
 
 A fine-tuned Llama model trained as a safety classifier. Follows the MLCommons Hazard Taxonomy.
@@ -316,6 +336,78 @@ outcome = guard(
 )
 response = outcome.validated_output
 ```
+
+### 4.6 Policy-Conditioned and Streaming Guard Models
+
+Llama Guard, Prompt Guard 2 and the vendor APIs all ship a **fixed taxonomy**: the categories were
+decided at training time, and changing what counts as a violation means retraining or fine-tuning.
+Two open-weight families released in October 2025 break a different assumption each.
+
+**gpt-oss-safeguard (OpenAI, October 29, 2025, Apache 2.0): the policy is an input.** Two
+reasoning models fine-tuned from gpt-oss: `gpt-oss-safeguard-120b` (117B total, 5.1B active) and
+`gpt-oss-safeguard-20b` (21B total, 3.6B active, fits a 16 GB GPU). You write the policy in plain
+language and put it in the system message; the content to classify goes in the user message. The
+model reasons over the policy, then returns a label. OpenAI's prompting guide gives the working
+numbers:
+
+| Setting | Guidance |
+|---------|----------|
+| Policy length | 400-600 tokens is the best range in early testing; still usable near 10,000 tokens |
+| Several policies in one prompt | Accuracy degrades slightly with each added policy; compress each to 300-600 tokens |
+| Output | One character (`0`/`1`), or JSON such as `{"violation": 1, "policy_category": "H2.f"}`, optionally with `rule_ids`, `confidence` and a short rationale |
+| Reasoning effort | `low`, `medium` (default) or `high`, set in the system message; do not cap output tokens, the model needs room to reason |
+| Prompt format | harmony only; the model does not work correctly without it |
+
+The design trade is explicit in the same guide: a classifier trained on thousands of labelled
+examples for one task will likely beat it on that task, and it costs more time and compute per
+call. OpenAI and ROOST's Osprey both run it behind a cheap, high-recall pre-filter and call it only
+on ambiguous cases. It earns its cost when the policy changes faster than you can label data: a
+new abuse pattern, a market-specific rule, a policy written last week.
+
+**Qwen3Guard-Stream (Alibaba Qwen, technical report arXiv 2510.14276, October 2025, Apache 2.0):
+moderation per token.** The Qwen3Guard family has a Generative variant (classification as an
+instruction-following task) and a Stream variant at 0.6B, 4B and 8B. Stream adds a token-level
+classification head, so each new assistant token gets a verdict as it is generated, with three
+levels (Safe, Controversial, Unsafe) and a category (violent, non-violent illegal acts, sexual
+content, PII, suicide and self-harm, unethical acts, politically sensitive topics, copyright,
+plus jailbreak on user input only), across 119 languages and dialects. The API keeps state across
+tokens:
+
+```python
+# Qwen3Guard-Stream: one call per generated token; state carries the prefix.
+result, state = guard.stream_moderate_from_ids(user_ids, role="user", stream_state=None)
+for tok in llm_stream:                                   # tokens from the serving model
+    result, state = guard.stream_moderate_from_ids(tok, role="assistant", stream_state=state)
+    if result["risk_level"][-1] == "Unsafe":
+        stop_generation(); emit_refusal(); break
+    send_to_client(tok)
+guard.close_stream(state)
+```
+
+The constraint is the tokenizer: the guard consumes token IDs, so it works best behind a model
+that shares Qwen3's tokenizer; anything else needs re-tokenising the stream before each call.
+
+```
+  where each guard style decides, for one 300-token answer
+
+  fixed-taxonomy classifier (Llama Guard 4)      verdict after token 300
+  sentence-gate streaming (§12 Q&A)              verdict every ~20 tokens
+  token-level head (Qwen3Guard-Stream)           verdict at every token
+  policy-conditioned reasoner (gpt-oss-safeguard) verdict after token 300
+                                                  + its own reasoning tokens
+
+  tokens  1 ......... 100 ......... 200 ......... 300
+  LG4                                              |X
+  gate      |    |    |    |    |    |    |    |   |
+  stream  |||||||||||||||||||||||||||||||||||||||||||
+  safeguard                                        |XXXXXX (reasoning)
+```
+
+| Need | Pick |
+|------|------|
+| Stable, standard categories at the lowest cost | Fixed-taxonomy classifier (Llama Guard 4, Prompt Guard 2, a vendor API) |
+| A policy you will rewrite monthly, or a long-tail rule nobody has labelled data for | gpt-oss-safeguard behind a cheap pre-filter |
+| Cut a streamed answer at the first unsafe token, not the first unsafe sentence | Qwen3Guard-Stream, if the serving model uses a Qwen3-compatible tokenizer |
 
 ---
 
@@ -644,9 +736,11 @@ own before you write it into an SLA.
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **NeMo Guardrails** | Programmable rails | NVIDIA; Colang DSL (1.0 is still the default; 2.0 is opt-in); most flexible |
+| **NeMo Guardrails** | Programmable rails | NVIDIA; Colang DSL (1.0 is still the default; 2.0 is opt-in) on the `LLMRails` engine; `IORails` engine runs input/output rails in parallel; rail actions return `RailOutcome` (allow, block, transform) from v0.24.0 |
 | **Llama Guard** | Safety classifier | Meta; multilingual; MLCommons taxonomy; current model is Llama Guard 4 12B |
 | **Guardrails AI** | Output validation | Pydantic-style; code-first; validators installed from Guardrails Hub |
+| **gpt-oss-safeguard** | Policy-conditioned safety reasoning | OpenAI, Apache 2.0, 120b and 20b; policy in the system message, harmony format only; low/medium/high reasoning effort; run behind a pre-filter |
+| **Qwen3Guard** | Safety classifier, generative and streaming | Alibaba Qwen, Apache 2.0, 0.6B/4B/8B; Stream variant classifies every generated token (Safe/Controversial/Unsafe); 119 languages |
 | **Llama Prompt Guard 2** | Prompt injection / jailbreak detection | Meta; 86M (mDeBERTa-base) and 22M (DeBERTa-xsmall) classifiers; 512-token window, 8 languages; 97.5% recall at 1% FPR on the 86M |
 | **AWS Bedrock Guardrails** | Managed service | Console/API/CloudFormation config; enterprise-grade |
 | **Azure AI Content Safety** | Managed moderation + prompt protection | Microsoft; severity-scored text/image categories, Prompt Shields (direct + document-embedded injection), groundedness detection, task adherence for agents; several features English-only |
@@ -684,6 +778,14 @@ A: Protect PII at three layers: input redaction, context redaction, and output s
 **Q: What is Llama Guard and when would you use it instead of the OpenAI Moderation API?**
 **Short:** Llama Guard is a self-hostable safety classifier trained on the 14-category MLCommons taxonomy, chosen over OpenAI's Moderation API for offline or customizable deployment.
 A: Llama Guard is Meta's fine-tuned Llama model trained as a safety classifier following the MLCommons Hazard Taxonomy (14 categories, S1-S14). It evaluates both user inputs and assistant responses; the current model is Llama Guard 4 12B, a multimodal classifier pruned from Llama 4 Scout that runs on one 24GB GPU. Use it when: (1) self-hosted deployment (no external API calls); (2) open-source model serving (consistent with open stack); (3) need specific categories not covered by OpenAI's API; (4) need to customize — Llama Guard can be fine-tuned on your domain. Use OpenAI Moderation API when: already using OpenAI stack, want simplest integration, free tier is sufficient.
+
+**Q: Your trust-and-safety team rewrites the harassment policy every month. Why does fine-tuning a Llama Guard variant each time lose, and what replaces it?**
+**Short:** Each rewrite needs fresh labels and a retrain; gpt-oss-safeguard reads the written policy at inference, so a policy change is a prompt change.
+A: A fixed-taxonomy classifier encodes the policy in its weights, so every rewrite means relabelling examples against the new wording, retraining, and re-evaluating, and the model lags the policy by weeks. gpt-oss-safeguard (OpenAI, October 2025, Apache 2.0, 120b and 20b) takes the policy as text in the system message and reasons over it before returning a label, so the monthly rewrite ships as a new prompt version, evaluated against your labelled set the same day. OpenAI's guide puts the best policy length at 400-600 tokens. The costs are real: it is slower and more expensive per call than a small classifier, and a classifier trained on thousands of examples for one stable task will likely beat it. The production shape is a cascade: a cheap high-recall classifier screens every event and only the ambiguous fraction reaches the reasoner, which is how OpenAI and ROOST's Osprey run it. Version the policy text like code, because it now is the classifier.
+
+**Q: How does a token-level streaming guard like Qwen3Guard-Stream differ from a sentence-buffered streaming gate?**
+**Short:** The gate re-classifies buffered chunks with a separate call; Qwen3Guard-Stream carries state and scores every token, so it can stop generation at the first unsafe token.
+A: A streaming gate buffers tokens to a sentence or a ~20-token window and runs an ordinary classifier on each chunk, so detection lags by up to one chunk and every chunk is a fresh call that re-reads context. Qwen3Guard-Stream (Alibaba Qwen, October 2025, 0.6B/4B/8B, Apache 2.0) adds a token-level classification head and an incremental API, `stream_moderate_from_ids`, that takes one new token plus a carried state and returns a risk level (Safe, Controversial, Unsafe) and category for that position. The serving loop can cut generation the moment a token tips to Unsafe, and the prefix it already released is at most one token past the violation. The constraint is tokenization: it consumes token IDs and works best behind a model that shares Qwen3's tokenizer, otherwise each step pays a re-tokenisation. Keep the sentence gate where the serving model uses a different tokenizer or where a full-sentence context gives a better verdict than a partial one.
 
 **Q: What is indirect prompt injection via tool results and how do you defend against it?**
 **Short:** Indirect prompt injection hides malicious instructions in retrieved content like a web page, defended by treating retrieved text as lower-trust than system or user instructions.

@@ -59,6 +59,13 @@ Hosts prompt templates clients can invoke. Examples: code review prompt, SQL gen
 
 All three server primitives plus client callbacks. Examples: a cloud MCP server exposing instance resources + action tools + setup prompts, using sampling for analysis when the client supports it.
 
+### 4.7 Server with an Interactive UI (MCP Apps)
+
+A tool that also returns an HTML interface the host renders inside the chat, through the MCP Apps
+extension (official since 2026-01-26). Examples: a dashboard for "show sales by region", a
+deployment form with dozens of options, a PDF or diff reviewer. The tool still returns text or
+structured data, so a host without MCP Apps support keeps working. See §6 for the mechanics.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -334,6 +341,20 @@ async def deploy(service: str, ctx: Context) -> str:
 
 The security rule is absolute and it is the part interviewers probe: a server **MUST NOT** request passwords, API keys, access tokens or payment credentials through form mode, because form data passes through the client and therefore through the LLM's context. Secrets go through **URL mode** (`ctx.elicit_url(message, url, elicitation_id)`), where the client only ever sees the URL, gets user consent, opens it out-of-band, and the server signals completion with `notifications/elicitation/complete`. URL mode carries its own trap: the server MUST verify that the user who opens the URL is the user the elicitation was created for, or an attacker binds their own third-party tokens to a victim's identity.
 
+### Returning a UI with MCP Apps
+
+The tool description carries `_meta.ui.resourceUri`, pointing at a `ui://` resource the server also
+serves. The host can preload that resource before the tool is called, fetches the HTML (usually with
+its JavaScript and CSS bundled in), and renders it in a sandboxed iframe. The app and the host then
+talk JSON-RPC over `postMessage`: shared methods such as `tools/call`, plus app-specific ones under a
+`ui/` prefix such as `ui/initialize`. The app can call tools on its own server, send messages and
+update the model's context, and the host pushes new tool results into the app without a reload.
+
+Two server-side rules follow. Keep the tool's text or structured result complete, because hosts
+without MCP Apps render only that. And list every external origin the app loads from in the
+resource's `_meta.ui.csp`, since the sandbox blocks anything not listed. The security consequences
+of a server shipping UI are in [MCP Security](mcp_security.md).
+
 ### Test with MCP Inspector
 
 ```bash
@@ -477,6 +498,7 @@ is withholding the information that determines whether the retry succeeds.
 | `mcp` Python SDK | Server + client |
 | `@modelcontextprotocol/sdk` (TS) | Server + client |
 | FastMCP (Python) | Higher-level decorator API |
+| `@modelcontextprotocol/ext-apps` | MCP Apps: `App` class for the in-chat UI, AppBridge for hosts; React, Vue, Svelte, Preact, Solid and vanilla JS starters |
 | MCP Inspector | Interactive testing UI |
 | `mcp-cli` | Command-line client for testing |
 | Official MCP Registry (`registry.modelcontextprotocol.io`) | Canonical server metadata; publish your `server.json` here (in preview) |
@@ -538,6 +560,10 @@ Only when the client declared that capability at initialize — otherwise `roots
 **Q: Why must a server never request an API key through form-mode elicitation?**
 **Short:** Form data flows back into the LLM's context, so the spec forbids secrets there and requires out-of-band URL mode instead.
 Because form-mode data passes back through the MCP client and into the LLM's context, so the spec forbids secrets there and mandates URL mode instead. Form mode is for benign structured input — a target environment, a ticket id, a date — and its schema is restricted to a flat object of primitives precisely because clients must be able to render it as a simple form. URL mode sends the user out of band to a page the server controls; the client sees only the URL, shows the full host for consent, and must not pre-fetch it. Practical guidance: if the value would be damaging in a log line, it belongs in URL mode, and the server must verify the user who opens the URL is the same user the elicitation was created for.
+
+**Q: How does an MCP server show an interactive UI in the chat, and what must it still return?**
+**Short:** Through the MCP Apps extension: the tool's `_meta.ui.resourceUri` points to a `ui://` HTML resource rendered in a sandboxed iframe, and the tool still returns a full text result for hosts without support.
+The tool description names a `ui://` resource in `_meta.ui.resourceUri`. The host fetches that HTML resource, renders it in a sandboxed iframe in the conversation, and talks to it with JSON-RPC over `postMessage`, using `tools/call` plus `ui/`-prefixed methods such as `ui/initialize`. The app can call the server's tools and update the model's context, and the host pushes fresh tool results into it. External origins the app loads must be listed in `_meta.ui.csp`. MCP Apps is an official extension, not part of the core spec, and host support varies, so the tool's text or structured result must stand on its own. Use it when the user needs to explore data, fill a form with many options or review media; a plain answer does not need it.
 
 **Q: How do you version an MCP server?**
 **Short:** Use semantic versioning with major bumps for breaking tool schema or behavior changes, and prefer additive optional fields otherwise.

@@ -337,7 +337,7 @@ schema_share = manifest_tokens / W
 | `t_schema` | Tokens for one ToolDefinition: name, description, and full inputSchema |
 | `N` | Total tools registered across all connected servers, not per server |
 | `N x t_schema` | Manifest size. Prepended to every request for the whole session |
-| `W` | Model context window. Worked below at 200K — the frontier Claude models are 1M, Claude Haiku 4.5 is 200K, and many other models are 128K |
+| `W` | Model context window. Worked below at 200K. Every current Claude model, Haiku 5.5 included, is 1M; many other models are 128K or 200K |
 | schema share | `N x t_schema / W`. The fraction of the window gone before the task starts |
 | `R` | Requests in the session. The manifest is paid `R` times, not once |
 

@@ -17,7 +17,7 @@ Core capabilities:
 - **FastAPI integration**: FastAPI uses Pydantic models for request body parsing, response serialization, and automatic OpenAPI schema generation.
 - **Custom types**: define reusable validation logic as first-class types via `__get_pydantic_core_schema__`.
 
-Python version target: 3.13 / 3.14 with `from __future__ import annotations` as needed.
+Python version target: 3.13 / 3.14 with `from __future__ import annotations` as needed. Pydantic 2.14.0 (2026-10-08) supports Python 3.10 through 3.15 (3.9 dropped).
 
 ---
 
@@ -87,7 +87,7 @@ Run after all field validators pass. Access `self` (mode `"after"`) or the raw d
 | `validate_default` | `False` | Run validators on fields with defaults |
 | `frozen` | `False` | Make model immutable and hashable |
 | `strict` | `False` | Disable type coercion globally |
-| `populate_by_name` | `False` | Allow field population by Python name when alias is set |
+| `validate_by_name` | `False` | Allow field population by Python name when an alias is set (2.11+; `validate_by_alias` stays `True`). Replaces `populate_by_name`, which will be deprecated in v3 |
 
 ### 4.5 Annotated Types
 
@@ -804,6 +804,28 @@ print(update.model_dump(exclude_unset=True))
 # name and age are NOT included — even though they default to None
 ```
 
+`exclude_unset` works, but "absent" lives outside the field value: `update.name` is `None`
+whether the client omitted it or sent `null`, and only `update.model_fields_set` tells the two
+apart. Since Pydantic 2.14 the `MISSING` sentinel is stable (`from pydantic import MISSING`) and
+puts absence in the value itself:
+
+```python
+from pydantic import MISSING, BaseModel
+
+class UserPatch(BaseModel):
+    name: str | None | MISSING = MISSING     # absent -> MISSING, null -> None
+    email: str | None | MISSING = MISSING
+
+patch = UserPatch.model_validate({"name": None})
+patch.name is None          # True: client asked to clear it
+patch.email is MISSING      # True: client did not mention it
+patch.model_dump()          # {'name': None}; MISSING fields are always dropped
+```
+
+`MISSING` never appears in the JSON Schema, so OpenAPI shows `string | null` as before. Use it
+when downstream code branches on absence; plain `exclude_unset=True` is enough when the dict
+goes straight into an `UPDATE`.
+
 ---
 
 ## 8. Tradeoffs
@@ -816,7 +838,7 @@ print(update.model_dump(exclude_unset=True))
 | ORM integration | `from_attributes=True` | `orm_mode=True` | Manual | Manual |
 | Strictness | Coercion default, strict opt-in | Coercion default | Strict by default | No validation |
 | Settings mgmt | `pydantic-settings` (separate pkg) | `BaseSettings` built-in | N/A | N/A |
-| FastAPI native | Yes (v2 since FastAPI 0.100) | Yes (v1, legacy) | No | No |
+| FastAPI native | Yes (required since FastAPI 0.126.0) | No (dropped in FastAPI 0.126.0) | No | No |
 | Custom types | `__get_pydantic_core_schema__` | `__get_validators__` | `structure_hook` | N/A |
 | Frozen / immutable | `ConfigDict(frozen=True)` | `Config.allow_mutation=False` | `@define(frozen=True)` | `@dataclass(frozen=True)` |
 
@@ -873,14 +895,14 @@ class Order(BaseModel):
     email: str
 
     @field_validator("email", mode="before")   # mode="before" replaces pre=True
-    @classmethod                                # @classmethod is required in v2
+    @classmethod                                # optional: Pydantic wraps a cls-first function itself
     def normalize(cls, v: object) -> str:
         if isinstance(v, str):
             return v.strip().lower()
         return v
 ```
 
-Note: v2 validators must be decorated with `@classmethod`. Forgetting this raises a `PydanticUserError`.
+Note: `@classmethod` is optional on v2 validators; Pydantic wraps a function whose first parameter is `cls` as a classmethod. Naming the first parameter `self` raises `PydanticUserError` ("cannot be applied to instance methods") at class definition.
 
 ---
 
@@ -1006,11 +1028,11 @@ def check_dates(self) -> Self:
 
 | Tool | Role | Notes |
 |------|------|-------|
-| `pydantic` (v2.x) | Core validation / serialization | Requires `pydantic-core` (Rust) |
+| `pydantic` (v2.x) | Core validation / serialization | Requires `pydantic-core` (Rust); 2.14 supports Python 3.10-3.15, adds `frozendict` and `TypeForm` support, and makes `MISSING` stable |
 | `pydantic-core` | Compiled Rust validation engine | Installed automatically as dependency |
 | `pydantic-settings` | BaseSettings, env/file config | Separate package since v2 |
 | `pydantic[email]` | EmailStr type | Requires `email-validator` |
-| `fastapi` | Web framework, uses Pydantic natively | FastAPI 0.100+ requires Pydantic v2 |
+| `fastapi` | Web framework, uses Pydantic natively | Supports v2 since 0.100; v1 dropped in 0.126.0; requires `pydantic>=2.9` since 0.135.2 |
 | `mypy` + `pydantic mypy plugin` | Static type checking | Plugin in `mypy.ini`: `[mypy] plugins = pydantic.mypy` |
 | `pyright` | Static type checking | Works out of the box; no plugin needed |
 | `pytest` + `pydantic` | Testing validation logic | Test `ValidationError.errors()` structure |
@@ -1066,7 +1088,7 @@ Use `Annotated[T, Field(...)]` to define a named type alias: `PositiveInt = Anno
 **Q7: How does Pydantic v2 integrate with FastAPI, and what does FastAPI do with Pydantic models?**
 **Short:** FastAPI uses Pydantic v2 models for request parsing, response serialization, and OpenAPI schema generation.
 
-FastAPI uses Pydantic v2 for request body parsing, response serialization, and OpenAPI schema generation. Concretely: (1) request body parsing — a `BaseModel` parameter in a route function causes FastAPI to parse the JSON body and validate it; (2) response serialization — a `response_model=SomeModel` annotation causes FastAPI to call `model_dump()` on the return value and filter/coerce fields; (3) OpenAPI schema generation — FastAPI calls `SomeModel.model_json_schema()` to generate the JSON Schema for the Swagger UI. FastAPI 0.100+ requires Pydantic v2; older versions used v1.
+FastAPI uses Pydantic v2 for request body parsing, response serialization, and OpenAPI schema generation. Concretely: (1) request body parsing: a `BaseModel` parameter in a route function causes FastAPI to parse the JSON body and validate it; (2) response serialization: a `response_model=SomeModel` annotation causes FastAPI to call `model_dump()` on the return value and filter/coerce fields; (3) OpenAPI schema generation: FastAPI calls `SomeModel.model_json_schema()` to generate the JSON Schema for the Swagger UI. FastAPI 0.100 added Pydantic v2 support alongside v1; 0.126.0 (2025-12-20) dropped v1 and 0.128.0 (2025-12-27) dropped `pydantic.v1` models, so current FastAPI requires `pydantic>=2.9`.
 
 **Q8: What is a discriminated union and why is it more efficient than a plain Union?**
 **Short:** A discriminated union uses a Literal tag to pick the right branch in O(1) instead of trying every branch.
@@ -1098,27 +1120,40 @@ By default, Pydantic v2 does NOT run validators on fields that use their default
 
 `Optional[str]` is equivalent to `str | None` — it changes the type but does NOT make the field optional in the sense of having a default. `name: Optional[str]` still requires `name` to be present in the input (as `None` or a string). `name: Optional[str] = None` makes the field optional with a `None` default — it can be omitted from input entirely. Use `model_dump(exclude_none=True)` to suppress `None` fields in output.
 
-**Q14: How do you use `TypeAdapter` and when is it preferable to a full `BaseModel`?**
+**Q14: In a PATCH endpoint, how do you tell "field omitted" apart from "field explicitly set to null"?**
+**Short:** Both leave the attribute as None, so check model_fields_set, or declare the field `T | None | MISSING = MISSING` so an omitted field holds the MISSING sentinel.
+
+With `name: str | None = None`, the attribute is `None` in both cases, and only
+`model.model_fields_set` (which `model_dump(exclude_unset=True)` reads) records whether the
+client sent the key. That is enough when the dumped dict goes straight into an `UPDATE`. When
+code needs to branch on absence, Pydantic 2.14 offers the stable `MISSING` sentinel: declare
+`name: str | None | MISSING = MISSING`, and an omitted field holds `MISSING` (test with
+`is MISSING`), an explicit `null` holds `None`, and `model_dump()` always drops `MISSING`
+fields. The sentinel is left out of the JSON Schema, so the OpenAPI contract does not change.
+The usual bug is `exclude_none=True` on a PATCH: it drops the explicit `null` too, so a client
+can never clear a field.
+
+**Q15: How do you use `TypeAdapter` and when is it preferable to a full `BaseModel`?**
 **Short:** TypeAdapter validates arbitrary types like lists or unions without needing a full BaseModel class.
 
 `TypeAdapter` validates arbitrary types without defining a model class: `TypeAdapter(list[int]).validate_python(["1","2"])` returns `[1, 2]`. Use it when you need to validate a single value, a generic container (`list[MyModel]`), or a union type without the overhead of a full model class definition. It also exposes `validate_json`, `dump_python`, and `json_schema` methods matching the `BaseModel` API.
 
-**Q15: What is `model_dump(mode="json")` vs `model_dump_json()`?**
+**Q16: What is `model_dump(mode="json")` vs `model_dump_json()`?**
 **Short:** model_dump(mode="json") returns a JSON-safe dict, while model_dump_json() returns a faster JSON string directly.
 
 `model_dump(mode="json")` returns a Python `dict` where all values have been converted to JSON-compatible types (e.g., `datetime` → ISO string, `UUID` → string). `model_dump_json()` returns a `str` containing the JSON document, produced directly by the Rust serializer, which is faster. Use `model_dump(mode="json")` when you need a dict for further manipulation before serializing; use `model_dump_json()` for the fastest direct JSON output.
 
-**Q16: How does `ConfigDict(frozen=True)` affect a model?**
+**Q17: How does `ConfigDict(frozen=True)` affect a model?**
 **Short:** frozen=True makes a model immutable and hashable, ideal for value objects used as dict keys.
 
 Setting `frozen=True` makes the model immutable after creation: any attempt to set an attribute raises a `ValidationError`. It also makes the model hashable (implements `__hash__`), so instances can be used as dict keys or set members. Internally, Pydantic sets `__setattr__` and `__delattr__` to raise exceptions. Use `frozen=True` for value objects — DTOs that are passed around but never modified.
 
-**Q17: How do you handle v1 → v2 migration for a large codebase?**
+**Q18: How do you handle v1 → v2 migration for a large codebase?**
 **Short:** Follow the PydanticDeprecatedSince20 warnings as a worklist, then automate rewrites with bump-pydantic.
 
-Lean on the deprecation warnings: v2 keeps many v1 spellings working but raises `PydanticDeprecatedSince20` for each, so the warning log is your worklist. (If a module genuinely cannot be ported yet, `import pydantic.v1` gives you the vendored v1 API side by side with v2 in the same process.) A safe migration path: (1) install Pydantic v2, (2) run your test suite and collect all `PydanticDeprecatedSince20` warnings, (3) replace `@validator` with `@field_validator`, `class Config` with `ConfigDict`, `.dict()` with `.model_dump()`, `.json()` with `.model_dump_json()`, `parse_obj` with `model_validate`, (4) replace `__fields__` accesses with `model_fields`. The `bump-pydantic` CLI tool automates most of these rewrites.
+Lean on the deprecation warnings: v2 keeps many v1 spellings working but raises `PydanticDeprecatedSince20` for each, so the warning log is your worklist. (There is no side-by-side escape hatch in a FastAPI app: FastAPI 0.128.0 rejects `pydantic.v1` models, and `pydantic.v1` does not run on Python 3.14+, so every model must be ported.) A safe migration path: (1) install Pydantic v2, (2) run your test suite and collect all `PydanticDeprecatedSince20` warnings, (3) replace `@validator` with `@field_validator`, `class Config` with `ConfigDict`, `.dict()` with `.model_dump()`, `.json()` with `.model_dump_json()`, `parse_obj` with `model_validate`, (4) replace `__fields__` accesses with `model_fields`. The `bump-pydantic` CLI tool automates most of these rewrites.
 
-**Q18: What is the purpose of `model_rebuild()` and when is it needed?**
+**Q19: What is the purpose of `model_rebuild()` and when is it needed?**
 **Short:** model_rebuild() recompiles the core schema, needed for unresolved forward references or dynamic fields.
 
 `model_rebuild()` re-compiles the Pydantic core schema for a model. It is needed when a model has forward references (`from __future__ import annotations` or string annotations) that were not resolved at class definition time, or when you add fields dynamically after class creation. In practice, you call `MyModel.model_rebuild()` at the end of a module after all referenced types are defined. FastAPI calls it automatically during app startup for models registered as request/response bodies.
@@ -1129,7 +1164,7 @@ Lean on the deprecation warnings: v2 keeps many v1 spellings working but raises 
 
 1. **Use `Annotated` types for constraints, not subclasses.** `PositiveInt = Annotated[int, Field(gt=0)]` is composable and readable. Subclassing `int` to add constraints creates a new type that breaks isinstance checks and adds inheritance complexity.
 
-2. **Declare `@classmethod` on all field validators.** Forgetting `@classmethod` raises `PydanticUserError` at class definition time, not at runtime — easy to catch in tests.
+2. **Write field validators as classmethods with `cls` first.** Pydantic adds `@classmethod` if you omit it, but a validator whose first parameter is `self` raises `PydanticUserError` at class definition time, not at runtime, so tests catch it on import.
 
 3. **Return `self` from `@model_validator(mode="after")`.** Annotate the return type as `Self` to make this explicit and catch missing returns with mypy/pyright.
 

@@ -147,7 +147,7 @@ The Gunicorn worker classes live in the standalone **`uvicorn-worker`** package
 |--------------|--------------|----------|
 | `uvicorn_worker.UvicornWorker` | HTTP/1.1 + WebSocket | Standard production choice |
 | `uvicorn_worker.UvicornH11Worker` | HTTP/1.1 only (h11 parser) | Stricter HTTP compliance, slower |
-| Hypercorn worker | HTTP/1.1, HTTP/2, HTTP/3 | HTTP/2 push, QUIC experiments |
+| Hypercorn worker | HTTP/1.1, HTTP/2, HTTP/3 | HTTP/2 and QUIC (HTTP/3) termination in the app process |
 
 ### 4.4 The ASGI Runtime Matrix
 
@@ -157,9 +157,9 @@ deployment least often wants.
 | Runtime | Process model | Admission control | Pick it when |
 |---|---|---|---|
 | Uvicorn, single process | one process, one event loop | `--limit-concurrency` (immediate 503) | K8s / Cloud Run / App Runner — the orchestrator already replicates |
-| Uvicorn `--workers N` | Uvicorn's own supervisor forks N children over a shared socket | same, per worker | a bare VM where you want multiple cores without adding Gunicorn |
+| Uvicorn `--workers N` | Uvicorn's own supervisor forks N children over a shared socket | same, per worker | a bare VM where you want multiple cores without adding Gunicorn; `kill -HUP` does a rolling worker restart (0.51.0+) |
 | Gunicorn + `uvicorn_worker.UvicornWorker` | pre-fork supervisor, mature signal handling | none of its own — Gunicorn queues | a bare VM already standardized on Gunicorn's config, hooks, and `max_requests` recycling |
-| Granian | Rust (Hyper + Tokio) supervisor; ASGI, WSGI, and its own RSGI | per-worker backpressure limiter on the accept loop | one binary instead of three packages; HTTP/2 without Hypercorn |
+| Granian | Rust (Hyper + Tokio) supervisor; ASGI, WSGI, and its own RSGI | per-worker backpressure limiter on the accept loop | one binary instead of three packages; HTTP/2 that is not marked experimental |
 | Hypercorn | asyncio/trio, HTTP/1.1 + HTTP/2 + HTTP/3 | none of its own | you genuinely need HTTP/2 or QUIC at the app tier |
 
 **Uvicorn's own `--workers` makes Gunicorn optional on a bare VM.** Uvicorn ships a
@@ -167,6 +167,21 @@ multiprocess supervisor: it binds the socket in the parent, forks N children, an
 child that dies. It does not have Gunicorn's full hook system, `preload_app`, or per-worker
 `max_requests` recycling — if you rely on those, keep Gunicorn. If you were only using
 Gunicorn to get N processes, you can delete it and one dependency with it.
+
+Graceful reload is no longer a reason to keep Gunicorn either. Since Uvicorn 0.51.0, `kill -HUP`
+on the parent rolls the workers one slot at a time: it starts the replacement, waits until that
+worker's server has finished startup, then sends the old worker `SIGTERM` so it drains in-flight
+requests. Old and new share the parent's socket, so the slot is never empty. If a replacement
+does not become ready within the healthcheck timeout, the restart stops and the old worker keeps
+serving, which can leave a mix of old and new workers until the next `HUP`.
+
+**HTTP/2 at the app tier has two Python options.** Granian serves HTTP/2 from its Rust (Hyper)
+stack. Uvicorn 0.53.0 added HTTP/2 through the `zttp` parser (`pip install zttp`, then
+`--http zttp --http2`), negotiated by ALPN over TLS or by cleartext prior knowledge; it is
+marked experimental, and h2c upgrade and WebSockets over HTTP/2 are not supported. Most
+deployments still terminate HTTP/2 at the load balancer and speak HTTP/1.1 to the pod, which
+needs neither. The same Uvicorn release added `--loop zuvloop` (installed separately, CPython
+3.14+) as a third event-loop choice beside `asyncio` and `uvloop`.
 
 **Where multi-process load balancing actually happens.** No Python server distributes requests
 itself. Either the parent binds one socket and all children `accept()` on it (the pre-fork
@@ -466,8 +481,8 @@ spec:
             periodSeconds: 10
           lifecycle:
             preStop:
-              exec:
-                command: ["sleep", "5"]  # drain LB connections before SIGTERM
+              sleep:
+                seconds: 5       # kubelet pauses 5 s before SIGTERM; no sleep binary needed
           envFrom:
             - configMapRef:
                 name: fastapi-config
@@ -504,6 +519,19 @@ async def readiness():
         raise HTTPException(status_code=503, detail=f"DB unreachable: {exc}")
     return {"status": "ready"}
 ```
+
+**`preStop.sleep` instead of `exec: sleep`** [Kubernetes 1.34 GA]. The manifest uses the native
+sleep lifecycle action (`PodLifecycleSleepAction`: alpha in 1.29, beta and on by default from
+1.30, GA and locked on in 1.34). The difference is where the pause runs. An `exec` hook runs a
+command *inside the container*, so `command: ["sleep", "5"]` needs a `sleep` binary in the image.
+`python:3.13-slim` has one; a distroless or `FROM scratch`-style runtime image does not, the hook
+fails, Kubernetes records a `FailedPreStopHook` event and goes straight to SIGTERM, and the pod
+drops the requests the pause was meant to protect. The `sleep` action is executed by the kubelet
+itself, the same way it runs `httpGet` hooks, so it works on any image and costs no process
+start inside the container. The pause still counts against `terminationGracePeriodSeconds`, so
+the sizing in Pitfall 3 is unchanged. Since 1.34 `seconds: 0` is also accepted
+(`PodLifecycleSleepActionAllowZero`), which lets a shared Helm chart template the hook and turn
+the pause off per service without deleting the block.
 
 ### 6.5 Horizontal Pod Autoscaler
 
@@ -735,12 +763,12 @@ dependency, not any property of FastAPI, is what keeps most of this ecosystem on
 
 Two related facts worth carrying:
 
-- **SQLAlchemy 2.1 moves greenlet entirely into the `[asyncio]` extra**, so it is no longer
+- **SQLAlchemy 2.1 (GA 2026-09-24) moved greenlet entirely into the `[asyncio]` extra**, so it is no longer
   installed by default and `AsyncSession` needs `pip install "sqlalchemy[asyncio]"`. The stated
   reason is packaging, not free-threading — 1.4 and 2.0 carried "a complex expression to
   determine if the `greenlet` dependency... could be installed from pypi using a pre-built
-  wheel", which broke tools like poetry. Pin the extra now: it is already valid on 2.0, which is
-  still the current stable line while 2.1 is in beta, so the upgrade becomes a non-event.
+  wheel", which broke tools like poetry. Pin the extra in every install line; it is also valid on
+  2.0, so the same pin works on both lines.
 - **A C extension not built for free-threading re-enables the GIL at import.** CPython's own
   guidance is blunt: extension modules "need to explicitly indicate that they support running
   with the GIL disabled; otherwise importing the extension will raise a warning and enable the
@@ -755,6 +783,43 @@ experimental and discourages it in production. Treat `3.14t` as a measured exper
 CPU-bound service with a verified-clean dependency tree, not as a deployment default. The
 interpreter-level detail lives in
 [`../../python/the_gil_and_free_threading/the_gil_and_free_threading.md`](../../python/the_gil_and_free_threading/the_gil_and_free_threading.md).
+
+### 6.11 Serving under a path prefix behind an ingress
+
+When the ingress routes `https://api.example.com/api/v1/*` to the pod and strips the prefix, the
+app sees `/items/1` but must generate `/api/v1/...` in OpenAPI, redirects and `url_for`. Set the
+prefix on the server with `--root-path`:
+
+```bash
+fastapi run app/main.py --root-path /api/v1
+# or, with Uvicorn directly:
+uvicorn app.main:app --root-path /api/v1 --proxy-headers --forwarded-allow-ips 10.0.0.0/8
+```
+
+`--proxy-headers` makes Uvicorn take the client address and scheme from `X-Forwarded-For` and
+`X-Forwarded-Proto`, but only from peers listed in `--forwarded-allow-ips` (default
+`127.0.0.1` and, since 0.53.0, `::1`). List the ingress pod CIDR there, never `*` on a pod that
+is reachable without the proxy, or any client can spoof its IP and scheme.
+
+### 6.12 Python 3.15 for service runtimes
+
+Python 3.15.0 (2026-10-09) adds three things a deployment notices:
+
+- **Explicit lazy imports (PEP 810).** `lazy import heavy_module` defers loading until the
+  name is first used. Cold start drops for CLIs, serverless handlers and worker processes that
+  import a large tree but use a small part per run. Pydantic 2.14 supports lazy imports. A web
+  server that serves every route soon after boot gains little, because the first requests load
+  everything anyway.
+- **Frame pointers on by default (PEP 831).** CPython is built with `-fno-omit-frame-pointer`,
+  so `perf`, eBPF profilers and `py-spy --native` get complete native stacks. One extension
+  built without frame pointers still breaks the chain for its frames.
+- **Tachyon sampling profiler (PEP 799).** `python -m profiling.sampling attach <PID>` samples
+  a running process with no restart and no code change, with `--mode cpu|wall|gil`,
+  `--async-aware` task stacks, and `--flamegraph` output. It covers what `py-spy` is usually
+  installed for, from the standard library.
+
+Python 3.10 reached end of life on 2026-10-01, and Starlette 1.8, SQLAlchemy 2.1, and
+pydantic-settings 2.16 already require 3.11, so 3.11 is the practical floor for a FastAPI stack.
 
 ---
 
@@ -796,7 +861,7 @@ by convention.
 | K8s HPA visibility | Opaque (N workers behind 1 IP) | Transparent (1 pod = 1 unit) |
 | `preload_app` savings | ~50MB per worker saved | Not applicable |
 | Startup complexity | gunicorn.conf.py needed | One `uvicorn` command |
-| Graceful reload | `kill -HUP $MASTER_PID` | Pod rolling update |
+| Graceful reload | `kill -HUP $MASTER_PID` | Pod rolling update; on a VM, `kill -HUP` on `uvicorn --workers N` (0.51.0+) |
 
 ### 8.2 Rolling Update vs Blue-Green vs Canary
 
@@ -928,8 +993,8 @@ already started shutting down — resulting in connection refused errors for cli
 # FIX: sleep before SIGTERM to let LB drain
 lifecycle:
   preStop:
-    exec:
-      command: ["sleep", "5"]   # 5s > typical LB propagation delay of 3-4s
+    sleep:
+      seconds: 5   # 5s > typical LB propagation delay of 3-4s; run by the kubelet
 # terminationGracePeriodSeconds must be > preStop sleep + graceful drain time
 # If preStop=5s and drain=30s, set terminationGracePeriodSeconds=40
 terminationGracePeriodSeconds: 40
@@ -1038,16 +1103,15 @@ you the thing you migrated for.
 
 | Tool | Role | Key Config | Production Notes |
 |------|------|------------|-----------------|
-| Uvicorn | ASGI server and multiprocess supervisor | `--workers 1` in K8s, `--workers N` on a bare VM, `--loop uvloop`, `--limit-concurrency N`, `--timeout-graceful-shutdown 30` | `uvicorn[standard]` adds uvloop and httptools; its own `--workers` replaces Gunicorn unless you need hooks, `preload_app`, or `max_requests` |
+| Uvicorn | ASGI server and multiprocess supervisor | `--workers 1` in K8s, `--workers N` on a bare VM, `--loop uvloop`, `--limit-concurrency N`, `--timeout-graceful-shutdown 30`, `--root-path` | `uvicorn[standard]` adds uvloop and httptools; its own `--workers` replaces Gunicorn unless you need hooks, `preload_app`, or `max_requests`; `SIGHUP` rolling restart (0.51.0+); experimental HTTP/2 via `--http zttp --http2` (0.53.0+) |
 | Gunicorn | Process supervisor | `workers=2*cpu+1`, `worker_class="uvicorn_worker.UvicornWorker"` | Use on bare VMs; skip in K8s |
 | uvloop | High-perf event loop | `pip install uvloop`; auto-detected by uvicorn[standard] | Linux/macOS only, no Windows wheels; 2-4x per its README |
 | Docker | Container packaging | Multi-stage, non-root, `PYTHONUNBUFFERED=1` | `python:3.13-slim` base; slim + multi-stage keeps it small |
 | Kubernetes Deployment | Replica management | `maxSurge=1, maxUnavailable=0` | Rolling update strategy |
 | Kubernetes HPA | Autoscaling | CPU 60% target or custom RPS metric | Requires `metrics-server` or Prometheus adapter |
 | Argo Rollouts | Advanced deployments | Canary weight, analysis templates | Requires Argo CD integration |
-
 | Granian | Rust (Hyper + Tokio) ASGI/WSGI/RSGI server | `--workers`, `--backpressure`, HTTP/2 built in | One binary instead of server + worker + supervisor; free-threading support is experimental per its own docs |
-| Hypercorn | Alternative ASGI server | HTTP/2 + HTTP/3 support | Less mature than Uvicorn; use for H2 push |
+| Hypercorn | Alternative ASGI server | HTTP/2 + HTTP/3 support | Less mature than Uvicorn; use when the app itself must speak HTTP/3. HTTP/2 server push is not a reason: Chrome removed it in 2022; send 103 Early Hints instead (Starlette 1.8, uvicorn 0.54) |
 | uv | Fast dependency management | `uv sync --frozen` in Dockerfile | Astral's README claims 10-100x faster than `pip` |
 
 ---
@@ -1074,67 +1138,80 @@ Kubernetes cannot see individual Gunicorn worker processes — it only sees the 
 
 (1) `preStop` hook runs (e.g., `sleep 5`) to let the load balancer drain connections. (2) Kubernetes sends SIGTERM to the pod. (3) Uvicorn stops accepting new connections. (4) In-flight requests continue to process up to Uvicorn's `--timeout-graceful-shutdown`, which is unbounded unless you set it — 30s is the usual choice. (5) FastAPI `lifespan` shutdown block executes: closes DB pool, flushes metrics, cleans up resources. (6) Process exits 0. The `terminationGracePeriodSeconds` on the pod must be greater than `preStop` duration + the drain timeout or Kubernetes sends SIGKILL prematurely.
 
-**Q5: What is the difference between `readinessProbe`, `livenessProbe`, and `startupProbe`?**
+**Q5: A `preStop` hook of `exec: command: ["sleep", "5"]` drops requests on every rollout after the team moves to a distroless image. Why, and what replaces it?**
+**Short:** An exec hook runs inside the container and distroless has no sleep binary, so the hook fails; the kubelet-run preStop.sleep action works on any image.
+
+An `exec` lifecycle hook runs its command inside the container, so `sleep 5` needs `/bin/sleep`
+in the image. A distroless or scratch-based runtime image has no shell utilities, the hook exits
+with an error, the kubelet logs a `FailedPreStopHook` event and sends SIGTERM immediately, and the
+pod starts shutting down while the load balancer is still routing to it, which is the 3-10 second
+window the pause existed to cover. The replacement is the native action
+`lifecycle: preStop: sleep: seconds: 5`, which the kubelet executes itself (feature
+`PodLifecycleSleepAction`, beta and default-on from Kubernetes 1.30, GA in 1.34). It needs nothing
+in the image and still counts against `terminationGracePeriodSeconds`, so the budget stays
+`preStop + drain + margin`.
+
+**Q6: What is the difference between `readinessProbe`, `livenessProbe`, and `startupProbe`?**
 **Short:** livenessProbe restarts dead processes, readinessProbe gates traffic, and startupProbe delays both during boot.
 
 `livenessProbe` asks "is this process alive and not deadlocked?" — failure triggers a pod restart. `readinessProbe` asks "is this app ready to serve traffic?" — failure removes the pod from the Service endpoint list without restarting it. `startupProbe` grants the application an extended startup budget before liveness begins checking; it prevents liveness from killing a slow-starting pod (e.g., one that loads a large ML model at startup). Once `startupProbe` succeeds, it stops running and liveness takes over.
 
-**Q6: How does `maxSurge=1, maxUnavailable=0` achieve zero-downtime rolling updates?**
+**Q7: How does `maxSurge=1, maxUnavailable=0` achieve zero-downtime rolling updates?**
 **Short:** maxUnavailable=0 with maxSurge=1 replaces pods one at a time only after the new pod is ready.
 
 `maxUnavailable=0` means Kubernetes will never terminate an old pod until its replacement is fully ready (passes readinessProbe). `maxSurge=1` allows one extra pod to exist during the rollout (temporarily running `replicas + 1` pods). The sequence: start new pod → wait for readiness → terminate one old pod → repeat. This ensures at least `replicas` pods are serving traffic at all times. The trade-off is a slightly slower rollout and one extra pod's worth of resources during the transition.
 
-**Q7: What throughput improvement does uvloop provide, and how do you enable it?**
+**Q8: What throughput improvement does uvloop provide, and how do you enable it?**
 **Short:** uvloop roughly doubles or quadruples asyncio throughput on I/O-heavy workloads versus the default loop.
 
 `uvloop` replaces the asyncio loop with a libuv-backed one; its README claims "uvloop makes asyncio 2-4x faster" on I/O-heavy workloads. In the illustrative §6.3 benchmark: ~28k req/s with the default asyncio event loop vs ~65k req/s with uvloop on a 4-core machine. Enable it with `pip install uvicorn[standard]`, which includes uvloop and httptools; Uvicorn auto-selects uvloop when available. For bare Python scripts: `asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())`. Limitation: uvloop does not support Windows.
 
-**Q8: What is the purpose of a multi-stage Dockerfile for a Python service?**
+**Q9: What is the purpose of a multi-stage Dockerfile for a Python service?**
 **Short:** A multi-stage Dockerfile strips build tools from the runtime image, shrinking size and attack surface.
 
 A multi-stage Dockerfile separates build-time dependencies (compilers, pip, uv, dev tools) from the runtime image. Stage 1 installs all dependencies and compiles any C extensions. Stage 2 starts from a fresh slim base image and copies only the virtual environment and application source. Result: runtime image contains no build tools, reducing attack surface and image size (typically 180MB vs 900MB). Smaller images reduce K8s pod scheduling time during scale-out events.
 
-**Q9: Why should the container run as a non-root user?**
+**Q10: Why should the container run as a non-root user?**
 **Short:** Running as non-root limits an attacker's blast radius if code execution is achieved inside the container.
 
 If an attacker achieves code execution inside the container, a root container maps to UID 0 on the host kernel, enabling potential container escape via kernel vulnerabilities. A non-root user (UID 1001) limits the blast radius: the attacker has no write access to system directories, cannot bind ports below 1024 (bind to 8000+), and cannot escalate privileges. Kubernetes `securityContext.runAsNonRoot: true` enforces this at the cluster level as a defense-in-depth measure.
 
-**Q10: When should you choose blue-green deployment over a rolling update?**
+**Q11: When should you choose blue-green deployment over a rolling update?**
 **Short:** Choose blue-green when old and new versions cannot coexist or instant rollback is required.
 
 Choose blue-green when the two versions cannot coexist, or when you need rollback to be a single instant switch. Three concrete triggers: (1) your DB migration is destructive (column drop, type change) and you cannot run both old and new code against the same schema simultaneously; (2) you need instant rollback capability (LB switch is sub-second vs minutes for rolling); (3) your integration tests must run against a fully deployed environment before any user traffic is cut over. The cost is 2x infrastructure during the transition window. Rolling updates are preferable when schema changes are additive and infrastructure cost matters.
 
-**Q11: How does HPA scale based on a custom RPS metric instead of CPU?**
+**Q12: How does HPA scale based on a custom RPS metric instead of CPU?**
 **Short:** The Prometheus adapter exposes a custom metric like RPS that HPA can scale on instead of CPU.
 
 Install the Prometheus adapter (`k8s-prometheus-adapter`), which queries Prometheus for a metric like `http_requests_per_second` scraped from your pods' `/metrics` endpoint. Configure the adapter to expose this as an `apiserver` custom metrics API. The HPA manifest references it under `metrics[].type: Pods` with `averageValue: "200"` — meaning scale up when average RPS per pod exceeds 200. This is more accurate than CPU for I/O-bound services where a DB slow query can spike RPS without increasing CPU.
 
-**Q12: What is the `--workers 1` flag for in a K8s Uvicorn command, and what happens if you omit it?**
+**Q13: What is the `--workers 1` flag for in a K8s Uvicorn command, and what happens if you omit it?**
 **Short:** --workers 1 keeps one process per pod so HPA and probes see accurate per-pod signals.
 
 `--workers 1` instructs Uvicorn to run exactly one worker process per pod. If omitted, Uvicorn defaults to 1 worker, so the effect is the same — but the flag is explicit documentation of intent. If you pass `--workers 4`, Uvicorn forks 4 processes, recreating the double-supervision anti-pattern: K8s sees one pod IP but 4 processes serve traffic, HPA cannot measure individual worker load, and probes become unreliable. In K8s, keep `--workers 1` and control parallelism through replica count.
 
-**Q13: How do ConfigMaps and Secrets differ in Kubernetes, and how do you inject them into FastAPI?**
+**Q14: How do ConfigMaps and Secrets differ in Kubernetes, and how do you inject them into FastAPI?**
 **Short:** ConfigMaps hold non-sensitive config while Secrets hold sensitive data, both injected as environment variables.
 
 `ConfigMap` stores non-sensitive key-value pairs (feature flags, log levels, service URLs). `Secret` stores sensitive data (DB passwords, API keys) encoded as base64 and optionally encrypted at rest with KMS. Both are injected into pods via `envFrom` (all keys as env vars) or `env[].valueFrom` (individual keys). In FastAPI, `pydantic-settings` reads env vars with `BaseSettings`, providing type validation and `.env` file fallback for local development. The app code never references ConfigMap or Secret names — it reads from environment variables, keeping it portable. See `../configuration_and_settings_management/configuration_and_settings_management.md` for the full `BaseSettings` pattern.
 
-**Q14: Why does a `livenessProbe` with `timeoutSeconds: 1` and `failureThreshold: 1` risk killing healthy pods under load?**
+**Q15: Why does a `livenessProbe` with `timeoutSeconds: 1` and `failureThreshold: 1` risk killing healthy pods under load?**
 **Short:** A 1-second liveness timeout with failureThreshold 1 kills healthy pods during ordinary transient load spikes.
 
 A 1-second timeout paired with a single-failure threshold treats any transient delay — a CPU spike, a GC pause, a burst of concurrent requests — identically to a genuinely deadlocked process. Any health-check response that misses that single 1-second window triggers an immediate pod restart, even though the application was about to recover on its own. Under real production load — the exact moment you most need pods to stay up — this aggressive configuration causes cascading restarts: a busy pod gets killed, its traffic shifts to the remaining pods, they get busier, and they start failing their own liveness checks too. The fix is a more lenient liveness probe (`timeoutSeconds: 5`, `failureThreshold: 3`, meaning 30 seconds of sustained unresponsiveness before a restart) paired with a stricter, faster-to-react `readinessProbe` that pulls an overloaded pod out of the load balancer without killing it outright. Reserve tight thresholds for readiness, where the failure mode is "stop sending traffic," not liveness, where the failure mode is "destroy the process."
 
-**Q15: In the ML inference case study, why does calling `_model.predict(arr)` directly inside an `async def` route handler stall the event loop, and what fixes it?**
+**Q16: In the ML inference case study, why does calling `_model.predict(arr)` directly inside an `async def` route handler stall the event loop, and what fixes it?**
 **Short:** A synchronous predict() call blocks the event loop; asyncio.to_thread offloads it to a worker thread.
 
 `predict()` is synchronous and CPU-bound, so it runs on the very thread that hosts the asyncio event loop and blocks every other coroutine for its full duration. Each call freezes that thread for roughly 5ms — no other requests served, no health-probe handlers, no telemetry flush — and at 100 concurrent requests those blocks stack up to roughly 500ms of total event-loop stall. The fix is `await asyncio.to_thread(_model.predict, arr)`, which hands the blocking call to Python's default thread pool executor and immediately frees the event loop to keep processing other coroutines while `predict()` runs in the background thread. This is the same class of bug as any synchronous DB driver call or `time.sleep()` inside an `async def` route — one blocking call silently negates the concurrency benefit of the entire async model. Profile with `py-spy` to catch this pattern before it reaches production, since it produces no error, only mysteriously rising p99 latency under load.
 
-**Q16: How do you correctly size `terminationGracePeriodSeconds`, and what happens if it is set too low?**
+**Q17: How do you correctly size `terminationGracePeriodSeconds`, and what happens if it is set too low?**
 **Short:** Size terminationGracePeriodSeconds as preStop delay plus drain timeout, or Kubernetes SIGKILLs mid-request.
 
 Size it as `preStop` sleep + graceful HTTP drain timeout + a small safety margin, never by feel. For example, a 5-second `preStop` sleep plus a 30-second drain needs at least 40 seconds. If the value is set too low, Kubernetes sends SIGKILL the instant the grace period expires regardless of whether requests are still in flight, hard-killing the process mid-request and dropping any connection that had not yet completed — the exact outcome graceful shutdown was meant to prevent. Kubernetes' shutdown sequence is fixed: SIGTERM first, then a wait of exactly `terminationGracePeriodSeconds`, then SIGKILL if the process has not exited on its own. Always compute this value explicitly from your own `preStop` and drain settings rather than trusting Kubernetes' 30-second default, which may not match your application's actual drain time.
 
-**Q17: Do you still need Gunicorn to run FastAPI on multiple cores on a bare VM?**
+**Q18: Do you still need Gunicorn to run FastAPI on multiple cores on a bare VM?**
 **Short:** No — Uvicorn ships its own multiprocess supervisor, so `--workers N` covers it unless you need Gunicorn's hooks, preload_app, or max_requests recycling.
 
 No. Uvicorn has a built-in supervisor: `uvicorn app.main:app --workers 4` binds the socket in
@@ -1142,11 +1219,13 @@ the parent, forks four children, and restarts one that dies. If the only reason 
 in the stack was "we need more than one process", it can be deleted along with the
 `uvicorn-worker` package. Keep Gunicorn when you actually use what it adds — the full server
 hook system, `preload_app`, per-worker `max_requests` recycling, or an existing
-`gunicorn.conf.py` your operations tooling depends on. Inside Kubernetes the question is moot:
+`gunicorn.conf.py` your operations tooling depends on. Zero-downtime reloads are not on that
+list: since 0.51.0, `kill -HUP` on Uvicorn's parent starts each replacement worker, waits for it
+to be ready, then drains the old one. Inside Kubernetes the question is moot:
 run a single process per pod and let replicas be the unit of scale, because a multi-worker
 process hides per-worker load from the HPA and makes readiness probes lie.
 
-**Q18: How does a request get distributed across worker processes, and why is per-worker load uneven?**
+**Q19: How does a request get distributed across worker processes, and why is per-worker load uneven?**
 **Short:** The kernel distributes, not the server — either children accept on one shared socket or SO_REUSEPORT hashes the connection 4-tuple to a worker.
 
 No Python server balances requests itself. In the pre-fork model the parent binds one listening
@@ -1159,7 +1238,7 @@ replaced without dropping the listener. Either way the unit of distribution is t
 worker at 90% CPU beside three at 20%, and it is why per-worker metrics matter more than the
 process average.
 
-**Q19: What does `--limit-concurrency` do, and how is it different from `--backlog`?**
+**Q20: What does `--limit-concurrency` do, and how is it different from `--backlog`?**
 **Short:** limit-concurrency returns an immediate 503 above N in-flight requests; backlog is the OS accept queue and holds connections the server has not seen yet.
 
 `--limit-concurrency N` is an application-level admission control: when in-flight connections
@@ -1172,7 +1251,7 @@ have measured accept-queue overflow. This matters because it is the only backsto
 in microseconds: an HPA takes tens of seconds, and until it acts a service with no limit
 converts an overload into a timeout storm.
 
-**Q20: Should you deploy FastAPI on free-threaded Python 3.14t?**
+**Q21: Should you deploy FastAPI on free-threaded Python 3.14t?**
 **Short:** Almost certainly not yet — greenlet calls its own free-threaded support "limited testing", so async SQLAlchemy runs there but is not production-qualified.
 
 Rarely, and only after measuring. The decisive blocker is dependency-level, not framework-level:
@@ -1204,7 +1283,7 @@ not on a bare interpreter.
 - Always use `lifespan` for resource init/cleanup; never open connections at module level
 - Set `terminationGracePeriodSeconds` = `preStop` sleep + drain timeout + 5s safety margin, and set
   `--timeout-graceful-shutdown` explicitly so the drain has a bound of its own
-- `preStop: sleep 5` is the minimum; increase to 10s for services behind cloud LBs (ALB, GKE LB propagation can take 8s)
+- `preStop: sleep: seconds: 5` (the kubelet-run action, not `exec: sleep`) is the minimum; increase to 10s for services behind cloud LBs (ALB, GKE LB propagation can take 8s)
 - Test graceful shutdown by running `kubectl delete pod <name>` during a load test and verifying zero 5xx errors
 
 **Container packaging**
@@ -1423,8 +1502,8 @@ spec:
             periodSeconds: 10
           lifecycle:
             preStop:
-              exec:
-                command: ["sleep", "5"]
+              sleep:
+                seconds: 5
 ```
 
 ### Discussion Questions

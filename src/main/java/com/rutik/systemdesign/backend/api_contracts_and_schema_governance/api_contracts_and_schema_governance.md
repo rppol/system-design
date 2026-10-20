@@ -295,7 +295,8 @@ headers themselves.
 ### 6.1 An OpenAPI 3.2 document using features that do not exist in 3.1
 
 OpenAPI 3.2.0 (released September 19, 2025) added the `query` HTTP method for safely
-querying resource state with a request body, first-class streaming media types with an
+querying resource state with a request body (the method itself is RFC 10008, The HTTP QUERY
+Method, 2026: safe, idempotent, and cacheable with the body in the cache key), first-class streaming media types with an
 `itemSchema` describing one item in the stream, and hierarchical tags with `summary`,
 `parent`, and `kind`. None of the three below can be expressed in 3.1 without an
 `x-` extension:
@@ -588,9 +589,11 @@ the contract.
 ## 7. Real-World Examples
 
 **Stripe** — date-based API versioning. Every account is pinned to whichever version was
-current when the account was created (e.g. `2026-07-29`), and a request can override it
-per-call with a `Stripe-Version` header to test against a newer version before switching
-the account default. New major versions with breaking changes ship roughly twice a year;
+current when the account was created (e.g. `2026-07-29.dahlia`: a date plus the named
+release train), and a request can override it per-call with a `Stripe-Version` header that
+takes the full string (e.g. `2026-09-30.endive`) to test against a newer version before
+switching the account default. A new release train with breaking changes ships roughly
+twice a year, and the monthly versions inside a train are backward-compatible;
 old ones keep working indefinitely for accounts still pinned to them, which is what lets
 Stripe evolve request/response shapes without ever forcing a synchronized migration across
 every integration.
@@ -708,7 +711,7 @@ from your organization's default mode.
 | Redocly CLI | Lint, bundle, and generate docs for OpenAPI/AsyncAPI/Arazzo descriptions; `redocly lint` |
 | oasdiff | OpenAPI diff and breaking-change detector; `oasdiff breaking` returns a CI-friendly exit code |
 | Buf + BSR | Protobuf build, lint, breaking-change detection, and a hosted schema registry; `buf breaking`, `buf generate` |
-| Arazzo | OpenAPI Initiative spec (current: 1.1.0) for describing multi-step API *workflows* across operations — not a replacement for OpenAPI, a layer on top of it |
+| Arazzo | OpenAPI Initiative spec (1.1.0) for describing multi-step API *workflows* across operations, layered on OpenAPI; 1.1 steps can also reference AsyncAPI operations |
 | springdoc-openapi | Generates an OpenAPI 3.1 document from Spring Boot 4.x controller annotations at runtime or build time |
 | Confluent Schema Registry | Kafka schema storage and compatibility enforcement (Avro, Protobuf, JSON Schema); see [Kafka Deep Dive](../kafka_deep_dive/kafka_deep_dive.md) |
 | AsyncAPI Generator | Generates docs, code, and HTML from AsyncAPI documents |
@@ -758,7 +761,7 @@ OpenAPI documents paths, methods, and the request/response shapes a client calls
 **Q: What is genuinely new in OpenAPI 3.2 that did not exist in 3.1?**
 **Short:** The `query` HTTP method, first-class streaming media types with `itemSchema`, and hierarchical tags.
 
-OpenAPI 3.2.0 (released September 19, 2025) added `query` as a path-item-level operation — GET-like idempotent semantics with a request body, for searches too complex for a query string. It added `itemSchema` on streaming-friendly media types (`text/event-stream`, `application/jsonl`, `application/json-seq`, `multipart/mixed`) to describe the shape of one streamed item, which previously had no standard representation. It also added hierarchical tags (`summary`, `parent`, `kind`) for building a tag taxonomy, and an OAuth 2.0 Device Authorization Flow for limited-input devices. All of it is additive — a 3.1 document remains a valid 3.2 document.
+OpenAPI 3.2.0 (released September 19, 2025) added `query` as a path-item-level operation for the HTTP QUERY method, which RFC 10008 (Proposed Standard, 2026) defines as safe and idempotent with a request body, for searches too complex for a query string. Because it is idempotent, clients and proxies may retry it after a connection failure, which RFC 9110 does not allow them to assume for the POST-as-search workaround. It added `itemSchema` on streaming-friendly media types (`text/event-stream`, `application/jsonl`, `application/json-seq`, `multipart/mixed`) to describe the shape of one streamed item, which previously had no standard representation. It also added hierarchical tags (`summary`, `parent`, `kind`) for building a tag taxonomy, and an OAuth 2.0 Device Authorization Flow for limited-input devices. All of it is additive — a 3.1 document remains a valid 3.2 document.
 
 **Q: How does Protobuf's approach to compatibility differ fundamentally from OpenAPI/JSON Schema's?**
 **Short:** Protobuf ties compatibility to immutable field numbers on the wire; JSON Schema ties it to field names and types.
@@ -788,7 +791,7 @@ GitHub versions its REST API by release date via the `X-GitHub-Api-Version` head
 **Q: How does Stripe's date-based versioning let it evolve the API without breaking every integration at once?**
 **Short:** Each account is pinned to the API version active when it was created, and can test newer ones via a header.
 
-Every Stripe account is "pinned" to whichever dated API version (e.g. `2026-07-29`) was current at account creation, and every request implicitly targets that pinned version unless a `Stripe-Version` header overrides it for that one call. This means Stripe can ship a new major version with genuinely breaking changes roughly twice a year without forcing every existing integration to migrate on the same day — old accounts keep receiving the old shape indefinitely, and a team migrates deliberately, one account or one request at a time, by bumping the header.
+Every Stripe account is "pinned" to whichever API version (e.g. `2026-07-29.dahlia`, a date plus the release-train name) was current at account creation, and every request implicitly targets that pinned version unless a `Stripe-Version` header with the full version string overrides it for that one call. This means Stripe can ship a new major version with genuinely breaking changes roughly twice a year without forcing every existing integration to migrate on the same day — old accounts keep receiving the old shape indefinitely, and a team migrates deliberately, one account or one request at a time, by bumping the header.
 
 **Q: What is the actual difference between contract testing (Pact) and a schema diff/lint gate?**
 **Short:** A schema diff checks the document against itself; Pact verifies the running provider against real consumer expectations.
@@ -796,9 +799,9 @@ Every Stripe account is "pinned" to whichever dated API version (e.g. `2026-07-2
 `oasdiff` or `buf breaking` only ever compares two versions of a contract document — they never invoke the provider's actual running code, so they cannot catch a handler that quietly returns something subtly different from what its own generated spec claims. Pact is consumer-driven: the consumer's tests record the exact interactions it depends on, and CI replays those recorded interactions against the live provider, verifying the real implementation — not just its documentation — still satisfies them. The two are complementary layers, not substitutes: a passing diff means the contract didn't break itself; a passing Pact verification means the code still honors what a specific real consumer needs.
 
 **Q: What is Arazzo, and how does it relate to OpenAPI rather than replace it?**
-**Short:** Arazzo describes multi-step API workflows across operations that OpenAPI alone can only document individually.
+**Short:** Arazzo describes multi-step workflows across operations that OpenAPI (and, since 1.1, AsyncAPI) can only document one at a time.
 
-OpenAPI documents each operation in isolation — what one endpoint does. Arazzo (current version 1.1.0) is a separate OpenAPI Initiative specification layered on top, describing a *workflow* that chains multiple operations together with explicit inputs, outputs, and success criteria — for example "create account, then verify email, then create subscription" — referencing each step by its OpenAPI `operationId` and passing runtime values (like a token from one response) into the next step. It does not replace per-operation documentation; it adds a machine-readable layer that can drive integration tests, automation, and production monitoring across a sequence your OpenAPI document alone has no way to express.
+OpenAPI documents each operation in isolation — what one endpoint does. Arazzo (current version 1.1.0) is a separate OpenAPI Initiative specification layered on top, describing a *workflow* that chains multiple operations together with explicit inputs, outputs, and success criteria — for example "create account, then verify email, then create subscription" — referencing each step by its OpenAPI `operationId` and passing runtime values (like a token from one response) into the next step. It does not replace per-operation documentation; it adds a machine-readable layer that can drive integration tests, automation, and production monitoring across a sequence your OpenAPI document alone has no way to express. Arazzo 1.1.0 adds AsyncAPI support, so one workflow can mix an HTTP call with sending or receiving a message, for example "POST the order, then wait for `OrderShipped` on the Kafka channel".
 
 **Q: What happened to Optic, and what replaced it for OpenAPI diff-gate tooling?**
 **Short:** Optic's GitHub repository was archived in January 2026 after Atlassian's acquisition; oasdiff is the direct replacement.

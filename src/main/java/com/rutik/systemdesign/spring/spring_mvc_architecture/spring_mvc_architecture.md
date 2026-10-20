@@ -288,6 +288,7 @@ public class OrderController {
 | Aspect | Spring MVC | Spring WebFlux |
 |--------|------------|----------------|
 | Threading model | Thread-per-request (Tomcat, ~200 threads) | Event loop (Netty, ~CPU cores threads) |
+| Threading model with `spring.threads.virtual.enabled=true` | Virtual thread per request, no Tomcat thread cap; ceiling moves to the connection pool | Unchanged (event loop) |
 | Programming model | Imperative, familiar | Reactive (Mono/Flux), learning curve |
 | Blocking I/O | Fine (JDBC, RestTemplate) | Must avoid (use R2DBC, WebClient) |
 | Throughput (I/O-bound) | Limited by thread pool | Much higher (non-blocking) |
@@ -352,6 +353,38 @@ throughput. If arrivals exceed `200 / service_time` on average, the queue fills 
 constant rate and every queued request adds latency before it adds a rejection. That is
 why raising `acceptCount` to hide an overload only converts connection refusals into
 timeouts.
+
+### Virtual threads on Tomcat (`spring.threads.virtual.enabled`)
+
+With `spring.threads.virtual.enabled=true` (Boot 3.2+, Java 21+), Boot gives embedded
+Tomcat an executor that starts one virtual thread per request. `server.tomcat.threads.max`
+no longer caps concurrency, because no pool of 200 exists. A request that blocks on a JDBC
+read or an HTTP call parks its virtual thread and frees the carrier platform thread, and
+the JVM runs a carrier pool sized to the CPU count. Since JDK 24 (JEP 491) a virtual thread
+blocking inside `synchronized` also releases its carrier; JNI and FFM downcalls still pin.
+
+The Little's Law arithmetic does not go away. It moves to the next bounded resource, which
+in a typical service is the HikariCP pool (`maximum-pool-size`, default 10):
+
+```
+  platform threads (default)                virtual threads
+  --------------------------                ----------------------------------
+  request -> [200 Tomcat threads] -> DB     request -> [unbounded vthreads] -> DB
+             ceiling = 200 / t                           ceiling = pool / t_db
+
+  same 20,000 req/sec, 35 ms service time, of which 20 ms holds a DB connection:
+    platform:  200 / 0.035          =  5,714 req/sec per instance (thread-bound)
+    virtual:   10 connections / 0.020 =    500 req/sec per instance (pool-bound)
+               40 connections / 0.020 =  2,000 req/sec per instance
+```
+
+Turning virtual threads on with the default pool of 10 lowers the effective ceiling for
+a DB-heavy endpoint: 700 in-flight requests now queue on `getConnection()` and fail after
+HikariCP's `connection-timeout` (30 s default) instead of queueing in `acceptCount`. Size
+the pool from the database side (`max_connections` divided by instances) and bound the
+in-flight work explicitly, for example a `Semaphore` around the downstream call or
+`spring.task.execution.simple.concurrency-limit` for `@Async`. Virtual threads remove the
+thread ceiling; they do not add database capacity.
 
 ---
 
@@ -445,6 +478,10 @@ server.tomcat.max-swallow-size=-1
 
 ## 12. Interview Questions with Answers
 
+**Q: You enable `spring.threads.virtual.enabled=true` on a Spring MVC service and DB-heavy endpoints get slower under load. Why?**
+**Short:** Virtual threads remove Tomcat's 200-thread cap, so hundreds of requests now queue on a 10-connection HikariCP pool and time out there.
+Virtual threads remove the Tomcat thread cap but not the Little's Law limit. Every request still needs a JDBC connection, and HikariCP defaults to `maximum-pool-size=10`. With platform threads, at most 200 requests were inside the service and the rest waited in `acceptCount`; with virtual threads every arriving request gets a thread and blocks on `getConnection()`, so for a query holding a connection 20 ms the instance ceiling is 10 / 0.020 = 500 req/sec regardless of thread count, and requests beyond that wait up to `connection-timeout` (30 s) and fail. Fix by sizing the pool from the database side (`max_connections` / instances), bounding in-flight work with a `Semaphore` or concurrency limit before the pool, and watching `hikaricp.connections.pending`. Blocking in `synchronized` no longer pins a carrier since JDK 24 (JEP 491), but JNI and FFM downcalls still do.
+
 **Q: What is the role of DispatcherServlet in Spring MVC?**
 **Short:** It is the Front Controller that orchestrates every HTTP request through the Spring MVC pipeline.
 `DispatcherServlet` is the Front Controller — a single servlet that handles all HTTP requests. It orchestrates the request pipeline by delegating to `HandlerMapping` (find the right controller method), `HandlerAdapter` (invoke it with resolved arguments), `ViewResolver` or `HttpMessageConverter` (render the response), and `HandlerExceptionResolver` (handle exceptions). Every Spring MVC request flows through this pipeline. In Spring Boot, `DispatcherServlet` is auto-configured and mapped to `"/"`.
@@ -490,8 +527,8 @@ Implement `HandlerMethodArgumentResolver` with `supportsParameter(MethodParamete
 Multipart support is handled by `MultipartResolver`. Spring Boot auto-configures `StandardServletMultipartResolver` (delegates to the servlet container, supports Servlet 3.0 API). When a request has `Content-Type: multipart/form-data`, the resolver parses the request into parts. `RequestMappingHandlerAdapter` resolves `@RequestParam MultipartFile file` parameters using `RequestPartMethodArgumentResolver`. Size limits are configured via `spring.servlet.multipart.max-file-size` and `spring.servlet.multipart.max-request-size`. Exceeding limits throws `MaxUploadSizeExceededException`, catchable in `@ControllerAdvice`.
 
 **Q: How does Spring MVC integrate with Tomcat's thread pool?**
-**Short:** Each request occupies one Tomcat thread for its full duration, capping concurrency at the pool size.
-Spring Boot auto-configures an embedded Tomcat with a thread pool (default max 200 threads via `server.tomcat.threads.max`). Each HTTP request acquires a thread for its entire duration. Blocking database calls, external API calls, and file I/O occupy the thread while waiting. When all 200 threads are busy, new requests queue (Tomcat's `acceptCount`, default 100) or are rejected (connection refused). This is the fundamental scalability limit of the thread-per-request model. WebFlux on Reactor Netty uses `max(CPU cores, 4)` event-loop threads and handles thousands of concurrent I/O-bound requests.
+**Short:** With platform threads each request holds one of 200 Tomcat threads for its full duration, so the pool size caps concurrency.
+Spring Boot auto-configures an embedded Tomcat with a thread pool (default max 200 threads via `server.tomcat.threads.max`). Each HTTP request acquires a thread for its entire duration. Blocking database calls, external API calls, and file I/O occupy the thread while waiting. When all 200 threads are busy, new requests queue (Tomcat's `acceptCount`, default 100) or are rejected (connection refused). This is the fundamental scalability limit of the thread-per-request model. WebFlux on Reactor Netty uses `max(CPU cores, 4)` event-loop threads and handles thousands of concurrent I/O-bound requests. With `spring.threads.virtual.enabled=true` Tomcat runs one virtual thread per request instead, and the cap moves to the next bounded resource, usually the JDBC connection pool.
 
 **Q: What is the difference between @Controller and @RestController?**
 **Short:** @RestController is @Controller plus @ResponseBody, serializing every return value straight to the body.

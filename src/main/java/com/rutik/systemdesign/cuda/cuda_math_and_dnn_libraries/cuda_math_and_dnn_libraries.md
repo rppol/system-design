@@ -97,6 +97,22 @@ Three things follow from that table.
 
 Two smaller library families worth knowing exist for the same reason CUTLASS does — you want the library's kernel *inside* your own. **cuBLASDx** and **cuFFTDx** are device-side extension libraries: header-only, callable from within a kernel, so a block-level GEMM or FFT becomes a step in a fused kernel rather than its own launch. **nvmath-python** exposes the same host-side libraries (cuBLASLt epilogues included) to Python without a C++ build step, which is often the fastest way to test whether an FP8 GEMM path is even available on your hardware before committing to a full extension.
 
+### FP64 emulation in cuBLAS
+
+cuBLAS can run an FP64 GEMM (DGEMM/ZGEMM) on the low-precision integer Tensor Cores by splitting each operand into fixed-point slices (the Ozaki scheme) and recombining the partial products. It is opt-in: set the compute type `CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT`, or the math mode `CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH` through `cublasSetMathMode()`. It needs CUDA 13.0 Update 2 or later and compute capability 8.x, 9.0, 10.x, 11.0, or 12.x.
+
+| Control | What it does |
+|---|---|
+| Mantissa control, dynamic (default) | cuBLAS computes how many mantissa bits reach FP64-level accuracy for the given inputs and falls back to native FP64 if that exceeds the configured maximum |
+| Mantissa control, fixed | `cublasSetFixedPointEmulationMantissaControl()` plus `cublasSetFixedPointEmulationMaxMantissaBitCount()` (default 55 bits) pins the bit count; fewer bits run faster and lose accuracy |
+| `cublasSetEmulationStrategy()` | Performant (emulate only when it is faster, the default) or eager (emulate whenever possible). `CUBLAS_EMULATION_STRATEGY=performant` or `eager` replaces the default strategy; an explicit performant or eager call still wins |
+| Workspace | Size depends on problem size and mantissa bits and never exceeds 8 GB. Without `cublasSetWorkspace()`, cuBLAS allocates from a CUDA memory pool and falls back to native FP64 if that allocation fails |
+| Inf / NaN | Handled by default, at some cost, because fixed-point emulation cannot represent them natively. For finite-only inputs, `cublasSetEmulationSpecialValuesSupport()` with `CUDA_EMULATION_SPECIAL_VALUES_SUPPORT_NONE` (or `CUBLAS_EMULATION_SPECIAL_VALUES_SUPPORT_MASK=0`) drops that cost |
+
+The default leaves results non-reproducible: cuBLAS's run-to-run guarantee does not hold with fixed-point emulation, because the workspace it gets can change the path it takes. Give it a workspace with `cublasSetWorkspace()` and use one handle per stream, or call `cublasLtMatmul()` with a workspace you own.
+
+CUDA 13.4 makes emulation use the Ozaki-II scheme when it is faster than Ozaki-I (Ampere and newer), reaching up to 175 TFLOPS emulated DGEMM on B200 by NVIDIA's numbers, and adds Rubin (compute capability 10.7) at up to 212 TFLOPS emulated DGEMM through a new TI16 type on `tcgen05.mma`.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -562,6 +578,63 @@ hand-tuning to move from naive to CUTLASS buys you 133 ms per call; the remainin
 0.31 ms to reach cuBLAS is what closed-source, per-architecture autotuning buys — and it
 is not worth reproducing.
 
+### GEMM Work Decomposition: Data-Parallel, Split-K, and Stream-K
+
+A tiled GEMM normally gives each CTA one `BM x BN` output tile and the whole K loop for it
+(data-parallel). That leaves the GPU under-filled whenever the tile count is small or not a
+multiple of the SM count, the tail effect covered in
+[occupancy_and_launch_configuration §6.6](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md).
+GEMM libraries attack it by splitting the K dimension as well.
+
+Worked example: `M = N = 1024`, `K = 8192`, FP16, 128x128 tiles, `BK = 64`, on an H100 SXM
+with 132 SMs. There are `8 x 8 = 64` output tiles, each with `8192 / 64 = 128` K-iterations,
+so 8,192 MAC-iterations of work in total.
+
+```
+Data-parallel   64 CTAs, 128 iters each      SMs busy: 64 / 132 = 48%
+  SM 0..63   [################################ tile i, k 0..127 ]
+  SM 64..131 [ idle ............................................ ]
+
+Split-K = 2     128 CTAs, 64 iters each      SMs busy: 128 / 132 = 97%
+  SM 0..127  [################ tile i, half of K ]
+  SM 128..131[ idle ]                        + partial-sum reduction
+
+Stream-K        132 CTAs, 62-63 iters each   SMs busy: 132 / 132 = 100%
+  SM 0       [ tile 0, k 0..62 ]
+  SM 1       [ tile 0, k 63..125 ]
+  SM 2       [ tile 0, k 126..127 ][ tile 1, k 0..60 ]  ... each CTA walks a
+             contiguous run of 62 or 63 (8192 / 132 = 62.06) iterations across tile edges
+```
+
+Data-parallel finishes in 128 iteration-times with 52% of the chip idle. Split-K = 2
+finishes in 64 iteration-times plus a reduction. Stream-K finishes in 63 iteration-times
+plus a small fix-up, with every SM busy.
+
+| Scheme | How work is cut | Cost it adds | Library knob |
+|--------|-----------------|--------------|--------------|
+| Data-parallel | One CTA per output tile, full K | Tail effect when `tiles mod SMs` is small or tiles < SMs | Default everywhere |
+| Split-K (serial) | `S` CTAs per tile, each a `K/S` slice; partials accumulated into C in turn through a semaphore | Serialized accumulation; `S x` more C traffic | cuBLASLt `CUBLASLT_MATMUL_ALGO_CONFIG_SPLITK_NUM` with `CUBLASLT_REDUCTION_SCHEME_INPLACE` |
+| Split-K (parallel) | Same split, partials written to a workspace, then a separate reduction kernel | Workspace of `S x M x N` accumulators, a second kernel | CUTLASS 2.x `GemmSplitKParallel`; cuBLASLt `CUBLASLT_REDUCTION_SCHEME_OUTPUT_TYPE` / `COMPUTE_TYPE` |
+| Stream-K | A persistent grid of about one CTA per SM; the total MAC-iteration count is divided evenly, so a CTA may start or finish mid-tile | CTAs sharing a tile exchange partials through a global workspace and flags (the "fix-up") | CUTLASS 3.x `cutlass::gemm::StreamKScheduler`, `DecompositionMode::{Heuristic, DataParallel, SplitK, StreamK}` |
+
+Stream-K is from Osama, Merrill, Cecka, Garland and Owens, "Stream-K: Work-centric
+Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU" (arXiv
+2301.03598, 2023). Its result was that one tile configuration per precision, with
+Stream-K decomposition, gave higher and more consistent performance across 32,824 GEMM
+shapes than CUTLASS and cuBLAS with their per-shape kernel-selection heuristics. The
+paper also describes a hybrid, and CUTLASS 3.x's `Heuristic` decomposition mode works
+the same way: tiles that fill complete waves run data-parallel, and only the leftover
+tiles of the last wave are cut Stream-K style, so the fix-up cost is paid only where the
+tail would otherwise leave SMs idle.
+
+When splitting K hurts: the reduction adds `(S - 1) x M x N` extra accumulator reads
+and writes, so a large square GEMM that already has many full waves only loses
+bandwidth; and parallel partial sums change the FP32 summation order, so results can
+differ in the last bits from the data-parallel kernel (see
+[debugging_correctness_and_numerics](../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md)).
+Split-K pays off for small `M x N` with large K, the shape of LLM decode GEMMs
+(batch 1-32 rows against a 4096-14336-wide weight).
+
 ### Thrust: STL-Shaped Parallel Algorithms
 
 Thrust is for parallel *algorithms* (sort, reduce, transform, scan), not dense math — it complements cuBLAS/cuDNN rather than competing with them:
@@ -909,9 +982,11 @@ cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | `cuBLAS` (`cublas_v2.h`) | Dense BLAS L1/L2/L3 | Column-major; `cublasSgemm`/`cublasGemmEx`; link `-lcublas` |
+| cuBLAS FP64 emulation | DGEMM/ZGEMM on integer Tensor Cores (Ozaki-I/II) | `CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT`; set a workspace (up to 8 GB) with `cublasSetWorkspace()` for reproducible results; Rubin support from CUDA 13.4 |
 | `cuBLASLt` (`cublasLt.h`) | Fused/mixed-precision GEMM | Descriptor-based API; algorithm heuristic search (`cublasLtMatmulAlgoGetHeuristic`); link `-lcublasLt` |
 | `cuDNN` (`cudnn_frontend.h`) | Convolution, pooling, RNN, normalization, fused attention | Graph API (`cudnn_frontend::graph::Graph`) is the supported surface; the pre-cuDNN-8 imperative API is deprecated. Heuristic (`HeurMode_t::A`) vs `BuildPlanPolicy_t::ALL` plan search; link `-lcudnn` |
 | `CUTLASS` (header-only) | Template GEMM/convolution building blocks | No separate runtime library — pure templates, compiled into your binary; open source on GitHub. CUTLASS 4.x also ships **CuTe DSL**, a Python-native front end for authoring the same kernels |
+| CUTLASS `StreamKScheduler` / cuBLASLt `CUBLASLT_MATMUL_ALGO_CONFIG_SPLITK_NUM` | K-dimension work splitting for GEMMs with few output tiles | CUTLASS `DecompositionMode` picks data-parallel, split-K or Stream-K; cuBLASLt pairs the split count with a `CUBLASLT_REDUCTION_SCHEME_*` |
 | `cuFFT` (`cufft.h`) | FFT (1D/2D/3D, real/complex) | Plan-based API (`cufftPlan*`, reused across calls); link `-lcufft` |
 | `cuSPARSE` (`cusparse.h`) | Sparse matrix operations | CSR/COO/blocked-sparse formats; link `-lcusparse` |
 | `cuRAND` (`curand.h`) | Device and host RNG | Host-API and device-API (per-thread generator) variants; link `-lcurand` |
@@ -933,6 +1008,14 @@ Every thread re-reads its row/column of the input matrices directly from global 
 **Short:** cuBLAS assumes column-major storage while C/NumPy/PyTorch default to row-major, so the same buffer represents a different matrix and silently computes the transpose.
 cuBLAS assumes column-major storage for every input, while C/C++/NumPy/PyTorch default to row-major, and the exact same flat memory buffer represents a different logical matrix under each convention. There is no runtime check for this mismatch — it silently computes the transpose of the intended product, which is why the standard fix is to swap operand order and dimensions (`C^T = B^T @ A^T`) rather than physically transposing any data.
 
+**Q: Your FP64 GEMM results differ slightly between runs after you turned on cuBLAS FP64 emulation. Why, and what is the fix?**
+**Short:** Fixed-point emulation's path depends on the workspace it gets; set one with cublasSetWorkspace() and use one handle per stream to get reproducible results.
+`CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT` runs DGEMM on integer Tensor Cores by slicing each operand into fixed-point pieces (the Ozaki scheme). It needs a workspace that depends on problem size and mantissa bit count, up to 8 GB. With no user workspace, cuBLAS allocates from a CUDA memory pool, and if that allocation fails it drops to native FP64 for that call, so two runs can take different paths. The cuBLAS docs state that the run-to-run reproducibility guarantee does not hold under fixed-point emulation or with several active streams. The fix is to reserve memory with `cublasSetWorkspace()` and keep one handle per stream, or use `cublasLtMatmul()` with a workspace you own.
+
+**Q: A GEMM with M = N = 1024 and K = 8192 reaches under half of an H100's Tensor Core peak even though it is compute-heavy. Why, and what fixes it?**
+**Short:** With 128x128 tiles it has only 64 output tiles for 132 SMs, so a data-parallel kernel leaves over half the chip idle; split-K or Stream-K divides the K loop across more CTAs.
+The work is large but the parallelism is in the wrong dimension. With 128x128 output tiles there are only `8 x 8 = 64` tiles, and a data-parallel GEMM gives each one to a single CTA that runs all 128 K-iterations, so 64 of 132 SMs work and 68 idle. Splitting K fixes the shape: split-K = 2 gives 128 CTAs of 64 iterations each plus a partial-sum reduction (97% of SMs busy), and Stream-K launches about one CTA per SM and gives each an equal 62-63 iteration run that may cross tile edges, with a small fix-up where two CTAs share a tile. cuBLAS and cuBLASLt pick split-K variants for such shapes through their heuristics; in CUTLASS 3.x select `cutlass::gemm::StreamKScheduler`. Check the tile count against the SM count before blaming the math library.
+
 **Q: When should you write a custom CUDA kernel instead of calling cuBLAS/cuDNN/CUTLASS?**
 **Short:** Only when fusing multiple ops eliminates an intermediate tensor's HBM round-trip, since a hand-written kernel almost never beats a single unfused library call.
 Only when you can fuse two or more operations to eliminate an intermediate tensor's round-trip through HBM — you essentially never beat a single, standard, unfused library operation by hand-writing it yourself. FlashAttention is the canonical example: it fuses softmax into the attention matmul specifically to avoid materializing the full attention-score matrix in global memory twice.
@@ -940,6 +1023,10 @@ Only when you can fuse two or more operations to eliminate an intermediate tenso
 **Q: What is CUTLASS, and why does it exist alongside cuBLAS and cuDNN?**
 **Short:** CUTLASS is an open-source C++ template library exposing cuBLAS/cuDNN's internal tiling and Tensor-Core building blocks so you can compose custom fused GEMMs at compile time.
 CUTLASS is an open-source C++ template library exposing the same tiling, pipelining, and Tensor-Core-dispatch building blocks that cuBLAS/cuDNN use internally, letting you compose a custom GEMM or convolution at compile time. It exists because cuBLAS/cuDNN's fixed function signatures can't express every fused epilogue or non-standard quantization scheme a production inference engine needs, while still reaching near-cuBLAS performance instead of a from-scratch kernel.
+
+**Q: How does Stream-K decomposition differ from split-K?**
+**Short:** Split-K cuts every tile's K loop into a fixed number of slices; Stream-K divides the total MAC-iteration count evenly over a persistent grid, so CTAs start and stop mid-tile.
+Split-K picks a factor `S`, launches `S` CTAs per output tile, and reduces their partial sums either serially in place or through a workspace and a second kernel, so the CTA count is `tiles x S` and can still leave a ragged last wave. Stream-K (Osama et al., arXiv 2301.03598) launches a grid of about one CTA per SM and gives each an equal contiguous share of all `tiles x K-iterations`; a CTA that ends mid-tile writes its partial accumulator to a global workspace and the CTA that finishes that tile adds it in (the fix-up). The paper reports that one tile size per precision with Stream-K beat the per-shape heuristics of CUTLASS and cuBLAS on average across 32,824 shapes. Split-K is simpler and fine when `tiles x S` lands near a multiple of the SM count; Stream-K removes the tail for any shape at the cost of cross-CTA synchronization.
 
 **Q: What does cuBLASLt add on top of classic cuBLAS?**
 **Short:** cuBLASLt adds a descriptor-based API for fusing bias, activation, or quantization scale directly into the GEMM kernel, plus explicit algorithm-heuristic control.

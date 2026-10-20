@@ -12,10 +12,12 @@ defect.
 
 Three forces make this engineering rather than decoration.
 
-**It is law.** In the United States the ADA and Section 508 both point at WCAG; in the European
+**It is law.** In the United States the ADA Title II rule adopts WCAG 2.1 AA (compliance from
+2027-04-26 for large public entities) and Section 508 incorporates WCAG 2.0 AA; in the European
 Union the European Accessibility Act has applied to consumer-facing digital products since
-2025-06-28. All of them reference the same technical standard, and **WCAG 2.2 Level AA is what
-an audit actually tests against**.
+2025-06-28 through EN 301 549 v3.2.1, which maps to WCAG 2.1 AA. Content that meets **WCAG 2.2
+Level AA** also meets 2.1 AA and 2.0 AA, which makes 2.2 AA the engineering target and what an
+audit actually tests against.
 
 **It is correctness.** Every WCAG success criterion is a falsifiable statement about the
 product. "Every function is operable by keyboard" is a test, not a preference, and a build can
@@ -124,14 +126,14 @@ tested on, and they are disproportionately represented in first-time 2.2 finding
 
 | | **WCAG 2.2** | **WCAG 3.0** |
 |---|---|---|
-| Status | **W3C Recommendation — the operative standard** | **W3C Working Draft**, latest 2026-03-03 |
-| Conformance | A / AA / AAA, pass-fail per criterion | **Bronze / Silver / Gold**, Bronze roughly equal to today's 2.2 AA |
-| Referenced by law | ADA, Section 508, the European Accessibility Act | nothing |
+| Status | **W3C Recommendation, the operative standard** | **W3C Working Draft**, latest 2026-09-10 |
+| Conformance | A / AA / AAA, pass-fail per criterion | every **core requirement** met; **Bronze / Silver / Gold** are reporting tiers above it that add supplemental requirements and assertions |
+| Referenced by law | not cited directly; ADA Title II cites 2.1 AA, Section 508 cites 2.0 AA, EN 301 549 maps to 2.1 AA, and 2.2 AA meets all three | nothing |
 | Next milestone | in force now | Candidate Recommendation targeted **Q4 2027** |
 | Legal adoption | now | estimated **2030 or later** |
 
 **Build against 2.2 AA. Read 3.0 as direction.** A team that plans its 2027 roadmap around
-Bronze conformance is planning around a document that will change before it is a Recommendation,
+WCAG 3.0 tiers is planning around a document that will change before it is a Recommendation,
 and is not conformant with anything a regulator can currently cite.
 
 ---
@@ -463,11 +465,11 @@ forward to billing fails, and the fix is usually a checkbox, not new markup.
 
 Three matter, and they differ enough that testing one is not testing the others.
 
-| Reader | Platform | Pair with | Primary reader, WebAIM 2024 survey |
+| Reader | Platform | Pair with | Primary desktop reader, WebAIM survey #11 (July-August 2026) |
 |--------|----------|-----------|-----------------------------------|
-| **JAWS** | Windows, commercial | Chrome | ~40% |
-| **NVDA** | Windows, free | Chrome or Firefox | ~38% |
-| **VoiceOver** | macOS and iOS, built in | Safari | ~10% desktop, dominant on mobile |
+| **JAWS** | Windows, commercial | Chrome | 55.0% |
+| **NVDA** | Windows, free | Chrome or Firefox | 32.9% |
+| **VoiceOver** | macOS and iOS, built in | Safari | 6.5% desktop; used by 72.2% on mobile, TalkBack 29.5% |
 
 The mechanic that trips developers is **browse mode versus focus mode** (NVDA calls the second
 one focus mode, JAWS calls it forms mode; VoiceOver's model differs again). In **browse mode**
@@ -516,8 +518,8 @@ test("checkout has no serious violations", async ({ page }) => {
 
 jsdom has no layout engine, so `jest-axe` **cannot evaluate contrast, target size or focus
 order** — those rules need the Playwright run. Gate the build on `serious` and `critical`,
-report `moderate` and `minor`, and add a snapshot of the accessibility tree
-(`page.accessibility.snapshot()`) for the components that keep regressing.
+report `moderate` and `minor`, and add an ARIA snapshot assertion
+(`await expect(locator).toMatchAriaSnapshot()`) for the components that keep regressing.
 
 ```mermaid
 flowchart LR
@@ -587,9 +589,12 @@ line.
 | Form participation | automatic | `formAssociated` plus `attachInternals` |
 | High Contrast Mode | handled by the OS | you style it |
 
-The honest counterweight: `<select>` with rich options and date inputs with brand styling are
-still hard to restyle, which is the legitimate reason teams build custom widgets. Build that
-widget **once**, in the design system, against the Authoring Practices pattern.
+The honest counterweight: date inputs with brand styling are still hard to restyle, which is the
+legitimate reason teams build custom widgets. Build that widget **once**, in the design system,
+against the Authoring Practices pattern. A rich `<select>` no longer needs one:
+`appearance: base-select`, `::picker(select)` and `<selectedcontent>` style the native control in
+Chromium 135+ and Safari 27.0 and keep its keyboard, screen reader and form behaviour.
+Feature-detect with `CSS.supports("appearance", "base-select")`; Firefox renders the plain select.
 
 | Gate | Cost per run | Issues found | Blind spots |
 |------|-------------|--------------|-------------|
@@ -782,10 +787,11 @@ cases where the same action is available at a larger size elsewhere.
 **Q: What is new in WCAG 2.2, and should you plan against WCAG 3.0?**
 **Short:** 2.2 added nine criteria including focus not obscured at 2.4.11 and target size at 2.5.8, while 3.0 remains a Working Draft with no legal force behind it.
 
-2.2 Level AA is what the ADA, Section 508 and the European Accessibility Act reference and what
-an audit tests. 3.0's latest draft is 2026-03-03: roughly 174 requirements and a
-Bronze/Silver/Gold model where Bronze is approximately today's 2.2 AA, with Candidate
-Recommendation targeted for Q4 2027 and legal adoption estimated 2030 or later.
+2.2 Level AA is what an audit tests, and it covers what the laws cite: ADA Title II adopts 2.1 AA,
+Section 508 incorporates 2.0 AA, and the EAA's EN 301 549 v3.2.1 maps to 2.1 AA. 3.0's latest
+draft is 2026-09-10: 180 requirements (106 core, 74 supplemental) plus 35 assertions, conformance
+when every core requirement is met, and Bronze/Silver/Gold as reporting tiers above it, with
+Candidate Recommendation targeted for Q4 2027 and legal adoption estimated 2030 or later.
 
 **Q: What is browse mode versus focus mode, and why does it break custom widgets?**
 **Short:** NVDA and JAWS intercept keystrokes in browse mode to navigate a virtual buffer, so arrow-key handlers on a custom widget never receive the event until a recognised role switches the reader into focus mode.

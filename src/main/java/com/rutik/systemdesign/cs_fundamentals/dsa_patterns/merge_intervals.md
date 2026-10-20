@@ -398,6 +398,7 @@ def merge_intervals_fixed(intervals: list[list[int]]) -> list[list[int]]:
 - **[Greedy](greedy.md)** — "maximize the number of non-overlapping intervals you can select" sorts by **end** time and greedily picks the earliest-ending compatible interval — a different sort key and a different goal (selection vs. merging) than this pattern, but operates on the same data shape.
 - **[Two Pointers](two_pointers.md)** — "Interval List Intersections" is structurally a two-pointer merge over two separate sorted interval lists.
 - **[Prefix Sum](prefix_sum.md)** — "Car Pooling" and similar "range update, point query" problems convert intervals into a delta array (`+1` at start, `-1` at `end+1`), then use prefix sums to get the value at each point — a different but related technique for counting overlaps at *every* point rather than just the *maximum* concurrency.
+- **[Sweep Line](sweep_line.md)** - when the answer is a count of active intervals (peak concurrency, active at time t) and start/end no longer need to stay paired, split each interval into +1/-1 events and sweep them in sorted order.
 - **[Top-K Elements](top_k_elements.md)** — "Minimum Meeting Rooms" can alternatively be solved with a min-heap of end times: iterate sorted-by-start intervals, and if the earliest-ending room (heap top) is free (`heap[0] <= current.start`), reuse it (pop); otherwise allocate a new room (push). This is a heap-based variant of the same overlap-counting idea.
 
 ---

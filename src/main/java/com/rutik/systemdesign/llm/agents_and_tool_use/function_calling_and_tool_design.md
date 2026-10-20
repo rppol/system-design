@@ -44,7 +44,7 @@ called in parallel, a custom function can be forced with strict decoding.
 |------|-----------------|-------------|----------|
 | Custom function | Your application code | A name, description and JSON Schema you write | Anything specific to your system — internal APIs, database reads, writes to external systems |
 | Provider-hosted | The provider, on their infrastructure | A `type` and its config; you never implement it | Sandboxed Python (`code_interpreter`), RAG over uploaded files (`file_search`), live web lookup (`web_search`), computer use |
-| Extraction tool | Your code, but the result is the point | A schema for the object you want back, forced with `tool_choice` | Turning the model into a structured extraction engine rather than a caller |
+| Extraction tool | Your code, but the result is the point | A strict schema for the object you want back, forced with `tool_choice` where the model allows it (Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 do not; use `auto` + `strict` or structured outputs there) | Turning the model into a structured extraction engine rather than a caller |
 
 ### Spec Shapes Across Providers
 
@@ -52,7 +52,7 @@ called in parallel, a custom function can be forced with strict decoding.
 |---------|-----------|-------------|--------------------|------------------|
 | OpenAI Chat Completions | `parameters`, nested under a `"function"` key | `strict` inside `function` | `tool_choice="required"` | `parallel_tool_calls=True` |
 | OpenAI Responses | `parameters`, flat at the top level | `strict` at the top level | `tool_choice="required"` | `parallel_tool_calls=True` |
-| Anthropic Messages | `input_schema` | `strict` top-level, beside `input_schema` | `tool_choice={"type": "any"}` | Opt-*out*: `disable_parallel_tool_use` on `tool_choice` |
+| Anthropic Messages | `input_schema` | `strict` top-level, beside `input_schema` | `tool_choice={"type": "any"}`; HTTP 400 on Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 | Opt-*out*: `disable_parallel_tool_use` on `tool_choice` |
 
 The shapes are close enough that ported code appears to work and then fails on
 the spelling: `any` versus `required`, an object versus a string, a nested versus
@@ -78,7 +78,7 @@ durations collapse it toward 1, because `max` is set entirely by the laggard.
 |------|-----------|------|----------|
 | Description only | None; the model may invent enums, omit required fields, pass wrong types | Cheapest schema to write | Prototyping only |
 | `strict: true` | Constrained decoding — arguments always satisfy the declared schema | Every property must appear in `required`; optionality is a `null` type union; `additionalProperties: false` everywhere | Production, always |
-| Strict + forced `tool_choice` | The model must call this tool, and the arguments will validate | Removes the model's option to answer in prose | Structured extraction pipelines |
+| Strict + forced `tool_choice` | The model must call this tool, and the arguments will validate | Removes the model's option to answer in prose; on Claude Haiku 5.5 a forced call also skips thinking | Structured extraction on OpenAI and on Claude models that accept forcing (Opus 5, Haiku 5.5); on Opus 5.5, Sonnet 5.5, and Fable 5.1 use `auto` + `strict` or structured outputs |
 
 Independent of the mode, the *result* format is its own decision: structured JSON
 with an explicit `status` field is what lets the model reason about recovery,
@@ -352,6 +352,35 @@ The `N×` speedup claimed above is the best case — it holds exactly when every
 
 The skewed row is the production case: one slow database tool alongside three fast cache reads yields almost no parallel win at all. Measure per-tool latency before promising `N×` — the payoff lives entirely in how uniform your tools are, and optimising the slowest tool beats parallelising the rest.
 
+### Async Tool Calls and Mid-Turn Steering
+
+Parallel calls still block the turn on the slowest tool. Async tool calling removes the block: the model issues a call and keeps working, and the result joins the conversation later. OpenAI shipped it for GPT-6 Astra and later on 2026-09-03 in the Responses API.
+
+```python
+tools = [{"type": "function", "name": "run_backtest", "async": True,   # model does not wait
+          "parameters": {...}}]
+resp = client.responses.create(model=MODEL, tools=tools, input=task)   # MODEL: GPT-6 Astra or later
+# Your app starts the job for each call item marked async, keyed by its call_id.
+# Later, when the job finishes, send the result on the ORIGINAL call_id:
+client.responses.create(
+    model=MODEL, tools=tools, instructions=instr,
+    previous_response_id=latest_response_id,          # newest response, not the one that made the call
+    input=[{"type": "function_call_output", "call_id": original_call_id, "output": result}],
+)
+```
+
+Rules from the OpenAI guide: your application still runs the job (async does not move execution to OpenAI); async applies only to function and custom tools, not hosted tools; do not combine async tools with parallel tool calls in multi-agent mode. If other turns happen while a job runs, update `previous_response_id` to the newest response and keep the original `call_id`. The guide does not define what happens to a result that never arrives, so the timeout and a "no answer" result are yours to build.
+
+Two related controls let you change a turn that is already running:
+
+| Control | OpenAI | Anthropic |
+|---|---|---|
+| Add instructions mid-turn | Steering (GPT-6 family): send `response.steer` over the Responses WebSocket; `response.steer.accepted` means queued, not acted on | No mid-response channel; append a mid-conversation `role: "system"` message before the next turn |
+| Change reasoning effort mid-conversation | Supported on GPT-6 Astra, keeps the cached prefix | Per-message effort: a `role: "system"` message with `output_config.effort` (beta `mid-conversation-output-config-2026-07-01`, 2026-09-01) |
+| Instruction for one turn only | Not offered | Turn-scoped system message: `clear_at: "next_user_message"` (beta `mid-conversation-system-clear-at-2026-08-21`); it stays in history at no token cost |
+
+All of these preserve the prompt cache because they append to the conversation instead of editing the system prompt or the tool list.
+
 ### tool_choice Parameter
 
 ```python
@@ -418,7 +447,7 @@ tool = {
 }
 
 # tool_choice is an OBJECT, not a string, and "must call something" is `any`,
-# not `required`.
+# not `required`. Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject any/tool.
 {"type": "auto"}                     # model decides (default)
 {"type": "any"}                      # must call some tool
 {"type": "tool", "name": "extract"}  # must call this exact tool
@@ -433,11 +462,15 @@ Two behaviours that do not port. **Schemas are compiled and cached separately fr
 messages** — strict mode turns `input_schema` into a grammar and retains the
 compiled artifact for up to 24 hours, so regulated data must never appear in
 property names, `enum` values, `const` values or `pattern` regexes; only message
-content carries the message-content protections. And **forcing a tool call
-conflicts with manual extended thinking**: with `thinking: {"type": "enabled"}`
-only `auto` and `none` are accepted, so the `tool_choice="required"` + strict
-extraction recipe above has no direct equivalent on a manual-budget thinking
-request. Adaptive thinking on current models lifts the restriction.
+content carries the message-content protections. And **forced tool use is not
+available everywhere**: Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1
+return HTTP 400 for `{"type": "any"}` and `{"type": "tool"}` whatever the
+thinking settings, and manual extended thinking (`thinking: {"type": "enabled"}`)
+accepts only `auto` and `none` on older models. On those models, get the
+extraction guarantee from `auto` plus `strict: true` with one tool and a prompt
+that asks for it, or from structured outputs. On models that still accept forcing
+(Opus 5, Haiku 5.5), check what forcing does to thinking: on Haiku 5.5 the response starts with the
+`tool_use` block and has no `thinking` block.
 
 ### Tool Result Injection Format
 
@@ -559,7 +592,7 @@ extract_tool = {
 | Sequential tool calls | O(N) | High | High | Dependent calls |
 | Parallel tool calls | O(max) | High | High | Independent calls |
 | strict: true | ~same | Highest (no hallucination) | Lower (schema-constrained) | Structured extraction |
-| tool_choice="required" | ~same | High | Lower | Forcing output format |
+| tool_choice="required" (OpenAI) / `any` (Claude, where accepted) | ~same | High | Lower | Forcing output format |
 | No tools (prose) | Fastest | Low (hallucination risk) | Highest | Conversational responses |
 
 ### Decoding the O(N) / O(max) latency column
@@ -733,7 +766,7 @@ A: Version by name: `search_v2` replaces `search`. During migration: include bot
 
 **Q: What is the tool_choice parameter and when would you set it to "required"?**
 **Short:** tool_choice="required" forces at least one tool call, useful for guaranteeing structured extraction output.
-A: `tool_choice` controls whether the model must call a tool. `"auto"` (default): model decides freely. `"required"`: model must call at least one tool — use for structured extraction workflows where you always want a tool call, never a prose response. `"none"`: prohibit tool calls — use for final synthesis steps where you want prose. Specific tool: `{"type": "function", "function": {"name": "extract_entities"}}` — forces that exact tool, effectively turning the LLM into a structured extraction engine with `strict: true`. The most powerful combination: `tool_choice="required"` + `strict: true` + single tool = guaranteed structured output matching a schema on every call, with no parsing failures.
+A: `tool_choice` controls whether the model must call a tool. `"auto"` (default): model decides freely. `"required"`: model must call at least one tool — use for structured extraction workflows where you always want a tool call, never a prose response. `"none"`: prohibit tool calls — use for final synthesis steps where you want prose. Specific tool: `{"type": "function", "function": {"name": "extract_entities"}}` — forces that exact tool, effectively turning the LLM into a structured extraction engine with `strict: true`. The most powerful combination: `tool_choice="required"` + `strict: true` + single tool = guaranteed structured output matching a schema on every call, with no parsing failures. Anthropic's equivalent, `{"type": "any"}`, returns HTTP 400 on Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1, so on those models the guarantee comes from structured outputs or from `strict: true` under `auto`.
 
 **Q: How do you design tools for a code generation agent vs. a research agent?**
 **Short:** Code-agent tools return execution feedback like stdout and exit codes; research tools return ranked snippets.
@@ -751,13 +784,17 @@ A: Never raise an exception from a tool failure — exceptions surface to the or
 **Short:** Parallelize calls with no data dependency; keep calls sequential when one call's result feeds the next.
 A: Parallelize when: the tool calls have no data dependency (neither call's arguments depend on the other call's result), both calls are safe to execute concurrently (no shared mutable state), and the latency savings justify the implementation complexity. Sequential when: call B requires call A's result to form its arguments ("find the CEO of Apple, then look up their net worth"), or when one call is a gate on whether the next call is needed at all ("check if file exists before reading it"). Detection heuristic: scan the model's tool call batch — if all calls use only information already in the original user message or prior observations (not results from the same batch), they are independent and safe to parallelize. The speedup is max(T_1, T_2, ..., T_N) instead of T_1 + T_2 + ... + T_N — significant for N >= 3 slow calls.
 
+**Q: With async tool calls, how do you match late results to calls and keep ordering correct?**
+**Short:** Key every job by the original call_id, return results on that call_id against the newest response, and keep a timeout that returns an explicit no-answer result.
+A: In OpenAI's async tool calling (GPT-6 Astra, 2026-09-03), the model keeps working after it issues a call marked `async: true`, so results can arrive several turns later and in any order. The `call_id` is the only correlation key: store `call_id -> job` when the call item arrives (you can start the job as soon as the complete call item streams in), and send the result as a `function_call_output` on that original `call_id`. Set `previous_response_id` to the newest response, not the one that issued the call, because other turns may have happened in between. If you expose a wait tool, return each finished result on its own `call_id` before the wait call's status, so the model sees the results when it resumes; keep task handles unique across the whole conversation. The guide does not cover a result that never arrives, so add a deadline that sends an explicit failure or no-answer result, or the model may wait on or assume an outcome it never received. Make the job idempotent too: a retried call must not run the side effect twice.
+
 **Q: How do you prevent infinite tool call loops in a production agent?**
 **Short:** Combine a hard step limit, exact-duplicate call detection, and periodic LLM progress scoring.
 A: Three layers of defense: (1) hard step limit — hard-code a maximum number of tool call rounds (typically 20-50 depending on task complexity); inject "You have N steps remaining — prioritize completing the task" at each step to give the model self-awareness; (2) repetition detection — after each tool call, compare the (tool_name, arguments) pair to all previous calls; if an exact duplicate appears, inject "You have already called this tool with these arguments and received the following result: [result]. Do not repeat this call. Try a different approach or conclude the task." (3) progress scoring — every 5 steps, ask a lightweight LLM call: "Based on the trajectory so far, is the agent making meaningful progress? YES or NO." If NO, inject a refocus message or abort. The repetition detection is the most important layer — infinite loops almost always manifest as repeated identical tool calls.
 
 **Q: How do strict mode and tool_choice differ between the OpenAI and Anthropic APIs?**
 **Short:** OpenAI nests strict mode under function with string tool_choice; Anthropic nests it top-level with object tool_choice.
-A: Both providers offer grammar-constrained tool arguments and forced tool calls, but the field shapes differ enough that a naive port fails at request-validation time. Strict mode: OpenAI puts `strict: true` inside the nested `"function"` object and requires every property to appear in `required` (optionality is a `null` type union); Anthropic puts `strict: true` at the top level of the tool beside `input_schema` and lets `required` list only the genuinely required keys. Tool choice: OpenAI's `tool_choice` is a string (`"auto"`, `"required"`, `"none"`) or a function object; Anthropic's is always an object, and the "call something" value is `{"type": "any"}` — there is no `"required"`. Parallel calls: OpenAI has a top-level `parallel_tool_calls` boolean that defaults to true; Anthropic makes it opt-out via `{"type": "auto", "disable_parallel_tool_use": true}` on `tool_choice`. Two Anthropic-specific gotchas are worth naming: compiled strict-mode grammars are cached separately from message content for up to 24 hours, so regulated data must stay out of property names, enums and regex patterns; and a forced `tool_choice` is rejected alongside manual extended thinking, which accepts only `auto` or `none`.
+A: Both providers offer grammar-constrained tool arguments and forced tool calls, but the field shapes differ enough that a naive port fails at request-validation time. Strict mode: OpenAI puts `strict: true` inside the nested `"function"` object and requires every property to appear in `required` (optionality is a `null` type union); Anthropic puts `strict: true` at the top level of the tool beside `input_schema` and lets `required` list only the genuinely required keys. Tool choice: OpenAI's `tool_choice` is a string (`"auto"`, `"required"`, `"none"`) or a function object; Anthropic's is always an object, and the "call something" value is `{"type": "any"}` — there is no `"required"`. Parallel calls: OpenAI has a top-level `parallel_tool_calls` boolean that defaults to true; Anthropic makes it opt-out via `{"type": "auto", "disable_parallel_tool_use": true}` on `tool_choice`. Two Anthropic-specific gotchas are worth naming: compiled strict-mode grammars are cached separately from message content for up to 24 hours, so regulated data must stay out of property names, enums and regex patterns; and a forced `tool_choice` (`any` or `tool`) returns HTTP 400 on Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 and alongside manual extended thinking, while on Haiku 5.5, which still accepts it, a forced call skips thinking.
 
 **Q: How do you version tools and maintain backward compatibility in a live production system?**
 **Short:** Version only breaking changes with a suffixed name; non-breaking optional additions extend the existing tool in place.

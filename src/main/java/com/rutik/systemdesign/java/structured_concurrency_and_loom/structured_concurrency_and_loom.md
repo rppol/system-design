@@ -8,11 +8,11 @@ Key components:
 - **Virtual threads** (`Thread.ofVirtual()`) — JVM-managed, ~few KB stack, multiplexed onto platform threads
 - **Carrier threads** — the OS-visible platform threads that run virtual threads
 - **Pinning** — when a virtual thread is "stuck" to its carrier (cannot be unmounted); today this means a native frame on the stack, not `synchronized`
-- **`StructuredTaskScope`** — composable, leak-proof scope for forking and joining subtasks (preview; opened with `open()` since Java 25, current shape JEP 525 in Java 26)
+- **`StructuredTaskScope`**: composable, leak-proof scope for forking and joining subtasks (preview; opened with `open()` since Java 25, current shape JEP 533 in Java 27)
 - **`ScopedValue`** — immutable, context-passing replacement for `ThreadLocal` (final in Java 25, JEP 506)
 - **Continuation** — internal JVM mechanism that saves/restores virtual thread stack state
 
-Timeline: virtual threads GA in Java 21 (JEP 444). JEP 491 (Java 24) made `synchronized` and `Object.wait()` stop pinning, and removed the `jdk.tracePinnedThreads` system property. `ScopedValue` finalised in Java 25 (JEP 506). `StructuredTaskScope` is still a preview API: JEP 505 (Java 25) replaced its public constructors with `open()` factory methods, and JEP 525 (Java 26) is the current shape.
+Timeline: virtual threads GA in Java 21 (JEP 444). JEP 491 (Java 24) made `synchronized` and `Object.wait()` stop pinning, and removed the `jdk.tracePinnedThreads` system property. `ScopedValue` finalised in Java 25 (JEP 506). `StructuredTaskScope` is still a preview API: JEP 505 (Java 25) replaced its public constructors with `open()` factory methods, JEP 525 (Java 26) renamed joiners, and JEP 533 (Java 27) is the current shape: a third type parameter `R_X` names the exception `join()` throws, and the built-in joiners throw `ExecutionException`.
 
 ---
 
@@ -106,10 +106,10 @@ flowchart TD
     subgraph SOF["open() — default policy"]
         A1["fork A"] --> J1["join()"]
         B1["fork B"] --> J1
-        J1 --> O1["if either fails:\ncancel other, throw FailedException"]
+        J1 --> O1["if either fails:\ncancel other, throw ExecutionException"]
     end
 
-    subgraph SOS["open(Joiner.anySuccessfulResultOrThrow())"]
+    subgraph SOS["open(Joiner.anySuccessfulOrThrow())"]
         A2["fork A"] --> J2["join()"]
         B2["fork B"] --> J2
         J2 --> O2["when first succeeds:\ncancel other, return result"]
@@ -186,7 +186,7 @@ flowchart TD
     F3 --> J
     J --> D{"fetchOrders() throws?"}
     D -->|"yes"| CANCEL["scope is cancelled\nother forks get InterruptedException"]
-    CANCEL --> RETHROW["join() throws FailedException\nno subtask leaks, scope closes cleanly"]
+    CANCEL --> RETHROW["join() throws ExecutionException\nno subtask leaks, scope closes cleanly"]
     D -->|"no"| RESULT["return Dashboard(user, orders, prefs)"]
 
     class S base
@@ -330,13 +330,13 @@ Item 81's advice necessary in the first place.
 // StructuredTaskScope is a preview API: compile and run with --enable-preview.
 record Dashboard(User user, List<Order> orders, Preferences prefs) {}
 
-Dashboard fetchDashboard(long userId) throws InterruptedException {
+Dashboard fetchDashboard(long userId) throws InterruptedException, ExecutionException {
     try (var scope = StructuredTaskScope.open()) {   // default policy: all succeed, or any fails
         Subtask<User>        userTask   = scope.fork(() -> userService.find(userId));
         Subtask<List<Order>> orderTask  = scope.fork(() -> orderService.findAll(userId));
         Subtask<Preferences> prefTask   = scope.fork(() -> prefService.get(userId));
 
-        scope.join();   // waits for ALL forks; throws FailedException with the first
+        scope.join();   // waits for ALL forks; throws ExecutionException with the first
                         // failure as its cause, after cancelling the siblings
 
         return new Dashboard(userTask.get(), orderTask.get(), prefTask.get());
@@ -347,24 +347,27 @@ Dashboard fetchDashboard(long userId) throws InterruptedException {
 
 The zero-argument `open()` covers the fan-out case with no joiner at all. Any other policy is
 a `Joiner` handed to `open(Joiner)`: `allSuccessfulOrThrow()` (a `List` of results in fork
-order), `awaitAllSuccessfulOrThrow()`, `awaitAll()`, `anySuccessfulResultOrThrow()`, and
-`allUntil(Predicate)` for a custom cancellation condition.
+order), `awaitAllSuccessfulOrThrow()`, `anySuccessfulOrThrow()`, and `allUntil(Predicate)` for a
+custom cancellation condition. The three `...OrThrow()` joiners also take a
+`Function<Throwable, R_X>` that maps the failure to your own exception type.
 
-### 6.4 Racing with `Joiner.anySuccessfulResultOrThrow()`
+### 6.4 Racing with `Joiner.anySuccessfulOrThrow()`
 
-> **Spelling depends on your JDK.** This is the **Java 25 LTS** name (JEP 505). JDK 26's
-> JEP 525 renamed it to `anySuccessfulOrThrow()`. It is a preview API, so a rename per
-> release is the contract — pin the JDK and budget the call-site edit at each upgrade.
+> **Spelling depends on your JDK.** This is the JDK 27 shape (JEP 533). Java 25 LTS
+> (JEP 505) spells it `anySuccessfulResultOrThrow()` and its `join()` throws
+> `FailedException`; JDK 26 (JEP 525) renamed it, and JDK 27 switched the exception to
+> `ExecutionException`. It is a preview API, so pin the JDK and budget the call-site edit
+> at each upgrade.
 
 ```java
 // Race two CDN endpoints; return whichever responds first
-String fetchWithRace(String path) throws InterruptedException {
-    try (var scope = StructuredTaskScope.open(Joiner.<String>anySuccessfulResultOrThrow())) {
+String fetchWithRace(String path) throws InterruptedException, ExecutionException {
+    try (var scope = StructuredTaskScope.open(Joiner.<String>anySuccessfulOrThrow())) {
         scope.fork(() -> fetchFromCDN1(path));
         scope.fork(() -> fetchFromCDN2(path));
 
         return scope.join();   // first success cancels the loser and is returned;
-                               // if every subtask fails, join() throws FailedException
+                               // if every subtask fails, join() throws ExecutionException
     }
 }
 ```
@@ -658,7 +661,7 @@ try (var scope = StructuredTaskScope.open()) {
 |---|---|---|
 | Virtual threads (`Thread.ofVirtual()`) | Java 21 GA (JEP 444) | JVM-managed lightweight threads |
 | `Executors.newVirtualThreadPerTaskExecutor()` | Java 21 GA | One virtual thread per submitted task |
-| `StructuredTaskScope` | Preview; `open()` factories since Java 25 (JEP 505), current shape Java 26 (JEP 525) | Scope-bounded fork/join with cancellation |
+| `StructuredTaskScope` | Preview; `open()` factories since Java 25 (JEP 505), current shape Java 27 (JEP 533) | Scope-bounded fork/join with cancellation |
 | `ScopedValue` | Java 25 final (JEP 506) | Immutable context propagation to subtasks |
 | `Continuation` (internal) | Java 19+ | Stack snapshot mechanism powering virtual threads |
 | `jdk.VirtualThreadPinned` JFR event | Java 24+ (JEP 491) | Diagnose pinning; on by default, 20 ms threshold |
@@ -687,7 +690,7 @@ No. Virtual threads are cheap to create (~few KB, microseconds to start), so the
 
 **Q4: What is `StructuredTaskScope` and what problem does it solve that `CompletableFuture.allOf()` does not?**
 **Short:** StructuredTaskScope guarantees every forked subtask completes or is cancelled before the enclosing scope exits, unlike allOf().
-`StructuredTaskScope` enforces that all forked subtasks complete or are cancelled before the enclosing scope exits. It solves three problems with `CompletableFuture.allOf()`: (1) **cancellation**: if one subtask fails, the default policy of `StructuredTaskScope.open()` cancels the remaining subtasks and makes `join()` throw `FailedException` — `allOf()` requires manual cancellation wiring; (2) **leak prevention**: subtasks cannot outlive their scope (the `try` block guarantees all threads are done); (3) **structured nesting**: scopes can be nested with predictable ownership — parent scopes wait for child scopes, forming a tree analogous to structured statement nesting. `StructuredTaskScope` also preserves the virtual-thread-centric blocking style: `scope.join()` blocks the parent virtual thread without pinning a carrier. It remains a preview API — enable it with `--enable-preview`.
+`StructuredTaskScope` enforces that all forked subtasks complete or are cancelled before the enclosing scope exits. It solves three problems with `CompletableFuture.allOf()`: (1) **cancellation**: if one subtask fails, the default policy of `StructuredTaskScope.open()` cancels the remaining subtasks and makes `join()` throw `ExecutionException`, while `allOf()` requires manual cancellation wiring; (2) **leak prevention**: subtasks cannot outlive their scope (the `try` block guarantees all threads are done); (3) **structured nesting**: scopes can be nested with predictable ownership, parent scopes wait for child scopes, forming a tree analogous to structured statement nesting. `StructuredTaskScope` also preserves the virtual-thread-centric blocking style: `scope.join()` blocks the parent virtual thread without pinning a carrier. It remains a preview API, enable it with `--enable-preview`.
 
 **Q5: Explain the difference between `ScopedValue` and `ThreadLocal`. When would you choose each?**
 **Short:** ScopedValue is immutable and automatically inherited by child scopes, while ThreadLocal is mutable and can leak stale values across pooled tasks.
@@ -701,9 +704,9 @@ The JVM's I/O infrastructure intercepts blocking calls (socket reads, file reads
 **Short:** Unbounded virtual threads each holding a ThreadLocal can multiply memory use far beyond a bounded platform-thread pool's total.
 With platform thread pools (bounded, e.g., 200 threads), `ThreadLocal` state is bounded: at most 200 copies of each `ThreadLocal` value exist. With virtual threads (unbounded), 100,000 concurrent tasks × a 64 KB `ThreadLocal<byte[]>` = 6.4 GB of ThreadLocal data. Additionally, if virtual threads are ever pooled (accidentally or via a third-party wrapper), stale ThreadLocal values from one task leak into the next. The fix: use local variables for task-scoped state, and `ScopedValue` for inherited context. If `ThreadLocal` is unavoidable, call `remove()` explicitly before the virtual thread ends.
 
-**Q8: How does `Joiner.anySuccessfulResultOrThrow()` work and when is it useful?**
-**Short:** Joiner.anySuccessfulResultOrThrow() cancels a scope the instant one subtask succeeds and returns that result, implementing a race pattern.
-It cancels the scope the moment the first subtask completes successfully, and `join()` returns that subtask's result directly. The losing forks are interrupted and terminate. This implements the "race" or "hedge" pattern: submit the same request to two or more backends, accept the fastest successful response, cancel the rest. Use cases: CDN failover, primary vs read-replica queries, A/B latency comparison. If every subtask fails, `join()` throws `FailedException` with one of the failures as its cause; if nothing was forked, `NoSuchElementException`. Unlike `CompletableFuture.anyOf()`, losers are guaranteed to be cancelled and no thread resources leak. Because the whole API is still preview, joiner names and signatures move between releases — build against one JDK feature release at a time and re-check the joiners when you upgrade.
+**Q8: How does `Joiner.anySuccessfulOrThrow()` work and when is it useful?**
+**Short:** Joiner.anySuccessfulOrThrow() cancels a scope the instant one subtask succeeds and returns that result, implementing a race pattern.
+It cancels the scope the moment the first subtask completes successfully, and `join()` returns that subtask's result directly. The losing forks are interrupted and terminate. This implements the "race" or "hedge" pattern: submit the same request to two or more backends, accept the fastest successful response, cancel the rest. Use cases: CDN failover, primary vs read-replica queries, A/B latency comparison. If every subtask fails, `join()` throws `ExecutionException` with one of the failures as its cause; if nothing was forked, `ExecutionException` with `NoSuchElementException` as its cause. Java 25 LTS spells this joiner `anySuccessfulResultOrThrow()` and throws `FailedException` instead. Unlike `CompletableFuture.anyOf()`, losers are guaranteed to be cancelled and no thread resources leak. Because the whole API is still preview, joiner names and signatures move between releases, build against one JDK feature release at a time and re-check the joiners when you upgrade.
 
 **Q9: Can virtual threads improve CPU-bound throughput?**
 **Short:** Virtual threads cannot improve CPU-bound throughput, since the bottleneck there is CPU cores rather than threads waiting on I/O.
@@ -731,7 +734,7 @@ The recognisable shape is a service whose throughput flatlines at exactly `carri
 
 **Q15: How do you set a timeout on a `StructuredTaskScope`?**
 **Short:** A StructuredTaskScope timeout is set on the scope's configuration via withTimeout(), not on the join() call itself.
-The timeout belongs to the scope's configuration, not to the `join()` call. Open the scope with the three-argument `open(Joiner, UnaryOperator<Configuration>)` and set `withTimeout(Duration)`; the clock starts when the scope is opened, and if it expires before or during `join()` the scope is cancelled — every unfinished subtask is interrupted. What happens next is the joiner's decision, via its `onTimeout()` method. The default is to throw `TimeoutException`, which is what `allSuccessfulOrThrow()`, `awaitAll()` and `anySuccessfulResultOrThrow()` all do. `allUntil(Predicate)` overrides it to do nothing, so `join()` returns the full subtask list instead and the ones that did not finish are in state `UNAVAILABLE` — this is the shape to use when a partial result is still useful.
+The timeout belongs to the scope's configuration, not to the `join()` call. Open the scope with `open(Joiner, UnaryOperator<Configuration>)`, or `open(UnaryOperator<Configuration>)` for the default policy (JDK 27), and set `withTimeout(Duration)`; the clock starts when the scope is opened, and if it expires before or during `join()` the scope is cancelled and every unfinished subtask is interrupted. What happens next is the joiner's decision, via its `timeout()` method (JDK 27, JEP 533; JDK 26 calls it `onTimeout()`, and JDK 25 has no hook, so `join()` throws `TimeoutException`). `allSuccessfulOrThrow()`, `awaitAllSuccessfulOrThrow()`, and `anySuccessfulOrThrow()` make `join()` throw `ExecutionException` with a `CancelledByTimeoutException` as its cause. `allUntil(Predicate)` does not throw, so `join()` returns the full subtask list instead and the ones that did not finish are in state `UNAVAILABLE`: this is the shape to use when a partial result is still useful.
 
 ```java
 List<String> collectWithin(List<Callable<String>> tasks, Duration budget)
@@ -808,7 +811,7 @@ Mono<SearchResult> search(SearchRequest req) {
 SearchResult search(SearchRequest req) throws InterruptedException {
     List<AirlineResponse> responses = new ArrayList<>();
 
-    // allUntil() never cancels early and its onTimeout() does not throw, so join()
+    // allUntil() never cancels early and its timeout() does not throw, so join()
     // returns at the 3s deadline with whatever finished; the rest are UNAVAILABLE.
     try (var scope = StructuredTaskScope.open(
             Joiner.<AirlineResponse>allUntil(subtask -> false),

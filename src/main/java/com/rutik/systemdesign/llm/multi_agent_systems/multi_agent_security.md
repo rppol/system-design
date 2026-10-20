@@ -761,7 +761,7 @@ attacker's control) gets the *appearance* of robustness from majority voting wit
 | **Pydantic / schema validation** | Enforces structured, field-separated inter-agent messages (§6.2) — data fields vs. absent "instruction" fields |
 | **A2A JWT signing** ([Agent-to-Agent Protocols §6.2](agent_to_agent_protocols.md)) | Message authentication (§3.7) — necessary but not sufficient (§8) |
 | **OpenTelemetry for LLM Apps** ([cross_cutting](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md)) | Cross-agent tracing (§10.4) — reconstructing propagation paths after an incident |
-| **Llama Guard / Rebuff** ([Safety & Alignment §11](../safety_and_alignment/safety_and_alignment.md)) | Pattern-based injection detection — applicable to §6.3's output-scanning layer |
+| **Llama Guard / Llama Prompt Guard 2** ([Safety & Alignment §11](../safety_and_alignment/safety_and_alignment.md)) | Classifier-based injection detection, applicable to §6.3's output-scanning layer |
 | **Garak** ([Automated Jailbreak Algorithms §11](../safety_and_alignment/automated_jailbreak_algorithms.md)) | Vulnerability scanning, extendable to multi-agent injection-propagation probes |
 
 ---

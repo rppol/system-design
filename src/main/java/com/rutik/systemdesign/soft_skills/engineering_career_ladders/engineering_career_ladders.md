@@ -95,16 +95,7 @@ None of these numbers are interchangeable across rows in a strict sense — see 
 
 **Why "archived" ladders still get cited.** Rent the Runway's original hosting is gone and Dropbox's is stale, yet both still appear in nearly every serious survey of the field, including this one. The reason is that a ladder's *language* — the specific way it phrases a scope statement — tends to get copied, adapted, and re-used by later companies long after the source document itself stops being maintained; Artsy's public ladder states outright that it was inspired by Rent the Runway's. Citing an archived ladder isn't citing current company practice at that specific company — it's citing the vocabulary that shaped several ladders that came after it.
 
-**Distribution, not just definition, matters when reading a grid.** A ladder document tells you what a level *means*; it says nothing about how many people actually hold it. Amazon is a instructive case: the company is reported to have fewer than roughly 2,000 Principal Engineers (L7) globally against a workforce of hundreds of thousands, with the large majority of engineers sitting at L4 or L5 — L6 (Senior SDE) is already a genuine career milestone, not a default outcome of tenure. Reading a grid without also asking "what fraction of engineers here actually reach this rung" produces an unrealistic sense of how fast the top of any of these ladders is supposed to move.
-
-### 4.4 Startups and the informal ladder
-
-Most companies below roughly 50–100 engineers don't run anything resembling the calibration process in §6 — level and title are usually a founder's or an early-hire's judgment call, applied inconsistently as the team grows. This produces two recurring, predictable distortions worth naming explicitly:
-
-- **Title creep with tenure, not scope.** An early engineer's title tends to rise with how long they've been there and how much the founders trust them personally, which correlates with scope but isn't the same thing — someone can hold a "Staff" or "Principal" title mostly because they were employee #3, not because a calibration process ever checked their evidence against a scope statement.
-- **Compressed ladders.** A 30-person startup often has no meaningful room between "the person who built most of this" and "everyone else," so titles jump straight from mid-level language to Staff or Principal with nothing in between — not because the scope gap is smaller, but because there's no population of engineers at the intervening levels to calibrate against.
-
-Neither distortion is dishonest on the founders' part — it's a structural consequence of not yet having the volume of comparable packets a real calibration process (§6) requires. The practical implication for reading a startup title, covered from the candidate's side in §7 and §12, is the same throughout this module: ask for the scope statement, not the label.
+**Distribution, not just definition, matters when reading a grid.** A ladder document tells you what a level *means*; it says nothing about how many people actually hold it. Amazon is an instructive case: the company is reported to have fewer than roughly 2,000 Principal Engineers (L7) globally against a workforce of hundreds of thousands, with the large majority of engineers sitting at L4 or L5 — L6 (Senior SDE) is already a genuine career milestone, not a default outcome of tenure. Reading a grid without also asking "what fraction of engineers here actually reach this rung" produces an unrealistic sense of how fast the top of any of these ladders is supposed to move.
 
 ### 4.3 What "Senior" actually measures, regardless of the word
 
@@ -129,6 +120,15 @@ Every row above, and every ladder in §4.1, is a different vocabulary wrapped ar
 | "trusted to represent the team externally" | Autonomy, often bundled with scope at Staff+ |
 
 Reading a new ladder is largely pattern-matching its specific phrasing against a table like this one — the exact words vary, but the underlying axis they're gesturing at rarely does.
+
+### 4.4 Startups and the informal ladder
+
+Most companies below roughly 50–100 engineers don't run anything resembling the calibration process in §6 — level and title are usually a founder's or an early-hire's judgment call, applied inconsistently as the team grows. This produces two recurring, predictable distortions worth naming explicitly:
+
+- **Title creep with tenure, not scope.** An early engineer's title tends to rise with how long they've been there and how much the founders trust them personally, which correlates with scope but isn't the same thing — someone can hold a "Staff" or "Principal" title mostly because they were employee #3, not because a calibration process ever checked their evidence against a scope statement.
+- **Compressed ladders.** A 30-person startup often has no meaningful room between "the person who built most of this" and "everyone else," so titles jump straight from mid-level language to Staff or Principal with nothing in between — not because the scope gap is smaller, but because there's no population of engineers at the intervening levels to calibrate against.
+
+Neither distortion is dishonest on the founders' part — it's a structural consequence of not yet having the volume of comparable packets a real calibration process (§6) requires. The practical implication for reading a startup title, covered from the candidate's side in §7 and §12, is the same throughout this module: ask for the scope statement, not the label.
 
 ---
 
@@ -249,6 +249,15 @@ stateDiagram-v2
     Calibrated --> Returned: one axis falls short
     Returned --> Drafted: next cycle, with the named gap addressed
     Approved --> [*]
+
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    class Nominated,Drafted info
+    class Calibrated warn
+    class Approved good
+    class Returned bad
 ```
 
 The state most packets actually die in is `Calibrated -> Returned`, not `Drafted` — which is exactly why step 2 (writing the evidence in the ladder's own axis language before it ever reaches the committee) is the highest-leverage place to invest effort, not the committee meeting itself.

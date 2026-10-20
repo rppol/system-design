@@ -80,8 +80,10 @@ helps, but the N+1 and query-cost problems are *yours* to manage.
    pass into a single backend call.
 
 5. **One endpoint, many operations.** All queries/mutations go to one HTTP endpoint;
-   subscriptions use a streaming transport (WebSocket/SSE). HTTP status is almost
-   always 200 — errors live in the response body's `errors` array.
+   subscriptions use a streaming transport (WebSocket/SSE). Once a document parses and
+   validates, the HTTP status is 200 and execution errors live in the body's `errors`
+   array; under the GraphQL-over-HTTP media type a document that fails to parse or
+   validate gets a 4xx instead.
 
 6. **Guard query cost.** An open query language invites expensive or malicious queries;
    depth/complexity limits and pagination are first-class concerns, not afterthoughts.
@@ -113,7 +115,17 @@ helps, but the N+1 and query-cost problems are *yours* to manage.
 | Operation | Transport | Spring support |
 |-----------|-----------|----------------|
 | Query / Mutation | HTTP `POST /graphql` | WebMVC or WebFlux |
-| Subscription | WebSocket (`graphql-ws`) or SSE | WebFlux-based; `Flux` return |
+| Subscription | WebSocket (`graphql-ws`) or SSE | WebMVC or WebFlux (`GraphQlWebSocketHandler` has both variants); `Flux` return |
+
+HTTP responses follow the [GraphQL over HTTP](https://github.com/graphql/graphql-over-http/blob/main/spec/GraphQLOverHTTP.md)
+spec. `application/graphql-response+json` is the default when the client states no
+preference; a client can still ask for the legacy `application/json`:
+
+| Outcome | `application/graphql-response+json` | `application/json` |
+|---------|-------------------------------------|--------------------|
+| Body is not valid JSON, credentials missing, server down | 4xx/5xx | 4xx/5xx |
+| Document fails to parse or validate (unknown field, bad syntax) | 4xx, `errors` in body, no `data` | 200, `errors` in body |
+| Validated; some resolvers fail | 200, partial `data` + `errors` | 200, partial `data` + `errors` |
 
 ### Pagination
 
@@ -332,8 +344,13 @@ Window<Book> books(ScrollSubrange subrange) {       // Spring Data Window/Scroll
 
 ### 6.6 Error handling
 
-GraphQL returns HTTP 200 even on errors; failures go into the `errors` array. Spring
-lets you translate exceptions to typed `GraphQLError`s:
+A request that parses and validates returns HTTP 200 whatever its resolvers do; field
+failures go into the `errors` array next to the partial `data`. Request-level failures are
+different: with the `application/graphql-response+json` media type (the default), a
+document that fails to parse or validate returns a 4xx, while legacy `application/json`
+returns 200 for the same request. Clients therefore need both checks: the HTTP status for
+request errors, and the `errors` array for execution errors. Spring lets you translate
+resolver exceptions to typed `GraphQLError`s:
 
 ```java
 @ControllerAdvice
@@ -389,7 +406,8 @@ is describing what the reporter wanted, not something that ships — write the
 
 **Spring for GraphQL does not implement federation.** It integrates the external
 [`apollographql/federation-jvm`](https://github.com/apollographql/federation-jvm) library
-(Maven: `com.apollographql.federation:federation-graphql-java-support:5.4.0`). A reader
+(Maven: `com.apollographql.federation:federation-graphql-java-support:6.0.0`, the line
+built on graphql-java 25 that Spring for GraphQL 2.0 uses; 7.0.0 targets graphql-java 26). A reader
 who assumes federation is built in will scaffold a subgraph service and find nothing
 there to compose a supergraph from — the wiring below is required.
 
@@ -473,7 +491,7 @@ federation subgraph. Source: <https://docs.spring.io/spring-graphql/reference/fe
 | N+1 risk | High (default) — needs DataLoader | Lower (you control the query) |
 | Query cost control | Your responsibility (depth/complexity limits) | Bounded by endpoint design |
 | File upload / binary | Awkward | Natural |
-| Error semantics | 200 + `errors` array | HTTP status codes |
+| Error semantics | 4xx for unparseable/invalid documents (`graphql-response+json`); 200 + `errors` array once validated | HTTP status codes |
 
 | N+1 fix | Pros | Cons |
 |---------|------|------|
@@ -516,9 +534,13 @@ requirement; REST wins when *simplicity and cacheability* dominate.
    trivial DoS. *Fix:* configure `maxQueryDepth` and complexity instrumentation; reject
    over-budget queries.
 
-3. **Assuming HTTP status reflects success.** GraphQL returns 200 even when fields fail;
-   clients that check only HTTP status miss errors in the `errors` array. *Fix:* always
-   parse `errors`; map domain exceptions to meaningful `GraphQLError` types.
+3. **Assuming HTTP status reflects success.** A validated GraphQL request returns 200 even
+   when fields fail; clients that check only HTTP status miss errors in the `errors` array.
+   The reverse also bites: a client written for "always 200" treats the 4xx that
+   `application/graphql-response+json` returns for an invalid document as a transport
+   failure and retries it. *Fix:* parse `errors` on every response, treat a 4xx with a
+   GraphQL body as a non-retryable request error, and map domain exceptions to meaningful
+   `GraphQLError` types.
 
 4. **Forgetting caching is different.** Teams expect REST-style HTTP caching and find
    POST queries uncacheable. *Fix:* use persisted queries (GET + hash), field-level
@@ -600,15 +622,22 @@ is the low-boilerplate way to batch; explicit `DataLoader` + `@SchemaMapping` gi
 finer control over keys and caching.
 
 **Q: Why does GraphQL usually return HTTP 200 even on errors, and how do you handle errors properly?**
-**Short:** A response can partially succeed, so errors are returned in a top-level errors array alongside whatever data resolved.
+**Short:** Once a request validates it can partially succeed, so execution errors go in a top-level errors array beside the resolved data, with HTTP 200.
 
-Because a GraphQL response can be *partially* successful — some fields resolve while
-others fail — so a single HTTP status cannot express the result; instead errors are
-returned in a top-level `errors` array alongside whatever `data` resolved. You handle
+Because a validated GraphQL response can be *partially* successful, with some fields
+resolving while others fail, a single HTTP status cannot express the result; instead errors are
+returned in a top-level `errors` array alongside whatever `data` resolved. That 200 applies
+only after validation: under the GraphQL-over-HTTP media type a document that fails to
+parse or validate gets a 4xx. You handle
 them by always parsing `errors` on the client, and on the server by mapping domain
 exceptions to typed `GraphQLError`s (via `@GraphQlExceptionHandler`/`DataFetcherExceptionResolver`)
 with meaningful error types and extensions; unhandled exceptions become an opaque
 `INTERNAL_ERROR`, so explicit mapping is required for usable error semantics.
+
+**Q: A client sends a query with a misspelled field to a Spring for GraphQL endpoint and gets HTTP 400 instead of 200. Is that a bug?**
+**Short:** No; with application/graphql-response+json, the default media type, a document that fails parsing or validation returns 4xx, while legacy application/json returns 200.
+
+No. Spring for GraphQL implements the GraphQL over HTTP specification. When the client accepts `application/graphql-response+json`, or states no preference, which makes it the default, a request whose document cannot be parsed or fails validation (an unknown field, a wrong argument type) is rejected with a 4xx status and the reasons in the body's `errors` array, with no `data`. A client that sends `Accept: application/json` gets the legacy behavior: 200 with the same `errors`. Once the document validates, both media types return 200 and report resolver failures in `errors` beside partial `data`. Client code should treat a 4xx carrying a GraphQL body as a permanent request error (fix the query, do not retry), and keep reading `errors` on 200 responses.
 
 **Q: How do GraphQL subscriptions work and what transport do they use?**
 **Short:** Subscriptions push events over a persistent transport like WebSocket, since request/response HTTP cannot stream.
@@ -759,7 +788,8 @@ data.
 - **Enforce query depth and complexity limits** on any non-trivial (especially public)
   API — it is your DoS guard.
 - **Map domain exceptions to typed `GraphQLError`s**; never leak raw exceptions, and
-  remember responses are HTTP 200 with errors in the body.
+  remember validated requests return HTTP 200 with errors in the body, while invalid
+  documents return 4xx under `application/graphql-response+json`.
 - **Use cursor-based (Relay Connection) pagination**, not deep offsets.
 - **Plan caching deliberately** — persisted queries, field/entity caching — because
   HTTP caching does not come for free.

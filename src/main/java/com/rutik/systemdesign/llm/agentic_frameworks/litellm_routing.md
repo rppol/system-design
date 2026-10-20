@@ -40,7 +40,7 @@ For running a gateway such as LiteLLM as a production service with its own confi
 
 ### 4.1 SDK (Python Library)
 
-`from litellm import completion` then `completion(model="claude-sonnet-5", ...)`. For simple provider swap.
+`from litellm import completion` then `completion(model="claude-sonnet-5-5", ...)`. For simple provider swap.
 
 ### 4.2 Proxy Server (Production)
 
@@ -107,7 +107,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    REQ["Request\nmodel='claude-sonnet-5'"]
+    REQ["Request\nmodel='claude-sonnet-5-5'"]
     RTR["Router\nprimary = anthropic-direct"]
     A1["Attempt 1\nanthropic-direct"]
     A2["Attempt 2\nbedrock-claude (same model)"]
@@ -185,7 +185,7 @@ tune first.
 ```
 Virtual key sk-team-billing-abc123:
   - max_budget: $500/month
-  - models: [claude-sonnet-5, gpt-4o]
+  - models: [claude-sonnet-5-5, gpt-4o]
   - tpm: 100,000 | rpm: 1,000
   - team_id: billing | expires: 2025-12-31
 
@@ -201,14 +201,14 @@ If budget exceeded → 429 returned to client
 
 ```yaml
 model_list:
-  - model_name: claude-sonnet-5
+  - model_name: claude-sonnet-5-5
     litellm_params:
       model: anthropic/claude-sonnet-4-20250514
       api_key: os.environ/ANTHROPIC_API_KEY
       rpm: 1000
       tpm: 100000
   
-  - model_name: claude-sonnet-5   # Same alias, different deployment
+  - model_name: claude-sonnet-5-5   # Same alias, different deployment
     litellm_params:
       model: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
       aws_region_name: us-east-1
@@ -233,9 +233,9 @@ router_settings:
   num_retries: 3
   timeout: 60
   fallbacks:
-    - claude-sonnet-5: [gpt-4o]  # If all claude fail, try gpt-4o
+    - claude-sonnet-5-5: [gpt-4o]  # If all claude fail, try gpt-4o
   context_window_fallbacks:
-    - claude-sonnet-5: [claude-opus-5]  # If context too long, escalate
+    - gpt-4o: [claude-sonnet-5-5]  # 128K window too small: move to a 1M window
 
 litellm_settings:
   cache: true
@@ -278,7 +278,7 @@ resp = httpx.post(
     headers={"Authorization": f"Bearer {MASTER_KEY}"},
     json={
         "team_id": "billing",
-        "models": ["claude-sonnet-5", "gpt-4o"],
+        "models": ["claude-sonnet-5-5", "gpt-4o"],
         "max_budget": 500,
         "duration": "30d",
         "tpm_limit": 100_000,
@@ -300,7 +300,7 @@ client = openai.OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="claude-sonnet-5",  # LiteLLM routes to actual deployment
+    model="claude-sonnet-5-5",  # LiteLLM routes to actual deployment
     messages=[{"role": "user", "content": "Hello"}],
 )
 # Same code works for Claude, GPT-4o, Gemini — just change model
@@ -358,7 +358,7 @@ response = client.chat.completions.create(
 ```yaml
 # BROKEN: single provider; if Anthropic down, app down
 model_list:
-  - model_name: claude-sonnet-5
+  - model_name: claude-sonnet-5-5
     litellm_params:
       model: anthropic/claude-sonnet-4-20250514
 ```
@@ -366,13 +366,13 @@ model_list:
 ```yaml
 # FIXED: multiple deployments + fallback
 model_list:
-  - model_name: claude-sonnet-5
+  - model_name: claude-sonnet-5-5
     litellm_params: {model: anthropic/claude-sonnet-4-20250514}
-  - model_name: claude-sonnet-5
+  - model_name: claude-sonnet-5-5
     litellm_params: {model: bedrock/anthropic.claude-sonnet-4-...}
 router_settings:
   fallbacks:
-    - claude-sonnet-5: [gpt-4o]  # Cross-provider fallback
+    - claude-sonnet-5-5: [gpt-4o]  # Cross-provider fallback
 ```
 
 ### Pitfall 2: Semantic cache similarity threshold too low
@@ -421,7 +421,7 @@ Config specifies multiple deployments per model_name (e.g., Anthropic direct + B
 
 **Q: What is the difference between `fallbacks` and `context_window_fallbacks`?**
 **Short:** `fallbacks` fire on request errors after retries; `context_window_fallbacks` trigger only on overflow and route to a larger-window model.
-`fallbacks` fire on errors — 5xx, rate limits, timeouts — after retries across same-name deployments are exhausted; `context_window_fallbacks` fire only on context-window-exceeded errors and route to a larger-window model (e.g., `claude-sonnet-5: [claude-opus-5]` in the config above). The trap: with only `fallbacks` configured, an over-long prompt fails every deployment identically — each retry resends the same too-long prompt — burning all retries with zero chance of success. Configure both, and make sure context-window fallbacks point at models with genuinely larger windows, not just different providers.
+`fallbacks` fire on errors — 5xx, rate limits, timeouts — after retries across same-name deployments are exhausted; `context_window_fallbacks` fire only on context-window-exceeded errors and route to a larger-window model (e.g., `gpt-4o: [claude-sonnet-5-5]` in the config above, 128K to 1M tokens). The trap: with only `fallbacks` configured, an over-long prompt fails every deployment identically — each retry resends the same too-long prompt — burning all retries with zero chance of success. Configure both, and make sure context-window fallbacks point at models with genuinely larger windows, not just different providers.
 
 **Q: Can a team actually exceed its virtual key `max_budget`, and why?**
 **Short:** Yes, briefly -- budget checks happen before a call's real cost is known, so concurrent in-flight calls can all pass the check at once.

@@ -70,6 +70,17 @@ flowchart LR
 
 *Applications own their deployment environment, so pinning and committing the lock file buys reproducibility; libraries are consumed by many different resolvers, so a committed lock file would be ignored — or worse, mistaken for a hard requirement.*
 
+**Development-only dependencies** (test runners, linters, type checkers, docs builders) go in the `[dependency-groups]` table (PEP 735, Final 2024-10-10), not in `[project.optional-dependencies]`. The two tables look alike and mean different things:
+
+| | `[project.optional-dependencies]` (extras) | `[dependency-groups]` (PEP 735) |
+|---|---|---|
+| Who it is for | Users of the published package | People working on the repository |
+| In wheel/sdist metadata | Yes: `Provides-Extra` and `Requires-Dist: ...; extra == "x"` | No: backends MUST NOT write it |
+| Installs the project itself | Yes, `pip install "pkg[x]"` | No, a group is a plain list of requirements |
+| Install command | `pip install ".[x]"` | `uv sync --group x`, `pip install --group x` (pip 25.1+) |
+| Can include another | Only by self-reference `pkg[a]` | `{include-group = "test"}` |
+| Typical content | Optional features: `postgres`, `otel`, `standard` | `test`, `lint`, `docs`, `dev` |
+
 ### Build Distribution Types
 
 **Wheel** (`.whl`): A ZIP archive with a standardized naming convention. Pre-built — no compilation needed at install time. For pure Python packages the tag is `py3-none-any` (works on any platform). For C extension packages separate wheels exist per Python version and platform (e.g., `cp314-cp314-manylinux_2_28_x86_64.whl`). Install time: milliseconds.
@@ -191,7 +202,8 @@ version = "1.0.0"
 description = "Production FastAPI microservice"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "MIT" }
+license = "MIT"              # PEP 639 SPDX expression
+license-files = ["LICENSE"]
 authors = [{ name = "Rutik", email = "dev@example.com" }]
 
 # Direct runtime dependencies — loose lower bounds only
@@ -205,18 +217,22 @@ dependencies = [
     "httpx>=0.28.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "ruff>=0.16.4",
-    "mypy>=2.3.0",
-    "pre-commit>=4.6.0",
-]
+# PEP 735: local-only dependency sets, never written into the wheel's metadata
+[dependency-groups]
 test = [
     "pytest>=9.1.0",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
-    "httpx>=0.28.0",       # needed for TestClient
     "respx>=0.23.0",       # mock httpx calls
+]
+lint = [
+    "ruff>=0.16.4",
+    "mypy>=2.3.0",
+]
+dev = [
+    { include-group = "test" },
+    { include-group = "lint" },
+    "pre-commit>=4.6.0",
 ]
 
 [project.scripts]
@@ -267,11 +283,12 @@ plugins = ["pydantic.mypy"]
 module = ["asyncpg.*", "uvicorn.*"]
 ignore_missing_imports = true
 
-# pytest configuration
-[tool.pytest.ini_options]
+# pytest 9 native TOML table: list options are real TOML arrays
+[tool.pytest]
+strict = true                  # strict_config, strict_markers, strict_xfail, strict_parametrization_ids
 asyncio_mode = "auto"          # pytest-asyncio: all async tests run automatically
 testpaths = ["tests"]
-addopts = "--cov=src/myservice --cov-report=term-missing --cov-fail-under=80"
+addopts = ["--cov=src/myservice", "--cov-report=term-missing", "--cov-fail-under=80"]
 ```
 
 ### `uv` Usage in Practice
@@ -284,32 +301,87 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Add a dependency: updates pyproject.toml AND re-locks in one step
 uv add "fastapi>=0.140.0"
-uv add --optional dev ruff mypy pre-commit
+uv add --group test pytest pytest-asyncio   # writes [dependency-groups] test
+uv add --dev pre-commit                     # --dev is shorthand for --group dev
 
 # uv lock: (re)writes uv.lock from pyproject.toml — pinned, hashed,
-# resolved by uv's own SAT solver
+# resolved by uv's own SAT solver; dependency groups are locked too
 uv lock
 
-# uv sync: reads pyproject.toml + uv.lock and makes .venv/ match exactly
-uv sync --all-extras
+# uv sync: reads pyproject.toml + uv.lock and makes .venv/ match exactly.
+# The dev group is a default group, so a bare `uv sync` installs it.
+uv sync
+uv sync --locked --no-default-groups --group test   # CI test job: project + test only
+uv sync --locked --no-dev                           # production: runtime deps only
 
 # Run a script inside the project's venv without activating it
 uv run python src/myservice/main.py
 
 # Install/pin a specific Python version for the project
 uv python install 3.14
+uv python pin 3.14      # writes .python-version; uv 0.13+ otherwise downloads 3.15
 ```
 
 **pip-compatible interface — `uv pip ...`:** for producing a `requirements.txt`-shaped artifact for tools outside the uv ecosystem, or installing into an environment `uv` isn't managing as a project (see the multi-stage Docker build in §14, which installs into a plain target directory rather than a venv):
 
 ```bash
 uv venv .venv && source .venv/bin/activate
-uv pip install -e ".[dev,test]"
-uv pip compile pyproject.toml -o requirements.lock --all-extras
+uv pip install -e . --group dev
+uv pip compile pyproject.toml -o requirements.lock   # runtime deps only; groups are not included
 uv pip install -r requirements.lock
 ```
 
 `uv` maintains a global cache of downloaded wheels at `~/.cache/uv/`. Subsequent installs hard-link from this cache rather than re-downloading, making reinstalls nearly instant.
+
+### PEP 735 `[dependency-groups]`
+
+A dependency group is a named list of requirements that lives only in `pyproject.toml`. The build backend never copies it into the wheel or sdist, so a published package carries no `Provides-Extra: dev` and nobody can `pip install "myservice[dev]"`. PEP 735 was accepted on 2024-10-10 and is now a PyPA specification.
+
+```toml
+[dependency-groups]
+test = ["pytest>=9.1.0", "pytest-asyncio>=1.3.0"]
+lint = ["ruff>=0.16.4", "mypy>=2.3.0"]
+typing = [{ include-group = "lint" }, "types-requests"]
+dev = [{ include-group = "test" }, { include-group = "typing" }]
+```
+
+An entry is either a PEP 508 requirement string or a table with the single key `include-group`. Includes are expanded recursively, and tools report an include cycle as an error. A group does not install the project: it is the same as a `requirements.txt`, so a test job runs `uv sync --group test` (the project plus `test`) or `pip install -e . --group test`.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    pp(["pyproject.toml"]) --> deps("[project]<br/>dependencies")
+    pp --> extras("[project.optional-dependencies]")
+    pp --> groups("[dependency-groups]")
+    deps --> whl(["wheel METADATA<br/>Requires-Dist"])
+    extras --> whl
+    groups --> lock(["uv.lock / pylock.toml"])
+    groups -.->|"never"| whl
+
+    class pp io
+    class deps,extras mathOp
+    class groups train
+    class whl frozen
+    class lock train
+```
+
+*Runtime dependencies and extras are part of the published contract; groups reach only the lock file and the developer's environment.*
+
+Tool support:
+
+| Tool | Command | Version / note |
+|---|---|---|
+| `pip` | `pip install --group test` or `--group path/pyproject.toml:test` | pip 25.1 (2025-04-26) |
+| `uv` project | `uv add --group test pytest`, `uv sync --group test`, `--only-group`, `--all-groups`, `--no-group` | `--dev` is shorthand for `--group dev` |
+| `uv pip` | `uv pip install --group test`, `uv pip compile --group test` | present in the uv 0.12 CLI |
+| `pylock.toml` | Records groups so a consumer can select them | PEP 751 |
+
+`uv` treats `dev` as a default group: `uv sync` and `uv run` install it unless you pass `--no-dev` or `--no-default-groups`. Change the defaults with `[tool.uv] default-groups = ["dev", "docs"]` or `default-groups = "all"`. The legacy `[tool.uv] dev-dependencies` list is merged into `dev`; move its entries into `[dependency-groups] dev`.
 
 ### PEP 751 — the `pylock.toml` Interoperable Lock File
 
@@ -700,7 +772,7 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 
 **What the ratio does not tell you.** A `100x` resolve speedup does not make a cold install `100x` faster, because the network download is unchanged — `uv` cannot make PyPI's bytes arrive sooner. The wins compound only on the paths where the removed work dominated: parsing, solving, and copying. This is why the CI numbers in Section 14 quote a *warm cache* build; on a cold cache the download term reasserts itself and the gap narrows sharply.
 
-**FastAPI itself**: Uses `pyproject.toml` with `hatchling` as the build backend. Has separate optional dependency groups: `[all]`, `[dev]`, `[doc]`, `[test]`. Maintains type stubs and ships `py.typed` so IDE integrations provide full type inference for FastAPI applications.
+**FastAPI itself**: Uses `pyproject.toml` with `pdm-backend` as the build backend. Its extras (`standard`, `standard-no-fastapi-cloud-cli`, `opentelemetry`, `all`) are optional runtime features users install with `pip install "fastapi[standard]"`. Its contributor tooling lives in `[dependency-groups]`: `tests`, `docs`, `docs-tests`, and `translations`, with `dev` built from `{ include-group = "tests" }`, `{ include-group = "docs" }`, and `{ include-group = "translations" }` plus `playwright`, `prek`, and `zizmor` (pyproject.toml on `master`, read 2026-10-19). Ships `py.typed` so IDE integrations provide full type inference for FastAPI applications.
 
 **Pydantic**: Ships wheels for 24 platform/Python combinations on every release, built via `maturin` (Rust-backed build backend). Pure Python fallback available. Uses `ruff` for linting, `mypy` in strict mode for the entire codebase (100,000+ lines typed).
 
@@ -721,7 +793,7 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 | Python version management | No | `uv python install 3.14` | No (use pyenv) | No (use pyenv) |
 | Build backend | N/A (installer only) | N/A (uses any PEP 517 backend) | Custom (poetry-core) | hatchling |
 | Adoption | Universal (ships with CPython) | Very large and still growing | Large (data science) | Moderate |
-| PEP 621 compliance | N/A | Yes (reads standard `[project]`) | Partial (uses `[tool.poetry]`) | Yes |
+| PEP 621 compliance | N/A | Yes (reads standard `[project]`) | Yes since 2.0 (`[tool.poetry]` holds Poetry-only settings) | Yes |
 
 ### Wheel vs sdist
 
@@ -843,6 +915,10 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 
 **`pre-commit` hook version drift**: Specifying `rev: v0.15.0` for ruff in `.pre-commit-config.yaml` while developers run `ruff==0.16.0` locally causes inconsistent lint results. Run `pre-commit autoupdate` quarterly and pin the result.
 
+**Tool defaults that move under an unpinned project**: uv 0.13.0 (2026-10-09) made 3.15 the default stable Python, so `uv venv` or `uv python install` with no request and no `.python-version` downloads 3.15 when no compatible interpreter is installed. ruff 0.17.0 (same day) assumes Python 3.11 when neither `target-version` nor `requires-python` is set, which changes which `UP` (pyupgrade) fixes it offers. Set `requires-python` in `pyproject.toml` and commit `.python-version` (`uv python pin 3.14`), so a tool upgrade cannot change the target. A project built with the uv build backend and an upper bound such as `uv_build>=0.12,<0.13` must raise it (`uv_build>=0.13.0,<0.14`) to build with uv 0.13.
+
+**Dev tools declared as an extra**: `[project.optional-dependencies] dev = ["pytest", "ruff"]` is written into the wheel as `Provides-Extra: dev` plus one `Requires-Dist: ...; extra == "dev"` line per tool. Every user can now `pip install "yourlib[dev]"`, the extra becomes public API you cannot rename without breaking someone, and `uv pip compile --all-extras` for the production lock pulls `pytest` and `ruff` into the image. Move them to `[dependency-groups]`, which backends never publish.
+
 **Importing from `__future__` annotations incorrectly**: `from __future__ import annotations` turns every annotation into a string (deferred evaluation). This breaks `pydantic` v2 model field resolution when a referenced type is not yet importable at class-definition time, unless you call `model_rebuild()` once the type is in scope.
 
 ---
@@ -853,11 +929,11 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 |---|---|---|---|---|---|---|---|
 | `pip` | Installer | 1x (baseline) | No (use pip-tools) | No | No | No | Universal, ships with Python |
 | `uv` | Installer + resolver | 10-100x | `uv.lock` / `requirements.lock` | Yes (`uv venv`) | Yes (`uv publish`) | Yes (`uv python`) | Rust, 2023+, PEP 621 compliant |
-| `poetry` | All-in-one | 2-5x | `poetry.lock` | Yes | Yes | No | Custom `[tool.poetry]` table |
+| `poetry` | All-in-one | 2-5x | `poetry.lock` | Yes | Yes | No | Reads `[project]` since 2.0; `[tool.poetry]` for Poetry-only settings |
 | `hatch` | Build + env | Similar to pip | No | Yes (`hatch env`) | Yes | No | PEP 621 compliant, hatchling backend |
 | `pip-tools` | Lock file only | 1-2x | `requirements.txt` | No | No | No | `pip-compile` + `pip-sync` |
 | `ruff` | Lint + format | 10-100x vs flake8 | N/A | N/A | N/A | N/A | Rust, replaces flake8/black/isort |
-| `mypy` | Type checker | Moderate | N/A | N/A | N/A | N/A | Most established, daemon mode fast |
+| `mypy` | Type checker | Moderate | N/A | N/A | N/A | N/A | Most established; 2.0 turned on `--strict-bytes` by default, 2.4 (2026-10-01) defaults to the native parser and makes `-n auto` parallel checking stable |
 | `pyright` | Type checker | Fast | N/A | N/A | N/A | N/A | Microsoft, powers Pylance in VS Code |
 | `pre-commit` | Git hooks | N/A | N/A | N/A | N/A | N/A | Runs hooks on staged files |
 | `twine` | Publishing | N/A | N/A | N/A | Yes | N/A | Mature, works with any build system |
@@ -870,6 +946,16 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: Why put `pytest` and `ruff` in `[dependency-groups]` rather than a `dev` extra in `[project.optional-dependencies]`?**
+**Short:** Extras are published in the wheel's metadata and installable by every user; PEP 735 dependency groups stay local to the repository and are never published.
+
+An extra is part of the package's public metadata: the build backend writes `Provides-Extra: dev` and one `Requires-Dist: ...; extra == "dev"` line per tool into the wheel, so anyone can `pip install "yourlib[dev]"` and renaming the extra later breaks them. Installing an extra also installs the project itself, so a lint-only CI job pays for the full runtime dependency tree. A `[dependency-groups]` entry (PEP 735, accepted 2024-10-10) is a plain requirements list that backends MUST NOT publish, that can compose other groups with `{include-group = "test"}`, and that installs with `uv sync --group test` or `pip install --group test` (pip 25.1+). Keep extras for optional runtime features users choose, such as `fastapi[standard]`; put contributor tooling in groups.
+
+**Q: What does a bare `uv sync` install from `[dependency-groups]`, and how do you keep test tools out of a production image?**
+**Short:** uv sync installs the dev group by default; build the production environment with uv sync --locked --no-dev, or --no-default-groups when other groups are defaults.
+
+`uv` special-cases the group named `dev` as a default group, so `uv sync` and `uv run` install it along with the project unless told otherwise; `[tool.uv] default-groups` changes that list, and `default-groups = "all"` makes every group a default. A Dockerfile that copies the project and runs `uv sync --locked` therefore ships `pytest`, `ruff`, and everything `dev` includes. Use `uv sync --locked --no-dev` in the production stage (or `--no-default-groups` if you added more defaults), and `uv sync --locked --no-default-groups --group test` in a CI test job so it gets the project plus the test group only. `--locked` makes the command fail instead of silently re-locking when `uv.lock` is out of date with `pyproject.toml`.
 
 **Q1: What problem does `pyproject.toml` solve, and which PEPs define it?**
 **Short:** pyproject.toml replaces setup.py and scattered config files with one declarative file standardized by PEP 517, 518, and 621.
@@ -919,7 +1005,7 @@ A library (published to PyPI) is consumed by many different applications, each w
 **Q10: How do you set up a full dependency resolution and lock workflow with `uv`?**
 **Short:** uv lock writes a hashed, SAT-resolved uv.lock from pyproject.toml, and uv sync installs exactly that pin set.
 
-Declare direct dependencies with `uv add` (which updates `pyproject.toml` and re-locks in the same step) or hand-edit `[project.dependencies]` with loose lower bounds. Run `uv lock` to (re)write `uv.lock` — a fully pinned, cross-platform, SHA-256-hashed lock file resolved by uv's own SAT solver — and commit it to the repository. In CI and Docker, run `uv sync --all-extras`, which reads `pyproject.toml` and `uv.lock` and makes the environment match exactly, adding and removing packages as needed rather than just layering installs on top of whatever was already there. For a `requirements.txt`-shaped artifact instead — handing a lock to a tool outside the uv ecosystem — use the pip-compatible interface: `uv pip compile pyproject.toml --all-extras --generate-hashes -o requirements.lock`, then `uv pip install --require-hashes -r requirements.lock` to install with hash verification and block supply-chain tampering.
+Declare direct dependencies with `uv add` (which updates `pyproject.toml` and re-locks in the same step) or hand-edit `[project.dependencies]` with loose lower bounds. Run `uv lock` to (re)write `uv.lock`, a fully pinned, cross-platform, SHA-256-hashed lock file resolved by uv's own SAT solver, and commit it to the repository. In CI, run `uv sync --locked`, which reads `pyproject.toml` and `uv.lock`, fails if the lock is stale, and makes the environment match exactly, adding and removing packages as needed rather than just layering installs on top of whatever was already there; it installs the `dev` dependency group by default, and `uv sync --locked --no-dev` gives a production environment with runtime dependencies only. To hand a lock to a tool outside the uv ecosystem as a `requirements.txt`-shaped artifact, use the pip-compatible interface: `uv pip compile pyproject.toml --generate-hashes -o requirements.lock`, then `uv pip install --require-hashes -r requirements.lock` to install with hash verification and block supply-chain tampering.
 
 **Q11: What is the src layout and why is it preferred over a flat layout?**
 **Short:** The src layout keeps the local directory off sys.path during tests, forcing an installed package so tests match production.
@@ -994,7 +1080,7 @@ Entry points are for plugins that ship as separate installable packages — anyt
 - **Separate direct and transitive dependency concerns**: Do not manually pin transitive dependencies in `pyproject.toml`. Let the resolver handle them via the lock file.
 - **Use `ruff` with the `UP` (pyupgrade) rule set**: It automatically modernizes syntax (e.g., `Optional[str]` → `str | None`, `Dict[str, Any]` → `dict[str, Any]`) for Python 3.10+ targets.
 - **Test wheel installation in CI**: Add a CI step that installs the built wheel in a fresh virtualenv and runs a smoke test (`python -c "import mypackage; print(mypackage.__version__)"`) before publishing.
-- **Use `[project.optional-dependencies]` groups**: Keep dev and test dependencies separate from runtime dependencies. CI test jobs install `.[test]`; developers install `.[dev,test]`.
+- **Put dev and test tools in `[dependency-groups]`, not extras**: Groups (PEP 735) stay out of the published metadata. Developers run `uv sync` (the `dev` group is a default), CI test jobs run `uv sync --locked --no-default-groups --group test`, and the production image installs with `--no-dev`. Keep `[project.optional-dependencies]` for optional runtime features users opt into, such as `postgres` or `otel`.
 - **Validate `pyproject.toml` in CI**: Run `python -m build --dry-run` or `hatch build --clean` to verify the build configuration before attempting a release.
 - **Set `requires-python` precisely**: `requires-python = ">=3.13"` prevents accidental installation on Python 3.12, where PEP 696 type-parameter defaults (`class Box[T = int]`) are a syntax error.
 
@@ -1052,15 +1138,15 @@ dependencies = [
     "structlog>=24.1.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 test = [
     "pytest>=9.1.0",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
-    "httpx>=0.28.0",
     "respx>=0.23.0",
 ]
 dev = [
+    { include-group = "test" },
     "ruff>=0.16.4",
     "mypy>=2.3.0",
     "pre-commit>=4.6.0",
@@ -1086,10 +1172,11 @@ plugins = ["pydantic.mypy"]
 module = ["uvicorn.*", "structlog.*"]
 ignore_missing_imports = true
 
-[tool.pytest.ini_options]
+[tool.pytest]
+strict = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=src/payment_service --cov-report=term-missing --cov-fail-under=85"
+addopts = ["--cov=src/payment_service", "--cov-report=term-missing", "--cov-fail-under=85"]
 ```
 
 **`Makefile`**:
@@ -1098,9 +1185,8 @@ addopts = "--cov=src/payment_service --cov-report=term-missing --cov-fail-under=
 .PHONY: install lint test build clean
 
 install:
-	uv venv .venv
-	uv pip install -e ".[dev,test]"
-	pre-commit install
+	uv sync
+	uv run pre-commit install
 
 lint:
 	ruff check src/ tests/
@@ -1118,7 +1204,8 @@ build:
 	python -m build
 
 lock:
-	uv pip compile pyproject.toml --all-extras -o requirements.lock
+	uv lock
+	uv pip compile pyproject.toml --generate-hashes -o requirements.lock
 
 clean:
 	rm -rf dist/ .venv/ .mypy_cache/ .ruff_cache/ .pytest_cache/
@@ -1149,7 +1236,6 @@ starlette==1.3.1
 ```bash
 # FIX: generate a proper lock file from pyproject.toml
 uv pip compile pyproject.toml \
-    --all-extras \
     --generate-hashes \
     --output-file requirements.lock
 
@@ -1167,7 +1253,7 @@ uv pip install --require-hashes -r requirements.lock
 
 # Update a single package when a security patch is released:
 uv pip compile --upgrade-package httpx pyproject.toml \
-    --all-extras --generate-hashes -o requirements.lock
+    --generate-hashes -o requirements.lock
 ```
 
 **Multi-stage `Dockerfile` using `uv`**:

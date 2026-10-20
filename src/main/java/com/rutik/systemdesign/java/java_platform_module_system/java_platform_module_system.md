@@ -389,6 +389,25 @@ module com.acme.orders {
 java --add-opens com.acme.orders/com.acme.orders.dto=com.fasterxml.jackson.databind -jar app.jar
 ```
 
+### Final-Field Mutation Needs a Third Grant (JEP 500, JDK 26)
+
+`opens` makes `setAccessible(true)` succeed, but from JDK 26 it no longer makes writing a `final` field through `Field.set` silent. JEP 500 adds a third condition: final field mutation must be enabled for the caller's module, the module whose code calls `Field.set` or `Lookup.unreflectSetter`, wherever the field is declared.
+
+| Condition | Grant | Applies to |
+|---|---|---|
+| Package exported to the caller | `exports` / `--add-exports` | Compile-time and public-member access |
+| Package open to the caller | `opens` / `--add-opens` | `setAccessible(true)` on non-public members |
+| Final-field mutation enabled for the caller | `--enable-final-field-mutation=M1,M2` or `=ALL-UNNAMED`; JAR manifest `Enable-Final-Field-Mutation: ALL-UNNAMED` | `Field.set` on a non-static `final` field |
+
+`--illegal-final-field-mutation` sets what happens when the third grant is missing: `allow`, `warn` (the JDK 26 default, at most one stderr warning per caller module), `debug` (warning plus a stack trace), or `deny` (`Field.set` throws `IllegalAccessException`). The JEP states that `deny` becomes the default in a later release. Class-path code is caught too: it lives in the unnamed module, needs no `--add-opens` to reflect into itself, and still warns until `ALL-UNNAMED` is enabled. Static final fields and the final fields of records and hidden classes were never settable through `Field.set`, so they are unchanged. A serialization library that builds `Serializable` objects through `sun.reflect.ReflectionFactory` needs no grant.
+
+```bash
+# Find every caller that writes a final field, then grant only those modules
+java -XX:StartFlightRecording:filename=ffm.jfr --illegal-final-field-mutation=debug -jar app.jar
+jfr print --events jdk.FinalFieldMutation ffm.jfr
+java --enable-final-field-mutation=com.acme.di -jar app.jar
+```
+
 ### Broken -> Fix: Split Package at Module-Graph Resolution
 
 ```java
@@ -463,6 +482,9 @@ A reporting service's PDF-export plugin was implemented as a separate module dis
 ### War Story 4: Automatic-module name churn broke eleven `requires` statements at once
 A team wrote `requires jackson.databind;` against Jackson's auto-derived automatic-module name (from `jackson-databind-2.9.x.jar`, before it shipped an `Automatic-Module-Name` header). When the team later upgraded to a Jackson release that shipped a real `module-info.java` naming itself `com.fasterxml.jackson.databind`, every `requires jackson.databind;` statement across 11 internal modules broke simultaneously with "module not found" at compile time. A one-line manifest attribute published a release earlier would have prevented the entire incident, because the interim automatic name would already have matched the destination name.
 
+### Pitfall: Frameworks that write `final` fields warn on JDK 26 and break under `deny`
+Dependency-injection containers that inject into `final` fields, test helpers that overwrite a `final` field, and object mappers that bind JSON into `final` fields without a creator constructor all call `Field.set` on a final field. On JDK 26 each such caller module prints one `WARNING: Final field f in p.C has been mutated` line, even when the package is already opened with `--add-opens`, and the same code throws `IllegalAccessException` once `--illegal-final-field-mutation=deny` applies. **Fix**: record `jdk.FinalFieldMutation` events in a JFR run of the test suite, move the flagged classes to constructor injection or creator-based binding, and add `--enable-final-field-mutation` only for the modules that cannot change yet.
+
 ---
 
 ## 11. Technologies & Tools
@@ -476,6 +498,7 @@ A team wrote `requires jackson.databind;` against Jackson's auto-derived automat
 | `jdeps` | Static dependency analyzer — module deps, JDK-internal API usage, `module-info` scaffolding |
 | `jmod` | Packaging format/tool for modules that carry native libraries or config, used as `jlink` input |
 | `--add-opens` / `--add-exports` / `--add-reads` | Command-line escape hatches granting reflection, accessibility, or readability without editing a module descriptor |
+| `--enable-final-field-mutation` / `--illegal-final-field-mutation` | JDK 26+: allow named caller modules (or `ALL-UNNAMED`) to write `final` fields through reflection, and choose `allow`/`warn`/`debug`/`deny` for the rest |
 | `--add-modules` / `--bind-services` | Force extra modules — or every discoverable service-provider module — into resolution or a `jlink` image |
 | `--patch-module` | Inject additional classes into an existing module (testing internals, patching) |
 | `ServiceLoader` | Runtime API that discovers `provides ... with` (or `META-INF/services`) implementations |
@@ -495,6 +518,11 @@ A team wrote `requires jackson.databind;` against Jackson's auto-derived automat
 **Short:** exports only covers public members, so reflection into private ones still needs a separate opens.
 
 Because `exports` only grants access to a package's public members, and `setAccessible(true)` is specifically the mechanism for reaching non-public members. The module system checks a separate permission for that operation — whether the target package is `opens`ed to the caller's module — and throws `InaccessibleObjectException` naming both modules and the package when it isn't. The fix is adding an `opens ... to` directive (or the command-line equivalent, `--add-opens`), never widening `exports`.
+
+**Q: On JDK 26, is `--add-opens` enough to let a framework set a `final` field through reflection?**
+**Short:** No. JEP 500 also requires --enable-final-field-mutation for the caller module; without it, JDK 26 warns and a deny setting throws IllegalAccessException.
+
+`--add-opens` (or `opens`) only makes `setAccessible(true)` succeed. JEP 500 in JDK 26 adds a separate check on `Field.set` for a non-static `final` field: final field mutation must be enabled for the module whose code performs the write, through `--enable-final-field-mutation=<modules>` or `ALL-UNNAMED` for class-path code. Without it, the default `--illegal-final-field-mutation=warn` prints one warning per caller module, and `deny`, which the JEP plans as a later default, makes `Field.set` throw `IllegalAccessException`. Find the callers with the `jdk.FinalFieldMutation` JFR event and prefer constructor injection over granting the flag.
 
 **Q: What is a split package, and why does JPMS forbid it outright?**
 **Short:** JPMS forbids split packages because a class's owning module would become ambiguous.

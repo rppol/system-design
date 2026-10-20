@@ -8,16 +8,16 @@ Semantic Kernel (SK) is Microsoft's enterprise-grade SDK for building AI applica
 
 Semantic Kernel is the foundation of Microsoft's Copilot Stack, powering GitHub Copilot, Microsoft 365 Copilot, and Bing Chat. This gives it production credibility at scale that few other frameworks match.
 
-**Semantic Kernel's successor is Microsoft Agent Framework 1.0**, which reached general availability on 2026-04-03 as the single, direct successor to both Semantic Kernel and AutoGen (docs: https://learn.microsoft.com/en-us/agent-framework/overview/). Microsoft describes it as combining Semantic Kernel's enterprise-grade plumbing — session-based state management, type safety, filters, telemetry, and broad model/embedding support — with AutoGen's simple agent abstractions, plus new graph-based workflows for explicit multi-agent orchestration. Semantic Kernel continues to receive updates but is no longer where new Microsoft-stack capability lands; Microsoft publishes a Semantic Kernel -> Agent Framework migration guide. This file now documents Semantic Kernel as **lineage**: the DI/plugin/planner/filter enterprise patterns that carried forward, and what breaks if you migrate an existing `semantic-kernel` 1.x codebase. For the sibling migration, see [AutoGen](autogen.md); for the underlying multi-agent orchestration ideas, see [Magentic-One and AutoGen v0.4](../multi_agent_systems/magentic_one_and_autogen_v04.md).
+**Semantic Kernel's successor is Microsoft Agent Framework 1.0**, which reached general availability on 2026-04-03 as the single, direct successor to both Semantic Kernel and AutoGen (docs: https://learn.microsoft.com/en-us/agent-framework/overview/). Microsoft describes it as combining Semantic Kernel's enterprise-grade plumbing — session-based state management, type safety, filters, telemetry, and broad model/embedding support — with AutoGen's simple agent abstractions, plus new graph-based workflows for explicit multi-agent orchestration. Semantic Kernel continues to receive updates but is no longer where new Microsoft-stack capability lands; Microsoft publishes a Semantic Kernel -> Agent Framework migration guide. This file now documents Semantic Kernel as **lineage**: the DI/plugin/filter enterprise patterns that carried forward, and what breaks if you migrate an existing `semantic-kernel` 1.x codebase. For the sibling migration, see [AutoGen](autogen.md); for the underlying multi-agent orchestration ideas, see [Magentic-One and AutoGen v0.4](../multi_agent_systems/magentic_one_and_autogen_v04.md).
 
-**Current version**: `semantic-kernel` 1.44.1 (Python; C# tracks its own 1.x line) — the last widely-used release line before the framework moved into Agent Framework
+**Current version**: `semantic-kernel` 1.45.0 (Python, 2026-10-06; C# tracks its own 1.x line) — the last widely-used release line before the framework moved into Agent Framework
 **Production adoption signal**: Powered GitHub Copilot Enterprise, Microsoft 365 Copilot, and Bing Chat integration historically. Salesforce used SK for Einstein AI. Thousands of enterprise deployments; new Microsoft-stack work should target Agent Framework instead.
 
 ---
 
 ## 2. Intuition
 
-**One-line analogy**: Semantic Kernel is like a Spring Boot application framework for AI — dependency injection, plugins (beans), planners (orchestrators), and enterprise patterns baked in.
+**One-line analogy**: Semantic Kernel is like a Spring Boot application framework for AI — dependency injection, plugins (beans), automatic function calling (the orchestrator), and enterprise patterns baked in.
 
 **Mental model**: In a Spring Boot app, you have beans (services), dependency injection, and configuration management. In Semantic Kernel: the `Kernel` is the DI container; plugins are the services (each with semantic functions and native functions); the Kernel invokes them via dependency injection. Enterprise developers adopt SK quickly because the patterns map directly to their existing knowledge.
 
@@ -33,9 +33,9 @@ Semantic Kernel is the foundation of Microsoft's Copilot Stack, powering GitHub 
 
 **Plugins**: The primary unit of capability. A plugin is a class or directory containing: semantic functions (prompt templates with input/output variables) and native functions (regular C#/Python/Java methods). Example: a `MathPlugin` with `Add(a, b)` (native) and `ExplainCalculation` (semantic).
 
-**Semantic functions vs native functions**: Semantic functions are prompt templates with variable substitution — `"Translate {{$text}} to {{$language}}"`. Native functions are regular programming language functions decorated to be SK-callable. Both types can be composed in planners.
+**Semantic functions vs native functions**: Semantic functions are prompt templates with variable substitution — `"Translate {{$text}} to {{$language}}"`. Native functions are regular programming language functions decorated to be SK-callable. Both types are exposed to the model as callable functions.
 
-**Planners**: Take a user goal and automatically decompose it into a sequence of plugin function calls. `SequentialPlanner` creates a step-by-step plan; `FunctionCallingStepwisePlanner` uses LLM function calling to dynamically generate and execute plans.
+**Planning through function calling**: SK plans multi-step tasks by letting the model call plugin functions in a loop. Set `FunctionChoiceBehavior.Auto()` on the execution settings and the kernel runs call, result, next call until the model answers. Microsoft deprecated the prompt-based Stepwise and Handlebars planners and removed them from SK in Python, .NET, and Java, so code that imports them fails on current releases.
 
 **Kernel filters**: Middleware that intercepts function invocations. Used for: logging every AI call, rate limiting, PII detection, cost tracking, and A/B testing prompt variants. This is the enterprise audit trail mechanism.
 
@@ -52,13 +52,13 @@ Semantic Kernel is the foundation of Microsoft's Copilot Stack, powering GitHub 
 | OpenAPI plugin | Imported from OpenAPI spec | REST API integration |
 | Copilot plugin | Compatible with Microsoft Copilot ecosystem | M365 integration |
 
-### Planner Types
+### Function Choice Behaviors
 
-| Planner | Strategy | Use Case |
+| Behavior | Strategy | Use Case |
 |---------|---------|---------|
-| `SequentialPlanner` | Creates a linear step-by-step plan | Known, predictable task structures |
-| `FunctionCallingStepwisePlanner` | Uses LLM function calling to plan dynamically | Complex, adaptive tasks |
-| `HandlebarsPlanner` | Template-based plan (Handlebars syntax) | Deterministic workflows with branching |
+| `FunctionChoiceBehavior.Auto()` | Model may call any advertised function; the kernel invokes it and loops | Multi-step tasks whose sequence is not known in advance |
+| `FunctionChoiceBehavior.Required()` | Model must call at least one advertised function | Forcing a lookup or a structured extraction |
+| `FunctionChoiceBehavior.NoneInvoke()` (C#: `None()`) | Functions are described to the model but never invoked | Asking the model what it would call, for review or tests |
 
 ### Memory and Context
 
@@ -93,9 +93,9 @@ flowchart LR
         plugins(["Plugins<br/>Math · Weather<br/>Database · Email"])
     end
 
-    planner(["Planner<br/>SequentialPlanner"])
+    planner(["Auto function calling<br/>FunctionChoiceBehavior.Auto()"])
     goal(["Goal:<br/>Write and email a report"])
-    plan(["Plan<br/>1. DraftReport - topic<br/>2. CalculateStats - data<br/>3. SendEmail - to, subject, body"])
+    plan(["Calls the model chose<br/>1. DraftReport - topic<br/>2. CalculateStats - data<br/>3. SendEmail - to, subject, body"])
 
     aiServices <--> kernelBox
     extFilters <--> kernelBox
@@ -354,27 +354,34 @@ response1 = await chat("What are the key features of Semantic Kernel?")
 response2 = await chat("Which of those features are most relevant for enterprise use?")
 ```
 
-### FunctionCallingStepwisePlanner
+### Multi-Step Planning with Automatic Function Calling
 
 ```python
-from semantic_kernel.planners import FunctionCallingStepwisePlanner
+from semantic_kernel.connectors.ai import FunctionChoiceBehavior
+from semantic_kernel.connectors.ai.chat_completion_client_base import ChatCompletionClientBase
+from semantic_kernel.connectors.ai.open_ai import AzureChatPromptExecutionSettings
+from semantic_kernel.contents import ChatHistory
 
-# Add plugins for the planner to use
 kernel.add_plugin(MathPlugin(), "Math")
 kernel.add_plugin(WeatherPlugin(), "Weather")
 kernel.add_plugin(EmailPlugin(), "Email")
 
-planner = FunctionCallingStepwisePlanner(service_id="gpt-4o")
+settings = AzureChatPromptExecutionSettings()
+settings.function_choice_behavior = FunctionChoiceBehavior.Auto()
 
-# Planner creates a plan, executes step by step
-result = await planner.invoke(
-    kernel,
+history = ChatHistory()
+history.add_user_message(
     "Get the weather in Seattle, calculate how many degrees that is above/below 70F, "
     "and email the result to weather@company.com"
 )
 
-print(result.final_answer)
-print(result.chat_history)  # see the step-by-step execution
+chat = kernel.get_service(type=ChatCompletionClientBase)
+result = await chat.get_chat_message_content(
+    chat_history=history, settings=settings, kernel=kernel,
+)
+
+print(result)
+print(history)  # every function call and result the loop added
 ```
 
 ### C# Example (Enterprise Pattern)
@@ -442,7 +449,7 @@ public class AIController : ControllerBase
 | OpenAPI plugin import | First-class | Manual | Manual |
 | Community/OSS ecosystem | Medium | Largest | Large |
 | Production examples | Microsoft scale | Many startups | Many startups |
-| Planner quality | Good | N/A (use LangGraph) | N/A |
+| Multi-step planning | Auto function-calling loop | Agent loop (`create_agent`) | Explicit graph |
 
 **When SK wins:**
 - .NET/C# enterprise shops
@@ -476,8 +483,8 @@ public class AIController : ControllerBase
 **Pitfall 1: Confusing semantic functions with native functions**
 Teams write everything as semantic functions (prompt templates) even for deterministic operations. Native functions are better for: math, date formatting, string manipulation, API calls. Semantic functions for everything inflates token usage and introduces non-determinism where determinism is needed.
 
-**Pitfall 2: Planner hallucination**
-`SequentialPlanner` uses the LLM to create a plan from plugin descriptions. If plugin descriptions are vague, the planner picks the wrong function or creates an invalid plan. Example: `description="process data"` is too vague — the planner may choose this for unrelated tasks. Requirement: every plugin function must have a specific, unique description: `"Calculate compound interest given principal, rate, and years"`.
+**Pitfall 2: Wrong function calls from vague descriptions**
+With automatic function calling the model picks functions from their descriptions alone. If descriptions are vague, it calls the wrong function or chains calls that make no sense. Example: `description="process data"` is too vague; the model may choose it for unrelated tasks. Requirement: every plugin function must have a specific, unique description: `"Calculate compound interest given principal, rate, and years"`.
 
 **Pitfall 3: Not using Kernel filters for security**
 Production SK deployments without filters have no audit trail. One enterprise customer deployed SK without filters, then had to reconstruct what happened in a compliance audit by querying LLM provider logs. Add `IFunctionInvocationFilter` on day 1 for logging; it takes 30 minutes and saves hours of post-incident forensics.
@@ -498,26 +505,26 @@ memory_store = AzureAISearchMemoryStore(
 )  # memories survive restarts, scale across replicas
 ```
 
-**Pitfall 5: Planner over-generation**
-`FunctionCallingStepwisePlanner` can generate 10+ step plans for simple tasks. Each step is an LLM call. A "summarize this document" task should be 1 step; the planner sometimes generates: translate → clean text → extract topics → format → summarize (5 steps × $0.005 = $0.025 per call). Use direct function invocation (`kernel.invoke(...)`) for known, simple tasks; reserve planners for genuinely complex multi-step coordination.
+**Pitfall 5: Over-decomposition under automatic function calling**
+With `FunctionChoiceBehavior.Auto()` and many plugins advertised, the model can chain 10+ function calls for a simple task. Each call is a model round trip. A "summarize this document" task should be 1 step; the loop sometimes runs: translate → clean text → extract topics → format → summarize (5 steps × $0.005 = $0.025 per call). Use direct function invocation (`kernel.invoke(...)`) for known, simple tasks, and advertise only the functions a task needs; reserve the auto-calling loop for genuinely open multi-step coordination.
 
-**Put simply.** "A planner charges you one LLM call per step it invents, plus one to invent them — so the cost of a task is decided by the model's imagination rather than by the task."
+**Put simply.** "An auto-calling loop charges you one model call per step it invents, plus one to write the answer, so the cost of a task is decided by the model's choices rather than by the task."
 
 | Symbol | What it is |
 |--------|------------|
-| `s` | Steps the planner generated — model-chosen, not specified by you |
+| `s` | Steps the model chained, model-chosen, not specified by you |
 | `p` | Cost per step, $0.005 at this model and prompt size |
 | `s x p` | Execution cost of the plan |
 | `s_min` | Steps the task actually required, 1 for "summarize this document" |
-| `kernel.invoke()` | Direct invocation — skips planning entirely, fixes `s` at 1 |
+| `kernel.invoke()` | Direct invocation, skips the auto-calling loop entirely, fixes `s` at 1 |
 
 **Walk one example.** The over-generated plan against the direct call:
 
 ```
-  planner path
+  auto-calling path
     translate + clean + extract + format + summarize   =  5 steps
     5 x $0.005                                         =  $0.025 per call
-    (plus the planning call itself, typically ~$0.005) =  $0.030
+    (plus the final answer turn, typically ~$0.005)    =  $0.030
 
   direct kernel.invoke() path
     1 x $0.005                                         =  $0.005
@@ -526,19 +533,19 @@ memory_store = AzureAISearchMemoryStore(
   waste       (0.025 - 0.005) / 0.025                  =  80%
 
   at 10,000 calls/day
-    planner    10,000 x $0.025                         =  $250 / day
+    auto loop  10,000 x $0.025                         =  $250 / day
     direct     10,000 x $0.005                         =  $ 50 / day
     annual difference  ($250 - $50) x 365              =  $73,000
 ```
 
 Four of those five steps do nothing a summarizer would not do internally — translating text
-that is already English, "cleaning" text that is already clean. The planner is not
-malfunctioning; it is doing what it was asked, which is to decompose. Decomposition applied
+that is already English, "cleaning" text that is already clean. The model is not
+malfunctioning; it was handed five tools and a goal, and it used them. Decomposition applied
 to a task that needs none is pure overhead, and at volume it is $73,000/year of it.
 
 **Why latency compounds the problem worse than cost.** The five steps run sequentially, each
 waiting on the last, so a 1.2s task becomes ~6s. Unlike the parallel tool case elsewhere in
-this section, planner steps are genuinely dependent — step 3 consumes step 2's output — so
+this section, these steps are genuinely dependent — step 3 consumes step 2's output — so
 there is no `max` to fall back to. You cannot parallelize your way out of an
 over-decomposed plan; you have to not generate it.
 
@@ -548,7 +555,7 @@ over-decomposed plan; you have to not generate it.
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `semantic-kernel` (Python) | Framework | `pip install semantic-kernel>=1.0` (current: 1.44.1) |
+| `semantic-kernel` (Python) | Framework | `pip install semantic-kernel>=1.0` (current: 1.45.0) |
 | `Microsoft.SemanticKernel` (NuGet) | Framework | C# package |
 | `agent-framework` (Python) | Successor | Microsoft Agent Framework 1.0 — where new Microsoft-stack agent work goes |
 | `Microsoft.Agents.AI` (NuGet) | Successor | Microsoft Agent Framework 1.0, C# package |
@@ -559,8 +566,9 @@ over-decomposed plan; you have to not generate it.
 **Version notes:**
 - SK 0.x (2023): preview, frequent breaking changes
 - SK 1.0.x (early 2024): stable API for C# and Python
-- SK 1.x Python (current: 1.44.1): `semantic_kernel.functions` module structure, async-first; 1.38+ adds `KernelFunction.as_agent_framework_tool()` for incremental migration
-- Microsoft Agent Framework 1.0 (2026-04-03): direct successor to both Semantic Kernel and AutoGen; no `Kernel` object, no planners — plain-function tools and graph-based Workflows
+- SK 1.x Python (current: 1.45.0): `semantic_kernel.functions` module structure, async-first; 1.38+ adds `KernelFunction.as_agent_framework_tool()` for incremental migration
+- Planners: the Stepwise and Handlebars planners are deprecated and removed in Python, .NET, and Java; planning is automatic function calling (`FunctionChoiceBehavior.Auto()`)
+- Microsoft Agent Framework 1.0 (2026-04-03): direct successor to both Semantic Kernel and AutoGen; no `Kernel` object, plain-function tools and graph-based Workflows
 
 ---
 
@@ -578,9 +586,9 @@ A plugin is a collection of functions (semantic and native) that represent a cap
 **Short:** Middleware intercepting function calls before and after execution, used for audit logging, PII detection, rate limiting, and cost tracking.
 Kernel filters are middleware that intercepts function invocations (pre and post). They receive the `FunctionInvocationContext` with: function name, input arguments, and (after execution) the result. Enterprise use cases: (1) Audit logging — log every AI call with user identity, inputs, outputs, latency, and cost; (2) PII detection — scan inputs for sensitive data before sending to LLM; (3) Rate limiting — enforce per-user or per-tenant usage limits; (4) Cost tracking — accumulate token usage per department or project; (5) A/B testing — route % of calls to different prompt variants. Filters are the enterprise audit trail mechanism that compliance teams require.
 
-**Q: What is the difference between SequentialPlanner and FunctionCallingStepwisePlanner?**
-**Short:** `SequentialPlanner` plans the whole sequence upfront and risks hallucinated steps; the stepwise planner decides one call at a time.
-`SequentialPlanner` generates a complete step-by-step plan upfront (as XML/JSON) using the LLM, then executes each step. It requires the LLM to see all available functions and plan the entire sequence before executing anything — prone to planning hallucinations on complex tasks. `FunctionCallingStepwisePlanner` uses native LLM function calling to decide each step dynamically: after each step, the LLM sees the result and decides the next function to call. More adaptive but more expensive (one LLM call per step). Use `SequentialPlanner` when the task structure is known; use `FunctionCallingStepwisePlanner` when the task requires adaptive reasoning.
+**Q: What happened to Semantic Kernel's SequentialPlanner and Stepwise planners?**
+**Short:** Microsoft removed the prompt-based planners from SK in Python, .NET, and Java; code using them fails, and `FunctionChoiceBehavior.Auto()` replaces them.
+The planners asked the model, through a prompt, to write a plan of plugin calls: `SequentialPlanner` wrote the whole sequence upfront and was prone to hallucinated steps, and `FunctionCallingStepwisePlanner` and the Handlebars planner came later. Once models gained native function calling, Microsoft deprecated the Stepwise and Handlebars planners and removed them from the Semantic Kernel package in Python, .NET, and Java (`SequentialPlanner` predates both and is gone too), so code that constructs `FunctionCallingStepwisePlanner` or `HandlebarsPlanner` no longer compiles or imports on current releases. The replacement is automatic function calling: set `FunctionChoiceBehavior.Auto()` on the execution settings and the kernel runs the call, result, next-call loop itself, adding every step to `ChatHistory`. Microsoft publishes a Stepwise Planner migration guide for existing code. The interview trap is describing planners as a live SK feature.
 
 **Q: How do you import a REST API as a Semantic Kernel plugin?**
 **Short:** `OpenApiKernelPluginFactory` turns an OpenAPI spec into one SK function per endpoint without any hand-written wrapper code.
@@ -591,13 +599,13 @@ Use `OpenApiKernelPluginFactory.create_kernel_plugin_from_openapi()` with the pa
 Semantic Memory stores text and vector embeddings for semantic search. Add memories: `kernel.memory.save_information(collection="knowledge_base", id="doc1", text="...")` — this embeds the text and stores it. Query memories: `results = await kernel.memory.search("knowledge_base", "what is the return policy?", limit=3)` — embeds the query, retrieves nearest neighbors. Memory backends: `VolatileMemoryStore` (in-memory, dev only), `AzureAISearchMemoryStore` (production Azure), `ChromaMemoryStore`, `SqliteMemoryStore`. The memory system is simpler than LlamaIndex's advanced RAG — sufficient for most enterprise Q&A but lacks advanced retrieval strategies.
 
 **Q: How does multi-model support work in Semantic Kernel?**
-**Short:** Register multiple AI services under distinct service IDs so functions and planners can route cheap or expensive models by task.
+**Short:** Register multiple AI services under distinct service IDs so each function or chat call can route to a cheap or expensive model by task.
 Register multiple AI services with different `service_id`s:
 ```python
 kernel.add_service(OpenAIChatCompletion(service_id="gpt-4o", ...))
 kernel.add_service(OpenAIChatCompletion(service_id="gpt-4o-mini", ...))
 ```
-Semantic functions specify which service to use in `config.json` or execution settings. Planners default to a designated "planner model." Use cheap models for classification and routing; expensive models for complex reasoning. Multi-model support enables: cost optimization (GPT-4o-mini for simple tasks), fallback (if primary fails, use secondary), and model routing by capability.
+Semantic functions specify which service to use in `config.json` or execution settings, and an auto function-calling loop runs on whichever service its execution settings name. Use cheap models for classification and routing; expensive models for complex reasoning. Multi-model support enables: cost optimization (GPT-4o-mini for simple tasks), fallback (if primary fails, use secondary), and model routing by capability.
 
 **Q: How do you build a multi-tenant AI application with Semantic Kernel?**
 **Short:** Isolate tenants via per-tenant Kernel instances, tenant-tagged `KernelArguments`, or tenant-prefixed memory collections enforced by filters.
@@ -605,11 +613,11 @@ Multi-tenancy in SK: (1) Per-tenant Kernel instances — create a `Kernel` per t
 
 **Q: What is the Copilot Stack and where does Semantic Kernel fit?**
 **Short:** Microsoft's AI application architecture, where Semantic Kernel sits in the orchestration layer between foundation models and Copilot extensions.
-The Copilot Stack is Microsoft's architecture for building AI-powered applications within the Microsoft ecosystem. Layers: Foundation Models (Azure OpenAI, GPT-4o), AI Orchestration (Semantic Kernel), Copilot Extensions (plugins), and Copilot Experience (M365, GitHub, Bing). SK sits in the AI Orchestration layer — it connects foundation models to application logic through plugins and planners. Building on SK means your application can potentially integrate with M365 Copilot as a plugin, though this requires additional Copilot Studio configuration.
+The Copilot Stack is Microsoft's architecture for building AI-powered applications within the Microsoft ecosystem. Layers: Foundation Models (Azure OpenAI, GPT-4o), AI Orchestration (Semantic Kernel), Copilot Extensions (plugins), and Copilot Experience (M365, GitHub, Bing). SK sits in the AI Orchestration layer — it connects foundation models to application logic through plugins and automatic function calling. Building on SK means your application can potentially integrate with M365 Copilot as a plugin, though this requires additional Copilot Studio configuration.
 
 **Q: How do you test a Semantic Kernel application?**
 **Short:** Unit test native functions as plain code, mock the chat completion service for semantic functions, and integration-test with a cheap model.
-Testing approach: (1) Unit test native plugins as plain C#/Python functions — no SK dependency; (2) Unit test semantic functions by mocking the `IChatCompletionService` in C# or patching the OpenAI client in Python; (3) Integration test with a cheap model (GPT-4o-mini) and `max_tokens=200` to keep tests fast and cheap; (4) Planner testing: provide a mock function catalog and verify the planner generates the expected plan structure. In C#: use `IKernelBuilder` with test doubles. Key: test the logic of what SK should do, not SK's internal behavior.
+Testing approach: (1) Unit test native plugins as plain C#/Python functions — no SK dependency; (2) Unit test semantic functions by mocking the `IChatCompletionService` in C# or patching the OpenAI client in Python; (3) Integration test with a cheap model (GPT-4o-mini) and `max_tokens=200` to keep tests fast and cheap; (4) Function-calling tests: provide a mock function catalog and assert, through a filter that records invocations, which functions the model calls and with what arguments. In C#: use `IKernelBuilder` with test doubles. Key: test the logic of what SK should do, not SK's internal behavior.
 
 **Q: How does SK's C# SDK differ from the Python SDK?**
 **Short:** The C# SDK is more mature with .NET DI and reflection-based plugin loading, while the Python SDK is newer but conceptually consistent.
@@ -617,7 +625,7 @@ C# SDK: mature (longer development), uses .NET DI for configuration, async/await
 
 **Q: What are the main limitations of Semantic Kernel for building agents?**
 **Short:** It lacks a built-in state machine, checkpointing, and reliable multi-step planning compared to LangGraph's agent orchestration.
-SK's agent capabilities lag behind LangGraph: (1) No built-in state machine — SK's planners don't support complex conditional branching or loops; (2) No checkpointing — long-running agent tasks cannot be paused and resumed; (3) Limited streaming of intermediate agent steps to UI; (4) Planner reliability — for complex multi-step plans, the LLM-generated plan often has errors; (5) No native multi-agent coordination beyond basic GroupChat patterns. For complex agentic tasks: combine SK's plugin/filter infrastructure with a custom state machine or use LangGraph. SK's strength is in the integration and enterprise patterns, not agent orchestration.
+SK's agent capabilities lag behind LangGraph: (1) No built-in state machine: the auto function-calling loop gives you no control over conditional branching or loops; (2) No checkpointing — long-running agent tasks cannot be paused and resumed; (3) Limited streaming of intermediate agent steps to UI; (4) Planning reliability: the model chooses every call, so long call chains drift and pick wrong functions; (5) No native multi-agent coordination beyond basic GroupChat patterns. For complex agentic tasks: combine SK's plugin/filter infrastructure with a custom state machine or use LangGraph. SK's strength is in the integration and enterprise patterns, not agent orchestration.
 
 **Q: How do you handle multi-language support in SK responses?**
 **Short:** A system-message instruction is simplest but least reliable; post-processing translation after an English response is most reliable but costlier.
@@ -627,17 +635,17 @@ Three approaches: (1) System message: "Always respond in {{$language}}" injected
 **Short:** SK plugins are strongly typed annotated classes with compile-time safety, while LangChain tools are more flexible decorated Python functions.
 Semantic Kernel plugins are strongly typed classes with annotated methods (KernelFunction attribute), providing compile-time type safety and IDE support — particularly advantageous in C# and Java enterprise environments. LangChain tools are Python functions wrapped with decorators, offering more flexibility but less type safety. SK's approach enables automatic function signature extraction for the model's function calling schema. Choose SK for enterprise .NET/Java projects where type safety and existing SDK integration matter; choose LangChain for Python-first rapid prototyping.
 
-**Q: How do you implement multi-step planning with Semantic Kernel's Planner?**
-**Short:** It generates a function-call sequence from a goal and available plugins, and quality degrades sharply past around 50 exposed functions.
-SK's planner takes a user goal and available plugins, then generates a plan (sequence of function calls) to achieve it. The Handlebars planner generates a Handlebars template with function calls; the Stepwise planner executes functions iteratively with ReAct-style reasoning. Key configuration: limit the number of available functions presented to the planner (exposing 50+ functions degrades plan quality), set max iterations (default 10), and implement plan validation before execution. The planner works best with well-described function parameters and clear function names.
+**Q: How do you implement multi-step planning in Semantic Kernel?**
+**Short:** Enable `FunctionChoiceBehavior.Auto()`, advertise only the functions the task needs, and guard each call with an auto-function-invocation filter.
+Set `FunctionChoiceBehavior.Auto()` on the prompt execution settings and pass the kernel to the chat call; the model calls a function, SK invokes it, appends the result to `ChatHistory`, and asks the model again until it answers in text. Key configuration: limit the functions advertised per request (`FunctionChoiceBehavior.Auto(filters={"included_plugins": [...]})` in Python), because exposing 50+ functions degrades selection quality; register an auto-function-invocation filter to validate arguments, block destructive calls, or end the loop early; and keep tasks with a known sequence on direct `kernel.invoke()` calls. Selection works best with well-described function parameters and clear function names.
 
 **Q: What replaces the Kernel, plugins, and Kernel filters in Microsoft Agent Framework?**
 **Short:** Agent Framework drops the `Kernel` object entirely — agents wrap a chat client directly, plain functions are tools, and middleware replaces filters.
 There is no `Kernel` to construct or pass around: an agent is built directly from a chat client, e.g. `agent = client.as_agent(instructions=..., tools=[...])`. Plugins disappear as a concept — a tool is just a plain Python function with type-hinted parameters and a docstring (no `@kernel_function` decorator or Plugin wrapper class required), passed straight to `tools=`. Kernel filters are replaced by Agent Framework's middleware, which intercepts agent actions the same way filters intercepted function invocations. Migration is not all-or-nothing: `KernelFunction.as_agent_framework_tool()` (semantic-kernel >= 1.38) converts an existing semantic or native `KernelFunction` — including a VectorStore's `create_search_function()` result — directly into an Agent Framework tool, so a codebase can adopt Agent Framework incrementally while still calling into SK plugins.
 
 **Q: What breaks when you migrate an existing Semantic Kernel 1.x codebase to Agent Framework?**
-**Short:** Planners disappear in favor of explicit graph-based Workflows, agent types consolidate into one class, and the invocation API is renamed.
-Four concrete breaks: (1) No planners — `SequentialPlanner` and `FunctionCallingStepwisePlanner`'s LLM-improvised plans are replaced by explicit, graph-based Workflows (the same shift AutoGen's `GroupChat` users hit — see [AutoGen](autogen.md)), so multi-step orchestration logic needs re-architecting, not renaming; (2) Agent-type consolidation — SK's per-provider classes (`ChatCompletionAgent`, `AzureAIAgent`, `OpenAIAssistantAgent` in C#) collapse into one client-agnostic `Agent`/`ChatClientAgent` built on any compatible chat client; (3) Invocation API rename — `agent.invoke()`/`invoke_stream()` become `agent.run()`/`agent.run(..., stream=True)`, returning `AgentResponse`/`AgentResponseUpdate` instead of an async iterator of `ChatMessageContent`; (4) Thread creation — SK requires picking a provider-specific thread type (`ChatHistoryAgentThread`, `AzureAIAgentThread`, ...) manually; Agent Framework's `agent.create_session()` creates the right session type for you. Options configuration also changes from `KernelArguments`/`PromptExecutionSettings` objects to a TypedDict-based `options=` parameter.
+**Short:** Multi-step orchestration moves to explicit graph-based Workflows, agent types consolidate into one class, and the invocation API is renamed.
+Four concrete breaks: (1) Orchestration moves to Workflows: model-driven call chains under SK's auto function calling are replaced, for multi-step orchestration, by explicit, graph-based Workflows (the same shift AutoGen's `GroupChat` users hit — see [AutoGen](autogen.md)), so multi-step orchestration logic needs re-architecting, not renaming; (2) Agent-type consolidation — SK's per-provider classes (`ChatCompletionAgent`, `AzureAIAgent`, `OpenAIAssistantAgent` in C#) collapse into one client-agnostic `Agent`/`ChatClientAgent` built on any compatible chat client; (3) Invocation API rename — `agent.invoke()`/`invoke_stream()` become `agent.run()`/`agent.run(..., stream=True)`, returning `AgentResponse`/`AgentResponseUpdate` instead of an async iterator of `ChatMessageContent`; (4) Thread creation — SK requires picking a provider-specific thread type (`ChatHistoryAgentThread`, `AzureAIAgentThread`, ...) manually; Agent Framework's `agent.create_session()` creates the right session type for you. Options configuration also changes from `KernelArguments`/`PromptExecutionSettings` objects to a TypedDict-based `options=` parameter.
 
 ---
 
@@ -645,12 +653,12 @@ Four concrete breaks: (1) No planners — `SequentialPlanner` and `FunctionCalli
 
 1. **Use C# for .NET enterprise deployments** — the C# SDK is more mature and better integrated with .NET DI.
 2. **Register Kernel filters on day 1** — audit logging is a compliance requirement, not an afterthought.
-3. **Write specific plugin descriptions** — vague descriptions cause planner failures; every function description must be unique and precise.
+3. **Write specific plugin descriptions** — vague descriptions cause wrong function calls; every function description must be unique and precise.
 4. **Use native functions for deterministic operations** — reserve semantic functions for tasks requiring LLM reasoning.
 5. **Use persistent memory stores in production** — `VolatileMemoryStore` is for testing only.
 6. **Register multiple AI services** — use GPT-4o-mini for simple tasks, GPT-4o for complex ones; configure per semantic function.
 7. **Import OpenAPI specs instead of writing wrappers** — any REST API becomes a plugin in minutes.
-8. **Use direct `kernel.invoke()` for known tasks** — only use planners when task structure is genuinely unknown.
+8. **Use direct `kernel.invoke()` for known tasks** — only enable automatic function calling when task structure is genuinely unknown.
 9. **Isolate plugin side effects** — plugins that write to databases or send emails must be clearly documented; filter-based confirmation for destructive operations.
 10. **Version semantic functions** — treat prompt templates as code; use git versioning; have a rollback plan.
 
@@ -672,7 +680,7 @@ AuditLoggingFilter (logs: user, query, timestamp)
 PiiDetectionFilter (scans for SSN, salary data in query)
   |
   v
-FunctionCallingStepwisePlanner
+Auto function calling (FunctionChoiceBehavior.Auto)
   |
   v
 Step 1: WorkdayPlugin.GetEmployeePTO(employee_id)
@@ -715,19 +723,19 @@ builder.Services.AddSingleton<IFunctionInvocationFilter, PIIDetectionFilter>();
 public async Task<IActionResult> Ask([FromBody] HRQuery query)
 {
     var employee = await _employeeService.GetCurrentEmployee(User);
-    var arguments = new KernelArguments
+    var settings = new AzureOpenAIPromptExecutionSettings
+    {
+        FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
+    };
+    var arguments = new KernelArguments(settings)
     {
         ["employee_id"] = employee.Id,
         ["department"] = employee.Department,
         ["user_id"] = employee.Id  // used by audit filter
     };
 
-    var planner = new FunctionCallingStepwisePlanner(
-        new FunctionCallingStepwisePlannerOptions { MaxIterations = 5 }
-    );
-
-    var result = await planner.ExecuteAsync(_kernel, query.Question, arguments);
-    return Ok(new { answer = result.FinalAnswer, steps = result.Iterations });
+    var result = await _kernel.InvokePromptAsync(query.Question, arguments);
+    return Ok(new { answer = result.ToString() });
 }
 ```
 

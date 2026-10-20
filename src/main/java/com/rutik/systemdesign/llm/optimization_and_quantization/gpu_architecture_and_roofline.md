@@ -46,12 +46,16 @@ This file builds that model quantitatively, walks the memory hierarchy and inter
 | H200 SXM | 989 TF | ~1,979 TF | 141 GB HBM3e | 4.8 TB/s | ~206 | NVLink4 900 GB/s |
 | B200 | ~2.25 PF | ~4.5 PF | 192 GB HBM3e | ~8 TB/s | ~280 | NVLink5 1.8 TB/s |
 | GB200 (Grace+2×B200) | 2× B200 + 480GB LPDDR via NVLink-C2C | — | per above | per above | — | NVL72 rack: 72 GPUs in one NVLink domain |
+| B300 (Blackwell Ultra) | ~2.5 PF | ~5 PF | ~280 GB HBM3e | ~8 TB/s | ~313 | NVLink5 1.8 TB/s; GB300 NVL72 rack |
+| Rubin (Vera Rubin) | not published | not published | HBM4 | not published | not published | NVLink 3.6 TB/s per GPU |
 | TPU v5p | 459 TF | — | 95 GB HBM | 2.76 TB/s | ~166 | ICI 3D torus, 8,960-chip pods |
 | TPU7x (Ironwood, v7) | 2,307 TF | 4,614 TF | 192 GiB HBM | 7.38 TB/s | ~313 | ICI 1.2 TB/s/chip, 3D torus to 9,216 chips |
 | AMD MI300X (CDNA3) | 1,305 TF | 2,610 TF | 192 GB HBM3 | 5.3 TB/s | ~246 | Infinity Fabric, 896 GB/s aggregate |
 | AMD MI355X (CDNA4) | ~2,500 TF | ~5,000 TF | 288 GB HBM3E | 8.0 TB/s | ~313 | Infinity Fabric, 1,075 GB/s |
 
 (Marketing sheets often quote sparse FLOPS — 2× the dense numbers — and Blackwell adds FP4 at ~2× FP8. Always check dense vs sparse and per-GPU vs per-superchip.)
+
+The B300 row is the GB300 NVL72 rack sheet divided by its 72 GPUs, with NVIDIA's sparse BF16 and FP8 figures halved to dense: 360 PF BF16 sparse, 720 PF FP8 sparse, 1,080 PF FP4 dense (15 PF per GPU), 20 TB HBM at 576 TB/s, 130 TB/s NVLink. Rubin's launch figure (2026-01-05, CES) is FP4-first: 50 PF of NVFP4 for inference per GPU, with no BF16 or FP8 number and no statement of dense or sparse. NVIDIA says Rubin is in full production, with partner systems in H2 2026.
 
 Reading the table like an engineer:
 - **H100 → H200**: identical compute, +43% bandwidth, +76% capacity. Inference (decode-heavy, KV-hungry) is exactly what improves; training improves far less. This pair is the cleanest proof that LLM inference buys bandwidth and capacity, not FLOPS.
@@ -621,9 +625,9 @@ TP splits every weight matrix, requiring an all-reduce of activations *inside ev
 **Short:** FlashAttention tiles Q, K, V into SRAM and keeps a running softmax so the score matrix never touches HBM, trading slightly more FLOPs for far fewer bytes moved.
 Standard attention writes the S×S score matrix to HBM and reads it back for softmax and the V product: O(S²) HBM traffic at intensity far below the ridge — memory-bound, quadratically so. FlashAttention computes the same exact math but tiles Q/K/V into SRAM (~228 KB/SM, an order of magnitude faster than HBM), maintains a running (online) softmax so the score matrix never materializes, and recomputes tiles in the backward pass rather than storing them. FLOPs slightly *increase*; HBM bytes collapse; wall-clock improves 2–4×. It is the cleanest proof of the section's thesis: when you're below the ridge, the algorithm that minimizes *bytes* beats the algorithm that minimizes *FLOPs* — "IO-aware" is the design axis.
 
-**Q10: H100 vs H200 vs B200 — same family, when does each win?**
-**Short:** H200 keeps H100's FLOPS but nearly doubles bandwidth and capacity for decode-heavy workloads, while B200 raises both FLOPS and bandwidth outright at higher platform cost.
-H100→H200 changes only memory: 80→141 GB and 3.35→4.8 TB/s at identical FLOPS — so decode-heavy inference gains up to ~1.4×, big models/long contexts fit with less TP (a 70B FP16 fits one H200), and pure training gains little. B200 raises everything — ~2.3× FLOPS, 192 GB, ~8 TB/s, NVLink5 1.8 TB/s, plus FP4 — winning outright but at platform cost (power, cooling, new racks). Decision shape: prefill/training-bound → FLOPS chips (H100 fine, B200 best); decode/long-context-bound → bandwidth-capacity chips (H200 is the cheapest unit of decode); trillion-scale MoE serving → NVL72-class fabric is the feature, not the chip. Citing the H100/H200 identical-FLOPS fact is the quickest way to demonstrate spec literacy.
+**Q10: H100 vs H200 vs B200 vs Rubin: same family, when does each win?**
+**Short:** H200 keeps H100's FLOPS but adds bandwidth and capacity for decode; B200 raises FLOPS and bandwidth at higher platform cost; Rubin is sold on FP4 inference throughput, so it pays only if you serve in NVFP4.
+H100→H200 changes only memory: 80→141 GB and 3.35→4.8 TB/s at identical FLOPS, so decode-heavy inference gains up to ~1.4×, big models/long contexts fit with less TP (a 70B FP16 fits one H200), and pure training gains little. B200 raises everything (~2.3× FLOPS, 192 GB, ~8 TB/s, NVLink5 1.8 TB/s, plus FP4), winning outright but at platform cost (power, cooling, new racks). Decision shape: prefill/training-bound → FLOPS chips (H100 fine, B200 best); decode/long-context-bound → bandwidth-capacity chips (H200 is the cheapest unit of decode); trillion-scale MoE serving → NVL72-class fabric is the feature, not the chip. Citing the H100/H200 identical-FLOPS fact is the quickest way to demonstrate spec literacy. Rubin shifts the headline again: NVIDIA's launch sheet gives 50 PF of NVFP4 inference per GPU and 3.6 TB/s of NVLink (2x Blackwell's 1.8 TB/s), but no BF16 or FP8 figure, against 15 PF dense FP4 per B300. That 50 PF is only usable if your model serves in NVFP4 at acceptable quality and the figure turns out dense; a BF16 or FP8 serving stack cannot be sized from it, so wait for the dense per-precision numbers before planning capacity.
 
 **Q11: Why are MoE models a memory-capacity play, and what does that do to serving topology?**
 **Short:** MoE models must keep every expert resident in HBM even though only a small active fraction streams per token, shifting the binding constraint to total capacity.

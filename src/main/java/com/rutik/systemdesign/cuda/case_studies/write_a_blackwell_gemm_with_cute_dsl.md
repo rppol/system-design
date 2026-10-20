@@ -672,7 +672,7 @@ later, which a spot check on `C[0, :4, :4]` will not see.
 
 | Decision | Chosen | Alternative | Why |
 |---|---|---|---|
-| Language | CuTe DSL (Python) | CUTLASS C++ templates | Same emitted kernel, seconds instead of minutes to compile a variant, and a Python autotuning loop is trivial. Cost: public beta until end of summer 2026, and a smaller body of examples |
+| Language | CuTe DSL (Python) | CUTLASS C++ templates | Same emitted kernel, seconds instead of minutes to compile a variant, and a Python autotuning loop is trivial. Cost: still labeled public beta in CUTLASS 4.8.0, and a smaller body of examples |
 | Language | CuTe DSL | Triton | Triton will not express `cta_group=2`, explicit TMEM staging, or a hand-placed warp-role split. When the kernel *is* those things, the tile abstraction is the wrong altitude — see [`triton_and_kernel_dsls`](../triton_and_kernel_dsls/triton_and_kernel_dsls.md) §4 |
 | MMA mode | `CtaGroup.TWO` | `CtaGroup.ONE` | Reaches a 256-row MMA tile across an SM pair, halving the number of tiles and the per-tile prologue cost. Costs: cluster M must be even, and a cluster is a scheduling unit that must be co-resident |
 | Kernel shape | Persistent + tile scheduler | One CTA per output tile | 2,048 tiles over 148 SMs is ~28 waves of cold starts otherwise. Costs: you own the scheduler, and load imbalance no longer self-corrects |
@@ -682,19 +682,20 @@ later, which a spot check on `C[0, :4, :4]` will not see.
 | Epilogue warps | 4 of 6 | 2 of 6 | The epilogue is the only role holding real data. Under-staffing it makes the drain the critical path on small-K shapes |
 
 The most consequential row is the first, and the honest version of it is: **you are choosing a
-beta.** CuTe DSL graduates out of public beta at the end of summer 2026 and CUTLASS is at 4.7.0
-(August 2026). Writing a production kernel against it today is a defensible bet — FlashAttention-4
-made it — but it is a bet.
+beta.** CuTe DSL is still labeled public beta in CUTLASS 4.8.0
+(September 2026). Writing a production kernel against it today is a defensible bet (FlashAttention-4
+made it), but it is a bet.
 
 ---
 
 ## 6. Real-World Implementations
 
-- **NVIDIA CUTLASS 4.7.0** (August 2026) is where this kernel comes from. Its Python DSL examples
+- **NVIDIA CUTLASS 4.8.0** (September 2026) is where this kernel comes from. Its Python DSL examples
   under `examples/python/CuTeDSL/` include the persistent dense GEMM this case study models,
   a blockscaled variant for NVFP4/MXFP8, and Blackwell GeForce (SM120) variants. CUTLASS supports
   B200 (SM100), B300 (SM103) and RTX 50 (SM120), which are three genuinely different targets — a
-  kernel tuned for SM100 is not automatically right for SM120.
+  kernel tuned for SM100 is not automatically right for SM120. 4.8.0 also adds initial Rubin
+  (SM107) support, which runs only on the R615 driver branch released with CUDA 13.4 GA.
 - **FlashAttention-4** (Dao et al.) is written entirely in CuTe DSL and is the highest-profile
   production kernel in the language. It uses the same primitives — 2-CTA MMA, TMEM accumulators,
   warp specialization — and adds a softmax warpgroup that ping-pongs with the MMA warpgroup
@@ -716,7 +717,7 @@ made it — but it is a bet.
 | Tool | Role here |
 |---|---|
 | `nvidia-cutlass-dsl` (pip) | The CuTe DSL package: `cutlass.cute`, `cutlass.pipeline`, `cutlass.utils`, `cutlass.cute.nvgpu.tcgen05` / `cpasync` |
-| CUTLASS 4.7.0 | The C++ library the DSL is layered on, and the source of the reference example |
+| CUTLASS 4.8.0 | The C++ library the DSL is layered on, and the source of the reference example |
 | `tcgen05.mma` / `tcgen05.ld` / `tcgen05.alloc` (PTX) | The Blackwell MMA family, the TMEM read, and TMEM allocation. Documented in the PTX ISA under "TensorCore 5th Generation Family Instructions" |
 | `cp.async.bulk.tensor` (TMA) | The descriptor-driven bulk copy the TMA warp issues. Mechanics in [`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) §4 and §6.7 |
 | Nsight Compute (`ncu`) | SOL bars, the hierarchical Tensor-Core roofline section, and the stall histogram. Metric names in [`profiling_and_performance_analysis`](../profiling_and_performance_analysis/profiling_and_performance_analysis.md) |
@@ -912,7 +913,7 @@ to the same CUTLASS kernel the C++ templates emit, and then it is a normal CUDA 
 no Python on the device and none in the launch path after the first call. What Python buys is
 compile time (seconds instead of minutes of C++ template instantiation), a trivially scriptable
 autotuning loop, and direct interop with PyTorch tensors through DLPack. What it costs is that the
-DSL is in public beta until the end of summer 2026 and has a much smaller body of examples and
+DSL is still a public beta as of CUTLASS 4.8.0 and has a much smaller body of examples and
 Stack Overflow answers than CUTLASS C++.
 
 **Q: When would you NOT write this kernel?**

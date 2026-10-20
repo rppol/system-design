@@ -180,6 +180,28 @@ The 2.24 nats of information the latent carries are simply not worth 8.97 nats o
 | DiT | Transformer backbone replacing the U-Net | Unchanged (backbone swap) |
 | Rectified Flow / Flow Matching | Straight-line noise-to-data path (SD3/3.5, FLUX.1) | 20-50 |
 
+**Few-Step Distillation (the main serving-cost lever):**
+
+A 1024x1024 SDXL image at 30 sampling steps with classifier-free guidance costs 60 U-Net evaluations, since guidance runs a conditional and an unconditional pass per step. A distilled student that samples in 4 steps with guidance built into its weights costs 4 evaluations, 15x fewer, and that ratio is most of the serving bill. The methods differ in what signal the student learns from:
+
+| Method | Training signal for the student | Steps | Example models |
+|--------|--------------------------------|-------|----------------|
+| Progressive distillation (Salimans and Ho, 2022) | Student matches two teacher DDIM steps in one, halving steps repeatedly | 4-8 | Early SD distillations |
+| Consistency distillation / LCM (Luo et al., 2023) | Any point on a teacher ODE trajectory must map to the same clean image; LCM does this in latent space with guidance folded in | 2-4 | LCM-SDXL, LCM-LoRA (a plug-in LoRA for existing SD checkpoints) |
+| Adversarial diffusion distillation, ADD (Sauer et al., 2023) | Score-distillation loss from the teacher plus a GAN loss whose discriminator uses frozen DINOv2 features | 1-4 | SDXL-Turbo |
+| Latent ADD, LADD (Sauer et al., 2024) | ADD with the discriminator on the teacher's own latent features, no pixel decoding | 1-4 | SD3-Turbo, FLUX.1 [schnell] (Apache 2.0) |
+| Progressive adversarial distillation | Progressive halving with an adversarial loss at each stage | 1-8 | SDXL-Lightning |
+| Distribution matching distillation, DMD / DMD2 (Yin et al., CVPR 2024 / NeurIPS 2024) | Student's output distribution is pushed toward the teacher's using the difference of two score networks (teacher score minus an online "fake" score trained on student samples); DMD2 drops DMD's regression loss and adds a GAN loss | 1-4 | DMD2 SDXL; 1.28 FID one-step on ImageNet 64x64 |
+
+The trade: distilled students lose some diversity and are weaker at high guidance, negative prompts, and some editing workflows, because guidance is baked in. Teams often serve both, a 4-step student for previews and interactive use and the full teacher for final renders.
+
+**Autoregressive Image Generation:**
+
+Raster-order autoregression over image tokens (VQGAN + transformer, Parti) is slow and ranks below diffusion on FID. Two developments changed that:
+
+- **VAR, next-scale prediction** (Tian et al., NeurIPS 2024 best paper): a multi-scale VQ tokenizer encodes an image as token maps of increasing size (1x1, 2x2, up to 16x16). The transformer predicts each whole map in parallel, conditioned on all coarser maps, so the number of sequential steps equals the number of scales, about 10, not the 256 tokens of a raster order. VAR reached 1.73 FID on ImageNet 256x256 class-conditional generation, ahead of the diffusion transformers it was compared with, and showed power-law scaling like LLMs.
+- **Native multimodal image output**: one model handles text and image tokens in the same sequence. OpenAI's system card addendum for GPT-4o image generation (March 2025) describes it as an autoregressive model embedded in ChatGPT, unlike the diffusion-based DALL-E. Open examples include Meta's Chameleon (early-fusion tokens) and DeepSeek's Janus-Pro (separate encoders for understanding and generation). The benefit is in-context control: the same model reads a conversation, reference images, and long text, which helps with text rendering and multi-turn editing. See [Multimodal Models](../../llm/multimodal_models/multimodal_models.md).
+
 **FID Score (Frechet Inception Distance)**: measures quality and diversity of generated images by comparing statistics of Inception-v3 feature distributions between real and generated sets. Lower FID = better. Computed as: `FID = ||mu_r - mu_g||^2 + Tr(Sigma_r + Sigma_g - 2*(Sigma_r * Sigma_g)^{1/2})`. Requires ~50K generated and real samples for reliable estimates. A FID of 0 would mean identical distributions; DDPM achieves FID ~3.17 on CIFAR-10 (compare: GAN ~4-10).
 
 ---
@@ -764,7 +786,7 @@ def detect_mode_collapse(
 
 **Stable Diffusion (Latent Diffusion Model)**: compresses a 512x512 image to a 64x64x4 latent with a KL-regularized autoencoder (the `kl-f8` VAE — the LDM paper offers both VQ- and KL-regularized variants and Stable Diffusion ships the KL one), then runs diffusion in that latent space. The 8x spatial downsample per side means 64x fewer latent positions than pixel-space diffusion. Uses a CLIP text encoder for conditioning and classifier-free guidance at scale 7.5. Generates 512x512 images in ~2 seconds on a consumer RTX 3090 (50 DDIM steps). SD 3/3.5 keeps the latent-space idea but swaps the U-Net for an MMDiT transformer and the DDPM objective for rectified flow.
 
-**StyleGAN2 for face generation**: achieves FID ~2.84 on FFHQ (70K face dataset). Uses progressive growing, style injection, and path length regularization to avoid mode collapse and achieve photorealistic diversity. Deployed by NVIDIA for avatar creation and data augmentation in medical imaging (synthetic face data for privacy-preserving datasets).
+**StyleGAN2 for face generation**: achieves FID ~2.84 on FFHQ (70K face dataset). Uses style injection with weight demodulation, skip/residual generator and discriminator designs in place of StyleGAN1's progressive growing, and path length regularization to avoid mode collapse and achieve photorealistic diversity. Deployed by NVIDIA for avatar creation and data augmentation in medical imaging (synthetic face data for privacy-preserving datasets).
 
 **VQ-VAE-2 for hierarchical image generation**: combines a discrete latent codebook (VQ-VAE) with an autoregressive prior (PixelCNN). Achieves diverse high-resolution generation without adversarial training or diffusion. The codebook approach enables discrete manipulation of image structure (changing hairstyle without changing identity).
 
@@ -782,6 +804,8 @@ def detect_mode_collapse(
 | DDPM | Excellent | SOTA | Excellent | Slow (1000 steps) | Moderate |
 | DDIM | Excellent | SOTA | Excellent | Medium (50 steps) | Moderate |
 | LDM | Excellent | SOTA | Excellent | Medium (50 latent) | Good with CFG |
+| Distilled LDM (LCM, ADD, DMD2) | Excellent (teacher training) | Near teacher | Lower than teacher | Fast (1-4 latent steps, no CFG pass) | Reduced; guidance baked in |
+| VAR (next-scale AR) | Excellent | SOTA on ImageNet 256 | Excellent | Fast (about 10 parallel scale steps) | Class or text conditioning |
 
 | FID Score Comparison (CIFAR-10 32x32, unconditional) | FID |
 |---------------------------------------|-----|
@@ -819,6 +843,7 @@ FID is only comparable within one dataset, resolution, and sample-count protocol
 - Vanilla GAN for complex diverse datasets (use WGAN-GP or StyleGAN2)
 - Standard VAE when sample quality matters (blurry output is a hard limitation)
 - DDPM (1000 steps) when fast inference is needed — use DDIM (50 steps) instead
+- A 30-50 step sampler for interactive or high-volume serving when a 1-4 step distilled student (LCM, SDXL-Turbo, FLUX.1 [schnell], DMD2) meets the quality bar
 
 ---
 
@@ -875,6 +900,9 @@ transform = transforms.Compose([
 **War story 4 — Diffusion model trained without timestep conditioning:**
 A diffusion model U-Net was implemented but the timestep t embedding was silently dropped (a bug in the conditioning code path). The model received the same noisy image x_t but had no way to know how much noise was added. It learned an average denoising behavior that worked poorly for both lightly and heavily noised images. FID was 47 vs expected ~4. Fix: always verify the timestep embedding is actually being added to the U-Net (check intermediate activation statistics across different t values — they should differ significantly).
 
+**War story 5: CFG applied to a guidance-distilled model:**
+A team swapped SDXL for SDXL-Turbo to cut latency and kept the pipeline's `guidance_scale=7.5` and 30 steps. Images came out oversaturated and burnt, and latency barely dropped. Turbo and other adversarially or guidance-distilled students already contain the guidance effect, so applying CFG again pushes far outside the training distribution, and the 2x CFG passes per step remain. Fix: use the student's documented settings, for SDXL-Turbo `guidance_scale=0.0` and 1 to 4 steps, and re-run the quality evaluation, since the step count and guidance are part of the model, not free parameters.
+
 ---
 
 ## 11. Technologies & Tools
@@ -885,6 +913,8 @@ A diffusion model U-Net was implemented but the timestep t embedding was silentl
 | `torchvision.utils.make_grid` | Visualize generated image grids |
 | `pytorch-fid` | Compute FID score for generated images |
 | `clean-fid` | More accurate FID (proper resize filters) |
+| `diffusers` LCM / Turbo pipelines | `LCMScheduler`, `load_lora_weights` for LCM-LoRA, SDXL-Turbo and FLUX.1 [schnell] few-step pipelines |
+| VAR (FoundationVision/VAR) | Reference next-scale autoregressive image generation |
 | `StyleGAN2-ADA` (NVIDIA) | Reference StyleGAN2 implementation with limited data augmentation |
 | `accelerate` (HuggingFace) | Multi-GPU/TPU training for diffusion models |
 | CLIP (`openai/clip`) | Text encoder for conditional generation |
@@ -976,6 +1006,21 @@ It degenerates into an ordinary autoencoder — the latent space loses its Gauss
 **Short:** A cosine noise schedule keeps more signal in the middle diffusion timesteps than a linear schedule, which collapses to near-pure noise too early and wastes model capacity.
 The noise schedule (the beta_t values) sets how fast signal is destroyed across timesteps, and the cosine schedule keeps more signal in the middle steps where image structure forms. Under DDPM's linear schedule (beta 1e-4 to 0.02), alpha_bar_t collapses to near zero by t≈800, so the final ~200 steps are almost pure noise and contribute little learning signal while wasting model capacity. The cosine schedule (Nichol & Dhariwal 2021) spreads the signal-to-noise decay more evenly, spending more steps in the medium-noise regime that governs global structure, which improves sample quality and log-likelihood. The schedule is fixed (not learned) and shared between the forward and reverse processes.
 
+**Q: Why does a 4-step distilled diffusion model cut serving cost by more than 7x versus a 30-step sampler?**
+**Short:** The 30-step sampler runs two network passes per step for classifier-free guidance, 60 in total, while a guidance-distilled student runs one pass per step, 4 in total.
+
+Classifier-free guidance runs the denoiser twice per step, conditional and unconditional, and mixes the outputs, so a 30-step guided sample is 60 network evaluations. Distilled students such as LCM, SDXL-Turbo, FLUX.1 [schnell], and DMD2 are trained to produce the guided result directly, so each step is one evaluation and 4 steps is 4 evaluations, about 15x fewer. The VAE decode and text encoding are fixed costs, so end-to-end speedup is somewhat lower. The cost is reduced diversity and weaker control at high guidance or with negative prompts, which is why some products keep the teacher for final renders.
+
+**Q: How does distribution matching distillation (DMD) train a one-step generator?**
+**Short:** It moves the student's output distribution toward the teacher's using the difference between the teacher's score and a score model trained online on the student's own samples.
+
+DMD treats the student as a generator and minimizes the KL divergence between its output distribution and the teacher's. The gradient of that KL at a generated image is the difference of two score functions: the real score from the frozen teacher and a fake score from a second diffusion model that is continually trained on the student's current outputs. Pushing samples along real minus fake moves them toward regions the teacher assigns high density. DMD added a regression loss on precomputed teacher samples for stability; DMD2 removes it, updates the fake-score model more often, and adds a GAN loss, reaching 1.28 FID one-step on ImageNet 64x64.
+
+**Q: How does VAR's next-scale prediction differ from raster-order autoregressive image generation?**
+**Short:** Raster AR predicts one token at a time left to right; VAR predicts a whole token map per resolution, coarse to fine, so sampling takes about 10 parallel steps instead of hundreds.
+
+Raster-order models flatten a 16x16 token grid into 256 positions and predict each one in sequence, which is slow and breaks the 2D structure, since a token cannot see what is below it. VAR uses a multi-scale VQ tokenizer that encodes an image as token maps from 1x1 up to 16x16, and its transformer predicts every token of the next scale in parallel, conditioned on all coarser maps. Sequential steps drop to the number of scales, and each prediction sees the full image at lower resolution. VAR reached 1.73 FID on ImageNet 256x256 and showed LLM-like scaling laws.
+
 **Q: How do autoregressive generative models differ from VAEs and diffusion models?**
 **Short:** Autoregressive models generate one token or pixel at a time with exact likelihoods, while VAEs and diffusion models use latent variables to sample in one pass or fixed denoising steps.
 Autoregressive models (PixelCNN, GPT) factorize p(x) into a product of per-element conditionals and generate one token/pixel at a time, giving exact likelihoods but slow sequential sampling. VAEs and diffusion models instead use latent variables and optimize a bound (ELBO) or a denoising objective, sampling in one pass (VAE) or a fixed number of denoising steps (diffusion) rather than element by element. Autoregressive models give tractable exact likelihoods and back both LLMs and VQ-VAE priors, but generating a 256x256 image pixel-by-pixel is prohibitively slow, which is why images use latent or diffusion approaches. Hybrids exist: VQ-VAE encodes an image to a small grid of discrete codes, then an autoregressive Transformer models that much shorter sequence.
@@ -993,7 +1038,7 @@ Autoregressive models (PixelCNN, GPT) factorize p(x) into a product of per-eleme
 - Set CFG scale 7.5 as the default starting point for Stable Diffusion; adjust based on prompt adherence vs diversity requirements.
 - Always compute FID with at least 10K generated samples (50K for publishable results). FID computed on 1K samples has variance of +-10-15 FID points.
 - For GAN training: update the discriminator 5x per generator step (n_critic=5 in WGAN-GP). Use Adam with betas=(0.0, 0.9) — not (0.9, 0.999) — for both networks to prevent momentum from destabilizing adversarial dynamics.
-- Use `xformers` memory-efficient attention in diffusion U-Nets to reduce VRAM by 40-60%, enabling larger batch sizes or higher resolutions.
+- Keep diffusers on PyTorch's `scaled_dot_product_attention` (the default in PyTorch 2.0+) for memory-efficient attention in diffusion U-Nets, reducing VRAM by 40-60% for larger batches or higher resolutions; `xformers` is optional.
 
 ---
 

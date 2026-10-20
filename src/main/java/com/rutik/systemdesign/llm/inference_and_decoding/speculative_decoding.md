@@ -48,6 +48,7 @@ This file is the decoding-algorithm half of the picture. For the serving-engine 
 | **Lookahead / Jacobi decoding** (Fu et al., 2024) | None — parallel Jacobi iterations of the target itself | None | N/A (verifies an n-gram pool, not a draft distribution) | Pure compute trade-off; speedup scales with spare FLOPs, not with a separate model's quality |
 | **Prompt-lookup / ngram decoding** | Hash lookup of recent output n-grams into the prompt/context | None | 0.3–0.9 (overlap-dependent) | Near-zero overhead; excellent for RAG, summarization, code-edit; useless for creative generation |
 | **DeepSeek-V3 Multi-Token Prediction (MTP)** (DeepSeek-AI, 2024) | Sequential "MTP modules" trained jointly during pretraining | Small, trained end-to-end | 0.85–0.9 | Originally a *training* signal-densification trick; repurposed at inference as a near-free, well-calibrated draft |
+| **Block-diffusion drafter** (DFlash, Chen et al., ICML 2026, arXiv 2602.06036) | Small [diffusion LM](../diffusion_language_models/diffusion_language_models.md) conditioned on context features extracted from the target model | Small drafter + its context K/V | Not reported as α; the paper reports over 6x lossless speedup, up to 2.5x EAGLE-3's | Proposes a whole block of K tokens in one parallel forward pass instead of K sequential draft steps, so draft cost stops growing with K; vLLM `method: "dflash"`, with `"dspark"` as a related block drafter |
 
 Spectrum of engineering cost vs. acceptance: prompt-lookup (zero cost, narrow applicability) < lookahead decoding (zero extra weights, FLOPs-bound) < self-speculative (zero extra weights, needs special training) < Medusa (small heads, needs fine-tuning) < EAGLE (small extra layer, needs training on target's features) < independent draft model (full separate deployment, but reuses off-the-shelf small models).
 
@@ -668,7 +669,7 @@ Compare that 37.5% to the ~1.4% FLOPs-ratio estimate a capacity plan would have 
 
 ## 7. Real-World Examples
 
-- **vLLM** — configured through a single `--speculative-config` object whose `method` selects the mechanism: `draft_model` (any HF causal LM with a matching tokenizer), `ngram` for prompt-lookup decoding, plus `eagle`/`eagle3`, `medusa`, `mlp_speculator` and per-model MTP heads. Key fields: `num_speculative_tokens`, `draft_sample_method` (`greedy` default, or `probabilistic`), `rejection_sample_method`, `draft_tensor_parallel_size`, and `num_speculative_tokens_per_batch_size` for batch-size-aware tapering. The older V0 flags (`speculative_model`, `speculative_disable_by_batch_size`, `use_v2_block_manager`) no longer exist.
+- **vLLM** — configured through a single `--speculative-config` object whose `method` selects the mechanism: `draft_model` (any HF causal LM with a matching tokenizer), `ngram` for prompt-lookup decoding, plus `eagle`/`eagle3`, `dflash` and `dspark` block drafters, `medusa`, `mlp_speculator`, `suffix` and per-model MTP heads; v0.31.0 added the LiLiCorr drafter. Key fields: `num_speculative_tokens`, `draft_sample_method` (`greedy` default, or `probabilistic`), `rejection_sample_method`, `draft_tensor_parallel_size`, and `num_speculative_tokens_per_batch_size` for batch-size-aware tapering. `enable_adaptive_verification` sizes the verification budget per request from draft confidence (`dspark` only in v0.32.0), and `--per-request-spec-decode-metrics` (v0.29.0) returns each request's acceptance stats in the OpenAI-compatible response, so acceptance can be tracked per tenant instead of only as a fleet average. The older V0 flags (`speculative_model`, `speculative_disable_by_batch_size`, `use_v2_block_manager`) no longer exist.
 - **SGLang** — EAGLE and EAGLE-2 integration with radix-tree-aware KV cache sharing between draft and target passes; reports among the highest published EAGLE throughput numbers due to tight integration with its scheduler.
 - **TensorRT-LLM** — draft-model speculative decoding plus Medusa support with custom fused kernels for tree attention, tuned for H100/B200.
 - **HuggingFace `transformers`** — "assisted generation" (`model.generate(assistant_model=...)`), the reference implementation of vanilla draft-model speculative decoding; widely used for prototyping and CPU/consumer-GPU inference (llama.cpp also implements draft-model speculation for the same use case).
@@ -723,7 +724,7 @@ Compare that 37.5% to the ~1.4% FLOPs-ratio estimate a capacity plan would have 
 
 | Tool / Method | Role |
 |------|------|
-| vLLM | Production serving with draft-model, ngram, EAGLE, and Medusa speculative decoding; adaptive batch-size disabling |
+| vLLM | Production serving with draft-model, ngram, EAGLE, DFlash/DSpark block-diffusion, and Medusa speculative decoding; adaptive batch-size disabling; per-request acceptance metrics |
 | SGLang | EAGLE/EAGLE-2 with radix-tree KV sharing between draft and target |
 | TensorRT-LLM | Fused tree-attention kernels for Medusa-style verification on H100/B200 |
 | HuggingFace `transformers` (assisted generation) | Reference implementation of vanilla draft-model speculation |

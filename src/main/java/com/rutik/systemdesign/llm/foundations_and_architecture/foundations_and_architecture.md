@@ -881,6 +881,50 @@ GELU(x) = x x Phi(x)
 | **Jamba** (AI21) | Hybrid: interleaved Transformer + Mamba layers | Long context + strong quality | More complex training |
 | **RWKV** | RNN-style but trainable like Transformer | Fast inference; no KV cache | Weaker on tasks requiring arbitrary lookback |
 
+**7. Residual-Stream Width and Conditional Memory (DeepSeek, 2025-2026)**
+
+Two DeepSeek changes go after parts of the block that sections 1-6 leave fixed: the single
+residual stream, and the assumption that every fact must be recomputed by attention and FFN
+layers. DeepSeek-V4 uses mHC; DeepSeek-V4.1-Flash adds Engram (552B backbone plus 196B of Engram
+lookup memory). vLLM serves both from v0.30.0 (2026-09-22): DeepGEMM Mega-mHC kernels, async
+Engram prefetch from host memory, and `--engram-config` for Engram table offload and tensor
+parallelism.
+
+| Improvement | Problem Solved | How It Works | Tradeoff |
+|------------|---------------|--------------|---------|
+| **Hyper-Connections (HC)** | One residual stream of width `C` limits how layers exchange information | Widen the stream to `n x C` (`n = 4`); learned `H_pre` (1 x n) mixes streams into the layer, `H_post` (1 x n) writes the output back, `H_res` (n x n) mixes streams across the skip | `H_res` is unconstrained, so the product across layers no longer stays near identity; signal gain peaked near 3000 and loss spiked around step 12k at 27B |
+| **mHC** (Manifold-Constrained HC, arXiv 2512.24880) | HC breaks the identity property of the residual path | Project `H_res` onto doubly stochastic matrices (non-negative, rows and columns sum to 1) with 20 Sinkhorn-Knopp iterations; `H_pre = sigmoid(.)`, `H_post = 2 x sigmoid(.)` | 6.7% extra training time at `n = 4`; wider residual stream means more memory traffic, which needs fused kernels |
+| **Engram** (conditional memory, arXiv 2601.07372) | Attention and FFN layers spend capacity rebuilding static local patterns (names, phrases, idioms) | Hash the last 2-3 (normalised) token ids into large embedding tables, O(1) lookup per token; a gate scores the retrieved vector against the hidden state and adds it to the residual stream at a few layers (2 and 15 in Engram-27B) | Tables are huge but static; deterministic addresses let them live in host DRAM and be prefetched |
+
+**Why doubly stochastic fixes it.** The residual path across `L` layers multiplies `L` copies of
+`H_res`. A product of unconstrained matrices can grow or shrink without bound; a product of
+doubly stochastic matrices is itself doubly stochastic, so every output stream is a convex mix
+of input streams and the total signal is conserved. That restores what Pre-LN and the plain
+`x + F(x)` skip guarantee: a path from layer 1 to layer `L` that neither explodes nor vanishes.
+
+```
+  standard residual            HC (n = 4 streams)             mHC
+  x --+-- F --+--> x'          x1 x2 x3 x4                    x1 x2 x3 x4
+      |       |                 \  |  |  /                     \  |  |  /
+      +-------+                 H_res: any 4x4                 H_res: rows=1, cols=1, >= 0
+  gain over L layers = 1       gain over L layers -> ~3000    gain over L layers <= ~1.6
+```
+
+On a 27B MoE built on DeepSeek-V3, mHC beat both the baseline and HC on most benchmarks: BBH
+51.0 (baseline 43.8, HC 48.9), DROP F1 53.9 (47.0, 51.6), MMLU 63.4 (59.0, 63.0). MATH was the
+exception, at 26.0 against HC's 26.4.
+
+**Engram is a second sparsity axis next to MoE.** MoE makes compute conditional: each token runs
+a few experts. Engram makes memory conditional: each token reads a few table rows chosen by its
+local n-gram. The paper splits a fixed sparse-parameter budget between the two and finds a
+U-shaped loss curve, best with roughly 20-25% of the sparse budget moved from experts to Engram.
+Engram-27B (5.7B of Engram memory, routed experts cut from 72 to 55, 3.8B active) beat an
+iso-parameter, iso-FLOP MoE by +3.4 MMLU, +5.0 BBH, +3.0 HumanEval, and lifted Multi-Query
+needle-in-a-haystack from 84.2 to 97.0. Because the table address depends only on token ids, the
+lookup is known before the layer runs: a 100B-parameter table held in host DRAM cost at most
+2.8% throughput on an 8B dense model. For serving, that makes Engram memory a host-RAM sizing
+question, not an HBM one.
+
 ### Where the Parameter Count Comes From
 
 Every budget on this page — `C = 6ND`, KV cache per token, GPU count — is denominated in `N`. But
@@ -1003,9 +1047,10 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 - Gemini 1.5 Pro (2024): first widely available 1M-token context window, multimodal natively. Google has not published the attention or positional-encoding scheme behind it.
 
 ### Anthropic Claude
-- Constitutional AI alignment, 1M-token context on the current Opus 5 / Sonnet 5 / Fable 5 generation (200K on Haiku 4.5), strong instruction following
+- Constitutional AI alignment, 1M-token context and 128K max output on every model in the Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5 generation, strong instruction following
 
 ### DeepSeek
+- DeepSeek-V4 (April 2026) and V4.1-Flash (September 2026): mHC widens the residual stream to several mixed streams under a doubly stochastic constraint, and V4.1-Flash adds 196B of Engram n-gram lookup memory beside a 552B backbone (see "Residual-Stream Width and Conditional Memory" in section 6).
 - DeepSeek-V3: 671B MoE, 37B active params. Its paper reports 2.788M H800 GPU-hours for the official training run — about $5.6M at an assumed $2/GPU-hour — explicitly excluding all prior research and ablation runs, which is the figure popularly quoted as "trained for $5.5M".
 
 ---
@@ -1029,8 +1074,9 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 Do not translate parameter count into a dollar rate: vendors do not disclose the size of hosted
 models, and MoE decouples total parameters from serving cost. For a checkable anchor, use published
-API rates instead — as of July 2026 Anthropic lists Claude Haiku 4.5 at $1/$5 per million input/output
-tokens, Sonnet 5 at $3/$15, Opus 5 at $5/$25, and Fable 5 at $10/$50.
+API rates instead. As of 2026-10-19 Anthropic lists Claude Haiku 5.5 at $0.10/$0.50 per million
+input/output tokens (prompts up to 100K tokens; $0.50/$2.50 above), Sonnet 5.5 at $2/$10, Opus 5.5
+at $4/$20, and Fable 5.1 at $10/$50.
 
 ---
 
@@ -1155,6 +1201,38 @@ Sliding window attention restricts each token to attend only to the W previous t
 **Short:** Pre-LN keeps the residual path free of normalization so gradients reach early layers undistorted, making it far more stable to train at scale than Post-LN.
 
 Post-LN (original Transformer) applies LayerNorm after the residual addition: `output = LN(x + sublayer(x))`. Pre-LN applies LayerNorm before the sublayer: `output = x + sublayer(LN(x))`. The critical difference is gradient flow stability. In Post-LN, the residual path passes through LayerNorm, which can distort gradients — early layers receive unstable gradients that require careful learning rate warmup (often 10K+ steps) to avoid divergence. In Pre-LN, the residual path is "clean" (identity connection with no normalization), so gradients flow directly to early layers without distortion. This makes Pre-LN dramatically easier to train at scale. The tradeoff: some studies show Post-LN achieves marginally higher final quality when training succeeds, but the training instability makes it impractical for billion-parameter models. GPT-2+, LLaMA, Mistral, and Falcon all use Pre-LN. Most modern models further replace standard LayerNorm with RMSNorm (normalizing by root-mean-square only, skipping mean centering), which Zhang & Sennrich (2019) measured at 7-9% faster per training step on Transformers with no quality loss.
+
+**Q: Hyper-Connections widened the residual stream and improved quality, so why did training a 27B model with them blow up, and how does mHC fix it?**
+**Short:** HC's learned stream-mixing matrix is unconstrained, so its product over layers amplified signal near 3000x; mHC forces it doubly stochastic, capping gain near 1.6.
+
+Hyper-Connections replace the single residual stream with `n` parallel streams (`n = 4`) and
+learn three mixing maps per layer: `H_pre` into the sublayer, `H_post` back out, and an `n x n`
+`H_res` across the skip. Across `L` layers the skip path is the product of `L` copies of `H_res`,
+and nothing stops that product from growing: DeepSeek measured a signal gain peaking near 3000
+and a loss surge around step 12k on a 27B run. The identity path that Pre-LN and `x + F(x)` rely
+on is gone. mHC (DeepSeek, arXiv 2512.24880) projects `H_res` onto doubly stochastic matrices
+with 20 Sinkhorn-Knopp iterations and keeps `H_pre` and `H_post` non-negative with sigmoids.
+Products of doubly stochastic matrices stay doubly stochastic, so each output stream is a convex
+mix of the inputs and the measured gain drops to about 1.6. The cost is 6.7% more training time
+at `n = 4` plus wider residual memory traffic, which is why serving stacks ship fused kernels for
+it (vLLM's DeepGEMM Mega-mHC for DeepSeek-V4.1-Flash, v0.30.0).
+
+**Q: What is Engram in DeepSeek-V4.1-Flash, and why can its tables live in host RAM when MoE experts cannot?**
+**Short:** Engram hashes each token's last 2-3 token ids into large embedding tables; the address is known from ids alone, so lookups prefetch from DRAM ahead of the layer.
+
+Engram (DeepSeek, arXiv 2601.07372) adds conditional memory beside MoE's conditional compute.
+At a few layers (2 and 15 in Engram-27B) it hashes the current suffix n-grams of normalised token ids into large
+embedding tables with several hash heads, gates the retrieved vector against the hidden state
+(the gate goes to zero when the memory contradicts context), and adds it to the residual stream.
+This takes static pattern recall (names, fixed phrases) off the attention and FFN layers; the
+paper finds the best split moves about 20-25% of the sparse-parameter budget from experts to
+Engram, and Engram-27B beat an iso-FLOP MoE by +3.4 MMLU and +5.0 BBH. The serving consequence
+is the address: an MoE expert is chosen by a router that needs the layer's hidden state, so the
+choice is known only when the layer runs and the experts must sit in HBM. An Engram row is
+chosen by token ids that are known before the forward pass, so it can be fetched over PCIe in
+advance: a 100B-parameter table in host DRAM cost at most 2.8% throughput in the paper. vLLM
+exposes the placement through `--engram-config` with async prefetch (v0.30.0), and
+DeepSeek-V4.1-Flash carries 196B of Engram memory beside its 552B backbone.
 
 **Q: Why do modern LLMs use SwiGLU in the FFN instead of ReLU or GELU?**
 **Short:** SwiGLU's multiplicative gating achieves lower loss than ReLU or GELU FFNs at equal compute, which is why PaLM and every LLaMA generation adopted it.

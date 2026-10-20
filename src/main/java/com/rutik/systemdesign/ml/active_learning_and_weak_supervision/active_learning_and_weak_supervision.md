@@ -82,6 +82,7 @@ Key insight: more labels are not the goal — more *informative* labels are. Act
 | Existing models / third-party APIs | off-the-shelf sentiment as one voter |
 | Distant supervision | align text to a KB to label relations |
 | Crowd labels (noisy) | multiple low-cost annotators per item |
+| LLM annotator | a prompted LLM pre-labels every item; humans verify a sample and the low-confidence tail |
 
 ### 4.4 Related semi-supervised techniques
 
@@ -460,6 +461,35 @@ The broad LF contributes about fifteen times more correct labels — and a hundr
 
 ---
 
+### LLM as annotator: pre-label, verify, calibrate
+
+An LLM can act as one more labeling function or as the primary pre-labeler. Treated as an oracle it fails silently; treated as a noisy annotator with a measured error rate it is the cheapest labeler available. Gilardi, Alizadeh and Kubli (PNAS, 2023) found ChatGPT zero-shot beat MTurk crowd workers on four of five tweet-annotation tasks at about $0.003 per label, roughly 20x cheaper. Wang et al. (EMNLP Findings, 2021) cut labeling cost 50% to 96% by mixing GPT-3 labels with human labels.
+
+```mermaid
+flowchart LR
+    U[Unlabeled pool] --> P[LLM pre-label<br/>label + confidence]
+    G[Gold set<br/>300-500 human labels] --> A[Agreement check<br/>kappa, per-class confusion]
+    P --> A
+    A -->|kappa below bar| R[Rewrite prompt<br/>or drop LLM]
+    A -->|kappa ok| C[Calibrate confidence<br/>on gold set]
+    C --> H{calibrated p >= tau?}
+    H -->|yes| T[Auto-accept]
+    H -->|no| Q[Human review queue]
+    Q --> T
+    T --> M[Train downstream model]
+```
+
+The loop has four checks, each with a number attached:
+
+1. **Agreement with gold.** Label 300 to 500 items by hand, stratified by class, and compute Cohen's kappa between the LLM and the gold labels, plus a per-class confusion matrix. Compare it to human-human kappa on the same items: if two trained annotators reach 0.80 and the LLM reaches 0.78, the LLM is at annotator level for this task. A macro average hides a class the LLM never predicts, so read the per-class recall.
+2. **Calibration.** Verbalized confidence ("I am 90% sure") is poorly calibrated. Better signals: the token log-probability of the label, or self-consistency (sample the label 5 times at temperature 0.7 and use the vote share). Fit an isotonic or Platt map from that raw score to P(correct) on the gold set, then choose the auto-accept threshold `tau` that gives the precision you need.
+3. **Routing.** Items above `tau` are accepted; the rest go to humans. With a well-calibrated score, 70% to 90% auto-acceptance at 95% precision is a common outcome on clear-cut intent or topic tasks; on subjective tasks (sarcasm, policy edge cases) the accept rate falls and the review queue grows.
+4. **Bias audit.** LLM labels carry systematic errors that do not average out: a preference for the first-listed or most generic label, sensitivity to label names (renaming `other` to `none_of_the_above` changes its rate), and dialect or demographic skew (Sap et al., ACL 2019 found toxicity labels skewed against African American English). Shuffle label order across calls, measure the label distribution against gold, and slice agreement by subgroup.
+
+**Cost per label.** For a 400-token prompt (instructions, 10 few-shot examples, the item) and a 5-token answer, 100,000 items is 40M input tokens. At $1 per million input tokens that is $40, and prompt caching of the fixed prefix cuts it further. Self-consistency with 5 samples multiplies the cost by 5. Human review of the 20% low-confidence tail at $0.10 per item adds $2,000, which is where most of the budget goes, so the calibration step that sizes the tail matters more than the per-token price.
+
+**LLM labels inside a label model.** In a Snorkel-style pipeline the LLM is one more column of the label matrix. Two LLM prompts that differ only in wording are highly correlated voters, so the label model must see them as correlated or it will count them twice. The downstream model trained on denoised labels is usually 100x to 1,000x cheaper to serve than the LLM that labeled its data, which is the point of the exercise.
+
 ## 7. Real-World Examples
 
 **Snorkel at industrial scale:** Snorkel (Stanford/Google) replaced hand-labeling for many internal classifiers — engineers wrote dozens of labeling functions (patterns, KB lookups, existing models) to generate training labels for millions of examples, matching hand-labeled quality at a fraction of the cost, and crucially making labels *maintainable as code* when policies change.
@@ -569,6 +599,10 @@ Converting probabilistic weak labels to hard 0/1 before training throws away the
 
 Adding a labeling function that fires often but is barely better than chance injects noise that the label model may not fully cancel. Track each LF's coverage *and* empirical accuracy on a small dev set; prune or fix LFs that are high-coverage but low-accuracy.
 
+### Pitfall 7: Trusting LLM labels without a gold set
+
+A team pre-labeled 200,000 support tickets with an LLM, spot-checked 30 that looked fine, and trained on all of them. In production the `billing_dispute` intent had 41% recall: the LLM mapped most disputes to the generic `billing_question` label, and the 30-item spot check contained 2 disputes. Fix: a stratified gold set of 300 to 500 items, per-class agreement against it before any training run, and a confidence threshold that sends the uncertain tail to humans.
+
 ---
 
 ## 11. Technologies & Tools
@@ -582,6 +616,7 @@ Adding a labeling function that fires often but is barely better than chance inj
 | cleanlab | Find label errors / confident learning | Data-centric label cleaning |
 | Label Studio / Prodigy | Human-in-the-loop annotation UIs | Prodigy has built-in active learning |
 | skweak | Weak supervision for NLP/NER | LF aggregation with HMM label model |
+| Label Studio ML backend / Argilla | LLM pre-labels shown to annotators for accept or fix | Keeps the human-verify step inside the annotation UI |
 
 ---
 
@@ -676,6 +711,16 @@ Data-centric AI holds the model architecture fixed and systematically improves t
 **Short:** Buy labels when they are cheap and automatic, use active learning when experts must label sparingly, use weak supervision when rules can scale.
 
 If labels are cheap/automatic (logged outcomes, clicks), just collect more — the overhead of clever selection is not worth it. If labels require expensive experts and you have abundant unlabeled data and a workable model, active learning maximizes accuracy per label. If experts can express rules but cannot label at scale, or you need a large set fast and can tolerate denoised noise, weak supervision wins. They combine well: weak supervision for broad coverage, active learning to spend the scarce gold labels at the boundary.
+
+**Q: An LLM labels your data with 92% accuracy on a random sample. Why might that still be unsafe to train on?**
+**Short:** Overall accuracy hides per-class failure and systematic bias; check per-class agreement on a stratified gold set and route low-confidence items to humans.
+
+A random sample is dominated by the majority classes, so 92% overall can coexist with 40% recall on a rare class the business cares about. LLM errors are also systematic, not random: a preference for generic or first-listed labels, label-name sensitivity, and dialect skew. Systematic errors do not average out in training; the downstream model learns them. Measure Cohen's kappa and per-class recall against a stratified gold set of 300 to 500 items, compare against human-human kappa, slice by subgroup, and send items below a calibrated confidence threshold to human review.
+
+**Q: How do you turn an LLM's confidence into a threshold for auto-accepting its labels?**
+**Short:** Use label log-probs or self-consistency vote share, calibrate it to P(correct) on a gold set with isotonic or Platt scaling, then pick the threshold that meets the target precision.
+
+Verbalized confidence is poorly calibrated, so do not threshold on it directly. Take the label token's log-probability, or sample the label several times (for example 5 at temperature 0.7) and use the vote share. On a held-out gold set, fit an isotonic or Platt map from that score to P(correct). Sweep the threshold and pick the lowest one whose accepted set meets the precision target, for example 95%. Everything below goes to humans. Recalibrate when the prompt, the model version, or the input distribution changes, since each one moves the score scale.
 
 **Q: What is the cold-start problem in active learning and how do you handle it?**
 **Short:** Early on an untrained model's uncertainty is meaningless, so seed with random or diversity sampling before switching to uncertainty-based acquisition.
@@ -782,3 +827,4 @@ Even at the pessimistic end of the range the team avoids buying 1,500 expert lab
 - [case_studies/design_ner_pipeline.md](../case_studies/design_ner_pipeline.md) — active learning in an NER pipeline
 - `../../llm/data_flywheels_and_continuous_learning/` — the LLM analog of the data-engine loop
 - `../../llm/synthetic_data_generation/` — generating training data with LLMs (a modern weak-supervision source)
+- [LLM evaluation and benchmarks](../../llm/evaluation_and_benchmarks/evaluation_and_benchmarks.md): the LLM-as-judge biases that also affect LLM labelers

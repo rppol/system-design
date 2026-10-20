@@ -95,7 +95,7 @@ Each decision point resolves one axis of variation — instance count, then copy
 | `@Bean` methods | Factory Method | The method is the factory; Spring calls it to create the bean |
 | `FactoryBean<T>` | Factory Method | `getObject()` is the overridable factory method; it returns an object of a different type than the bean itself |
 | Singleton scope (default) | Singleton | Spring manages one instance per container |
-| Builder pattern in `WebClient`, `RestTemplate` | Builder | Fluent API for complex HTTP client configuration |
+| `RestClient.builder()`, `WebClient.builder()` | Builder | Fluent API for complex HTTP client configuration |
 
 ---
 
@@ -270,11 +270,21 @@ public final class QueryTemplate {
 
 ---
 
+## 10. Common Pitfalls
+
+- **Prototype-scoped bean injected into a singleton.** Spring injects a `@Scope("prototype")` dependency once, when the singleton is built, so every request shares that one instance. A per-request `ShoppingCart` injected into a singleton controller leaks items between users. Fix: inject `ObjectProvider<ShoppingCart>` and call `getObject()` per use, or use a `@Lookup` method.
+- **Static singleton across class loaders.** A `static` instance is one per class loader, not one per JVM. In a servlet container that redeploys a web app, the old class loader stays reachable through the static field (and through any thread or `ThreadLocal` it started), and each redeploy leaks a copy of every loaded class until Metaspace runs out. Fix: let the container own the instance and release it on shutdown.
+- **Builder that skips validation in `build()`.** Lombok `@Builder` does not enforce required fields, so a missing `customerId` becomes a `NullPointerException` far from the code that forgot it. Fix: check invariants in `build()` or in the target's constructor (a record's compact constructor is the usual place), or use a generator such as Immutables that rejects missing mandatory attributes.
+- **Factory that switches on a type string.** `if ("pdf".equals(type)) ... else if ("csv" ...)` turns every new product into an edit of the factory and its tests. Fix: register creators in a `Map<String, Supplier<Exporter>>`, populated from Spring beans or `ServiceLoader`, so a new product is a new class plus one registration.
+- **Shallow copy in a Prototype.** `Object.clone()` and `new ArrayList<>(other.items)` copy references, so two clones share the same mutable nested objects. Fix: copy every mutable field in a copy constructor, or make the nested types immutable so sharing them is safe.
+
+---
+
 ## 11. Technologies and Tools
 
 | Pattern | Java Standard Library | Spring Framework | Third-Party |
 |---------|----------------------|-----------------|-------------|
-| Singleton | `enum` singleton, holder idiom, `Runtime.getRuntime()`, `ProcessHandle.current()` | Default singleton bean scope (one per `ApplicationContext`, not per JVM), `@MockitoBean` for tests | Guice `@Singleton`, Jakarta CDI `@ApplicationScoped`, Guava `Suppliers.memoize` |
+| Singleton | `enum` singleton, holder idiom, `Runtime.getRuntime()`, `ProcessHandle.current()`, `LazyConstant` (preview, JEP 531 in JDK 27) | Default singleton bean scope (one per `ApplicationContext`, not per JVM), `@MockitoBean` for tests | Guice `@Singleton`, Jakarta CDI `@ApplicationScoped`, Guava `Suppliers.memoize` |
 | Factory Method | `List.of`, `Optional.of`, `LocalDate.of`, `Executors.newVirtualThreadPerTaskExecutor()` (Java 21+), `ServiceLoader`, `ThreadFactory` | `@Bean` methods, `FactoryBean<T>`, `ObjectProvider<T>` | SLF4J `LoggerFactory.getLogger` |
 | Abstract Factory | `DocumentBuilderFactory`, `TransformerFactory`, `FileSystems`, `SSLContext`, `EntityManagerFactory` | `BeanFactory`, `@Profile` and `@ConditionalOnProperty` for family selection | Jackson `JsonFactory` / `YAMLFactory`, Testcontainers per-backend fixtures |
 | Builder | `StringBuilder`, `HttpRequest.newBuilder()` (JDK 11+), `Stream.builder()`, `Locale.Builder` | `UriComponentsBuilder`, `MockMvcRequestBuilders` | Lombok `@Builder`, Immutables, AutoValue, protobuf builders, Caffeine and OkHttp builders |

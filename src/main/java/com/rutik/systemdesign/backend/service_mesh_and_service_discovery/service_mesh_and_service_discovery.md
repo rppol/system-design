@@ -30,12 +30,12 @@ Without a service mesh, every service must implement its own retry logic, circui
 - Istio + Envoy: most feature-complete; one control-plane binary (`istiod`), two data-plane modes — Envoy sidecars, or ambient (`ztunnel` per node for L4/mTLS plus optional `waypoint` proxies for L7); complex to operate
 - Linkerd: lightweight, Rust-based sidecar; simpler than Istio; less feature-complete
 - Consul service mesh: HashiCorp Consul with built-in mTLS and intentions
-- Amazon ECS Service Connect: AWS's managed service-to-service connectivity for ECS, and the migration target AWS names for App Mesh (App Mesh loses support on 30 September 2026)
+- Amazon ECS Service Connect: AWS's managed service-to-service connectivity for ECS
 
 **Service discovery mechanisms**:
 - Client-side: service registers with registry (Eureka, Consul), client queries registry, client load-balances
 - Server-side: client calls load balancer (AWS ALB, Nginx), LB queries registry, LB routes request
-- DNS-based: Kubernetes Services create DNS entries, kube-proxy maintains iptables/IPVS rules
+- DNS-based: Kubernetes Services create DNS entries, kube-proxy programs iptables rules (the default) or nftables rules
 - Mesh-based: control plane distributes service endpoints to all sidecar proxies (xDS protocol)
 
 **Health check types (Kubernetes)**:
@@ -123,7 +123,7 @@ flowchart TD
     subgraph DNSSD["DNS-Based (Kubernetes)"]
         direction LR
         dnsA(["Service A"]) -->|"DNS lookup"| dnsKube["CoreDNS"]
-        dnsKube -->|"ClusterIP"| dnsIptables{"iptables / IPVS"}
+        dnsKube -->|"ClusterIP"| dnsIptables{"iptables / nftables"}
         dnsIptables --> dnsB(["healthy pod"])
     end
 

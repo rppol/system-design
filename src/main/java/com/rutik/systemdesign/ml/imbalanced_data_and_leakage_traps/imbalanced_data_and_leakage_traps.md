@@ -656,6 +656,41 @@ def business_cost_threshold(
     return float(grid[int(np.argmin(costs))])
 ```
 
+**The built-in version: `TunedThresholdClassifierCV` (scikit-learn 1.5+).** The two helpers above pick the threshold on one validation set, so the chosen value carries that set's noise, and a hand-rolled sweep is easy to run on the training data by mistake. scikit-learn 1.5 (May 2024) added two meta-estimators that make the threshold part of the model:
+
+```python
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, make_scorer
+from sklearn.model_selection import (
+    FixedThresholdClassifier, StratifiedKFold, TunedThresholdClassifierCV,
+)
+
+
+def neg_business_cost(y_true, y_pred, fp_cost=5.0, fn_cost=500.0):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return -(fp * fp_cost + fn * fn_cost)        # scorers are maximized
+
+
+tuned = TunedThresholdClassifierCV(
+    LogisticRegression(max_iter=1000),
+    scoring=make_scorer(neg_business_cost),      # default is "balanced_accuracy"
+    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=0),
+    thresholds=200,                              # grid size; default 100
+).fit(X_train, y_train)
+tuned.best_threshold_                            # the cross-validated cutoff
+tuned.predict(X_test)                            # applies it; predict_proba is unchanged
+
+# A threshold fixed by policy, e.g. "flag everything above 0.05":
+fixed = FixedThresholdClassifier(LogisticRegression(max_iter=1000), threshold=0.05)
+```
+
+For each fold, `TunedThresholdClassifierCV` fits the estimator on the training part, scores every candidate threshold on the held-out part with the given scorer, and averages the score curves across folds; the best threshold on the average curve becomes `best_threshold_`, and with `refit=True` (the default) the estimator is refit on all the data. Three consequences:
+
+- **The threshold is chosen out of fold**, so it is not tuned on predictions the model has already fit, and it averages over 5 splits of the rare positives instead of trusting one split.
+- **The threshold ships with the model.** One pickled object holds both, so serving cannot use the default 0.5 by accident, and `predict_proba` stays the calibrated score.
+- **It composes.** Put the whole `Pipeline` (or a `CalibratedClassifierCV`) inside it, so preprocessing is refit per fold with the threshold. Use `response_method="decision_function"` for models such as `LinearSVC` that have no `predict_proba`, and `store_cv_results=True` to keep the score-versus-threshold curve for the model card.
+
 ### 6.5 PR-AUC vs ROC-AUC Under Imbalance
 
 ```python
@@ -1299,6 +1334,8 @@ a held-out sample from the true, un-resampled distribution — and note that
 switching to class weights would not have fixed it, since balanced weights
 land on the same rescaled prior.
 
+**Pitfall 10: Tuning the threshold on the training predictions.** A team swept thresholds on `model.predict_proba(X_train)` for a gradient-boosted fraud model and chose 0.62 to hit 90% recall. On the training set the model separated the classes almost perfectly, so the curve was flat and high; on live traffic the same 0.62 gave 71% recall. Fix: choose the threshold on out-of-fold or held-out predictions, for example with `TunedThresholdClassifierCV`, which scores thresholds only on the held-out part of each fold.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1307,6 +1344,7 @@ land on the same rescaled prior.
 |---|---|---|
 | imbalanced-learn (imblearn) | SMOTE, ADASYN, Tomek links, NearMiss, combined samplers | `pip install imbalanced-learn`; use `imblearn.pipeline.Pipeline`, not sklearn's, when a sampler is a step |
 | scikit-learn | `class_weight`, `Pipeline`, `ColumnTransformer`, `GroupKFold`, `TimeSeriesSplit`, calibration | Structural leakage prevention via `Pipeline` |
+| scikit-learn `TunedThresholdClassifierCV` / `FixedThresholdClassifier` (1.5+) | Cross-validated threshold moving against any scorer, including a business-cost scorer; a policy-fixed threshold wrapped into the model | Threshold ships inside the fitted estimator; `predict_proba` unchanged |
 | XGBoost / LightGBM / CatBoost | `scale_pos_weight` / `is_unbalance`, native missing-value and categorical handling | Cost-sensitive learning built into the training objective |
 | category_encoders | `TargetEncoder`, `CatBoostEncoder`, with CV-aware wrappers | Must wrap in a fold-aware CV (e.g. `NestedCVWrapper`) to avoid leakage |
 | PyTorch / TensorFlow | Custom focal loss, sample-weighted losses | Needed when the base library ships no focal-loss primitive |
@@ -1491,6 +1529,16 @@ minimizing a business cost function weighting false positives and false
 negatives differently. Because the model never changes, threshold moving is
 the cheapest imbalance fix available and never distorts calibration.
 
+**Q: Why tune the decision threshold with cross-validation instead of on one validation split?**
+**Short:** With rare positives one split's threshold is noisy and may be overfit; TunedThresholdClassifierCV averages the score-versus-threshold curve over folds and ships the cutoff inside the model.
+
+At 1% positives, a 2,000-row validation split has about 20 positives, so moving one of them across the cutoff shifts recall by 5 points and the chosen threshold jumps around. Choosing it on training predictions is worse, since the model has fit those rows. scikit-learn's `TunedThresholdClassifierCV` (1.5+) fits per fold, scores each candidate threshold on the held-out part with a chosen scorer such as a business-cost function, averages the curves, and stores `best_threshold_`. The fitted object applies that threshold in `predict`, so serving cannot fall back to 0.5, while `predict_proba` stays the calibrated score.
+
+**Q: When do you use `FixedThresholdClassifier` instead of `TunedThresholdClassifierCV`?**
+**Short:** When the cutoff is set by policy or by a downstream capacity limit rather than learned from data; it wraps a fixed threshold into the model so `predict` and serving agree.
+
+`TunedThresholdClassifierCV` learns the threshold that maximizes a scorer. Sometimes the threshold is not a modeling decision: a compliance rule says flag anything above 0.05, or a review team can handle exactly the top 2% of daily traffic and the threshold is reset from that quota. `FixedThresholdClassifier(estimator, threshold=0.05)` stores that value with the model, so `predict` applies it everywhere the model is loaded. Keep the threshold in the model artifact either way, and log it with the model version, because a threshold kept in a separate config file drifts out of sync with retrains.
+
 **Q: When should you avoid resampling altogether?**
 **Short:** Avoid resampling when raw probabilities feed pricing or risk decisions, since it biases predict_proba away from the true population rate.
 Avoid resampling whenever the model's raw probability feeds a pricing or
@@ -1566,7 +1614,9 @@ of one-class and reconstruction-based approaches at this regime.
     before trusting a leaderboard-style split.
 11. Log the threshold and its business-cost tradeoff alongside AUC — the
     threshold is the actual deployment decision, not the metric.
-12. Prefer focal loss or class weighting over hard oversampling for deep
+12. Choose the threshold out of fold with `TunedThresholdClassifierCV` and a
+    business-cost scorer, so the cutoff ships inside the fitted estimator.
+13. Prefer focal loss or class weighting over hard oversampling for deep
     learning imbalance; it avoids memorizing duplicated or interpolated
     minority samples.
 

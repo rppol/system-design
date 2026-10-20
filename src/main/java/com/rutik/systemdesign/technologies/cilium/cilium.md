@@ -1,10 +1,11 @@
 # Cilium
 
-> **Version anchor (2026-08-26).** **Cilium 1.20.1** (released **2026-08-18**) is the current
+> **Version anchor (2026-10-19).** **Cilium 1.20.3** (released **2026-10-15**) is the
 > stable patch on the **1.20** minor line, cut **2026-07-29**. Cilium supports its three most
 > recent minor releases with bug and security fixes on roughly a six-month cadence, so **1.19**
-> (latest patch **1.19.7**, also 2026-08-18) and **1.18** (latest patch **1.18.13**, also
-> 2026-08-18) are still patched, while **1.17** exited support the same week 1.20 shipped.
+> (patch **1.19.9**, also 2026-10-15) and **1.18** (patch **1.18.15**, also 2026-10-15) are
+> still patched, while **1.17** exited support the same week 1.20 shipped. The next minor,
+> **1.21**, is in pre-release (`1.21.0-pre.3`, 2026-10-02).
 > Cilium graduated the CNCF on **2023-10-11** — the first CNI project to do so — under governance
 > from maintainers across 7+ companies and 800+ contributors. Its creating company, Isovalent,
 > was acquired by Cisco in a deal that closed **2024-04-12**; Cisco is now the largest single
@@ -74,7 +75,7 @@ none elsewhere; treat this primer as the floor, not a substitute for one):
   Cilium's per-packet logic lives. **Socket-level** hooks (`connect()`/`sendmsg()` interception
   via `cgroup/connect4`, `cgroup/sendmsg4`) let Cilium redirect a Service connection to a
   backend *before* a packet is even built, for same-node traffic. **kprobes/tracepoints**
-  attach to kernel functions and syscalls — Tetragon's domain (§6.12), not the networking
+  attach to kernel functions and syscalls — Tetragon's domain (§6.11), not the networking
   datapath.
 - **The verifier.** Before any BPF program is loaded into the kernel, the verifier statically
   walks every possible execution path and rejects the program if it can find an unbounded
@@ -183,7 +184,7 @@ This is the single idea that makes the rest of the page make sense.
 | Hubble UI | Deployment | Web UI for the aggregated flow graph, built on Hubble Relay |
 | `clustermesh-apiserver` | Deployment, one per participating cluster | Exposes that cluster's identities, endpoints and Services to peer clusters for ClusterMesh (§6.7) |
 | Cilium CLI (`cilium`) | Client binary | `cilium status`, `cilium connectivity test`, `cilium bpf ct list`, cluster install/upgrade |
-| `cilium-envoy` | Container inside the agent pod (or its own DaemonSet, per node) | The embedded Envoy instance handling L7 CiliumNetworkPolicy rules, Ingress/Gateway API HTTP routing, and sidecar-free Service Mesh (§6.4, §6.11) |
+| `cilium-envoy` | Container inside the agent pod (or its own DaemonSet, per node) | The embedded Envoy instance handling L7 CiliumNetworkPolicy rules, Ingress/Gateway API HTTP routing, and sidecar-free Service Mesh (§6.4, §6.10) |
 
 ### 4.2 Datapath (routing) modes
 
@@ -192,6 +193,11 @@ This is the single idea that makes the rest of the page make sense.
 | **Native routing** | `routingMode: native` | Relies on the underlying network fabric — BGP (§6.9) or L2 adjacency with `autoDirectNodeRoutes` — to route pod-CIDR traffic between nodes with no encapsulation | Bare metal or a cloud VPC where you control routing; maximum throughput, no MTU tax |
 | **Tunnel (encapsulation)** | `routingMode: tunnel`, `tunnelProtocol: vxlan` (default) or `geneve` | Every inter-node packet is VXLAN- or Geneve-encapsulated over UDP, forming a full mesh with zero fabric routing requirements | Environments with no control over the underlying network, or where nodes aren't on a shared L2/L3 fabric — the default because it always works |
 | **eBPF host routing** | Auto-enabled when the kernel supports it | Bypasses iptables and the upper host network stack entirely for pod-bound packets, delivering directly from the physical NIC into the pod's network namespace | Automatic — verify it's active via `cilium status` reporting "Host Routing: BPF" rather than "Legacy" |
+
+The routing mode is independent of the **pod device mode**, `bpf.datapathMode`: `veth` (the
+default, a Layer 2 veth pair per pod), `netkit` (a Layer 3 netkit pair, `[1.16]`, kernel 6.8
+or later, beta), `netkit-l2`, or `auto` (netkit when the kernel supports it, else veth). §6.13
+covers what netkit changes and why it cannot be switched on in place.
 
 ### 4.3 IPAM modes
 
@@ -323,7 +329,7 @@ flowchart LR
 ```
 *Same-node Service traffic can be redirected at the socket hook before a packet is even
 built; cross-node traffic is decided at tc (policy, NAT, routing-mode encapsulation) with
-XDP as the earliest possible drop point for hostile or clearly-invalid packets (§6.13).*
+XDP as the earliest possible drop point for hostile or clearly-invalid packets (§6.12).*
 
 ```mermaid
 flowchart LR
@@ -362,7 +368,7 @@ flowchart LR
 ```
 *DSR: the LB node picks a backend via Maglev consistent hashing and forwards the request,
 but the backend replies directly to the client — the LB node never sees return traffic,
-which is the throughput win and the operational cost (§6.13).*
+which is the throughput win and the operational cost (§6.12).*
 
 ---
 
@@ -371,7 +377,7 @@ which is the throughput win and the operational cost (§6.13).*
 ### 6.1 Packet path: pod-to-pod
 
 **Same node.** Traffic between two pods on the same node never leaves the host: the socket
-hook or a tc program on the source pod's veth resolves the destination pod's veth directly
+hook or a tc program on the source pod's veth (or netkit device, §6.13) resolves the destination pod's device directly
 and redirects the packet there, skipping any router or bridge lookup — genuinely a single
 kernel hop.
 
@@ -394,7 +400,7 @@ support it.
 With `kubeProxyReplacement: true`, a same-node client's `connect()` to a ClusterIP is
 intercepted at the `cgroup/connect4` socket hook *before* any packet exists: the eBPF program
 looks up the Service's backend list in a BPF map, picks one (round-robin or Maglev — see
-§6.13), and rewrites the destination address in the socket itself, so every packet the
+§6.12), and rewrites the destination address in the socket itself, so every packet the
 application ever sends already targets the real backend IP with zero further per-packet NAT
 cost. A remote client (from outside the cluster, or via NodePort) hits the tc-level datapath
 instead: the packet is DNAT'd from VIP to backend IP and, unless DSR is enabled, SNAT'd so
@@ -598,7 +604,7 @@ in a new deployment.
 
 Cilium implements the Kubernetes **Gateway API** natively — `Gateway` and `HTTPRoute`
 resources are reconciled directly by `cilium-agent`, which programs the per-node embedded
-Envoy (§6.11) to serve the matched routes; classic `Ingress` objects are also supported via a
+Envoy (§6.10) to serve the matched routes; classic `Ingress` objects are also supported via a
 built-in `IngressClass`, but Gateway API is the recommended surface for anything new, both
 because it expresses traffic-splitting and header-based routing that annotation-driven
 Ingress cannot, and because it is the migration target named in the ingress-nginx retirement
@@ -660,6 +666,64 @@ response behaviour, and it is not Cilium's default precisely because it trades a
 win for an operational one — plain SNAT/DNAT with the LB node in both directions is simpler to
 reason about and debug, which is why most deployments start there and move to DSR only once
 LB-node CPU on return traffic is a measured bottleneck.
+
+### 6.13 netkit: the pod device that replaces veth
+
+Every pod has historically been wired to the host by a **veth pair**, and the veth crossing
+is the last cost eBPF host routing could not remove. When a pod sends, `veth_xmit` hands the
+packet to the host-side peer as if it had just arrived from a NIC: it goes onto the CPU's
+backlog queue, a second softirq pass picks it up, and only then does Cilium's tc program on
+the host-side `lxc*` device run and redirect it to the physical NIC. **netkit** (Linux 6.7,
+written by Cilium maintainers for this datapath) is a device pair whose BPF program runs
+**inside the device's own transmit path**: the program attached to the pod-side peer
+(`BPF_NETKIT_PEER`) decides the packet's fate while the pod is still transmitting and can
+redirect it straight to the physical device, with no backlog queue, no second softirq and no
+qdisc. Cilium's docs state the goal as throughput and latency "as if they would have
+resided directly in the host namespace", i.e. namespace overhead reduced to zero.
+
+```mermaid
+flowchart LR
+    subgraph veth["veth (default)"]
+        direction LR
+        p1([pod socket]) --> v1([veth_xmit]) --> b1([CPU backlog<br/>queue]) --> s1([softirq]) --> t1([tc BPF on<br/>host lxc]) --> n1([NIC])
+    end
+    subgraph nk["netkit"]
+        direction LR
+        p2([pod socket]) --> k2([netkit xmit<br/>runs peer BPF]) --> n2([NIC])
+    end
+    classDef pod fill:#3d4451,stroke:#61afef,color:#e6e6e6
+    classDef cost fill:#3d4451,stroke:#e06c75,color:#e6e6e6
+    classDef bpf fill:#3d4451,stroke:#98c379,color:#e6e6e6
+    classDef nic fill:#3d4451,stroke:#e5c07b,color:#e6e6e6
+    class p1,p2 pod
+    class v1,b1,s1 cost
+    class t1,k2 bpf
+    class n1,n2 nic
+```
+
+Requirements and configuration, from the Cilium tuning guide:
+
+| Item | Value |
+|---|---|
+| Kernel | 6.8 or later (netkit support in Cilium shipped in `[1.16]`) |
+| Helm | `bpf.datapathMode: netkit` (L3, recommended: no ARP handling), `netkit-l2`, or `auto` |
+| Also required | eBPF host routing, so `kubeProxyReplacement: true` and `bpf.masquerade: true`; `routingMode: native` in the reference config |
+| Extras | BIG TCP works with it; Cilium also switches every non-netkit attachment to **tcx** BPF links |
+| Status | beta; `cilium status` shows the active mode on its "Device Mode" line |
+
+**Security side effect.** Both ends' programs are managed only from the host namespace: the
+kernel rejects an attach or detach made through the peer's interface index with `-EACCES`,
+so a process inside the pod, even with `CAP_NET_ADMIN` in its namespace, cannot detach the
+policy program from its own device, and Cilium sets the peer to drop traffic if no program
+is attached.
+
+**The migration constraint is the operational fact.** A node cannot run veth pods and netkit
+pods side by side, and enabling netkit on a running cluster in place is not supported. In
+`auto` mode, an agent that restarts on a 6.8 kernel with existing veth pods errors out
+rather than mixing. Roll it out as a node-pool change: new nodes (or per-node configuration)
+get `netkit`, and existing nodes are cordoned and drained before the setting changes, the
+same pattern as a kernel upgrade. The docs say veth mode will be deprecated once 6.8+
+kernels are common, so a node image on an older kernel is now a datapath decision too.
 
 ### 6.14 Transparent encryption: WireGuard vs IPsec
 
@@ -1117,6 +1181,14 @@ The instant any `CiliumNetworkPolicy` or `CiliumClusterwideNetworkPolicy` matche
 **Short:** No — BPF maps and programs are pinned to bpffs independently of the agent process, so already-established flows keep forwarding.
 The datapath's state lives in the kernel's pinned BPF maps, not in the userspace agent process, so a crash or restart of `cilium-agent` doesn't remove the programs already loaded or the maps already populated — existing connections continue to be forwarded exactly as before. What does stall is anything needing a *new* decision during the restart window: a pod scheduled while the agent is down, a policy change applied during the gap, or Service endpoint churn during the gap won't be reflected in the BPF maps until the agent finishes resyncing its view of the Kubernetes API. So the operationally accurate framing is "steady-state traffic survives an agent restart cleanly; anything requiring reconciliation during the outage window is delayed until resync completes," not "the agent is a single point of failure for the dataplane."
 
+**Q: A team sets `bpf.datapathMode: netkit` in the Helm values of a running cluster on 6.8 kernels and rolls the agents. Why do nodes start failing instead of getting faster?**
+**Short:** veth and netkit pods cannot coexist on a node and netkit cannot be enabled in place, so nodes must be cordoned and drained, or replaced, before the mode changes.
+Each existing pod is wired to the host with a veth pair that Cilium created when the pod started; switching the agent's device mode does not rewire those pods, and running both device types on one node is not supported; the docs record that even `auto` mode makes the agent error on restart when it detects netkit support while veth pods exist. The supported paths are per-node configuration on newly joined nodes, or cordon, drain, change the setting and restart, node by node. Check the other prerequisites first: netkit needs eBPF host routing, which needs `kubeProxyReplacement: true` and `bpf.masquerade: true`, and it is still beta. Confirm the result per node from the "Device Mode" line of `cilium status`.
+
+**Q: What does netkit remove from the pod datapath that eBPF host routing alone could not?**
+**Short:** The veth crossing: with veth a pod's outgoing packet is requeued on the CPU backlog and handled by a second softirq before Cilium's BPF runs; netkit runs the BPF in the pod device's transmit path.
+eBPF host routing already skips iptables and the upper host stack, and `bpf_redirect_peer` gives a fast switch into the pod for ingress. On egress, though, `veth_xmit` still hands the packet to the host-side peer through the per-CPU backlog queue, so it waits for another softirq pass before the tc program on the `lxc*` device can redirect it. A netkit pair (Linux 6.7, Cilium support since 1.16, kernel 6.8 required) runs the program attached with `BPF_NETKIT_PEER` while the pod's device transmits, so the redirect to the NIC happens immediately, with no qdisc and no requeue; Cilium's tuning guide describes the goal as performance as if the pod lived in the host namespace. Programs on both ends can be attached only from the host, which also stops a pod with `CAP_NET_ADMIN` from detaching its own policy. Use `bpf.datapathMode: netkit` on new node pools with 6.8+ kernels.
+
 **Q: Your team is used to `iptables -L` for debugging connectivity, and Cilium is now in the cluster — what's actually different about diagnosing a dropped packet?**
 **Short:** There's no sequential rule list to read; you need `hubble observe` and `cilium bpf ct list` because the decision is a map lookup, not a chain walk.
 `iptables -L` works because iptables' cost model *is* a sequential chain, so reading the chain in order tells you exactly what a packet would hit — there's no equivalent "print the rules in order" for a BPF map, because the whole design point is that the lookup is a hash, not a walk. `hubble observe --verdict DROPPED` is the fastest path to "what got denied and why, with both sides' resolved identity," and `cilium bpf ct list` or `cilium bpf policy get` inspect the actual map contents when Hubble's summary isn't enough. This is a genuine tooling-literacy gap, not a minor syntax difference: a team adopting Cilium without training on `cilium status`, `hubble observe` and basic `bpftool` usage is trading a debugging workflow everyone already knows for one nobody on call has practiced, and that gap is exactly what shows up at 2am during the first real incident.
@@ -1292,6 +1364,7 @@ Cilium's IPsec key rotation deliberately keeps the old and new key both valid si
 - **Prefer native routing over tunnel mode wherever the underlying fabric genuinely supports it**, and treat that choice as coupled to a specific, verified fabric guarantee (BGP-advertised routes or confirmed L2 adjacency) rather than a one-time setup decision that stays correct through every future topology change.
 - **Commit to `kubeProxyReplacement: true` rather than mixing individually-enabled feature flags with a coexisting kube-proxy**, once any single eBPF Service feature is needed — the coexistence path is exactly where the historic `partial`-mode confusion still lives (§10).
 - **Set `service.cilium.io/affinity` explicitly on every ClusterMesh global Service** intended for regional failover — the default (`none`) load-balances randomly across every cluster and does not imply a local-preferred topology.
+- **Adopt `bpf.datapathMode: netkit` through new or drained node pools on 6.8+ kernels**, never by flipping the Helm value under running veth pods, and confirm the "Device Mode" line of `cilium status` per node (§6.13).
 - **Run `cilium connectivity test` after every Cilium upgrade and every kernel/node-image change**, not just after a version bump to Cilium itself.
 - **Adopt Gateway API for new ingress rather than annotation-driven `Ingress`**, both for the traffic-splitting and header-routing capability annotations can't express and because it is the documented target for teams migrating off `ingress-nginx`.
 - **Scope `toEntities: world` rules as deliberate, reviewed, and time-boxed exceptions**, never as a stopgap — a broad `world` allow does not narrow itself when a more specific `toFQDNs` rule is added alongside it later.

@@ -178,7 +178,9 @@ cite it by name without re-litigating its reliability each time.
 | Brynjolfsson, Chandar & Chen, "Canaries in the Coal Mine?" (Stanford Digital Economy Lab, 2025, updated 2026) | **Measured** | Individual-level ADP payroll administrative data, quasi-experimental design comparing AI-exposed vs non-exposed occupations |
 | GitHub Octoverse 2025 | **Measured, vendor-published** | Platform-level telemetry (actual commit, PR, comment counts), not self-report — but published by the company selling the Copilot product driving the trend |
 | DORA State of DevOps / AI-assisted Software Development reports (2024, 2025) | **Reported** | Large self-reported survey (~3,000 respondents in 2024, ~5,000 in 2025), correlational by design |
-| Stack Overflow Developer Survey 2025 | **Reported** | Large but self-selected voluntary online survey |
+| Stack Overflow Developer Survey 2025 and 2026 | **Reported** | Large but self-selected voluntary online survey |
+| METR, "Measuring the Self-Reported Impact of Early-2026 AI on Technical Worker Productivity" (2026) | **Reported** | Convenience-sample survey of 349 technical workers with about a 2% response rate to emailed invitations; METR flags its own magnitudes as likely overstated |
+| METR, "Task Substitution and Uplift" (2026) | **Conceptual** | An economic model of how task reallocation separates speed gains from value gains; no new data |
 | Faros AI, CodeRabbit, CircleCI vendor analytics (2025-2026) | **Reported, vendor-interested** | Real customer telemetry, published by companies that sell tools addressing the exact problem the data describes |
 | AI interview-cheating flag-rate statistics (2026) | **Reported, vendor-interested** | Interview-proctoring vendor data; the vendor has a commercial incentive to report high fraud rates |
 | Shopify's April 2025 internal memo | **A verified event, not a study** | A real, publicly posted policy statement — reported here as a fact about what one company did, not as evidence about the industry |
@@ -218,11 +220,13 @@ a clear and communicated AI stance, healthy data ecosystems, AI-accessible inter
 strong version control practices, working in small batches, a user-centric focus, and
 quality internal platforms. The 2025 program also retired its long-standing four-tier
 performance model (Elite/High/Medium/Low) in favor of seven team archetypes spanning
-throughput, stability, product performance, and burnout — and added a fifth core metric,
-**rework rate**, alongside the four familiar ones (deployment frequency, lead time for
-changes, change failure rate, and failed-deployment recovery time), specifically to capture
-the kind of quality erosion that a pure speed metric would miss in an AI-accelerated
-pipeline.
+throughput, stability, product performance, and burnout. The fifth core metric,
+**deployment rework rate** (the ratio of deployments that are unplanned and happen because of
+an incident in production),
+dates from the 2024 report, which added it to the four familiar ones (deployment frequency,
+lead time for changes, change failure rate, and failed-deployment recovery time) because
+change failure rate was only a proxy for rework. It is the metric that shows quality
+erosion a pure speed metric would miss in an AI-accelerated pipeline.
 
 **Read together, 2024 and 2025 are not contradictory** — they are the same underlying
 mechanism observed a year apart at different adoption levels: AI does not change whether
@@ -259,7 +263,34 @@ output can exceed the overhead of just writing the fix themselves. It does not d
 establish what happens for a less-familiar codebase, a junior engineer, or a purely
 greenfield task, and this module does not claim it does.
 
-### 6.5 Stack Overflow 2025 — adoption up, trust down, both real
+**The follow-up study (METR, February 24, 2026).** METR started a second study in August 2025:
+57 developers (10 returning from the first study, 47 new, from smaller and more greenfield
+repositories), 143 repos, more than 800 tasks, with pay cut from $150/h to $50/h. On the same
+time-change scale as the original +19%, it estimates -18% for returning developers (CI -38% to
++9%) and -4% for new developers (CI -15% to +9%): the point estimates lean toward a speedup,
+but both intervals include zero. METR calls this very weak evidence and likely a lower bound,
+because developers declined to join rather than work without AI, and 30% to 50% said they
+held back tasks they did not want to do without AI. METR is changing its study design as a
+result. The 2025 result stays the cleanest causal number; the follow-up shows that study
+design is hard to repeat once developers depend on the tools.
+
+**Self-reported speed vs value (METR, May 11, 2026).** METR surveyed 349 technical workers
+(including 87 software engineers, 71 researchers, 129 academics and PhD students, and 48
+founders and managers) in February to April 2026. The median self-reported speed change from AI tools was
+3x; the median self-reported change in the value of their work was 1.4x to 2x. METR gives
+reasons to doubt the magnitudes: the sample is a convenience sample, and its own early-2025
+RCT found people overestimated AI's effect on their task time by 40 percentage points.
+
+**Why speed and value diverge.** METR's "Task Substitution and Uplift" note (Tom Cunningham
+and Parker Whitfill, May 8, 2026) gives the mechanism: people move their time toward the tasks
+AI makes cheap, so uplift on the old task mix <= uplift in value <= uplift on the new task mix.
+In its worked example, AI halves the time to write a PR but not a document; uplift is +33% on
+the old mix of tasks and +50% on the new mix, and value lands between the two. A task done
+only because AI made it cheap, which METR calls a "Cadillac task", raises the speed figure
+without adding much value. A team that reports "3x faster" is usually reporting the new-mix
+number.
+
+### 6.5 Stack Overflow 2025 and 2026: adoption up, trust conditional
 
 Stack Overflow's 2025 Developer Survey reports **84% of developers use or plan to use AI
 tools**, up from 76% in 2024. In the same survey, **46% say they don't trust the accuracy of
@@ -270,6 +301,15 @@ and 66% say AI solutions are frequently "close, but ultimately miss the mark." W
 why they'd still turn to a human over AI for a coding question, 75.3% cited not trusting
 AI's answers, 61.7% cited ethical or security concerns about the code, and 61.3% said they
 wanted to fully understand the code themselves.
+
+The 2026 survey (the 16th, 30,903 responses from 169 countries, published October 6, 2026)
+shows use rising further and trust staying conditional. 80% of respondents used AI at least
+an hour per day, and 31% of daily users used it four or more hours. 62% hold a favorable
+view of AI tools at work (32% very, 30% somewhat). Asked when it is acceptable to trust AI,
+48% trust it when they can easily validate the answer and only 16% extend that trust to most
+tasks that are not important work decisions. When looking for answers, 69.9% ask an AI agent,
+second only to online search at 82.7%. The 2026 trust question is worded differently from
+2025's accuracy question, so the two years are not a like-for-like trend line.
 
 **Read against §6.4**, this is not a contradiction — it's the same phenomenon from a
 different angle. Developers are adopting the tools at a high and rising rate while, in
@@ -533,6 +573,12 @@ work.** The single clearest lesson across every measured and reported source in 
 is that AI adoption on its own does not fix a team's process; it reveals and accelerates
 whatever was already there, for better and for worse.
 
+**Budget for a productivity dip during rollout.** DORA's "ROI of AI-assisted Software
+Development" report gives calculations for managing the initial "productivity dip" of a new AI
+rollout and for defending the AI budget into the next fiscal year. Plan the dip into the rollout
+and put the before/after measurement window past it, or the first quarter's numbers will read
+as a failed rollout.
+
 ---
 
 ## 10. Common Pitfalls
@@ -543,6 +589,18 @@ metric that was already a weak proxy for engineering value a decade ago is a mat
 worse one now that generation cost has collapsed. GitHub's own -27%-comments-per-commit
 figure (§6.6) is the visible symptom of exactly this: volume metrics kept climbing while the
 signal a human actually reviewed anything carefully fell.
+
+**Ranking engineers on AI usage or token spend.** Token leaderboards ("tokenmaxxing") spread
+through large tech companies in early 2026. DORA's June 2, 2026 analysis ("Finding balance
+in the era of tokenmaxxing", Evan Conaway) calls raw token count a vanity metric: it measures
+input, it is easy to game, and token leaderboards "can undermine the productivity they seek
+to boost." The reported costs: developers running agents on nonsense projects to stay above
+the company average, developers withholding their best prompts to out-rank colleagues, more
+low-quality generated code accepted without review, and, per DORA, the
+highest-budget teams often getting only a marginal throughput gain at 10x the cost. DORA's position is
+that company-wide aggregates are meaningless and individual scores are harmful; judge AI by
+outcome metrics (the DORA metrics, cost per accepted change, rework rate). Shopify replaced
+its AI leaderboard with a usage dashboard and circuit breakers on runaway agent spend.
 
 **Mandating an AI tool and calling it a strategy.** DORA's 2025 finding that AI is an
 *amplifier*, not a fix, directly contradicts the common leadership move of rolling out a
@@ -581,13 +639,14 @@ counter-effect is plausible and unmeasured.
 
 **Strong version — the same claim, properly calibrated**
 
-> Stack Overflow's 2025 survey found 84% of developers use AI tools and productivity is
-> broadly self-reported as improved, but METR's 2025 randomized trial found experienced
-> developers were actually 19% slower on real tasks in codebases they knew well, and DORA's
-> 2024 data found AI adoption correlated with reduced delivery stability. I'd guess we're
-> seeing real gains on unfamiliar or boilerplate-heavy work and a real verification tax on
-> familiar, high-stakes work — I want us to measure our own review time and defect rate
-> before and after, not assume the survey numbers apply to our specific codebase.
+> Stack Overflow's 2026 survey found 80% of developers use AI at least an hour a day, but
+> only 48% trust it when they can easily verify the output, and METR's 2025 randomized trial
+> found experienced developers were actually 19% slower on real tasks in codebases they knew
+> well (its 2026 follow-up leaned toward a speedup, which METR itself calls very weak
+> evidence). DORA's 2024 data found AI adoption correlated with reduced delivery stability.
+> I'd guess we're seeing real gains on unfamiliar or boilerplate-heavy work and a real
+> verification tax on familiar, high-stakes work. I want us to measure our own review time
+> and defect rate before and after, not assume the survey numbers apply to our codebase.
 
 **What changed:** the weak version treats a self-reported survey figure as a universal,
 proven multiplier and offers no mechanism for being wrong. The strong version names which
@@ -601,10 +660,16 @@ specific team rather than importing someone else's number.
 
 | Source | What it gives you |
 |---|---|
-| DORA, "Accelerate State of DevOps Report" (2024) (dora.dev) | The 1.5% throughput / 7.2% stability correlational finding, in the report's own words |
-| DORA, "State of AI-assisted Software Development" (2025) (dora.dev) | The amplifier framing, the 7-capability AI Capabilities Model, the retired 4-tier system, and the new 5th (rework rate) metric |
+| DORA, "Accelerate State of DevOps Report" (2024) (dora.dev) | The 1.5% throughput / 7.2% stability correlational finding, in the report's own words, and the fifth metric, deployment rework rate |
+| DORA, "State of AI-assisted Software Development" (2025) (dora.dev) | The amplifier framing, the 7-capability AI Capabilities Model, and the retired 4-tier system replaced by seven team archetypes |
 | METR, "Measuring the Impact of Early-2025 AI on Experienced Open-Source Developer Productivity" (arXiv:2507.09089, 2025) | The randomized controlled trial behind the 19%-slower / 20%-perceived-faster finding |
+| METR, "We are Changing our Developer Productivity Experiment Design" (metr.org, 2026-02-24) | The August 2025 follow-up study (57 developers, -18% and -4% time-change estimates) and why METR calls it very weak evidence |
+| METR, "Measuring the Self-Reported Impact of Early-2026 AI on Technical Worker Productivity" (metr.org, 2026-05-11) | The 349-worker survey: median 3x self-reported speed change against 1.4x to 2x value change |
+| Tom Cunningham, Parker Whitfill, "Task Substitution and Uplift" (metr.org, 2026-05-08) | Why speed uplift on a new task mix overstates value uplift; the "Cadillac task" |
 | Stack Overflow, "2025 Developer Survey" (survey.stackoverflow.co/2025/ai) | The adoption-up, trust-down figures in the company's own words |
+| Stack Overflow, "2026 Developer Survey" (survey.stackoverflow.co/2026) | 30,903 responses: 80% use AI at least an hour a day, 62% favorable, 48% trust AI when they can verify it, 69.9% ask an AI agent for answers |
+| Evan Conaway, "Finding balance in the era of tokenmaxxing" (dora.dev/insights, 2026-06-02) | DORA's case against token leaderboards as a vanity metric, and the outcome metrics it recommends instead |
+| DORA, "ROI of AI-assisted Software Development" (dora.dev/research/publications) | Calculations and conversation starters for the rollout productivity dip and for defending the AI budget |
 | GitHub, "Octoverse 2025" (github.blog/news-insights/octoverse) | Platform-measured commit, PR, and comment-volume data; the Broken Access Control security finding |
 | Erik Brynjolfsson, Bharat Chandar, Ruyu Chen, "Canaries in the Coal Mine? Six Facts about the Recent Employment Effects of Artificial Intelligence" (Stanford Digital Economy Lab, 2025, updated 2026) | The quasi-causal evidence on young-worker employment in AI-exposed occupations |
 | SignalFire, "State of Talent Report" (2026) | Named-company entry-level hiring figures (venture-firm-published, reported not measured) |
@@ -638,35 +703,64 @@ own — strong teams get stronger, weak teams ship low-quality work faster. It n
 predictive capabilities: a clear AI stance, healthy data ecosystems, AI-accessible internal
 data, strong version control, small batches, a user-centric focus, and quality internal
 platforms, and it retired the old four-tier (Elite/High/Medium/Low) model for seven team
-archetypes plus a new fifth core metric, rework rate.
+archetypes. The fifth core metric, deployment rework rate, dates from the 2024 report.
 
 **Q: What did METR's 2025 randomized controlled trial find, and why does the methodology matter here?**
-**Short:** Experienced devs were 19% slower with AI tools, despite believing they were faster.
+**Short:** In early 2025, experienced devs were 19% slower with AI tools, despite believing they were faster.
 Sixteen experienced open-source developers completed 246 real tasks in codebases they
 averaged five years of experience with, each task randomly assigned to allow or disallow
 early-2025 AI tools (mainly Cursor Pro with Claude 3.5/3.7 Sonnet). Measured completion time
 was 19% *slower* with AI allowed — yet developers had forecast a 24% speedup beforehand and,
 after finishing, still estimated a 20% speedup had actually occurred. It matters because
 this is a randomized trial, not a survey, making it one of the few genuinely causal data
-points in a field otherwise dominated by self-report.
+points in a field otherwise dominated by self-report. METR's follow-up (started August 2025,
+57 developers) leaned toward a speedup, but METR calls it very weak evidence because
+developers who refused to work without AI dropped out or held back tasks.
 
 **Q: Why is the METR finding not a blanket claim that "AI slows everyone down"?**
-**Short:** It measured one narrow, common case: experienced devs, familiar mature codebases.
+**Short:** It measured one narrow case: experienced devs, familiar mature codebases, early-2025 tools. METR's 2026 follow-up leaned toward a speedup.
 The study's scope was specific — 16 experienced developers, tasks in large mature
 repositories they already knew deeply, early-2025 tooling. It says something real about that
 exact scenario, where the overhead of specifying a task to an agent and verifying its output
 can exceed just writing the fix yourself. It does not directly measure unfamiliar
 codebases, junior engineers, or greenfield work, and treating it as a universal verdict on
-AI coding tools overstates what a 16-person, single-vintage study can establish.
+AI coding tools overstates what a 16-person, single-vintage study can establish. METR's own
+follow-up, with 57 developers and later tools, estimated -18% and -4% task-time changes
+(both intervals include zero) and METR treats even that as a likely lower bound on speedup.
 
-**Q: What does the Stack Overflow 2025 survey say about the relationship between AI adoption and trust?**
-**Short:** Adoption hit 84% while distrust of AI accuracy rose to 46%, both up sharply.
-84% of developers report using or planning to use AI tools, up from 76% in 2024, while 46%
-say they don't trust the accuracy of AI output, up from 31% — only 29% report trusting it at
-all, down 11 points, and just 3% "highly" trust it. Sixty-six percent say AI solutions are
-often "close, but ultimately miss the mark," and 45% say debugging AI-generated code takes
-longer than writing it themselves would have — adoption and skepticism are rising together,
-not trading off against each other.
+**Q: Why can a self-reported AI speedup overstate the value AI adds to an engineer's work?**
+**Short:** People shift time toward tasks AI makes cheap, so speedup on the new task mix exceeds value gained; METR's 2026 survey found a median 3x speedup but only 1.4x to 2x value.
+METR's "Task Substitution and Uplift" note (May 2026) shows that, for someone allocating time
+to maximize an objective with accurate beliefs about task-level uplift, uplift on the old task mix <= uplift in value <= uplift on the new task mix. In its
+example, AI halves PR time but not document time: +33% on the old mix, +50% on the new mix,
+value in between. Tasks done only because AI made them cheap ("Cadillac tasks") inflate the
+speed number. METR's survey of 349 technical workers, run February to April 2026, measured
+the gap: median self-reported speed change 3x, median value change 1.4x to 2x, and METR
+itself gives reasons to doubt both magnitudes. When someone quotes "3x faster", ask which task mix
+the multiplier is measured on.
+
+**Q: What do the Stack Overflow 2025 and 2026 surveys say about the relationship between AI adoption and trust?**
+**Short:** Use kept rising (80% use AI an hour a day in 2026) while trust stayed conditional: 46% distrusted AI accuracy in 2025, and in 2026 only 48% trust AI when they can verify it.
+In 2025, 84% of developers reported using or planning to use AI tools, up from 76% in 2024,
+while 46% said they don't trust the accuracy of AI output, up from 31%; only 29% trusted it at
+all, down 11 points, and just 3% "highly" trusted it. Sixty-six percent said AI solutions are
+often "close, but ultimately miss the mark," and 45% said debugging AI-generated code takes
+longer than writing it themselves. The 2026 survey (30,903 responses, 169 countries) has 80%
+using AI at least an hour a day and 62% favorable, but only 48% trust AI when they can easily
+validate the answer and 16% trust it for most tasks that are not important work decisions.
+The 2026 trust question is worded differently, so read it as the same pattern, not a
+like-for-like trend: adoption and skepticism rise together rather than trading off.
+
+**Q: Why does DORA call AI token leaderboards ("tokenmaxxing") a vanity metric, and what does it recommend measuring instead?**
+**Short:** Token count measures input, not outcomes, so it is easy to game and can undermine the productivity it aims to boost; DORA says judge AI by outcome metrics.
+DORA's June 2026 analysis by Evan Conaway puts tokenmaxxing in the same family as lines of
+code and commit counts: an activity metric that becomes a target and stops measuring work
+(Goodhart's Law). Reported effects include developers running agents on nonsense projects to
+stay above the company average, hoarding effective prompts, and accepting low-quality
+generated code without rigorous review. DORA's position is that company-wide aggregates are
+meaningless and individual scores are harmful; judge impact with the DORA metrics plus cost per accepted change
+and rework rate. In an interview, name the metric you would use instead, not just the one you
+would drop.
 
 **Q: What did GitHub's Octoverse 2025 report measure about code review specifically, and why is this data different in kind from the DORA and Stack Overflow figures?**
 **Short:** Commits rose 25% while comments on them fell 27% — platform-measured, not self-reported.

@@ -1,6 +1,6 @@
 # HashiCorp Vault (and OpenBao) — Secrets Management
 
-> **Version anchor (2026-08-25).** HashiCorp Vault **2.0.4** (2026-08-04) on the **2.0** feature line, which went GA as **2.0.0** on 2026-04-14; the supported lines are **2.0.x**, **1.21.x**, **1.20.x** and **1.19.x**. Licence is **BUSL 1.1**, with the Licensor now recorded as **International Business Machines Corporation (IBM)**, a **Change Date** four years after each release and a **Change License** of MPL 2.0. **OpenBao 2.6.1** (2026-07-22), **MPL 2.0**, under the Linux Foundation. Ecosystem: **Vault Secrets Operator 1.5.0**, **vault-k8s (Agent Injector) 1.7.5**, **vault-csi-provider 1.7.3**, and **External Secrets Operator 2.8.0** serving `external-secrets.io/v1` (v1beta1 stopped being served in `[ESO 0.17]`). Version-specific behaviour is tagged inline as `[2.0]`, `[OpenBao 2.6]`, `[VSO 1.5]`, `[ESO 0.17]`; nothing here is called current without naming the release it landed in.
+> **Version anchor (2026-10-19).** HashiCorp Vault **2.2.0** (2026-10-15), the latest minor on the **2.x** major line, which went GA as **2.0.0** on 2026-04-14 (2.1.0 followed on 2026-09-01). From 2.x, Vault Enterprise follows IBM's Support Cycle-2 model: fixes ship only in the latest fix release of a major line, with no backports across 2.x minors, and **1.19.x** is the remaining LTS line, in extended maintenance until April 2027. Licence is **BUSL 1.1**, with the Licensor now recorded as **International Business Machines Corporation (IBM)**, a **Change Date** four years after each release and a **Change License** of MPL 2.0. **OpenBao 2.7.1** (2026-10-01; the 2.7.0 feature release shipped 2026-09-23), **MPL 2.0**, under the Linux Foundation. Ecosystem: **Vault Secrets Operator 1.5.0**, **vault-k8s (Agent Injector) 1.7.5**, **vault-csi-provider 1.7.3**, and **External Secrets Operator 2.8.0** serving `external-secrets.io/v1` (v1beta1 stopped being served in `[ESO 0.17]`). Version-specific behaviour is tagged inline as `[2.0]`, `[2.2]`, `[OpenBao 2.6]`, `[OpenBao 2.7]`, `[VSO 1.5]`, `[ESO 0.17]`; nothing here is called current without naming the release it landed in.
 
 Vault is a **secrets platform**: a process that holds an encrypted store, authenticates a caller against an identity the caller already has, decides what that identity may reach, and — for the interesting half of its surface — **mints a brand-new credential on the spot** and takes it away again when its lease ends. This page is about the inside of that process: the barrier, the seal, the engines, the leases, the policies, the identities, and the operational failure modes that only show up at 3am.
 
@@ -72,7 +72,7 @@ Three separate facts get tangled together here, and an adoption review needs all
 | 2023–2025 | **Vault Secrets Operator** (a native Kubernetes controller, no sidecar); Seal HA (Enterprise); OpenBao ships its own releases and begins to diverge |
 | **Feb 2026** | **IBM closes the HashiCorp acquisition**; brand becomes "IBM Vault (formerly HashiCorp Vault)" |
 | **Apr 2026** | **Vault 2.0.0 GA** — the first major-version bump in a decade, carrying the security-hardening breaking changes in §6.23 |
-| 2026 | Vault **2.0.4**; OpenBao **2.6.1**, now removing and deprecating things Vault still ships |
+| 2026 | Vault **2.0** GA (April), **2.1** (September), **2.2** (October); OpenBao **2.7.0** (September) moves the KMS seals and the LDAP, Kerberos and RADIUS auth methods out to plugins and removes `file` storage, and adds Control Groups, which Vault keeps in Enterprise |
 
 ### What Vault is not
 
@@ -201,7 +201,7 @@ The one non-obvious property, and the source of §6.2's worst outcome: **a recov
 | **Consul** | Yes | A separate Consul cluster | Supported, historical | Only if you already run Consul for other reasons and have operated it for years |
 | `postgresql`, `mysql`, `dynamodb`, `etcd`, `zookeeper`, … | Some | An external database | Community-supported; several deprecated | Do not start here |
 | `s3`, `gcs`, `azure`, `swift` | **No** | Object storage | Community-supported | Single-node only. Not a production HA story |
-| `file` | No | A local directory | Dev/test; **deprecated in `[OpenBao 2.6]`** | Never in production |
+| `file` | No | A local directory | Dev/test in Vault; **removed from the OpenBao server in `[OpenBao 2.7]`** | Never in production |
 | `inmem` | No | RAM | `-dev` mode | Never |
 
 The consolidation is deliberate and it is the right call: Integrated Storage collapses "operate Vault" and "operate Vault's database" into one problem, makes `vault operator raft snapshot save` a single complete backup, and removes an entire distributed system from the dependency graph.
@@ -242,14 +242,18 @@ OpenBao was taken from Vault at the BUSL change and is **API-compatible at the f
 
 What has actually diverged, and it is more than "a rename":
 
-| Area | Vault `[2.0]` | OpenBao `[OpenBao 2.6]` |
+| Area | Vault `[2.0]` | OpenBao `[OpenBao 2.7]` |
 |---|---|---|
 | Licence | BUSL 1.1, Licensor IBM, Change Date +4y to MPL 2.0 | **MPL 2.0**, Linux Foundation, public TSC |
-| Enterprise features | Namespaces, replication, HSM seal, Seal HA, lease-count quotas, performance standbys | None of the above — but namespaces and some previously-Enterprise ideas are being built in the open |
+| Enterprise features | Namespaces, replication, HSM seal, Seal HA, lease-count quotas, performance standbys, Control Groups | Namespaces (since 2.3), read-serving standbys (Raft since 2.5, on by default, off with `disable_standby_reads`; PostgreSQL since 2.7) and Control Groups (2.7) ship in the open build; replication, Seal HA and lease-count quotas do not exist |
 | `stored_shares` | Still accepted on `sys/init` and `sys/rekey/init` | **Removed** — a client passing it gets an error |
 | Container user | Runs as root by default in the official image | Runs as the unprivileged **`openbao`** user — a genuine upgrade break for anyone with a host mount owned by root |
-| Built-in KMS seals | `awskms`, `azurekeyvault`, `gcpckms`, `pkcs11` are core | All four **deprecated, for removal in 2.7.0**, moving to an external plugin model |
-| `file` storage | Supported for dev | **Deprecated** |
+| Built-in KMS seals | `awskms`, `azurekeyvault`, `gcpckms`, `pkcs11` are core | **External plugins since 2.7.0**: `pkcs11`, `alicloudkms`, `awskms`, `azurekeyvault`, `gcpckms` and `ocikms` must be installed separately; the HSM distribution is discontinued |
+| LDAP, Kerberos, RADIUS auth; LDAP secrets | Built in | **Removed from the main binary in 2.7.0**, shipped in `openbao-plugins` |
+| `file` storage | Supported for dev | **Removed from the server in 2.7.0**; `bao operator migrate` support is deprecated, removal in 2.8.0 |
+| Keys held outside the barrier | Managed keys for PKI and Transit (Enterprise) | **External Keys** `[OpenBao 2.7]`: PKI and Transit sign, verify, encrypt and decrypt through a KMS plugin, and OpenBao stores no key material |
+| Post-quantum crypto | ML-DSA in PKI `[2.2]`; ML-DSA (since 1.19) and SLH-DSA (since 1.20.1) in Transit, experimental and Enterprise; `X25519MLKEM768` in the TLS stack (since 1.20) | ML-DSA in PKI and Transit (`mldsa-44`, `mldsa-65`, `mldsa-87`) `[OpenBao 2.7]`; listener `tls_key_exchange_preferences` can require `X25519MLKEM768`, `MLKEM1024` and the hybrid NIST-curve groups, and accepts ML-DSA certificates. Go's OCSP does not support ML-DSA issuers |
+| Read-after-write on standbys | `X-Vault-Index` and `X-Vault-Inconsistent` headers (Enterprise) | Same headers in the open build `[OpenBao 2.7]`, tuned by `consistency_fallback_behavior` and `consistency_max_index_wait` |
 | Release cadence | HashiCorp/IBM's | The foundation's, independent |
 
 The practical reading: **the compatibility risk is not the API, it is the operational surface.** A migration that only exercises `vault kv get` will succeed and prove nothing; the things that break are init flags, seal configuration, container file ownership, and any Enterprise feature you had quietly started to depend on. §8.4 turns this into a decision.
@@ -592,14 +596,16 @@ listener "tcp" {
 
 api_addr     = "https://vault-1.internal:8200"   # how CLIENTS reach this node
 cluster_addr = "https://vault-1.internal:8201"   # how PEERS reach this node
+disable_mlock = true                             # must be explicit with raft; turn swap off on the host
 ```
 
-Four things to know:
+Five things to know:
 
 1. **`api_addr` and `cluster_addr` must be individually correct per node.** They are how a standby tells a client where the active node is, and how peers find each other. Setting them to a load-balancer address is a classic bootstrap failure — the standby redirects the client to the load balancer, which sends it back to the standby.
 2. **Autopilot** manages the server set automatically: dead-server cleanup, `min_quorum` protection, and stabilisation before a new node counts toward quorum. Check it with `vault operator raft autopilot state` after every node replacement; a cluster that looks healthy in `vault status` can be one node from losing quorum in autopilot's view.
 3. **Snapshots are the backup.** `vault operator raft snapshot save prod.snap` captures everything inside the barrier, still encrypted. Take them on a schedule, store them where the KMS key is not, and **restore one into a scratch cluster every quarter** — a snapshot you have never restored is a hypothesis.
 4. **Raft is not a throughput layer.** Every write is a quorum write. Vault's write path is deliberately not fast, and this is the reason lease churn (§6.9) is expensive: each issuance and each revocation is at least one quorum write.
+5. **`disable_mlock` must be set explicitly, and swap must be off.** Since 1.20 a server on integrated storage refuses to start without an explicit `disable_mlock` value. HashiCorp's configuration reference recommends `true` with Raft: `mlock` pulls BoltDB's memory-mapped file into resident memory, so a dataset larger than RAM ends in an out-of-memory kill. With `mlock` off the barrier still protects data at rest, but keys and plaintext in process memory can be paged out, so disable swap (or use only encrypted swap) on every node. In containers, the 2.2.0 changelog carries two entries for the official image: one built without `cap_ipc_lock` (set `disable_mlock = true`) and one built with it (the runtime must grant `IPC_LOCK`). `disable_mlock = true` with swap off works with either image.
 
 **Sizing, as arithmetic rather than a shrug.** Vault's storage footprint is driven almost entirely by *countable objects*, not by secret size, so it is predictable in advance:
 
@@ -800,6 +806,43 @@ That design had one embarrassing hole for its first two years, and it is exactly
 | **Azure** | a federated credential on an app registration — and note Azure accepts an OIDC issuer **only over a publicly trusted CA**, so a Vault cluster behind a private CA cannot federate to Azure at all |
 
 Two operational consequences follow, and the second is the one that bites. First, the same WIF plumbing is available to the cloud **secrets engines** (`aws`, `azure`, `gcp`), so a Vault that mints AWS credentials no longer needs a root AWS key of its own either — which removes the `aws/config/rotate-root` chore in §6.6 rather than automating it. Second, **Vault's identity-token issuer URL must be reachable by the cloud provider**, because the provider fetches the JWKS to verify the signature. An air-gapped or purely internal Vault cannot use WIF, and that is a topology decision, not a setting: teams discover it after designing the whole migration around federation.
+
+### 6.8b Post-quantum signatures in PKI and Transit
+
+A signature made today with ECDSA or RSA can be forged once a large enough quantum computer
+exists, so anything that must verify for a decade (a root or intermediate CA, firmware and
+release signing, signed audit evidence) is the first candidate for NIST's post-quantum
+signature algorithms: **ML-DSA** (FIPS 204, lattice-based) and **SLH-DSA** (FIPS 205,
+hash-based). Vault carries them in two engines, landed in steps:
+
+| Release | What landed |
+|---|---|
+| `[1.19]` | experimental ML-DSA signatures in Transit |
+| `[1.20]` | `X25519MLKEM768` hybrid key agreement in Vault's Go TLS stack; experimental SLH-DSA in Transit (1.20.1) |
+| `[2.1]` | SLH-DSA as the post-quantum half of **hybrid** Transit keys, paired with ECDSA P-256, P-384, P-521 or Ed25519 (Enterprise) |
+| `[2.2]` | ML-DSA keys in the **PKI** engine; PKI CA key export wrapped with RSA-OAEP, ECDH-ES or ML-KEM (Enterprise) |
+| `[OpenBao 2.7]` | ML-DSA (`mldsa-44`, `mldsa-65`, `mldsa-87`) in PKI and Transit in the open build |
+
+```bash
+# Transit (Enterprise): pure ML-DSA, and a hybrid key that signs with both algorithms
+vault write -f transit/keys/release-signing type=ml-dsa parameter_set=65
+vault write -f transit/keys/release-hybrid type=hybrid parameter_set=65 \
+  hybrid_key_type_pqc=ML-DSA hybrid_key_type_ec=ecdsa-p256
+vault write transit/sign/release-hybrid input=$(base64 < artifact.sha256)
+```
+
+A **hybrid** signature holds a classical and a post-quantum signature, and verification
+needs both, so it stays secure if either algorithm is broken: a flaw found in the young
+lattice schemes does not expose you, and a quantum attacker on ECDSA does not either. That
+is why hybrid, not pure ML-DSA, is the usual first step. The costs are size and reach. A
+P-256 ECDSA signature is about 64 bytes; ML-DSA-65 (FIPS 204) is 3,309 bytes with a
+1,952-byte public key; SLH-DSA-SHA2-128s (FIPS 205) has a 32-byte public key but a
+7,856-byte signature and slow signing. Certificate chains, JWTs and anything sent per
+request grow by kilobytes, and every verifier (OpenSSL, Go, Java, browsers, HSMs) must
+understand the algorithm OIDs before an ML-DSA leaf is useful. OpenBao's 2.7 notes, for
+example, record that Go's OCSP package cannot handle an ML-DSA issuer. Start with a separate
+ML-DSA intermediate or a hybrid Transit signing key for long-lived artifacts, and keep the
+ECDSA hierarchy for short-lived workload certificates (§6.7) until the relying parties catch up.
 
 ### 6.9 Leases — the centrepiece, and the arithmetic nobody runs first
 
@@ -1338,11 +1381,13 @@ annotations:
 
 **The container runs as `openbao`, not root `[OpenBao 2.6]`.** A `docker run -v /srv/vault:/openbao/data` that worked because the process was root now fails to write. Fix the ownership; do not fix it by running as root.
 
-**The four built-in KMS seals are deprecated for removal in 2.7.0 `[OpenBao 2.6]`.** `awskms`, `azurekeyvault`, `gcpckms` and `pkcs11` move to an external plugin model. Anything auto-unsealing today needs a plan before 2.7.0, and "we will deal with it at upgrade time" is how a cluster ends up unable to start.
+**The KMS seals are external plugins `[OpenBao 2.7]`.** `pkcs11`, `alicloudkms`, `awskms`, `azurekeyvault`, `gcpckms` and `ocikms` are no longer built in, and the HSM distribution is discontinued. A cluster that auto-unseals must have the seal plugin installed before it starts on 2.7.0, or it cannot unseal; "we will deal with it at upgrade time" is how a cluster ends up unable to start.
 
-**`file` storage is deprecated `[OpenBao 2.6]`.** Only relevant for dev and test rigs — but those rigs are in CI, and CI is where a deprecation warning becomes a failed pipeline.
+**LDAP, Kerberos and RADIUS auth and the LDAP secrets engine left the main binary `[OpenBao 2.7]`.** They ship in `openbao-plugins`, so a Vault design that authenticates humans through LDAP needs that plugin registered before the migration, not after.
 
-**No Enterprise features, ever.** Namespaces, replication, HSM seals, Seal HA, performance standbys and lease-count quotas do not exist. If your Vault design leans on any of them, OpenBao is not a drop-in and the migration is a redesign. Note that OpenBao is building some of these ideas in the open, so this list shortens over time — check it against the current release rather than trusting this table in a year.
+**`file` storage is removed from the server `[OpenBao 2.7]`.** Only relevant for dev and test rigs, but those rigs are in CI, and a CI job that starts a server on `file` storage fails on 2.7.0. `bao operator migrate` still reads it, deprecated, with removal planned for 2.8.0.
+
+**Some Vault Enterprise features exist in OpenBao, some do not.** Namespaces (since 2.3), read-serving standby nodes (since 2.5) and Control Groups (2.7) ship in the open build, and PKCS#11 keys work through the `kms-pkcs11` plugin. Replication (performance or DR), Seal HA and lease-count quotas do not exist. If your Vault design leans on any of those three, OpenBao is not a drop-in and the migration is a redesign.
 
 The migration itself, when it applies, is mechanically simple: OpenBao reads a Vault storage backend from the fork point. The work is entirely in the surrounding automation.
 
@@ -1446,6 +1491,17 @@ Never skip a major version, always read the release's upgrade guide, and remembe
 
 The first three deserve a specific warning. They make Vault meaningfully safer — an unauthenticated rekey endpoint is a denial-of-service surface — and they mean **your break-glass procedure now requires a token at the moment you have none**. Re-write and re-rehearse that runbook *before* upgrading, not during the incident that needs it.
 
+**The `[2.2]` upgrade checks.** Three of these also shipped in the 2.1.2 patch (2026-10-07) and in Enterprise 1.21.12, 1.20.17 and 1.19.23, so a patch upgrade can carry them:
+
+| Change | What breaks | Check before upgrading |
+|---|---|---|
+| ACL and Sentinel EGP paths naming an AppRole, AWS, Azure, GCP, Kubernetes, SCEP or TPM role, a userpass user, a GitHub team or user mapping, a cert or CRL name, or a policy name are matched against the **lowercased** name | A rule such as `deny` on `auth/approle/role/MyRole` stops matching, so the deny **fails open**; Sentinel `request.path` comparisons against mixed case stop matching too | Grep every policy and Sentinel rule for uppercase characters in those paths; rewrite them lowercase |
+| Policy names with `.` or `..` segments are rejected on write, and legacy references are skipped when the ACL is built | Tokens silently lose the permissions those policies granted | Rename the policies first |
+| Plugin catalog entries are checked against `plugin_directory` on every use, symlinks included | A plugin whose binary resolves outside the directory is refused, and its mounts are skipped at startup (data kept) | Move the binaries inside `plugin_directory` and register them again |
+| HCP Link removed (2.2.0 only) | The `cloud` stanza has no effect and is unrecognised; `vault operator diagnose` and `vault status` drop the HCP Link check | Remove the stanza from server config |
+
+The lowercase change closes a real bypass: those backends always resolved `MyRole` and `myrole` to the same role, so an exact deny on one spelling was evaded by requesting another. It does not cover Okta group names, LDAP and RADIUS names on mounts left case-insensitive, or Enterprise SCIM client names; on those paths do not pair a wildcard allow with an exact deny.
+
 **The DR drill.** Rehearse quarterly, and rehearse the human part: reaching the recovery-key holders, generating the DR operation token from a quorum, promoting the secondary, and repointing clients. The technical steps are minutes; finding three people with keys at 2am is the part that fails.
 
 ---
@@ -1515,14 +1571,14 @@ The line that decides it in practice: **if you cannot name a dynamic secrets eng
 
 ### 8.4 Vault versus OpenBao
 
-| Axis | Vault `[2.0]` | OpenBao `[OpenBao 2.6]` | Weight |
+| Axis | Vault `[2.0]` | OpenBao `[OpenBao 2.7]` | Weight |
 |---|---|---|---|
 | Licence | BUSL 1.1, source-available, IBM Licensor | MPL 2.0, OSI-approved | **Decisive** where policy requires OSI |
 | Governance | Single vendor, now IBM | Linux Foundation, public TSC | Matters over a 5-year horizon |
 | API compatibility | — | Compatible at the fork point, diverging since | Low risk for core paths |
-| Enterprise features | Namespaces, replication, HSM, Seal HA, lease-count quotas, performance standbys | **None** | **Decisive** if you use any |
+| Enterprise features | Namespaces, replication, HSM, Seal HA, lease-count quotas, performance standbys, Control Groups | Namespaces, read-serving standbys, Control Groups, PKCS#11 via plugin; **no** replication, Seal HA or lease-count quotas | **Decisive** if you use any of the missing three |
 | Ecosystem | Every integration targets it first | Growing; most Vault clients work | Moderate |
-| Operational surface | Stable | `stored_shares` removed, non-root container, KMS seals deprecated for 2.7.0, `file` storage deprecated | **The actual migration cost** |
+| Operational surface | Stable | `stored_shares` removed, non-root container, KMS seals and LDAP/Kerberos/RADIUS auth moved to plugins in 2.7.0, `file` storage removed | **The actual migration cost** |
 | Commercial support | HashiCorp/IBM | Vendors around the foundation | Depends on procurement |
 
 **Choose Vault** when you use or will use Enterprise features, when commercial support from a single vendor is a procurement requirement, or when you simply want the path every integration is tested against. **Choose OpenBao** when an OSI-approved licence is a hard requirement, when single-vendor governance is a risk you are explicitly managing, or when you are starting fresh and the community edition covers you. **Do not choose OpenBao to save money** — Vault's community edition is free too, and the migration cost is in §6.21's operational surface, not in the API.
@@ -1597,7 +1653,7 @@ Read the plot as the recommendation it is: **VSO occupies the useful corner** �
 | Application must not hold a key | **Vault**, transit engine |
 | Multi-cloud plus on-premises | **Vault**, one broker |
 | Licence policy requires OSI-approved | **OpenBao** |
-| Need namespaces or replication | **Vault Enterprise** — OpenBao has neither |
+| Need replication, Seal HA or lease-count quotas | **Vault Enterprise**; OpenBao has none of the three |
 | GitOps, want ciphertext in Git | Sealed Secrets or SOPS — see [`devops/secrets_management`](../../devops/secrets_management/secrets_management.md) |
 | Want K8s Secrets synced from a backend | External Secrets Operator, or VSO if the backend is Vault |
 | 5,000 secrets and a very chatty client | Fix the client first. Then read §8.2 |
@@ -1620,6 +1676,7 @@ Read the plot as the recommendation it is: **VSO occupies the useful corner** �
 12. **The root token in the CI variable.** The initial root token from `vault operator init`, three years old, in a pipeline variable, used by everything, revocable by nobody because nobody knew what would break. **Fix:** revoke the initial root token as the last step of bootstrap; generate one with a quorum when genuinely needed and revoke it after.
 13. **The snapshot that had never been restored.** Nightly snapshots for two years, monitored, alerted, green. During a real recovery they discovered the snapshots were of the wrong cluster — a copy-paste in the cron job — and nobody had ever restored one. **Fix:** restore into a scratch cluster on a schedule; a snapshot you have never restored is a hypothesis.
 14. **Certificates for everything, stored forever.** A PKI mount issuing 24-hour certificates to 5,000 pods with default settings wrote every certificate into storage. Barrier growth of several gigabytes a month and a CRL too large to fetch. **Fix:** `no_store=true` for short-lived leaves, `generate_lease=false`, and a scheduled `tidy`. See §6.7.
+15. **The deny rule that became an allow.** A policy granted `auth/approle/role/*` to a platform team and denied `auth/approle/role/PaymentsAdmin`. After a 2.1.2 patch upgrade the deny matched nothing, because `[2.2]` and 2.1.2 match role paths against the lowercased name, and the team could rewrite the payments role's `token_policies`. **Fix:** rewrite every role, user and policy name in ACL and Sentinel paths in lowercase before upgrading, and test each deny with `vault token capabilities`. See §6.23.
 
 ---
 
@@ -1627,8 +1684,8 @@ Read the plot as the recommendation it is: **VSO occupies the useful corner** �
 
 ### 11.1 Vault itself and its fork
 
-- **HashiCorp Vault** — the identity-brokered secrets platform this page covers, at 2.0.4 under BUSL 1.1 with IBM recorded as Licensor since the February 2026 acquisition close.
-- **OpenBao** — the Linux Foundation, MPL 2.0 fork taken at the BUSL change, at 2.6.1, API-compatible at the fork point and diverging on operational surface rather than on paths.
+- **HashiCorp Vault** — the identity-brokered secrets platform this page covers, at 2.2.0 under BUSL 1.1 with IBM recorded as Licensor since the February 2026 acquisition close.
+- **OpenBao** — the Linux Foundation, MPL 2.0 fork taken at the BUSL change, at 2.7.1, API-compatible at the fork point and diverging on operational surface rather than on paths.
 
 The Vault CLI, the HTTP API and the client libraries are the three surfaces you actually touch; Integrated Storage is the storage backend to choose, and Vault Enterprise is where namespaces, replication, HSM seals and lease-count quotas live.
 
@@ -1682,6 +1739,10 @@ Related reading: [secrets management](../../devops/secrets_management/secrets_ma
 **Short:** On a KV v2 mount the real API path is `secret/data/app/db`, so a policy written against the CLI path grants nothing at all.
 KV version 2 inserts a `data/` segment into every read and write, and a separate `metadata/` segment for listing and version history — but the `vault kv` CLI hides both, so the path you type and the path the API receives are different strings. A policy on `secret/app/db` therefore matches no request any client ever makes. The fix is to write policies against API paths: `secret/data/app/*` for values and `secret/metadata/app/*` for `list` and version history, deliberately withholding `secret/destroy/*` and `secret/delete/*` from applications. Verify before shipping with `vault token capabilities <token> secret/data/app/db`, which reports the effective capabilities on the real path — and never test with a root token, because a root token makes every path work.
 
+**Q: After a Vault patch upgrade, a deny rule on `auth/approle/role/MyRole` stopped denying anything. Why?**
+**Short:** Since 2.2.0 and 2.1.2, ACL and Sentinel EGP paths for case-insensitive backends match the lowercased name, so a mixed-case rule never matches and an exact deny fails open.
+AppRole, AWS, Azure, GCP, Kubernetes, SCEP and TPM roles, userpass usernames, GitHub team and user mappings, cert and CRL names and policy names all resolve case-insensitively in their backends, so `MyRole` and `myrole` were always one object. That let a caller evade an exact deny on `MyRole` by requesting `myrole`. The fix in 2.2.0, 2.1.2 and Enterprise 1.21.12, 1.20.17 and 1.19.23 lowercases the request path before ACL and Sentinel EGP matching, and Sentinel RGP and EGP rules see the lowercased `request.path`. The side effect: a rule written with an uppercase character no longer matches anything, so a wildcard allow plus an exact mixed-case deny becomes plain allow. Before the upgrade, grep every policy and Sentinel rule for uppercase characters in those paths, rewrite them lowercase, and confirm with `vault token capabilities`. Okta group names, LDAP and RADIUS names on default case-insensitive mounts and Enterprise SCIM client names are not covered, so avoid wildcard-allow-plus-exact-deny there.
+
 **Q: Security asks you to cut the dynamic database credential TTL from one hour to five minutes. What actually happens to Vault's load?**
 **Short:** Lease count stays the same because steady-state leases equal the number of clients regardless of TTL, while issuance and revocation rates each go up twelvefold.
 Steady-state active leases are `issuance_rate x TTL`, and a well-behaved client re-fetches on expiry, so `issuance_rate = N_clients / TTL`. Substituting, active leases equal `N_clients` — **independent of the TTL**. At 4,000 pods with a one-hour TTL you have roughly 4,000 leases and 1.1 issuances per second; at five minutes you still have roughly 4,000 leases and 13.3 issuances *and* 13.3 revocations per second, each revocation being a real `DROP ROLE` against the database plus a quorum write to Raft. So the change buys a shorter exposure window at twelvefold the operational cost and no reduction in the number that actually limits Vault. The levers that do reduce lease count are sharing one credential per process, using batch tokens where revocation is not needed, using static roles where per-consumer isolation does not matter, and a lease-count quota to cap a runaway client.
@@ -1689,6 +1750,10 @@ Steady-state active leases are `issuance_rate x TTL`, and a well-behaved client 
 **Q: Vault is unsealed, healthy and returning 500 to every request. What is the first thing you check?**
 **Short:** Whether every audit device is failing — Vault refuses any request it cannot write to at least one enabled audit device.
 Vault guarantees that a request is recorded before it is served, so it sends to *all* enabled audit devices and requires at least one success. If every device is unavailable — a full disk on a `file` device, an unreachable collector on a `socket` device, a wedged syslog — Vault deliberately refuses the request rather than serving it unrecorded. The confusing part is that `sys/health` still reports healthy and unsealed, so dashboards say the cluster is fine while every client sees 500s. The permanent fix is to enable at least two audit devices on independent failure domains, which turns a total outage into an alert, and to make sure the log destination never authenticates using a Vault-issued credential, because that loop makes a hiccup permanent.
+
+**Q: You move Vault 2.2 onto Kubernetes with Integrated Storage and set `disable_mlock = true`. What else has to be true for that to be safe?**
+**Short:** Swap must be off (or encrypted) on every node, since with `mlock` off the kernel may page keys and plaintext from Vault's memory to disk.
+`mlock()` pins the process's pages in RAM so the kernel never writes them to swap. With Raft it does more harm than good: it also pins BoltDB's memory-mapped file, so a dataset larger than RAM ends in an out-of-memory kill, which is why the configuration reference strongly recommends `disable_mlock = true` with Integrated Storage and why the server refuses to start without an explicit value since 1.20. The barrier still protects data at rest, but the unsealed root key, the keyring and decrypted secrets live in process memory, and with `mlock` off they can be paged out. Kubernetes nodes run without swap by default, so check that node pools with `NodeSwap` enabled are excluded for Vault. The 2.2.0 changelog lists both an image built without `cap_ipc_lock` (set `disable_mlock = true`) and one built with it (grant `IPC_LOCK`); outside containers, `setcap cap_ipc_lock=+ep` on the binary and on every external plugin, or `LimitMEMLOCK=infinity` under systemd, is what lets `mlock` work without root.
 
 **Q: You are using auto-unseal with AWS KMS. Someone deletes the KMS key. What is your recovery path?**
 **Short:** There is none — recovery keys cannot decrypt the root key, so every node, snapshot and DR copy is permanently unreadable ciphertext.
@@ -1754,6 +1819,10 @@ Every token gets its own namespace under `cubbyhole/`, isolated at the token lev
 **Short:** Vault performs the encryption itself, so the application handles only ciphertext and the key never enters application memory.
 Storing an encryption key in KV means the application reads it and holds it — so a heap dump, a log line or a memory-scraping exploit yields the key and every record it ever protected. The transit engine instead exposes `encrypt`, `decrypt`, `sign`, `verify`, `hmac` and `rewrap` as API calls: the key is created in Vault, never leaves it, and every operation is audited against a named identity. Key rotation becomes a single call because the version travels inside the ciphertext as a `vault:v1:` prefix, and `rewrap` upgrades stored ciphertext to the current key without ever returning the plaintext to the caller. The costs are a network round trip per operation, which makes it right for field-level PII and wrong for a hot path — use batch mode or `transit/datakey` for envelope encryption there — and convergent encryption leaks equality by construction, so enable it only as a deliberate trade.
 
+**Q: Security asks for post-quantum signatures on release artifacts signed through Vault. Which key do you create, and why not pure ML-DSA everywhere?**
+**Short:** A hybrid Transit key (ML-DSA or SLH-DSA plus ECDSA or Ed25519), which stays secure if either algorithm breaks; pure ML-DSA adds kilobytes and needs every verifier to support it.
+Transit (Enterprise) takes `type=ml-dsa`, `type=slh-dsa` and `type=hybrid`; a hybrid key signs with both a post-quantum and a classical algorithm and the verifier checks both, so a future cryptanalytic break of the young lattice scheme and a quantum attack on ECDSA each leave the other signature standing. Pure ML-DSA is the end state but costs size and reach: an ML-DSA-65 signature is 3,309 bytes against about 64 for P-256 ECDSA, and SLH-DSA-SHA2-128s is 7,856 bytes, while OpenSSL, Go, Java, HSMs and OCSP responders all need to recognise the algorithm before an ML-DSA signature or certificate is useful. Vault 2.2 added ML-DSA keys to the PKI engine, so a separate ML-DSA intermediate for long-lived signing is now possible, but keep short-lived workload certificates on ECDSA until every relying party verifies ML-DSA. Sign long-lived artifacts with a hybrid key first, since they are the ones a future attacker can forge.
+
 **Q: You are issuing 72-hour certificates to 5,000 pods from Vault's PKI engine. Which two settings decide whether that survives?**
 **Short:** `no_store=true` so certificates are not written into the barrier, and `generate_lease=false` so issuance does not create a lease object per certificate.
 At 5,000 pods with a 72-hour lifetime you issue roughly 1,700 certificates a day. With default settings each one is written into the storage backend, which grows the barrier without bound and produces a CRL that eventually cannot be fetched, and turning on `generate_lease` would additionally create a lease per certificate and rediscover the lease-count arithmetic the hard way. `no_store=true` means the certificate cannot be revoked, which sounds alarming and is the correct modern answer: a 72-hour certificate expires faster than a CRL propagates, so short lifetimes replace revocation rather than needing it. Round it out by keeping the root CA offline with only an intermediate in Vault, scheduling `pki/tidy`, setting `leaf_not_after_behavior` explicitly, and letting cert-manager drive renewal rather than hand-rolling it.
@@ -1791,8 +1860,8 @@ Prefix revocation is the payoff for leases existing at all: `vault lease revoke 
 An auth method turns an external identity into a token, but a human who logs in via Okta and again via LDAP, or a service that authenticates from two clusters, produces unrelated tokens with no shared notion of who they are. The identity store adds an **entity** (the principal, with arbitrary metadata), **aliases** (one per auth mount, attached to the entity), and **groups** that can be internal or mapped from an IdP's group claim so provider membership drives Vault policy with no Vault-side change. The practical payoff is policy templating: one policy containing `{{identity.entity.id}}` or `{{identity.groups.names}}` serves every tenant instead of one policy per team. It is also the one place Vault's policies genuinely accumulate — token plus entity plus every group — and `deny` still beats the union.
 
 **Q: How does OpenBao differ from Vault today, and what actually breaks on migration?**
-**Short:** It is API-compatible at the fork point under MPL 2.0, has no Enterprise features at all, and the migration cost is in init flags, container users and seal plugins rather than in paths.
-The API, policy HCL, secrets engines and auth methods are the ones already in use, so clients, Terraform providers and agents generally point at it unchanged — which is why a migration test that only runs `vault kv get` succeeds and proves nothing. What actually breaks is operational surface: `[OpenBao 2.6]` removed `stored_shares` from `sys/init` and `sys/rekey/init` so older bootstrap automation now errors, the container runs as the unprivileged `openbao` user rather than root so root-owned host mounts fail, the built-in `awskms`, `azurekeyvault`, `gcpckms` and `pkcs11` seals are deprecated for removal in 2.7.0, and `file` storage is deprecated. Above all, there are **no Enterprise features** — no namespaces, replication, HSM seals, Seal HA, performance standbys or lease-count quotas — so if your design leans on any of those, this is a redesign rather than a drop-in.
+**Short:** It is API-compatible at the fork point under MPL 2.0, lacks replication, Seal HA and lease-count quotas, and the migration cost is in init flags, container users and plugins, not paths.
+The API, policy HCL, secrets engines and auth methods are the ones already in use, so clients, Terraform providers and agents generally point at it unchanged — which is why a migration test that only runs `vault kv get` succeeds and proves nothing. What actually breaks is operational surface: `[OpenBao 2.6]` removed `stored_shares` from `sys/init` and `sys/rekey/init` so older bootstrap automation now errors, the container runs as the unprivileged `openbao` user rather than root so root-owned host mounts fail, and `[OpenBao 2.7]` made the KMS seals (`pkcs11`, `awskms`, `azurekeyvault`, `gcpckms` and others) external plugins, moved LDAP, Kerberos and RADIUS auth into `openbao-plugins`, and removed `file` storage from the server. On features, OpenBao ships namespaces, read-serving standbys and Control Groups, but has **no replication, Seal HA or lease-count quotas**, so a design that leans on any of those three is a redesign rather than a drop-in. 2.7.0 also put several Vault Enterprise capabilities in the open build: External Keys (PKI and Transit sign and encrypt through a KMS plugin without storing key material), the `X-Vault-Index` and `X-Vault-Inconsistent` read-after-write headers, ML-DSA in PKI and Transit, and listeners that can require post-quantum key exchange through `tls_key_exchange_preferences`.
 
 **Q: When should a team choose a cloud-native secrets manager over Vault?**
 **Short:** Whenever they cannot name a dynamic secrets engine, a PKI need or a transit need they will actually use — a KV store does not justify Vault's operational cost.
@@ -1829,6 +1898,7 @@ No, and the direction matters. SPIFFE/SPIRE has normally been the *source* of th
 - **Integrated Storage, 3 or 5 nodes, never an even number.** Set `api_addr` and `cluster_addr` per node to that node's own address, never to a load balancer.
 - **Revoke the initial root token as the final bootstrap step.** Generate one from a quorum when you genuinely need it, and revoke it when you are done.
 - **Restore a snapshot into a scratch cluster quarterly.** A snapshot you have never restored is a hypothesis, not a backup.
+- **Set `disable_mlock` explicitly and turn swap off on every node.** With Raft, `disable_mlock = true` avoids pulling BoltDB into resident memory; swap off keeps in-memory keys off disk. In containers, either grant `IPC_LOCK` or run with `mlock` disabled.
 
 ### Policies and access
 
@@ -1842,6 +1912,7 @@ No, and the direction matters. SPIFFE/SPIRE has normally been the *source* of th
 ### Leases and secrets engines
 
 - **Run the lease arithmetic before you shorten a TTL.** Halving the TTL does not halve the lease count; it doubles issuance and revocation.
+- **Sign long-lived artifacts with a hybrid post-quantum Transit key**, and keep ECDSA for short-lived workload certificates until every verifier handles ML-DSA (§6.8b).
 - **One credential per process, not per request.** This is the biggest single reduction in Vault load available to you, and it is an application change.
 - **Use batch tokens where revocation before expiry is not required**, and static roles where per-consumer isolation genuinely does not matter.
 - **Always `rotate-root` after configuring a database connection**, and accept the consequence: nobody can log in as that user again.
@@ -1862,6 +1933,7 @@ No, and the direction matters. SPIFFE/SPIRE has normally been the *source* of th
 - **Snapshot before every upgrade**, upgrade standbys first, then `vault operator step-down` and upgrade the active node last. Never skip a major version.
 - **Rehearse break-glass and DR promotion quarterly**, including the human part — reaching key-holders is what fails, not the commands.
 - **Re-write break-glass runbooks before the `[2.0]` upgrade**, since `sys/rekey`, `sys/generate-root` and the DR operation-token endpoint are now authenticated.
+- **Before a `[2.2]` or 2.1.2 upgrade, lowercase role and user names in policy paths, rename policies with `.` or `..` segments, and move plugin binaries inside `plugin_directory`.** Each of the three silently changes access after the upgrade.
 - **Manage mounts, roles and policies in Terraform**, so the security posture is reviewable, diffable and reproducible rather than a sequence of `vault write` commands somebody ran.
 - **Design for Vault being down**: generous TTLs, renewal at two-thirds, agent-side caching, and an honest statement in the design review that new workloads cannot start without it.
 
@@ -1879,7 +1951,7 @@ The regulator's finding gives them nine months and three requirements: every pri
 
 The estate is genuinely hybrid — EKS, on-premises VMware, and a mainframe-adjacent tier that will not move — so a single cloud's secrets manager would have covered roughly 60% of it and left the audit finding open on the rest. More decisively, **the requirement is dynamic**: "individually attributable and revocable in fifteen minutes" is not a rotation schedule, it is a per-consumer credential, and no managed service in their clouds offers one.
 
-They also had to answer the licence question in writing. The bank's policy permits source-available software with legal review; BUSL 1.1 passed, with the note that IBM is now the Licensor. **OpenBao was evaluated and rejected** — not on capability but because the design used **namespaces** to separate the retail and markets divisions and **lease-count quotas** to bound blast radius, and neither exists outside Enterprise.
+They also had to answer the licence question in writing. The bank's policy permits source-available software with legal review; BUSL 1.1 passed, with the note that IBM is now the Licensor. **OpenBao was evaluated and rejected** because the design used **lease-count quotas** to bound blast radius, and OpenBao does not ship them. The **namespaces** separating the retail and markets divisions were not the blocker: OpenBao has shipped namespaces since 2.3.
 
 ### The architecture
 
@@ -1956,5 +2028,5 @@ The sentence the team put at the top of their own runbook is the one this module
 1. The regulator asked for rotation every 24 hours and revocation within fifteen minutes. Why does an 8-hour TTL satisfy both, and why would a 5-minute TTL satisfy neither *better*?
 2. The pilot's lease count was identical at 5 minutes and 8 hours. Derive that result, and name the three levers that would actually have reduced it.
 3. Incident 2 was invisible to every dashboard because `sys/health` reported healthy. What is the correct alert, and what does it monitor?
-4. The team rejected OpenBao on namespaces and lease-count quotas. If a later release adds namespaces, what else would have to be true before the migration became reasonable?
+4. The team rejected OpenBao on lease-count quotas. If a later release adds them, what else would have to be true before the migration became reasonable?
 

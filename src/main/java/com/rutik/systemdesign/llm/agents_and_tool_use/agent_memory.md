@@ -77,6 +77,26 @@ threshold; MemGPT's distinguishing move is handing the decision to the model.
 FIFO is only defensible when the conversation is uniformly important throughout.
 Recency-weighted is the OS LRU analogue and the practical default.
 
+### Write-Time Extraction vs Offline Consolidation
+
+Eviction decides what leaves the context window. A separate maintenance problem is the store
+itself: agents write memories as they work, each write is local and incremental, and over many
+sessions the store fills with duplicates, contradictions, and stale entries.
+
+| Strategy | When it runs | What it sees | Fixes |
+|----------|--------------|--------------|-------|
+| Write-time extraction and dedup (Mem0-style) | On every write, in the request path | The new fact plus its nearest neighbours | Exact and near duplicates at insert time |
+| Offline consolidation | As a batch job between sessions | The whole store plus many past transcripts | Cross-session contradictions, stale values, patterns no single session shows |
+
+Anthropic's Dreams (research preview, beta header `dreaming-2026-04-21`, part of Claude Managed
+Agents) is a provider-run version of the second row. A dream is an asynchronous job that takes one
+memory store and 1 to 100 past sessions and writes a **new** memory store: duplicates merged,
+stale or contradicted entries replaced with the latest value, and new insights added. It never
+modifies its inputs. Optional `instructions` (up to 4,096 characters) steer the synthesis, for
+example "focus on coding-style preferences". A dream takes minutes to a few hours, is billed at
+standard token rates, and its cost grows roughly linearly with the number and length of input
+sessions. Since 2026-10-01 it runs on Claude Opus 5.5, Fable 5.1, and Sonnet 5.5, among others.
+
 ### Build It or Adopt It
 
 | Axis | Vector-store memory you build | Provider-native memory tool |
@@ -563,6 +583,8 @@ Recency-Weighted:
 
 5. **Stale semantic memory**: User preferences change (they switched from Python to TypeScript); old memories contradict new behavior. Add `last_updated` timestamps and recency weighting; allow users to explicitly override or delete memories.
 
+6. **Memory store that only grows**: Each session appends what it learned, and no step ever reads the store as a whole. After a few hundred sessions retrieval returns three versions of the same preference, two of which contradict the third. Write-time dedup only compares a new fact with its neighbours, so it misses these. Schedule offline consolidation (your own batch job, or a provider job such as Anthropic's Dreams) that writes a cleaned store, review it, and then swap the agent onto it.
+
 ---
 
 ## 11. Technologies & Tools
@@ -616,6 +638,10 @@ A: Mem0 is a memory management library that handles the full lifecycle: extracti
 **Q: What does a provider-native memory tool change compared with a vector-store memory layer?**
 **Short:** A file-based memory tool replaces similarity ranking with model-driven file edits, shifting the burden to path safety and organization.
 A: It replaces similarity retrieval with the model reading and editing files, so ranking disappears as a problem and file organisation plus path validation take its place. Mechanically the memory tool is client-side: the model emits `view`, `create`, `str_replace`, `insert`, `delete` and `rename` requests against paths under `/memories`, and your handler executes them against storage you own, so nothing is persisted provider-side. What you stop building: the extraction prompt, the embedding pipeline, the top-K retrieval, and the combined recency/importance/similarity score — the model decides what to write and which file to open. What you start owning: (1) path traversal defence, since `/memories` is just a prefix and `/memories/../../secrets.env` escapes it unless you canonicalise and re-check every path; (2) size and expiry policy, because a file the model keeps appending to grows without bound; (3) organisation quality, since retrieval is now "did the model name and structure the file well enough to find it again". Choose the file model when memory is narrative and agent-authored (project state, lessons learned across sessions); keep a vector store when memory is many small independent facts across many users, where ranking genuinely is the problem.
+
+**Q: Why should memory consolidation write a new store instead of editing the live one?**
+**Short:** A consolidation pass can merge or drop facts wrongly; writing a separate store lets you diff, review, and discard it, and keeps the live agent on the old store until you switch.
+A: Consolidation is an LLM rewriting the agent's long-term state: it merges duplicates, picks a winner between contradicting entries, and drops what it judges stale. Any of those can be wrong, and an in-place edit leaves no clean way back. Writing a separate output store makes the job reviewable (diff the two stores, spot-check merged entries), reversible (discard the output, the input is untouched), and safe to run while agents are live (sessions keep reading the old store until you attach the new one). Anthropic's Dreams is built this way: it reads one memory store plus 1 to 100 past sessions, writes a new store, and never modifies its inputs; on failure or cancellation the partial output store stays for inspection. The cost is a cutover step and twice the storage for a while, which is cheap next to a silently corrupted memory.
 
 **Q: When is it better to not use external memory and just extend the context window?**
 **Short:** For single-session bounded tasks under the context limit, just extend the context window instead of adding retrieval.

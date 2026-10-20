@@ -1,6 +1,6 @@
 # NVIDIA Triton Inference Server
 
-> Version anchor: this module tracks Triton by **NGC container release** (e.g. `nvcr.io/nvidia/tritonserver:26.06-py3`). Each monthly NGC tag pins a specific CUDA, TensorRT, and backend matrix — always design against a tag, never "latest". Default ports: **8000 HTTP/REST**, **8001 gRPC**, **8002 Prometheus metrics**.
+> Version anchor: this module tracks Triton by **NGC container release** (e.g. `nvcr.io/nvidia/tritonserver:26.09-py3`, server release 2.73.0, 2026-09-30, the first tag with initial NVIDIA Rubin GPU support). Each monthly NGC tag pins a specific CUDA, TensorRT, and backend matrix — always design against a tag, never "latest". Default ports: **8000 HTTP/REST**, **8001 gRPC**, **8002 Prometheus metrics**.
 
 ---
 
@@ -543,6 +543,8 @@ The `tensorrtllm` backend is how Triton serves large LLMs at high throughput, an
 - **Multi-GPU via MPI** — tensor/pipeline parallelism across GPUs is orchestrated by an **MPI** launcher (`mpirun` with one rank per GPU). This is why a multi-GPU TensorRT-LLM deployment has a different launch story than a normal Triton model.
 - **Multi-node reality** — Triton is fundamentally a **single-node** server; a model must fit within one node's GPUs. Multi-node LLM serving (a 405B across two nodes) is done with the TensorRT-LLM MPI orchestrator spanning nodes, or by sharding at a higher layer (a router in front of node-local Tritons) — Triton itself does not shard one model across nodes natively.
 
+**Packaging `[26.08+]`.** The 26.08 (server 2.72.0) and 26.09 (server 2.73.0) release notes list the Triton TensorRT-LLM backend container image as not included in the release. On those tags, Triton serves TensorRT-LLM only from a backend you build yourself from the `tensorrtllm_backend` repository or from an older tag's image. NVIDIA's other serving paths for TensorRT-LLM engines are `trtllm-serve` (TensorRT-LLM's own OpenAI-compatible server) and Dynamo; see [Dynamo and the NVIDIA serving stack](dynamo_and_the_nvidia_serving_stack.md).
+
 ### 6.19 Model Repository Agents and Cloud Repositories
 
 The model repository can live in object storage, not just local disk. Triton reads `s3://bucket/models`, `gs://bucket/models`, and `as://account/container/models` directly, pulling models into a local cache at load time:
@@ -575,12 +577,12 @@ Write a C++ backend over the Python backend when: you need every microsecond (no
 
 ### 6.21 Building Minimal Images with compose.py
 
-The stock NGC image (`tritonserver:26.06-py3`) carries every backend and is ~10-15 GB. For production you usually want only one or two backends. `compose.py` assembles a slim image from the per-backend layers:
+The stock NGC image (`tritonserver:26.09-py3`) carries every backend and is ~10-15 GB. For production you usually want only one or two backends. `compose.py` assembles a slim image from the per-backend layers:
 
 ```bash
 python3 compose.py --backend tensorrt --backend python \
-  --repoagent checksum --container-version 26.06 \
-  --output-name triton-slim:26.06
+  --repoagent checksum --container-version 26.09 \
+  --output-name triton-slim:26.09
 ```
 
 This drops the image to a few GB, shrinks the attack surface, and speeds pulls in autoscaling. Backend selection happens at **build** time (which `.so` backends are baked in), independent of which models the repository actually loads at **run** time — a model referencing a backend not in the image simply fails to load.
@@ -853,6 +855,7 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 **Do NOT reach for Triton when:**
 
 - You are a **pure-LLM shop** serving a handful of large models — run **vLLM or SGLang directly** for a simpler stack ([../../llm/inference_engines/inference_engines.md](../../llm/inference_engines/inference_engines.md); deep dive [../../llm/vllm_deep_dive/vllm_deep_dive.md](../../llm/vllm_deep_dive/vllm_deep_dive.md)). Triton adds value once you also have non-LLM models to consolidate.
+- You serve **TensorRT-LLM engines and want a prebuilt image**. The 26.08 and 26.09 releases ship no Triton TensorRT-LLM backend container, so on those tags run `trtllm-serve` or Dynamo instead, or build the backend yourself from `tensorrtllm_backend` (§6.18).
 - You serve **small CPU-only models** — a **FastAPI + ONNX Runtime** service is lighter and cheaper; see the reader-linked case study [../../fastapi/case_studies/design_ml_inference_api_fastapi.md](../../fastapi/case_studies/design_ml_inference_api_fastapi.md).
 - You are choosing **TorchServe** — its repository was **archived on 7 August 2025** and is read-only, with no further bug fixes or security patches; Triton's PyTorch backend or Ray Serve is where PyTorch serving lives now.
 - Your workload is a **Python-heavy multi-step pipeline** where the model is a small part — **Ray Serve** composes Python business logic more naturally than Triton's ensemble/BLS.

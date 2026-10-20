@@ -739,9 +739,8 @@ Given a fixed total write QPS and player count, the number of shards `N` is itse
 
 "Buy the sorted set" leaves one decision open that an interviewer will push on, because it is a
 2026 question rather than a 2020 one: **which sorted-set engine.** Redis moved off BSD in
-March 2024, and Redis 8.0 (May 2025) ships under **AGPLv3** — copyleft, with obligations that
-matter to anyone who offers the engine as a service or embeds it in a product they
-redistribute. **Valkey** is the fork that came out of that change: BSD-3, stewarded by the
+March 2024, and Redis 8.0 (May 2025) ships under a choice of **RSALv2, SSPLv1, or AGPLv3**, and every option
+restricts or attaches obligations to offering the engine as a hosted service. **Valkey** is the fork that came out of that change: BSD-3, stewarded by the
 Linux Foundation, built by long-standing Redis contributors, and command- and
 wire-compatible. Every primitive this design rests on — `ZADD`, `ZRANK`, `ZRANGE ... REV`,
 16,384 hash slots, `EXPIRE`-based season keys (§4.4) — behaves identically, so §4's complexity
@@ -751,7 +750,7 @@ What changes is procurement and cost:
 
 | | Valkey | Redis (8.x) |
 |---|---|---|
-| Licence | BSD-3 (Linux Foundation) | AGPLv3 |
+| Licence | BSD-3 (Linux Foundation) | RSALv2, SSPLv1, or AGPLv3 |
 | Managed availability | ElastiCache and MemoryDB (Valkey 9.1), Google Memorystore, and other clouds | ElastiCache "Redis OSS" engine, Redis Cloud |
 | Managed price | AWS prices it ~20% below Redis OSS on node-based clusters, ~33% below on serverless | Baseline |
 | Reason to prefer it here | Nothing in this design uses a Redis-only feature | Only if you need RedisJSON/RedisTimeSeries or Redis Enterprise Active-Active CRDT geo-replication |

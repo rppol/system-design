@@ -597,7 +597,7 @@ guarantee `1 <= k <= n` as a constraint, or expect you to clamp `k = min(k,
 n)` and return everything — always check the constraints section for this
 edge case before coding.
 
-**Q: Python's `heapq` only provides a min-heap — how do tuple comparisons behave when the second element is a non-comparable object (e.g., a list of points)?**
+**Q: In Python's `heapq`, how do tuple comparisons behave when the second element is a non-comparable object (e.g., a list of points)?**
 **Short:** Tied first elements make Python compare the next tuple field, which raises `TypeError` for non-comparable objects — add an explicit tiebreaker.
 Python compares tuples element-by-element, falling through to the second
 element only if the first elements are equal. If two points have the *exact

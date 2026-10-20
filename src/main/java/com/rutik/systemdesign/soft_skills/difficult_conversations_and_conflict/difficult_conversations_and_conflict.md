@@ -190,6 +190,15 @@ stateDiagram-v2
     Silence --> Safety: Rebuild safety, clarify intent or apologize
     Violence --> Safety: Rebuild safety, clarify intent or apologize
     Content --> [*]: Conversation resolves
+
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    class Safety good
+    class Content info
+    class Silence warn
+    class Violence bad
 ```
 
 *From Crucial Conversations: the moment someone goes to silence (sarcasm, withdrawal,
@@ -324,7 +333,7 @@ substitutes at least one of these with a hedge.
 specific act and its measured impact (40 minutes, payments) are named, and there's a
 concrete, checkable change instead of a vague promise to be more careful.
 
-### 6.6b Opening a sensitive topic
+### 6.7 Opening a sensitive topic
 
 **Weak version**
 
@@ -342,7 +351,7 @@ with the worst plausible meaning before they've heard a single specific fact; th
 version contrasts what it isn't before what it is, and names the evidence (three people,
 two examples) instead of leaving the scope of the complaint undefined.
 
-### 6.6c Escalating a stuck cross-team disagreement
+### 6.8 Escalating a stuck cross-team disagreement
 
 **Weak version**
 
@@ -361,7 +370,7 @@ managers"; and the weak version can be agreed with and then never acted on, whil
 strong version commits to a date and tells the other person directly instead of letting
 them find out secondhand.
 
-### 6.7 Escalating without ambushing
+### 6.9 Escalating without ambushing
 
 Escalating a conflict — bringing it to a manager, a skip-level, or a cross-team lead — is
 sometimes the right call: when you've tried the direct conversation and it hasn't moved,
@@ -376,7 +385,7 @@ I'm going to bring it to both our managers next week. I wanted you to hear
 that from me first, not find out in a meeting you weren't in."
 ```
 
-### 6.8 Four conversations, badly and well
+### 6.10 Four conversations, badly and well
 
 Descriptions of conversations are cheap; the actual words are where the technique either
 holds up or falls apart. Four complete conversations follow, each run twice.
@@ -523,11 +532,12 @@ think we need to relitigate it further in the review."
   and let it leak" pattern this module prices in §6.4.
   ("Netflix" is a company name; the specific internal mechanics beyond the published book
   are not independently verified here and are not claimed beyond what the book states.)
-- **Basecamp's internal "heated debate" norm**, described publicly by Jason Fried and
-  David Heinemeier Hansson, treats a written, time-boxed async debate as the default venue
-  for a technical disagreement precisely because it forces people to write their actual
-  position down rather than let it fester as a hallway comment — an explicit answer to
-  the "avoiding" default this module names as engineers' most common conflict style.
+- **Basecamp's "How we communicate" guide** (basecamp.com/guides/how-we-communicate)
+  states "If it's important, critical, or fundamental, write it up, don't chat it down"
+  and "Real-time sometimes, asynchronous most of the time." Applied to a disagreement,
+  this puts each person's actual position in a written document that others can read and
+  answer, instead of a hallway comment that never gets resolved. That counters the
+  "avoiding" default this module names as engineers' most common conflict style.
 
 ---
 

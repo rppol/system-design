@@ -227,7 +227,7 @@ Key frames:
 - **DATA**: carries request/response body
 - **SETTINGS**: negotiates connection parameters (max concurrent streams, initial window, max header list size)
 - **WINDOW_UPDATE**: flow control — increases available window
-- **RST_STREAM**: aborts a stream without closing connection
+- **RST_STREAM**: aborts a stream without closing connection; the frame behind the Rapid Reset and MadeYouReset attacks (§6.6)
 - **GOAWAY**: graceful shutdown — in-flight streams can complete; no new streams accepted
 
 The frame types above drive a per-stream state machine (the 8-bit Flags field carries the END_STREAM flag that moves a stream toward closed):
@@ -367,10 +367,47 @@ HSTS tells browsers to only use HTTPS for this domain for the next `max-age` sec
 | PATCH | No | No | Yes | Partial update |
 | TRACE | Yes | Yes | No | Loopback of the request path (usually disabled) |
 | CONNECT | No | No | No | Tunnel establishment (proxies) |
+| QUERY | Yes | Yes | Yes | Search or filter with the query in the body (RFC 10008) |
 
-Safe and idempotent per RFC 9110 Table 7: safe = GET, HEAD, OPTIONS, TRACE; idempotent = those four plus PUT and DELETE. PATCH is defined in RFC 5789, is not in Table 7, and is neither safe nor idempotent. The "Body" column above records what the method *defines a use for* — RFC 9110 says a client SHOULD NOT generate content in GET, HEAD or DELETE, and permits content on OPTIONS (with a Content-Type) while defining no use for it.
+Safe and idempotent per RFC 9110 Table 7: safe = GET, HEAD, OPTIONS, TRACE; idempotent = those four plus PUT and DELETE. PATCH is defined in RFC 5789, is not in Table 7, and is neither safe nor idempotent. QUERY is defined in RFC 10008 (2026): safe and idempotent like GET, but it carries the query in the request body, and its responses are cacheable with the body as part of the cache key. The "Body" column above records what the method *defines a use for* — RFC 9110 says a client SHOULD NOT generate content in GET, HEAD or DELETE, and permits content on OPTIONS (with a Content-Type) while defining no use for it.
 
 Idempotent: sending the same request N times has the same effect as sending it once. This property is critical for retry logic in distributed systems.
+
+### 6.6 HTTP/2 Control-Frame Abuse: Rapid Reset, CONTINUATION Flood, and MadeYouReset
+
+`SETTINGS_MAX_CONCURRENT_STREAMS` (RFC 9113 recommends advertising at least 100; nginx's `http2_max_concurrent_streams` defaults to 128) looks like a per-connection bound on server work. It is not. It counts streams that are open in the protocol state machine (§6.1), and a stream leaves that count the moment it is reset, while the request it carried may already be parsed, dispatched, and running. Three attack families use the gap between the protocol count and the backend work.
+
+| Attack | Disclosed | What the client sends | Why the server suffers |
+|--------|-----------|-----------------------|------------------------|
+| Rapid Reset, CVE-2023-44487 | October 2023, after attacks from August 25, 2023 | HEADERS, then RST_STREAM straight away, repeated without waiting for responses | Each reset frees a stream slot at once, so the stream limit never trips; the server has already started the request |
+| CONTINUATION flood, CERT/CC VU#421644 | April 3, 2024 | HEADERS, then CONTINUATION frames that never set END_HEADERS | The server buffers or HPACK-decodes an unfinished header block, exhausting memory or CPU before any request exists to rate-limit |
+| MadeYouReset, CVE-2025-8671 | August 13, 2025 | A valid request, then a frame that is invalid for that stream: WINDOW_UPDATE with increment 0, a WINDOW_UPDATE that pushes the window above 2^31-1, PRIORITY with a length other than 5, or DATA or HEADERS after END_STREAM | The server sends the RST_STREAM itself, so a defence that counts client-sent resets sees nothing, while the backend keeps working |
+
+The scale is set by bandwidth, not by the stream limit. Google measured a Rapid Reset peak above 398 million requests per second; Cloudflare saw just over 201 million from a botnet of about 20,000 machines, and its proof of concept sent 1,000 requests on a connection that advertised a limit of 100. Little's Law shows why one connection is enough:
+
+```
+  in-flight handlers = request rate x handler time
+                     = 10,000 req/s per connection x 0.050 s
+                     = 500 handlers from ONE connection
+
+  protocol view (what MAX_CONCURRENT_STREAMS=100 sees)
+    open streams   | 0 0 0 0 0 0 0 0      every stream reset within microseconds
+  backend view (what the CPU and the thread pool see)
+    running work   | ##################   500 handlers, 5x the advertised limit
+```
+
+*The stream limit counts protocol state; the attack lives in the work the reset does not cancel.*
+
+The defences bound work and resets per connection, then close the connection, since rejecting single requests leaves the attacker's connection open:
+
+| Server | Defence |
+|--------|---------|
+| Netty | `decoderEnforceMaxRstFramesPerWindow` (client-sent resets) and `encoderEnforceMaxRstFramesPerWindow` (server-sent resets) on the HTTP/2 handler builders; servers default to 200 of each per 30 seconds. Rapid Reset fixed in 4.1.100.Final; MadeYouReset (CVE-2025-55163) fixed in 4.1.124.Final and 4.2.4.Final |
+| Go `net/http` and `x/net/http2` | Limits concurrently executing handlers and queued requests regardless of how a stream ended, so the Go team reported it not affected by MadeYouReset |
+| Envoy | Its Rapid Reset mitigation in the HTTP connection manager covers every codec; Envoy reported not affected by MadeYouReset |
+| Apache Tomcat | MadeYouReset (CVE-2025-48989) fixed in 11.0.10, 10.1.44, and 9.0.108 |
+
+The general rules from the disclosures: count resets in both directions per connection, treat stream-level protocol errors as connection errors after a small cap, cap CONTINUATION frames and total header bytes per header block, bound in-flight handlers separately from `MAX_CONCURRENT_STREAMS`, and on abuse send GOAWAY and close the TCP connection at once. Google's write-up notes that the RFC's graceful two-step GOAWAY leaves the connection open for a round trip, which is too long against a hostile client.
 
 ---
 
@@ -459,6 +496,8 @@ Browser support from caniuse.com; site adoption from W3Techs, July 2026 (W3Techs
 
 **HPACK dynamic table size and header size limits**: HTTP/2 has a `SETTINGS_HEADER_TABLE_SIZE` (default 4096 octets) and servers enforce `SETTINGS_MAX_HEADER_LIST_SIZE`. Spring Boot's `server.max-http-request-header-size` defaults to 8KB, but the Spring Boot docs warn that the limit is applied differently per server: Netty applies it to each individual header, while Tomcat applies it to the combined size of the request line plus all header names and values — so the same 8KB setting is far stricter on Tomcat. Applications with large cookies or JWT tokens in headers can hit this limit and receive 431 (Request Header Fields Too Large).
 
+**Trusting MAX_CONCURRENT_STREAMS to bound server work**: A team set `MAX_CONCURRENT_STREAMS=100` on an internet-facing HTTP/2 endpoint and sized its thread pool at 100 per connection, assuming no connection could ever run more. A Rapid Reset client opened and cancelled streams in a loop; each stream left the count at once while its handler kept running, and a few connections exhausted the pool. After patching for Rapid Reset (client-reset counting), the same server was still open to MadeYouReset, because the resets were now sent by the server. Fix: bound in-flight handlers per connection independently of the stream count, rate-limit RST_STREAM in both directions, and keep the HTTP/2 stack on the fixed releases (§6.6).
+
 **Missing Content-Type on REST responses**: HTTP/1.1 clients that receive JSON without `Content-Type: application/json` may treat the response as text. Proxies may not compress it. Always set Content-Type explicitly.
 
 **Certificate pinning and rotation**: Mobile apps that pin the server certificate will break when the certificate is rotated. Use public key pinning (pin the SubjectPublicKeyInfo hash) rather than certificate pinning, and always ship a backup pin. Certificate pinning is generally not recommended for most APIs — use HSTS and certificate transparency instead.
@@ -536,9 +575,9 @@ HSTS (Strict-Transport-Security) tells browsers to only connect via HTTPS for th
 HTTP/2 server push allowed a server to proactively send resources (CSS, JS) to the client before it requests them, using PUSH_PROMISE frames. In theory, this eliminated round trips for critical resources. In practice, servers couldn't know what was already in the browser cache — they would push resources the browser already had, wasting bandwidth. Chrome's removal notice reported push was used by only about 1.25% of HTTP/2 sites and that analysis showed no clear net performance gain, with regressions in many cases; Chrome 106 (stable September 2022) disabled HTTP/2 and gQUIC push by default. Push is still specified for HTTP/3 in RFC 9114 but no major browser implements it. Use `<link rel="preload">` or 103 Early Hints instead.
 
 **Q: What are the HTTP methods and which are idempotent?**
-**Short:** GET, HEAD, OPTIONS, TRACE, PUT, and DELETE are idempotent per RFC 9110, while POST, CONNECT, and PATCH are not.
+**Short:** GET, HEAD, OPTIONS, TRACE, PUT, DELETE, and QUERY (RFC 10008) are idempotent, while POST, CONNECT, and PATCH are not.
 
-Per RFC 9110 Table 7, GET, HEAD, OPTIONS, TRACE, PUT and DELETE are idempotent — sending the request N times has the same effect as sending it once. POST and CONNECT are not idempotent, and neither is PATCH (defined separately in RFC 5789), so submitting the same POST twice creates two resources. Safe methods — GET, HEAD, OPTIONS, TRACE — do not modify server state; every safe method is also idempotent, but not the reverse (PUT and DELETE are idempotent and unsafe). Idempotency is critical for retry logic in distributed systems — safely retrying a PUT or DELETE after a network failure cannot create inconsistency.
+Per RFC 9110 Table 7, GET, HEAD, OPTIONS, TRACE, PUT and DELETE are idempotent — sending the request N times has the same effect as sending it once. POST and CONNECT are not idempotent, and neither is PATCH (defined separately in RFC 5789), so submitting the same POST twice creates two resources. QUERY (RFC 10008, 2026) is safe and idempotent and carries a request body, which makes it the retry-safe replacement for using POST to send a search too large for a URL. Safe methods — GET, HEAD, OPTIONS, TRACE — do not modify server state; every safe method is also idempotent, but not the reverse (PUT and DELETE are idempotent and unsafe). Idempotency is critical for retry logic in distributed systems — safely retrying a PUT or DELETE after a network failure cannot create inconsistency.
 
 **Q: What is the Vary header and when does it cause problems?**
 **Short:** The Vary header stores a separate cached response per listed header value, and overusing it can destroy cache hit rates.
@@ -560,6 +599,21 @@ HTTP/2 has flow control at two levels: per-connection and per-stream. Each strea
 
 SETTINGS frames are exchanged at connection setup and can be sent anytime to update settings. Key parameters, with the RFC 9113 §6.5.2 defaults: HEADER_TABLE_SIZE (HPACK dynamic table size, default 4096 octets), ENABLE_PUSH (server push, default 1, set 0 to disable), MAX_CONCURRENT_STREAMS (no limit initially; the RFC recommends servers advertise at least 100, and 100-1000 is typical in practice), INITIAL_WINDOW_SIZE (flow control window, default 65,535 octets, max 2^31-1), MAX_FRAME_SIZE (default 16,384 octets, valid range 2^14 to 2^24-1), MAX_HEADER_LIST_SIZE (advisory, unlimited by default). Setting these too low costs you either 431 Request Header Fields Too Large or stream-level REFUSED_STREAM resets, not 429 — 429 is application rate limiting and has nothing to do with SETTINGS.
 
+**Q: Why does MAX_CONCURRENT_STREAMS not stop the HTTP/2 Rapid Reset attack?**
+**Short:** A reset stream stops counting against the limit at once, but the server has already started its work, so a client can open and cancel streams as fast as its bandwidth allows.
+
+`MAX_CONCURRENT_STREAMS` counts streams that are open in the HTTP/2 state machine. In Rapid Reset (CVE-2023-44487), the client sends HEADERS and then RST_STREAM for the same stream without waiting for a response; the stream moves to closed and frees its slot at once, but the server has already parsed and dispatched the request. The client repeats this as fast as its link allows, so the open-stream count stays near zero while backend work piles up: at 10,000 request-and-reset pairs per second and 50 ms per handler, one connection keeps about 500 handlers busy against an advertised limit of 100. Cloudflare's proof of concept sent 1,000 requests on a connection that advertised 100, and the August 2023 attacks peaked above 398 million requests per second at Google. The defence counts resets per connection and closes abusive connections; lowering the stream limit alone does not help, as Cloudflare found when a limit of 64 broke legitimate clients and was raised back to 100.
+
+**Q: How does MadeYouReset get past Rapid Reset defences that count client RST_STREAM frames?**
+**Short:** It sends malformed frames, such as a zero-increment WINDOW_UPDATE, that make the server reset the stream itself, so no client reset is counted while the backend work keeps running.
+
+MadeYouReset (CVE-2025-8671, disclosed August 13, 2025 by researchers at Tel Aviv University) sends a valid request and then a frame that is a stream error for that stream: a WINDOW_UPDATE with an increment of 0, a WINDOW_UPDATE that pushes the flow-control window above 2^31-1, a PRIORITY frame whose length is not 5, or DATA or HEADERS after the client already set END_STREAM. The server answers with its own RST_STREAM. The stream leaves the concurrency count, many servers keep processing the request, and a Rapid Reset mitigation that counts only client-sent RST_STREAM frames sees none. Affected stacks included Netty (CVE-2025-55163, fixed in 4.1.124.Final and 4.2.4.Final) and Apache Tomcat (CVE-2025-48989, fixed in 11.0.10, 10.1.44, and 9.0.108). Stacks that bound in-flight handlers regardless of how a stream ends, such as Go's `net/http` and Envoy, were not affected. The fix is to cap server-sent resets per connection (Netty defaults servers to 200 per 30 seconds) and to bound backend work independently of the stream count.
+
+**Q: Which server-side limits defend an HTTP/2 endpoint against control-frame floods?**
+**Short:** Bound in-flight handlers per connection separately from the stream limit, rate-limit resets in both directions, cap CONTINUATION frames and header bytes, and close abusive connections outright.
+
+Five limits cover the three known families. First, keep `MAX_CONCURRENT_STREAMS` at a normal value (100-128) but enforce a separate cap on in-flight handlers per connection, because the stream count is protocol state, not work. Second, count RST_STREAM frames the client sends (Rapid Reset) and the server sends (MadeYouReset) per connection over a window; Netty's server defaults are 200 of each per 30 seconds. Third, cap the number of CONTINUATION frames and the total header bytes in one header block, which stops the April 2024 CONTINUATION flood (VU#421644) before any request exists. Fourth, after a small number of stream-level protocol errors on one connection, treat the next one as a connection error. Fifth, when a limit trips, send GOAWAY and close the TCP connection at once rather than refusing single streams, since a hostile client keeps using an open connection. Then keep the HTTP/2 library on its patched release, because most of these limits shipped as security fixes.
+
 ---
 
 ## 13. Best Practices
@@ -572,6 +626,7 @@ SETTINGS frames are exchanged at connection setup and can be sent anytime to upd
 - Configure HTTP/2 on both client and server sides of your infrastructure, including LB-to-backend connections.
 - Set `Content-Type` on all responses; never rely on content sniffing.
 - Monitor HTTP/2 stream errors (RST_STREAM frames) in server metrics — they indicate client or server behavior issues.
+- On internet-facing HTTP/2, cap concurrent streams near 100-128, bound in-flight handlers per connection separately, rate-limit both client-sent and server-sent RST_STREAM, cap CONTINUATION frames, and close abusive connections outright (§6.6).
 
 ---
 

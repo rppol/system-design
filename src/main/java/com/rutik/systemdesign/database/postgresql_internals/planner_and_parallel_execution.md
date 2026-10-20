@@ -8,10 +8,10 @@
 > you. Join-algorithm cost crossovers and generic `EXPLAIN` reading live in
 > [SQL Query Optimization](../sql_query_optimization/sql_query_optimization.md) — read that
 > first if you have not; this file builds on its cost-model vocabulary rather than
-> re-deriving it. **Version anchor — August 2026**: PostgreSQL 18 is current stable; every
-> GUC name, default and behaviour below is PG18 unless tagged `[PG19]`, and PG19 itself is
-> in beta (beta 3 in August 2026, GA expected September/October) — treat every `[PG19]` item
-> as beta behaviour that can still change before release.
+> re-deriving it. **Version anchor (2026-10-19)**: PostgreSQL 18 is current stable; every
+> GUC name, default and behaviour below is PG18 unless tagged `[PG19]`. PG19 reached RC1 on
+> 15 October 2026 and GA is planned for 19 November 2026; a release candidate can still take
+> a fix before GA, so re-check a `[PG19]` default against the final release notes.
 
 ---
 
@@ -743,7 +743,7 @@ specific speedup multiplier for this change — the documented benefit is the me
 (overlapping I/O and CPU on cold-cache scans), not a benchmark number.
 
 **Q: How did PostgreSQL historically achieve plan stability without an in-core hint mechanism, and what does PG19 change?**
-**Short:** Postgres relied on out-of-tree pg_hint_plan and blunt enable_* GUCs until PG19's pg_plan_advice added an in-core, query-id-keyed advice mechanism.
+**Short:** Postgres relied on out-of-tree pg_hint_plan and blunt enable_* GUCs; PG19 (GA planned 19 November 2026) adds pg_plan_advice, an in-core advice module keyed by query id.
 
 Core PostgreSQL never shipped Oracle/MySQL-style inline hints; the levers available were the
 `enable_*` GUCs (blunt, session-wide, diagnostic rather than targeted), statistics tuning,
@@ -751,9 +751,9 @@ query rewriting, and the third-party out-of-tree extension `pg_hint_plan` for SQ
 hints. `[PG19]` `pg_plan_advice`, plus its companion `pg_stash_advice`, changes this by
 shipping as an **in-core `contrib` module** — not a third-party extension — that attaches
 verified advice to a specific query id, so a plan you have checked stays pinned even after
-statistics change underneath it. As of August 2026 this ships in PostgreSQL 19, which is
-still in **beta** (beta 3, GA expected September/October 2026) — it is real, in-tree, shipped
-code, but not yet a GA feature.
+statistics change underneath it. It ships in PostgreSQL 19, which reached RC1 on 15 October
+2026 with GA planned for 19 November 2026; on PG18 and earlier, the out-of-tree `pg_hint_plan` is still the usual
+way to pin a plan.
 
 **Q: How does pg_plan_advice differ from pg_hint_plan?**
 **Short:** pg_hint_plan is a third-party out-of-tree extension using inline SQL comments; pg_plan_advice is an in-core PG19 contrib module keyed by query id, not query text.

@@ -130,7 +130,7 @@ flowchart LR
     classDef high  fill:#98c379,stroke:#27ae60,color:#1a1a1a
     classDef vhigh fill:#61afef,stroke:#2e86c1,color:#1a1a1a
 
-    A(["Almost no chance<br/>1-5%"]) --> B(["Unlikely<br/>5-20%"])
+    A(["Almost no chance<br/>1-5%"]) --> B(["Very unlikely<br/>5-20%"])
     B --> C(["Roughly even<br/>45-55%"])
     C --> D(["Likely<br/>55-80%"])
     D --> E(["Almost certain<br/>95-99%"])

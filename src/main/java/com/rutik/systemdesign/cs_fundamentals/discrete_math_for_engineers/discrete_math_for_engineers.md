@@ -975,7 +975,7 @@ def bucket_index(hash_code: int, num_buckets: int) -> int:
 | Tool | Ecosystem | Purpose | Notes |
 |---|---|---|---|
 | Z3 | SMT solver (Microsoft Research) | Automated theorem proving over propositional/predicate logic | Used in program verification and symbolic execution |
-| Coq / Lean 4 | Proof assistants | Machine-checked induction proofs | Lean 4's Mathlib formalizes large bodies of proved mathematics |
+| Rocq / Lean 4 | Proof assistants | Machine-checked induction proofs | Lean 4's Mathlib formalizes large bodies of proved mathematics |
 | TLA+ | Formal specification (Lamport) | Model-checks an invariant across every reachable system state | The same "loop invariant" idea from Section 6.1, checked exhaustively |
 | SymPy `rsolve` | Python | Symbolic recurrence solving | Automates the characteristic-equation method from Section 6.5 |
 | `sympy.ntheory` | Python | Modular arithmetic, Miller-Rabin primality, modular inverse | `mod_inverse`, `isprime`, `discrete_log` |

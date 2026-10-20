@@ -1,6 +1,6 @@
 # Temporal — Durable Execution
 
-> **Version anchor (2026-08-04).** Temporal Server **1.31.2** (patch) on the **1.31** feature line; supported server lines are **1.29.7**, **1.30.6**, **1.31.2**. SDKs: **Go 1.47.0**, **Java 1.37.0**, **Python 1.31.0**, **TypeScript 1.21.1**, **.NET 1.17.0**. The `temporal` CLI is **1.8.2**. Everything — server, SDKs, CLI, Web UI — is **MIT licensed** (Temporal Technologies Inc., retaining the original Uber Technologies copyright from the Cadence fork). Version-specific behaviour is tagged inline as `[1.31]`, `[Go 1.47]`, `[Java 1.37]` and so on; nothing in this module is described as current without naming the release it landed in.
+> **Version anchor (2026-10-19).** Temporal Server **1.32.1** (released 2026-10-08) on the **1.32** feature line; supported server lines are **1.30.8**, **1.31.4**, **1.32.1**. SDKs: **Go 1.50.0**, **Java 1.40.0**, **Python 1.34.0**, **TypeScript 1.24.0**, **.NET 1.20.0**. The `temporal` CLI is **1.9.1**. Everything — server, SDKs, CLI, Web UI — is **MIT licensed** (Temporal Technologies Inc., retaining the original Uber Technologies copyright from the Cadence fork). Version-specific behaviour is tagged inline as `[1.31]`, `[Go 1.47]`, `[Java 1.37]` and so on; nothing in this module is described as current without naming the release it landed in.
 
 Temporal is a **durable execution** platform: you write an ordinary function in Go, Java, Python, TypeScript or .NET, and the platform guarantees it runs to completion — across process crashes, machine loss, deploys, and waits measured in months. It does that by persisting the function's *progress* (an append-only event history) rather than asking you to persist its *state* (a status column and a poller).
 
@@ -119,12 +119,13 @@ If you can restate that one sentence and derive those four consequences from it,
 
 ### 4.1 The primitive taxonomy — what each building block is for, and when it is the wrong tool
 
-Temporal has ten user-facing primitives. Most production mistakes are a primitive used outside its lane, so the last column matters more than the first.
+Temporal has eleven user-facing primitives. Most production mistakes are a primitive used outside its lane, so the last column matters more than the first.
 
 | Primitive | Durable? | May do I/O? | Blocks the caller? | Writes history? | When it is the WRONG tool |
 |---|---|---|---|---|---|
 | **Workflow** | Yes | **No** | n/a | Yes (its own history) | Anything that fits in one request/response, or anything needing sub-10 ms latency |
 | **Activity** | Yes (result recorded) | **Yes** | Workflow awaits it | Yes (3 events per attempt-chain) | Pure computation on data already in the workflow — you pay 3 events and a round trip for nothing |
+| **Standalone Activity** `[1.32 GA]` | Yes (persisted before dispatch) | **Yes** | Client may wait on the result or poll it by Activity ID | **No** workflow history | Two or more dependent steps, anything needing a timer, signal or compensation, or a recurring schedule (not supported): use a workflow (§6.4) |
 | **Local Activity** | Yes (marker) | Yes | Workflow awaits it | Yes (1 marker event, batched) | Anything slow, anything needing heartbeats, anything needing long retries — it must finish inside the workflow task timeout |
 | **Child Workflow** | Yes | No | Optional (`await` handle or just start) | Parent + its own history | A function call. A child costs a full execution, its own history, its own retention and its own visibility row — see §6.7 |
 | **Signal** | Yes | n/a (input) | No — fire and forget | Yes (`WorkflowExecutionSignaled`) | Anything where the sender needs a result or needs to know it was processed — that is an Update |
@@ -191,7 +192,7 @@ A **worker** is a process running your code with an embedded SDK. What varies is
 
 | Rung | Command / artifact | Persistence | Fit |
 |---|---|---|---|
-| Dev server | `temporal server start-dev` (CLI 1.8.2) | In-memory or SQLite file | Laptop, unit tests, CI integration tests |
+| Dev server | `temporal server start-dev` (CLI 1.9.1) | In-memory or SQLite file | Laptop, unit tests, CI integration tests |
 | Docker Compose | `temporalio/auto-setup` images | Postgres/Cassandra + optional Elasticsearch | Team dev cluster, demos |
 | **Kubernetes via Helm** | The `temporal` Helm chart, four Deployments | Managed Postgres/Cassandra + Elasticsearch | Self-hosted production |
 | **Temporal Cloud** | No cluster at all — you get an endpoint plus mTLS certs or API keys | Vendor-operated | Production without a stateful tier to own (§6.20) |
@@ -222,7 +223,7 @@ Four legitimate strategies, each with a different granularity and a different bi
 - **Pinned** — an execution stays on the Deployment Version it started on for its whole life. New code never touches it, so **patching is largely unnecessary**, at the cost of keeping the old worker build running until the last pinned execution finishes. This is the right default for long-lived business processes.
 - **AutoUpgrade** — an execution moves to whatever the current Deployment Version is at its next workflow task. New code applies immediately, so **determinism is your problem again** and patching comes back. Correct for short-lived executions and for behaviour changes you genuinely want applied to in-flight work.
 
-`[1.31 → removal in 1.32]` The **legacy Worker Versioning v1/v2 APIs are deprecated**: `UpdateWorkerBuildIdCompatibility`, `GetWorkerBuildIdCompatibility`, `UpdateWorkerVersioningRules`, `GetWorkerVersioningRules` and `GetWorkerTaskReachability`. Anything written against build-ID *sets* must migrate to Worker Deployments before 1.32.
+`[1.31 deprecated, removal in 1.33]` The **legacy Worker Versioning v1/v2 APIs are deprecated**: `UpdateWorkerBuildIdCompatibility`, `GetWorkerBuildIdCompatibility`, `UpdateWorkerVersioningRules`, `GetWorkerVersioningRules` and `GetWorkerTaskReachability`. Server 1.32 is the last release that contains them, with the management APIs disabled by default; anything written against build-ID *sets* must migrate to Worker Deployments, and drain every execution still routed by a legacy build ID, before the 1.33 upgrade.
 
 ---
 
@@ -626,6 +627,22 @@ Three things heartbeating buys you, and the third is the one people miss:
 
 Use a local activity for a fast in-process lookup, a small local computation, a cheap cache read. Use a normal activity for anything crossing the network.
 
+**Activity eager execution `[1.32 default on]`.** When a workflow schedules an activity on the same task queue and the completing worker has a free slot, the Service returns the activity task in the response to the workflow task completion, skipping one matching round trip. Server 1.32 turns `system.enableActivityEagerExecution` on by default; the SDK still decides per activity whether to request it.
+
+#### Standalone Activities `[1.32 GA]`: an activity with no workflow
+
+A **Standalone Activity** is a top-level Activity Execution started directly by a client: Temporal persists it, queues it, dispatches it to a worker and retries it, with no workflow, no event history and no replay. It is Temporal used as a durable job queue. Server 1.32.0 enables it by default (`activity.enableStandalone`, `activity.startDelayEnabled`); it needs CLI 1.9.1+ and is GA on Temporal Cloud.
+
+```bash
+temporal activity start --activity-id email-42 --type SendReceipt --task-queue mail-tq --start-to-close-timeout 30s
+temporal activity result --activity-id email-42
+temporal activity list --query 'ActivityType = "SendReceipt"'
+```
+
+What carries over from a normal activity: the same activity function and worker registration, the retry policy (at-least-once with backoff; `MaximumAttempts=1` for at-most-once), heartbeats with checkpointed details, async completion, priority and fairness, and Activity-ID deduplication through conflict and reuse policies. What does not: deduplication only reaches back through the namespace retention period, the `TerminateExisting` conflict policy is not supported, it cannot be started from a Schedule or from Nexus, and cancelling a running attempt still needs heartbeats. Pause, reset, update-options and batch cancel/terminate/delete exist but are public preview and gated by `history.enableStandaloneActivityOperatorCommands` and `frontend.enableBatchOperationsForStandaloneActivities`.
+
+**Standalone Activity versus a one-step workflow.** Pick the standalone form for one independent job (send an email, transcode a file, call a webhook) that needs retries and an ID but no orchestration: it costs fewer billable actions on Cloud, fewer worker round trips, and no history to retain. Pick a workflow the moment a second step depends on the first, or you need a timer, a signal, a compensation, or a durable record of every attempt in an event history.
+
 ### 6.5 Timers and the durable clock
 
 `workflow.Sleep(30 * 24 * time.Hour)` is two events and one row:
@@ -885,7 +902,7 @@ temporal worker deployment describe --deployment-name order-workers
 
 With **Pinned** behaviour, an execution stays on the version it started on for life. The consequence is worth stating loudly: **pinning long-running workflows makes most patching unnecessary.** You stop writing `GetVersion` branches and instead keep the old worker build running until its executions drain. The bill is operational (two or more worker builds alive at once, and a way to know when the old one is finally idle) rather than in the code.
 
-`[1.31 → removal in 1.32]` The legacy build-ID *sets* APIs are deprecated: `UpdateWorkerBuildIdCompatibility`, `GetWorkerBuildIdCompatibility`, `UpdateWorkerVersioningRules`, `GetWorkerVersioningRules`, `GetWorkerTaskReachability`. If your deploy tooling calls any of those, it breaks on the 1.32 upgrade.
+`[1.31 deprecated, removal in 1.33]` The legacy build-ID *sets* APIs are deprecated: `UpdateWorkerBuildIdCompatibility`, `GetWorkerBuildIdCompatibility`, `UpdateWorkerVersioningRules`, `GetWorkerVersioningRules`, `GetWorkerTaskReachability`. Server 1.32 ships them disabled by default and is the last release that contains them. If your deploy tooling calls any of those, it breaks on the 1.33 upgrade.
 
 **Upgrade on Continue-as-New (public preview).** Pinned has one genuinely awkward case: an entity workflow that runs for months or years, or an AI-agent workflow that sleeps waiting for a human, never ends and therefore never picks up a new version — so "keep the old build alive until it drains" becomes "keep it alive forever". Upgrade-on-Continue-as-New lets a Pinned execution move to the current version **at its Continue-as-New boundary**, which is exactly the point at which its history resets and a replay divergence cannot occur. It is the answer for workflows that checkpoint by Continue-as-New anyway; it does nothing for a long execution that has no such boundary, and adding one purely to get the upgrade is a real design change, not a config flag.
 
@@ -927,12 +944,14 @@ Treat this as mandatory, not as a nicety. It is the difference between a determi
 |---|---|---|
 | Event history length | **10,240 events** | **51,200 events** — the execution is **terminated** |
 | Event history size | **10 MB** | **50 MB** — terminated |
-| Single payload (blob) | **256 KB** | **2 MB** |
+| Single payload (blob) | **256 KB** | **2 MB** (SDK external storage, public preview, moves larger payloads out of history) |
 | Pending activities | — | **2,000** (docs recommend staying under 500) |
 | Pending child workflows | — | **2,000** (same recommendation) |
 | Pending signals to other executions | — | **2,000** |
 | Pending cancel requests | — | **2,000** |
 | Incomplete Nexus operations | — | **30** |
+
+**SDK external storage for large payloads (public preview).** The SDK can do the "pass pointers" claim check for you. Configured on the data converter, a storage driver uploads any payload at or above a threshold (256 KiB by default) to an object store and puts a small reference token in the event history; workers download referenced payloads in parallel when a task arrives. It runs after the payload codec, so the stored object is already encrypted, and the Web UI shows the reference rather than the data. An S3 driver ships for Go, Java, Python and TypeScript, a GCS driver for Go and TypeScript (Go contrib `s3driver` 0.3.0 and `gcsdriver` 0.2.0; `[Go 1.50]` adds `ExternalStorage.Concurrency` limits). Replay needs the referenced object, so give the bucket a lifecycle rule no shorter than the namespace retention period.
 
 **How Continue-As-New works.** The workflow returns a special "continue as new" result carrying the input for the next run. The Service closes the current run with `WorkflowExecutionContinuedAsNew` and immediately starts a **new run** — **same workflow ID, new run ID, empty history** — with the input you chose. To the outside world it is still one logical workflow: signals addressed to the workflow ID reach the new run, and the Web UI chains the runs together.
 
@@ -1046,6 +1065,8 @@ temporal workflow list --query \
 # and batch operations run over the same query
 temporal workflow terminate --query 'WorkflowType="StuckWorkflow" AND ExecutionStatus="Running"' --reason "bad rollout"
 ```
+
+**Query type checks `[1.32]`.** Server 1.32 makes the unified query converter the default for every visibility store. A comparison whose value type differs from the attribute type (`CustomKeyword = 123`, `CustomInt = '123'`) is now an error rather than store-dependent, except `Int` against `Double`, and a `Text` attribute compared with an empty string is an error. `system.visibilityEnableUnifiedQueryConverter: false` restores the legacy converter until 1.33 removes it.
 
 **Visibility is eventually consistent.** The visibility record is written asynchronously off the History service's visibility task queue, so "I started the workflow and it is not in the list" is expected, not a bug — and it can lag by seconds to minutes when the cluster is loaded. Never build a correctness-critical read on a visibility query. If you must know whether a specific execution exists, use `DescribeWorkflowExecution` on its workflow ID, which reads mutable state directly and is strongly consistent.
 
@@ -1441,7 +1462,7 @@ class RenewalWorkflow:
         workflow.continue_as_new(state)
 ```
 
-**Driving it from the `temporal` CLI** (1.8.2). Note that this reference lives here in §6 rather than in §11 — §11 indexes product names, and a command reference there would be indexed as if the commands were products:
+**Driving it from the `temporal` CLI** (1.9.1). Note that this reference lives here in §6 rather than in §11 — §11 indexes product names, and a command reference there would be indexed as if the commands were products:
 
 ```bash
 # start
@@ -1674,23 +1695,23 @@ Temporal's advantages in 2026 are maturity, five first-class SDKs, an MIT licenc
 
 ### 11.1 The Temporal Service and its stores
 
-- **Server:** **Temporal** — the MIT-licensed server binary running four roles (Frontend, History, Matching, internal Worker), deployed as four Deployments in production, pinned here at 1.31.2.
+- **Server:** **Temporal** — the MIT-licensed server binary running four roles (Frontend, History, Matching, internal Worker), deployed as four Deployments in production, pinned here at 1.32.1.
 - **Core persistence:** **Cassandra**, **PostgreSQL**, **MySQL**, **SQLite** — Cassandra 5.0.4+ for the highest write throughput, Postgres or MySQL on core schema v1.19 for most self-hosted clusters, SQLite for the dev server only.
 - **Advanced visibility:** **Elasticsearch**, **OpenSearch** — the searchable index behind custom search attributes and List Filter queries, on visibility schema v14 for the 1.31 server line.
 
 ### 11.2 Developer surface
 
-- **temporal CLI** — version 1.8.2, the single binary for everything operational: it runs the local dev server via `temporal server start-dev`, starts and signals and queries and describes executions, manages namespaces and search attributes and schedules, drives worker deployment versions, and runs batch operations over a List Filter. It supersedes the legacy `tctl`, which should not appear in new tooling.
+- **temporal CLI** — version 1.9.1, the single binary for everything operational: it runs the local dev server via `temporal server start-dev`, starts and signals and queries and describes executions, manages namespaces and search attributes and schedules, drives worker deployment versions, and runs batch operations over a List Filter. It supersedes the legacy `tctl`, which should not appear in new tooling.
 - **Temporal Web UI** — the execution browser: the event history rendered as a readable timeline, pending activities with their attempt counts and next-retry times, the input and result payloads, search over visibility, and the buttons behind cancel, terminate and reset. With a payload codec in place it needs a codec server to render anything (§6.19).
 
 ### 11.3 SDKs
 
-- **Temporal Go SDK** — v1.47.0, the reference implementation and the language the server itself is written in; determinism is enforced only by the replayer and the `workflowcheck` static analyzer, and 1.47 adds automatic poller autoscaling and `PreferredVersionProvider`.
-- **Temporal Java SDK** — v1.37.0, the most mature enterprise surface: a deadlock detector, the `Saga` compensation helper, stable virtual threads on JVM 21+, `PreferredVersionProvider`, an experimental `temporal-aws-lambda` module and Workflow Streams in preview.
-- **Temporal Python SDK** — v1.31.0, the strongest determinism enforcement of the five thanks to a real sandbox with `workflow.unsafe.imports_passed_through()`; 1.31 adds `patch_activation_callback` for rolling deploys and moves payload limits onto `Client.connect`.
-- **Temporal TypeScript SDK** — v1.21.1, running workflow code in an isolated bundle where Node I/O is simply unreachable, which makes determinism violations largely impossible rather than merely detectable.
+- **Temporal Go SDK** — v1.50.0, the reference implementation and the language the server itself is written in; determinism is enforced only by the replayer and the `workflowcheck` static analyzer, and 1.47 added automatic poller autoscaling and `PreferredVersionProvider`.
+- **Temporal Java SDK** — v1.40.0, the most mature enterprise surface: a deadlock detector, the `Saga` compensation helper, stable virtual threads on JVM 21+, `PreferredVersionProvider`, an experimental `temporal-aws-lambda` module and Workflow Streams in preview.
+- **Temporal Python SDK** — v1.34.0, the strongest determinism enforcement of the five thanks to a real sandbox with `workflow.unsafe.imports_passed_through()`; 1.31 added `patch_activation_callback` for rolling deploys and moved payload limits onto `Client.connect`.
+- **Temporal TypeScript SDK** — v1.24.0, running workflow code in an isolated bundle where Node I/O is simply unreachable, which makes determinism violations largely impossible rather than merely detectable.
 
-The .NET SDK (1.17.0), plus the Ruby and PHP SDKs, cover the same model with smaller ecosystems and are the right choice only when the language is already fixed.
+The .NET SDK (1.20.0), plus the Ruby and PHP SDKs, cover the same model with smaller ecosystems and are the right choice only when the language is already fixed.
 
 ### 11.4 Platform features
 
@@ -1768,6 +1789,10 @@ A Query is served from cached or replayed workflow state and produces **no histo
 **Q: When is a child workflow the wrong tool and an activity the right one?**
 **Short:** A child workflow is wrong whenever the work is a single unit of I/O — it costs a full execution, history, retention and visibility row.
 Use an activity when the work is one unit that does I/O and returns a value; use a child workflow only when the work is genuinely a multi-step process with its own timers, signals, retries and observable identity. A child is a first-class Workflow Execution: several database writes to start, its own event history, its own retention cost, its own visibility row, its own workflow tasks. Fanning one out per item over a 50,000-item list hits the **2,000 pending-children** ceiling and bloats the parent's history long before that. Batch instead — one child per few hundred items, or bounded-parallel activities.
+
+**Q: You need to send one receipt email with retries and no duplicates. Workflow, or Standalone Activity?**
+**Short:** A Standalone Activity (Server 1.32 GA): the client starts the activity directly by Activity ID, Temporal persists and retries it, and there is no workflow history to pay for.
+Since Server 1.32 a client can start an activity with no workflow around it. It keeps everything that makes an activity reliable: persisted before dispatch, the retry policy, heartbeats with checkpointed details, async completion, priority and fairness, and an Activity ID with conflict and reuse policies that rejects a duplicate start. It drops the workflow event history and replay, so on Temporal Cloud it costs fewer billable actions and finishes with fewer worker round trips than a one-activity workflow. The limits decide the boundary: deduplication only covers the namespace retention period, it cannot be started from a Schedule or from Nexus, and there is no place to put a second step, a timer, a signal or a compensation. Once the job grows a dependent step, move it into a workflow; the activity function and worker registration stay the same.
 
 **Q: temporal workflow terminate versus temporal workflow cancel — why does the choice change your data?**
 **Short:** Cancel is cooperative and runs your compensation code, while terminate is a hard stop that runs nothing.
@@ -1881,7 +1906,7 @@ This is Pinned's genuinely awkward case: "keep the old build alive until it drai
 
 - **Be deterministic by construction, not by review.** No clock reads, no randomness, no I/O, no env-var or feature-flag reads, no unordered iteration in workflow code. Where the SDK cannot enforce it (Go especially), run `workflowcheck` in CI.
 - **Every side effect is an activity.** If it touches the network, the disk, a clock or a random source, it belongs in an activity — including the ones that feel too small to bother with.
-- **Keep payloads small and pass pointers.** An S3 URI, a row ID, a document key. The 256 KB warning is a design signal, not a nuisance, and small payloads are a security practice too.
+- **Keep payloads small and pass pointers.** An S3 URI, a row ID, a document key. The 256 KB warning is a design signal, not a nuisance, and small payloads are a security practice too. Where the code cannot avoid large values, let the SDK's external storage do the claim check (§6.11) rather than hand-rolling it per activity.
 - **Derive idempotency keys from `workflowId + activityId`.** Stable across attempts. Never from `attempt`, never from a UUID generated inside the activity.
 - **Always set `StartToClose`.** Leave `ScheduleToStart` unset unless you can articulate exactly which mis-routing you are detecting.
 - **Register all signal and update handlers before the first await**, so there is no window in which one is missing.
@@ -1900,7 +1925,7 @@ This is Pinned's genuinely awkward case: "keep the old build alive until it drai
 - **Prefer Pinned Worker Deployments for long-lived workflows.** New code touches only new executions, and most patching disappears.
 - **Replay-test in CI against real production histories.** Export a corpus nightly, commit it as fixtures, fail the build on any replay error. This is the single highest-value practice on this page.
 - **Follow the full patch lifecycle:** patch, deploy, drain, deprecate, remove. Verify the drain with a visibility query, not with a guess.
-- **Migrate off the legacy build-ID sets APIs** before 1.32 removes the five deprecated calls named in §6.10.
+- **Migrate off the legacy build-ID sets APIs** before 1.33 removes the five deprecated calls named in §6.10 (1.32 is the last release that still contains them).
 - **Give workers a meaningful identity** (pod name plus build ID) so history events name the process that misbehaved.
 
 ### Operations

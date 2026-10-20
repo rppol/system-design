@@ -1064,6 +1064,30 @@ inherited the stdout pipe keeps `Wait` blocked forever even after the direct chi
 the duration of the call, which is how platform-specific process control (job objects on
 Windows, `pidfd` operations on Linux) is done without racing against reaping.
 
+### 6.17 `uuid` `[1.27]`
+
+```go
+import "uuid"
+
+id := uuid.New()            // random, version 4
+key := uuid.NewV7()         // time-ordered, version 7
+u, err := uuid.Parse(s)
+if a.Compare(b) < 0 { /* a sorts before b */ }
+```
+
+`uuid.UUID` is a `[16]byte`, so it is comparable, usable as a map key, and costs no
+allocation to copy. `New` returns a version 4 UUID (122 random bits) and is documented as
+equivalent to `NewV4`. `NewV7` puts a millisecond timestamp in the most significant 48 bits
+and fills at least 62 more bits with random data, and the package documents that successive
+`NewV7` values sort in increasing order except when the system clock moves backwards.
+`Compare` uses the big-endian byte order from RFC 9562 section 6.11, which matches a byte-wise
+sort in a database index. `Nil()` and `Max()` return the all-zero and all-ones values.
+
+`UUID` implements `encoding.TextMarshaler`, `TextAppender` and `TextUnmarshaler`, so it
+encodes as a JSON string and decodes from one with no wrapper type, and `String` writes the
+lowercase hex-and-dash form. `MustParse` panics on bad input and belongs only in tests and
+package-level constants.
+
 ---
 
 ## 7. Real-World Examples
@@ -1345,6 +1369,7 @@ until the deploy that finally restarted them.
 | `golang.org/x/sys/unix` | Raw syscall bindings | `Setpgid`, `pidfd` and everything `syscall` no longer grows |
 | `google/renameio` | Atomic file replacement | Wraps the temp-file-plus-rename pattern including the directory fsync |
 | `spf13/afero` | Filesystem abstraction | Test doubles for code that predates `fs.FS` and `os.Root` |
+| `uuid` `[1.27]` | Stdlib UUID generation and parsing | `NewV7` gives time-ordered keys for B-tree indexes |
 | `goreleaser` | Release automation | Builds the `GOOS`/`GOARCH` matrix and injects version strings that `//go:embed` alternatives used to carry |
 
 ---
@@ -1527,6 +1552,19 @@ UTC has no DST and never repeats. Keep the user's timezone as a separate IANA na
 fixed offset, since governments change offset rules — and convert with `.In(loc)` only at the
 moment of display. In a scratch or distroless image `LoadLocation` fails outright unless you
 import `time/tzdata`, which embeds the database for about 450 KB.
+
+**Q: Should a primary key be a UUID v4 or a UUID v7?**
+**Short:** v7 for B-tree primary keys: its 48-bit millisecond prefix makes inserts append to the right edge of the index, where random v4 keys land on random pages.
+
+A version 4 UUID is 122 random bits, so each insert into a B-tree index (PostgreSQL, InnoDB
+clustered keys) lands on an arbitrary leaf page. Under load that means page splits across the
+whole index, a working set equal to the whole index instead of its tail, and more WAL per row.
+`uuid.NewV7` `[1.27]` puts a Unix millisecond timestamp in the top 48 bits, so new keys sort
+after old ones (the package documents this, except when the system clock steps backwards) and
+inserts touch the rightmost pages that are already cached. It keeps at least 62 random bits, so
+two IDs created in the same millisecond still do not collide in practice. The cost is that a
+v7 ID reveals its creation time to millisecond precision; use v4 for tokens or any ID shown to
+users where that leaks information.
 
 **Q: What is the deadlock in exec.Cmd's StdoutPipe, and what is the correct order?**
 **Short:** Wait closes the pipes, so reading after Wait races the close while the child blocks on a full 64 KB pipe buffer.

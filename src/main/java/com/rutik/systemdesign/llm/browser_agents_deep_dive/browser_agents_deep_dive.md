@@ -4,7 +4,7 @@
 
 Browser agents are LLM agents that navigate and interact with web pages — clicking, typing, scrolling, filling forms, extracting data — to accomplish tasks on sites without official APIs. They complement the more general "computer use" pattern by specializing on web interfaces, where DOM structure provides richer context than raw pixels and where browser automation tools (Playwright, Puppeteer) provide reliable primitives.
 
-The browser-agent ecosystem includes Browser Use (Python, LLM-controlled Playwright with hybrid DOM+vision extraction), Stagehand (TypeScript, Browserbase-backed, vision+DOM), Playwright MCP (Anthropic's official MCP server for Playwright control), Browserbase (cloud browser infrastructure), Skyvern (form-heavy automation), and the vision-driven "computer use" agents — Anthropic's Claude computer use and OpenAI's Computer-Using-Agent (the model behind ChatGPT Atlas) — plus a newer wave of AI-native consumer browsers (Perplexity Comet, OpenAI's ChatGPT Atlas, Opera Neon). WebArena (2023), the benchmark this ecosystem originally measured itself against, has stopped separating systems — third-party trackers put 2026 frontier scaffolds in the high-60s to mid-70s, close to WebArena's own 78.24% human reference. The field has moved to OSWorld 2.0 (2026, 108 hour-scale GUI workflows, best reported agent around 20% binary completion) and BrowseComp (2025, 1,266 web-research questions, where persistence-built agents reach roughly 51.5% against under 2% for browsing-only baselines) for benchmarks that still discriminate between systems — see [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md) for the full roster and numbers.
+The browser-agent ecosystem includes Browser Use (Python, LLM-controlled Playwright with hybrid DOM+vision extraction), Stagehand (TypeScript, Browserbase-backed, vision+DOM), Playwright MCP (Microsoft's MCP server for Playwright control, `microsoft/playwright-mcp`, maintained by the Playwright team), Browserbase (cloud browser infrastructure), Skyvern (form-heavy automation), and the vision-driven "computer use" agents — Anthropic's Claude computer use and OpenAI's Computer-Using-Agent (the model behind ChatGPT Atlas) — plus a newer wave of AI-native consumer browsers (Perplexity Comet, OpenAI's ChatGPT Atlas, Opera Neon). WebArena (2023), the benchmark this ecosystem originally measured itself against, has stopped separating systems — third-party trackers put 2026 frontier scaffolds in the high-60s to mid-70s, close to WebArena's own 78.24% human reference. The field has moved to OSWorld 2.0 (2026, 108 hour-scale GUI workflows, best reported agent around 20% binary completion) and BrowseComp (2025, 1,266 web-research questions, where persistence-built agents reach roughly 51.5% against under 2% for browsing-only baselines) for benchmarks that still discriminate between systems — see [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md) for the full roster and numbers.
 
 The fundamental design choice — DOM extraction vs vision vs hybrid — drives reliability, latency, and cost.
 
@@ -44,9 +44,9 @@ Open-source library. Wraps Playwright. Default flow: extract accessibility tree 
 
 Browserbase team. Three primitives: `page.act("click sign up")`, `page.extract({schema, instruction})`, `page.observe()`. Vision+DOM hybrid. Tight Browserbase integration for cloud browser infrastructure.
 
-### 4.3 Playwright MCP (Anthropic)
+### 4.3 Playwright MCP (Microsoft)
 
-Official [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) server exposing Playwright operations as tools. Standard tool interface; works with Claude, Claude Code, any MCP client. Lowest-friction integration for agent systems already on MCP.
+The Playwright team's [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) server (`@playwright/mcp`) exposing Playwright operations as tools. It drives pages from accessibility-tree snapshots, not pixels; screenshots are for viewing only. Standard tool interface; works with Claude, Claude Code, any MCP client. Lowest-friction integration for agent systems already on MCP.
 
 ### 4.4 Browserbase (Cloud Infrastructure)
 
@@ -59,6 +59,20 @@ Form-filling specialist. Combines vision + LLM for complex multi-step web workfl
 ### 4.6 Anthropic Computer Use
 
 Generic computer control (screenshot + click/type/key) — works on browsers but not browser-specialized. Lower accuracy on web tasks than DOM-aware approaches. See [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the generic computer-use loop.
+
+### 4.7 Anthropic Browser Use Tool (`browser_toolset_20260801`)
+
+A provider-defined hybrid DOM+vision toolset, launched 2026-08-19. It is a client toolset: Claude emits the calls, and your application runs each one against a browser it hosts (Playwright, CDP); nothing runs on Anthropic's side. You add `{"type": "browser_toolset_20260801"}` to `tools` with no `name`.
+
+- **27 default members**: navigation and capture (`navigate`, `screenshot`, `zoom`), pointer actions (`left_click`, `double_click`, `hover`, `scroll`, `scroll_to`, and others), keyboard (`type`, `key`, `hold_key`, `wait`), page reading (`read_page`, `find`, `get_page_text`), `form_input`, and tabs (`new_tab`, `list_tabs`, `switch_tab`, `close_tab`).
+- **Element refs**: `read_page` and `find` return an accessibility-tree listing such as `link "Getting started" [ref_2]`, and actions target `{"type": "ref", "ref": "ref_2"}`. A ref stays valid until the tab navigates or its DOM changes materially. Coordinates are the fallback for canvas and video; screenshots show visual state.
+- **4 opt-in members**: `javascript_exec`, `file_upload`, `read_console`, and `read_network` are off by default. Enable one per member with `"configs": {"file_upload": {"enabled": true}}`. A disabled member is removed from the definition Claude sees, but the docs state that this does not guarantee Claude never names it, so the executor must still return an error result for such a call.
+
+It is not available inside Claude Managed Agents. Compared with the computer use toolset (`computer_toolset_20260801`, out of beta the same day), it works inside one viewport and reads the page structure; computer use sees only screenshots and coordinates across a whole desktop. Both can be declared in one request, each with its own coordinate frame.
+
+### 4.8 Site-Declared Tools (WebMCP)
+
+The first three strategies (DOM, vision, hybrid) all scrape a page built for humans. In the fourth, the page publishes a tool API for agents. WebMCP is a Draft Community Group Report from the W3C Web Machine Learning Community Group (2026-10-16), edited by people from Microsoft and Google. It is not a W3C Standard and is not on the Standards Track. A page calls `document.modelContext.registerTool(...)` to expose a JavaScript tool; an agent in the browser lists tools with `getTools()` and runs one with `executeTool(...)`, which resolves to a string. Access is gated by a `tools` permissions policy whose default allowlist is `'self'`, so cross-origin iframes get no access unless the embedding page grants it. The spec names prompt injection through tool output, misrepresented intent, and privacy leakage through over-broad parameters as risks, and lists mitigations such as turning the feature off through the permissions policy, capping input lengths, and annotating tool output as untrusted.
 
 ---
 
@@ -184,7 +198,7 @@ from browser_use.llm import ChatAnthropic
 async def main():
     agent = Agent(
         task="Find the cheapest flight from JFK to SFO on December 15, 2025 on Google Flights and report the airline and price",
-        llm=ChatAnthropic(model="claude-sonnet-5"),
+        llm=ChatAnthropic(model="claude-sonnet-5-5"),
         max_actions_per_step=3,  # Allow chained actions
         max_failures=5,
         use_vision=True,  # Fall back to vision when DOM ambiguous
@@ -206,7 +220,7 @@ const stagehand = new Stagehand({
   env: "BROWSERBASE",  // or "LOCAL"
   apiKey: process.env.BROWSERBASE_API_KEY!,
   projectId: process.env.BROWSERBASE_PROJECT_ID!,
-  modelName: "claude-sonnet-5",
+  modelName: "claude-sonnet-5-5",
   modelClientOptions: { apiKey: process.env.ANTHROPIC_API_KEY! },
 });
 
@@ -233,16 +247,17 @@ await stagehand.close();
 
 ```bash
 # Run the Playwright MCP server
-npx @anthropic/mcp-server-playwright
+npx @playwright/mcp@latest
 ```
 
 ```python
 # Claude (any MCP client) connects; Playwright tools available:
 # - browser_navigate(url)
-# - browser_click(selector)
-# - browser_type(selector, text)
-# - browser_screenshot()
-# - browser_evaluate(js)
+# - browser_snapshot()                  accessibility tree with element refs
+# - browser_click(target)               target = snapshot ref or unique selector
+# - browser_type(target, text)
+# - browser_take_screenshot()           for viewing; actions use the snapshot
+# - browser_evaluate(function)
 # Agent calls these like any other MCP tool
 ```
 
@@ -288,6 +303,9 @@ context = await browser.new_context(storage_state="auth.json")
 | Hybrid DOM+Vision | Medium (~500ms) | 95% standard + ~80% on hard sites | Mid | Best overall |
 | Computer Use (generic) | Slow (multi-second per action) | ~60-70% on web | High | Universal |
 | Stagehand semantic actions | Fast (DOM-first) | 90%+ | Mid | Excellent for natural language |
+| Browser use tool (`browser_toolset_20260801`) | DOM refs plus screenshots, client-executed | Ref-based targeting, no published web score | Mid | Any page your browser renders; one viewport only |
+| Computer use toolset (`computer_toolset_20260801`) | Screenshots and coordinates only | No DOM signal | High (image tokens) | Whole desktop, native apps included |
+| Site-declared tools (WebMCP) | One tool call, no page reading | Exact, as the site defines it | Lowest | Only sites that register tools |
 
 WebArena (2023) was the benchmark this table's numbers used to cite, and it has stopped
 separating systems: third-party 2026 trackers put frontier scaffolds in the high-60s to
@@ -360,6 +378,12 @@ This single exponent explains the whole benchmark table. Nobody's research agent
 - Sites with aggressive bot protection (Cloudflare BOT-management, captchas every request)
 - Heavy-Canvas applications (Google Sheets, Figma) where DOM is opaque
 
+**Prefer site-declared tools (WebMCP) over scraping when:**
+- The site registers tools through `document.modelContext`: a declared `add_to_cart(sku, qty)` replaces a chain of find, click, and verify steps and does not break on a redesign
+- You control both the site and the agent (an internal app), so you can ship the tool contract with the page
+
+Keep the scraping path as the fallback: WebMCP is a draft Community Group report, and most sites register no tools.
+
 ---
 
 ## 10. Common Pitfalls
@@ -416,7 +440,9 @@ await secure_input_tool.fill("#password", credential_ref="user_pwd")
 |---|---|
 | Browser Use | Python LLM-controlled Playwright |
 | Stagehand | TypeScript browser agent SDK |
-| Playwright MCP | Official Anthropic MCP for Playwright |
+| Anthropic browser use tool | `browser_toolset_20260801`: client toolset with accessibility-tree refs and screenshots |
+| WebMCP | W3C Community Group draft (2026-10-16): pages register agent tools via `document.modelContext` |
+| Playwright MCP | Microsoft's MCP server for Playwright (`@playwright/mcp`) |
 | Browserbase | Cloud browser infrastructure |
 | Playwright | Browser automation library |
 | Puppeteer | Chrome-only browser automation |
@@ -435,8 +461,8 @@ await secure_input_tool.fill("#password", credential_ref="user_pwd")
 Accessibility tree is built for assistive technology — it surfaces semantic info (labels, roles, states) and filters out presentational noise. Smaller (10-100× fewer tokens than raw HTML), structured for interpretation, more stable across CSS refactors. LLMs reason over it more accurately than over raw HTML.
 
 **Q: What's the difference between Browser Use, Stagehand, and Playwright MCP?**
-**Short:** Browser Use is a Python DOM+vision library, Stagehand is a TypeScript act/extract/observe SDK, and Playwright MCP is Anthropic's protocol-based server.
-Browser Use: Python library, Playwright-based, DOM+vision hybrid, default to Claude. Stagehand: TypeScript SDK from Browserbase team, three high-level primitives (act/extract/observe), tightly integrated with Browserbase cloud. Playwright MCP: Anthropic's official MCP server — protocol-based, works with any MCP client.
+**Short:** Browser Use is a Python DOM+vision library, Stagehand is a TypeScript act/extract/observe SDK, and Playwright MCP is Microsoft's protocol-based server.
+Browser Use: Python library, Playwright-based, DOM+vision hybrid, default to Claude. Stagehand: TypeScript SDK from Browserbase team, three high-level primitives (act/extract/observe), tightly integrated with Browserbase cloud. Playwright MCP: Microsoft's MCP server from the Playwright team, protocol-based, drives pages through accessibility snapshots, and works with any MCP client.
 
 **Q: Why are semantic selectors more reliable than CSS/XPath?**
 **Short:** Semantic selectors like get_by_role reference stable user-visible text and ARIA roles instead of brittle CSS IDs or XPath that change every deploy.
@@ -486,6 +512,14 @@ Computer Use is generic — screenshot + click/type/key, works on any GUI. Brows
 **Short:** Playwright MCP exposes browser actions as standardized tools so any MCP client can drive a browser without a proprietary SDK integration.
 Playwright MCP (and community variants like Browser MCP) expose browser operations as standardized tools. Any MCP client (Claude Code, custom agents, etc) can use them without proprietary SDK integration. Standardizing on MCP enables interoperability.
 
+**Q: Why are `javascript_exec` and `file_upload` off by default in Anthropic's browser use tool?**
+**Short:** Page content is untrusted and can inject instructions; arbitrary JS and local file upload turn one injection into code execution or data exfiltration, so they are opt-in.
+Everything a page supplies is untrusted input, and the docs state that Claude sometimes follows instructions found in page content. With only the 27 default members, a successful injection can click and type inside one viewport. With `javascript_exec` it can run arbitrary script in an authenticated origin (read tokens, call internal APIs); with `file_upload` it can send a local file to an attacker's form; `read_console` and `read_network` can expose secrets in logs and requests. So the four members are opt-in through `configs`, and the docs add defense in depth: a dedicated VM or container with a fresh profile and no credentials, a network-layer domain allowlist, scheme checks with a URL parser, and human confirmation for purchases, account changes, and messages. Disabling a member removes it from the definition but does not stop the model naming it, so the executor must reject such calls too.
+
+**Q: How does WebMCP differ from accessibility-tree scraping, and where is the trust boundary?**
+**Short:** WebMCP has the site publish typed tools the agent calls directly instead of inferring actions from the page; the site, not the agent, now defines what the tool does and returns.
+Scraping infers actions from a UI built for humans: the agent reads the accessibility tree, picks a ref, clicks, and verifies, and every redesign can break it. With WebMCP (W3C Web Machine Learning Community Group draft, 2026-10-16) the page calls `document.modelContext.registerTool()` and the agent runs `executeTool()`, so one call with typed arguments replaces several steps. The trust boundary moves. The agent must trust the site's description of what a tool does, and tool output is still untrusted text that can carry injected instructions; the spec lists tool poisoning, misrepresented intent, and over-broad parameters that leak private data. Access is limited by the `tools` permissions policy (default `'self'`). It is a draft, not a standard, so production agents keep scraping as the fallback.
+
 **Q: Can browser agents run unattended at scale?**
 **Short:** Running unattended at scale requires a managed browser fleet like Browserbase rather than hundreds of local headless Chrome instances, which exhausts memory.
 Yes but with constraints. For 100s of concurrent browser sessions, use Browserbase or similar (don't try to run 100 headless Chrome on one host — memory dies). Implement rate limiting per target site (politeness), captcha handling, session refresh on auth expiry, retry/failure handling.
@@ -530,7 +564,7 @@ flowchart TD
     w0["Worker 0<br/>Portal A<br/>Browserbase session"]
     w1["Worker 1<br/>Portal B<br/>Browserbase session"]
     w5["Worker 5<br/>Portal C<br/>Browserbase session"]
-    claude["Claude Sonnet 5<br/>Anthropic API<br/>in: accessibility tree + recipe hints<br/>out: action sequence"]
+    claude["Claude Sonnet 5.5<br/>Anthropic API<br/>in: accessibility tree + recipe hints<br/>out: action sequence"]
     s3@{ icon: "logos:aws-s3", form: "square", label: "Audit Log +<br/>Screenshot Archive (S3)", pos: "b", h: 44 }
 
     oms --> pg
@@ -613,7 +647,7 @@ async def run_portal_agent(
     order: OrderEntry,
     recipe: PortalRecipe,
     session_state_path: Path,
-    llm_model: str = "claude-sonnet-5",
+    llm_model: str = "claude-sonnet-5-5",
 ) -> dict[str, Any]:
     """
     Execute a single order entry on a supplier portal.
@@ -678,7 +712,7 @@ def _extract_confirmation(text: str) -> str:
 
 def _estimate_cost(result: Any) -> float:
     # ~800 input tokens + 200 output tokens per step, 15 steps avg
-    # claude-sonnet-5: $2/$10 per 1M in/out
+    # claude-sonnet-5-5: $2/$10 per 1M in/out
     avg_steps = 15
     # Prices are per 1M tokens, so divide by 1e6 (not 1e9).
     return round((800 * avg_steps * 2 + 200 * avg_steps * 10) / 1e6, 4)

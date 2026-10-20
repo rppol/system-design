@@ -12,6 +12,7 @@ Low-level design patterns that address coordination between threads sharing a JV
 | Producer-Consumer | [ProducerConsumer.md](ProducerConsumer.md) | Decouple production from consumption via bounded buffer | `BlockingQueue`, `wait()`/`notifyAll()` |
 | Read-Write Lock | [ReadWriteLock.md](ReadWriteLock.md) | Allow concurrent reads, exclusive writes | `ReentrantReadWriteLock`, `StampedLock` |
 | Thread Pool | [ThreadPool.md](ThreadPool.md) | Reuse worker threads across many tasks | `ExecutorService`, `ThreadPoolExecutor` |
+| Monitor Object, Guarded Suspension, Balking, Two-Phase Termination, Active Object, Reactor, Proactor, Actor | [CoordinationPatterns.md](CoordinationPatterns.md) | Wait, refuse, stop, hand off work, or serve many connections on few threads | `Condition`, `compareAndSet`, `shutdown()`, `Selector`, Netty, Pekko |
 
 ---
 

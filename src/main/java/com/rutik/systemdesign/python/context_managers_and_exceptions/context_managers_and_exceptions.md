@@ -579,6 +579,102 @@ def validate_all(items: list[dict]) -> None:
         raise ExceptionGroup("validation errors", errors)
 ```
 
+### 6.7 Context managers as decorators: `ContextDecorator`
+
+A context manager that subclasses `contextlib.ContextDecorator` can also decorate a function, and
+`@contextmanager` builds on it, so every generator-based CM works both ways. `@cm()` on a function
+is the same as wrapping its whole body in `with cm():`. The CM is entered on every call, so it
+must be reusable across `with` statements.
+
+```python
+from contextlib import contextmanager
+import time
+from collections.abc import Iterator
+
+@contextmanager
+def timer(label: str) -> Iterator[None]:
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(f"{label}: {(time.perf_counter() - start) * 1000:.1f} ms")
+
+@timer("load")                 # same as: def load(): with timer("load"): ...
+def load() -> list[int]:
+    return list(range(1_000_000))
+
+@timer("stream")               # [3.15]: timer stays open until iteration ends
+def stream_rows() -> Iterator[int]:
+    yield from range(1_000_000)
+```
+
+Since 3.15, when the decorated function is a generator function, coroutine function, or async
+generator function, the wrapper is the same kind of function and keeps the CM open for the whole
+iteration or `await`, closing the generator when iteration ends. `AsyncContextDecorator` and
+`@asynccontextmanager` behave the same way with `async with`. On 3.14 and earlier, the CM exits as
+soon as the generator or coroutine object is created, before any of its body runs (Pitfall 8).
+
+Also since 3.15, `ExitStack.enter_context()` and `AsyncExitStack.enter_async_context()` look up
+`__enter__`/`__exit__` (and the async pair) the same way the `with` statement does, so a CM whose
+methods are custom descriptors behaves identically in both.
+
+### 6.8 `except` and `except*` without parentheses [3.14]
+
+PEP 758 (Final, Python 3.14) lets an `except` or `except*` clause list several exception types
+without parentheses, but only when the clause has no `as` target:
+
+```python
+try:
+    payload = decode(raw)
+except ValueError, UnicodeDecodeError:          # [3.14]: same as (ValueError, UnicodeDecodeError)
+    payload = None
+
+try:
+    async with asyncio.TaskGroup() as tg:
+        ...
+except* TimeoutError, ConnectionError:          # [3.14]: except* form, no `as`
+    metrics.incr("upstream_failures")
+
+try:
+    payload = decode(raw)
+except (ValueError, UnicodeDecodeError) as exc: # `as` still requires the parentheses
+    log.warning("bad payload: %s", exc)
+```
+
+The grammar adds `'except' expressions ':' block` beside the existing
+`'except' expression 'as' NAME ':' block`. Semantics do not change: the expressions still form a
+tuple that is evaluated only when an exception reaches the clause, and matching is the same
+`isinstance` check against each element. Without parentheses and with `as`, 3.14 still raises
+`SyntaxError: multiple exception types must be parenthesized when using 'as'`; on 3.13 and
+earlier any unparenthesized list is `SyntaxError: multiple exception types must be parenthesized`.
+
+The `as` rule exists because of Python 2, where `except ValueError, e:` meant "catch
+`ValueError` and bind it to `e`". In 3.14 the same line parses and means "catch `ValueError` or
+whatever `e` holds" (Pitfall 9). Code that must still run on 3.11 to 3.13 has to keep the
+parentheses, since the new form is a syntax error there and fails at import.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    C{"except A, B"} -->|"no as, 3.14+"| OK(["catches A or B"])
+    C -->|"no as, 3.13 and earlier"| E1(["SyntaxError"])
+    C -->|"with as, any version"| E2(["SyntaxError:<br/>must be parenthesized"])
+    P(["except (A, B) as e"]) -->|"every version"| OK2(["catches A or B,<br/>binds e"])
+
+    class C mathOp
+    class OK,OK2 train
+    class E1,E2 lossN
+    class P io
+```
+
+*Parentheses stay valid on every version; dropping them is legal only on 3.14+ and only when
+nothing is bound with `as`.*
+
 ---
 
 ## 7. Real-World Examples
@@ -833,6 +929,63 @@ or `continue` would exit a `finally` block. Run CI with `-W error::SyntaxWarning
 warning into a build failure, which is the only way it gets fixed in a codebase that has
 learned to ignore warnings.
 
+### Pitfall 8: A context manager decorating a generator or coroutine exits immediately (before 3.15)
+
+```python
+# BROKEN on 3.14 and earlier: the transaction commits before a single row is read
+@transaction(conn)
+def export_rows() -> Iterator[Row]:
+    yield from conn.execute("SELECT * FROM orders")
+
+for row in export_rows():   # export_rows() returned a generator object; the CM already exited
+    write(row)
+```
+
+The decorator wraps the call, and calling a generator function (or an `async def`) only creates
+the generator or coroutine object. `__exit__` runs right after that, so the transaction, lock, or
+timer covers nothing: timings read near zero, locks are released before the critical section, and
+the query runs outside the transaction. Python 3.15 fixes this in `ContextDecorator` itself (§6.7).
+On older versions, put the `with` inside the body:
+
+```python
+# FIX on any version
+def export_rows() -> Iterator[Row]:
+    with transaction(conn):
+        yield from conn.execute("SELECT * FROM orders")
+```
+
+### Pitfall 9: A Python 2 `except X, e:` line that parses on 3.14
+
+```python
+# BROKEN: ported from Python 2; a SyntaxError up to 3.13, valid syntax on 3.14 (PEP 758)
+retry_delay = 5
+
+def fetch() -> bytes:
+    try:
+        return http_get(URL)
+    except TimeoutError, retry_delay:   # 3.14 reads this as (TimeoutError, retry_delay)
+        return b""
+```
+
+Before 3.14 the module failed to import, so the line could not ship. On 3.14 it imports cleanly
+and the bug appears only when an exception reaches the clause: Python evaluates the tuple
+`(TimeoutError, 5)`, and because `5` is not an exception class the handler raises
+`TypeError: catching classes that do not inherit from BaseException is not allowed`, replacing
+the original error. If the second name is undefined, the clause raises `NameError` instead.
+Neither happens on the success path, so tests that never trigger the exception pass.
+
+```python
+# FIX: bind with `as`, which forces the parenthesized form
+    except TimeoutError as exc:
+        log.info("timeout: %s", exc)
+        return b""
+```
+
+A linter that only checks syntax accepts the broken line on 3.14 (ruff 0.17.0 with
+`--select ALL` reports nothing on that line). A type checker catches it: `mypy` on 3.14 reports
+`Exception type must be derived from BaseException (or be a tuple of exception classes)`. Run
+one on any code ported from Python 2.
+
 ---
 
 ## 11. Technologies & Tools
@@ -851,6 +1004,28 @@ learned to ignore warnings.
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: Is `except ValueError, TypeError:` valid Python, and what changes if you add `as e`?**
+**Short:** On 3.14+ it catches either type (PEP 758), but only without as; with as, and on 3.13 or earlier at all, the parentheses are required.
+
+PEP 758 (Final, Python 3.14) allows an unparenthesized list of types in `except` and `except*`
+when there is no `as` clause, so `except ValueError, TypeError:` means exactly
+`except (ValueError, TypeError):`. With a binding, `except ValueError, TypeError as e:` is still
+`SyntaxError: multiple exception types must be parenthesized when using 'as'`. On 3.11 to 3.13
+every unparenthesized form is a `SyntaxError`, so a library supporting those versions must keep
+the parentheses. The parenthesized form works everywhere and is the one to use with `as`.
+
+**Q: Why is a Python 2 style `except TimeoutError, err:` more dangerous on 3.14 than on 3.13?**
+**Short:** On 3.13 it is a SyntaxError at import; on 3.14 it parses as catching TimeoutError or whatever err holds, and fails only when an exception arrives.
+
+In Python 2 the comma bound the exception to the name. On 3.13 and earlier the line is a syntax
+error, so the module cannot import and the bug cannot reach production. Under PEP 758 the same
+line is a valid two-element type list: when an exception reaches it, Python evaluates `err`. If
+`err` is undefined the handler raises `NameError`; if it holds a non-exception value such as an
+`int`, it raises `TypeError: catching classes that do not inherit from BaseException is not
+allowed`. Either replaces the original exception, and nothing happens on the success path, so
+tests that never raise pass. Use `except TimeoutError as err:`, and run `mypy`, which reports
+`Exception type must be derived from BaseException` for the broken line.
 
 **Q1: What does `__exit__` returning `True` do, and when should you return `True`?**
 **Short:** Returning True from __exit__ suppresses the exception, so the with block exits as if nothing happened.
@@ -979,6 +1154,18 @@ So that Ctrl-C and `sys.exit()` still roll the transaction back. `KeyboardInterr
 **Short:** A return in a finally block discards whatever was propagating through it, silently swallowing the in-flight exception; PEP 765 raises a SyntaxWarning for it.
 
 The `return` **cancels whatever was propagating through the `finally`** — an in-flight exception, or the `try` block's own return value — so the function completes normally and the caller never learns anything went wrong. `try: return parse(...) finally: return {}` swallows a `ValueError` and hands back `{}` as though the parse succeeded; monitoring sees a healthy call and the bad input flows downstream. `break` and `continue` that exit a `finally` do the same thing, which is why a `finally` inside a loop is worth a second look. It is the same failure mode as an `__exit__` that returns a truthy value, with the difference that there is no `__exit__` for a reviewer to notice. Python 3.14 added **PEP 765**, which emits a `SyntaxWarning` whenever `return`, `break`, or `continue` would leave a `finally` block; run CI with `-W error::SyntaxWarning` so it fails the build rather than scrolling past. Keep `finally` for cleanup that transfers no control, and put any deliberate error handling in an explicit `except` clause where it is visible.
+
+**Q: What happens when a `@contextmanager` CM decorates a generator or `async def` function?**
+**Short:** Before 3.15 the CM exits as soon as the generator or coroutine object is created, so it covers nothing; 3.15 keeps it open for the whole iteration or await.
+
+`ContextDecorator`, which `@contextmanager` uses, wraps the function call in `with cm():`. Calling
+a generator function or a coroutine function does not run its body; it only returns a generator
+or coroutine object. So on 3.14 and earlier, `__enter__` and `__exit__` both run before the first
+`next()` or `await`, and the lock, transaction, or timer protects nothing, with no error to show
+it. Python 3.15 changed `ContextDecorator` and `AsyncContextDecorator` to detect generator,
+coroutine, and async generator functions, return a wrapper of the same kind, and hold the CM open
+until iteration or the await finishes, closing the generator at the end. For code that must run on
+older versions, put the `with` statement inside the function body.
 
 **Q: When should you use `add_note()` instead of raising a new exception from the original?**
 **Short:** Use add_note to attach diagnostic context while keeping the exception's type and identity; use raise-from when you are genuinely translating an error across an API boundary.

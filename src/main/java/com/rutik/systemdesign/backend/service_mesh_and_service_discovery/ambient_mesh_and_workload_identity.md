@@ -37,7 +37,7 @@ A sidecar is a bodyguard assigned to one person: it never leaves their side, but
 **Workload identity approaches**:
 - **Istio's built-in CA**: issues SPIFFE-shaped X.509 identities (`spiffe://cluster.local/ns/x/sa/y`) out of the box, scoped to one mesh, using Kubernetes namespace and service account as the attestation source.
 - **SPIRE as Istio's CA**: Istio can point at a SPIRE deployment's Workload API socket instead of its built-in CA, trading Istio's simpler out-of-box setup for SPIRE's richer attestation plugins and multi-cluster/multi-platform federation.
-- **Cilium's native mTLS**: SPIFFE identities derived from Cilium's own security identities, issued and rotated by a dedicated SPIRE server, currently a Beta feature.
+- **Cilium's mTLS**: Cilium (1.20, July 2026) provides mTLS through ztunnel transparent encryption, a beta feature: namespaces labeled `io.cilium/mtls-enabled=true` get sidecar-free TCP encryption and mutual authentication.
 
 **Sidecar-free dataplanes compared**:
 - **Istio ambient**: kernel-agnostic (works on any CNI plugin's networking), userspace ztunnel does L4, separate waypoint does L7.
@@ -179,6 +179,10 @@ metadata:
 
 A waypoint is itself a standard Kubernetes `Gateway` object using the Gateway API resource kind (§6.9), not an Istio-specific CRD — the same GatewayClass mechanism that underlies the modern proxy field in [`gateway_api_and_modern_proxies`](../api_gateway_patterns/gateway_api_and_modern_proxies.md) is reused here. `istio.io/waypoint-for: service` scopes it to Service-level traffic; `all` would also cover pod-to-pod traffic that bypasses a Service.
 
+**Choosing the waypoint proxy.** The `gatewayClassName` picks the proxy. `istio-waypoint` deploys Envoy. From Istio 1.31 (August 31, 2026), `istio-agentgateway-waypoint` deploys agentgateway instead, an open source proxy hosted by the Agentic AI Foundation that understands LLM provider, MCP, and agent-to-agent (A2A) traffic as well as HTTP and gRPC. Use it for a namespace whose L7 traffic is mostly agent and tool calls; keep Envoy where services depend on `EnvoyFilter`, which agentgateway does not read.
+
+**Canarying a waypoint.** Since every request for the namespace or service crosses the waypoint, a bad waypoint config change is an outage for all of it. Istio 1.31 lets a service or namespace reference a primary and a canary waypoint (`istio.io/use-waypoint-canary`, `istio.io/use-waypoint-canary-namespace`), and the `istio.io/use-waypoint-canary-weight` annotation sends a set share of in-mesh connections to the canary with no client change. Raise the weight in steps and watch the canary's 5xx rate before cutting over.
+
 ### 6.5 SPIFFE identity anatomy
 
 A SPIFFE ID is a URI: `spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>` is the shape Istio and Kubernetes-flavored SPIRE deployments use, though SPIFFE itself only requires a trust domain and an opaque path. Two SVID formats carry it:
@@ -222,7 +226,7 @@ spec:
 
 ### 6.8 Cilium's dataplane: eBPF for L3/L4, shared Envoy for L7
 
-Cilium's mesh has no per-pod proxy at all by default. L3/L4 policy enforcement, load balancing, and connection tracking run entirely in-kernel via eBPF — the traffic never leaves kernel space for those decisions. When a policy needs L7 visibility (HTTP header inspection, gRPC-aware routing), Cilium routes the connection through **one Envoy instance per node**, shared across every pod on that node — architecturally similar to a waypoint in spirit, but always co-located per-node rather than deployed separately per namespace. Cilium's own mTLS feature (Beta) issues workload identities as SPIFFE IDs derived from Cilium's security-identity model, backed by a dedicated SPIRE server — so a Cilium mesh and an Istio ambient mesh can, in principle, share the same identity standard even though their dataplanes are built differently.
+Cilium's mesh has no per-pod proxy at all by default. L3/L4 policy enforcement, load balancing, and connection tracking run entirely in-kernel via eBPF, so the traffic never leaves kernel space for those decisions. When a policy needs L7 visibility (HTTP header inspection, gRPC-aware routing), Cilium routes the connection through **one Envoy instance per node**, shared across every pod on that node: similar to a waypoint, but always co-located per node rather than deployed separately per namespace. For mTLS, Cilium runs ztunnel (`encryption.type=ztunnel`, beta): namespaces labeled `io.cilium/mtls-enabled=true` get sidecar-free TCP encryption and mutual authentication, while traffic between enrolled and non-enrolled workloads is not supported. A Cilium cluster and an Istio ambient mesh can therefore use the same L4 mTLS component even though their policy dataplanes are built differently.
 
 ### 6.9 GAMMA: HTTPRoute for east-west traffic
 
@@ -296,6 +300,8 @@ The only structural difference from an ingress `HTTPRoute` is the `parentRefs` t
 
 **Labeling a namespace `ambient` does not retroactively strip sidecars from running pods.** Existing injected pods keep their sidecar until they are redeployed; a rollout restart is required to actually move them onto the ztunnel path, and until that restart happens the namespace is running both proxies for those pods, not neither.
 
+**Istio 1.31 artifacts are no longer published to Google-hosted locations.** From 1.31, nothing new goes to `gcr.io/istio-release`, `registry.istio.io`, or the GCS bucket. Images stay on Docker Hub, Helm charts move to `blob.istio.io/istio-release/charts`, and OCI charts move to `ghcr.io/istio/release/charts`. The project disables the old GCP-hosted artifacts in scheduled test windows on September 15, October 13, November 17, and December 8 to 9, 2026 (UTC), so a CI pipeline or cluster autoscaler pulling from `gcr.io/istio-release` fails during those windows. Pin the new registry and chart URLs, or mirror the images into your own registry.
+
 **`EnvoyFilter` resources written against the sidecar do not carry over to ztunnel.** Ztunnel has no Envoy filter chain to extend — any custom Lua, Wasm, or native filter logic that a service depended on under sidecar mode either needs a waypoint (which is a real Envoy and does support `EnvoyFilter`) or needs to move out of the mesh layer entirely.
 
 ---
@@ -306,11 +312,12 @@ The only structural difference from an ingress `HTTPRoute` is the `parentRefs` t
 |---|---|
 | **Istio ztunnel** | Per-node L4 proxy: mTLS, L4 authorization, telemetry; no HTTP parsing |
 | **Istio waypoint** | Optional per-namespace/per-service-account Envoy for L7 routing and policy |
+| **agentgateway** | Alternative waypoint proxy (`istio-agentgateway-waypoint` GatewayClass, Istio 1.31) for LLM, MCP, and A2A traffic |
 | **istio-cni** | Node agent installing traffic-redirection rules for both sidecar and ambient pods |
 | **HBONE** | HTTP/2 CONNECT-based mTLS tunnel protocol between ztunnels and waypoints, port 15008 |
 | **SPIFFE** | The identity specification: SPIFFE ID URI format, X.509-SVID and JWT-SVID document formats |
 | **SPIRE** | The reference SPIFFE implementation: SPIRE Server (issues SVIDs), SPIRE Agent (attests workloads, exposes the Workload API over a local UDS) |
-| **Cilium** | eBPF-based CNI with an optional service mesh mode: in-kernel L3/L4, per-node shared Envoy for L7, SPIFFE/SPIRE-backed mTLS (Beta) |
+| **Cilium** | eBPF-based CNI with an optional service mesh mode: in-kernel L3/L4, per-node shared Envoy for L7, ztunnel-based mTLS for enrolled namespaces (beta) |
 | **Kubernetes Gateway API / GAMMA** | The resource kind (`HTTPRoute`, `GatewayClass`) a waypoint is defined as, and the extension (`parentRefs` to a `Service`) that lets it express east-west mesh routing |
 
 ---
@@ -411,6 +418,8 @@ Cilium requires Cilium itself as the cluster's CNI plugin, which lets it push L3
 - Prefer X.509-SVID for service-to-service calls; reach for JWT-SVID only where an intermediary genuinely cannot forward a client certificate.
 - Use SPIRE (or federate trust domains) the moment identity needs to cross more than one cluster or platform — do not stretch one mesh's built-in CA across infrastructure it was never scoped to attest.
 - Roll a namespace's pods after labeling it for ambient — the label alone does not remove existing sidecars.
+- Roll out waypoint config changes behind `istio.io/use-waypoint-canary-weight` (Istio 1.31) instead of editing the live waypoint.
+- Pull Istio images and charts from Docker Hub, `blob.istio.io`, or `ghcr.io/istio/release/charts`, or from your own mirror; `gcr.io/istio-release` gets no 1.31 artifacts.
 - Keep waypoints scoped as narrowly as the traffic actually needs (`service` rather than `all`) so the L4-only fast path stays the default for traffic that does not require it.
 
 ---

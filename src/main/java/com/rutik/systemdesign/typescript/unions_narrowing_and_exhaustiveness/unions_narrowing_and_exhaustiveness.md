@@ -637,7 +637,7 @@ returning `v is readonly number[]`.
 |------|------|------------------------|
 | TypeScript | The compiler and checker (7.0, native Go binary) | Owns control-flow analysis and inferred predicates |
 | tsc6 | The 6.0 binary shipped as `@typescript/typescript6` | The only stable Compiler API until 7.1 |
-| typescript-eslint | Type-aware linting (8.69.0) | `switch-exhaustiveness-check`, `no-unnecessary-condition` |
+| typescript-eslint | Type-aware linting (8.71.2) | `switch-exhaustiveness-check`, `no-unnecessary-condition` |
 | Zod | Runtime schema parsing | Replaces a hand-written predicate at trust boundaries |
 | ts-pattern | Exhaustive pattern matching for unions | `.exhaustive()` fails the build on an unhandled member |
 | Vitest | Test runner with `expectTypeOf` | Asserts a narrowed type is what you expect |

@@ -985,14 +985,6 @@ public class SalesReport {
 
 **Key stream concepts**: custom `Collector` with combiner (parallel-safe), single-pass aggregation, `Map.merge()` for concurrent accumulation, `finisher` for post-processing, `Records` for type-safe result objects.
 
----
-
-## Related / See Also
-
-- [Java 8 Features](../java8_features/java8_features.md) — lambda syntax, Optional, and stream overview that precedes this deep dive
-- [Functional Programming](../functional_programming/functional_programming.md) — custom Collectors, function composition, pipeline design
-- [Performance & Tuning](../performance_and_tuning/performance_and_tuning.md) — parallel stream benchmarking with JMH, common allocation pitfalls
-
 **Performance**: One pass O(n) vs four passes O(4n). For 1M sales records, this matters — measured with JMH at ~4× faster than 4 separate stream passes due to better cache utilization (data touched once instead of 4 times).
 
 **Put simply.** "Four passes and one pass do the same arithmetic; the difference is that four passes drag the same 30MB of records past the CPU four times, and after the first pass none of it is still in cache."
@@ -1035,3 +1027,11 @@ Big-O calls `O(n)` and `O(4n)` the same complexity, and for a constant factor of
 ```
 
 The measured 4x matching the pass count exactly is the tell that this workload is memory-bound, not compute-bound: if the arithmetic per record dominated, cutting traversals would have bought far less than 4x. That is also the condition under which `teeing` or a hand-written `Collector` is worth the loss of readability — check that your working set exceeds L3 before paying that price.
+
+---
+
+## Related / See Also
+
+- [Java 8 Features](../java8_features/java8_features.md) — lambda syntax, Optional, and stream overview that precedes this deep dive
+- [Functional Programming](../functional_programming/functional_programming.md) — custom Collectors, function composition, pipeline design
+- [Performance & Tuning](../performance_and_tuning/performance_and_tuning.md) — parallel stream benchmarking with JMH, common allocation pitfalls

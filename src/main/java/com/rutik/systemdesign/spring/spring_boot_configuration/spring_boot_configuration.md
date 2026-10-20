@@ -142,7 +142,7 @@ public class DatabaseProperties {
 
     private Map<String, String> connectionProperties = new LinkedHashMap<>();
 
-    // Getters and setters required (or use @ConstructorBinding for immutable)
+    // Getters and setters required (or use a record for immutable binding)
 }
 
 // Registration (two ways)
@@ -168,27 +168,31 @@ public class MyApplication { }
 # app.database.connection-properties.sslMode=verify-full
 ```
 
-### Immutable @ConfigurationProperties with @ConstructorBinding
+### Immutable @ConfigurationProperties with Constructor Binding
 
 ```java
-// Spring Boot 2.2+: immutable properties via constructor binding
+// One constructor (a record has one): Boot binds through it, no annotation needed
 @ConfigurationProperties(prefix = "app.server")
-@ConstructorBinding  // Spring Boot 2.x (optional in Boot 3.x if single constructor)
-public class ServerProperties {
-    private final int port;
-    private final String host;
-    private final Duration readTimeout;
+public record ServerProperties(int port, String host, Duration readTimeout) {}
 
-    public ServerProperties(int port, String host, Duration readTimeout) {
-        this.port = port;
-        this.host = host;
-        this.readTimeout = readTimeout;
+// Several constructors: @ConstructorBinding marks the one Boot binds through
+@ConfigurationProperties(prefix = "app.client")
+public class ClientProperties {
+    private final URI baseUrl;
+    private final Duration timeout;
+
+    @ConstructorBinding
+    public ClientProperties(URI baseUrl, Duration timeout) {
+        this.baseUrl = baseUrl;
+        this.timeout = timeout;
     }
 
-    // Only getters — no setters (immutable)
-    public int getPort() { return port; }
-    public String getHost() { return host; }
-    public Duration getReadTimeout() { return readTimeout; }
+    public ClientProperties(URI baseUrl) {
+        this(baseUrl, Duration.ofSeconds(5));
+    }
+
+    public URI getBaseUrl() { return baseUrl; }
+    public Duration getTimeout() { return timeout; }
 }
 ```
 
@@ -273,6 +277,8 @@ spring.config.import=optional:configtree:/etc/config/
 ### EnvironmentPostProcessor — Programmatic Property Sources
 
 ```java
+import org.springframework.boot.EnvironmentPostProcessor;
+
 // Add custom property source before application starts
 public class VaultEnvironmentPostProcessor implements EnvironmentPostProcessor {
     @Override
@@ -287,7 +293,7 @@ public class VaultEnvironmentPostProcessor implements EnvironmentPostProcessor {
 }
 
 // Registration in META-INF/spring.factories:
-// org.springframework.boot.env.EnvironmentPostProcessor=\
+// org.springframework.boot.EnvironmentPostProcessor=\
 //   com.example.VaultEnvironmentPostProcessor
 ```
 
@@ -411,7 +417,7 @@ public class AppConfig { }
 |-----------|------|
 | `ConfigDataEnvironmentPostProcessor` | Loads `application.properties` / YAML |
 | `@ConfigurationProperties` | Type-safe property binding |
-| `@ConstructorBinding` | Immutable `@ConfigurationProperties` (Spring Boot 2.x) |
+| `@ConstructorBinding` | Marks the binding constructor when a `@ConfigurationProperties` class has several; a record or single-constructor class binds without it |
 | `@Validated` | JSR-303 validation on `@ConfigurationProperties` |
 | `spring-boot-configuration-processor` | Generates metadata for IDE autocompletion |
 | `EnvironmentPostProcessor` | Programmatic property source addition |
@@ -435,9 +441,9 @@ Relaxed binding maps multiple property name formats to the same Java field. `max
 **Short:** Files outside the JAR on the filesystem override the packaged defaults inside it.
 Profile-specific files outside the JAR (filesystem, current directory) have higher priority than those inside the JAR. This allows operations teams to place an `application-production.properties` file alongside the JAR to override packaged defaults. Spring Boot checks `./config/`, `./`, then `classpath:/config/`, then `classpath:/` in order. The convention enables the same JAR to be configured differently per environment without rebuilding.
 
-**Q: How does @ConstructorBinding work and why is it preferred for immutable classes?**
-**Short:** It binds properties through constructor parameters instead of setters, enabling safe final fields.
-`@ConstructorBinding` (Spring Boot 2.x) or automatic detection of single constructor (Spring Boot 3.x) tells Spring to bind properties via constructor parameters instead of setters. This enables `final` fields — the bound object is immutable after creation. Immutable configuration is safer: no code can accidentally modify configuration post-initialization, and the object can be safely shared across threads. In Spring Boot 3.x, if `@ConfigurationProperties` class has only one constructor, `@ConstructorBinding` is implicit.
+**Q: How does constructor binding work for @ConfigurationProperties, and when do you need @ConstructorBinding?**
+**Short:** A record or single-constructor class binds through its constructor with no annotation; @ConstructorBinding only picks one of several constructors.
+A `@ConfigurationProperties` class with one parameterized constructor, which includes every record, binds through that constructor automatically: Boot passes the bound values as arguments instead of calling setters. `@ConstructorBinding` targets constructors only, not types, so it cannot sit on the class; you add it to one constructor when the class declares several and Boot must know which to use. Constructor binding allows `final` fields, so the bound object is immutable after creation: no code can change configuration after startup, and the object is safe to share across threads. `@DefaultValue` on a constructor parameter supplies a value when the property is missing, and `@Validated` still applies.
 
 **Q: What is spring.config.import and how does it replace bootstrap.yml?**
 **Short:** It imports additional config sources like configserver: directly into the main context, replacing bootstrap.yml.
@@ -456,12 +462,12 @@ No. `@PropertySource` only supports `.properties` files by default. It uses `Pro
 Add `spring-boot-configuration-processor` to build dependencies (optional compile scope). It runs at compile time and generates `META-INF/spring-configuration-metadata.json` describing all `@ConfigurationProperties` classes. IDE plugins (IntelliJ, Eclipse) read this metadata to provide: property name autocompletion in `application.properties`, documentation tooltips showing field descriptions, type information, and default values. Without this, application.properties is edited without any IDE assistance. For library/starter authors, this metadata is what makes their configuration discoverable and documented.
 
 **Q: How do multi-document YAML files work with profiles?**
-**Short:** Documents separated by --- can each be activated per profile, with later documents overriding earlier keys.
-A YAML file can contain multiple documents separated by `---`. Each document can be conditionally activated using `spring.config.activate.on-profile`. When a profile is active, only the matching documents (plus documents with no activation condition) are applied. Documents are applied in order — later documents override earlier ones for the same key. This allows a single `application.yml` to contain all environment configurations, which some teams prefer over multiple files. Multi-document `.properties` files are not supported; only YAML supports this.
+**Short:** Documents separated by --- in YAML (or #--- in .properties) can each be activated per profile, with later documents overriding earlier keys.
+A YAML file can contain multiple documents separated by `---`. Each document can be conditionally activated using `spring.config.activate.on-profile`. When a profile is active, only the matching documents (plus documents with no activation condition) are applied. Documents are applied in order, and later documents override earlier ones for the same key. This allows a single `application.yml` to contain all environment configurations, which some teams prefer over multiple files. `.properties` files support the same split since Boot 2.4: a line containing only `#---` separates documents, and each document can carry its own `spring.config.activate.on-profile`.
 
 **Q: What is EnvironmentPostProcessor and when would you use it?**
 **Short:** It is an SPI that manipulates the Environment before the ApplicationContext is created, e.g. for loading secrets.
-`EnvironmentPostProcessor` is an SPI that runs before the ApplicationContext is created, allowing programmatic manipulation of the `ConfigurableEnvironment`. Register via `spring.factories` (key: `org.springframework.boot.env.EnvironmentPostProcessor`) or `META-INF/spring/...` (Boot 3.x). Use cases: loading secrets from Vault or AWS Secrets Manager before other config is bound (ensuring secrets are available at highest priority), decrypting encrypted property values, or adding environment-specific property sources based on system detection.
+`EnvironmentPostProcessor` is an SPI that runs before the ApplicationContext is created, allowing programmatic manipulation of the `ConfigurableEnvironment`. Register it in `META-INF/spring.factories` under the key `org.springframework.boot.EnvironmentPostProcessor`, the interface's package since Boot 4.0; `spring.factories` is the only registration mechanism for this SPI. Use cases: loading secrets from Vault or AWS Secrets Manager before other config is bound (ensuring secrets are available at highest priority), decrypting encrypted property values, or adding environment-specific property sources based on system detection.
 
 **Q: What does /actuator/env expose and what are the security risks?**
 **Short:** It exposes every property source's values with only pattern-based, non-exhaustive secret masking.

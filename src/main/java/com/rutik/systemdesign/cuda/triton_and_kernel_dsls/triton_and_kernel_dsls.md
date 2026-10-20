@@ -253,6 +253,14 @@ prerequisites — a wider stated floor than Triton's Ampere-only (CC 8.0) cutoff
 implies, though NVIDIA's docs do not publish a per-generation performance-parity
 guarantee to go with it (see "Honest limits" below).
 
+CUDA Tile is no longer Python-only. CUDA 13.3 extended it to **C++** (in `nvcc` and
+NVRTC), so an existing CUDA C++ codebase can write tile kernels without a Python layer,
+and its release notes add Ampere and Hopper (`sm_80` and later) as supported targets. CUDA 13.4 added two C++
+view types, `ct::strided_view` for stencil access and `ct::gather_scatter_view` for
+sparse access, gave Tile IR a developer-preview `sm_107` (Rubin) target, and added
+Programmatic Dependent Launch to Tile IR (`cuda_tile.gdc_launch_dependents_tko`) and to
+Tile Python 1.6.0.
+
 **What changes when the unit of computation is a tile instead of a thread.** Every
 kernel in §6 eventually names a thread: `threadIdx.x` in CUDA C++, or a
 `tl.program_id`/`tl.arange` offset vector in Triton that the compiler still lowers to
@@ -355,6 +363,79 @@ is to keep that cost low, not eliminate it. cuTile's stated hardware floor is br
 source-level portability is not yet the same thing as performance-portability — no
 source found in this research publishes a concrete cross-generation slowdown figure,
 so none is stated here.
+
+### 4.5 Helion and TileLang
+
+Two more tile DSLs show up in kernel-author job descriptions. They sit at different
+points relative to Triton:
+
+| | Helion (`pytorch/helion`) | TileLang (`tile-ai/tilelang`) |
+|---|---|---|
+| Source language | PyTorch ops inside `hl.tile` loops | Python DSL with explicit memory scopes (`T.alloc_shared`, `T.alloc_fragment`) |
+| Lowers to | Triton by default (exactly one Triton kernel per Helion kernel); a beta backend lowers through CuTe DSL instead (PyTorch built with CUDA 13+) | Its own TVM-based compiler to CUDA, HIP, and other backends |
+| Who picks tile sizes, `num_warps`, stages, indexing | The autotuner, from a search space Helion derives | You, as `@tilelang.jit` parameters (`block_M`, `num_stages`) |
+| Who writes the copies and pipelining | Compiler (via Triton) | You, with `T.copy` and `T.Pipelined(..., num_stages=3)` |
+| Hardware reach | Whatever Triton targets; needs PyTorch 2.9+ and Triton 3.5+ | NVIDIA sm_70 to sm_120 (TMA/WGMMA/TMEM where the GPU has them), AMD ROCm CDNA and RDNA, plus Ascend, Metal and experimental backends |
+| Typical user | PyTorch engineers who want a fused op without writing offsets or masks | Authors of attention and MLA kernels who want CUTLASS-level placement in about 100 lines of Python |
+
+Helion removes the parts of Triton people get wrong: there is no `tl.program_id`, no
+offset arithmetic, and no mask. The outer `hl.tile` loop becomes the launch grid, the
+inner one a loop inside the generated kernel, and the body is ordinary PyTorch:
+
+```python
+import torch, helion, helion.language as hl
+
+@helion.kernel()
+def matmul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    m, k = x.size()
+    _, n = y.size()
+    out = torch.empty([m, n], dtype=x.dtype, device=x.device)
+    for tile_m, tile_n in hl.tile([m, n]):          # -> Triton launch grid
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
+        for tile_k in hl.tile(k):                   # -> loop inside the kernel
+            acc = torch.addmm(acc, x[tile_m, tile_k], y[tile_k, tile_n])
+        out[tile_m, tile_n] = acc
+    return out
+```
+
+The cost moves to the first call. Helion's README shows a sample autotune log of
+"Autotuning complete in 586.6s after searching 1520 configs" and gives about 10 minutes
+as typical, against seconds for a hand-written `triton.autotune` list of a dozen
+configs. Production code pins the winner with `@helion.kernel(config=helion.Config(...))`
+so deployed processes never search.
+
+TileLang goes the other way: it keeps the tile view but hands back explicit placement.
+The README's GEMM names the shared-memory tile, the register fragment that accumulates
+in FP32, and the pipeline depth itself:
+
+```python
+import tilelang, tilelang.language as T
+
+@tilelang.jit
+def matmul_relu(A, B, block_M: int = 128, block_N: int = 128, block_K: int = 32):
+    M, N, K = T.const("M, N, K")
+    A: T.Tensor((M, K), T.float16)
+    B: T.Tensor((K, N), T.float16)
+    C = T.empty((M, N), T.float16)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K), T.float16)
+        B_shared = T.alloc_shared((block_K, block_N), T.float16)
+        C_local  = T.alloc_fragment((block_M, block_N), T.float32)
+        T.clear(C_local)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+            T.copy(A[by * block_M, k * block_K], A_shared)
+            T.copy(B[k * block_K, bx * block_N], B_shared)
+            T.gemm(A_shared, B_shared, C_local)
+        for i, j in T.Parallel(block_M, block_N):
+            C_local[i, j] = T.max(C_local[i, j], 0)
+        T.copy(C_local, C[by * block_M, bx * block_N])
+    return C
+```
+
+That is roughly the information a CUTLASS mainloop carries, written without C++
+templates, and it compiles for AMD from the same source. The TileLang repository's
+examples include DeepSeek MLA decoding, DeepSeek V3.2 and V4 kernels, and FlashMLA on
+AMD MI300X.
 
 ---
 
@@ -636,7 +717,7 @@ bytes by 3x and you cut the time by 3x. Section 14 measures 2.86x rather than th
 3.00x — 95% of the theoretical win, the remaining 5% being launch overhead and the fact
 that the fused kernel still holds a full row in registers.
 
-### 6.3 Tiled matmul — `tl.dot`, block pointers, and autotuning
+### 6.3 Tiled matmul: `tl.dot`, tensor descriptors, and autotuning
 
 This is the kernel where Triton's abstraction earns its keep: a competitive
 tiled GEMM in CUDA C++ is 200-300+ lines of explicit shared-memory staging,
@@ -760,6 +841,14 @@ CUDA version's barriers make visible), and dispatches `tl.dot` to `mma.sync`
 Tensor-Core instructions automatically (see
 [tensor_cores_and_mixed_precision](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) for
 what those instructions do underneath).
+
+**`tl.dot` output dtype (Triton 3.8.0).** `out_dtype` now defaults to the dtype of the
+`acc` argument when one is passed. `tl.dot(a, b, acc)` with an FP16 `acc` and no
+`out_dtype` used to fail with an `AssertionError` (the default was hard-coded to
+`tl.float32`); from Triton 3.8.0 (August 28, 2026, PR #10353) it compiles and returns FP16.
+The kernel above is not affected: it does `acc += tl.dot(a, b)` into an FP32 `acc`. A kernel
+that passes a low-precision `acc` now gets low-precision output without an error, so keep
+`acc` in FP32 unless FP16 output is the intent.
 
 **Put simply.** A tile's arithmetic intensity is "how many multiply-adds you buy per byte
 you drag in from memory" — and doubling `BLOCK_M` and `BLOCK_N` doubles it for free,
@@ -1173,6 +1262,13 @@ multi-day CUDA C++ investment.
    than the actual fused vendor kernel or a properly tuned custom CUDA C++
    kernel — always benchmark against the best available baseline, not the
    easiest one to beat.
+7. **Passing an FP16 accumulator to `tl.dot` and expecting FP32 output.**
+   Before Triton 3.8.0, `acc = tl.dot(a, b, acc)` with an FP16 `acc` and no
+   `out_dtype` raised an `AssertionError`, which forced an FP32 accumulator.
+   From 3.8.0 `out_dtype` defaults to the accumulator's dtype, so the same line
+   compiles and returns FP16 with no error, and a long-K matmul written that way
+   loses precision as K grows. Keep the accumulator FP32 (`tl.zeros(..., dtype=tl.float32)`)
+   and cast once at the store (§6.3).
 
 ---
 
@@ -1180,15 +1276,17 @@ multi-day CUDA C++ investment.
 
 | Tool | Language / Model | Primary Use | Notes |
 |------|-------------------|-------------|-------|
-| **Triton** (the language, `triton-lang/triton`) | Python DSL, block-level SPMD | Fused custom kernels, `torch.compile` backend | This module's focus. NVIDIA compute capability 8.0+; in-tree AMD/HIP and Intel backends. Distinct from NVIDIA Triton Inference Server, which is a model-serving daemon |
-| **Gluon** | Python, same compiler stack as Triton, explicit layouts | Expert kernels needing direct control over tile layouts, shared memory and warp specialization | Ships inside the Triton repo as a lower-level sibling language — CUTLASS-grade control without leaving Python, at the cost of Triton's automation |
+| **Triton** (the language, `triton-lang/triton`) | Python DSL, block-level SPMD | Fused custom kernels, `torch.compile` backend | This module's focus. NVIDIA compute capability 8.0+, with initial Rubin (SM107) support from 3.8.0; in-tree AMD/HIP and Intel backends. Distinct from NVIDIA Triton Inference Server, which is a model-serving daemon |
+| **Gluon** | Python, same compiler stack as Triton, explicit layouts | Expert kernels needing direct control over tile layouts, shared memory and warp specialization | Ships inside the Triton repo as a lower-level sibling language: CUTLASS-grade control without leaving Python, at the cost of Triton's automation. Triton 3.8.0 adds Cluster Launch Control (CLC) for dynamic work distribution in persistent Blackwell kernels and TMA im2col for convolutions |
+| **Helion** (`pytorch/helion`) | Python, PyTorch ops inside `hl.tile` loops; lowers to Triton (beta CuTe DSL backend) | Fused custom ops written as PyTorch code, with tile sizes, warps, stages and indexing chosen by an autotuner | One Helion kernel compiles to exactly one Triton kernel; needs PyTorch 2.9+ and Triton 3.5+; first-call autotuning searches hundreds to thousands of configs (about 10 minutes), so pin a `helion.Config` for deployment. See §4.5 |
+| **TileLang** (`tile-ai/tilelang`) | Python DSL on a TVM-based compiler, explicit shared/fragment scopes | Attention, MLA and GEMM kernels with CUTLASS-level placement control in Python | Backends: NVIDIA (sm_70 to sm_120), AMD ROCm, Ascend, Metal, experimental CPU/WebGPU/CuTe DSL; examples include DeepSeek MLA and FlashMLA on MI300X. See §4.5 |
 | **Numba CUDA** | Python, thread-level (mirrors CUDA C++) | Python-native kernels with full manual control | See [python_gpu_ecosystem](../python_gpu_ecosystem/python_gpu_ecosystem.md) — no block-level abstraction |
 | **CUTLASS** | C++ templates | Peak dense/batched GEMM & conv, custom epilogues | See [cuda_math_and_dnn_libraries](../cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md); same codebase NVIDIA builds cuBLAS from |
 | **Mojo** | New language, Python-superset syntax | Unified high-level + low-level GPU/CPU programming | MLIR-based; younger ecosystem, fewer production deployments to date |
 | **JAX / Pallas** | Python DSL, block-level (Triton-like) | Fused kernels inside JAX programs, TPU + GPU targets | Closest philosophical peer to Triton; JAX-native instead of PyTorch-native |
 | **ThunderKittens** | C++ template library | Hopper/Blackwell-specific Tensor-Core kernel building blocks | Lower-level than CUTLASS's classic API; targets newest hardware features directly |
-| **CuTe DSL** | Python DSL over CUTLASS's CuTe layout algebra | Tiling, TMA copies, and `tcgen05` MMAs expressed from Python without dropping to PTX or C++ templates | Ships inside CUTLASS (current release 4.7.0); public beta, graduating end of summer 2026. The language FlashAttention-4 is written in end to end — see §7 and [tensor_cores_and_mixed_precision §4.1b](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) |
-| **CUDA Tile (cuTile)** | Python DSL, tile-level, compiles to CUDA Tile IR | Compiler-owned thread mapping, TMA staging and Tensor-Core dispatch from a single tile-shaped kernel | NVIDIA-native peer to Triton, shipped in CUDA 13.1; public beta. See §4.4 |
+| **CuTe DSL** | Python DSL over CUTLASS's CuTe layout algebra | Tiling, TMA copies, and `tcgen05` MMAs expressed from Python without dropping to PTX or C++ templates | Ships inside CUTLASS 4.8.0 (September 22, 2026), still labeled public beta; 4.8.0 adds initial Rubin (SM107) support and an opt-in `cute_ext` compiler pipeline preview. The language FlashAttention-4 is written in end to end; see §7 and [tensor_cores_and_mixed_precision §4.1b](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) |
+| **CUDA Tile (cuTile)** | Python and C++ (CUDA 13.3+), tile-level, compiles to CUDA Tile IR | Compiler-owned thread mapping, TMA staging and Tensor-Core dispatch from a single tile-shaped kernel | NVIDIA-native peer to Triton. CUDA 13.1 shipped the Python DSL; CUDA 13.3 added C++ and Ampere/Hopper targets (CC 8.0+); CUDA 13.4 added C++ strided and gather/scatter views, a Tile IR `sm_107` developer preview, and PDL. See §4.4 |
 | **`compute-sanitizer` / `cuda-gdb`** | N/A (CUDA C++ toolchain) | Race/memcheck, step debugging | Applies to Triton's *generated* SASS only indirectly — Triton's own error surface is less mature |
 | **Nsight Compute** | N/A (profiler) | Occupancy, memory-throughput, Tensor-Core utilization for ANY of the above | See [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md) — the profiler doesn't care which DSL produced the SASS |
 
@@ -1229,8 +1327,8 @@ A: Yes — coalescing is a property of the access pattern you express, not somet
 A: Roughly 80-95% of hand-tuned CUDA C++/CUTLASS throughput on common shapes, in exchange for 3-5× less code and a search-based re-tuning loop measured in minutes instead of the days a manual CUDA re-derivation takes. The remaining 5-20 percentage points come from instruction-level control (exotic MMA variants, warp-specialized producer/consumer pipelines) that Triton's language does not currently expose.
 
 **Q: Why does `torch.compile` matter to someone who has never written a Triton kernel by hand?**
-**Short:** TorchInductor generates fused Triton kernels, not CUDA C++, for captured graphs — every `torch.compile` speedup is an autogenerated Triton kernel underneath.
-A: Because TorchInductor, `torch.compile`'s backend, generates fused Triton kernels — not CUDA C++ — for the graphs it captures. Every speedup a PyTorch user sees from `torch.compile` on eligible ops is, underneath, an autogenerated Triton kernel doing the fusion, so understanding Triton's cost model (fewer HBM round-trips, autotuned tile shapes) explains why `torch.compile` helps on some graphs and not others.
+**Short:** TorchInductor emits its pointwise and reduction fusions as autogenerated Triton kernels, so Triton's cost model explains most `torch.compile` speedups.
+A: Because TorchInductor, `torch.compile`'s backend, generates fused Triton kernels, not CUDA C++, for the pointwise and reduction fusions in the graphs it captures. Those autogenerated Triton kernels are where most `torch.compile` speedups come from, so understanding Triton's cost model (fewer HBM round-trips, autotuned tile shapes) explains why `torch.compile` helps on some graphs and not others. Triton is not the only code path: PyTorch 2.13 (July 2026) added a CuTeDSL backend as a second Inductor path, and PyTorch 2.14 (September 2026) added NVGEMM, which brings CuTeDSL-generated CUTLASS GEMM kernels into Inductor's autotuning.
 
 **Q: What is a Triton tensor descriptor (`tl.make_tensor_descriptor`), and why use it over manual offset/mask arithmetic?**
 **Short:** A strided tile view described by pointer, shape, and strides, read via `desc.load` with out-of-range lanes padded automatically; on Hopper/Blackwell it lowers to hardware TMA.
@@ -1251,6 +1349,14 @@ A: Numba CUDA keeps the CUDA C++ execution model exactly — you still write `th
 **Q: Is a Triton kernel still compiled to PTX and SASS, or does it run through some other execution path?**
 **Short:** Yes — it compiles through Triton IR, GPU IR, LLVM IR, PTX, and `ptxas` to the same SASS a CUDA C++ kernel produces, so Nsight Compute profiles it identically.
 A: Yes — the pipeline is Python AST → Triton IR → Triton GPU IR (layout assignment and pipelining passes) → LLVM IR → PTX → `ptxas` → SASS, the same final NVIDIA instruction set a CUDA C++ kernel produces. Triton is a different compiler front end targeting the same backend, not an interpreted or alternative execution model — this is why Nsight Compute profiles a Triton kernel exactly like any other CUDA kernel.
+
+**Q: Helion kernels contain no offsets, masks, or block sizes. Where did those decisions go, and what does that cost?**
+**Short:** Helion lowers to Triton by default and hands block sizes, warps, stages, and indexing strategy to an autotuner, so the first call searches for minutes unless you pin a `helion.Config`.
+A: Helion (`pytorch/helion`) by default compiles each kernel to exactly one Triton kernel: the outer `hl.tile` loop becomes the launch grid, inner `hl.tile` loops become loops inside the kernel, and PyTorch ops in the body map to Triton through TorchInductor's lowerings, so the generated code supplies the `tl.program_id`, offsets, and masks. Every free choice (tile sizes from `hl.tile` and `hl.register_block_size`, `num_warps`, `num_stages`, indexing and loop order) goes into a search space that Helion autotunes on first call; its README shows a run of 586.6 s over 1,520 configs and calls about 10 minutes typical. That is the trade: much less code than Triton and fewer masking bugs, paid for in tuning time and one more compiler layer to read through when the output is slow. Pin the winning config with `@helion.kernel(config=helion.Config(...))` before shipping.
+
+**Q: When would you pick TileLang over Triton for a new attention kernel?**
+**Short:** When you want to place shared-memory tiles, register fragments, and pipeline stages yourself in Python, or need one source that also compiles for AMD ROCm and other non-NVIDIA backends.
+A: Triton decides shared-memory layout, register allocation, and software pipelining for you; TileLang makes them explicit in Python with `T.alloc_shared`, `T.alloc_fragment`, `T.copy`, and `T.Pipelined(..., num_stages=N)`, compiled through a TVM-based stack. That gives CUTLASS-like control over where each tile lives, which matters for attention variants such as DeepSeek MLA, whose kernels appear among TileLang's examples. Its backends cover NVIDIA from sm_70 to sm_120 (using TMA, WGMMA, and TMEM where present), AMD ROCm CDNA and RDNA, and others, so one source reaches MI300X, where the repo shows FlashMLA. Choose Triton when the compiler's choices are good enough and you want the larger ecosystem (`torch.compile` emits Triton); choose TileLang when you need the placement control without dropping to CUTLASS C++.
 
 **Q: How does Mojo's positioning differ from Triton's?**
 **Short:** Mojo aims to unify high-level tensor code and low-level thread/SIMD control in one language, while Triton commits to a single block-level SPMD abstraction.

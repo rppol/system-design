@@ -477,6 +477,110 @@ server.accept(null, new CompletionHandler<AsynchronousSocketChannel, Void>() {
 // Virtual threads (Java 21) provide simpler model for new code
 ```
 
+### `java.net.http.WebSocket` [JEP 321, Java 11]
+
+`HttpClient` also builds WebSocket clients (RFC 6455). The opening handshake is an HTTP/1.1 `Upgrade: websocket` request even when the client prefers HTTP/2; the JDK does not implement WebSockets over HTTP/2 (RFC 8441). After the upgrade the connection carries frames, and the API delivers them to a `WebSocket.Listener` under explicit flow control.
+
+```java
+HttpClient client = HttpClient.newHttpClient();
+WebSocket ws = client.newWebSocketBuilder()
+        .connectTimeout(Duration.ofSeconds(5))
+        .header("Authorization", "Bearer " + token)
+        .buildAsync(URI.create("wss://stream.example.com/prices"), new PriceListener())
+        .join();
+
+final class PriceListener implements WebSocket.Listener {
+    private final StringBuilder text = new StringBuilder();
+
+    @Override public void onOpen(WebSocket ws) {
+        ws.request(1);                               // counter starts at 0: nothing arrives without this
+    }
+
+    @Override public CompletionStage<?> onText(WebSocket ws, CharSequence part, boolean last) {
+        text.append(part);                           // one message can arrive in several parts
+        if (last) {
+            prices.offer(text.toString());
+            text.setLength(0);
+        }
+        ws.request(1);                               // ask for the next invocation
+        return null;                                 // null: `part` may be reclaimed now
+    }
+
+    @Override public CompletionStage<?> onClose(WebSocket ws, int code, String reason) {
+        scheduleReconnect();
+        return null;
+    }
+
+    @Override public void onError(WebSocket ws, Throwable error) {
+        scheduleReconnect();                         // no listener method runs after onError
+    }
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant L as Listener
+    participant W as WebSocket (JDK)
+    participant S as Server
+    Note over W: receive counter = 0 after the handshake
+    W->>L: onOpen
+    L->>W: request(1), counter = 1
+    S->>W: text frame (fin=false)
+    W->>L: onText(part, last=false), counter = 0
+    L->>W: request(1), counter = 1
+    S->>W: continuation frame (fin=true)
+    W->>L: onText(part, last=true), counter = 0
+    Note over L,W: without another request(n) the JDK stops reading and TCP backpressure reaches the server
+```
+
+The rules that trip people up:
+
+| Rule | Consequence |
+|------|-------------|
+| The receive counter starts at 0 and each `onText`/`onBinary`/`onPing`/`onPong`/`onClose` call uses one unit | An override that never calls `request(n)` gets nothing, or stops after the first message. The interface's default methods call `request(1)`, which is why a listener that overrides nothing still works |
+| `request(n)` counts invocations, not messages | A 1 MB message can arrive as many `onText` parts with `last == false`; buffer until `last == true` |
+| The `CharSequence` or `ByteBuffer` passed in may be reused once the returned `CompletionStage` completes | Copy it (`toString()`) before returning `null`, or return a stage that completes after processing |
+| At most one `sendText`/`sendBinary` may be pending | A second call before the first future completes returns a future that fails with `IllegalStateException`; serialize sends with `thenCompose` or a single sender thread |
+| Ping and Close are answered automatically | The JDK replies to a Ping with a Pong; liveness detection is still the application's job, for example a `sendPing` every 30 s and a timeout on the Pong |
+
+There is no built-in reconnect. `onClose` or `onError` ends the `WebSocket` for good; build a new one with backoff and resubscribe.
+
+### Unix-domain socket channels [JEP 380, Java 16]
+
+`SocketChannel` and `ServerSocketChannel` accept `StandardProtocolFamily.UNIX` and a `UnixDomainSocketAddress` (a filesystem path) since Java 16, on Linux, macOS, and Windows 10 / Server 2019 and later. A Unix-domain socket connects two processes on the same host without the TCP/IP stack: no ports, no checksums, no congestion control. Access is controlled by file permissions on the socket file, which is why a sidecar admin endpoint, the Docker daemon (`/var/run/docker.sock`), and PostgreSQL's local socket (`/var/run/postgresql/.s.PGSQL.5432`) use them.
+
+```java
+Path path = Path.of("/run/app/agent.sock");
+Files.deleteIfExists(path);                      // a file left by the last run makes bind() fail
+
+try (ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+    server.bind(UnixDomainSocketAddress.of(path));
+    Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-rw----"));
+    while (true) {
+        SocketChannel peer = server.accept();
+        UnixDomainPrincipal who = peer.getOption(ExtendedSocketOptions.SO_PEERCRED);
+        Thread.ofVirtual().start(() -> serve(peer, who.user()));
+    }
+} finally {
+    Files.deleteIfExists(path);                  // closing the channel does not remove the file
+}
+
+// Client
+try (SocketChannel ch = SocketChannel.open(UnixDomainSocketAddress.of(path))) {
+    ch.write(ByteBuffer.wrap("PING\n".getBytes(UTF_8)));
+}
+```
+
+| Gotcha | Detail |
+|--------|--------|
+| The socket file outlives the channel | The `ServerSocketChannel` javadoc says the file "persists after the channel is closed"; delete it before `bind()` and on shutdown |
+| Path length | The OS caps the path at about 100 bytes (`sun_path` is 108 bytes on Linux, 104 on macOS); a deep temp directory fails at `bind()` |
+| Channels only | `java.net.Socket`, `DatagramChannel`, and `HttpClient` have no Unix-domain support; HTTP over `docker.sock` needs HTTP/1.1 written over a `SocketChannel` or a library that does it |
+| Peer identity | `jdk.net.ExtendedSocketOptions.SO_PEERCRED` (Java 16) returns a `UnixDomainPrincipal` with the peer's OS user and group, captured at connect time |
+| Containers | Both processes must see the same file, so share the directory as a volume between the containers |
+
+Blocking reads on these channels work with virtual threads the same way TCP channels do, so a thread-per-connection server on a Unix socket needs no `Selector`.
+
 ---
 
 ## 7. Real-World Examples
@@ -586,6 +690,8 @@ A service made 20 parallel `HttpClient.sendAsync()` calls but response times did
 | `java.net.http.HttpClient` (Java 11+) | High-level HTTP/1.1 and HTTP/2 client |
 | `java.nio.channels.*` | NIO channels, Selector |
 | `java.nio.channels.AsynchronousServerSocketChannel` | NIO2 async server |
+| `java.net.http.WebSocket` (Java 11+) | WebSocket client with `request(n)` flow control, built from `HttpClient` |
+| `UnixDomainSocketAddress` + `StandardProtocolFamily.UNIX` (Java 16+) | Same-host IPC over `SocketChannel`/`ServerSocketChannel` |
 | Netty | High-performance NIO framework |
 | OkHttp | Popular third-party HTTP client with interceptors |
 | Wireshark | Capture and inspect network traffic |
@@ -670,7 +776,15 @@ if (buffer.remaining() == 0) {
 
 Practical guidance: always profile selector-loop CPU usage in load tests; a 100 % core indicates an always-ready `OP_WRITE` registration.
 
-**Q13: How do you implement retry with exponential backoff for `HttpClient.sendAsync()` without blocking executor threads?**
+**Q13: Why does a `java.net.http.WebSocket` listener stop receiving messages?**
+**Short:** The receive counter starts at 0 and each listener call uses one unit; an override that does not call webSocket.request(1) stops delivery.
+The API uses explicit flow control: after the handshake the receive counter is 0, `request(n)` adds n, and every `onText`, `onBinary`, `onPing`, `onPong`, or `onClose` call uses one. The interface's default methods call `request(1)`, so a listener that overrides nothing keeps receiving; an override of `onOpen` or `onText` that forgets the call receives nothing, or exactly one message part, and then the JDK stops reading the socket. The count is per invocation, not per message, so a large message that arrives in several parts with `last == false` needs one `request` per part. Call `ws.request(1)` at the end of `onOpen` and of each receive method.
+
+**Q14: What happens when two threads call `sendText` on the same JDK `WebSocket` at once?**
+**Short:** The second call returns a future that fails with IllegalStateException, since only one text or binary send may be pending; chain sends or use one sender.
+Only one `sendText` or `sendBinary` may be pending at a time, so a call made before the previous `CompletableFuture` completes does not throw; it returns a `CompletableFuture` that completes exceptionally with `IllegalStateException`, which is lost if nobody chains on it (the same holds for `sendPing`/`sendPong`). The rule keeps frames of different messages from interleaving on one connection. Chain the sends (`ws.sendText(a, true).thenCompose(w -> w.sendText(b, true))`), or put outgoing messages on a queue drained by one sender. Pongs to the server's Pings are sent automatically, so the application rarely calls `sendPong` itself.
+
+**Q15: How do you implement retry with exponential backoff for `HttpClient.sendAsync()` without blocking executor threads?**
 **Short:** Use CompletableFuture.delayedExecutor for the backoff so no executor thread sleeps or blocks.
 
 ```java
@@ -702,30 +816,34 @@ static CompletableFuture<HttpResponse<String>> sendWithRetry(
 
 `CompletableFuture.delayedExecutor` (Java 9) defers execution without blocking — no thread sits idle during the backoff delay.
 
-**Q14: What is HTTP/2 server push and why did most browsers and `HttpClient` abandon it?**
+**Q16: What is HTTP/2 server push and why did most browsers and `HttpClient` abandon it?**
 **Short:** Server push was abandoned because it often pushed already-cached resources, wasting bandwidth.
 
 HTTP/2 server push allows the server to proactively send resources to the client before the client requests them (e.g., pushing `style.css` when it sees `GET /index.html`). Java `HttpClient` supported it via `PushPromiseHandler`. In practice, server push proved harmful: the server often pushes resources the client already has cached, wasting bandwidth and causing cache collisions. Chrome removed server push support in 2022. `HttpClient`'s push API still exists but should not be used for new systems. The more useful HTTP/2 feature is multiplexed request pipelining — many concurrent requests over one connection — which `HttpClient` uses automatically when negotiated via ALPN.
 
-**Q15: How do you diagnose and fix connection pool exhaustion in `HttpClient` under high concurrency?**
+**Q17: How do you diagnose and fix connection pool exhaustion in `HttpClient` under high concurrency?**
 **Short:** HttpClient exposes no built-in pool metrics, so diagnose via logging and bound concurrency with a semaphore.
 
 `HttpClient` uses an internal connection pool with no built-in metrics exposed via JMX or Micrometer. Symptoms of exhaustion: requests queue up, p99 latency spikes, `HttpTimeoutException` at `request.timeout()`. Diagnosis steps: (1) enable JDK HTTP client logging with `-Djdk.httpclient.HttpClient.level=ALL`; (2) check if target server closes connections early (look for `GOAWAY` in HTTP/2 or `Connection: close`); (3) measure actual concurrency — if `sendAsync()` is called with 1,000 unbounded `CompletableFuture`s, all 1,000 requests compete for pool slots. Fix: use a `Semaphore` to bound concurrent in-flight requests to a sensible limit (e.g., 50 per host); drain results before issuing more. For HTTP/2, confirm the server advertises `MAX_CONCURRENT_STREAMS` and that the client respects it — Java's `HttpClient` does respect the server's `MAX_CONCURRENT_STREAMS` setting automatically.
 
-**Q16: How do you enable HTTP/3 in `HttpClient`, and what is the default?**
+**Q18: How do you enable HTTP/3 in `HttpClient`, and what is the default?**
 **Short:** HTTP/3 is opt-in via Version.HTTP_3 on the client or request; HTTP/2 stays the default.
 
 HTTP/3 support ships in Java 26 (JEP 517) and is opt-in — the JEP explicitly leaves `HttpClient`'s default preferred version at HTTP/2. Enable it per client with `HttpClient.newBuilder().version(HttpClient.Version.HTTP_3).build()`, which races an HTTP/3 connection attempt against HTTP/2 or HTTP/1.1 and uses whichever completes first, or per request with `HttpRequest.newBuilder(uri).version(HttpClient.Version.HTTP_3).build()`, which tries HTTP/3 first for that request and falls back after a timeout. A third path, the `H3_DISCOVERY` request option set to `Http3DiscoveryMode.ALT_SVC`, defers the decision to the server: the first request goes over HTTP/2, and later requests use HTTP/3 only if that response advertised it via the `Alt-Svc` header. Because every path can fall back, always check `response.version()` rather than assuming a request actually used HTTP/3.
 
-**Q17: Why can't an existing HTTP/2 connection be upgraded to HTTP/3 the way HTTP/1.1 upgrades to HTTP/2?**
+**Q19: Why can't an existing HTTP/2 connection be upgraded to HTTP/3 the way HTTP/1.1 upgrades to HTTP/2?**
 **Short:** HTTP/2 runs over TCP and HTTP/3 runs over QUIC/UDP, so there is no shared connection to upgrade in place.
 
 HTTP/1.1 upgrading to HTTP/2 — via ALPN during the TLS handshake, or the h2c `Upgrade` header — works because both are byte streams carried over the *same* TCP connection; the upgrade only changes how bytes on that stream are framed. HTTP/3 has no equivalent path because it is not TCP at all: RFC 9114 runs over QUIC (RFC 9000, plus 8999/9001/9002), an independent transport built directly on UDP datagrams with TLS 1.3 integrated into the transport rather than layered on top of it. There is no existing connection to hand off — an HTTP/3 attempt always establishes a brand-new QUIC connection, in parallel with or instead of a TCP one. That is exactly why HTTP/3 needs an explicit negotiation strategy (racing, `Alt-Svc` discovery, or HTTP/3-only) instead of a one-line protocol upgrade.
 
-**Q18: You configured `HttpClient.Version.HTTP_3` but traffic is still going over HTTP/2 — how do you diagnose it?**
+**Q20: You configured `HttpClient.Version.HTTP_3` but traffic is still going over HTTP/2 — how do you diagnose it?**
 **Short:** Check response.version() and Alt-Svc/network conditions — HTTP_3 is a preference that silently falls back.
 
 Setting `Version.HTTP_3` only expresses a preference, not a guarantee — every negotiation path (request-level preference, client-level racing, or `Alt-Svc` discovery) falls back to HTTP/2 or HTTP/1.1 when HTTP/3 doesn't succeed, and the client does not surface that fallback as an error. Start by reading `response.version()` on the actual response — if it reports `HTTP_2`, negotiation fell back. Common causes: the server or its CDN doesn't advertise HTTP/3 support at all; `Http3DiscoveryMode.ALT_SVC` was used but the first HTTP/2 response never carried an `Alt-Svc` header advertising h3; a firewall, NAT, or corporate proxy between client and server drops outbound UDP/443, so every QUIC handshake attempt times out; or, on a fast low-RTT network, the client-level race simply lost to the parallel TCP+TLS handshake. If you know the server supports HTTP/3 and want a hard failure instead of a silent fallback while diagnosing, temporarily switch to `Http3DiscoveryMode.HTTP_3_URI_ONLY`, which fails outright rather than falling back — surfacing the real connectivity problem instead of masking it.
+
+**Q21: How do you use Unix-domain sockets from Java, and what are the gotchas?**
+**Short:** Since Java 16 (JEP 380), SocketChannel/ServerSocketChannel take a UnixDomainSocketAddress; the socket file outlives the channel and must be deleted.
+Open `ServerSocketChannel.open(StandardProtocolFamily.UNIX)`, bind a `UnixDomainSocketAddress.of(path)`, and connect with `SocketChannel.open(address)`. It works on Linux, macOS, and Windows 10+. It suits same-host IPC (sidecars, `docker.sock`, PostgreSQL's local socket) because it skips the TCP/IP stack and access is controlled by file permissions; `ExtendedSocketOptions.SO_PEERCRED` returns the peer's OS user. Gotchas: the socket file persists after `close()`, so a restart fails at `bind()` until the file is deleted; the path is capped at about 100 bytes; and only the NIO stream channels support it, not `java.net.Socket`, `DatagramChannel`, or `HttpClient`.
 
 ---
 
@@ -740,7 +858,9 @@ Setting `Version.HTTP_3` only expresses a preference, not a guarantee — every 
 7. **Use HTTP/2** for high-volume service-to-service calls — multiplexing reduces connection overhead.
 8. **Close `InputStream`s** from `BodyHandlers.ofInputStream()` — unclosed streams hold connection resources.
 9. **Monitor connection pool usage** in production — connection pool exhaustion manifests as `HttpTimeoutException`.
-10. **Provide a custom executor to `HttpClient`** — controls thread priority and lifecycle for the async callback threads.
+10. **Call `request(1)` in every overridden `WebSocket.Listener` receive method and serialize sends**; reconnect with backoff from `onClose` and `onError`.
+11. **Delete a Unix-domain socket file before `bind()` and on shutdown**, and restrict it with file permissions.
+12. **Provide a custom executor to `HttpClient`**: controls thread priority and lifecycle for the async callback threads.
 
 ---
 
@@ -902,6 +1022,8 @@ A blocking `send()` on a *virtual thread* (Java 21) is fine — it unmounts from
 
 **How do you handle a `SSLHandshakeException` for a missing intermediate cert correctly?** Build a custom `SSLContext` initialized with a trust manager that contains the full chain (intermediate + root) and pass it to the client; disabling certificate validation to "make it work" turns a config bug into a man-in-the-middle vulnerability.
 
+**Why prefer `sendAsync` over wrapping `send` in your own threads?** `sendAsync` uses the client's non-blocking I/O and its managed executor, returning a `CompletableFuture` you can compose (`allOf`, `thenApply`, `orTimeout`) without dedicating a thread per in-flight request, which is both more scalable and less error-prone than hand-rolled threading around the blocking API.
+
 ---
 
 ## Related / See Also
@@ -912,5 +1034,3 @@ A blocking `send()` on a *virtual thread* (Java 21) is fine — it unmounts from
 - [TCP/IP Deep Dive (Backend)](../../backend/tcp_ip_deep_dive/tcp_ip_deep_dive.md) — handshakes, congestion control, and the transport-layer mechanics underneath every `Socket`/`HttpClient` call
 - [gRPC & Protobuf (Backend)](../../backend/grpc_and_protobuf/grpc_and_protobuf.md) — Protobuf wire format, 4 RPC modes, interceptors, deadlines
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — full connection pooling design applicable to both DB and HTTP connections
-
-**Why prefer `sendAsync` over wrapping `send` in your own threads?** `sendAsync` uses the client's non-blocking I/O and its managed executor, returning a `CompletableFuture` you can compose (`allOf`, `thenApply`, `orTimeout`) without dedicating a thread per in-flight request, which is both more scalable and less error-prone than hand-rolled threading around the blocking API.

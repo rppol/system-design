@@ -147,7 +147,8 @@ each kind (Section 6.1) — one stray emoji widens every character in the string
 
 | Strategy | Use case | Example |
 |----------|----------|---------|
-| `re.match()` | Match from string start | `re.match(r"\d+", "42abc")` |
+| `re.prefixmatch()` `[3.15]` | Match from string start (the explicit name) | `re.prefixmatch(r"\d+", "42abc")` |
+| `re.match()` | Same as `prefixmatch()`; soft deprecated in 3.15, not scheduled for removal | `re.match(r"\d+", "42abc")` |
 | `re.search()` | Find first match anywhere | `re.search(r"\d+", "abc42")` |
 | `re.fullmatch()` | Entire string must match | Input validation |
 | `re.findall()` | All non-overlapping matches as list | Extracting all tokens |
@@ -535,6 +536,38 @@ the old slice-after-`startswith` dance, which silently truncates when the prefix
 "unittest.py".rstrip(".py")           # 'unittes' -- rstrip takes a CHARACTER SET, not a suffix
 ```
 
+### 6.5d Grapheme clusters: what a user calls a character [3.15]
+
+`len()` counts code points, but one visible character can be several: a family emoji is three
+people joined by two zero-width joiners (5 code points), a flag is two regional-indicator code
+points, and a decomposed `é` is `e` plus a combining accent. Slicing at a code-point index can cut
+one of these in half, which is how a truncated display name ends in a broken glyph. Python 3.15
+adds `unicodedata.iter_graphemes()`, which splits text into extended grapheme clusters by the
+Unicode Standard Annex #29 rules. Each item has `start` and `end` offsets, and `str(item)` is the
+substring.
+
+```python
+import unicodedata
+
+family = "\U0001F468\u200d\U0001F469\u200d\U0001F467"   # man, ZWJ, woman, ZWJ, girl
+flag = "\U0001F1EE\U0001F1F3"                               # regional indicators I + N
+len(family), len(flag)                                      # (5, 2)
+sum(1 for _ in unicodedata.iter_graphemes(family))          # 1
+
+def truncate(text: str, limit: int) -> str:
+    """Cut at a grapheme boundary, never inside a cluster."""
+    for i, g in enumerate(unicodedata.iter_graphemes(text)):
+        if i == limit:
+            return text[: g.start]
+    return text
+```
+
+The same release adds the per-character properties the algorithm uses
+(`grapheme_cluster_break()`, `indic_conjunct_break()`, `extended_pictographic()`) and moves the
+Unicode database to 17.0.0 (`unicodedata.unidata_version`). On 3.14 and earlier, the third-party
+`regex` module's `\X` pattern gives the same segmentation. Grapheme count is still not display
+width: East Asian wide characters take two terminal columns, which needs `wcwidth`.
+
 ### 6.6 The `re` Module in Depth
 
 ```python
@@ -811,10 +844,10 @@ Two environment-level backstops, neither of which replaces the explicit argument
 on the locale, which is how you find these call sites in an existing codebase rather than
 grepping for them.
 
-PEP 686 makes **UTF-8 mode the default in Python 3.15** [3.15], which removes the cp1252
-default on Windows for good; `PYTHONUTF8=0` opts back out. Until your minimum supported
-version is 3.15, and honestly after it too, still pass `encoding="utf-8"` explicitly — it is
-the only form that reads correctly to someone who does not know which interpreter you ship on.
+Python 3.15 (released 2026-10-09) runs in UTF-8 mode by default (PEP 686), which removes the
+cp1252 default on Windows; `PYTHONUTF8=0` opts back out. Until your minimum supported version is
+3.15, and after it too, still pass `encoding="utf-8"` explicitly: it is the only form that reads
+correctly to someone who does not know which interpreter you ship on.
 
 ---
 
@@ -979,6 +1012,8 @@ and always log or alert when replacements occur.
 - f-strings: Python 3.6; `f"{x = }"` self-doc: Python 3.8; multi-line f-string with backslash in expression: Python 3.12 (PEP 701).
 - t-strings (`t"..."` yielding a `string.templatelib.Template`): Python 3.14, PEP 750.
 - UTF-8 mode on by default: Python 3.15, PEP 686. Opt out with `PYTHONUTF8=0`.
+- `re.prefixmatch()` / `Pattern.prefixmatch()`: Python 3.15; `re.match()` is soft deprecated, with no removal planned.
+- `unicodedata.iter_graphemes()` and the Unicode 17.0.0 database: Python 3.15.
 
 ---
 
@@ -1021,11 +1056,14 @@ large buffer: binary protocol parsing, video frames, `socket.send()` of sub-rang
 roughly 1 KB; below that, copy overhead is negligible.
 
 **Q6: What is the difference between `re.match()`, `re.search()`, and `re.fullmatch()`?**
-**Short:** re.fullmatch requires the entire string to match, unlike match or search, which allow partial matches.
+**Short:** match anchors only at the start (prefixmatch is its explicit 3.15 name), search finds a match anywhere, and fullmatch requires the whole string to match.
 `re.match()` anchors only at the start but does not require consuming the full string. `re.search()`
 scans for the first match anywhere in the string. `re.fullmatch()` requires the pattern to span the
 entire string. For input validation always use `re.fullmatch()` — `re.match()` silently accepts
-trailing garbage after a valid prefix.
+trailing garbage after a valid prefix. Python 3.15 adds `re.prefixmatch()` and
+`Pattern.prefixmatch()` as the explicit name for `match()` semantics and soft deprecates `match()`
+(it keeps working, with no removal planned), because most other regex libraries use "match" for
+what Python calls `search()`.
 
 **Q7: What are named groups in regex and how do you use them?**
 **Short:** Named groups, written (?P<name>...), let you read captures by name via group() or groupdict().
@@ -1121,6 +1159,18 @@ A t-string (`t"..."`, PEP 750, added in 3.14) evaluates to a `string.templatelib
 **Short:** They use different Unicode code point sequences for the same glyph, so normalize both to NFC with unicodedata.normalize before comparing.
 
 Because Python compares code points, not rendered glyphs, and Unicode offers more than one encoding of the same character. `é` is either the single code point U+00E9 or the two-code-point sequence `e` + U+0301 (combining acute); the two render identically, compare unequal, and even report different `len()`. The fix is `unicodedata.normalize(form, s)` on both sides. There are four forms along two axes: NFC and NFD differ in whether characters are composed or decomposed, while the K forms (NFKC, NFKD) additionally apply *compatibility* folding, which is lossy — NFKC turns the ligature U+FB01 into `fi` and superscript `²` into `2`. Use **NFC** as the default for storage, comparison and interchange; use NFKC for search and identifier matching where `ﬁ` should match `fi`; never apply a K form to a password or any cryptographic input, whose bytes must survive unchanged. This is not academic: macOS hands you NFD filenames while Linux hands you NFC, so the same file mismatches across a sync, and a username uniqueness check that skips normalization lets an attacker register a visually identical account. Normalize once at the trust boundary where input arrives, rather than at every comparison site.
+
+**Q: How do you count or truncate the characters a user sees, such as emoji and flags?**
+**Short:** Split by extended grapheme clusters: unicodedata.iter_graphemes() on 3.15, or the regex module's \X before that, since one visible character can be many code points.
+
+`len()` and slicing work on code points, and one user-perceived character can span several: a
+family emoji is 5 code points (three people and two zero-width joiners), a flag is 2 regional
+indicators, and a decomposed `é` is 2. Truncating a display name with `name[:20]` can split one of
+these and render a broken glyph. Unicode Standard Annex #29 defines extended grapheme clusters,
+and Python 3.15 implements it as `unicodedata.iter_graphemes(s)`, whose items carry `start` and
+`end` offsets so you can count clusters or cut at `text[:g.start]`. Before 3.15, use the third-party
+`regex` module: `regex.findall(r"\X", s)`. Normalizing to NFC first does not solve this; it merges
+`e` plus accent but leaves emoji sequences and flags as multiple code points.
 
 **Q: Why use `removesuffix()` instead of `rstrip()` to drop a file extension?**
 **Short:** rstrip takes a set of characters to strip repeatedly, not a suffix, so it eats far more than intended.

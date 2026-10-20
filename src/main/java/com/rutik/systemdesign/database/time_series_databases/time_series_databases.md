@@ -3,9 +3,10 @@
 > **Version anchor (2026-08-25).** **Prometheus 3.x** is current — 3.0 shipped
 > November 2024 (first major release since 2.0 in 2017, rebuilt UI, native OTLP
 > ingestion, UTF-8 metric/label names) and **native histograms went stable in
-> 3.8**. **Remote-Write 2.0** (shipped with 3.0) is the wire protocol this page
-> assumes unless a snippet is explicitly labeled 1.0. **InfluxDB 3** — Core and
-> Enterprise — reached GA in **April 2025**: a ground-up Rust rewrite on Apache
+> 3.8**. **Remote-Write 2.0** (`io.prometheus.write.v2.Request`) is opt-in per
+> `remote_write` block; the `protobuf_message` default is still the 1.0
+> `prometheus.WriteRequest`. **InfluxDB 3** (Core and
+> Enterprise) reached GA in **April 2025**: a ground-up Rust rewrite on Apache
 > Arrow / DataFusion / Parquet / Arrow Flight that replaces the TSM-indexed
 > 1.x/2.x engine entirely; where a fact is specific to the old engine it is
 > tagged `[InfluxDB 1.x/2.x]`. The open-source **`TimescaleDB`** extension keeps
@@ -147,14 +148,14 @@ CREATE TABLE sensor_readings (
 SELECT create_hypertable('sensor_readings', 'time', chunk_time_interval => INTERVAL '7 days');
 -- Default chunk = 7 days of data. Each chunk is a separate PostgreSQL table.
 
--- Compression (TimescaleDB 1.5+):
+-- Columnstore (Hypercore API, TimescaleDB 2.18+):
 ALTER TABLE sensor_readings SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'device_id',
-    timescaledb.compress_orderby = 'time DESC'
+    timescaledb.enable_columnstore,
+    timescaledb.segmentby = 'device_id',
+    timescaledb.orderby = 'time DESC'
 );
-SELECT add_compression_policy('sensor_readings', INTERVAL '7 days');
--- Chunks older than 7 days are automatically compressed
+CALL add_columnstore_policy('sensor_readings', after => INTERVAL '7 days');
+-- Chunks older than 7 days are converted to the columnstore
 -- Compression ratio: typically 90-95% (10-20x smaller)
 
 -- Continuous aggregates (pre-computed rollups):
@@ -182,7 +183,7 @@ service is now **Tiger Cloud** rather than "Timescale Cloud". Tiger Cloud's
 storage engine, **Hypercore**, is a hybrid row-columnar engine: a freshly
 inserted row lands in row-oriented form (fast single-row inserts and updates,
 the same job the uncompressed active chunk does above), then converts to the
-columnar form in place as it ages past the compression policy — one engine
+columnar form in place as it ages past the columnstore policy: one engine
 covering both regimes instead of a row store plus a separately-maintained
 columnar copy. Tiger Cloud layers hot/cold data tiering and horizontally
 scalable read replicas on top of that engine. None of this changes how you
@@ -356,9 +357,10 @@ flowchart LR
 
 All three backends solve the same gap — Prometheus's own storage is deliberately short-term, so the real choice is scale and multi-tenancy, not whether to add one of them at all.
 
-**`[3.0]` Remote-Write 2.0.** The arrows above used to carry Remote-Write 1.0;
-Prometheus 3.0 ships **Remote-Write 2.0** as the default, with automatic
-protocol negotiation falling back to 1.0 if the receiving backend is old.
+**`[3.0]` Remote-Write 2.0.** The arrows above carry Remote-Write 1.0 unless
+you opt in: set `protobuf_message: io.prometheus.write.v2.Request` on a
+`remote_write` block, after confirming the receiving backend accepts 2.0
+(the default is the 1.0 `prometheus.WriteRequest`).
 2.0 adds native support for **metadata, exemplars, created timestamps, and
 native histograms** in the wire format, and it uses **string interning** —
 repeated label names/values are sent once and referenced by index instead of
@@ -840,7 +842,7 @@ Default chunk_time_interval=7 days may be wrong. For high-write workloads (1B ro
 | InfluxDB 3 Core / Enterprise | Purpose-built TSDB, GA April 2025 — Rust on Arrow/DataFusion/Parquet/Flight, unlimited cardinality; Enterprise adds HA/security/scale |
 | Telegraf | Agent for collecting metrics (InfluxDB ecosystem) |
 | ClickHouse | Columnar OLAP with time-series strengths |
-| Prometheus 3.x | Pull-based metrics (PromQL, Alertmanager); Remote-Write 2.0 + native histograms (stable `[3.8]`) |
+| Prometheus 3.x | Pull-based metrics (PromQL, Alertmanager); opt-in Remote-Write 2.0 + native histograms (stable `[3.8]`) |
 | Thanos | Long-term storage and multi-cluster Prometheus |
 | VictoriaMetrics | Prometheus-compatible (PromQL + MetricsQL) long-term store; lower memory/disk footprint than Prometheus at the same series count |
 | QuestDB | Column-oriented SQL TSDB for extreme ingest; `ASOF JOIN`/`SAMPLE BY`/`LATEST ON`, InfluxDB line-protocol ingest |
@@ -935,7 +937,7 @@ ClickHouse's MergeTree engine stores one index mark per granule of rows, 8192 ro
 **Q: How does TimescaleDB's native columnar compression work internally?**
 **Short:** TimescaleDB compresses each chunk by segmenting and reordering rows into columnar arrays for delta-friendly encoding.
 
-TimescaleDB compresses each chunk by reorganizing its rows into column-oriented arrays, grouped by `compress_segmentby` and sorted by `compress_orderby`. Segmenting by `device_id` keeps each device's readings together as one compressible unit, while ordering by `time DESC` within that segment means consecutive values are often close in magnitude, letting delta-style encoding shrink them dramatically. This is why the module's compression policy achieves a 90-95% size reduction, 10-20x smaller, on chunks older than the configured compression age: the reorganization happens once per chunk when the compression policy runs, not continuously, so recent uncompressed chunks stay in the fast row-oriented format for efficient inserts. Choosing a `compress_segmentby` column with too many distinct values spreads related rows across many tiny segments and loses most of the compression benefit. Segment by the column your queries filter on most, typically the same column you would use as a partition key, and order by time within it.
+TimescaleDB compresses each chunk by reorganizing its rows into column-oriented arrays, grouped by `timescaledb.segmentby` and sorted by `timescaledb.orderby` (the 2.18+ Hypercore option names set with `timescaledb.enable_columnstore`). Segmenting by `device_id` keeps each device's readings together as one compressible unit, while ordering by `time DESC` within that segment means consecutive values are often close in magnitude, letting delta-style encoding shrink them dramatically. This is why the module's compression policy achieves a 90-95% size reduction, 10-20x smaller, on chunks older than the configured compression age: the reorganization happens once per chunk when the compression policy runs, not continuously, so recent uncompressed chunks stay in the fast row-oriented format for efficient inserts. Choosing a `segmentby` column with too many distinct values spreads related rows across many tiny segments and loses most of the compression benefit. Segment by the column your queries filter on most, typically the same column you would use as a partition key, and order by time within it.
 
 **Q: How do you tune chunk_time_interval in TimescaleDB, and what happens if it's set wrong for the write rate?**
 **Short:** chunk_time_interval should keep the active chunk within about 25% of RAM, shrinking as write rate grows.
@@ -955,7 +957,7 @@ A classic Prometheus histogram materializes one time series per `le` bucket boun
 **Q: What does Remote-Write 2.0 add over Remote-Write 1.0 in Prometheus, and why does it matter at scale?**
 **Short:** Remote-Write 2.0 adds metadata, exemplars, and native histograms, plus string interning that shrinks payloads sharply.
 
-Remote-Write 2.0, the default wire format since Prometheus 3.0, extends what a `remote_write` sample carries — metadata (type, help text, unit), exemplars, created timestamps, and native histograms all travel natively, instead of being dropped or bolted on as they were in 1.0. The bigger operational win is **string interning**: repeated label names and values across a batch of samples are sent once and referenced by index rather than repeated in every sample, cutting both the bytes on the wire and the CPU cost of compressing and decompressing them. Figures reported at KubeCon NA 2024 put this at roughly 60% smaller messages, 90% less memory, and 70% less CPU versus 1.0 for equivalent sample volume. Protocol negotiation is automatic: a 2.0-capable sender falls back to 1.0 against an older receiving backend (Thanos, Cortex, VictoriaMetrics, or any remote-write-compatible store), so upgrading Prometheus itself does not require upgrading every downstream target in lockstep. The practical effect for capacity planning: the same fleet of Prometheus servers can fan out to a long-term store at a fraction of the network and CPU cost they needed under 1.0.
+Remote-Write 2.0 (`io.prometheus.write.v2.Request`), opt-in per `remote_write` block through `protobuf_message`, extends what a `remote_write` sample carries: metadata (type, help text, unit), exemplars, created timestamps, and native histograms all travel natively, instead of being dropped or bolted on as they were in 1.0. The bigger operational win is **string interning**: repeated label names and values across a batch of samples are sent once and referenced by index rather than repeated in every sample, cutting both the bytes on the wire and the CPU cost of compressing and decompressing them. Figures reported at KubeCon NA 2024 put this at roughly 60% smaller messages, 90% less memory, and 70% less CPU versus 1.0 for equivalent sample volume. There is no automatic negotiation: `protobuf_message` defaults to the 1.0 `prometheus.WriteRequest`, so upgrading Prometheus changes nothing on the wire, and you switch each `remote_write` block to 2.0 only after its receiving backend (Thanos, Cortex, VictoriaMetrics, or any remote-write-compatible store) supports it. The practical effect for capacity planning: the same fleet of Prometheus servers can fan out to a long-term store at a fraction of the network and CPU cost they needed under 1.0.
 
 **Q: Why does InfluxDB 3's rewrite on Arrow, DataFusion, and Parquet remove the cardinality ceiling that InfluxDB 1.x/2.x had?**
 **Short:** InfluxDB 3 addresses data by Parquet file and time range instead of a resident per-series index, so cardinality stops costing RAM.
@@ -977,7 +979,7 @@ InfluxDB 1.x/2.x's TSM engine has to know, in memory, which files hold which ser
 ## 13. Best Practices
 
 1. Use chunk interval that keeps the active chunk (latest time period) in 25% of available RAM.
-2. Apply compression policies to TimescaleDB chunks older than the active write period.
+2. Apply columnstore policies (`add_columnstore_policy`) to TimescaleDB chunks older than the active write period.
 3. Use Delta + ZSTD codec for slowly-changing numeric metrics in ClickHouse.
 4. Set data retention policies before going to production — disk fills silently without them.
 5. For InfluxDB: keep tag cardinality below 10,000 unique values per tag.

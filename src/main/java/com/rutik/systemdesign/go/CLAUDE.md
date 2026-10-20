@@ -23,7 +23,7 @@ section is Go the language and Go the runtime.
 
 ## PRIMARY TARGET VERSION — Go 1.27
 
-**Go 1.27** (released 2026-08-19; 1.27.1 on 2026-09-01) is the version every module
+**Go 1.27** (released 2026-08-19; 1.27.1 on 2026-09-01, 1.27.2 on 2026-10-08) is the version every module
 targets. Go 1.26 shipped 2026-02-10. Supported releases are 1.26 and 1.27 only — Go
 supports a release until two newer majors exist.
 

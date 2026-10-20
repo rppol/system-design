@@ -43,6 +43,7 @@ GraphQL defines a strongly-typed schema as the contract between client and serve
 | Interface | Abstract type (fields must be present) | `interface Node { id: ID! }` |
 | Union | One of multiple types | `union SearchResult = User \| Post` |
 | Input type | Object used as argument | `input CreateUserInput { name: String! }` |
+| OneOf input type | Input object where exactly one field is set, to a non-null value (September 2025 edition) | `input UserBy @oneOf { id: ID, email: String }` |
 | List | Array of a type | `[User]`, `[User!]!` |
 | Non-null | Field cannot be null | `String!` |
 
@@ -315,18 +316,22 @@ public class DepartmentDataLoader {
     }
 }
 
-// Resolver uses DataLoader
-@Component
-public class UserResolver implements GraphQLResolver<User> {
+// Spring for GraphQL: the field resolver takes the per-request DataLoader as a parameter.
+// It resolves the loader registered with BatchLoaderRegistry.forTypePair(Long.class, Department.class).
+@Controller
+public class UserController {
 
+    @SchemaMapping
     public CompletableFuture<Department> department(
-            User user, DataFetchingEnvironment env) {
-        DataLoader<Long, Department> loader =
-            env.getDataLoader("department");
+            User user, DataLoader<Long, Department> loader) {
         // This call is deferred — DataLoader batches all pending loads
         return loader.load(user.getDepartmentId());
     }
 }
+
+// Shorthand: @BatchMapping registers the DataLoader itself and gets every User in one call
+// @BatchMapping
+// public Map<User, Department> department(List<User> users) { ... }
 ```
 
 ### 6.3 Query Complexity and Depth Limiting
@@ -458,6 +463,82 @@ The flow above is **Automatic Persisted Queries (APQ)**, and its benefits are pu
 
 APQ gives you **no safelisting**. The server populates its APQ cache dynamically from whatever operation a client registers on a miss, so any client can register any query and then execute it by hash — the registry is a cache, not an allowlist. Safelisting comes from a separate mechanism: a **persisted query list (trusted documents)**, where a build step extracts the operations your first-party clients actually ship and publishes that list to the server, which then rejects every hash it was not given ahead of time. Because APQ lets clients register operations at runtime, you must turn APQ **off** for a trusted-document safelist to mean anything.
 
+### 6.5 September 2025 Spec Edition, GraphQL over HTTP, and Incremental Delivery
+
+**The September 2025 edition** (spec.graphql.org/September2025) is the first GraphQL spec edition since October 2021. It adds:
+
+| Feature | What it gives you |
+|---------|-------------------|
+| OneOf input objects (`@oneOf`) | An input where the client sets exactly one field, checked by validation instead of resolver code |
+| Schema coordinates | A standard string for any schema element: `User`, `User.email`, `Query.user(by:)`, `UserBy.email`, `@deprecated(reason:)` |
+| Descriptions on executable documents | Operations and fragments can carry a description, for people and for tools that pick operations |
+| Wider `@deprecated` | Deprecation on more schema elements, so input values can be retired the same way as output fields |
+| Full Unicode | The language grammar accepts the whole Unicode range |
+
+**OneOf input objects** replace the "several optional arguments, exactly one required" pattern that every resolver used to check by hand. The rules: every field of a `@oneOf` input must be nullable and have no default value, and a request must set exactly one field to a non-null value; two fields, zero fields, or one field set to `null` fail validation before any resolver runs. Introspection exposes it as `__Type.isOneOf`. Support starts at GraphQL.js 16, GraphQL Java 21.2, GraphQL Ruby 2.0.21, and HotChocolate 16.
+
+```graphql
+input UserBy @oneOf {
+  id: ID
+  email: String
+  username: String
+}
+
+type Query {
+  user(by: UserBy!): User
+}
+```
+
+```java
+public record UserBy(String id, String email, String username) {}
+
+@Controller
+class UserController {
+
+    private final UserRepository users;
+
+    UserController(UserRepository users) { this.users = users; }
+
+    @QueryMapping
+    User user(@Argument UserBy by) {
+        if (by.id() != null) return users.findById(by.id());
+        if (by.email() != null) return users.findByEmail(by.email());
+        return users.findByUsername(by.username());
+    }
+}
+```
+
+The resolver has no "none or more than one set" branch, because validation has already rejected those requests.
+
+**Schema coordinates** give field-usage metrics, lint rules, error messages, and deprecation reports one shared name per element. "Remove `User.legacyId` once usage is zero" is now a string every tool parses the same way.
+
+**GraphQL over HTTP** is a separate specification, still a working draft. It defines the response media type `application/graphql-response+json`, which servers must support; a client that does not know the server sends `Accept: application/graphql-response+json, application/json;q=0.9`. The status codes in the October 2026 working draft:
+
+| Situation | Status |
+|-----------|--------|
+| Request body is not valid JSON, or the document does not parse | 400 |
+| Request is not a well-formed GraphQL-over-HTTP request, the document fails validation, the operation is ambiguous, or variable coercion fails | 422 |
+| Mutation sent with GET | 405, with an `Allow` header |
+| None of the `Accept` media types is supported | 406 |
+| Result has both `data` (even null) and `errors` | 294 "Partial Success", recommended only with `application/graphql-response+json`; a client that does not know 294 treats it as 200 |
+| Result has `data` and no errors | 200 |
+
+With `application/graphql-response+json`, a client reads the body whatever the status code says. A response that is not a well-formed GraphQL response at all (a proxy's 502 page) must not use that media type, which is how a client tells the two apart.
+
+**Incremental delivery (`@defer`, `@stream`)** is not in the September 2025 edition. It is a working-draft RFC (September 2024 revision) that servers such as Apollo Router implement ahead of the spec. `@defer(if:, label:)` on a fragment and `@stream(if:, label:, initialCount:)` on a list field let the server send the fast part of a response first:
+
+```
+  t=40 ms   payload 1: { data: {user: {name}}, pending: [{id:"0",path:["user"]}], hasNext: true }
+  t=120 ms  payload 2: { incremental: [{ id:"0", data: { orders: [..] } }], hasNext: true }
+  t=310 ms  payload 3: { incremental: [{ id:"0", data: { reviews: [..] } }],
+                         completed: [{ id:"0" }], hasNext: false }
+            first paint at 40 ms instead of 310 ms; the server does the same total work
+```
+
+*`pending` announces each deferred or streamed part, `incremental` delivers it (`data` for `@defer`, `items` for `@stream`), and `completed` closes it; the last payload sets `hasNext: false`.*
+
+Servers commonly send the payloads as a `multipart/mixed` HTTP response. Any proxy, CDN, or gzip layer on the path that buffers the full response turns the stream back into one late response.
+
 ---
 
 ## 7. Real-World Examples
@@ -479,7 +560,7 @@ APQ gives you **no safelisting**. The server populates its APQ cache dynamically
 | N+1 queries | Requires DataLoader | Handled at endpoint |
 | Learning curve | Higher | Lower |
 | Tooling | Excellent (GraphiQL, Apollo GraphOS Studio) | Excellent (curl, Postman) |
-| Error handling | Non-standard (HTTP 200 with errors) | Standard HTTP codes |
+| Error handling | `errors` array in the body; with `application/graphql-response+json`, 4xx/5xx only when no `data` | Standard HTTP codes |
 | File uploads | Not in spec (workarounds exist) | Native multipart |
 | Type safety | Strong (introspection) | Optional (OpenAPI) |
 | Schema evolution | Good (additive only) | Version-based |
@@ -498,7 +579,9 @@ APQ gives you **no safelisting**. The server populates its APQ cache dynamically
 
 **N+1 queries without DataLoader**: Every field resolver in GraphQL executes independently. Without DataLoader, resolving 100 user objects and their departments results in 101 database queries. DataLoader is not optional for production GraphQL — it is mandatory. Every resolver that loads related data must use a DataLoader.
 
-**HTTP 200 for all errors**: GraphQL returns HTTP 200 even when there are errors in the response, with an `errors` array alongside `data`. This breaks monitoring tools expecting non-2xx for errors, breaks circuit breakers, and confuses logging. Add instrumentation to propagate error presence to HTTP 4xx/5xx when no data is returned.
+**Monitoring on HTTP status alone**: A partial success (some fields resolved, some failed) returns 2xx with an `errors` array alongside non-null `data`, and servers on the legacy `application/json` response type return 2xx even when execution fails entirely. Dashboards and circuit breakers keyed on non-2xx miss these errors. Serve `application/graphql-response+json` so total failures get 4xx/5xx, and count `errors` entries in instrumentation for partial ones.
+
+**`@defer` behind a buffering proxy**: A team added `@defer` to a product page query so the price could paint before reviews, and saw no change in production. The CDN in front of the router buffered the whole `multipart/mixed` response before forwarding it, so the client got every payload at once at the old total latency. Fix: disable response buffering for the GraphQL route on every hop (CDN, ingress, service mesh), and check that compression does not hold back chunks; measure time to first payload, not total time.
 
 **Missing query depth/complexity limits**: A malicious client can send an exponentially complex query (nested friends of friends of friends) that exhausts server resources. Always configure MaxQueryDepthInstrumentation and MaxQueryComplexityInstrumentation before going to production.
 
@@ -522,6 +605,7 @@ APQ gives you **no safelisting**. The server populates its APQ cache dynamically
 | Apollo Router | Rust-based federation gateway |
 | GraphiQL | In-browser GraphQL IDE |
 | Apollo GraphOS Studio | Schema management, observability |
+| GraphQL over HTTP (working draft) | Transport rules: `application/graphql-response+json`, status codes, GET versus POST |
 | `graphql-code-generator` | Generate types from schema |
 
 ---
@@ -539,9 +623,9 @@ GraphQL is an API query language and runtime that lets clients specify exactly w
 When resolving a list of objects with a related field (e.g., 10 users and their departments), each field resolver executes independently — causing 1 query for users and 10 queries for departments = 11 total. DataLoader solves this by batching all pending loads within a single request execution: after resolving all 10 users, DataLoader collects all 10 department IDs and fetches them in one SELECT IN query. DataLoader also caches within the request so duplicate IDs are fetched once.
 
 **Q: How does GraphQL handle errors differently from REST?**
-**Short:** GraphQL always returns HTTP 200 with a data field and an errors array, so status codes can't signal failure.
+**Short:** Errors go in an errors array next to data; a partial success still returns 2xx, so status codes alone miss field-level failures.
 
-GraphQL always returns HTTP 200, with a `data` field for results and an `errors` array for errors. Errors include a message, locations in the query, and a path to the failing field. Partial responses are possible: some fields may resolve successfully while others fail. This differs fundamentally from REST where HTTP status codes communicate success/failure. For monitoring, you must parse the errors array, not rely on HTTP status codes.
+GraphQL reports errors in an `errors` array next to the `data` field. The GraphQL-over-HTTP working draft (October 2026) gives a document that fails to parse 400, a document that fails validation or variable coercion 422, and a result with both `data` and `errors` the 2xx code 294 "Partial Success" (recommended only with the `application/graphql-response+json` media type; clients that do not know 294 treat it as 200). Many servers on the legacy `application/json` response type return 200 for every well-formed request, execution failures included. Errors include a message, locations in the query, and a path to the failing field. Partial responses are possible: some fields may resolve successfully while others fail. This differs fundamentally from REST where HTTP status codes communicate success/failure. For monitoring, parse the errors array; HTTP status catches only whole-request failures.
 
 **Q: What are GraphQL subscriptions and how are they implemented?**
 **Short:** GraphQL subscriptions push real-time updates to clients over WebSocket using the graphql-ws protocol.
@@ -608,6 +692,21 @@ A custom scalar is a leaf type beyond String, Int, Float, Boolean, and ID that a
 
 Field-level authorization is enforced per-field, either inside a resolver or via a directive like `@auth(role: "ADMIN")` applied in the schema. Because a single GraphQL query can traverse many types and fields owned by different parts of the domain, endpoint-level authorization — the REST model of "can this user call this URL" — does not translate directly; a `user` query might be public, but a nested `user.ssn` field might require an admin role. A custom `@auth` directive wraps the field's data-fetcher with a permission check, returning null or a field-level error for unauthorized access without failing the rest of the query. Implement authorization directives early in schema design, since retrofitting per-field checks onto an already-large schema means auditing every resolver individually.
 
+**Q: Why must every field of a @oneOf input object be nullable, and what happens if a client sends two of its fields?**
+**Short:** Exactly one field may be set, so none can be required or defaulted; a request with two fields, no field, or one field set to null fails validation before any resolver runs.
+
+A `@oneOf` input (September 2025 spec edition) says "the client picks exactly one of these". If any field were non-null (`ID!`) the client would be forced to set it every time, and if any field had a default value it would count as set, so the spec requires every field to be nullable and to have no default. At request time, validation and input coercion check that exactly one field is present with a non-null value: `user(by: {id: "1", email: "a@b.com"})`, `user(by: {})`, and `user(by: {email: null})` all fail with a request error and no resolver runs. The common mistake is reading the nullable field types as "optional, any combination allowed" and adding resolver code for the two-field case; that branch is dead. The other mistake is adding a field with a default later to keep old clients working, which the schema rejects; add a new nullable field instead.
+
+**Q: What changed in the September 2025 GraphQL spec edition, and why does it matter for schema design?**
+**Short:** The first edition since 2021 added OneOf input objects, schema coordinates, descriptions on operations, wider @deprecated, and full Unicode; OneOf replaces hand-checked exactly-one argument sets.
+
+The September 2025 edition is the first since October 2021. OneOf input objects (`input UserBy @oneOf { id: ID, email: String }`) move "exactly one of these arguments" from resolver code into validation, so one `user(by: UserBy!)` field replaces `userById`, `userByEmail`, and friends, and the rule shows in introspection as `__Type.isOneOf`. Schema coordinates give every element a standard name (`User.email`, `Query.user(by:)`, `@deprecated(reason:)`), which usage metrics, lint rules, and error messages can share. Executable documents can carry descriptions. `@deprecated` covers more schema elements, so input values can be retired through the same deprecate-then-remove cycle as output fields. The grammar accepts full Unicode. Support for OneOf starts at GraphQL.js 16, GraphQL Java 21.2, and HotChocolate 16, so check every server and code generator in the path before using it in a public schema.
+
+**Q: How do @defer and @stream deliver one GraphQL response in parts, and are they in the spec?**
+**Short:** They are a working-draft RFC outside the September 2025 edition; the server sends an initial payload, then incremental parts announced as pending, until a payload sets hasNext to false.
+
+`@defer` on a fragment and `@stream` on a list field are defined by the incremental delivery RFC (working draft, September 2024 revision), not by the September 2025 edition, though Apollo Router and other servers implement them. The first payload is a normal response minus the deferred fields and with only `initialCount` items of a streamed list, plus a `pending` array (each entry an `id`, optional `label`, and `path`) and `hasNext: true`. Later payloads carry `incremental` entries (`data` for a deferred fragment, `items` for streamed list items) keyed by those ids, and `completed` when a part is done; the last payload sets `hasNext: false`. Both directives take `if` to switch deferral off per request. The benefit is time to first paint: a page whose slow reviews take 310 ms can render the product at 40 ms. The cost is that every hop must forward the `multipart/mixed` response unbuffered, and clients and caches must handle a response that arrives in parts.
+
 ---
 
 ## 13. Best Practices
@@ -620,6 +719,7 @@ Field-level authorization is enforced per-field, either inside a resolver or via
 - Deprecate, never remove fields; monitor usage with Apollo GraphOS Studio or similar.
 - Return structured errors with error codes in extensions: `{"code": "NOT_FOUND", "field": "userId"}`.
 - Use Input types for mutations (not inline arguments) to enable clean schema evolution.
+- Model "exactly one of these" arguments as a `@oneOf` input once every server and client tool in the path supports it, instead of checking the combination in resolvers.
 
 ---
 

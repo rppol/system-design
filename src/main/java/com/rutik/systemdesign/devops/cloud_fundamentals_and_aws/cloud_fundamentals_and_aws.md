@@ -2,6 +2,8 @@
 
 > Phase 5 — Cloud Platforms · Difficulty: Intermediate
 
+> **Version anchor (2026-10-19).** **Graviton5** runs the **M9g, C9g and R9g** families (EC2 instance-type docs, Nitro v6); Graviton4 runs the 8g generation (c8g, r8g, i8g). **EKS Pod Identity** is the default way to give EKS pods IAM roles: no per-cluster OIDC provider, one trust principal `pods.eks.amazonaws.com`, up to 5,000 associations per cluster. It does not run on Fargate, Windows EC2 nodes, Outposts, EKS Anywhere or self-managed clusters, where IRSA remains the mechanism.
+
 AWS is the dominant public cloud, and its primitives — **IAM** for identity, **VPC** for networking, **EC2** for compute, **S3/EBS** for storage, **ELB** for load balancing, **Route 53** for DNS, **RDS** for managed databases, and **EKS** for Kubernetes — are the building blocks every cloud architect composes. This module covers what each service does, how they fit together, the concrete limits and pricing that drive design decisions, and the **Well-Architected Framework** lens (six pillars) that ties them into defensible architectures.
 
 ---
@@ -113,8 +115,8 @@ Each added nine divides downtime by 10, which is why the cost of an SLA rises so
 | Family | Prefix | Use case | Example |
 |--------|--------|----------|---------|
 | General purpose | m, t | Balanced web/app servers | m8i.large (Intel Xeon 6), m9g.large (Graviton5), t3.micro (burstable) |
-| Compute optimized | c | CPU-bound (batch, gaming) | c8g.xlarge (Graviton4) |
-| Memory optimized | r, x | In-memory DB, caches | r8g.2xlarge (Graviton4) |
+| Compute optimized | c | CPU-bound (batch, gaming) | c9g.xlarge (Graviton5), c8g.xlarge (Graviton4) |
+| Memory optimized | r, x | In-memory DB, caches | r9g.2xlarge (Graviton5), r8g.2xlarge (Graviton4) |
 | Storage optimized | i, d | High local IOPS | i8g.large (NVMe, Graviton4) |
 | Accelerated | p, g, inf | GPU/ML inference | p6-b200.48xlarge (NVIDIA B200), inf2 |
 
@@ -128,6 +130,20 @@ Each added nine divides downtime by 10, which is why the cost of an SLA rises so
 | Glacier Instant | Instant | Archive, occasional read | ~$0.004/GB-mo |
 | Glacier Flexible | Minutes-hours | Backups | ~$0.0036/GB-mo |
 | Glacier Deep Archive | 12 hours | Compliance/cold | ~$0.00099/GB-mo |
+| Express One Zone | Single-digit ms, one AZ | Hot small-object reads/writes next to compute (ML training, analytics scratch) | ~$0.11/GB-mo, requests ~13x cheaper than Standard for GET |
+
+**S3 Express One Zone** is the exception to "S3 is regional". Objects live in a **directory bucket** pinned to one Availability Zone (name ends in `--<az-id>--x-s3`, for example `--use1-az4--x-s3`), designed for 99.95% availability inside that AZ and not replicated to a second one. Requests go to a Zonal endpoint and authenticate with `CreateSession`, which returns bucket-scoped credentials that expire after 5 minutes (the SDKs refresh them), so a request skips the per-call IAM evaluation. AWS quotes up to 10x faster access than Standard. Since the April 10, 2025 price cut (us-east-1): storage $0.11/GB-month (Standard: $0.023), GET $0.00003 per 1,000 (Standard: $0.0004), PUT $0.00113 per 1,000, plus $0.0032/GB uploaded and $0.0006/GB retrieved. The break-even is request density: Express storage costs $0.087/GB-month more, and each 1,000 GETs saves $0.00037, so each GB stored there needs roughly 235,000 GETs a month (requests under 512 KB, which carry no per-GB retrieval fee) before Express is cheaper on cost alone. Treat it as a cache or scratch tier with the durable copy in a regional bucket.
+
+### EKS compute modes
+
+| Mode | Who runs the nodes | Pricing on top of EC2 | Fits |
+|------|--------------------|-----------------------|------|
+| Managed node groups | You pick AMI and instance types; AWS runs the ASG and drains on upgrade | None | Steady fleets, custom AMIs, DaemonSet-heavy clusters |
+| Karpenter (self-installed) | You run the Karpenter controller and NodePools | None | Bin-packing and Spot with full control |
+| Fargate | AWS, one micro-VM per pod | Per vCPU and GB of the pod | Small or bursty workloads, no DaemonSets, no GPUs |
+| Auto Mode (GA December 2024) | AWS, Karpenter-based, Bottlerocket nodes, no SSH or SSM, 21-day max node lifetime | ~12% of the EC2 On-Demand price per managed instance, billed per second | Teams that want nodes, VPC CNI, EBS CSI, load balancer controller, and Pod Identity Agent run as managed components |
+
+EKS Auto Mode moves node operations to AWS: it chooses the AMI, patches by replacing nodes (it respects PodDisruptionBudgets, but a node is replaced at 21 days regardless), and runs the compute, networking, storage, and load-balancing controllers as part of the control plane instead of as add-ons you upgrade. The fee is per instance, not per cluster: the EKS pricing page lists a c6a.4xlarge at $0.612/hour EC2 plus $0.07344/hour Auto Mode, so 50 of them cost about $2,680 a month in fees alone. You still own the VPC, the cluster configuration, and your application containers.
 
 ### EBS volume types
 
@@ -251,7 +267,7 @@ CloudFront terminates TLS at the edge and serves cached responses; API Gateway a
 }
 ```
 
-IAM evaluation: an explicit `Deny` always wins; otherwise an `Allow` must exist or the request is denied by default. Prefer **roles** assumed via STS (temporary credentials, default 1-hour) — for EC2 use an **instance profile**, for EKS use **IRSA** (IAM Roles for Service Accounts).
+IAM evaluation: an explicit `Deny` always wins; otherwise an `Allow` must exist or the request is denied by default. Prefer **roles** assumed via STS (temporary credentials, default 1-hour): for EC2 use an **instance profile**, for EKS use **EKS Pod Identity**, or **IRSA** (IAM Roles for Service Accounts) on Fargate, Windows nodes and self-managed clusters.
 
 ```mermaid
 flowchart LR
@@ -351,7 +367,14 @@ resource "aws_autoscaling_group" "web" {
 }
 ```
 
-### RDS Multi-AZ vs read replicas
+### RDS Multi-AZ instance, Multi-AZ cluster, and read replicas
+
+| Deployment | Copies | Replication | Standby readable? | Failover |
+|------------|--------|-------------|-------------------|----------|
+| Multi-AZ DB instance | Primary + 1 standby, 2 AZs | Synchronous block-level | No | ~60-120 s, DNS flip |
+| Multi-AZ DB cluster (MySQL, PostgreSQL) | Writer + 2 readers, 3 AZs | Semisynchronous: commit waits for 1 of 2 readers | Yes, through the reader endpoint | Typically under 35 s |
+| Read replica | Primary + up to 15 replicas | Asynchronous | Yes | Manual promotion |
+
 
 ```hcl
 resource "aws_db_instance" "orders" {
@@ -364,7 +387,7 @@ resource "aws_db_instance" "orders" {
 }
 ```
 
-Multi-AZ = **HA** (synchronous standby, automatic failover, not readable). Read replicas = **scale reads** (asynchronous, readable, can promote). For DB internals see [../../database/](../../database/README.md).
+Multi-AZ DB instance = **HA** (synchronous standby, automatic failover, not readable). Multi-AZ DB cluster = **HA and read capacity** (two readable standbys, semisynchronous, lower commit latency than the DB instance mode because the writer waits for the faster of two readers, not for a block-level mirror). Read replicas = **scale reads** (asynchronous, readable, can promote). The cluster mode runs only on instance classes with local NVMe (`db.m6gd`, `db.r6gd`, `db.r8gd` and similar), and its failover time grows with replica lag, because a reader must apply outstanding transactions before it is promoted. For DB internals see [../../database/](../../database/README.md).
 
 ```mermaid
 flowchart LR
@@ -376,7 +399,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph MAZ["Multi-AZ — high availability"]
+    subgraph MAZ["Multi-AZ DB instance: high availability"]
         App1(["app writes"])
         Pri1[("primary")]
         Stb1[("standby")]
@@ -399,7 +422,7 @@ flowchart LR
     class Stb1,Rep2 frozen
 ```
 
-Multi-AZ keeps a synchronous standby that is never readable, purely for a ~60-120s automatic failover; read replicas are asynchronous, readable copies that offload read traffic and can be promoted to a standalone primary — different problems, which is why production systems often run both at once (Q4).
+A Multi-AZ DB instance keeps a synchronous standby that is never readable, purely for a ~60-120s automatic failover (the Multi-AZ DB cluster mode in the table above replaces it with two readable standbys); read replicas are asynchronous, readable copies that offload read traffic and can be promoted to a standalone primary. These are different problems, which is why production systems often run both at once (see the RDS Multi-AZ vs read replicas question in §12).
 
 ### Route 53 failover
 
@@ -425,7 +448,7 @@ resource "aws_route53_record" "api" {
 
 - **Netflix** runs almost entirely on AWS across thousands of EC2/ASG instances, multi-Region active-active, with Route 53 + their own Zuul gateway; chaos engineering (Chaos Monkey) validates AZ-failure resilience.
 - **Airbnb** moved from a Rails monolith on EC2 to services on EKS, using RDS/Aurora for transactional data and S3 + Glacier for the photo archive with lifecycle policies.
-- **A typical SaaS** uses the 3-tier pattern above: ALB -> EKS in private subnets -> Aurora Multi-AZ, with S3 for uploads behind CloudFront, IRSA for per-service S3 access, and Route 53 latency routing across two Regions.
+- **A typical SaaS** uses the 3-tier pattern above: ALB -> EKS in private subnets -> Aurora Multi-AZ, with S3 for uploads behind CloudFront, EKS Pod Identity for per-service S3 access, and Route 53 latency routing across two Regions.
 - **Data lakes**: S3 Standard for hot partitions, Intelligent-Tiering or lifecycle rules transitioning to Glacier Deep Archive after 90 days, cutting storage cost ~95% on cold data.
 
 ---
@@ -554,67 +577,75 @@ Durability that high means media failure stops being the risk worth designing ag
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is the difference between a Region and an Availability Zone, and why does it matter for design?**
+**Q: What is the difference between a Region and an Availability Zone, and why does it matter for design?**
 **Short:** A Region is a geographic area with at least 3 independent Availability Zones, and spreading resources across AZs protects against a data-center-level outage.
 A Region is a geographic area (e.g., us-east-1); an Availability Zone is one or more discrete data centers within a Region with independent power/cooling/networking, and each Region has at least 3 AZs. It matters because AZs fail independently, so spreading instances and using Multi-AZ managed services gives you fault tolerance against a data-center-level outage. Always deploy across at least two AZs for any production workload.
 
-**Q2: Explain IAM roles vs IAM users and when to use each.**
+**Q: Explain IAM roles vs IAM users and when to use each.**
 **Short:** IAM users hold long-lived credentials for humans or legacy apps, while IAM roles have no permanent credentials and are assumed via STS for short-lived tokens, cutting leak blast radius.
-An IAM user has long-lived credentials (password/access keys) tied to a human or legacy app; an IAM role has no permanent credentials and is *assumed* via STS to get temporary tokens (default 1-hour). Use roles for workloads (EC2 instance profiles, EKS IRSA, cross-account access) and for humans via SSO, because temporary credentials drastically reduce the blast radius of a leak. Reserve users for break-glass or systems that genuinely can't assume roles, and rotate their keys.
+An IAM user has long-lived credentials (password/access keys) tied to a human or legacy app; an IAM role has no permanent credentials and is *assumed* via STS to get temporary tokens (default 1-hour). Use roles for workloads (EC2 instance profiles, EKS Pod Identity or IRSA, cross-account access) and for humans via SSO, because temporary credentials drastically reduce the blast radius of a leak. Reserve users for break-glass or systems that genuinely can't assume roles, and rotate their keys.
 
-**Q3: Security groups vs network ACLs — what's the difference?**
+**Q: Security groups vs network ACLs: what's the difference?**
 **Short:** Security groups are stateful, instance-level, allow-only rules with automatic return traffic, while NACLs are stateless, subnet-level, and support explicit allow and deny rules.
 Security groups are stateful, instance/ENI-level, allow-only rules — return traffic is automatically permitted. NACLs are stateless, subnet-level, and support both allow and explicit deny, so you must define inbound and outbound rules separately. Use security groups as the primary control (they're easier and stateful) and NACLs for coarse subnet-wide deny rules like blocking a bad CIDR.
 
-**Q4: RDS Multi-AZ vs read replicas — what problem does each solve?**
-**Short:** Multi-AZ maintains a synchronous, unreadable standby for automatic HA failover, while read replicas are asynchronous, readable copies that scale reads and can be promoted to primaries.
-Multi-AZ maintains a synchronous standby in another AZ for high availability with automatic failover (~60-120s) but the standby is not readable. Read replicas are asynchronous copies you can read from to scale read traffic, and they can be promoted to standalone primaries. They solve different problems — HA vs read scaling — and are often used together: Multi-AZ for resilience plus replicas for read-heavy workloads.
+**Q: RDS Multi-AZ vs read replicas: what problem does each solve?**
+**Short:** Multi-AZ gives automatic HA failover (one unreadable standby in instance mode, two readable standbys in cluster mode), while read replicas are asynchronous readable copies that scale reads.
+A Multi-AZ DB instance keeps one synchronous standby in another AZ for automatic failover (~60-120s), and that standby is not readable. A Multi-AZ DB cluster (RDS for MySQL and PostgreSQL) runs a writer plus two readers in three AZs with semisynchronous replication, so the standbys serve reads through the reader endpoint and failover is typically under 35 seconds. Read replicas are asynchronous copies you can read from to scale read traffic, and they can be promoted to standalone primaries. They solve different problems, HA vs read scaling, and are often used together: Multi-AZ for resilience plus replicas for read-heavy workloads.
 
-**Q5: How do you choose between ALB and NLB?**
+**Q: How do you choose between ALB and NLB?**
 **Short:** Choose ALB for Layer-7 HTTP features like path-based routing and WAF integration, and NLB for Layer-4 TCP/UDP needing ultra-low latency, massive throughput, or a static IP.
 Choose ALB for HTTP/HTTPS/gRPC when you need Layer-7 features: path/host-based routing, WAF integration, TLS termination, and sticky sessions. Choose NLB for Layer-4 TCP/UDP when you need ultra-low latency, millions of requests per second, a static IP, or to preserve the client source IP. A common pattern is NLB in front of ALB only when you specifically need NLB's static IP plus ALB's routing.
 
-**Q6: What gives S3 its durability, and what are the storage classes for?**
-**Short:** S3 replicates objects across at least three AZs for eleven nines of durability, while storage classes trade retrieval latency and cost, from Standard down to Glacier Deep Archive.
-S3 stores objects redundantly across multiple devices in at least three AZs, yielding 99.999999999% (11 nines) durability — statistically you'd lose one object in 10 million every 10,000 years. Storage classes trade retrieval latency/cost for storage cost: Standard for hot data, Standard-IA and Glacier Instant for infrequent access, and Glacier Flexible/Deep Archive for archives (minutes to 12 hours retrieval). Use lifecycle policies to transition data automatically and cut cost by up to ~95% on cold data.
+**Q: What gives S3 its durability, and what are the storage classes for?**
+**Short:** S3 stores objects across at least three AZs for eleven nines of durability, and storage classes trade latency and cost, from single-AZ Express One Zone through Standard to Glacier Deep Archive.
+S3 stores objects redundantly across multiple devices in at least three AZs, yielding 99.999999999% (11 nines) durability; statistically you'd lose one object in 10 million every 10,000 years. Storage classes trade retrieval latency/cost for storage cost: Standard for hot data, Standard-IA and Glacier Instant for infrequent access, and Glacier Flexible/Deep Archive for archives (minutes to 12 hours retrieval). S3 Express One Zone is the exception to the multi-AZ rule: a directory bucket in a single AZ with single-digit-millisecond access, for hot data next to compute. Use lifecycle policies to transition data automatically and cut cost by up to ~95% on cold data.
 
-**Q7: How does EC2 Auto Scaling decide when and how to scale?**
+**Q: How does EC2 Auto Scaling decide when and how to scale?**
 **Short:** An Auto Scaling Group scales via target tracking, step scaling on CloudWatch alarms, or scheduled policies, replacing unhealthy instances found by EC2 status or ELB health checks.
 An Auto Scaling Group has min/desired/max sizes and scaling policies — target tracking (e.g., keep CPU at 50%), step scaling on CloudWatch alarms, or scheduled scaling. It uses health checks (EC2 status or ELB) to replace unhealthy instances and launches new ones from a launch template across the configured AZs. Set the health check type to `ELB` so an instance failing the application health check (not just the hypervisor check) gets replaced.
 
-**Q8: What's the role of a NAT Gateway, and how can it bite you on cost?**
+**Q: What's the role of a NAT Gateway, and how can it bite you on cost?**
 **Short:** A NAT Gateway lets private-subnet instances reach the internet outbound, but it bills per hour plus per GB processed, so high-volume egress gets expensive without VPC endpoints.
 A NAT Gateway lets instances in private subnets make outbound internet connections (e.g., to download packages) without being inbound-reachable. It charges per hour (~$0.045) plus ~$0.045 per GB processed, so high-volume egress — especially to S3 or other AWS services routed through it — gets expensive fast. Use VPC Gateway Endpoints for S3/DynamoDB (free) and Interface Endpoints (PrivateLink) for other services to bypass NAT.
 
-**Q9: Walk through the six pillars of the Well-Architected Framework.**
+**Q: Walk through the six pillars of the Well-Architected Framework.**
 **Short:** The six pillars are Operational Excellence, Security, Reliability, Performance Efficiency, Cost Optimization, and Sustainability, reviewed recurringly rather than checked once.
 Operational Excellence (run and monitor systems, automate, learn from failures), Security (least privilege, defense in depth, encryption), Reliability (recover from failure, scale horizontally, test recovery), Performance Efficiency (use the right resource types, scale, experiment), Cost Optimization (right-size, use the right pricing model, measure), and Sustainability (minimize resource use and carbon footprint). It's a recurring review lens, not a one-time checklist — you run a Well-Architected Review to surface risks against each pillar.
 
-**Q10: How does EKS differ from running Kubernetes on EC2 yourself?**
+**Q: How does EKS differ from running Kubernetes on EC2 yourself?**
 **Short:** EKS provides a managed, Multi-AZ control plane that AWS patches and scales, while self-managed Kubernetes on EC2 leaves you operating etcd, upgrades, and control-plane HA yourself.
-EKS provides a managed, Multi-AZ Kubernetes control plane (API server, etcd) that AWS patches and scales, while you manage the worker nodes (or use Fargate/managed node groups). Self-managed Kubernetes on EC2 gives full control but you operate the control plane, including etcd backups, upgrades, and HA. Choose EKS to offload the hardest operational part (the control plane) and integrate with IAM via IRSA — see [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md).
+EKS provides a managed, Multi-AZ Kubernetes control plane (API server, etcd) that AWS patches and scales, while you manage the worker nodes (managed node groups, Karpenter, Fargate), or hand the nodes to AWS too with EKS Auto Mode. Self-managed Kubernetes on EC2 gives full control but you operate the control plane, including etcd backups, upgrades, and HA. Choose EKS to offload the hardest operational part (the control plane) and integrate with IAM via EKS Pod Identity; see [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md).
 
-**Q11: How would you give an application running on EKS access to a specific S3 bucket securely?**
-**Short:** IRSA associates a least-privilege IAM role with a Kubernetes service account via OIDC trust, giving the pod temporary STS credentials instead of node-wide instance-profile access.
-Use IRSA (IAM Roles for Service Accounts): create an IAM role with a least-privilege policy scoped to that bucket, associate it with a Kubernetes service account via an OIDC trust relationship, and run the pod under that service account. The pod then gets temporary STS credentials automatically, with no static keys in the container. This is far safer than node-wide instance-profile permissions, which would grant access to every pod on the node.
+**Q: When does EKS Auto Mode cost more than it saves, and what do you give up?**
+**Short:** Auto Mode adds about 12% of the EC2 price per managed instance and takes away SSH, custom AMIs, and node lifetimes over 21 days, so it pays off only when node toil costs more than the fee.
+Auto Mode charges a management fee per instance it launches, about 12% of the On-Demand EC2 price (a c6a.4xlarge is $0.612/hour plus $0.07344/hour), on top of the $0.10/hour cluster fee, and AWS states the fee is independent of the purchase option, so a Spot node or one covered by a Savings Plan still pays the full fee while only its EC2 part is discounted. In return AWS runs Karpenter, the VPC CNI, EBS CSI, the load balancer controller, and node patching. You lose SSH and SSM access to nodes, custom AMIs (nodes are locked-down Bottlerocket), and long-lived nodes, because every node is replaced within 21 days. For a 500-node fleet the fee is roughly $26,800 a month at that instance size (500 x $0.07344 x 730 hours), which buys a platform engineer; for a 20-node cluster run by a product team it is far less than the time spent upgrading add-ons.
 
-**Q12: What are the main ways to reduce VPC data transfer and egress costs?**
+**Q: When would you put data in S3 Express One Zone instead of S3 Standard?**
+**Short:** When the workload makes many small reads or writes from compute in the same AZ, such as ML training shards or analytics scratch, and a durable copy lives elsewhere, since Express stores data in one AZ.
+Express One Zone stores objects in a directory bucket in one AZ, gives single-digit-millisecond access with session-based auth (`CreateSession`), and since April 2025 charges $0.00003 per 1,000 GETs against Standard's $0.0004, but $0.11/GB-month storage against $0.023. That trade only pays when a byte is read many times in small requests: the storage premium of $0.087/GB-month is covered only after about 235,000 GETs per GB per month. The bigger constraint is placement: an AZ outage makes the bucket unavailable, and the class is designed for 99.95% availability, not multi-AZ resilience, so put compute in the same AZ, keep the source of truth in a regional bucket, and treat Express as a cache or scratch tier.
+
+**Q: How would you give an application running on EKS access to a specific S3 bucket securely?**
+**Short:** Bind a least-privilege IAM role to the pod's service account with EKS Pod Identity (IRSA on Fargate or Windows), so the pod gets temporary credentials instead of node-wide instance-profile access.
+Use EKS Pod Identity: create an IAM role with a least-privilege policy scoped to that bucket, trust the single principal `pods.eks.amazonaws.com`, create an EKS Pod Identity association from the role to the namespace and service account, and run the pod under that service account. The Pod Identity Agent DaemonSet hands the pod temporary credentials, with no static keys in the container and no per-cluster OIDC provider, so the same role serves every cluster through identical associations. Pod Identity does not run on Fargate, Windows EC2 nodes or self-managed clusters; there use IRSA (IAM Roles for Service Accounts), which trusts the cluster's OIDC provider with a `sub` condition naming the exact service account. Either way this is far safer than node-wide instance-profile permissions, which would grant access to every pod on the node; restrict IMDS so pods cannot fall back to the node role. See [workload_identity_and_federation](../kubernetes_security/workload_identity_and_federation.md) for the two side by side.
+
+**Q: What are the main ways to reduce VPC data transfer and egress costs?**
 **Short:** Keep traffic in-Region and in-AZ, use VPC Gateway Endpoints for S3/DynamoDB to skip NAT charges, and use PrivateLink or peering instead of the internet for cross-VPC traffic.
 Keep traffic in-Region and in-AZ where possible (cross-AZ transfer is billed, internet egress more so), use VPC Gateway Endpoints for S3/DynamoDB to avoid NAT data charges, and place chatty services in the same AZ when latency and cost matter more than AZ isolation. For cross-VPC or cross-account traffic, use PrivateLink or peering instead of routing through the internet, and use CloudFront to offload origin egress. Tag and monitor with Cost Explorer to find the biggest transfer line items — see [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
 
-**Q13: How does IAM resolve a conflict when one policy allows an action and another explicitly denies it?**
+**Q: How does IAM resolve a conflict when one policy allows an action and another explicitly denies it?**
 **Short:** An explicit Deny in any evaluated IAM policy always wins over an Allow, and if neither an explicit Deny nor Allow exists, IAM denies the request by default.
 An explicit Deny in any evaluated policy always wins, overriding any Allow; if no explicit Deny exists, the request needs at least one explicit Allow or IAM denies it by default. This is the evaluation order shown in the module's IAM decision flowchart in section 6: check for an explicit Deny first, then check for an explicit Allow, defaulting to Deny if neither is found. The practical trap is asymmetric — a single stray wildcard Deny statement is airtight and blocks access everywhere it applies, while a missing Allow silently blocks access too, since IAM never grants access by default. This is also why Pitfall 3's wildcard `"Action": "*", "Resource": "*"` policy is so dangerous: an overly broad Allow with no offsetting Deny grants everything a leaked key's holder could want. When debugging an unexplained "access denied," look for an explicit Deny before assuming an Allow is simply missing.
 
-**Q14: How do you choose an EC2 instance family for a given workload?**
+**Q: How do you choose an EC2 instance family for a given workload?**
 **Short:** Match the family to the bottleneck — compute-optimized for CPU-bound jobs, memory-optimized for in-memory databases, storage-optimized for local IOPS — but start on general purpose until profiling says otherwise.
-Match the family to the resource the workload is bound by: compute-optimized (c) for CPU-bound jobs, memory-optimized (r/x) for in-memory databases, and accelerated (p/g/inf) for GPU workloads. General purpose (m, t) covers balanced web/app servers — t3.micro is burstable for spiky-but-light traffic, while m8i.large (Intel Xeon 6) suits steady balanced load. Storage-optimized (i, d) instances like i8g.large add local NVMe for high local IOPS workloads such as caches or scratch space. Graviton (ARM) variants of most families give better price-performance for workloads that don't need x86-specific binaries — c8g/r8g/i8g on Graviton4, and m9g on Graviton5 (GA June 2026, with C9g/R9g following later in 2026). Default to general purpose until profiling shows you're actually CPU-, memory-, or IOPS-bound, then move to the matching specialized family.
+Match the family to the resource the workload is bound by: compute-optimized (c) for CPU-bound jobs, memory-optimized (r/x) for in-memory databases, and accelerated (p/g/inf) for GPU workloads. General purpose (m, t) covers balanced web/app servers: t3.micro is burstable for spiky-but-light traffic, while m8i.large (Intel Xeon 6) suits steady balanced load. Storage-optimized (i, d) instances like i8g.large add local NVMe for high local IOPS workloads such as caches or scratch space. Graviton (ARM) variants of most families give better price-performance for workloads that don't need x86-specific binaries: c8g/r8g/i8g on Graviton4, and m9g/c9g/r9g on Graviton5. Default to general purpose until profiling shows you're actually CPU-, memory-, or IOPS-bound, then move to the matching specialized family.
 
-**Q15: When would you choose io2 Block Express over the default gp3 EBS volume?**
+**Q: When would you choose io2 Block Express over the default gp3 EBS volume?**
 **Short:** Choose io2 Block Express only when you need beyond gp3's 80,000 IOPS ceiling, sub-500-microsecond latency, 99.999% durability, or Multi-Attach — not merely for high IOPS.
 Choose io2 Block Express when you need more than gp3's 80,000 IOPS ceiling, consistently sub-500-microsecond latency, 99.999% volume durability, or Multi-Attach — not merely "high IOPS," because gp3 now covers most of that range. gp3 is the default general-purpose SSD, baselined at 3000 IOPS and 125 MiB/s, and you provision beyond that up to 80,000 IOPS (500 IOPS per GiB, so 160 GiB or larger) and 2,000 MiB/s independently of capacity. io2 Block Express scales to 256,000 IOPS and 4,000 MiB/s per volume, and its durability is two orders of magnitude better than gp3's 99.8-99.9% — that durability difference, not raw IOPS, is often the real reason a critical database sits on io2. For big sequential workloads like log ingestion or a data lake, st1 (HDD, up to 500 MiB/s throughput) is cheaper than either SSD type since sequential throughput, not IOPS, is the bottleneck. Start every volume on gp3 and only move to io2 Block Express once a measured requirement — IOPS above 80,000, tail latency, or durability — actually exceeds what gp3 provides.
 
-**Q16: What's the tradeoff between On-Demand, Spot, and Savings Plans pricing on EC2?**
+**Q: What's the tradeoff between On-Demand, Spot, and Savings Plans pricing on EC2?**
 **Short:** On-Demand costs the most with full flexibility, Savings Plans trade a 1- or 3-year commitment for a lower rate on steady capacity, and Spot saves up to 90% but can be reclaimed with little notice.
 On-Demand offers full flexibility at the highest price, Savings Plans cut cost via a 1- or 3-year commitment, and Spot can save up to 90% but may be reclaimed with little notice. On-Demand has no commitment and no discount — the baseline for unpredictable or short-lived workloads. Savings Plans (and Reserved Instances) trade a 1- or 3-year commitment for a lower effective hourly rate on steady-state, predictable capacity. Spot instances bid on AWS's unused capacity for up to 90% off On-Demand, but AWS can reclaim them with a two-minute interruption warning, so they suit fault-tolerant, stateless, or checkpointable workloads like batch jobs and CI runners, not a primary database. Mix all three in one fleet — Savings Plans for the steady baseline, Spot for elastic burst capacity, and On-Demand as the fallback when Spot is unavailable.
 

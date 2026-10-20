@@ -504,6 +504,82 @@ me personally uncomfortable" are not the same instruction, and an interviewer wh
 articulate, in observable rubric terms, exactly which competency a candidate failed to meet
 does not have a defensible no-hire — they have a feeling wearing the bar's language.
 
+### 6.9 AI policy, AI-assisted answers, and the law on automated screening
+
+**Decide the policy before the loop, and tell the candidate.** There are two coherent
+positions and one incoherent one. Canva's position (June 2025, a post titled "Yes, you can
+use AI in our interviews. In fact, we insist.") replaced its CS-fundamentals round with an
+AI-assisted coding round and scores how the candidate directs and checks the tool. Meta
+began piloting AI-assisted coding interviews in mid-2025 (reported by 404 Media in July
+2025). The other coherent position bans assistants and says so in the invite. The
+incoherent one is no stated policy, where one interviewer penalises what another expected,
+and the debrief compares two different tests.
+
+| Policy | What the rubric scores | What the interviewer does |
+|--------|------------------------|---------------------------|
+| AI allowed or required | problem framing, prompts, catching the tool's wrong output, tests written, final explanation | asks "what did the tool get wrong, and how did you know?" at least once |
+| AI not allowed | the candidate's own reasoning and recall | states the rule at the start, then probes for unrehearsable detail |
+| No stated policy | nothing comparable | do not run the loop until one exists |
+
+**Probes that expose a generated answer, without accusing anyone.** A script read off a
+second screen holds up on the first pass and fails under questions it could not predict.
+The probes:
+
+1. **Return to a number later.** Ask for the p99 or the team size early; ten minutes later
+   ask "you said the p99 was 340 ms, what was it before the change?" A lived memory stays
+   consistent; a generated one drifts.
+2. **Change a constraint mid-answer.** "Same design, but the writes are now 10x and the
+   budget is flat. What breaks first?" This forces new reasoning, not retrieval.
+3. **Ask for the other person's words.** "What did the engineer who disagreed actually
+   say?" Generated stories have generic opponents.
+4. **Ask about their own artifact.** "Sketch the schema you shipped, not the ideal one."
+5. **Ask what they would not do again.** Stock answers produce a stock regret.
+
+Write down what you observed, never a conclusion about tools: "answer to the 10x-writes
+change repeated the original design word for word; could not say what broke first after
+two asks" is evidence. "Probably using ChatGPT" is an accusation you cannot support, and
+it does not belong in a scorecard that HR, a committee, or a court may read.
+
+**Weak version** (scorecard note)
+
+> Pretty sure he was reading from an AI. Eyes kept moving. No hire.
+
+**Strong version**
+
+> Policy: no assistants, stated at the start. Gave p99 of 340 ms at 10:05; at 10:16 gave
+> 180 ms for the same service and could not reconcile them when asked. Under the 10x-writes
+> change, repeated the original design and did not name a bottleneck after two prompts.
+> Problem-solving: 1 of 4 against the anchor "adapts the design when a constraint changes".
+
+**What changed:** the weak note scores a suspicion and an eye movement, neither of which is
+on the rubric. The strong note records the policy, two observable inconsistencies with
+timestamps, and a rubric score tied to its anchor, which survives a debrief and an audit.
+
+**The law on automated screening.** These rules bind the employer that uses a tool to
+screen, rank or score candidates. An interviewer who pastes a transcript into a chatbot to
+"score this candidate" may be creating exactly such a use without an audit, a notice, or a
+data-protection basis.
+
+| Rule | Scope | What it requires | In force |
+|------|-------|------------------|----------|
+| NYC Local Law 144 of 2021 | an "automated employment decision tool" that substantially assists hiring or promotion decisions for NYC jobs | an independent bias audit within one year before use, a public summary of the results, and notice to candidates 10 business days before use | enforced from July 5, 2023 |
+| Illinois HB 3773 (amends the Illinois Human Rights Act) | any AI use in recruitment, hiring, promotion, discipline or discharge | bans AI use that has a discriminatory effect, bans zip code as a proxy for a protected class, requires notice to employees | January 1, 2026; IDHR proposed notice rules in May 2026 and withdrew them in June 2026, so the notice format is still undefined |
+| Illinois Artificial Intelligence Video Interview Act | AI analysis of recorded video interviews | explain the AI to the applicant and get consent before use | January 1, 2020 |
+| EU AI Act, Art. 5(1)(f) | emotion recognition in the workplace | prohibited, outside medical or safety uses | February 2, 2025 |
+| EU AI Act, Annex III point 4 | AI for recruitment, filtering applications, evaluating candidates | high-risk system: risk management, human oversight, logging, transparency to the people assessed | December 2, 2027, after the AI Omnibus, Regulation (EU) 2026/1744, moved it from August 2, 2026 |
+
+What this means for the interviewer, not the legal team:
+
+- **Do not run candidate material through an unapproved model.** It is personal data
+  leaving the company, and the output may count as an automated assessment the employer
+  never audited.
+- **An AI note-taker in the interview is a recording.** California (Penal Code §632) and
+  Illinois require all-party consent to record a confidential conversation; say it is on
+  and get a yes.
+- **A video tool that scores "enthusiasm" from facial expressions is emotion recognition.**
+  In the EU it has been banned since February 2025. If your team's vendor does this, escalate
+  it before your next loop.
+
 ---
 
 ## 7. Real-World Examples
@@ -634,6 +710,9 @@ there wasn't one.
 | Daniel Kahneman, Olivier Sibony, Cass Sunstein, *Noise: A Flaw in Human Judgment* (2021) | The "mediating assessments protocol" — independent judgment before group discussion — and the broader case for why unstructured group decisions are noisier than most people assume |
 | Paul C. Smith & Lorne M. Kendall, "Retranslation of expectations: An approach to the construction of unambiguous anchors for rating scales," *Journal of Applied Psychology* (1963) | The original Behaviorally Anchored Rating Scale (BARS) method behind §6.3's rubric format |
 | John C. Flanagan, "The Critical Incident Technique," *Psychological Bulletin* (1954) | The research lineage behind building interview questions around specific, describable past behaviour |
+| NYC Department of Consumer and Worker Protection, "Automated Employment Decision Tools" (Local Law 144 of 2021 and its rules) | The bias-audit, public-summary and 10-business-day notice rules for automated hiring tools |
+| Regulation (EU) 2024/1689 (AI Act), Art. 5 and Annex III, as amended by Regulation (EU) 2026/1744 | The workplace emotion-recognition ban and the high-risk status of recruitment AI, with its December 2, 2027 application date |
+| Simon Newton (Canva), "Yes, you can use AI in our interviews. In fact, we insist." (June 2025) | A worked example of an AI-required technical round and what it scores |
 | aboutamazon.com, "What is an Amazon bar raiser?" | Official framing of an independent, outside-the-hiring-team interviewer role — see the companion module's §6.1 for full detail |
 
 Related modules in this section:
@@ -665,6 +744,43 @@ observable statements ("names the assumption they chose and why, describes how t
 validate it"), cannot be quietly reshaped after the fact, because either the candidate said
 something matching the anchor or they did not. This is the mechanical difference between a
 scoring instrument and a rationalization with a table format.
+
+**Q: A candidate's answers are fluent but you suspect an AI assistant. What do you do in the room and in your notes?**
+**Short:** Probe for detail a script cannot predict, such as returning to an earlier number or changing a constraint, and record only what you observed, never an accusation.
+
+In the room, return to a number they gave ten minutes earlier, change a constraint
+mid-answer ("same design, writes are now 10x, what breaks first?"), and ask for the exact
+words of the person who disagreed with them. A lived answer gets more specific and stays
+consistent; a generated one drifts or repeats itself. In the notes, write the observation
+with timestamps ("gave p99 of 340 ms, later 180 ms for the same service, could not
+reconcile") and score it against the rubric anchor. "Probably reading from ChatGPT" is an
+unsupportable accusation in a document HR or a court may read, and it scores something
+that is not on the rubric.
+
+**Q: Which laws limit using AI to screen or score job candidates?**
+**Short:** NYC Local Law 144 needs a yearly independent bias audit and 10 business days' notice; Illinois HB 3773 bans discriminatory AI use from 2026; the EU AI Act treats hiring AI as high-risk.
+
+NYC Local Law 144 of 2021, enforced from July 5, 2023, covers automated employment
+decision tools for NYC jobs: a bias audit within one year before use, a public summary,
+and candidate notice 10 business days before use. Illinois HB 3773 amended the Illinois
+Human Rights Act from January 1, 2026 to ban AI use with a discriminatory effect and the
+use of zip code as a proxy, and requires notice. In the EU, Art. 5 of the AI Act has
+banned workplace emotion recognition since February 2, 2025, and recruitment AI in Annex
+III becomes a high-risk system with full obligations on December 2, 2027. For an
+interviewer the practical rule is the same everywhere: do not run candidate material
+through a model the company has not approved and audited.
+
+**Q: Why should an interviewer not paste a candidate's transcript into a chatbot to draft the scorecard?**
+**Short:** It sends personal data to an unapproved processor and turns the chatbot into an unaudited automated assessment, while the scorecard stops being your own evidence.
+
+Three separate problems. Data: the transcript is the candidate's personal data, and an
+unapproved model is an unapproved processor under GDPR and most company policies. Law: a
+model that summarises and rates candidates can fall under NYC Local Law 144 or the EU AI
+Act's high-risk category, neither of which the employer has assessed for that use. Signal:
+the scorecard's value is independent judgment before the debrief; a model's summary
+smooths away the specific observed facts, the timestamps and quotes, that make a note
+usable. Use the approved note-taker, if any, with the candidate's consent, and write the
+score yourself.
 
 **Q: What is a Behaviorally Anchored Rating Scale, and why does it matter for interview rubrics?**
 **Short:** A BARS ties each score level to a real observable statement, not an adjective.

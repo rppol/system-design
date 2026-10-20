@@ -125,6 +125,21 @@ optimizes it like any other code.
 - `META-INF/services/javax.annotation.processing.Processor` (ServiceLoader file), or
 - Google's `@AutoService(Processor.class)` to generate that file for you.
 
+### Discovery policy: when `javac` runs processors at all
+
+Registration says *which* processors a JAR offers. The `-proc` policy says whether
+`javac` looks for them on the plain classpath. That default changed in JDK 23
+(JDK-8321314, GA 2024-09-17):
+
+| JDK | Processors found only on the classpath | Explicit opt-in |
+|-----|----------------------------------------|-----------------|
+| 20 and earlier | Run (implicit full processing) | Not needed |
+| 21, 22 | Run, plus a note that a future release may stop | `-proc:full` added in 21; backported to 17.0.11, 11.0.23 and Oracle 8u411 |
+| 23 and later | **Not run** (default `-proc:none`) | `-processor`, `--processor-path` / `-processorpath`, `--processor-module-path`, or `-proc:full` / `-proc:only` |
+
+The failure mode is silent: the build compiles, but no generated files appear, so the
+first error is a missing `UserMapperImpl` or a missing Lombok getter somewhere else.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -322,6 +337,36 @@ The processor JAR goes on the consumer's `annotationProcessorPath` (Maven) /
 `annotationProcessor` (Gradle) configuration — *separate from* the compile classpath,
 so the processor runs at build time but is not a runtime dependency.
 
+On JDK 23+ this is also what makes processing happen at all: both settings pass
+`-processorpath` to `javac`, which enables discovery. A processor declared only as an
+ordinary `<dependency>` is on the classpath and is skipped.
+
+```xml
+<plugin>
+  <artifactId>maven-compiler-plugin</artifactId>
+  <configuration>
+    <release>25</release>
+    <annotationProcessorPaths>
+      <path>
+        <groupId>org.mapstruct</groupId>
+        <artifactId>mapstruct-processor</artifactId>
+        <version>${mapstruct.version}</version>
+      </path>
+      <path>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <version>${lombok.version}</version>
+      </path>
+    </annotationProcessorPaths>
+  </configuration>
+</plugin>
+```
+
+Gradle's `annotationProcessor` configuration has passed a separate processor path
+since Gradle 5.0, so Gradle builds are unaffected. For a plain `javac` call or a
+build that cannot separate the path, `-proc:full` restores the pre-23 behavior and
+is accepted from JDK 21 (and the 17, 11 and 8 update releases above).
+
 ### 6.3 The element model (not reflection)
 
 ```java
@@ -468,9 +513,14 @@ treating it as free.
    Lombok in lockstep with the JDK, or avoid it for long-lived builds.
 
 7. **Putting the processor on the compile classpath.** Adding it as a normal
-   dependency (not `annotationProcessor`) bloats the runtime and can cause double
-   processing. *Fix:* use the dedicated `annotationProcessor`/`annotationProcessorPath`
-   configuration.
+   dependency (not `annotationProcessor`) bloats the runtime, and on JDK 23+ `javac`
+   no longer runs processors it finds there. *War story:* a Maven service moved from
+   JDK 21 to 25 with MapStruct and Lombok declared as ordinary `provided`
+   dependencies. JDK 21 had printed a note ("Annotation processing is enabled because
+   one or more processors were found on the class path") that nobody read; on 25 the
+   build failed with hundreds of "cannot find symbol" errors for `getX()` methods and
+   `*MapperImpl` classes. *Fix:* list processors in `annotationProcessorPaths` /
+   `annotationProcessor`, or pass `-proc:full` as a stopgap.
 
 ---
 
@@ -490,6 +540,32 @@ treating it as free.
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: Why did Lombok or MapStruct stop generating code after a JDK 23+ upgrade?**
+**Short:** Since JDK 23 javac defaults to -proc:none for processors found only on the classpath; use a processor path or -proc:full.
+
+JDK 23 changed `javac`'s default so it no longer runs annotation processors it
+discovers on the ordinary classpath. Processing still runs when the build names a
+processor (`-processor`), gives a processor search path (`-processorpath` /
+`--processor-path`, `--processor-module-path`), or sets `-proc:full` or `-proc:only`.
+Maven's `annotationProcessorPaths` and Gradle's `annotationProcessor` configuration
+pass a processor path, so builds wired that way keep working; builds that declared
+Lombok or MapStruct as an ordinary dependency silently stop generating and fail later
+with "cannot find symbol". JDK 21 and 22 printed a note warning about this. Move the
+processors to the processor path; `-proc:full` (accepted since JDK 21 and in 17.0.11,
+11.0.23, Oracle 8u411) is the stopgap.
+
+**Q: What do `-proc:none`, `-proc:only` and `-proc:full` do?**
+**Short:** -proc:none skips processing, -proc:only runs processors without compiling, and -proc:full runs processors then compiles.
+
+They set `javac`'s annotation-processing policy. `-proc:none` compiles without
+running any processor, which is the default on JDK 23+ unless a processor path or
+`-processor` is given. `-proc:only` runs processors and stops before compiling,
+which is useful for checking generated sources or for a separate codegen step.
+`-proc:full` runs processors and then compiles; it was the implicit default through
+JDK 22 and was added as an explicit value in JDK 21 so builds can pin the behavior
+across the change. Set the policy explicitly in shared build files so a JDK bump
+does not change what gets generated.
 
 **Q: What is annotation processing and how does it differ from reflection?**
 **Short:** Annotation processing generates code at compile time with zero runtime cost; reflection inspects types at runtime with a per-call cost.
@@ -674,7 +750,7 @@ proper Kotlin semantics.
 - **Keep processors deterministic and declare them incremental** so they do not force
   full rebuilds.
 - **Put the processor on the annotation-processor path**, not the compile/runtime
-  classpath.
+  classpath. On JDK 23+ a processor found only on the classpath does not run.
 - **Prefer codegen over reflection** when targeting startup latency or GraalVM native
   images.
 - **If you use Lombok, pin it to your JDK** and understand its non-spec AST mutation;

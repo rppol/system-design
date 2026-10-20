@@ -2,12 +2,12 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
-> **Version anchor (2026-09-04).** **Terraform 1.16.1** (2026-09-02) is the current stable
-> release; 1.16.0 shipped 2026-08-26, and 1.15.x and 1.16.x are the supported lines. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
+> **Version anchor (2026-10-19).** **Terraform 1.16.6** (2026-10-14) is the current stable
+> release, with 1.17.0-rc2 out the same day; 1.15.x and 1.16.x are the supported lines. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
 > recommendation — it is the release that made S3-native state locking GA, which is the
-> oldest version the backend block on this page will work on. The `hashicorp/aws ~> 6.57`
-> pin is current as of this date; providers move faster than the CLI, so re-check the pin
-> before copying it. **Terraform Stacks** (§4) are GA and **HCP Terraform-only**.
+> oldest version the backend block on this page will work on, and the first with write-only
+> arguments. The `hashicorp/aws ~> 6.57` pin admits the current provider, 6.69.1 (2026-10-15);
+> providers move faster than the CLI, so re-check the pin before copying it. **Terraform Stacks** (§4) are GA and **HCP Terraform-only**.
 > Sources: [Terraform releases](https://github.com/hashicorp/terraform/releases),
 > [Stacks](https://developer.hashicorp.com/terraform/language/stacks).
 
@@ -518,6 +518,38 @@ terraform plan -generate-config-out=generated.tf   # 1.5+: scaffold HCL for impo
 terraform apply                                     # state now tracks the existing bucket
 ```
 
+Up to Terraform 1.15 an `import` block is valid only in the root module, so importing into a module means writing `to = module.logs.aws_s3_bucket.this` in the root. From 1.16.0 (2026-08-26) a module can carry its own `import` blocks, so a module that adopts existing infrastructure ships the import with it.
+
+### Keeping secrets out of state
+
+State stores every attribute in plaintext JSON, and `sensitive = true` only masks CLI output. Three features decide where a secret ends up:
+
+```hcl
+# ephemeral resource (1.10+): read at plan/apply time, never written to plan or state
+ephemeral "aws_secretsmanager_secret_version" "db" {
+  secret_id = aws_secretsmanager_secret.db.id
+}
+
+resource "aws_db_instance" "main" {
+  # write-only argument (1.11+): sent to the provider, never stored
+  password_wo         = jsondecode(ephemeral.aws_secretsmanager_secret_version.db.secret_string)["password"]
+  password_wo_version = 1          # stored; bump it to push a rotated value
+  # ...
+}
+
+# store block (1.16+): the opposite direction. It copies an ephemeral value INTO state
+# (sensitive_output) so a later run can read it again. Use it only when that is the goal.
+resource "terraform_data" "bootstrap_token" {
+  store {
+    input     = ephemeral.random_password.bootstrap.result
+    sensitive = true
+    version   = 1                  # input changes are ignored until version changes
+  }
+}
+```
+
+An ephemeral value can flow only into write-only arguments, provider and provisioner configuration, other ephemeral blocks, and the `store` block's `input`; Terraform rejects it in an ordinary argument, so a plan that compiles has not leaked it by accident. The `store` block is the explicit opt-in to persist one, which makes the leak visible in review instead of silent.
+
 ### State surgery (use sparingly, always back up first)
 
 ```bash
@@ -547,7 +579,7 @@ terraform state pull > backup.tfstate                 # ALWAYS back up before su
 | Resource fan-out | `count` | `for_each` | Stable addressing (avoid re-index churn) |
 | State granularity | One big state | Many small states | Plan speed/blast radius vs cross-ref complexity |
 | Provider version | Loose (`>=`) | Pinned (`~>`) | Latest features vs reproducible plans |
-| Secrets | Variables in state | External (Vault/SSM) | Convenience vs leakage (state stores plaintext) |
+| Secrets | Ordinary arguments and data sources | Write-only arguments fed by `ephemeral` resources | Convenience vs leakage (state stores every non-write-only value in plaintext) |
 | Apply driver | Local CLI | Atlantis / HCP Terraform / CI | Simplicity vs policy + audit + locking |
 
 ---
@@ -586,7 +618,7 @@ terraform {
 }
 ```
 
-**Pitfall 2 — Secrets land in state as plaintext.** Any sensitive value passed to a resource (an RDS `password`, a `tls_private_key`) is stored *unencrypted inside the state JSON*, regardless of `sensitive = true` (which only masks console output). Anyone with read access to the S3 bucket can read the password. FIX: restrict S3 bucket policy + KMS encryption, never commit state to Git, and source secrets from [secrets_management](../secrets_management/secrets_management.md) (Vault dynamic creds / AWS Secrets Manager) rather than passing them through Terraform.
+**Pitfall 2: Secrets land in state as plaintext.** A sensitive value passed to an ordinary argument (an RDS `password`, a `tls_private_key`), or read through a `data` source, is stored *unencrypted inside the state JSON*, regardless of `sensitive = true` (which only masks console output). Anyone with read access to the S3 bucket can read the password. FIX: on Terraform 1.11+, pass secrets only to write-only arguments (`password_wo` with `password_wo_version` on `aws_db_instance`) from an `ephemeral` resource, which Terraform stores in neither plan nor state, or let RDS own the password with `manage_master_user_password = true`. Still restrict the S3 bucket policy, KMS-encrypt state, never commit state to Git, and keep the secret of record in [secrets_management](../secrets_management/secrets_management.md) (Vault dynamic creds / AWS Secrets Manager).
 
 **Pitfall 3 — `count` re-indexing destroys the wrong resources.**
 
@@ -638,77 +670,77 @@ resource "aws_instance" "node" {
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is the Terraform state file and why is it critical?**
+**Q: What is the Terraform state file and why is it critical?**
 **Short:** The state file maps each resource to its real-world ID and cached attributes, and Terraform trusts it as the source of truth for computing diffs.
 The state file is a JSON document mapping each resource in your config (e.g., `aws_instance.web`) to its real-world ID (`i-0abc123`) and caching its attributes, so Terraform can compute diffs without re-discovering everything. It is the source of truth Terraform trusts: if state is lost, Terraform thinks nothing exists and will try to recreate duplicates; if state disagrees with the cloud, the next plan reconciles toward state. Always store it remotely with locking and never edit it by hand without a backup.
 
-**Q2: Explain the `init` → `plan` → `apply` lifecycle.**
+**Q: Explain the `init` → `plan` → `apply` lifecycle.**
 **Short:** `init` sets up providers and the backend, `plan` diffs refreshed state against your HCL as a dry run, and `apply` executes that diff and writes state back.
 `init` downloads providers and modules and configures the backend; `plan` refreshes state against the cloud, diffs it against your HCL, and prints proposed creates/updates/replaces/destroys; `apply` walks the dependency graph and executes that diff via provider APIs, then writes back state. `plan` is a safe dry run — the place you catch dangerous `-/+` replacements before they happen. In CI you save the plan (`terraform plan -out=tfplan`) and apply exactly that artifact so what's reviewed is what runs.
 
-**Q3: Why is remote state with locking necessary for teams?**
+**Q: Why is remote state with locking necessary for teams?**
 **Short:** A remote backend with locking serializes applies so concurrent runs can't corrupt one shared state file into duplicated or orphaned resources.
 Local state can't be safely shared, and concurrent applies against one state file corrupt it — two engineers each write a partial state, producing duplicated or orphaned resources. A remote backend (S3 with `use_lockfile = true`) serializes applies via a lock: the second `apply` waits until the first releases the `.tflock` object, and everyone reads the same authoritative state. This is the single most important step to move Terraform from solo use to team use.
 
-**Q4: What's the difference between `count` and `for_each`, and which is safer?**
+**Q: What's the difference between `count` and `for_each`, and which is safer?**
 **Short:** `count` indexes resources by integer, so removing one re-indexes and recreates the rest, while `for_each` keys by stable map or set keys, leaving others untouched.
 `count` creates resources indexed by integer (`[0]`, `[1]`), so removing a middle element re-indexes the rest — Terraform destroys and recreates resources that merely shifted position. `for_each` keys instances by a stable map/set key (`["api"]`, `["worker"]`), so adding or removing one leaves the others untouched. Prefer `for_each` for anything where identities matter; reserve `count` for simple "N identical copies" or conditional creation (`count = var.enabled ? 1 : 0`).
 
-**Q5: What does it mean when a plan shows `-/+` (replace), and why is it dangerous?**
+**Q: What does it mean when a plan shows `-/+` (replace), and why is it dangerous?**
 **Short:** `-/+` means Terraform will destroy and recreate a resource because you changed an attribute the provider marks "forces new resource," risking data loss.
 `-/+` means Terraform will destroy the existing resource and create a new one because you changed an attribute the provider marks "Forces new resource" (an EC2 AMI, `storage_encrypted` or `kms_key_id` on an RDS instance, an S3 bucket name). For stateless resources it's fine; for stateful ones (databases, EBS volumes) it can mean data loss and downtime. Always scrutinize `-/+` lines, protect critical resources with `lifecycle { prevent_destroy = true }`, and use `create_before_destroy` where a replacement must avoid a gap.
 
-**Q6: How do you handle secrets in Terraform given that state stores them in plaintext?**
-**Short:** Encrypt state at rest, restrict backend access, and source real secrets at apply time from an external store like Vault or Secrets Manager instead.
-Any sensitive value passed to a resource is written unencrypted into the state JSON — `sensitive = true` only masks CLI output, not the stored value. So you encrypt state at rest (KMS on the S3 bucket), lock down bucket access, and never commit state to Git. Better, source secrets at apply time from an external store like Vault or AWS Secrets Manager (see [secrets_management](../secrets_management/secrets_management.md)) so the secret of record lives outside Terraform, and use dynamic credentials where possible.
+**Q: How do you keep secrets out of Terraform state?**
+**Short:** Pass them only to write-only arguments fed by ephemeral resources (Terraform 1.11+), or let the service own the secret; ordinary arguments and data sources still store it in state as plaintext.
+Since Terraform 1.11, write-only arguments such as `password_wo` on `aws_db_instance` take a value from an `ephemeral` resource (`ephemeral "random_password"` or `ephemeral "aws_secretsmanager_secret_version"`), and Terraform stores it in neither the plan nor state; only the companion `password_wo_version` is recorded, and bumping it pushes a new value. The other route is to let the service own the secret: `manage_master_user_password = true` makes RDS generate the master password and keep it in Secrets Manager. Everything else still lands unencrypted in the state JSON: an ordinary `password` argument, a `tls_private_key`, any value read through a `data` source. `sensitive = true` only masks CLI output, not the stored value. So also encrypt state at rest (KMS on the S3 bucket), lock down bucket access, never commit state to Git, and keep the secret of record in Vault or AWS Secrets Manager (see [secrets_management](../secrets_management/secrets_management.md)), with dynamic credentials where possible.
 
-**Q7: What is drift and how do you detect and remediate it?**
+**Q: What is drift and how do you detect and remediate it?**
 **Short:** Drift is the live cloud resource diverging from state/HCL; detect it with `plan -refresh-only` or a CI `-detailed-exitcode` check, then commit or reapply to fix it.
 Drift is when the real cloud resource diverges from what state/HCL describes — usually because someone changed it manually in the console. Detect it with `terraform plan -refresh-only` (shows cloud-vs-state differences without config changes) or a nightly `terraform plan -detailed-exitcode` in CI (exit code 2 means drift). Remediate by either accepting the change into HCL (commit it) or running `apply` to revert the cloud back to the declared state — the discipline of "change infra via PR, not console" prevents it in the first place.
 
-**Q8: How do you bring an existing, manually-created resource under Terraform management?**
+**Q: How do you bring an existing, manually-created resource under Terraform management?**
 **Short:** Write matching `import` and `resource` blocks (or use imperative `terraform import`), then run `plan` and reconcile until it shows no changes.
-Use the declarative `import` block (Terraform 1.5+): write an `import { to = ..., id = ... }` block and a matching `resource` block, then `terraform plan -generate-config-out=...` can scaffold the HCL and `apply` records it in state. The older imperative `terraform import <addr> <id>` still works but doesn't generate config. After import, run a `plan` and reconcile until it shows no changes — proving your HCL matches the live resource exactly.
+Use the declarative `import` block (Terraform 1.5+): write an `import { to = ..., id = ... }` block and a matching `resource` block, then `terraform plan -generate-config-out=...` can scaffold the HCL and `apply` records it in state. The older imperative `terraform import <addr> <id>` still works but doesn't generate config. From Terraform 1.16, `import` blocks can also live inside child modules instead of only the root. After import, run a `plan` and reconcile until it shows no changes, which proves your HCL matches the live resource exactly.
 
-**Q9: What are Terraform modules and when should you write one?**
+**Q: What are Terraform modules and when should you write one?**
 **Short:** A module is a reusable, parameterized bundle of resources with variable inputs and outputs, worth writing once a pattern repeats or needs enforced standards.
 A module is a reusable, parameterized bundle of resources with `variable` inputs and `output` outputs — you write a VPC or EKS pattern once and instantiate it per environment. Write a module when you'll repeat a pattern, want to enforce standards (tagging, encryption defaults), or need to hide complexity behind a clean interface. Keep modules focused and composable; avoid the "one giant module that does everything," which becomes as hard to change as the infrastructure it replaced.
 
-**Q10: Workspaces vs directory-per-environment — how do you isolate environments?**
+**Q: Workspaces vs directory-per-environment: how do you isolate environments?**
 **Short:** Workspaces give one config multiple state files cheaply but share config and backend, while directory-per-environment gives stronger isolation at the cost of duplication.
 Workspaces give one config multiple state files (`terraform workspace select prod`) — cheap and DRY, but they share the same backend and config, so a bad change can hit all environments and isolation is weak. Directory-per-environment (`envs/dev`, `envs/prod`, each with its own backend, ideally separate AWS accounts) gives strong blast-radius isolation at the cost of some duplication. For serious prod/dev separation, separate accounts/backends win; workspaces suit ephemeral or similar-shaped environments.
 
-**Q11: How does Terraform order operations, and how do you control ordering?**
+**Q: How does Terraform order operations, and how do you control ordering?**
 **Short:** Terraform builds a dependency graph from resource references and orders and parallelizes accordingly, with `depends_on` adding explicit ordering when no reference exists.
 Terraform builds a directed acyclic graph from references — `aws_subnet.app` referencing `aws_vpc.main.id` creates an implicit dependency, so the VPC is created first; independent nodes run in parallel (default `-parallelism=10`). When there's no reference but a real ordering need (an IAM policy that must exist before a resource uses it indirectly), add explicit `depends_on`. Avoid overusing `depends_on`; prefer real references so the graph stays accurate.
 
-**Q12: What's the purpose of `.terraform.lock.hcl` and should you commit it?**
+**Q: What's the purpose of `.terraform.lock.hcl` and should you commit it?**
 **Short:** It pins the exact provider versions and checksums selected, and committing it ensures every engineer and CI runner resolves identical providers.
 It's the dependency lockfile recording the exact provider versions and their checksums that were selected, analogous to `package-lock.json`. Commit it so every engineer and CI runner resolves identical provider versions and gets byte-identical plans — without it, a `>= 6.0` constraint could silently pull a newer provider that changes defaults and proposes surprise diffs. Update it deliberately with `terraform init -upgrade` and review the resulting plan.
 
-**Q13: How do `terraform state mv` and `terraform state rm` differ, and when do you use them?**
+**Q: How do `terraform state mv` and `terraform state rm` differ, and when do you use them?**
 **Short:** `state mv` relocates a resource's address in state without touching the real resource, while `state rm` drops it from state without deleting it in the cloud.
 `state mv` renames or moves a resource within state (e.g., after refactoring `aws_instance.old` to `aws_instance.new`) so Terraform updates the address instead of destroying and recreating the real resource. `state rm` removes a resource from state without deleting it in the cloud — used to hand a resource off to another config or stop managing it. Both are state surgery: always `terraform state pull > backup.tfstate` first, because a mistake can orphan or duplicate real infrastructure.
 
-**Q14: How do you reduce blast radius and plan time as infrastructure grows?**
+**Q: How do you reduce blast radius and plan time as infrastructure grows?**
 **Short:** Split one monolithic state into smaller states by lifecycle or ownership, shrinking plan time and blast radius at the cost of coordinating cross-state references.
 Split one monolithic state into multiple smaller states by lifecycle/ownership (`network`, `iam`, `data`, `app`), each with its own backend key — this shrinks plan time, limits what any single apply can break, and lets teams own their slice. Share values across states via `terraform_remote_state` data sources or, better, published outputs in a parameter store. The tradeoff is cross-state references add coordination, so split along stable, low-churn boundaries.
 
-**Q15: What changed with the Terraform-to-OpenTofu license fork, and does it affect your code?**
+**Q: What changed with the Terraform-to-OpenTofu license fork, and does it affect your code?**
 **Short:** HashiCorp relicensed Terraform to the source-available BUSL in 2023, prompting the MPL-licensed OpenTofu fork that is a largely drop-in CLI replacement.
 In August 2023 HashiCorp relicensed Terraform from MPL 2.0 to the BUSL (a source-available, non-compete license), prompting the Linux Foundation-backed OpenTofu fork that keeps the MPL and is a drop-in CLI replacement. Your HCL, providers, and workflow are largely identical, so migration is mostly swapping the binary and re-running `init`; the divergence to watch is newer features landing differently in each. Choose based on licensing comfort and the specific features (e.g., state encryption, early variable evaluation) each ships — covered in [terraform_advanced_and_alternatives](../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md).
 
-**Q16: Your team has 40 directory-per-env states and every release needs them applied in a specific order. What does Terraform Stacks change?**
+**Q: Your team has 40 directory-per-env states and every release needs them applied in a specific order. What does Terraform Stacks change?**
 **Short:** Stacks move the dependency graph inside Terraform — components reference each other directly and deploy as one planned unit — instead of leaving the ordering to a pipeline or a wrapper.
 
 Stacks move the ordering problem from your pipeline into Terraform. Today that graph lives somewhere outside the configuration: a Jenkins job that applies `network` then `data` then `app`, or a Terragrunt `dependency` block, with cross-state values passed by `terraform_remote_state`. In a Stack you declare each module as a `component` in a `.tfcomponent.hcl` file, reference one component's outputs from another directly (`component.network.private_subnet_ids`), and instantiate the whole set into named `deployment`s in `.tfdeploy.hcl` — each deployment keeps its own isolated state, but HCP Terraform derives the apply order and plans the set as one unit, so a change rippling across four components appears in a single plan instead of four sequential ones. The catch, and you should say it in an interview because it is the first thing a good interviewer asks: **Stacks are an HCP Terraform feature**, unavailable in the open-source CLI workflow, in OpenTofu, and on legacy HCP team plans. If your state lives in your own S3 bucket, this is not on the menu and directory-per-env with a pipeline remains the right answer.
 
-**Q17: What does `required_version = ">= 1.11"` actually protect you from, and why not pin it exactly?**
+**Q: What does `required_version = ">= 1.11"` actually protect you from, and why not pin it exactly?**
 **Short:** It is a floor that stops an older CLI from misreading configuration written for a newer one, and pinning it exactly would break every colleague who is one patch ahead.
 
-`required_version` is a compatibility floor, and its job is to fail `init` loudly rather than let an older binary silently misinterpret newer syntax. The `>= 1.11` on this page is not arbitrary: 1.11 is where S3-native state locking went GA, so it is the oldest CLI that understands the `use_lockfile = true` in this configuration's backend block — an older binary would ignore the setting and run unlocked, which is exactly the silent-corruption case the constraint exists to prevent. Pinning it exactly (`= 1.11.0`) is the common overcorrection and it is worse: every teammate, CI runner and Atlassian bot then has to hold that precise patch, and a security patch release breaks the whole team at once. Use a floor for the CLI and a pessimistic major pin (`~> 6.57`) for providers, and commit `.terraform.lock.hcl` so provider *versions and checksums* are reproducible even though the constraint is a range. The current stable line is 1.15.x, so a `>= 1.11` floor is comfortably satisfied everywhere while still refusing the binary that would run your state unlocked.
+`required_version` is a compatibility floor, and its job is to fail `init` loudly rather than let an older binary silently misinterpret newer syntax. The `>= 1.11` on this page is not arbitrary: 1.11 is where S3-native state locking went GA, so it is the oldest CLI that understands the `use_lockfile = true` in this configuration's backend block; an older binary would ignore the setting and run unlocked, which is exactly the silent-corruption case the constraint exists to prevent. Pinning it exactly (`= 1.11.0`) is the common overcorrection and it is worse: every teammate, CI runner and Atlassian bot then has to hold that precise patch, and a security patch release breaks the whole team at once. Use a floor for the CLI and a pessimistic major pin (`~> 6.57`) for providers, and commit `.terraform.lock.hcl` so provider *versions and checksums* are reproducible even though the constraint is a range. The current stable line is 1.16.x, so a `>= 1.11` floor is comfortably satisfied everywhere while still refusing the binary that would run your state unlocked.
 
-**Q18: You run `terraform plan` and it wants to destroy and recreate a resource you only renamed in the config. Why, and what do you do?**
+**Q: You run `terraform plan` and it wants to destroy and recreate a resource you only renamed in the config. Why, and what do you do?**
 **Short:** Terraform keys state by resource address, so renaming the block makes the old address vanish and a new one appear — which reads as a destroy plus a create.
 
 Terraform tracks resources by their address in state (`aws_instance.web`), not by any property of the cloud resource, so renaming the block makes the old address disappear and a new one appear — and a disappeared address means destroy, a new address means create. The cloud resource never changed; only your label for it did. The fix is to tell Terraform about the rename rather than let it infer a replacement, and there are two ways. The declarative one is a `moved` block, which you commit alongside the rename so every teammate and CI runner replays the same history: `moved { from = aws_instance.web  to = aws_instance.frontend }`. The imperative one is `terraform state mv aws_instance.web aws_instance.frontend`, which mutates state directly and is invisible to everyone else — use it only for a one-off you are cleaning up locally, and back the state up first. Prefer `moved` blocks: they are code-reviewable, they survive in history, and they are safe to leave in place for a release or two before deleting. The same trap fires when you move a resource into a module or add `for_each` to something that had none, and `moved` handles both.
@@ -721,7 +753,7 @@ Terraform tracks resources by their address in state (`aws_instance.web`), not b
 - **Pin provider versions** with `~>` and **commit `.terraform.lock.hcl`** for reproducible plans.
 - **Always review the plan**, especially `-/+ replace` lines; in CI, `plan -out=tfplan` then `apply tfplan` so reviewed == applied.
 - Prefer **`for_each` over `count`** for stable addressing; protect stateful resources with `prevent_destroy`.
-- **Never store secrets in HCL/state**; source them from [secrets_management](../secrets_management/secrets_management.md) and KMS-encrypt state.
+- **Never store secrets in HCL or state**: pass them to write-only arguments from `ephemeral` resources, keep the secret of record in [secrets_management](../secrets_management/secrets_management.md), and KMS-encrypt state.
 - **Split state by lifecycle/ownership** to bound blast radius and speed up plans.
 - Run **`fmt`, `validate`, `tflint`, `trivy config`/Checkov, and Infracost** in CI on every PR; gate with policy (see [policy_as_code_and_compliance](../policy_as_code_and_compliance/policy_as_code_and_compliance.md)).
 - **Detect drift on a schedule** (`plan -detailed-exitcode`) and treat console changes as incidents to fold back into HCL.
@@ -763,7 +795,7 @@ terraform {
   }
 }
 
-data "aws_secretsmanager_secret_version" "db" {
+ephemeral "aws_secretsmanager_secret_version" "db" {
   secret_id = "prod/rds/admin"        # secret of record lives OUTSIDE Terraform
 }
 
@@ -772,7 +804,8 @@ resource "aws_db_instance" "main" {
   engine_version    = "17"
   storage_encrypted = true
   username          = "admin"
-  password          = jsondecode(data.aws_secretsmanager_secret_version.db.secret_string)["password"]
+  password_wo         = jsondecode(ephemeral.aws_secretsmanager_secret_version.db.secret_string)["password"]
+  password_wo_version = 1               # write-only: never in plan or state; bump to push a rotated value
 
   lifecycle {
     prevent_destroy = true              # apply errors out instead of destroying the DB
@@ -781,13 +814,13 @@ resource "aws_db_instance" "main" {
 }
 ```
 
-With remote locking, concurrent applies serialize and state stays consistent. `prevent_destroy` turns the accidental RDS replacement into a hard error rather than a deleted database, so encryption gets enabled the only way AWS allows — snapshot, restore into a new encrypted instance, cut over — and version upgrades become a deliberate, reviewed process. The password is pulled from AWS Secrets Manager at apply time, so it no longer sits in HCL (though it still lands in state — hence KMS encryption and locked-down bucket access, with rotation handled per [secrets_management](../secrets_management/secrets_management.md)).
+With remote locking, concurrent applies serialize and state stays consistent. `prevent_destroy` turns the accidental RDS replacement into a hard error rather than a deleted database, so encryption gets enabled the only way AWS allows (snapshot, restore into a new encrypted instance, cut over), and version upgrades become a deliberate, reviewed process. The password is read from AWS Secrets Manager through an `ephemeral` resource into the write-only `password_wo` argument, so it sits in neither HCL, the plan nor state; bumping `password_wo_version` pushes a rotated value, with rotation handled per [secrets_management](../secrets_management/secrets_management.md). KMS encryption and locked-down bucket access still matter, because state holds every other attribute of the database.
 
 **Outcome:** state corruption incidents went to zero (locking), the near-miss database deletion became impossible (`prevent_destroy`), and the secret stopped living in version control. The team added a CI pipeline (`fmt` → `validate` → `tflint` → `plan -out`) with required review on the plan, so a dangerous `-/+` line can never reach `apply` unseen again.
 
 **Discussion questions:**
 1. Why does sharing local state over a file drive inevitably corrupt it, and exactly how does the S3 lockfile prevent that?
-2. The password still appears in the state file even when sourced from Secrets Manager — what protects it, and what's the residual risk?
+2. Why does the fix read the password through an `ephemeral` resource into `password_wo` instead of a `data` source into `password`, and what in state still needs KMS encryption?
 3. How would you safely perform the `engine_version` upgrade that `ignore_changes` now suppresses?
 
 ---

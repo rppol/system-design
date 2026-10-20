@@ -5,37 +5,48 @@
 LLM costs are primarily token-based, making token economics critical for production viability. Every
 API call incurs a charge proportional to the number of tokens consumed (input) and generated
 (output), and these costs compound rapidly at scale. A system generating 10 million output tokens
-per day at Claude Sonnet 5's $10/1M output rate spends $100/day on output alone.
+per day at Claude Sonnet 5.5's $10/1M output rate spends $100/day on output alone.
 
 Understanding the full cost picture — API pricing tiers, prompt caching discounts, batch API
 savings, and the break-even math for self-hosting — enables engineering teams to achieve 5-10x cost
 reduction without meaningful quality loss.
 
-**Reference list prices, as of 2026-09-04 (per 1M tokens; always re-check the provider's pricing page
+**Reference list prices, as of 2026-10-19 (per 1M tokens; always re-check the provider's pricing page
 before putting a number in a spreadsheet — these move several times a year):**
 
 | Model | Input ($/1M tokens) | Output ($/1M tokens) |
 |---|---|---|
-| gpt-5.6-sol (OpenAI flagship) | $5.00 | $30.00 |
-| gpt-5.6-terra | $2.50 | $15.00 |
-| gpt-5.6-luna | $1.00 | $6.00 |
+| gpt-6-astra (OpenAI flagship) | $10.00 | $50.00 |
+| gpt-6.1-sol | $2.00 | $10.00 |
+| gpt-6-sol | $2.00 | $10.00 |
+| gpt-6-luna | $0.10 | $0.50 |
+| gpt-5.6-sol (previous generation; promo price through at least 2026-11-21) | $4.00 | $20.00 |
+| gpt-5.6-terra (previous generation) | $2.00 | $12.00 |
+| gpt-5.6-luna (previous generation) | $0.20 | $1.20 |
 | gpt-5.4-mini | $0.75 | $4.50 |
 | gpt-5.4-nano | $0.20 | $1.25 |
 | GPT-4o (legacy, still served) | $2.50 | $10.00 |
 | GPT-4o cached input (50% off) | $1.25 | $10.00 |
 | GPT-4o-mini (legacy, still served) | $0.15 | $0.60 |
-| Claude Opus 5 | $5.00 | $25.00 |
-| Claude Sonnet 5 | $2.00 | $10.00 |
+| Claude Opus 5.5 | $4.00 | $20.00 |
+| Claude Sonnet 5.5 (this module's anchor) | $2.00 | $10.00 |
+| Claude Sonnet 5.5 cache read (0.05x input) | $0.10 | $10.00 |
+| Claude Haiku 5.5 (prompts <= 100K) | $0.10 | $0.50 |
+| Claude Haiku 5.5 (prompts > 100K) | $0.50 | $2.50 |
+| Claude Sonnet 5 (previous generation) | $2.00 | $10.00 |
 | Claude Sonnet 5 cache read (0.1x input) | $0.20 | $10.00 |
-| Claude Haiku 4.5 | $1.00 | $5.00 |
-| Gemini 3.1 Pro (prompts <= 200K) | $2.00 | $12.00 |
-| Gemini 3.5 Flash | $1.50 | $9.00 |
+| Gemini 3.1 Pro Preview (prompts <= 200K) | $2.00 | $12.00 |
+| gemini-4-argon (promo price through 2026-11-30, then $4/$20) | $2.00 | $10.00 |
+| gemini-3.8-flash (promo price through 2026-12-31, then $1.50/$7.50) | $0.75 | $3.75 |
 | Self-hosted LLaMA 3 8B (A10G) | illustrative | illustrative |
 | Self-hosted LLaMA 3 70B (A100x4) | illustrative | illustrative |
 
-Claude Sonnet 5's $2/$10 rate launched as introductory pricing through 2026-08-31 and is now the
-standard price — Anthropic cancelled the increase to $3/$15 that had been scheduled for 2026-09-01,
-so $2/$10 is what this module prices against throughout. The self-hosted rows have no list price at
+Claude Sonnet 5.5 (launched 2026-09-28) at $2/$10 is the rate this module prices against. Its
+cache reads bill at 0.05x ($0.10/1M) and its minimum cacheable prefix is 512 tokens. Sonnet 5 has
+the same $2/$10 base, but reads cache at 0.1x ($0.20/1M) and needs a 1,024-token prefix, so only
+the caching numbers differ between the two. The GPT-6 models (Astra 2026-09-03, Sol and Luna priced
+2026-09-22, 6.1 Sol 2026-09-29) share a 1,050,000-token context window and 128K max output; above
+272K input tokens the whole request bills at 2x input and 1.5x output. The self-hosted rows have no list price at
 all — a self-hosted per-token cost is an *output* of the TCO and utilization model
 in Section 4, not an input, which is exactly the mistake that section exists to prevent.
 
@@ -119,15 +130,15 @@ The lever is exactly linear in volume, so a routing saving quoted without its vo
 prompt caching, and intelligent routing save more than any infrastructure optimization. You can tune
 Kubernetes all you like; removing 500 tokens from a system prompt that runs a million times a day
 strips 500M input tokens off the bill — $75/day at GPT-4o-mini's $0.15/1M, $1,250/day at GPT-4o's
-$2.50/1M, $2,500/day at Claude Opus 5's $5.00/1M — every single day.
+$2.50/1M, $2,000/day at Claude Opus 5.5's $4.00/1M, every single day.
 
 ---
 
 ## 3. Core Principles
 
 **Input tokens cost less than output tokens.** The ratio is typically 4-6x across providers and has
-widened over time: GPT-4o is 4x ($2.50 in vs $10.00 out), Claude Sonnet 5 and Opus 5 are both 5x
-($2/$10 and $5/$25), and OpenAI's GPT-5.6 family is 6x ($2.50/$15.00 on gpt-5.6-terra).
+widened over time: GPT-4o is 4x ($2.50 in vs $10.00 out), Claude Sonnet 5.5 and Opus 5.5 are both 5x
+($2/$10 and $4/$20), gpt-6.1-sol is 5x ($2/$10), and gpt-5.6-terra is 6x ($2/$12).
 This means long outputs (essays, code
 generation, chain-of-thought reasoning) are disproportionately expensive. Constraining output
 length, using structured extraction instead of free-form generation, and streaming with early
@@ -135,9 +146,10 @@ termination all target the expensive side of the ratio.
 
 **Prompt caching provides 50-90% discount on repeated prefixes.** Anthropic requires you to opt in
 with a `cache_control` breakpoint — it is not on by default — and the minimum cacheable prefix is
-per-model and non-monotonic: 512 tokens on Opus 5 and Fable 5, 1,024 on Sonnet 5 and Opus 4.8,
-2,048 on Opus 4.7, 4,096 on Opus 4.6/4.5 and Haiku 4.5. Cache reads are billed at 0.1x the input
-rate (90% off) and the 5-minute cache write at 1.25x. OpenAI caches prefixes automatically for
+per-model and non-monotonic: 512 tokens on Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5, Fable 5 and
+Fable 5.1, 1,024 on Sonnet 5 and Opus 4.8, 2,048 on Opus 4.7, 4,096 on Opus 4.6/4.5 and Haiku 4.5.
+Cache reads are billed at 0.1x the input rate (90% off) on most models, 0.05x on Opus 5.5 and
+Sonnet 5.5, and 0.025x on Fable 5.1 and Mythos 5.1; the 5-minute cache write is 1.25x. OpenAI caches prefixes automatically for
 prompts of 1,024 tokens or more, but the cached-input discount is model-dependent — 50% on GPT-4o,
 90% on the GPT-5.x family. For RAG systems where the
 system prompt and retrieved context are largely stable, caching eliminates most input token costs.
@@ -188,12 +200,12 @@ carries multipliers that compose *multiplicatively* with each other:
 |---|---|---|
 | Data residency (`inference_geo: "us"`) | Claude 4.6 and later, first-party API | 1.1x on **every** token category — input, output, cache writes and cache reads |
 | Regional / multi-region endpoints | Claude on Bedrock and Google Cloud, Sonnet 4.5 / Haiku 4.5 / Opus 4.5 and later | 10% premium over the global endpoint |
-| Prompt cache write / read | any model | 1.25x (5-min) or 2.0x (1-hour) write; 0.1x read |
+| Prompt cache write / read | any model | 1.25x (5-min) or 2.0x (1-hour) write; 0.1x read (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1) |
 | Batch | any model | 0.5x, both sides |
 
 Writing them as multipliers rather than as prices is what keeps the arithmetic honest, because they
-do not cancel. A cache read on a US-pinned Sonnet 5 costs `0.1 x 1.1 x $2.00 = $0.22/1M`, not
-$0.20, and the "90% off" you reported is really 89%. On one line item that is noise; across a bill
+do not cancel. A cache read on a US-pinned Sonnet 5.5 costs `0.05 x 1.1 x $2.00 = $0.11/1M`, not
+$0.10, and the "95% off" you reported is really 94.5%. On one line item that is noise; across a bill
 where residency is mandatory for all regulated traffic it is a flat 10% tax, and the only way it
 gets *decided* rather than absorbed is to show it as its own line in the per-feature dashboard.
 Global routing is the default, so a team that pins every request to a region "to be safe" pays the
@@ -201,10 +213,12 @@ tax on traffic that never needed it. Which traffic genuinely must take the resid
 governance question rather than a cost one — the classification and the routing table behind it are
 covered in [Privacy & Data Governance](../llm_security/privacy_and_data_governance.md).
 
-Long context is the multiplier people expect and do not always get. Claude 4.6 and later bill the
-full 1M-token context window at standard rates — a 900K-token request costs the same per token as a
-9K-token one — while Google tiers Gemini 3.1 Pro at $2/$12 per 1M up to 200K tokens and $4/$18 above
-it. Check the provider before assuming either behaviour: a step at 200K turns a context-budget
+Long context is the multiplier people expect and do not always get. Claude 4.6 and later models
+except Haiku 5.5 bill the full 1M-token context window at standard rates, so a 900K-token request
+costs the same per token as a 9K-token one. Haiku 5.5 moves from $0.10/$0.50 to $0.50/$2.50 per 1M
+once a prompt passes 100K tokens. OpenAI's gpt-5.6 and GPT-6 models bill a request above 272K input
+tokens at 2x input and 1.5x output (gpt-5.6-terra: $4 in, $18 out instead of $2/$12), and Google tiers Gemini 3.1 Pro Preview at
+$2/$12 per 1M up to 200K tokens and $4/$18 above it. Check the provider before assuming either behaviour: a step at 200K turns a context-budget
 decision into a cliff, where one extra retrieved chunk doubles the rate on the entire prompt.
 
 ### Self-Hosting Cost Models
@@ -349,7 +363,7 @@ effective per-token price exceeds any API rate.
 | `C_api` | The API's blended rate per 1M tokens — the line you must get under |
 
 **Walk one example.** Fixed TCO of `$28,700/month` on a node whose flat-out ceiling is 200M
-tokens/day (= 6.0B tokens/month), measured against the `$5.20/1M` Sonnet 5 blended rate:
+tokens/day (= 6.0B tokens/month), measured against the `$5.20/1M` Sonnet 5.5 blended rate:
 
 ```
   utilization   tokens served / month     amortized cost per 1M tokens
@@ -359,7 +373,7 @@ tokens/day (= 6.0B tokens/month), measured against the `$5.20/1M` Sonnet 5 blend
       30%       1.80B = 1,800M            $28,700 / 1,800 = $15.94
       10%       0.60B =   600M            $28,700 /   600 = $47.83
 
-  API reference line (Claude Sonnet 5, 60/40 blend)           $ 5.20
+  API reference line (Claude Sonnet 5.5, 60/40 blend)         $ 5.20
 
   Read the crossover straight off the table:
     at 100% utilization self-hosting costs 92% of the API     ($4.78 vs $5.20)
@@ -368,7 +382,7 @@ tokens/day (= 6.0B tokens/month), measured against the `$5.20/1M` Sonnet 5 blend
     at  10% utilization self-hosting costs 9.2x the API       ($47.83 vs $5.20)
 ```
 
-The whole economic case for self-hosting lives in the top row, and at Sonnet 5's $2/$10 there is
+The whole economic case for self-hosting lives in the top row, and at Sonnet 5.5's $2/$10 there is
 barely a case at all: you have to run the cluster essentially flat out to save 8%. A cluster sized
 for peak traffic and running at 30% average utilization is not a cheaper way to buy tokens — it is a
 3x markup on them, paid for the privilege of owning the capacity. Every cut to API list prices
@@ -454,7 +468,7 @@ for a specific SKU; note p4d.24xlarge is 8x A100 40GB and p4de.24xlarge is
 | Total (reserved)      | $28,700/month    |
 +-----------------------+------------------+
 
-Break-even vs Claude Sonnet 5 ($2/$10 per 1M tokens, as of 2026-09-04):
+Break-even vs Claude Sonnet 5.5 ($2/$10 per 1M tokens, as of 2026-10-19):
 Assume 60/40 input/output split, avg 1,500 tokens total per request.
   API cost per 1M tokens:  $2 * 0.6 + $10 * 0.4 = $5.20 / 1M tokens
   Self-hosted cost per 1M tokens: $28,700 / (monthly tokens, in millions)
@@ -482,13 +496,13 @@ is at 184M, so revisit in two quarters."
 | Symbol | What it is |
 |--------|------------|
 | `TCO_month` | The flat monthly self-hosting bill. Does not move with volume. `$28,700` |
-| `r_in`, `r_out` | The two API prices per 1M tokens. `$2.00` and `$10.00` for Sonnet 5 |
+| `r_in`, `r_out` | The two API prices per 1M tokens. `$2.00` and `$10.00` for Sonnet 5.5 |
 | `s_in`, `s_out` | Fraction of your tokens that are input vs output. `0.60` and `0.40` here |
 | `C_blend` | `s_in x r_in + s_out x r_out` — one API price per 1M tokens for your traffic mix |
 | `B` | `TCO_month / C_blend` — tokens per month at which the two bills are equal |
 | `x1M` | Every rate is quoted per 1M tokens, so volumes must be expressed in millions before dividing |
 
-**Walk one example.** The 4x A100 node above, against Claude Sonnet 5:
+**Walk one example.** The 4x A100 node above, against Claude Sonnet 5.5:
 
 ```
 Step 1 -- collapse two API prices into one blended rate for a 60/40 split:
@@ -607,24 +621,25 @@ def deduplicate_chunks(chunks: list[str], embeddings: np.ndarray, threshold: flo
 ### Prompt Caching — Anthropic
 
 Anthropic caching is opt-in: you mark a `cache_control` breakpoint on the content you want cached.
-The minimum cacheable prefix is per-model — 1,024 tokens on Sonnet 5, 512 on Opus 5, 4,096 on
-Haiku 4.5 — and an undersized prefix fails **silently**, with no error and no caching. The default
+The minimum cacheable prefix is per-model (1,024 tokens on Sonnet 5, 512 on Opus 5.5, Sonnet 5.5
+and Haiku 5.5, 4,096 on Haiku 4.5), and an undersized prefix fails **silently**, with no error and no caching. The default
 cache TTL is 5 minutes, refreshed on each access; a 1-hour TTL is available at a higher write price.
-You pay $2.50/1M tokens for a 5-minute cache write (1.25x the standard input rate), then $0.20/1M
-for cache reads (0.1x, i.e. 90% off the $2.00 standard Sonnet 5 rate). Claude Fable 5.1 and Mythos
-5.1 are the one exception to the 0.1x read: they read at 0.025x, $0.25/1M against a $10/1M base. For a RAG system with a
+On Sonnet 5.5 you pay $2.50/1M tokens for a 5-minute cache write (1.25x the standard input rate),
+then $0.10/1M for cache reads (0.05x, i.e. 95% off the $2.00 standard rate). Opus 5.5 also reads at
+0.05x ($0.20/1M), most other models at 0.1x (Sonnet 5: $0.20/1M), and Fable 5.1 and Mythos 5.1 at
+0.025x ($0.25/1M against a $10/1M base). For a RAG system with a
 2,000-token system prompt queried 10,000 times/day:
 
 ```
 Without caching: 2,000 tokens * 10,000 requests * $2.00/1M = $40/day
 With caching (1 write + 9,999 reads):
   Write: 2,000 * $2.50/1M = $0.0050
-  Reads: 2,000 * 9,999 * $0.20/1M = $4.000
-  Total: ~$4.00/day   (90% reduction)
+  Reads: 2,000 * 9,999 * $0.10/1M = $2.000
+  Total: ~$2.00/day   (95% reduction)
 ```
 
 **What this actually says.** "Pay a one-time 25% surcharge to park the prefix in the provider's
-KV cache, then buy it back at a tenth of the price on every request that follows — the surcharge is
+KV cache, then buy it back at a twentieth of the price on every request that follows; the surcharge is
 repaid before the second request finishes."
 
 The framing that matters is *per-prefix, not per-request*. Caching does not make requests cheaper;
@@ -633,10 +648,10 @@ and inside the TTL window.
 
 | Symbol | What it is |
 |--------|------------|
-| `$2.00 / 1M` | Standard Sonnet 5 input rate — what an uncached prefix costs every single time |
+| `$2.00 / 1M` | Standard Sonnet 5.5 input rate, what an uncached prefix costs every single time |
 | `$2.50 / 1M` | Cache-write rate. `1.25 x` standard — the surcharge for storing the prefix |
-| `$0.20 / 1M` | Cache-read rate. `0.10 x` standard — the 90% discount |
-| prefix | The leading span of tokens that is byte-identical across requests. Must reach the model's minimum (1,024 on Sonnet 5) to cache at all |
+| `$0.10 / 1M` | Cache-read rate. `0.05 x` standard, the 95% discount |
+| prefix | The leading span of tokens that is byte-identical across requests. Must reach the model's minimum (512 on Sonnet 5.5) to cache at all |
 | TTL | 5 minutes by default, refreshed on each hit. A gap longer than this forces a re-write. A 1-hour TTL costs 2.0x on write |
 | hit rate | Fraction of requests that find the prefix still cached. `9,999 / 10,000` in the example above |
 
@@ -647,21 +662,21 @@ and inside the TTL window.
 
     uncached      0.002M  x  $2.00 / 1M  =  $0.004000
     cache write   0.002M  x  $2.50 / 1M  =  $0.005000     <- paid once
-    cache read    0.002M  x  $0.20 / 1M  =  $0.000400     <- paid 9,999 times
+    cache read    0.002M  x  $0.10 / 1M  =  $0.000200     <- paid 9,999 times
 
 Daily bill at 10,000 requests:
 
     no caching        10,000  x  $0.004000  =  $40.0000 / day
     with caching           1  x  $0.005000  =  $ 0.0050
-                       9,999  x  $0.000400  =  $ 3.9996
+                       9,999  x  $0.000200  =  $ 1.9998
                                                ----------
-                       total                    $ 4.0046 / day    (90% reduction)
+                       total                    $ 2.0048 / day    (95% reduction)
 
 How many reuses repay the write surcharge:
 
     extra cost of writing  =  $0.005000 - $0.004000  =  $0.001000
-    saving per later hit   =  $0.004000 - $0.000400  =  $0.003600
-    hits needed to break even = $0.001000 / $0.003600 = 0.28
+    saving per later hit   =  $0.004000 - $0.000200  =  $0.003800
+    hits needed to break even = $0.001000 / $0.003800 = 0.26
 
     Fewer than one reuse. If the prefix is read even a single extra time,
     caching has already paid for itself.
@@ -682,7 +697,7 @@ boundary is at the end of the longest repeated prefix.
 OpenAI caches automatically for prompts of 1,024 tokens or more, with no explicit API changes
 required. The cached-input rate is model-dependent: 50% of standard input on GPT-4o ($1.25 vs
 $2.50), but 10% of standard input — a 90% discount — across the GPT-5.x family (for example
-$0.25 vs $2.50 on gpt-5.6-terra). GPT-5.6 and later also charge a 1.25x cache write, where earlier
+$0.20 vs $2.00 on gpt-5.6-terra). GPT-5.6 and later also charge a 1.25x cache write, where earlier
 models wrote for free, and retain a prefix for at least 30 minutes rather than the 5-10 minutes of
 inactivity typical of the earlier in-memory cache. On GPT-5.6 and later, set `prompt_cache_key` to
 get reliable cache matching. The cache operates at the
@@ -789,10 +804,12 @@ on a latency-price ladder, selected by one request field:
 
 | Tier | How you select it | Price vs standard | What you trade |
 |---|---|---|---|
-| Priority (OpenAI) | `service_tier: "priority"` | Premium per token | Lower, more consistent latency; long-context, fine-tuned and embedding models are not supported |
-| Fast mode (Anthropic) | `speed: "fast"` | $10/$50 per 1M on Opus 5 and Opus 4.8, against $5/$25 standard — 2x | Faster output; unavailable with the Batch API |
+| Ultrafast (OpenAI) | `service_tier: "ultrafast"`, gpt-6-astra and gpt-6.1-sol only | 6x standard ($60/$300 per 1M on gpt-6-astra, $12/$60 on gpt-6.1-sol) | OpenAI's fastest tier; separate rate limits from Standard and Fast |
+| Fast mode (OpenAI) | `service_tier: "fast"` (`"priority"` selects the same tier) | 2x standard on GPT-5.6 Sol ($8/$40 per 1M) | Up to 2.5x faster output; fine-tuned and embedding models are not supported |
+| Fast mode (Anthropic) | `speed: "fast"` | 2x standard: $8/$40 per 1M on Opus 5.5 (against $4/$20), $10/$50 on Opus 5 and Opus 4.8 (against $5/$25) | Faster output; unavailable with the Batch API |
 | Standard | default (`service_tier: "auto"`) | 1.0x | The baseline |
 | Flex (OpenAI) | `service_tier: "flex"` | Batch API rates — the same 50% | Synchronous but slower, and capacity is not guaranteed |
+| Flex (Gemini) | `service_tier: "flex"` | 50% ($1/$5 per 1M on gemini-4-argon through 2026-11-30) | 1-15 minute latency target; returns 503 at capacity and never falls back to Standard on its own |
 | Batch | `completion_window: "24h"`, or Message Batches | 50% | Up to 24 hours, no partial results |
 
 Flex is the tier most cost models omit: it prices at batch rates while still answering inside the
@@ -803,12 +820,12 @@ it, so every flex path needs an explicit fallback (exponential backoff, or a ret
 `service_tier: "auto"` and full price) or the job silently stalls. Raise the client timeout too: the
 official SDKs default to 10 minutes, which flex can legitimately exceed.
 
-Priority is not a cost lever and should never be argued for as one — it is a latency purchase, so
-price it against what the latency is worth rather than against the token bill. Two traps: the
-premium applies to every token on that path, and OpenAI documents that priority requests may be
-**downgraded to standard** when traffic ramps more than 50% within 15 minutes at high volume
-(1M TPM and above) — the p99 you paid for reverts during exactly the spike you bought it for. Cache
-discounts still apply on priority requests, and Anthropic's caching multipliers apply on top of
+Fast and Ultrafast are not cost levers. They are latency purchases, so price them against what the
+latency is worth rather than against the token bill. Two traps: the premium applies to every token
+on that path, and OpenAI documents that fast-mode requests may be **downgraded to standard** (the
+response reports `service_tier: "default"`) when traffic above 1M input TPM grows by more than 50%
+within 15 minutes. The p99 you paid for reverts during the spike you bought it for. Cache
+discounts still apply on fast-mode requests, and Anthropic's caching multipliers apply on top of
 fast-mode pricing, so tier selection and caching compose rather than compete.
 
 ### Model Routing with Quality Gate
@@ -861,7 +878,7 @@ effective_output_tokens = visible_output + reasoning_tokens
 reasoning_multiplier    = effective_output_tokens / visible_output
 ```
 
-Worked against this module's own anchor of $2.00/$10.00 per 1M for Sonnet 5, on 1M requests a
+Worked against this module's own anchor of $2.00/$10.00 per 1M for Sonnet 5.5, on 1M requests a
 month with a 2K-token prompt and a 300-token visible answer:
 
 ```
@@ -1017,7 +1034,7 @@ annual saving at their old 200M/day volume would have been only ~$30,000.
 ## 9. When to Use / When NOT to Use
 
 ### Use prompt caching when:
-- System prompt exceeds the provider's per-model minimum (1,024 tokens on OpenAI and Claude Sonnet 5; 512 on Opus 5; 4,096 on Haiku 4.5) and is reused across requests
+- System prompt exceeds the provider's per-model minimum (1,024 tokens on OpenAI and Claude Sonnet 5; 512 on Opus 5.5, Sonnet 5.5 and Haiku 5.5; 4,096 on Haiku 4.5) and is reused across requests
 - RAG system has a stable context prefix
 - Few-shot examples are the same across users
 - You are using Anthropic or OpenAI (the two providers with automatic caching)
@@ -1055,7 +1072,7 @@ annual saving at their old 200M/day volume would have been only ~$30,000.
 ### Do NOT self-host when:
 - Volume is below break-even threshold
 - Team lacks GPU cluster operational experience
-- Frontier model capabilities (gpt-5.6-sol, Claude Opus 5) are required and no open-weight equivalent exists
+- Frontier model capabilities (gpt-6-astra, Claude Opus 5.5) are required and no open-weight equivalent exists
 
 ---
 
@@ -1096,6 +1113,25 @@ round-trip at frontier cost for something a 1B-parameter local model can do in 5
 Any preprocessing, classification, or intent detection step should use the cheapest viable model,
 not the default.
 
+**Building a long-horizon cost model on promotional prices.** Several list prices carry an end
+date. gemini-4-argon doubles from $2/$10 to $4/$20 per 1M on 2026-12-01, gemini-3.8-flash doubles
+from $0.75/$3.75 to $1.50/$7.50 on 2027-01-01 (Flex and Batch double with them), and gpt-5.6-sol's
+$4/$20 promo is guaranteed only through 2026-11-21. A 12-month forecast priced at today's rate
+understates those lines by up to 2x. Store each rate with its end date and price the forecast month
+by month.
+
+**Assuming a refusal is free.** Since 2026-09-24 the Claude API bills a refusal that arrives before
+any output when `stop_details.category` is `"bio"`, `"frontier_llm"` or `"reasoning_extraction"`, at
+the rates of the model that ran it. Mid-stream refusals were already billed; pre-output refusals in
+other categories are not. A pipeline that retries refusals in a loop pays for every attempt, so cap
+retries per request and log `stop_details.category` next to cost.
+
+**One retry policy for every overload error.** OpenAI splits overload into two codes (2026-09-02):
+`429` with code `slow_down` means your traffic ramped too fast, and the fix is to ramp more slowly;
+`503` with code `server_is_overloaded` means the model is overloaded, and the fix is to back off.
+Both can carry `Retry-After`, and when it is present the client must wait at least that long.
+Immediate retries on `slow_down` add to the ramp that caused it.
+
 **Treating the LLM budget as a single engineering cost.** LLM costs are product costs — they scale
 directly with usage. Unlike server infrastructure, which can be right-sized once, LLM costs grow
 with every new user and every new feature. Enforce per-feature cost budgets during product planning,
@@ -1107,7 +1143,7 @@ not after the bill arrives.
 
 | Tool | Category | Purpose | Notes |
 |---|---|---|---|
-| tiktoken | Token counting | OpenAI tokenizer | Exact count before sending. `encoding_for_model` only maps model IDs it already knows — the newest families (gpt-5.6, gpt-5.4) raise `KeyError` as of tiktoken 0.13.0, so call `get_encoding("o200k_base")` explicitly for them |
+| tiktoken | Token counting | OpenAI tokenizer | Exact count before sending. `encoding_for_model` only maps model IDs it already knows. tiktoken 0.14.0 maps the `gpt-5` prefix (so every gpt-5.x ID) to `o200k_base`, but gpt-6 IDs still raise `KeyError`; call `get_encoding("o200k_base")` explicitly for them |
 | LiteLLM | Proxy / abstraction | Unified API across 100+ providers; built-in cost tracking | Key tool for multi-provider routing |
 | Helicone | Observability | Request logging, cost attribution, prompt management | SaaS; self-hostable |
 | Portkey | Observability + routing | Cost tracking, fallback routing, semantic caching | Strong multi-provider support |
@@ -1118,6 +1154,7 @@ not after the bill arrives.
 | Redis | Caching backend | Exact cache for deterministic prompts; token budget enforcement | Standard infrastructure |
 | OpenAI Batch API | Cost reduction | 50% discount, 24h SLA | Native to OpenAI; no client changes needed |
 | Anthropic Message Batches | Cost reduction | 50% discount for offline workloads | Anthropic's batch equivalent |
+| OpenAI GPT-6 family | Model tiers | gpt-6-astra $10/$50, gpt-6-sol and gpt-6.1-sol $2/$10, gpt-6-luna $0.10/$0.50 per 1M | 1,050,000-token window; above 272K input the request bills at 2x input and 1.5x output |
 | LangSmith | Observability | LangChain-native cost and latency tracking | Tight LangChain integration |
 
 ---
@@ -1127,8 +1164,8 @@ not after the bill arrives.
 **Q: How do input and output token costs differ, and what does this imply for prompt design?**
 **Short:** Output tokens cost 4-6x more than input tokens across major providers, so generation length is the dominant cost lever, not prompt length.
 Output tokens cost 4-6x more than input tokens across all major providers. GPT-4o charges $2.50/1M
-input vs $10.00/1M output (4x); Claude Sonnet 5 is $2/$10 (5x) and OpenAI's gpt-5.6-terra is
-$2.50/$15.00 (6x). This means generation length is the dominant cost driver, not prompt
+input vs $10.00/1M output (4x); Claude Sonnet 5.5 is $2/$10 (5x) and OpenAI's gpt-5.6-terra is
+$2/$12 (6x). This means generation length is the dominant cost driver, not prompt
 length. Concise output instructions ("respond in under 150 words"), structured extraction instead
 of free-form prose, and explicit max_tokens limits all target the expensive side. Do not over-index
 on prompt compression at the expense of ignoring output verbosity.
@@ -1160,8 +1197,9 @@ cache hit rate?**
 **Short:** OpenAI caches automatically above 1,024 tokens while Anthropic needs an explicit cache_control breakpoint; both require static content placed first, byte-identical, before dynamic content.
 The two providers differ in who opts in and how big the discount is. OpenAI caches automatically for
 prompts of 1,024 tokens or more; Anthropic requires an explicit `cache_control` breakpoint and
-enforces a per-model minimum (512 on Opus 5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5) that fails
-silently when unmet. Anthropic discounts cache reads by 90% (0.1x input) and charges 1.25x on a
+enforces a per-model minimum (512 on Opus 5.5 and Sonnet 5.5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5)
+that fails silently when unmet. Anthropic discounts cache reads by 90% (0.1x input) on most models
+and 95% (0.05x) on Opus 5.5 and Sonnet 5.5, and charges 1.25x on a
 5-minute write; OpenAI's cached-input discount is 50% on GPT-4o and 90% on the GPT-5.x family. The
 Anthropic TTL is 5 minutes by default (1 hour available at a 2.0x write), and OpenAI retains a
 prefix for 5-10 minutes of inactivity on pre-5.6 models and at least 30 minutes on 5.6 and later,
@@ -1199,19 +1237,19 @@ backfills, the workloads that are too patient for real-time pricing and too impa
 window. The tradeoff is capacity rather than latency alone: when there is none, flex returns
 `429 Resource Unavailable` and does not charge you, so a flex path needs an explicit fallback —
 exponential backoff, or a retry at `service_tier: "auto"` and full price — plus a client timeout
-above the SDK's 10-minute default. In the other direction, priority processing
-(`service_tier: "priority"`) and Anthropic's fast mode (`speed: "fast"`, $10/$50 per 1M on Opus 5
-against $5/$25 standard) buy lower latency at a premium; both are latency purchases to justify
-against revenue, never cost optimizations, and priority requests can be downgraded to standard when
-traffic ramps more than 50% within 15 minutes at high volume.
+above the SDK's 10-minute default. In the other direction, OpenAI's fast mode
+(`service_tier: "fast"`, 2x standard on GPT-5.6 Sol) and Anthropic's fast mode (`speed: "fast"`,
+$8/$40 per 1M on Opus 5.5 against $4/$20 standard) buy lower latency at a premium; both are latency
+purchases to justify against revenue, never cost optimizations, and OpenAI fast-mode requests can be
+downgraded to standard when traffic ramps more than 50% within 15 minutes above 1M TPM.
 
 **Q: What does a data-residency requirement cost per token, and how does it interact with prompt
 caching?**
-**Short:** Anthropic's `inference_geo: "us"` multiplies every token category by 1.1x and compounds with cache discounts, so a nominally 90%-off cached read is really only 89% off.
+**Short:** Anthropic's `inference_geo: "us"` multiplies every token category by 1.1x and compounds with cache discounts, so a nominally 95%-off Sonnet 5.5 cached read is really 94.5% off.
 On the first-party Claude API, `inference_geo: "us"` applies a 1.1x multiplier to every token
 category — input, output, cache writes and cache reads. Residency is therefore a flat 10% tax rather
 than a fixed fee, and because it composes multiplicatively with the caching multipliers, a cache
-read on a US-pinned Sonnet 5 is `0.1 x 1.1 x $2.00 = $0.22/1M` and your "90% off" is really 89%.
+read on a US-pinned Sonnet 5.5 is `0.05 x 1.1 x $2.00 = $0.11/1M` and your "95% off" is really 94.5%.
 Partner clouds price it separately: on Bedrock and Google Cloud, regional and multi-region endpoints
 carry a 10% premium over global endpoints for Sonnet 4.5, Haiku 4.5, Opus 4.5 and later. Two
 operational consequences. Global routing is the default, so pinning everything "to be safe" pays the
@@ -1230,11 +1268,11 @@ do not eliminate the gap. If you operate multilingually, measure tokens-per-char
 on your actual traffic and build per-language cost models rather than one global average.
 
 **Q: When does prompt caching lose money, given the cache-write premium?**
-**Short:** A written-but-never-reread cache entry costs 25% more than skipping caching, but break-even arrives at roughly 1.3 reuses of the same prefix within the TTL.
+**Short:** A written-but-never-reread cache entry costs 25% more than skipping caching, but on Sonnet 5.5 break-even arrives at about 1.26 uses of the same prefix within the TTL.
 Anthropic bills cache writes at a 25% premium over standard input ($2.50 vs $2.00 per 1M tokens
-on Sonnet 5). A prefix that is written but never re-read within the TTL therefore costs
+on Sonnet 5.5). A prefix that is written but never re-read within the TTL therefore costs
 25% more than not caching at all. Break-even arithmetic for N uses of the same prefix: uncached cost
-scales as 2.00 × N, cached cost as 2.50 + 0.20 × (N − 1); the lines cross at N ≈ 1.3, so a single
+scales as 2.00 × N, cached cost as 2.50 + 0.10 × (N − 1); the lines cross at N ≈ 1.26, so a single
 reuse within the ~5-minute TTL already profits. Caching loses money only for genuinely unique
 prefixes (per-request dynamic content mistakenly marked cacheable) or very sparse traffic where
 entries always expire before reuse. Watch the ratio of cache_creation to cache_read tokens — a
@@ -1262,6 +1300,18 @@ of production queries, rigorous offline evaluation of the cheap model on the "si
 and monitoring of user satisfaction signals (thumbs down, escalation rate) by route. A safe
 starting point is routing only a subset (e.g., the highest-confidence simple queries) and expanding
 gradually.
+
+**Q: How do you choose between gpt-6-astra, gpt-6-sol and gpt-6-luna for one task?**
+**Short:** Compare cost per successful task, not per token: Astra costs 5x Sol and 100x Luna per token, so it pays only when its higher pass rate saves more than the price gap in retries or review.
+Per 1M tokens, gpt-6-astra is $10/$50, gpt-6-sol $2/$10 and gpt-6-luna $0.10/$0.50, all with a
+1,050,000-token window. For a task with 20K input and 2K output tokens that is $0.30, $0.06 and
+$0.003 per attempt. Divide by the pass rate on your own eval set: Sol at 80% costs $0.075 per
+success, Astra at 95% costs $0.32. Astra wins only when a failure carries a cost the token bill
+does not show, such as a human review at $2 per failed task (Sol: $0.075 + 0.20 x $2 = $0.475;
+Astra: $0.32 + 0.05 x $2 = $0.42). Count reasoning tokens in the output column, because effort
+level moves them more than model choice does, and note that Astra has no `none` effort level, so
+every Astra call pays for some reasoning. The usual result is Luna for classification and
+extraction, Sol for most agent steps, and Astra for the steps whose failures escalate to people.
 
 **Q: How do you enforce per-user or per-feature token budgets?**
 **Short:** Estimate tokens pre-call with tiktoken and do an atomic Redis increment-and-check against the budget key, reconciling against actual usage after the call.

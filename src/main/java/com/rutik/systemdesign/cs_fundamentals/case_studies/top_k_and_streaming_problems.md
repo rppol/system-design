@@ -426,7 +426,7 @@ from typing import List
 
 def top_k_frequent_BROKEN(nums: List[int], k: int) -> List[int]:
     counts = Counter(nums)
-    # Build a max-heap by negating frequencies (Python has min-heap only)
+    # Max-heap by negating frequencies (heapq.heappush_max needs Python 3.14+)
     max_heap = [(-freq, elem) for elem, freq in counts.items()]
     heapq.heapify(max_heap)          # O(d) heapify — but heap has d elements
     result = []

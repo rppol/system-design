@@ -1,6 +1,6 @@
 # Apache Flink
 
-> **Version anchor (2026-08-26).** **Apache Flink 2.3.0** (released **2026-06-25**) is the
+> **Version anchor (2026-10-19).** **Apache Flink 2.3.0** (released **2026-06-25**) is the
 > current stable release on the 2.x line, alongside the bugfix releases **2.2.1**
 > (2026-05-15) and **2.1.3** (2026-06-14) on their own minor lines. **Flink 1.20** is the
 > maintained Long-Term-Support branch on the 1.x line, with **1.20.5** released
@@ -10,10 +10,11 @@
 > APIs, `SourceFunction`/`SinkFunction`/Sink V1, `TableSource`/`TableSink`, and the legacy
 > flat `flink-conf.yaml` (replaced by a structured `config.yaml`), while requiring Java 11 as
 > the minimum runtime. It also introduced **ForSt**, Flink's disaggregated state backend
-> (§6.4), and the asynchronous execution model built on it. **Apache Flink CDC 3.6.0**
-> (released 2026-03-31) is the current stable release of the separate, now fully
-> ASF-governed CDC framework (§6.7). Version-gated behavior is tagged inline as `[2.0]`,
-> `[2.3]`, `[CDC 3.x]`, and so on; anything untagged is stable across the 2.x line.
+> (§6.4), and the asynchronous execution model built on it. **Apache Flink CDC 3.7.0**
+> (released 2026-10-10) is the stable release of the separate, ASF-governed CDC framework
+> (§6.7). The **Flink Kubernetes Operator** is at **1.16.1**, on the 1.16 line announced
+> 2026-09-15 (§6.11), supporting Flink 1.19.x to 2.3.x. Version-gated behavior is tagged
+> inline as `[2.0]`, `[2.3]`, `[CDC 3.7]`, `[Operator 1.16]`, and so on; anything untagged is stable across the 2.x line.
 
 Apache Flink is a distributed engine for **stateful** computation over unbounded and bounded
 data streams — the word "stateful" is the whole point of this page, and §1 opens on exactly
@@ -673,7 +674,9 @@ replication log *into* a Flink job with no Kafka hop in between — lower latenc
 fewer moving part when Flink is the only consumer, at the cost of the database's replication
 slot now being held open by a Flink job instead of a dedicated, purpose-built CDC service.
 Both share the same underlying log-based capture mechanics that Debezium's own page owns in
-full.
+full. `[CDC 3.7]` adds SQL Server and Apache Fluss pipeline sources, OpenAI-compatible model
+calls (completion, classification, embeddings and others) inside YAML transform expressions
+with an experimental ordered async mode, and Python UDFs defined inline in the pipeline YAML.
 
 ### 6.8 Restart strategies and failover regions
 
@@ -787,6 +790,19 @@ since Flink 1.18, changes parallelism without a full stop-and-restore-from-savep
 which is what makes autoscaling responsive enough to react to real load swings rather than
 only correcting yesterday's provisioning mistake on tomorrow's manual deploy.
 
+**What Operator 1.16 changed `[Operator 1.16]`.** The autoscaler now rounds a computed
+parallelism with `job.autoscaler.scaling.parallelism-alignment.mode`, default `BALANCED`:
+it takes the first parallelism that reduces per-subtask load and tolerates mild key-group
+skew, and when no aligned value fits it applies the computed target instead of vetoing the
+rescale. The previous default, `EVENLY_SPREAD` (via the deprecated
+`scaling.key-group.partitions.adjust.mode`), blocked such rescales, so after an upgrade a
+job that used to sit still can start rescaling. Three SPIs make the decision pluggable:
+FLIP-514 custom evaluators reinterpret collected metrics, FLIP-575 scaling executors can
+veto, gate or adjust a proposed rescale before it runs (a change-freeze window, a cost
+cap), and FLIP-586 makes alignment modes pluggable. Pod resources move to standard
+Kubernetes `ResourceRequirements`, replacing the operator's own `resource` fields and
+adding separate requests and limits, ephemeral storage and extended resources such as GPUs.
+
 ### 6.12 `maxParallelism` and key groups
 
 Every keyed stream is internally partitioned into a fixed number of **key groups** —
@@ -806,6 +822,110 @@ realistically anticipated future parallelism (Flink's own default heuristic mult
 the initial parallelism to leave headroom), since raising it later is exactly as
 disruptive as any other incompatible state change, while an unnecessarily high value costs
 only a small, fixed amount of metadata overhead per checkpoint.
+
+### 6.13 Materialized Tables: one DDL, streaming or batch refresh
+
+A **Materialized Table** `[1.20]` (FLIP-435) is a table defined by a query plus a **freshness**
+target. Flink derives the schema from the query and builds and runs the refresh pipeline
+itself, so the same statement can become a streaming job or a scheduled batch job without
+the author writing either.
+
+```sql
+CREATE MATERIALIZED TABLE dwd_orders
+  PARTITIONED BY (ds)
+  WITH ('partition.fields.ds.date-formatter' = 'yyyy-MM-dd')
+  FRESHNESS = INTERVAL '1' HOUR          -- target lag, not a guarantee
+  -- REFRESH_MODE = FULL                 -- optional, overrides inference
+AS SELECT o.ds, o.order_id, o.amount, p.pay_status
+   FROM orders o LEFT JOIN payments p ON o.order_id = p.order_id;
+```
+
+```mermaid
+flowchart LR
+    ddl([CREATE MATERIALIZED TABLE<br/>FRESHNESS = F]) --> mode{"REFRESH_MODE<br/>set?"}
+    mode -->|"yes"| explicit([use it])
+    mode -->|"no"| cmp{"F below threshold<br/>(default 30 min)?"}
+    cmp -->|"yes"| cont([CONTINUOUS<br/>streaming job<br/>checkpoint interval = F])
+    cmp -->|"no"| full([FULL<br/>batch job every F<br/>embedded scheduler])
+    classDef in fill:#3d4451,stroke:#61afef,color:#e6e6e6
+    classDef dec fill:#3d4451,stroke:#c678dd,color:#e6e6e6
+    classDef stream fill:#3d4451,stroke:#98c379,color:#e6e6e6
+    classDef batch fill:#3d4451,stroke:#e5c07b,color:#e6e6e6
+    class ddl,explicit in
+    class mode,cmp dec
+    class cont stream
+    class full batch
+```
+
+The threshold is `materialized-table.refresh-mode.freshness-threshold` (default 30 minutes);
+an omitted `FRESHNESS` defaults to 3 minutes in CONTINUOUS mode
+(`materialized-table.default-freshness.continuous`) and 1 hour in FULL mode
+(`materialized-table.default-freshness.full`). The two modes cost very different things:
+
+| | CONTINUOUS | FULL |
+|---|---|---|
+| What runs | one long-lived streaming job | a batch job per cycle, triggered by the SQL Gateway's embedded scheduler |
+| Freshness becomes | the checkpoint interval | the schedule (a cron cycle) |
+| State | keyed state for joins and aggregates, held between runs | none between runs |
+| Write pattern | incremental upserts; visibility follows the sink's commit (often the checkpoint) | overwrite of the whole table, or only the latest partition when a `date-formatter` is set |
+| FRESHNESS values | any positive interval | must divide its unit: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20 or 30 seconds or minutes; 1, 2, 3, 4, 6, 8 or 12 hours; 1 day |
+
+Three operational facts decide whether this is usable. Materialized tables must be created
+through the **SQL Gateway** (it also hosts the `workflow-scheduler.type: embedded` scheduler
+for FULL mode), and the catalog must support them; the 2.3 deployment guide names only the
+**Paimon** catalog. `ALTER MATERIALIZED TABLE ... SUSPEND` stops a CONTINUOUS job with a
+savepoint, so `execution.checkpointing.savepoint-dir` must be set, and `RESUME` restores it.
+And `ALTER MATERIALIZED TABLE ... AS <new query>` on a CONTINUOUS table starts a new job from
+the beginning **without restoring state**, so changing the query of a join over a large topic
+means a full reprocess. `ALTER ... REFRESH PARTITION (ds = '2026-10-18')` runs a one-off
+batch backfill of one partition in either mode.
+
+### 6.14 Apache Fluss as Flink's streaming storage
+
+**Apache Fluss** ("Flink Unified Streaming Storage") started in Alibaba Cloud's Flink team
+in July 2023, was open-sourced in November 2024, entered the ASF Incubator in June 2025,
+graduated to a top-level project (ASF board approval July 2026, announced **2026-08-06**) and shipped **1.0 on 2026-09-21**. It sits
+where Kafka usually sits in a Flink pipeline, but it stores tables rather than byte
+records:
+
+- **Log tables** are append-only streams stored in Apache Arrow columnar format, so the
+  server applies column projection, predicate pushdown and partition pruning before data
+  crosses the network. A Flink job reading 3 columns of a 60-column event stream fetches
+  those 3, where a Kafka consumer fetches and deserializes all 60.
+- **Primary-key tables** keep the current row per key in a RocksDB-backed KV store on the
+  tablet servers and emit a changelog (`$changelog`, `$binlog` virtual tables). A Flink job
+  can run a temporal lookup join (`FOR SYSTEM_TIME AS OF`) against one with sub-millisecond
+  point lookups, instead of holding the dimension table in its own keyed state.
+- **Lakehouse tiering** runs as a Flink job that compacts and commits Fluss data into
+  Paimon, Iceberg, Hudi (`[Fluss 1.0]`) or Lance, and a **union read** serves hot data
+  from Fluss and cold history from the lake in one query.
+
+The architectural point for Flink is state size. A streaming join that today keeps both
+sides in RocksDB state (§6.4) can instead look up a Fluss primary-key table, so the job's
+state, checkpoint size and restore time shrink to what the join itself needs. The cost is a
+second storage system with its own coordinator and tablet servers to run, and a far
+smaller connector and tooling ecosystem than Kafka's, so it fits best where Flink is both
+the main writer and the main reader.
+
+### 6.15 Flink Agents: event-driven AI agents on the Flink runtime
+
+**Apache Flink Agents** is a Flink sub-project for agents that react to event streams
+instead of chat turns: 0.1.0 shipped 2025-10-15, 0.2.0 on 2026-02-06 and **0.3.0 on
+2026-06-19** (bug fix 0.3.1 on 2026-07-25). It has Java and Python APIs, Workflow agents
+(explicit actions triggered by event types) and ReAct agents (the model picks tools), chat
+model, embedding and vector-store integrations, tools and prompts served from MCP servers,
+and short-term and long-term memory (Mem0-backed `[Agents 0.3]`).
+
+What Flink adds over a Python agent loop is the runtime: agents run keyed and parallel like
+any Flink operator, every action and its events land in an event log, and action results are
+kept **exactly-once** by combining Flink checkpoints with an external action-state store
+(Kafka, or Fluss `[Agents 0.3]`), so a restore does not call the model or the tool a second
+time. A side effect already in flight at a crash can be reconciled through a durable block's
+reconciler callback `[Agents 0.3]`. The 0.3.0 announcement calls the release a **preview**
+with experimental APIs and configuration, lists breaking changes from 0.2 (actions listen on
+event-type strings, the chat model signature changed), and defers API compatibility
+commitments to 1.0. Treat it as a design to evaluate, not a dependency for a production
+pipeline that has to survive upgrades.
 
 ---
 
@@ -1093,7 +1213,8 @@ this page can be adjusted with a routine savepoint restore; this one cannot.
 
 | Tool | What it does |
 |---|---|
-| Flink CDC | ASF project embedding log-based database CDC sources directly as Flink sources. |
+| Flink CDC | ASF project embedding log-based database CDC sources directly as Flink sources. 3.7.0 adds SQL Server and Fluss pipeline sources, AI model calls inside YAML transforms, and inline Python UDFs. |
+| Apache Fluss | Top-level ASF project (graduation announced 2026-08-06; 1.0 on 2026-09-21): streaming storage built for Flink, with log tables and primary-key tables that a job can look up and update, tiered into a lakehouse format. |
 | Debezium | Log-based CDC connector family Flink jobs can also consume from Kafka. |
 | Apache Kafka | The most common source and sink for Flink streaming jobs. |
 | Confluent Schema Registry | Schema management Flink connectors use for Avro/Protobuf formats. |
@@ -1205,6 +1326,18 @@ Kafka Streams is a library embedded directly in your JVM application; "the clust
 **Short:** When the real need is a materialized view maintained incrementally, not arbitrary stateful compute — it trades Flink's generality for a database's smaller footprint.
 A streaming database exposes a Postgres-compatible SQL surface over incrementally maintained materialized views, so the operational unit is a database you query directly, not a job you deploy, checkpoint-tune, and monitor with Flink's own tooling — for a genuinely SQL-shaped set of streaming aggregations and joins, that's a large reduction in what a team has to learn and operate. The tradeoff is programmability: nothing in a streaming database's SQL surface reaches ProcessFunction-level custom stateful logic, arbitrary timers, or non-relational state machines, so any requirement that steps outside "maintain this view" pushes back toward Flink. The practical rule: default to a streaming database when the workload really is a handful of well-defined incremental SQL views, and reach for Flink when the logic needs custom code, broad job diversity across many teams, or capabilities (CEP, arbitrary windowing, broadcast joins) a streaming database's SQL surface doesn't expose.
 
+**Q: A Materialized Table declared with `FRESHNESS = INTERVAL '1' HOUR` was meant to be a streaming pipeline, but no streaming job appears. Why?**
+**Short:** With no `REFRESH_MODE`, a freshness at or above `materialized-table.refresh-mode.freshness-threshold` (default 30 minutes) selects FULL mode: a scheduled batch overwrite.
+Flink infers the refresh mode from the freshness target. Below the threshold it starts one CONTINUOUS streaming job whose checkpoint interval equals the freshness; at or above it, the SQL Gateway's embedded scheduler runs a batch job every cycle that overwrites the table, or only the latest partition when `partition.fields.#.date-formatter` is set. FULL mode also accepts only freshness values that divide their unit, so a 45-minute or 5-hour freshness without an explicit mode fails at `CREATE` instead of silently going to batch. Set `REFRESH_MODE = CONTINUOUS` explicitly when the pipeline must be streaming, or lower the freshness; and remember that changing a CONTINUOUS table's query with `ALTER ... AS` restarts the job from the beginning without its state.
+
+**Q: When does a Flink job gain from reading an Apache Fluss primary-key table instead of a compacted Kafka topic?**
+**Short:** When the job joins against a large, changing dimension: Fluss serves keyed point lookups, so the job stops holding that table in its own RocksDB state and checkpoints.
+A compacted Kafka topic can only be replayed, so a join against it forces the Flink job to rebuild and keep the whole dimension in keyed state, which grows checkpoint size and restore time with the table. A Fluss primary-key table keeps the latest row per key on its tablet servers and answers a temporal lookup join (`FOR SYSTEM_TIME AS OF`) directly, while also emitting a changelog for jobs that need the stream. Fluss log tables add Arrow-columnar storage with server-side projection, so a job reading a few columns does not fetch the rest. The price is another stateful system to operate, announced as a top-level ASF project only on 2026-08-06, with 1.0 on 2026-09-21, and a smaller ecosystem than Kafka's. Choose it where Flink owns both ends of the data; keep Kafka where many non-Flink consumers share the stream.
+
+**Q: Why would a team build an LLM agent on Apache Flink Agents rather than a plain Python agent loop, and what stops them using it for production today?**
+**Short:** Flink Agents gives event-driven agents keyed parallelism, an event log and exactly-once action results through checkpoints, but 0.3 is a preview with experimental APIs.
+An agent that reacts to every order, alert or sensor event is a streaming job, so Flink's runtime fits it: actions run per key in parallel, each action and event is logged, and action results are stored in an action-state store (Kafka, or Fluss since 0.3) tied to Flink checkpoints, so recovery does not repeat a model or tool call. Durable blocks can register a reconciler for side effects that were in flight at a crash. The project shipped 0.1.0 on 2025-10-15 and 0.3.0 on 2026-06-19, and the 0.3.0 announcement calls it a preview whose APIs may change incompatibly, with breaking changes from 0.2 and compatibility promises deferred to 1.0. Prototype on it if the workload is event-driven; pin the version and budget for API churn before running it on a critical path.
+
 **Q: What replaced the removed `SourceFunction`/`SinkFunction` interfaces, and what does the replacement actually change functionally?**
 **Short:** `Source`/`Sink` V2, which unify batch and streaming source/sink implementations under one interface instead of requiring separate ones per execution mode.
 The old `SourceFunction`/`SinkFunction` model required largely separate implementations for streaming versus the (now-removed) DataSet batch API, duplicating connector logic; the `Source`/`Sink` V2 interfaces (`FLIP-27`/`FLIP-143`) are execution-mode-agnostic, letting one connector implementation serve both `STREAMING` and `BATCH` execution modes on the unified DataStream API, with split enumeration, checkpointed reader state, and unified metric reporting built into the interface itself rather than bolted on per-connector. A team maintaining a custom connector against the old interfaces has to migrate to `Source`/`Sink` V2 to run on 2.x at all — there is no compatibility shim, consistent with §1's removed-not-deprecated framing for everything else in this table.
@@ -1280,6 +1413,9 @@ Hand-rolled Kubernetes manifests can deploy a Flink cluster, but every operation
 - **Assign an explicit `.uid()` to every stateful operator, on day one, and never change it
   for that operator's lifetime.** Enforce it with a CI check rather than a code-review
   reminder — §10.3's incident is what happens when this is left to memory.
+- **Set `REFRESH_MODE` explicitly on every Materialized Table** rather than relying on the
+  30-minute freshness threshold, and set `execution.checkpointing.savepoint-dir` so
+  `SUSPEND` can take its savepoint (§6.13).
 - **Couple `execution.checkpointing.interval` and any two-phase-commit sink's transaction
   timeout as a single setting.** Changing one without reviewing the other is exactly how
   §6.5's and §10.2's incidents happen; size the timeout for worst-case checkpoint duration,

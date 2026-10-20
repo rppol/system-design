@@ -807,6 +807,19 @@ reproduction and never in production.
 showed 2.1 GB while the process held 5.4 GB. `?gc=1` forces a collection first. It costs one
 GC cycle and removes an entire class of confusion.
 
+**8. Diffing profiles across the Go 1.27 toolchain bump.**
+
+Go 1.27 names function literals the same way whether or not the enclosing function was
+inlined. Before it, a closure inlined into a caller carried a long name built from that
+inlining chain. A `-diff_base` between a 1.26 build and a 1.27 build therefore shows closures
+vanishing under the old names and reappearing under new ones, which reads as a large
+regression and a matching improvement that cancel out. The compiler can also merge copies of
+one closure from several inlined call sites into a single symbol, so per-call-site cost that
+used to be split now sums into one node. Take the before and after profiles on the same
+toolchain when measuring a code change, and when measuring the toolchain bump itself compare
+by enclosing function (`-focus` on the parent, or `top -cum`) rather than by closure name.
+Any test or alert that matches a `func1` symbol name needs updating.
+
 ---
 
 ## 11. Technologies & Tools

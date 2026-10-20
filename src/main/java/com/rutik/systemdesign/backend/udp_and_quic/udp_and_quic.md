@@ -322,6 +322,50 @@ Now apply QUIC's rule to the same shot:
 
 **Why the cap is `3` and not `1`.** A `1x` cap would forbid the server from ever sending more than it received, which breaks the legitimate handshake — the server's certificate chain alone is several KB against a small ClientHello. `3x` is the smallest multiple that still lets a real TLS handshake complete in one flight, which is why RFC 9000 picked it rather than something rounder. Without it, QUIC servers would be exactly as attractive a reflector as open DNS resolvers.
 
+### 6.5 QUIC CPU Cost and Kernel Offloads (UDP GSO, GRO, Pacing)
+
+TCP gets decades of kernel and NIC help: an application hands the kernel 64 KB in one `send()`, TSO (TCP segmentation offload) cuts it into MTU-sized packets on the NIC, and GRO/LRO merge received packets before the stack sees them. A naive QUIC server gets none of that. Every 1,200-byte packet is one `sendmsg()`, one full trip down the UDP/IP stack, one AEAD encryption plus header protection in user space, and every ACK is parsed in user space too.
+
+Measured cost:
+
+- Cloudflare (quiche in NGINX, Linux 5.3, h2load fetching a 100 MB file 10 times): one `sendmsg()` per packet topped out at 80-90 MB/s and made 904,539 `sendmsg()` calls. With UDP GSO the same transfer needed 18,824 calls, about 48x fewer, and throughput rose sharply; GSO plus `sendmmsg()` was faster still.
+- Zhang et al., "QUIC is not Quick Enough over Fast Internet" (WWW 2024): on fast links the UDP + QUIC + HTTP/3 stack delivered up to 45.2% lower data rate than TCP + TLS + HTTP/2, and the gap grew with bandwidth. The cause was receiver-side processing: too many small packets and user-space ACK handling.
+
+**UDP GSO (`UDP_SEGMENT`, Linux 4.18).** The sender passes one large buffer plus a segment size, either as a socket option or per call as a `cmsg`. The kernel walks the stack once and splits the buffer into datagrams at the bottom, in software or on a NIC that supports UDP segmentation offload (`ethtool -k eth0 | grep tx-udp-segmentation`). Every segment except the last must be exactly `gso_size` bytes, and one call carries up to 64 segments (128 from Linux 6.9, `UDP_MAX_SEGMENTS`).
+
+```
+  without GSO: 40 packets of 1,200 B
+    app ---sendmsg---> UDP -> IP -> qdisc -> driver     x 40 syscalls, 40 stack walks
+
+  with GSO: one 48,000 B buffer, gso_size = 1,200
+    app ---sendmsg---> UDP -> IP -> qdisc -> driver     x 1 syscall, 1 stack walk
+                                                |
+                                       split into 40 datagrams
+                                       (kernel or NIC USO)
+```
+
+**UDP GRO (`UDP_GRO` socket option, Linux 5.0).** The receive-side mirror: the kernel coalesces consecutive datagrams of one flow into a single large buffer and reports the segment size in a `cmsg`, so `recvmsg()` returns dozens of packets at once. It cuts per-packet stack cost on receive, which is the bottleneck the WWW 2024 paper found; `recvmmsg()` cuts only the syscall count.
+
+**Pacing.** RFC 9002 tells QUIC senders to pace rather than burst a whole congestion window. GSO pulls the other way: a full GSO batch leaves the NIC back to back at line rate. Production stacks reconcile the two by capping the batch size and giving each batch a send time: `SO_TXTIME` (Linux 4.19) with the `fq` qdisc, which honours earliest departure times from Linux 4.20, holds each GSO batch until its timestamp, or `SO_MAX_PACING_RATE` lets `fq` pace the socket as a whole.
+
+| Lever | What it removes | Where |
+|---|---|---|
+| `sendmmsg()` / `recvmmsg()` | Syscalls only; each datagram still walks the stack | Linux 3.0+ |
+| UDP GSO (`UDP_SEGMENT`) | Send-side stack walks; NIC USO moves segmentation to hardware | Linux 4.18+ |
+| UDP GRO (`UDP_GRO`) | Receive-side stack walks | Linux 5.0+ |
+| `SO_TXTIME` + `fq` | Bursts from large GSO batches | Linux 4.20+ |
+| ACK frequency extension (`draft-ietf-quic-ack-frequency`) | ACK packets the peer must send and you must parse | Implementation support varies |
+| AES-GCM with AES-NI / VAES | Per-packet crypto cost | CPU and TLS library |
+
+### 6.6 Debugging QUIC: qlog and qvis
+
+The TCP debugging kit does not work on QUIC. `tcpdump` sees encrypted payloads and encrypted packet numbers, and `ss -ti` shows nothing because congestion window, RTT, and loss state live inside the user-space library. Two replacements:
+
+- **qlog** (`draft-ietf-quic-qlog-main-schema-14` plus the QUIC event definitions in `draft-ietf-quic-qlog-quic-events-13`, both Internet-Drafts, not RFCs) is a structured event log written by the endpoint itself: `quic:packet_sent`, `quic:packet_received`, `quic:packet_lost`, and `quic:recovery_metrics_updated` events carrying `congestion_window`, `bytes_in_flight`, and `smoothed_rtt`. quiche and quic-go write one file per connection when `QLOGDIR` is set, and ngtcp2's example client and server take `--qlog-dir`; the files are JSON text sequences (`.sqlog`).
+- **qvis** (`qvis.quictools.info`) loads qlog files and draws the packet sequence diagram, the congestion-window and RTT graph over time, and per-stream multiplexing, which shows head-of-line blocking or a flow-control stall directly.
+
+For wire-level checks, set `SSLKEYLOGFILE` on the client and give the key log to Wireshark, which then decrypts the QUIC frames. qlog answers "what did the stack decide"; the decrypted capture answers "what was on the wire".
+
 ---
 
 ## 7. Real-World Examples
@@ -350,7 +394,7 @@ Now apply QUIC's rule to the same shot:
 | 0-RTT | Faster on resumption | Replay attack risk |
 | Connection migration | Mobile continuity | Increased server state |
 | Encrypted headers | Reduces middlebox ossification | Cannot use transparent proxies |
-| User-space | Fast protocol evolution | Higher CPU than kernel TCP |
+| User-space | Fast protocol evolution | Higher CPU than kernel TCP: up to 45.2% lower data rate than TCP + TLS + HTTP/2 on fast links (Zhang et al., WWW 2024) until GSO, GRO, and pacing offloads are on (§6.5) |
 
 ---
 
@@ -407,6 +451,8 @@ The two questions that actually decide the protocol are loss tolerance and wheth
 
 **QUIC blocked by enterprise firewalls**: Many enterprise firewalls block UDP on port 443 or rate-limit UDP. QUIC clients must fall back to TCP gracefully. Google's GQUIC had a 3-second fallback timer — causing worse performance than TCP-only when QUIC is blocked. Proper QUIC implementations detect QUIC-blocking quickly and fall back without the user noticing.
 
+**Running a QUIC server without UDP GSO and GRO**: A server that sends one 1,200-byte datagram per `sendmsg()` pays one syscall, one stack walk, and one encryption per packet. In Cloudflare's test that meant 904,539 `sendmsg()` calls for 1 GB, against 18,824 with GSO. Check that the QUIC library enables `UDP_SEGMENT` and `UDP_GRO`, that the kernel is 5.0 or later, and that the container or VM network path does not disable them, before concluding HTTP/3 is slower than HTTP/2.
+
 **UDP socket reuse without SO_REUSEPORT**: Multiple threads cannot read from the same UDP socket without external locking. Use SO_REUSEPORT to create per-thread sockets all bound to the same port. Kernel distributes packets using a 4-tuple hash.
 
 ---
@@ -422,14 +468,27 @@ The two questions that actually decide the protocol are loss tolerance and wheth
 | `ngtcp2` | QUIC transport library |
 | Nginx (1.25+) | HTTP/3 support via QUIC |
 | Envoy Proxy | HTTP/3 / QUIC support |
-| Netty | Java NIO with UDP; experimental QUIC support |
+| Netty | Java NIO with UDP; QUIC codec (`netty-codec-classes-quic`) in core since 4.2.1 and HTTP/3 (`netty-codec-http3`) since 4.2.2 |
 | Wireshark | QUIC dissector (decrypts with key log file) |
+| qlog | Endpoint-written QUIC event log (`QLOGDIR` in quiche and quic-go, `--qlog-dir` in ngtcp2's examples) |
+| qvis | Browser visualizer for qlog: sequence diagram, congestion graph, stream multiplexing |
+| `ethtool -k` | Shows whether the NIC offers UDP segmentation offload (`tx-udp-segmentation`) |
 | `QUIC Tracker` | QUIC interoperability test suite |
 | `curl --http3` | HTTP/3 client testing |
 
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: Your HTTP/3 endpoint delivers less throughput than HTTP/2 on the same server and uses more CPU. Why, and what fixes it?**
+**Short:** A naive QUIC stack pays a syscall, a stack walk, and user-space crypto and ACK work per 1,200-byte packet; UDP GSO, UDP GRO, and paced batches remove most of that.
+
+TCP sends 64 KB per `send()` and the NIC segments it (TSO), while GRO merges received packets, so the kernel stack runs once per large buffer. QUIC in user space without offloads runs the whole UDP/IP path, AEAD encryption, and header protection for every datagram, and parses every ACK in user space. Zhang et al. (WWW 2024) measured up to 45.2% lower data rate than TCP + TLS + HTTP/2 on fast links, caused by receiver-side packet and ACK processing. The fixes: UDP GSO (`UDP_SEGMENT`, Linux 4.18) to send up to 64 segments per call (128 from Linux 6.9), which cut Cloudflare's `sendmsg()` count about 48x; UDP GRO (`UDP_GRO`, Linux 5.0) to coalesce on receive; `SO_TXTIME` with `fq` to pace those batches; and the ACK frequency extension where both peers support it. `recvmmsg()` alone helps less because each datagram still walks the stack.
+
+**Q: How do you debug a slow QUIC connection when tcpdump and ss show nothing useful?**
+**Short:** Turn on qlog in the QUIC library (QLOGDIR in quiche and quic-go) and open the file in qvis; decrypt captures in Wireshark with SSLKEYLOGFILE when you need the wire view.
+
+QUIC encrypts its packet numbers and frames, so `tcpdump` cannot see ACKs or retransmissions, and congestion state lives in the user-space library, so `ss -ti` has nothing to report. qlog (`draft-ietf-quic-qlog-main-schema` and `draft-ietf-quic-qlog-quic-events`, both Internet-Drafts) is the endpoint's own structured log of `quic:packet_sent`, `quic:packet_received`, `quic:packet_lost`, and `quic:recovery_metrics_updated` events with `congestion_window`, `bytes_in_flight`, and `smoothed_rtt`; quiche and quic-go write it per connection when `QLOGDIR` is set, and ngtcp2's examples take `--qlog-dir`. qvis turns it into a packet sequence diagram, a congestion and RTT graph, and a stream multiplexing view, which shows whether the stall was loss, a flow-control limit, or the application not reading. For on-wire verification, export `SSLKEYLOGFILE` from the client and load it into Wireshark.
 
 **Q: What does UDP provide that IP does not?**
 **Short:** UDP adds only port-based multiplexing and a payload checksum on top of what IP already provides.
@@ -520,6 +579,8 @@ QUIC enforces flow control at two levels — MAX_DATA for the whole connection a
 - Enable QUIC/HTTP/3 on public-facing APIs with a graceful fallback to HTTP/2 for clients where UDP is blocked.
 - Never use 0-RTT QUIC for non-idempotent operations; treat 0-RTT data like an HTTP GET.
 - Use recvmmsg() for high-throughput UDP receivers (>1 Gbps).
+- For a QUIC server, confirm UDP GSO (`UDP_SEGMENT`) and GRO (`UDP_GRO`) are on and pace GSO batches with `SO_TXTIME` and the `fq` qdisc.
+- Turn on qlog (`QLOGDIR`, or `--qlog-dir` for ngtcp2) in staging and for sampled production connections; it is the only view of QUIC congestion state.
 - Implement application-level heartbeats over UDP to detect silent connection loss (no FIN/RST in UDP).
 - When implementing custom protocols over UDP, handle reordering, duplication, and loss explicitly.
 

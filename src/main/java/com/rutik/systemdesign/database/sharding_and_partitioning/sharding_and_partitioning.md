@@ -291,8 +291,8 @@ VTTablet:
   - Query rewriting (adding shard filters)
   - Metrics and health checks
 
-MoveTables:
-  - Online re-sharding without downtime
+Reshard (VReplication workflow):
+  - Online re-sharding without downtime (MoveTables moves tables between keyspaces)
   - Copies data from source shards to target shards
   - VReplication tracks change stream from source
   - Cutover = brief read-only window + atomic routing switch
@@ -314,6 +314,26 @@ MoveTables:
   }
 }
 ```
+
+### Postgres Sharding: Extension vs Proxy
+
+Postgres has two ways to shard, and they put the routing logic in different places.
+
+**Extension (Citus).** Every node runs Postgres with the Citus extension. A coordinator holds the distribution metadata, plans each query with a distributed planner, and pushes joins and aggregates down to the workers; colocated tables join on the worker without moving rows. The cost is that every node must run the extension, so you can only use a host or managed service that ships Citus, and each Postgres major upgrade waits for a matching Citus release.
+
+**Proxy or router (the Vitess model).** A router speaks the Postgres wire protocol, parses each statement, and sends it to unmodified Postgres shards. A query with the shard key goes to one shard; any other query fans out and the router merges the rows in its own memory.
+
+- **PgDog** (Rust, AGPL-3.0, v0.1.62 on 16 October 2026): a connection pooler, load balancer, and sharder in one process. It shards by hash, list, or range using Postgres's own partition functions, or by schema, can run cross-shard commits as two-phase commit, and reshards online with logical replication. Its README lists AWS RDS as a supported target, which an extension cannot reach.
+- **Multigres** (Go, Apache-2.0, v0.1.0 on 30 May 2026): a Vitess adaptation for Postgres, still at its first release.
+- **PlanetScale Neki** (platform preview from 10 September 2026, not for production workloads): a router in front of real Postgres shards, each one primary and at least two replicas, with resharding, online schema changes, and version upgrades run as online workflows behind one connection string. It is built for Postgres by the Vitess maintainers, not a Vitess fork, and a database can run unsharded until it needs to split.
+
+| | Extension (Citus) | Proxy (PgDog, Multigres, Neki) |
+|---|---|---|
+| Where routing runs | Inside Postgres, on the coordinator | In a separate router tier |
+| Shard nodes | Postgres plus the extension | Stock Postgres, including managed services |
+| Cross-shard joins and aggregates | Planned and pushed down by the distributed planner | Merged in the router; SQL coverage is narrower |
+| Extra network hop | Coordinator to worker | Client to router |
+| Upgrade coupling | Waits for a Citus release | Router and Postgres upgrade on their own schedules |
 
 ### Hotspot Problem and Solutions
 
@@ -595,6 +615,9 @@ Both schemes prune to the same handful of rows for a one-day query; only the pla
 |-----------------|----------------------------------------------|---------------------------
 | Vitess          | MySQL sharding middleware                    | Shopify, YouTube-scale MySQL
 | Citus           | PostgreSQL sharding extension                | Multi-tenant PostgreSQL
+| PgDog           | Postgres pooler, load balancer and sharding proxy (Rust, AGPL-3.0) | Sharding stock or managed Postgres
+| Multigres       | Vitess adaptation for Postgres (Go, Apache-2.0, v0.1.0) | Vitess-style Postgres sharding
+| PlanetScale Neki | Managed sharded Postgres behind a router (platform preview, September 2026) | Managed Postgres sharding without an extension
 | pg_partman      | Automatic partition management (PG)          | Time-based partition creation/dropping
 | ProxySQL        | MySQL query routing + read/write split       | MySQL connection routing
 | Amazon DynamoDB | Managed sharded key-value store              | Serverless, auto-scaling
@@ -616,9 +639,9 @@ Use `tenant_id` as the shard key. All data belonging to a tenant is co-located o
 Consistent hashing maps both keys and nodes to a circular ring using a hash function. A key is assigned to the first node clockwise on the ring. When a node joins or leaves, only the keys between it and its predecessor move. Without virtual nodes (3 physical nodes = 3 points on the ring), ring arcs are unequal in size, causing uneven data distribution. With 150 virtual nodes per physical node, each physical node has 150 random positions, making arc lengths statistically uniform. Adding a new node means giving it virtual nodes taken evenly from all existing nodes, moving ~1/N of total data with each addition.
 
 **Q: How does Vitess enable online resharding without downtime?**
-**Short:** Vitess MoveTables backfills and streams the binlog to new shards, then cuts traffic over in a brief window.
+**Short:** The Vitess Reshard workflow backfills and streams the binlog to new shards via VReplication, then cuts traffic over in a brief window.
 
-Vitess MoveTables copies data from source shards to target shards in the background using VReplication (which reads the MySQL binlog as a change stream). During the copy: (1) Historical data is bulk-copied. (2) Incremental changes are captured via binlog and applied to target. (3) Once the target catches up (lag < 1 second), a brief "traffic cutover" switches reads and writes to the new shards. The cutover involves a short read-only window (typically < 5 seconds) to drain in-flight transactions, then atomically updating VTGate's routing table. The old shards are kept for a rollback window before being decommissioned.
+The Vitess `Reshard` workflow copies data from source shards to target shards in the background using VReplication (which reads the MySQL binlog as a change stream). During the copy: (1) Historical data is bulk-copied. (2) Incremental changes are captured via binlog and applied to target. (3) Once the target catches up (lag < 1 second), a brief "traffic cutover" switches reads and writes to the new shards. The cutover involves a short read-only window (typically < 5 seconds) to drain in-flight transactions, then atomically updating VTGate's routing table. The old shards are kept for a rollback window before being decommissioned. `MoveTables` is the sibling VReplication workflow that moves whole tables from one keyspace to another (for example, splitting a table out of an unsharded keyspace into a sharded one), rather than changing a keyspace's shard count.
 
 **Q: What is the celebrity shard problem and how do you handle it?**
 **Short:** A celebrity shard problem is handled with dedicated replicas, write fan-out, caching, or precomputed feed pushes.
@@ -674,6 +697,11 @@ Options: (1) UUID v4 (random): guaranteed globally unique, no coordination neede
 **Short:** Citus extends PostgreSQL with a coordinator and worker nodes that distribute and colocate sharded tables.
 
 Citus is a PostgreSQL extension (now open source, by Microsoft) that transforms PostgreSQL into a distributed database. A Citus cluster has one coordinator node and N worker nodes. The coordinator stores table distribution metadata (shard key → worker node mapping). Tables are distributed across workers using hash or range distribution. Queries arrive at the coordinator, which creates a distributed execution plan, sends sub-queries to the relevant worker nodes, and aggregates results. Colocation groups ensure that tables sharded on the same key store matching rows on the same worker, enabling co-located joins without cross-node data transfer. Citus is particularly popular for multi-tenant SaaS workloads where `tenant_id` is the distribution column.
+
+**Q: When would you shard Postgres with a proxy such as PgDog or Neki instead of the Citus extension?**
+**Short:** Choose a proxy when shards must stay stock or managed Postgres; choose Citus when you need cross-shard joins and aggregates planned inside the database.
+
+The difference is where routing runs. Citus runs inside Postgres: the coordinator's distributed planner pushes joins and aggregates to workers and joins colocated tables locally, so analytical cross-shard SQL works well. The price is that every node must run the extension, which rules out managed services that do not ship it and ties each Postgres major upgrade to a Citus release. A proxy (PgDog, Multigres, PlanetScale Neki) parses the wire protocol and routes to unmodified Postgres, so it works in front of RDS or any other host and upgrades on its own schedule. Its limits: a query without the shard key fans out and the router merges rows in its own memory, cross-shard SQL coverage is narrower, and atomic cross-shard writes need two-phase commit (PgDog supports it as an option). Pick a proxy for OLTP traffic where nearly every query carries the shard key; pick Citus for multi-tenant analytics that join across shards. Maturity matters too: PgDog is at v0.1.x, Multigres at v0.1.0, and Neki is in a platform preview that PlanetScale says not to use for production workloads.
 
 **Q: How does re-sharding differ from initial sharding?**
 **Short:** Consistent hashing turns re-sharding into small incremental additions instead of one costly mod-N doubling.

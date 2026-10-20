@@ -385,7 +385,7 @@ Target: 3-5 primary metrics monitored at high frequency (score distribution, PSI
 | Tool | Purpose | Strengths | Notes |
 |---|---|---|---|
 | Evidently AI | Drift monitoring + reports | PSI, KS, data quality checks; HTML reports; Grafana plugin | Open source; production-ready |
-| WhyLabs (whylogs) | Logging + drift profiling | Lightweight logging library; cloud aggregation | Sends to WhyLabs cloud; open core. The whylogs repo has had no upstream commits since January 2025 — check maintenance status before adopting |
+| whylogs | Logging + drift profiling | Lightweight statistical profiles, Apache-2.0 | Do not start new work on it: WhyLabs, the company behind it, has wound down, so there is no hosted aggregation, and the last PyPI release is 1.6.4 (2024-12-03) |
 | Arize AI | Drift + performance monitoring | Schema inference, embedding drift, SHAP-over-time | Managed SaaS |
 | Great Expectations | Data quality validation | Schema checks, value range, column statistics | Training pipeline validation gate |
 | Prometheus + Grafana | Metrics collection + visualization | Time series alerts, custom metrics | Infrastructure monitoring; add ML metrics |

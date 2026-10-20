@@ -8,7 +8,7 @@ Structured outputs refers to the pattern of forcing LLM responses to conform to 
 
 Two mechanisms exist for structured outputs: (1) native structured output APIs (OpenAI `response_format={"type": "json_schema", ...}`, Anthropic [tool use](../agents_and_tool_use/agents_and_tool_use.md)), which constrain the model at the token sampling level; and (2) prompt-based parsing (ask the model to output JSON, parse the response), which is less reliable.
 
-**Current versions**: instructor 1.15.x, openai 1.x with GA structured outputs (`chat.completions.parse` / `responses.parse`)
+**Current versions** (PyPI, 2026-10-18): instructor 1.17.0, openai 3.35.1 with GA structured outputs (`chat.completions.parse` / `responses.parse`)
 **Production adoption signal**: Instructor reports 3M+ monthly downloads and 10K+ GitHub stars. The pattern is used in virtually every production LLM application that extracts structured information.
 
 ---
@@ -46,7 +46,7 @@ Two mechanisms exist for structured outputs: (1) native structured output APIs (
 | Mode | Mechanism | Reliability | Model Support |
 |------|-----------|------------|---------------|
 | `TOOLS` | OpenAI function calling | High | Any OpenAI model with tool calling |
-| `JSON_SCHEMA` | OpenAI structured outputs (strict) | Highest | Current GPT-5.x line |
+| `JSON_SCHEMA` | OpenAI structured outputs (strict) | Highest | GPT-5.x and GPT-6 models |
 | `JSON` | OpenAI JSON mode (prompt + parse) | Medium | Any OpenAI chat model |
 | `ANTHROPIC_TOOLS` | Anthropic tool use | High | Claude Sonnet 5 / Opus 5 / Haiku 4.5 |
 | `GEMINI_JSON` | Gemini response_mime_type | High | Current Gemini line |
@@ -519,7 +519,7 @@ Changing a Pydantic model field name or type is a breaking change for any persis
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `instructor` | Pydantic + LLM extraction | 1.15.x; one syntax across OpenAI, Anthropic, Gemini, Ollama |
+| `instructor` | Pydantic + LLM extraction | 1.17.0; one syntax across OpenAI, Anthropic, Gemini, Ollama |
 | `pydantic` v2 | Schema definition + validation | Required for instructor; v2 for performance |
 | `openai` SDK | Native structured outputs | `chat.completions.parse`, or `responses.parse` on the Responses API |
 | `anthropic` SDK | Anthropic tool use | `instructor.from_provider("anthropic/claude-sonnet-5")` |
@@ -529,8 +529,8 @@ Changing a Pydantic model field name or type is a breaking change for any persis
 | `jsonschema` | Schema validation without Pydantic | Lightweight alternative |
 
 **Version notes:**
-- Instructor 1.15.x is the current line. `instructor.from_provider("openai/gpt-5.6-terra")` is the unified constructor — one call for every provider, and `async_client=True` returns the async variant. The per-provider constructors (`from_openai(OpenAI())`, `from_anthropic(Anthropic())`) still work and are what you will see in most existing code.
-- OpenAI native structured outputs are available on the current GPT-5.x models; use `client.chat.completions.parse` (Chat Completions) or `client.responses.parse` (Responses API). Both are GA — no `beta.` namespace.
+- Instructor 1.17.0 (2026-09-09) is the current release. `instructor.from_provider("openai/gpt-5.6-terra")` is the unified constructor — one call for every provider, and `async_client=True` returns the async variant. The per-provider constructors (`from_openai(OpenAI())`, `from_anthropic(Anthropic())`) still work and are what you will see in most existing code.
+- OpenAI native structured outputs are available on the GPT-5.x and GPT-6 models (for example `gpt-6.1-sol`); use `client.chat.completions.parse` (Chat Completions) or `client.responses.parse` (Responses API). Both are GA — no `beta.` namespace.
 
 ---
 

@@ -76,7 +76,7 @@ not a query wait, and not covered further here):
 | `IO` | A physical I/O operation to complete | `DataFileRead`, `WalWrite`, `DataFileSync` | The storage layer itself — disk latency, not contention |
 | `IPC` | Coordination with another PostgreSQL process | `SyncRep`, `BufferIo`, `CheckpointDone` | Cross-process handoffs — a synchronous replica acknowledging, or waiting on another backend's I/O |
 | `Client` | Activity on the socket to the client application | `ClientRead`, `ClientWrite` | Usually **not a database problem** — the server is waiting on the application or the network, not the other way around |
-| `BufferPin` | Exclusive access to a buffer another session has pinned | `BufferPin` | An open cursor or a long-held reference holding a page pinned, blocking a `VACUUM` or an index operation |
+| `BufferPin` (`Buffer` in 19 `[19]`) | Exclusive access to a buffer another session has pinned | `BufferPin` (`BufferCleanup` in 19) | An open cursor or a long-held reference holding a page pinned, blocking a `VACUUM` or an index operation |
 | `Timeout` | A timeout expiring on purpose | `VacuumDelay`, `PgSleep` | Usually benign — throttling, not contention |
 | `Extension` | A condition defined by a loaded extension module | (extension-specific) | Investigate the specific extension; PostgreSQL core has no visibility into what it means |
 
@@ -527,7 +527,10 @@ currently has pinned — commonly caused by a long-open cursor or a reference he
 multiple statements without releasing it. It is a common, easy-to-miss cause of a stalled
 `VACUUM` or index operation: the vacuum or reindex needs the buffer released to proceed, and
 a session that pinned it and then went idle (rather than crashing or erroring visibly) can
-block it indefinitely with no obvious error anywhere.
+block it indefinitely with no obvious error anywhere. PostgreSQL 19 renames the type to
+`Buffer` and the pin wait to `BufferCleanup`, and moves buffer content-lock waits into the
+same type as `BufferExclusive` and `BufferShared` `[19]`, so a dashboard filter on
+`wait_event_type = 'BufferPin'` returns nothing after the upgrade.
 
 **Q: What does the `Client` wait event type mean, and why is a high proportion of it
 usually not a database problem?**
@@ -606,7 +609,11 @@ heap scans, and `VACUUM`. `io_method` selects the mechanism — `sync` keeps the
 blocking behavior, `worker` (the default) dispatches reads to a pool of background I/O
 worker processes, and `io_uring` submits them directly to the Linux kernel's `io_uring`
 interface on a supported build. `io_workers` (default 3) sets the size of that worker pool
-and only takes effect when `io_method = worker`.
+and only takes effect when `io_method = worker`. PostgreSQL 19 replaces the fixed pool with
+one that scales between `io_min_workers` and `io_max_workers` (see
+[`postgresql_internals`](../postgresql_internals/postgresql_internals.md) §11.1), and adds
+`EXPLAIN (ANALYZE, IO)`, which reports per scan node the prefetch distance, the number and
+average size of I/O requests, and the number of I/O waits `[19]`.
 
 **Q: Why does comparing `io_method` values in a benchmark require holding every other
 variable constant?**

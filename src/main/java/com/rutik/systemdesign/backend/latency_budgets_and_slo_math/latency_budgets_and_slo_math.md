@@ -403,7 +403,7 @@ That single definition makes latency and availability spend the *same* budget, w
 
 ## 10. Common Pitfalls
 
-**Every timeout was 30 seconds (real, 4-hour full outage).** A payments platform used the framework default everywhere. A read replica became slow — not down, slow, roughly 8 seconds per query. Because every tier waited 30 seconds, nothing failed fast: the checkout service's 200 Tomcat threads filled in 25 seconds, the gateway's connection pool to checkout filled next, and the outage propagated *upward* to services that never touched the replica. Total customer-facing outage: 4 hours 10 minutes, versus the roughly 90 seconds the degraded replica would have caused on its own.
+**Every timeout was 30 seconds (illustrative composite, 4-hour full outage).** A payments platform used the framework default everywhere. A read replica became slow — not down, slow, roughly 8 seconds per query. Because every tier waited 30 seconds, nothing failed fast: the checkout service's 200 Tomcat threads filled in 25 seconds, the gateway's connection pool to checkout filled next, and the outage propagated *upward* to services that never touched the replica. Total customer-facing outage: 4 hours 10 minutes, versus the roughly 90 seconds the degraded replica would have caused on its own.
 
 ```yaml
 # BROKEN: copy-pasted defaults. Nothing here relates to the 200ms SLO,

@@ -171,6 +171,36 @@ DETR uses a CNN backbone + FPN for feature extraction, then feeds flattened feat
 **Speed**: DETR-R50 achieves ~28 fps on V100.
 **mAP**: 42.0 on COCO val2017.
 
+### NMS-Free Detection: YOLOv10 and YOLO26
+
+NMS has two costs in production: its runtime grows with the number of candidate boxes, and its IoU threshold is a hyperparameter that fails in crowded scenes (Pitfall 1). DETR removed NMS with one-to-one Hungarian matching, but YOLO-style detectors used one-to-many label assignment, which gives each object several positive anchors and so needs NMS at inference. YOLOv10 (Wang et al., NeurIPS 2024) trains two heads with **consistent dual assignments**: a one-to-many head that supplies dense supervision during training and a one-to-one head, matched with the same metric, that is the only head used at inference. Each object then produces one box and NMS is removed. YOLO26 (Ultralytics, January 2026) keeps both heads at inference and removes the Distribution Focal Loss (DFL) head, which simplifies export to TensorRT, CoreML, and edge runtimes. Its `predict`, `val`, and `export` default to the one-to-many head with NMS for accuracy; pass `nms=False` to run the one-to-one head with no NMS, which costs about 0.6 mAP (YOLO26-L: 55.0 with NMS, 54.4 end-to-end).
+
+### Real-Time DETRs: RT-DETR, D-FINE, RF-DETR
+
+The DETR lineage now competes with YOLO on latency, with NMS-free output and Apache-2.0 code.
+
+- **RT-DETR** (Baidu, CVPR 2024) uses an efficient hybrid encoder and IoU-aware query selection to reach real-time speed.
+- **D-FINE** (ICLR 2025) replaces fixed box regression with **Fine-grained Distribution Refinement**: each decoder layer refines a probability distribution over the offset of each box edge, and **Global Optimal Localization Self-Distillation** distills the final layer's distributions into earlier layers.
+- **RF-DETR** (Roboflow, ICLR 2026) builds on LW-DETR with a DINOv2 backbone and uses weight-sharing neural architecture search to produce a family of sizes from one training run. The DINOv2 backbone is why it transfers well to small custom datasets.
+
+COCO val2017 numbers below are from Roboflow's RF-DETR README, measured by Roboflow on an NVIDIA T4 with TensorRT FP16 at batch size 1. They are vendor-measured, so rerun them on your own hardware and data before choosing.
+
+| Model | COCO AP50:95 | T4 latency (ms) | Params (M) | License |
+|-------|--------------|-----------------|------------|---------|
+| YOLO26-S | 47.7 | 2.6 | 9.4 | AGPL-3.0 or Ultralytics Enterprise |
+| RF-DETR-S | 53.0 | 3.5 | 32.1 | Apache 2.0 |
+| D-FINE-M | 55.0 | 5.4 | 19.2 | Apache 2.0 |
+| YOLO26-L | 54.1 | 5.7 | 25.3 | AGPL-3.0 or Ultralytics Enterprise |
+| RF-DETR-L | 56.5 | 6.8 | 33.9 | Apache 2.0 |
+| D-FINE-X | 59.3 | 11.5 | 62.0 | Apache 2.0 |
+| RF-DETR-2XL | 60.1 | 17.2 | 126.9 | PML 1.0 (Roboflow) |
+
+Not every checkpoint in a family shares a license: RF-DETR's N to L sizes are Apache 2.0, while its Atto, Femto, Pico, XL, and 2XL sizes need the `rfdetr_plus` extension under Roboflow's PML 1.0, and D-FINE checkpoints pretrained on Objects365 carry that dataset's terms.
+
+### Licensing: AGPL-3.0 versus Apache 2.0
+
+Ultralytics YOLO code and weights (YOLOv8, YOLO11, YOLO26) are dual-licensed: AGPL-3.0 or a paid Ultralytics Enterprise License. AGPL-3.0 is copyleft with a network clause (section 13): if users interact with a modified version over a network, they must be offered its complete source. Ultralytics states that integrating its software or models into commercial products, internal tools, or production services needs the Enterprise License unless the whole product is released under AGPL-3.0. Apache 2.0 (RT-DETR, D-FINE, RF-DETR N to L, Detectron2, torchvision, MMDetection) allows closed-source commercial use with attribution and a patent grant. For a closed commercial product, the license decision comes before the accuracy comparison: either budget the Enterprise License or start from an Apache-2.0 detector.
+
 ### Anchor-Free: FCOS
 
 FCOS (Fully Convolutional One-Stage) predicts, at each foreground pixel, the distance to the four sides of the ground-truth box: (l, r, t, b). A centerness branch suppresses low-quality boxes near object boundaries, partially replacing NMS. No anchor hyperparameters to tune.
@@ -745,8 +775,10 @@ Note the enclosing-box term is also what makes GIoU slower to converge early (th
 | Faster R-CNN R50-FPN | ~5 fps | 37.4 | No | No | High accuracy, offline |
 | YOLOv8-N (nano) | ~500 fps | 37.3 | Yes | No | Edge/mobile |
 | YOLOv8-L (large) | ~100 fps | 52.9 | Yes | No | Real-time production |
+| YOLO26-N (nano) | ~590 fps (T4 TensorRT) | 40.1 e2e | Yes | Yes | Edge/mobile, CPU |
+| YOLO26-L (large) | ~160 fps (T4 TensorRT) | 54.4 e2e | Yes | Yes | Real-time production default |
 | DETR-R50 | ~28 fps | 42.0 | Yes | Yes | Crowded scenes |
-| DINO-Det Swin-L | ~6 fps | 63.3 | Yes | No | SOTA accuracy |
+| DINO-Det Swin-L | ~6 fps | 63.3 | Yes | Yes | SOTA accuracy |
 
 | Loss | Advantage | Disadvantage |
 |------|-----------|--------------|
@@ -760,7 +792,7 @@ Note the enclosing-box term is also what makes GIoU slower to converge early (th
 
 **Use Faster R-CNN when**: accuracy is paramount and throughput can be 1-10 fps (medical imaging, satellite analysis, quality control where each image is high-value).
 
-**Use YOLOv8 when**: real-time is required (robotics, drone tracking, security cameras, sports analytics). Default starting point for most production detection systems.
+**Use a one-stage YOLO (YOLO26 for new work) when**: real-time is required (robotics, drone tracking, security cameras, sports analytics). Default starting point for most production detection systems.
 
 **Use DETR when**: scenes have heavily overlapping objects where NMS fails, or when you want a cleaner end-to-end pipeline without anchor and NMS hyperparameters.
 
@@ -785,17 +817,23 @@ An engineer resized images from 1920x1080 to 640x640 using cv2 but did not scale
 **Pitfall 5: Batch size too small for detection training**
 Detection models with FPN and RPN are sensitive to batch normalization statistics. Training with batch size 1–2 (common when GPU memory is limited) causes noisy BN estimates. Fix: use Synchronized BN across GPUs, or freeze BN and use Group Normalization, or use gradient accumulation to simulate larger batches.
 
+**Pitfall 6: Shipping an AGPL-3.0 detector inside a closed product**
+A startup fine-tuned YOLO11 with the `ultralytics` package and served it behind a paid API. During due diligence for an acquisition, the buyer's counsel flagged that the AGPL-3.0 network clause applied to the modified training and inference code and that Ultralytics requires an Enterprise License for closed commercial use. The deal paused until the team bought a license, which they could have avoided by retraining RF-DETR or D-FINE (Apache 2.0) at a similar accuracy and latency. Fix: record the license of every model, checkpoint, and training library in the model card at project start, and treat a license change as a design decision.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Use Case | Notes |
 |------|----------|-------|
-| Ultralytics YOLOv8 | Training & inference | Best DX for production YOLOv8 |
+| Ultralytics (YOLO26, YOLO11, YOLOv8) | Training & inference | Best DX for production YOLO; YOLO26 ships in `ultralytics` 8.4.0+ |
 | Detectron2 (Meta) | Research, Faster R-CNN | Flexible but steep learning curve |
 | torchvision.models.detection | Faster R-CNN, SSD, FCOS | Good for quick baselines |
 | MMDetection | 50+ detector zoo | Research standard for fair comparison |
 | DETR / DINO-Det | Transformer detectors | Official repos on GitHub |
+| RF-DETR (`rfdetr`) | Real-time DETR with DINOv2 backbone; detection and segmentation | Apache 2.0 for N to L sizes; PML 1.0 for Plus sizes |
+| D-FINE | Real-time DETR with distribution refinement | Apache 2.0; Objects365-pretrained checkpoints carry dataset terms |
+| RT-DETR | Baidu real-time DETR | Apache 2.0 |
 | ONNX + TensorRT | Production deployment | 2-4x speedup over PyTorch eager |
 | Roboflow | Dataset management, annotation | Auto-formats to YOLO/COCO JSON |
 | FiftyOne | Dataset visualization, analysis | Visualize mAP, confusion matrix |
@@ -816,6 +854,11 @@ The RPN is a small fully convolutional network that slides a 3x3 window over the
 **Q: Why does YOLO divide the image into a grid? What is a limitation of this approach?**
 **Short:** YOLO assigns each grid cell responsibility for objects whose center falls inside it, but this causes missed detections when multiple same-class object centers collide in one cell.
 YOLO assigns responsibility for detecting an object to the grid cell that contains the object's center. Each cell predicts B bounding boxes and C class probabilities simultaneously in one forward pass, making the model very fast. The limitation is that each cell can predict at most one object per scale, causing missed detections when multiple objects of the same class have overlapping centers — this is called the grid cell collision problem and is partially mitigated by multi-scale prediction in YOLOv3+.
+
+**Q: Your team wants YOLO26 in a closed-source commercial product. What do you check first?**
+**Short:** The license: Ultralytics YOLO is AGPL-3.0 or a paid Enterprise License, so either budget the license or pick an Apache-2.0 detector such as RF-DETR or D-FINE.
+
+Ultralytics code and weights are dual-licensed under AGPL-3.0 or its Enterprise License. AGPL-3.0's network clause requires offering complete source to users who interact with a modified version over a network, and Ultralytics states that closed commercial deployment needs the Enterprise License. Apache-2.0 alternatives at similar latency exist: on Roboflow's T4 TensorRT FP16 benchmark, RF-DETR-L reaches 56.5 COCO AP at 6.8 ms against YOLO26-L at 54.1 AP and 5.7 ms. Check per-checkpoint licenses too, since RF-DETR's Plus sizes use PML 1.0 and Objects365-pretrained D-FINE weights carry that dataset's terms.
 
 **Q: What is the Hungarian algorithm and why does DETR use it?**
 **Short:** The Hungarian algorithm finds the minimum-cost one-to-one bipartite match between predictions and ground truths, letting DETR skip NMS and anchor heuristics entirely.
@@ -869,6 +912,16 @@ COCO (Common Objects in Context) is the primary detection benchmark with 80 obje
 **Short:** Two-stage detectors first propose regions then classify them for higher accuracy on small objects, while one-stage detectors predict directly for much higher speed.
 Two-stage detectors first generate region proposals and then classify each one, while one-stage detectors predict boxes and classes directly in a single pass over a dense grid. Two-stage models like Faster R-CNN are more accurate on small and overlapping objects because the second stage refines a focused set of proposals, but they run at only ~5 fps. One-stage models like YOLO, SSD, and RetinaNet are far faster (100+ fps) and lean on focal loss to fight the massive background imbalance, trading a few mAP points for speed. Choose two-stage for offline high-accuracy work and one-stage for real-time.
 
+**Q: How does YOLOv10 remove NMS while keeping YOLO's dense training signal?**
+**Short:** Consistent dual assignments: a one-to-many head gives dense supervision in training, a one-to-one head matched by the same metric is used alone at inference, so each object yields one box.
+
+One-to-many assignment gives each object several positive predictions, which trains fast but produces duplicates that NMS must remove. One-to-one assignment, as in DETR, produces one prediction per object but gives sparse supervision and slow training. YOLOv10 trains both heads on a shared backbone and uses the same matching metric for both so their rankings agree. At inference only the one-to-one head runs, so there are no duplicates and no NMS. YOLO26 ships both heads: the default path still runs NMS, and `nms=False` selects the one-to-one head, which removes the NMS IoU threshold and the NMS step from the export graph.
+
+**Q: What does D-FINE change about box regression compared with predicting four coordinates?**
+**Short:** It predicts a probability distribution over each box edge's offset and refines it layer by layer, then distills the last layer's distributions into earlier layers.
+
+A standard detector regresses four numbers per box, and an L1 or IoU loss pushes them toward the target. D-FINE's Fine-grained Distribution Refinement has each decoder layer output a distribution over offsets for each of the four edges, and each later layer refines the previous one's distribution rather than predicting from scratch. Global Optimal Localization Self-Distillation then uses the final layer's refined distributions as soft targets for earlier layers. The distribution carries localization uncertainty, which helps on blurred or occluded edges, and the distillation adds accuracy at no inference cost.
+
 **Q: Why does DETR converge slowly and how does Deformable DETR fix it?**
 **Short:** DETR needs about 500 epochs because global attention and Hungarian matching are slow to stabilize; Deformable DETR's sparse key-point sampling cuts that to about 50.
 DETR needs roughly 500 training epochs because its global attention must learn from scratch which image regions each object query should attend to. The Hungarian matching is also unstable early in training, and dense self-attention over every feature token is expensive at high resolution. Deformable DETR replaces dense attention with deformable attention that samples a small set of key points per query, cutting training to about 50 epochs and markedly improving small-object AP.
@@ -877,7 +930,7 @@ DETR needs roughly 500 training epochs because its global attention must learn f
 
 ## 13. Best Practices
 
-1. Start with YOLOv8 pretrained on COCO for any real-time application. It has the best speed/accuracy tradeoff and the simplest training API as of 2024.
+1. Start with YOLO26 (Ultralytics 8.4.0+, January 2026) pretrained on COCO for any real-time application. It drops DFL, and exporting with `nms=False` gives an NMS-free graph that simplifies TensorRT and edge export; YOLO26-L reaches 54.4 COCO mAP end-to-end at 6.2 ms on a T4.
 2. Use GIoU or CIoU loss for box regression instead of Smooth L1 — faster convergence and higher mAP, especially for oddly-shaped or non-overlapping boxes during early training.
 3. Validate anchor sizes before training: run k-means clustering (k=9) on your training set box dimensions and compare to the default COCO anchors. Mismatched anchors can cost 5–10 mAP points.
 4. Apply mosaic augmentation (YOLOv5+): randomly combines 4 training images into one, exposing the model to objects at non-standard scales and positions. Improves small object AP significantly.

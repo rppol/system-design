@@ -327,6 +327,46 @@ sequenceDiagram
 
 Neither session ever sees the other's write before committing, because both take the same snapshot (`COUNT = 2`) — the fix is SERIALIZABLE isolation or an explicit `SELECT ... FOR UPDATE` lock.
 
+### Adya's Anomaly Taxonomy (G0 to G2)
+
+The ANSI phenomena (dirty read, non-repeatable read, phantom) are defined by lock behavior on single items, and they cannot describe write skew or most bugs that MVCC engines actually ship. Atul Adya's 1999 thesis (and Adya, Liskov and O'Neil, ICDE 2000) instead defines anomalies as cycles in a dependency graph between committed transactions. Jepsen, Elle and most isolation papers use this vocabulary.
+
+Three edge types connect two transactions `T1 -> T2`:
+
+| Edge | Meaning |
+|------|---------|
+| `ww` (write dependency) | T2 overwrites a version T1 wrote |
+| `wr` (read dependency) | T2 reads a version T1 wrote |
+| `rw` (anti-dependency) | T2 overwrites the version T1 read, so T1 did not see T2 |
+
+| Phenomenon | Graph shape | Plain name | Lowest level that forbids it |
+|------------|-------------|------------|------------------------------|
+| G0 | Cycle of `ww` edges only | Dirty write | Read Uncommitted (PL-1) |
+| G1a | Read of a version written by an aborted transaction | Aborted read | Read Committed (PL-2) |
+| G1b | Read of an intermediate, non-final version of a committed transaction | Intermediate read | Read Committed (PL-2) |
+| G1c | Cycle of `ww` and `wr` edges | Circular information flow | Read Committed (PL-2) |
+| G-single | Cycle with exactly one `rw` edge | Read skew | Consistent view (PL-2+), so Snapshot Isolation and Repeatable Read |
+| G2-item | Cycle with one or more item `rw` edges | Write skew | Repeatable Read (PL-2.99), Serializable |
+| G2 | Cycle with `rw` edges, including predicate reads | Phantom, predicate write skew | Serializable (PL-3) |
+
+Snapshot isolation sits off this ladder. It forbids G0, G1 and G-single, and it also forbids **G-nonadjacent**: any cycle where no two `rw` edges are next to each other. It allows G2-item cycles in which two `rw` edges are adjacent, which is exactly the doctors write skew above (`T1 -rw-> T2 -rw-> T1`). PostgreSQL's SERIALIZABLE (SSI) adds the missing check by aborting a transaction that would close a cycle with two adjacent `rw` edges.
+
+**Long Fork** is the G-nonadjacent case that matters for replicated databases:
+
+```
+  T1: write x = 1            T2: write y = 1          (independent, both commit)
+
+  T3 reads:  x = 1, y = 0    -> T3 saw T1 but not T2
+  T4 reads:  x = 0, y = 1    -> T4 saw T2 but not T1
+
+  edges: T1 -wr-> T3 -rw-> T2 -wr-> T4 -rw-> T1
+  the two rw edges never touch -> G-nonadjacent -> forbidden by snapshot isolation
+```
+
+Two readers disagree about the order of two independent writes. No single serial order of T1 and T2 explains both reads. Parallel Snapshot Isolation, a weaker model used by some geo-replicated stores, allows it; snapshot isolation does not.
+
+**Jepsen: Amazon RDS for PostgreSQL Multi-AZ clusters (2025-04-29).** Jepsen tested RDS Multi-AZ *clusters* (one writer plus two readable standbys, `db.m6id.large`, `gp3`) with no faults injected. Transactions against the writer and reader endpoints showed G-nonadjacent cycles, including Long Fork, every few minutes, in every version tested from 13.15 to 17.4. The clusters therefore do not provide snapshot isolation across endpoints; Jepsen suggests they may provide Parallel Snapshot Isolation. Single-node PostgreSQL at Repeatable Read was not observed doing this. The May 3 update named the cause: a PostgreSQL primary decides the order in which commits become visible by an in-memory lock (`ProcArrayLock`), while standbys make commits visible in WAL order, and the two orders can differ. The mechanism is in stock PostgreSQL replication, not an RDS addition, so a self-managed setup that mixes primary and standby reads has the same ordering gap. Route reads that must agree with each other to one node, or read from the primary.
+
 ### Two-Phase Commit (2PC) Protocol
 
 2PC implements distributed atomicity across independent participants with a coordinator-driven prepare/vote/commit handshake:
@@ -441,7 +481,7 @@ Any MVCC engine must keep every row version that the oldest live snapshot might 
 | AP NoSQL | Cassandra, DynamoDB, Riak | Tunable consistency |
 | CP NoSQL | HBase, MongoDB (`w:"majority"` + `readConcern:"majority"`), etcd | Consistency over availability |
 | Coordination | ZooKeeper, etcd | Linearizable KV, leader election |
-| Testing isolation | PostgreSQL's `isolationtester` permutation specs, Jepsen | Verify isolation level behavior under concurrency |
+| Testing isolation | PostgreSQL's `isolationtester` permutation specs, Jepsen with Elle | Elle checks histories for Adya cycles (G0 to G2, G-single, G-nonadjacent) and names the anomaly it finds |
 
 ---
 
@@ -471,6 +511,16 @@ READ COMMITTED takes a new snapshot before each statement in a transaction — r
 **Short:** Write skew happens when two transactions each read overlapping data and jointly violate a constraint neither violated alone.
 
 Write skew occurs when two concurrent transactions read overlapping data and make decisions that together violate a constraint, even though each transaction individually is consistent. Classic example: two doctors both check "at least one on-call" and both go off-call. Prevention options: (1) SERIALIZABLE isolation (PostgreSQL uses Serializable Snapshot Isolation, SSI), (2) explicit locking with SELECT FOR UPDATE, (3) application-level coordination.
+
+**Q: Why do Jepsen and isolation papers use Adya's G0/G1/G2 phenomena instead of the ANSI dirty, non-repeatable and phantom reads?**
+**Short:** Adya defines anomalies as cycles of write, read and anti-dependency edges between committed transactions, which can name write skew, read skew and Long Fork that the lock-based ANSI phenomena cannot.
+
+The ANSI phenomena were written in terms of single-item reads and lock behavior, so they miss anomalies that MVCC engines actually produce: snapshot isolation passes all three ANSI tests and still allows write skew. Adya builds a graph whose edges are `ww` (T2 overwrites T1), `wr` (T2 reads T1's write) and `rw` (T2 overwrites what T1 read), and names each anomaly by its cycle: G0 is a `ww` cycle (dirty write), G1a/G1b/G1c are aborted reads, intermediate reads and `ww`/`wr` cycles, G-single is a cycle with one `rw` edge (read skew), G2-item and G2 are cycles with `rw` edges on items or predicates (write skew, phantoms). Snapshot isolation forbids every cycle except those with two adjacent `rw` edges, which is exactly why it allows write skew. Jepsen's Elle checker reports violations in these terms, so read a vendor's isolation claim as "which cycles can occur", not as an ANSI level name.
+
+**Q: What did Jepsen find in Amazon RDS for PostgreSQL Multi-AZ clusters in April 2025?**
+**Short:** Healthy Multi-AZ clusters (versions 13.15 to 17.4) showed Long Fork, two readers seeing independent writes in opposite orders, so they do not provide snapshot isolation across the writer and reader endpoints.
+
+Jepsen's report of 2025-04-29 ran transactions against the writer and reader endpoints of RDS Multi-AZ clusters with no faults and found G-nonadjacent cycles, including Long Fork, every few minutes in every version from 13.15 to 17.4. In a Long Fork, T1 writes `x` and T2 writes `y`; one reader sees `x` but not `y`, another sees `y` but not `x`, so no serial order explains both. Snapshot isolation forbids that; Parallel Snapshot Isolation allows it. The cause is in PostgreSQL itself: the primary makes commits visible in the order transactions release an in-memory lock, while standbys make them visible in WAL order, and the two orders can differ. Single-node PostgreSQL at Repeatable Read did not show it. Any design that reads from standbys should assume this: send reads that must agree with each other, or with a recent write, to one node or to the primary.
 
 **Q: When is eventual consistency acceptable, and when is it dangerous?**
 **Short:** Eventual consistency is fine for cosmetic staleness like counts, but dangerous wherever stale reads cause financial or security harm.

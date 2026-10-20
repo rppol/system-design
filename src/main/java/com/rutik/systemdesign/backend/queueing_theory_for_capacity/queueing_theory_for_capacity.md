@@ -737,11 +737,11 @@ instances = math.ceil(peak_qps / (usable_qps_per_instance * AZ_SURVIVING))
 | KEDA | 2.x | Queue-length and backlog-per-replica scalers that express the deficit as a number |
 | Prometheus | 3.x | Native histograms for `Cs²` and quantiles; `rate()` for `λ`; recording rules for `ρ` |
 | Micrometer | 1.17+ | `Timer` with percentile histograms, `ExecutorServiceMetrics` for queue depth and active threads |
-| Grafana | 12.x | Plot `R` versus `ρ` for your own service and mark the knee where it crosses the SLO |
+| Grafana | 13.x | Plot `R` versus `ρ` for your own service and mark the knee where it crosses the SLO |
 | Little's Law calculators / `queueing` (R), `queueing-tool` (Python) | — | Erlang C for M/M/c; useful for pool sizing where the closed form is tedious |
 | async-profiler | 4.x | Wall-clock mode separates service time from queue wait — `S` versus `Wq` |
 | JFR | Java 25 | `jdk.ThreadPark`, `jdk.JavaMonitorEnter` — where in-process queueing actually happens |
-| k6 / Gatling | k6 1.x | Constant-arrival-rate executors to measure `R` as a function of `ρ` and find your real knee |
+| k6 / Gatling | k6 2.x, Gatling 3.16 | Constant-arrival-rate executors to measure `R` as a function of `ρ` and find your real knee |
 
 ---
 

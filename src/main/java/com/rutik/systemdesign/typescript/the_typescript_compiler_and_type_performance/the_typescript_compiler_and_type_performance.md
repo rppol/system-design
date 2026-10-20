@@ -99,13 +99,13 @@ Causes, in the order they usually bite:
 | `skipLibCheck: true` | 10-40% off a cold build | a broken dependency declaration goes unseen |
 | `incremental: true` | 60-90% off a warm rebuild | a `.tsbuildinfo` to cache and invalidate |
 | `composite` + `tsc --build` | only changed projects re-check | `declaration: true` everywhere, real boundaries |
-| `--checkers N` `[7.0]` | up to 16.7x on vscode with 8 | memory per checker thread |
+| `--checkers N` `[7.0]` | vscode vs TS 6.0: 11.9x at the default 4, 16.7x with 8 | memory per checker thread |
 | Narrower `include` | linear in files removed | nothing, if the glob was wrong |
 | Restructured types | unbounded — 45s to 0.9s is real | design work, and a trace to find it |
 
 ### 4.3 Two workloads, one program
 
-| | Batch (`tsc --noEmit`, CI) | Interactive (`tsserver`, editor) |
+| | Batch (`tsc --noEmit`, CI) | Interactive (language server, editor) |
 |---|---|---|
 | Program lifetime | one cold run, then exit | live for hours, mutated per keystroke |
 | What is measured | total wall clock | p95 latency of one request |
@@ -295,11 +295,11 @@ tsc --build --builders 4         # 4 projects built concurrently in a composite 
 tsc --noEmit --singleThreaded    # force one thread: for profiling and for CI determinism
 ```
 
-`--checkers` splits the file set across threads, each with its own checker instance. On
-vscode with 8 checkers the reported speedup reaches **16.7x** over the single-threaded 7.0
-baseline. The cost is memory: each checker holds its own type cache, so 8 checkers is roughly
-8 partial caches rather than one shared one. On a 2-core CI runner, `--checkers 8` is slower
-than the default.
+`--checkers` splits the file set across threads, each with its own checker instance, and the
+default is 4. Against TypeScript 6.0 on vscode, the default gives **11.9x** (125.7s to 10.6s) and
+`--checkers 8` gives **16.7x** (125.7s to 7.51s). The cost is memory: each checker holds its own type cache, so
+8 checkers is roughly 8 partial caches rather than one shared one. On a 2-core CI runner,
+`--checkers 8` is slower than the default.
 
 `--singleThreaded` is the one to reach for when a build is *nondeterministically* slow —
 it removes scheduling as a variable before you go looking at types.
@@ -313,19 +313,33 @@ compiler rather than shelling out to it cannot run on 7.0 yet:
 ```json
 {
   "devDependencies": {
-    "typescript": "7.0.3",
-    "typescript6": "npm:@typescript/typescript6@6.0.4",
-    "typescript-eslint": "8.69.0"
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "8.71.2"
   }
 }
 ```
 
-typescript-eslint (8.69.0), ts-jest, ts-morph, and the framework template checkers for Vue,
-Svelte, Astro and Angular all consume the Compiler API, and so all run against the aliased
-`@typescript/typescript6` package whose binary is `tsc6`. The practical consequence: your
-**type-check** is 10x faster and your **type-aware lint** is not, so lint becomes the longest
-job in CI the week you upgrade. Budget for it. Lint cost and how to bound it belong to
-[Linting, Formatting and Code Quality](../../frontend_platform/linting_formatting_and_code_quality/linting_formatting_and_code_quality.md).
+typescript-eslint (8.71.2, peer `typescript >=4.8.4 <6.1.0`), ts-jest, ts-morph, and the framework
+template checkers for Vue, Svelte, Astro and Angular all `require("typescript")` for the Compiler
+API. Aliasing `typescript` to `@typescript/typescript6` hands them the 6.0 API, which also installs
+a `tsc6` binary; the `@typescript/native` alias supplies 7.0's `tsc`. The practical consequence:
+your **type-check** is 10x faster and your **type-aware lint** is not, so lint becomes the longest
+job in CI the week you upgrade. Budget for it. Lint cost and how to bound it belong to [Linting,
+Formatting and Code
+Quality](../../frontend_platform/linting_formatting_and_code_quality/linting_formatting_and_code_quality.md).
+
+typescript-eslint warns when it detects TypeScript 7 loaded as `typescript` (since 8.65.0), and
+the parser option `onUnsupportedTypeScriptVersion` turns that into a hard error, so a missing
+alias fails the lint job instead of linting against the wrong API. Nightlies of the next release
+install from `typescript@next` (`7.1.0-dev.*`).
+
+The editor side has its own split. 7.0's language server speaks the Language Server Protocol and
+serves requests on multiple threads; against 6.0's `tsserver` the team measured over 80% fewer
+failing commands and over 60% fewer crashes. In VS Code it ships as the extension
+`TypeScriptTeam.native-preview`. Template-aware tooling for Vue, Svelte, Astro, MDX, and Angular
+templates embeds the 6.0 language service, so in those projects the editor stays on 6.0 while the
+CI type-check runs 7.0.
 
 ### 6.6 Measuring: `--extendedDiagnostics`
 
@@ -610,7 +624,7 @@ team had been suppressing with `// @ts-ignore` for a year.
 | TypeScript | The compiler and checker (7.0, native Go) | Owns every flag in this module |
 | tsc6 | The 6.0 binary as `@typescript/typescript6` | The only stable Compiler API until 7.1 |
 | Perfetto | Trace viewer for `--generateTrace` output | Where a 41-second file becomes visible |
-| typescript-eslint | Type-aware linting (8.69.0) | Runs on `tsc6`, so it does not get the 10x |
+| typescript-eslint | Type-aware linting (8.71.2) | Runs on `tsc6`, so it does not get the 10x |
 | ts-morph | Programmatic AST and type manipulation | Compiler-API consumer, pinned to `tsc6` |
 | esbuild | Transpile-only, no type checking | Fast emit, zero correctness |
 | SWC | Transpile-only, in Rust | Same tradeoff as esbuild |
@@ -649,22 +663,24 @@ What did not change matters more in review: a slow type is still slow, just 10x 
 the upgrade is not a substitute for fixing a 60-member union.
 
 **Q: Why is `tsc6` still installed on a project that upgraded to TypeScript 7.0?**
-**Short:** No stable programmatic Compiler API exists until 7.1, so every tool that embeds the compiler rather than shelling out to it still runs the aliased 6.0 binary.
+**Short:** TypeScript 7.0 ships no programmatic Compiler API (7.1 is expected to add one), so every tool that embeds the compiler still loads the 6.0 API through an npm alias.
 
-typescript-eslint 8.69.0, ts-jest, ts-morph and the Vue, Svelte, Astro and Angular template
-checkers all consume the Compiler API, so `package.json` carries
-`"typescript6": "npm:@typescript/typescript6@6.0.4"` alongside `typescript@7`. The practical
+typescript-eslint 8.71.2, ts-jest, ts-morph and the Vue, Svelte, Astro and Angular template
+checkers all `require("typescript")`, so `package.json` aliases
+`"typescript": "npm:@typescript/typescript6@^6.0.2"` (which provides `tsc6`) and adds
+`"@typescript/native": "npm:typescript@^7.0.2"` for 7.0's `tsc`. The practical
 consequence is that your type-check gets the 10x and your type-aware lint does not, so lint
 becomes the longest CI job. Measure the two jobs separately before promising a build-time number.
 
 **Q: The editor feels sluggish but CI passes in 40 seconds. Why the disagreement?**
 **Short:** The language service holds one live program in memory and re-checks on every keystroke, so latency depends on the open file's dependents rather than on total throughput.
 
-A batch build pays its cost once and exits; `tsserver` pays it repeatedly on a program it
-must keep resident, and its memory grows with project size until an editor restart. A single
-hovered type that CI never resolves — because nothing referenced it — is computed on every
-render of that tooltip. Narrow the editor's project with references, keep `skipLibCheck` on,
-and check `tsserver` memory before blaming the extension.
+A batch build pays its cost once and exits; the language server (7.0's LSP server, or `tsserver` on
+a TypeScript 6 setup) pays it repeatedly on a program it must keep resident, and its memory grows
+with project size until an editor restart. A single hovered type that CI never resolves — because
+nothing referenced it — is computed on every render of that tooltip. Narrow the editor's project
+with references, keep `skipLibCheck` on, and check the language server's memory before blaming the
+extension.
 
 **Q: Which numbers in `--extendedDiagnostics` do you read first?**
 **Short:** Check time as a fraction of total, plus Files and Instantiations, because those three separate a configuration problem from a type-design problem in one glance.
@@ -765,15 +781,16 @@ verifiable against 60,000 existing conformance tests, which is what made "same d
 same semantics" a checkable claim rather than a hope.
 
 **Q: What did TypeScript 6.0 remove versus merely deprecate?**
-**Short:** It removed only classic resolution, outFile and the AMD/UMD/SystemJS formats; everything else it disapproves of, baseUrl roots and esModuleInterop false included, merely warns.
+**Short:** Nothing: 6.0 deprecated every option it disapproves of, classic and outFile included, as build errors that ignoreDeprecations 6.0 silences; the Go-based 7.0 removed them.
 
 Released 2026-03-23 as the last JavaScript-codebase compiler and the explicit deprecation
-bridge before the Go port. The distinction is the thing interviewers probe: deprecated
-options still work, removed options fail the build outright, so a migration plan needs both
-lists. The deprecated list is the long one — `baseUrl` as a resolution root,
-`esModuleInterop: false`, `alwaysStrict: false`, `moduleResolution: "node"`, `target: "es5"`,
-`downlevelIteration` — which means a 5.x config usually still builds on 6.0 and the real risk
-is that nobody reads the warnings before they become errors.
+bridge before the Go port. The distinction is the thing interviewers probe. On `tsc` 6.0.3,
+`moduleResolution: "classic"`, `outFile`, AMD/UMD/SystemJS emit, `baseUrl` as a resolution
+root, `esModuleInterop: false`, `alwaysStrict: false`, `moduleResolution: "node"`,
+`target: "es5"` and `downlevelIteration` each fail the build with TS5101 or TS5107, and
+`"ignoreDeprecations": "6.0"` turns the old behaviour back on. 7.0 reports TS5102 or TS5108 for
+the same options and accepts no override. The real risk is a 6.0 bump that adds
+`ignoreDeprecations` to get green and leaves the options in place until 7.0 breaks the build.
 
 **Q: We run `tsc --noEmit` to make the build faster. Does skipping emit help?**
 **Short:** Emit is a small fraction of a typical build, so skipping it saves disk writes rather than the check time anyone is hoping to cut.

@@ -696,7 +696,7 @@ def should_retrain(
 | Model training | PyTorch, LightGBM, Optuna, MLflow | MLflow for experiment tracking |
 | ANN retrieval | FAISS, ScaNN, Pinecone | FAISS self-hosted, Pinecone managed |
 | Model serving | Triton, BentoML, Ray Serve, TF Serving | Triton best for multi-framework GPU |
-| Monitoring | Evidently AI, Arize, WhyLogs | Evidently open-source, PSI for drift |
+| Monitoring | Evidently AI, Arize | Evidently open-source, PSI for drift |
 | Orchestration | Kubeflow Pipelines, Airflow | Airflow most widely deployed |
 
 ---

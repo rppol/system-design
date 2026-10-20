@@ -231,7 +231,7 @@ Constrain the model to a schema so the output is parseable by construction, not 
 
 ```python
 response = client.chat.completions.create(
-    model="gpt-5.6",
+    model="gpt-6-astra",
     response_format={
         "type": "json_schema",
         "json_schema": {
@@ -272,17 +272,19 @@ class Entity(BaseModel):
     confidence: float
 
 completion = client.chat.completions.parse(
-    model="gpt-5.6",
+    model="gpt-6-astra",
     response_format=Entity,
     messages=[...]
 )
 entity = completion.choices[0].message.parsed
 ```
 
-**Which endpoint.** OpenAI's structured-outputs guide states that "both Structured Outputs and JSON
-mode are supported in the Responses API, Chat Completions API, Assistants API, Fine-tuning API and
-Batch API", so the Chat Completions form above is current, not legacy. The guide's own examples are
-written against the **Responses API** and it recommends `gpt-5.6` for new projects — so for new code
+**Which endpoint.** OpenAI's structured-outputs guide lists Structured Outputs and JSON mode as
+supported in the Responses API, Chat Completions API, Fine-tuning API and Batch API, so the Chat
+Completions form above is current, not legacy. The same sentence also names the Assistants API,
+which shut down on 2026-08-26; the Responses and Conversations APIs replace it. The guide's own
+examples are written against the **Responses API** and it says to start new projects with
+`gpt-6-astra`, so for new code
 prefer `client.responses.parse(...)`, which takes the same Pydantic model via `text_format=` and
 returns it on `response.output_parsed`. Both paths enforce the schema identically; the choice is
 which endpoint the rest of your application already speaks.
@@ -506,7 +508,7 @@ That is the part teams get wrong. Input and output are not two separate budgets 
 
 | Symbol | What it is |
 |--------|------------|
-| context window | Hard ceiling on input + output combined. 128K here; 1M on current Claude models (Opus 5 / Sonnet 5) |
+| context window | Hard ceiling on input + output combined. 128K here; 1M on current Claude models (Opus 5.5 / Sonnet 5.5 / Haiku 5.5) |
 | input subtotal | System prompt + few-shot + retrieved docs + query. Everything you send |
 | response reserve | `max_tokens` you allow the model to generate. Spend it before the call, not after |
 | headroom | Window minus everything committed. Your margin for a longer query or one more doc |
@@ -814,7 +816,7 @@ class Contract(BaseModel):
     governing_law: str
 
 response = client.chat.completions.parse(
-    model="gpt-5.6",
+    model="gpt-6-astra",
     response_format=Contract,
     messages=[system_prompt, user_query]
 )

@@ -81,7 +81,7 @@ Every animatable property lands in one of three tiers: **composite-only** (`tran
 every frame and is the tier that visibly janks. Diagram 5.2 maps each property to the stage it
 re-enters; 5.4 is the technique decision that follows.
 
-### 4.3 Which timeline drives the animation
+### 4.2 Which timeline drives the animation
 
 Three timelines exist: the document's wall clock (the default), scroll progress
 (`animation-timeline: scroll()`), and view progress (`animation-timeline: view()`). The last
@@ -538,6 +538,8 @@ mid-range Android. Apply it on the state *preceding* the animation — `.card:ho
 { will-change: transform }` — and release it after. `transform: translateZ(0)` as a blanket
 hack is worse: permanent, and it creates a stacking context that traps a `z-index` months
 later. If you cannot name the frame it fixed in a profile, delete it.
+
+---
 
 ## 7. Real-World Examples
 

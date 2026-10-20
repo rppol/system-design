@@ -179,7 +179,7 @@ FROM pg_statio_user_indexes;
 **Replica sets**:
 - Primary election via Raft-like protocol; primary handles all writes; secondaries replicate via oplog (capped collection, circular)
 - `writeConcern: majority` = wait for acknowledgment from majority of replica set members
-- `readConcern: majority` = read only data confirmed on majority (linearizable)
+- `readConcern: majority` = read only data acknowledged by a majority; it can still return stale data, so it is not linearizable. `readConcern: linearizable` (primary reads only) adds that guarantee at the cost of a majority round trip
 - Oplog default size: 5% of available disk space; min 990MB
 
 **Sharding**:
@@ -447,7 +447,7 @@ UPDATE user_activity SET events = events + [new_event] WHERE user_id = ?;
 
 **Elasticsearch concrete numbers**:
 - Recommended max shard size: 50GB
-- Recommended max shards per node: 20 per GB of heap (e.g., 30GB heap → 600 shards max)
+- Shards per node: no fixed per-heap cap since 8.3; heap use grows with indices, fields per index, and shards, so size by mapped field count, keep each shard between 10GB and 50GB, and keep it under 200 million documents
 - Refresh interval: 1s (makes documents searchable)
 - Translog fsync: 5s (default, durability tradeoff)
 - Max document size: 2GB (practical limit much lower due to memory)
@@ -555,8 +555,8 @@ flowchart LR
 
 - **Instagram**: migrated from PostgreSQL to Cassandra for user feed (write-heavy, time-ordered); kept PostgreSQL for user account data (relational, strong consistency)
 - **Uber**: uses multiple databases: MySQL for transactional data, Cassandra for geospatial and time-series, Elasticsearch for search, Redis for caching; ~100 different database deployments across their microservices
-- **GitHub**: PostgreSQL for all primary data; Elasticsearch for code search; Redis for caching and pub/sub; switched from MySQL to vitess (sharded MySQL) for scale
-- **Twitter**: Timeline delivery uses Redis sorted sets for ~4 billion users' feeds; Manhattan (proprietary key-value on SSD) for tweet storage; replaced MySQL for most use cases
+- **GitHub**: MySQL for primary data, split into functional clusters with Vitess for horizontal sharding; Elasticsearch for search; Redis for caching and pub/sub
+- **Twitter**: Timeline delivery uses Redis to cache active users' home timelines (fan-out on write, each capped at 800 tweet IDs per the 2013 "Timelines at Scale" talk); Manhattan (proprietary key-value on SSD) for tweet storage; replaced MySQL for most use cases
 - **LinkedIn**: Voldemort (key-value), Espresso (document), Venice (read-only derived data); chose different engines per data access pattern
 
 ---
@@ -636,9 +636,9 @@ flowchart LR
 
 **Elasticsearch fielddata OOM**: A team added aggregations on a high-cardinality `user_email` text field. Elasticsearch loaded all unique email addresses into heap as fielddata. With 100 million users, fielddata consumed 8GB of heap, triggering GC storms and OOM. Fix: use `keyword` type (not `text`) for fields used in aggregations; keyword fields use DocValues (on-disk, memory-mapped) instead of fielddata.
 
-**MongoDB without write concern on critical data**: A MongoDB cluster had a primary and two secondaries. `writeConcern: w=1` (default) acknowledged writes on the primary only. During a primary failover, 30 seconds of writes that were acknowledged by the old primary but not yet replicated were lost when the old primary was demoted and its writes rolled back. Fix: use `writeConcern: {w: "majority", j: true}` for critical data — wait for majority acknowledgment AND journal flush.
+**MongoDB without write concern on critical data**: A MongoDB cluster had a primary and two secondaries. The application overrode the write concern to `w: 1` for throughput (the implicit default is `w: "majority"` since MongoDB 5.0, except in primary-secondary-arbiter sets), so writes were acknowledged by the primary only. During a primary failover, 30 seconds of writes that were acknowledged by the old primary but not yet replicated were lost when the old primary was demoted and its writes rolled back. Fix: use `writeConcern: {w: "majority", j: true}` for critical data — wait for majority acknowledgment AND journal flush.
 
-**Redis data eviction during cache stampede**: A team cached session data in Redis with LRU eviction. At peak load, Redis hit `maxmemory` limit and started evicting LRU keys. Evicted sessions caused all evicted users to hit the database simultaneously for re-authentication. The database was overwhelmed. Fix: (1) use a larger Redis instance or Redis Cluster to avoid memory pressure; (2) use TTL-based eviction (allkeys-ttl) with staggered TTLs to avoid simultaneous expiry; (3) implement probabilistic early expiry (XFetch) to refresh hot keys before they expire.
+**Redis data eviction during cache stampede**: A team cached session data in Redis with LRU eviction. At peak load, Redis hit `maxmemory` limit and started evicting LRU keys. Evicted sessions caused all evicted users to hit the database simultaneously for re-authentication. The database was overwhelmed. Fix: (1) use a larger Redis instance or Redis Cluster to avoid memory pressure; (2) use `volatile-ttl` eviction (evicts keys that have an expiry, shortest remaining TTL first) with staggered TTLs to avoid simultaneous expiry; (3) implement probabilistic early expiry (XFetch) to refresh hot keys before they expire.
 
 ---
 
@@ -653,7 +653,7 @@ flowchart LR
 | Elasticsearch | Kibana, Elasticsearch Head, Curator | AWS OpenSearch, Elastic Cloud |
 | Neo4j | Neo4j Browser, APOC, GDS library, Bloom | Neo4j Aura |
 | InfluxDB | InfluxDB UI, Telegraf (agent), Chronograf | InfluxDB Cloud |
-| TimescaleDB | psql, pgAdmin (it is PostgreSQL), timescaledb-tune | Timescale Cloud |
+| TimescaleDB | psql, pgAdmin (it is PostgreSQL), timescaledb-tune | Tiger Cloud (TigerData) |
 | CockroachDB | CockroachDB Console, CockroachDB SQL shell | CockroachDB Serverless |
 
 ---
@@ -723,7 +723,7 @@ Ask three questions: (1) What are the access patterns? If every query retrieves 
 **Q: What is consistent hashing in the context of Cassandra, and how do virtual nodes work?**
 **Short:** Consistent hashing places nodes on a token ring, and virtual nodes split each node's range into many small pieces for better rebalancing.
 
-Consistent hashing assigns each node a position on a circular token ring from 0 to 2^64-1. Each key is hashed to a token, and the key belongs to the first node clockwise from that token. When a node is added, it takes responsibility for a portion of an existing node's range — only those keys need to be moved. Without virtual nodes (vnodes): each node has one token position; adding a node only distributes load from one neighboring node; uneven data distribution when nodes have different capacities. With vnodes (default in Cassandra 3.0+, `num_tokens=256`): each node is assigned 256 small, non-contiguous token ranges distributed around the ring; adding a node takes small pieces from many nodes; better load balance and faster rebalancing.
+Consistent hashing assigns each node a position on a circular token ring from 0 to 2^64-1. Each key is hashed to a token, and the key belongs to the first node clockwise from that token. When a node is added, it takes responsibility for a portion of an existing node's range — only those keys need to be moved. Without virtual nodes (vnodes): each node has one token position; adding a node only distributes load from one neighboring node; uneven data distribution when nodes have different capacities. With vnodes (default `num_tokens=16` since Cassandra 4.0, with `allocate_tokens_for_local_replication_factor=3` so 16 tokens still balance): each node owns many small, non-contiguous token ranges distributed around the ring; adding a node takes small pieces from many nodes; better load balance and faster rebalancing.
 
 **Q: What is the CAP theorem and how does it apply to database selection?**
 **Short:** CAP theorem forces a choice between consistency and availability during a network partition, since partition tolerance is not optional.

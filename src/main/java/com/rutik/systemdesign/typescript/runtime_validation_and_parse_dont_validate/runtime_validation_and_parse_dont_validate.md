@@ -29,7 +29,7 @@ type that carries the proof**. `unknown` and narrowing live in
 `../unions_narrowing_and_exhaustiveness/unions_narrowing_and_exhaustiveness.md`; structural
 typing and `satisfies` in
 `../structural_typing_and_assignability/structural_typing_and_assignability.md`. The target is
-TypeScript 7.0 with Zod 4.5.4.
+TypeScript 7.0 with Zod 4.6.7.
 
 ---
 
@@ -97,10 +97,10 @@ because the value it returns is the value it inspected.
 
 | Library | Version | Shape of the API | Where it wins |
 |---------|---------|------------------|---------------|
-| Zod | 4.5.4 | chained methods, one namespace import | ecosystem, error tooling, familiarity |
-| Valibot | 1.4.2 | standalone functions composed with `pipe` | bundle size — you import only what you use |
-| ArkType | 2.2.3 | schemas written as TypeScript-shaped strings | syntax closest to the types themselves |
-| Effect Schema | 3.22.1 | bidirectional codecs inside a larger effect system | encode as well as decode, typed errors |
+| Zod | 4.6.7 | chained methods, one namespace import | ecosystem, error tooling, familiarity |
+| Valibot | 1.5.0 | standalone functions composed with `pipe` | bundle size — you import only what you use |
+| ArkType | 2.2.8 | schemas written as TypeScript-shaped strings | syntax closest to the types themselves |
+| Effect Schema | 4.0.5 | bidirectional codecs inside a larger effect system | encode as well as decode, typed errors |
 
 **Choose on four axes.** Bundle size (does this ship to a browser?), error ergonomics (does a
 form need field-level messages?), transform needs (are you only checking, or also converting?),
@@ -176,7 +176,7 @@ flowchart LR
     classDef step fill:#2c313a,stroke:#c678dd,color:#abb2bf
     classDef ok   fill:#2c313a,stroke:#98c379,color:#abb2bf
     z(["Zod 4"]) --> spec("the tilde-standard<br/>property, version 1")
-    val(["Valibot 1.4"]) --> spec
+    val(["Valibot 1.5"]) --> spec
     ark(["ArkType 2.2"]) --> spec
     spec --> trpc(["tRPC 11"])
     spec --> forms(["form libraries"])
@@ -424,7 +424,7 @@ returns either `{ value }` or `{ issues }` — never throws for a validation fai
 return a promise. The tilde prefix sorts the property to the bottom of editor autocomplete so it
 never clutters the schema's own API.
 
-Zod 4, Valibot 1.4 and ArkType 2.2 all implement it. **tRPC 11.18.0 accepts any conforming
+Zod 4, Valibot 1.5 and ArkType 2.2 all implement it. **tRPC 11.19.0 accepts any conforming
 validator natively** in `.input()` and `.output()`, with no adapter package. That is the point:
 the framework author writes one code path, and swapping Zod for Valibot to save bundle size
 becomes a dependency change rather than a migration.
@@ -495,6 +495,34 @@ A schema walk is proportional to node count and refinement count. On a 12,000-el
 that fetched it, and not irrelevant inside a loop that runs per request on an already-parsed
 value. That asymmetry is the whole argument for parsing at the boundary and only there.
 
+### 6.10 Compiled schemas: `z.compile`, `.validate`, `z.withParser`
+
+When a boundary is hot (a gateway, a queue consumer), Zod can stop interpreting the schema:
+
+```ts
+const Player = z.compile(z.object({ id: z.uuid(), score: z.number().int() }));
+
+Player.parse(input);      // valid input runs flat, loop-free generated code
+Player.validate(input);   // boolean only: no ZodError, no transforms, no output value
+```
+
+`z.compile()` (Zod 4.5) walks the schema once and emits straight-line JavaScript through
+`new Function`. The release notes measure a 20-key object at 301 ns down to 38 ns and report
+3-9x on objects, arrays, and unions. On invalid input the generated code returns `INVALID` and the
+interpreted parser reruns to build the `ZodError`, so error output is identical. `node --import
+zod/compile app.js` compiles every schema defined after it, each on its first parse.
+
+`.validate()` (Zod 4.6) answers "is this valid?" without constructing an error: up to 35x faster
+than `.safeParse().success` on invalid input against a compiled schema, up to 5.9x uncompiled. It
+is a validate-shaped call, so it hands back no parsed value and applies no transform or brand.
+Use it to drop or route a message, never to produce the value the rest of the code trusts.
+
+`new Function` is blocked by a Content Security Policy without `'unsafe-eval'`, which rules
+`z.compile()` out of most hardened browser builds. `z.withParser()` installs a parser generated
+elsewhere, at build time, so the page runs compiled checks with no runtime code generation. Its
+parser must return exactly what the schema would, and returning `z.INVALID` hands the input back
+to the runtime for the error.
+
 ---
 
 ## 7. Real-World Examples
@@ -534,14 +562,21 @@ as a handled banner instead of `NaN`. Contract governance itself lives in
 | `as` assertion | 0 bytes | none — it crashes later | none | never |
 | Hand-written type predicates | tens of bytes each | you write them | manual | only what you remember to check |
 | Zod 4 | roughly 13 kB gzipped for the full import | best-in-class: flatten, treeify, prettify | yes, one-way | yes |
-| Valibot 1.4 | roughly 1 kB gzipped for a small schema | good, issue array | yes, one-way | yes |
+| Valibot 1.5 | roughly 1 kB gzipped for a small schema | good, issue array | yes, one-way | yes |
 | ArkType 2.2 | comparable to Zod, syntax-first | good | yes | yes |
-| Effect Schema 3.22 | largest, and it brings the Effect runtime | typed, structured | **bidirectional** | yes |
+| Effect Schema 4.0 | the Effect runtime alone is about 7.1 kB min+gz (35.6 kB on 3.x), before any schema code | typed, structured | **bidirectional** | yes |
 | Generated types only (OpenAPI, GraphQL) | 0 bytes | none | none | never |
 
-Zod's `zod/mini` entry point trades the chained API for a functional one and drops a small-schema
-build to roughly 2 kB gzipped. On a Node service none of this column matters and familiarity
-should decide.
+Zod Mini (the `zod/mini` entry point, also published as the standalone `@zod/mini` package in
+lockstep with `zod`) trades the chained API for a functional one and drops a small-schema build to
+roughly 2 kB gzipped. On a Node service none of this column matters and familiarity should decide.
+
+| Zod execution mode | Valid-input speed | Runs under strict CSP | Error on failure |
+|--------------------|-------------------|-----------------------|------------------|
+| Interpreted (default) | baseline | yes | full `ZodError` |
+| `z.compile()` | 3-9x on objects, arrays, unions | no, needs `new Function` | full `ZodError`, rebuilt by the interpreter |
+| `z.withParser()` with a build-time parser | set by the supplied parser | yes | full `ZodError`, rebuilt by the interpreter |
+| `.validate()` on a compiled schema | up to 35x vs `.safeParse().success` on invalid input | no | boolean only |
 
 ---
 
@@ -646,12 +681,13 @@ on a parameter already typed `Order` is an admission that you do not believe you
 
 | Tool | Role | Relevance here |
 |------|------|----------------|
-| Zod | Schema validation and inference (4.5.4) | The default choice: `z.infer`, `safeParse`, error tooling |
-| Valibot | Modular schema library (1.4.2) | Tree-shakes to roughly 1 kB — the browser-bundle choice |
-| ArkType | Type-syntax schema library (2.2.3) | Schemas written the way the types are written |
-| Effect Schema | Bidirectional codecs (Effect 3.22.1) | Encode as well as decode, inside a typed effect system |
+| Zod | Schema validation and inference (4.6.7) | The default choice: `z.infer`, `safeParse`, `z.compile`, error tooling |
+| Zod Mini | Functional Zod API as `@zod/mini` (4.6.7) | Same schemas and `.validate()` at roughly 2 kB gzipped for a small schema |
+| Valibot | Modular schema library (1.5.0) | Tree-shakes to roughly 1 kB — the browser-bundle choice |
+| ArkType | Type-syntax schema library (2.2.8) | Schemas written the way the types are written |
+| Effect Schema | Bidirectional codecs (Effect 4.0.5) | Encode as well as decode, inside a typed effect system; zero-dependency core, 4.x bug fixes to at least 2029-09 |
 | Standard Schema | The `~standard` interface spec (1.1.0) | One interface all three implement, and tRPC consumes |
-| tRPC | End-to-end typed RPC (11.18.0) | Accepts any Standard Schema validator with no adapter |
+| tRPC | End-to-end typed RPC (11.19.0) | Accepts any Standard Schema validator with no adapter |
 | openapi-zod-client | OpenAPI to Zod generator | Generated *checking*, not just generated types |
 | Pydantic | The same discipline in Python (v2) | The parallel model, in `../../fastapi/pydantic_v2_deep_dive/` |
 
@@ -703,8 +739,8 @@ any refinement is async, such as a database uniqueness check.
 **Short:** A single interface property lets any conforming library plug into any framework, decoupling the validator choice from the framework choice.
 
 The contract is `~standard: { version: 1, vendor, validate, types }`, where `validate` returns
-`{ value }` or `{ issues }` and may return a promise. Zod 4, Valibot 1.4 and ArkType 2.2 all
-implement it, and tRPC 11.18.0 accepts any of them natively with no adapter package. Swapping
+`{ value }` or `{ issues }` and may return a promise. Zod 4, Valibot 1.5 and ArkType 2.2 all
+implement it, and tRPC 11.19.0 accepts any of them natively with no adapter package. Swapping
 Zod for Valibot to save bundle size becomes a dependency change rather than a migration.
 
 **Q: How does a branded type make "this value was validated" a compile-time fact?**
@@ -726,7 +762,7 @@ something narrows it, which is exactly the prompt you want. The same trick appli
 **Q: When would you choose Valibot over Zod?**
 **Short:** Importing only the validators you use lets the bundler drop the rest, which is why a modular API ships far less browser code.
 
-Valibot 1.4.2 composes standalone functions with `pipe`, so a small login schema lands around
+Valibot 1.5.0 composes standalone functions with `pipe`, so a small login schema lands around
 1 kB gzipped against roughly 13 kB for Zod's full import — material on a landing page, invisible
 in a Node service. Zod's `zod/mini` closes most of the gap at around 2 kB with a functional API.
 Both implement Standard Schema, so the switch is a dependency change, not a rewrite.
@@ -763,6 +799,15 @@ A 12,000-element array of 9-field objects parses in milliseconds — irrelevant 
 round trip that fetched it, and very relevant inside a per-request loop over an already-parsed
 value. That asymmetry is the argument for the perimeter: one walk per external value, zero walks
 internally. Time it with `console.time` on your own shapes rather than trusting a benchmark blog.
+
+**Q: When does `z.compile()` help, and why can it fail in a browser?**
+**Short:** It generates straight-line JavaScript with `new Function`, giving 3-9x on objects and arrays, but a Content Security Policy without `'unsafe-eval'` blocks that.
+
+Zod 4.5's `z.compile()` walks the schema once and emits loop-free checks; invalid input falls
+back to the interpreter, so the `ZodError` is unchanged. It pays off on a hot server path such as
+a queue consumer. In a hardened browser build, generate the parser at build time and install it
+with `z.withParser()` (Zod 4.6). Pair it with `.validate()` only to gate or route input, since a
+boolean carries no parsed value.
 
 **Q: How do you turn a `ZodError` into something a form can render?**
 **Short:** Flattening the issue array by path gives a field-to-message map that a form library can consume directly.

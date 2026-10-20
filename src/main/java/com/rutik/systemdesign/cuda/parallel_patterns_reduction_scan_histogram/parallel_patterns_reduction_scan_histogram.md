@@ -894,6 +894,11 @@ production.
   [`../../llm/mixture_of_experts/`](../../llm/mixture_of_experts/mixture_of_experts.md)) uses an exclusive
   scan over per-expert token counts to compute the contiguous write offset for each
   expert's token bucket before the all-to-all dispatch.
+- **CUB's own scan on Blackwell**: CCCL 3.4 (CUDA 13.4) reimplemented `cub::DeviceScan`
+  on Blackwell with TMA loads and warp specialization. Every `thrust::inclusive_scan` and `cupy.cumsum` built on that
+  CCCL picks it up with no source change, which is the practical case for calling the
+  library instead of keeping a hand-rolled decoupled-lookback scan in sync with each
+  architecture.
 - **cuDNN/TensorRT INT8 calibration** builds a per-channel activation histogram to
   choose a quantization threshold (percentile clipping) — a direct instance of the
   privatized-histogram pattern at calibration time, not inference time.
@@ -1017,7 +1022,7 @@ neither.
 | Tool | Provides | Notes |
 |---|---|---|
 | Thrust | `thrust::reduce`, `inclusive_scan`, `exclusive_scan` | Header-only C++ template library shipped with the CUDA Toolkit; STL-like API |
-| CUB | `cub::BlockReduce`, `cub::BlockScan`, `cub::DeviceReduce`, `cub::DeviceScan`, `cub::DeviceHistogram` | Lower-level than Thrust — composable *inside* your own kernel via block-level primitives, or as standalone device-wide calls |
+| CUB | `cub::BlockReduce`, `cub::BlockScan`, `cub::DeviceReduce`, `cub::DeviceScan`, `cub::DeviceHistogram`, `cub::WarpReduceBatched` | Lower-level than Thrust: composable *inside* your own kernel via block-level primitives, or as standalone device-wide calls. CCCL 3.4 (CUDA 13.4) adds a TMA warp-specialized `DeviceScan` on Blackwell and `WarpReduceBatched`, which reduces several independent batches across one warp |
 | CuPy | `cupy.sum`/`cupy.max`/`cupy.min`, `cupy.cumsum`, `cupy.histogram` | Python, NumPy-compatible API, CUB-backed under the hood |
 | Numba CUDA | `@cuda.reduce` decorator | Python JIT; simpler than hand-writing a kernel, less tuned than CUB |
 | PyTorch / cuDNN | `torch.sum`, `torch.cumsum`, fused-kernel reductions inside attention/normalization ops | Production DL framework path; fusion is the reason custom kernels persist here |
@@ -1086,8 +1091,9 @@ scan, or histogram kernel?**
 Call the library whenever the operation stands alone
 with no adjacent computation to fuse it with. Thrust's `reduce`/`inclusive_scan`
 and CuPy's `sum`/`cumsum`/`histogram` dispatch CUB's architecture-tuned
-implementations, which already include everything past sequential addressing —
-hand-roll only when you need to fuse the pattern into a larger kernel to avoid an
+implementations, which already include everything past sequential addressing and
+track new hardware (CCCL 3.4 moved `cub::DeviceScan` on Blackwell to TMA loads with
+warp specialization, with no caller change). Hand-roll only when you need to fuse the pattern into a larger kernel to avoid an
 extra HBM round-trip, or when an interviewer is specifically testing whether you
 understand the mechanics.
 

@@ -584,7 +584,7 @@ A: Directly: a saga orchestrator holds the workflow, calls each service in turn,
 | Technology | What it gives you | When to reach for it |
 |-----------|-------------------|---------------------|
 | Spring `ApplicationEventPublisher` + `@EventListener` | A container-managed in-process mediator; publishers hold no reference to subscribers, and `@TransactionalEventListener` ties delivery to commit | The default in a Spring application — colleagues stay decoupled with zero extra infrastructure |
-| Guava `EventBus` / `AsyncEventBus` | A standalone mediator with `@Subscribe` handlers, type-based dispatch, and `DeadEvent` for unhandled messages | Non-Spring JVM applications; `DeadEvent` is the cheapest way to catch a silently unwired colleague |
+| Guava `EventBus` / `AsyncEventBus` | A standalone mediator with `@Subscribe` handlers, type-based dispatch, and `DeadEvent` for unhandled messages | Existing code that already uses it; Guava's Javadoc recommends against it for new code, so start new non-Spring code on Reactor, RxJava 3, or plain listener interfaces |
 | Spring Integration `MessageChannel` + routers | A mediator with explicit channels, routing rules, transformers, and channel-level monitoring | Coordination logic complex enough to deserve a visible topology |
 | Vert.x event bus | Address-based mediator with point-to-point and pub/sub modes, and clustering across nodes | Event-driven services on the Vert.x runtime |
 | Apache Pekko (or Akka) actors | Message-passing colleagues with supervision hierarchies and per-actor mailboxes | Concurrency-heavy coordination where each colleague must be single-threaded |

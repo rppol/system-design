@@ -69,6 +69,29 @@ Key insight: The hardest problem in messaging is not sending messages — it is 
 - **Manual commit (enable.auto.commit=false)**: application controls when to commit. Use `Acknowledgment.acknowledge()` after successful processing.
 - **Batch commit**: commit once per poll batch.
 
+### Kafka consumer groups vs share groups, and the KIP-848 protocol
+
+| Dimension | Consumer group (`ConcurrentKafkaListenerContainerFactory`) | Share group (`ShareKafkaListenerContainerFactory`) |
+|-----------|------------------------------------------------|-----------------------------------------------|
+| Assignment | Each partition owned by exactly one member | Members share partitions; the broker hands out records |
+| Max useful consumers | Partition count | Not bounded by partition count |
+| Progress tracking | One committed offset per partition | Per-record state: acquired, acknowledged, released, archived |
+| Ordering | Per partition | None across members |
+| Redelivery | Seek back or error handler | Broker redelivers on RELEASE or lock expiry |
+| Poison record | `DefaultErrorHandler` + DLT | `group.share.delivery.count.limit` (default 5), then archived |
+| Kafka version | Any | KIP-932: early access in 4.0, production-ready in 4.2 (February 17, 2026) |
+| Spring Kafka | All versions | Introduced in 4.0, fully supported in 4.1 on Kafka 4.2 |
+
+**KIP-848 consumer rebalance protocol.** Kafka 4.0 (March 18, 2025) made the
+next-generation protocol GA and enabled it by default on the broker. The group coordinator
+computes assignments server-side (`group.consumer.assignors`, `uniform` or `range`) and
+moves partitions one at a time, so members that keep their partitions never stop
+consuming. A client opts in with `group.protocol=consumer`; the client-side
+`partition.assignment.strategy`, `session.timeout.ms`, and `heartbeat.interval.ms` no longer
+apply, because the broker owns session (`group.consumer.session.timeout.ms`, 45 s) and
+heartbeat (`group.consumer.heartbeat.interval.ms`, 5 s) settings. `max.poll.interval.ms`
+still applies: a listener that stalls past it is still removed from the group.
+
 ### RabbitMQ Acknowledgement Modes
 
 - **AUTO**: broker removes message immediately on delivery. At-most-once.
@@ -322,6 +345,66 @@ public class OrderConsumer {
     }
 }
 ```
+
+### Share consumer: queue-style consumption (Spring Kafka 4.1, Kafka 4.2)
+
+A share group lets more listener threads than partitions pull from one topic. Each fetched
+record is locked to one member for `group.share.record.lock.duration.ms` (default 30 s) and
+must be settled with ACCEPT, RELEASE, or REJECT:
+
+```
+  consumer group: 3 partitions, 6 threads          share group: 3 partitions, 6 threads
+  P0 -> t1    P1 -> t2    P2 -> t3                  P0 --+                +--> t1 .. t6
+  t4, t5, t6 idle (no partition to own)            P1 --+--> broker locks --+   each record
+                                                   P2 --+    per record       held by one
+                                                                              thread at a time
+  ACCEPT  -> record done, never redelivered
+  RELEASE -> record back to Available, delivery count +1
+  REJECT  -> record archived, not redelivered
+  lock expiry (30 s) -> same as RELEASE; count reaches 5 -> archived
+```
+
+```java
+@Bean
+public ShareConsumerFactory<String, OrderEvent> shareConsumerFactory() {
+    Map<String, Object> config = new HashMap<>();
+    config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+    config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+    config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+    return new DefaultShareConsumerFactory<>(config);
+}
+
+@Bean
+public ShareKafkaListenerContainerFactory<String, OrderEvent> shareKafkaListenerContainerFactory(
+        ShareConsumerFactory<String, OrderEvent> shareConsumerFactory) {
+    ShareKafkaListenerContainerFactory<String, OrderEvent> factory =
+        new ShareKafkaListenerContainerFactory<>(shareConsumerFactory);
+    factory.getContainerProperties().setShareAckMode(ContainerProperties.ShareAckMode.MANUAL);
+    return factory;
+}
+
+@KafkaListener(topics = "thumbnails", groupId = "thumbnail-workers",
+               containerFactory = "shareKafkaListenerContainerFactory", concurrency = "12")
+public void render(ConsumerRecord<String, OrderEvent> record, ShareAcknowledgment ack) {
+    try {
+        renderThumbnail(record.value());
+        ack.acknowledge();                 // ACCEPT
+    } catch (TransientStorageException e) {
+        ack.release();                     // RELEASE: redeliver, delivery count +1
+    } catch (InvalidImageException e) {
+        ack.reject();                      // REJECT: archive, never redeliver
+    }
+}
+```
+
+`ShareAckMode` has three values. `EXPLICIT` (default) lets the container send ACCEPT on
+success and ask the recoverer (default REJECT) on an exception. `MANUAL` requires exactly one
+terminal call per record and blocks the next poll until every record of the previous poll is
+settled. `IMPLICIT` lets the broker accept every acquired record whatever the listener does, so it
+fits only work where a failed record may be dropped. Call `ack.renew()` (KIP-1222, Kafka 4.2) to extend the lock for slow work;
+a terminal call is still required after it. Share listeners have no batch mode, no message
+converters, no `CommonErrorHandler`, no seek, and no DLT integration: the broker's delivery
+count limit replaces the retry topic chain.
 
 ### Error Handling — DefaultErrorHandler with BackOff
 
@@ -675,7 +758,7 @@ public void publishOutboxEvents() {
 | Routing flexibility | Low (topic + partition key) | High (exchange types, headers) |
 | Ordering guarantee | Within partition | Within single-consumer queue |
 | Message size | Best for small (<1MB) | Small to medium messages |
-| Consumer scaling | Up to partition count | Many consumers on one queue |
+| Consumer scaling | Up to partition count in a consumer group; beyond it with a share group (Kafka 4.2), at the cost of ordering | Many consumers on one queue |
 | Operational complexity | Higher (KRaft quorum, partition rebalancing) | Lower |
 | Latency | ~1-5ms end-to-end | Sub-millisecond possible |
 
@@ -912,16 +995,12 @@ public void onOrder(OrderEvent event, Channel channel,
 ```java
 // FIXED: requeue=false on non-transient errors; rely on DLX for dead-letter handling
 // For transient errors: retry with backoff before the message goes back on the wire.
-//
-// IMPORT CHECK: two @Retryable annotations exist and they count differently.
-//   org.springframework.retry.annotation.Retryable   -> maxAttempts = 3  (3 calls total)
-//   org.springframework.resilience.annotation.Retryable -> maxRetries = 2  (3 calls total)
-// Framework 7's core annotation needs @EnableResilientMethods to take effect at all.
-// This example uses Spring Retry's; picking the other one by IDE auto-import
-// compiles fine and quietly changes your retry budget by one.
+// org.springframework.resilience.annotation.Retryable (Spring Framework 7) counts
+// retries, not calls: maxRetries = 2 means 3 calls in total. It does nothing unless
+// a configuration class carries @EnableResilientMethods.
 
 @RabbitListener(queues = "orders")
-@Retryable(maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
+@Retryable(includes = TransientException.class, maxRetries = 2, delay = 1000, multiplier = 2)
 public void onOrder(OrderEvent event, Channel channel,
                     @Header(AmqpHeaders.DELIVERY_TAG) long tag) throws IOException {
     try {
@@ -930,8 +1009,9 @@ public void onOrder(OrderEvent event, Channel channel,
     } catch (BusinessException e) {
         channel.basicNack(tag, false, false); // requeue=false -> DLX
     }
-    // TransientException: @Retryable will retry up to 3 times with backoff
-    // After 3 failures -> @Recover method or DLX
+    // TransientException: @Retryable retries twice with backoff (1s, 2s)
+    // After the last retry the exception reaches the container; with
+    // defaultRequeueRejected=false the message is rejected to the DLX
 }
 ```
 
@@ -1007,9 +1087,19 @@ A Dead Letter Topic holds messages that could not be processed successfully afte
 The Outbox pattern solves the dual-write problem: when you need to write to a database and publish a Kafka event atomically. Without it, the two operations are independent — a crash between DB commit and Kafka send leaves the system in an inconsistent state. The Outbox pattern stores the event as a row in an outbox table within the same database transaction as the business write. A separate relay process (polling or Debezium CDC) reads pending outbox rows and publishes them to Kafka, then marks them as published. Because the business write and the outbox row are in the same transaction, they always succeed or fail together. Debezium CDC-based relay is preferred in production because it reads from the database write-ahead log rather than polling, providing near-real-time publishing.
 
 **Q: What is the difference between concurrency in @KafkaListener and partition count?**
-**Short:** Listener concurrency is capped by partition count, since Kafka assigns at most one consumer per partition.
+**Short:** In a consumer group each partition has one owner, so threads beyond the partition count idle; a Kafka 4.2 share group removes that cap but drops ordering.
 
-The concurrency attribute on @KafkaListener creates multiple KafkaMessageListenerContainer instances, each running its own poll loop. However, Kafka's consumer group protocol assigns at most one consumer per partition. So if concurrency=3 but the topic has only 2 partitions, one container will be idle. To utilize all three containers, the topic must have at least 3 partitions. In practice, partition count should be set to the maximum number of consumers you anticipate across all instances of the service. Adding partitions after the fact is possible but requires a rebalance.
+The concurrency attribute on @KafkaListener creates multiple KafkaMessageListenerContainer instances, each running its own poll loop. However, Kafka's consumer group protocol assigns at most one consumer per partition. So if concurrency=3 but the topic has only 2 partitions, one container will be idle. To utilize all three containers, the topic must have at least 3 partitions. In practice, partition count should be set to the maximum number of consumers you anticipate across all instances of the service. Adding partitions after the fact is possible but requires a rebalance, and it changes the key-to-partition mapping for keyed records. When per-key ordering does not matter (independent jobs such as thumbnail rendering or email sends), a share group on Kafka 4.2 with Spring Kafka 4.1's `ShareKafkaListenerContainerFactory` lets 12 threads consume a 3-partition topic, because the broker locks individual records instead of assigning whole partitions.
+
+**Q: On a Spring Kafka share consumer, what do `release()` and `reject()` do, and what stops a poison record from looping forever?**
+**Short:** release() returns the record for redelivery and reject() archives it; the broker archives any record after group.share.delivery.count.limit (default 5) deliveries.
+
+`ShareAcknowledgment.acknowledge()` sends ACCEPT, so the record is done. `release()` sends RELEASE: the record goes back to Available and another member (or the same one) receives it again, with the broker's delivery count incremented. `reject()` sends REJECT: the record is archived and never redelivered, which is the share-group equivalent of a dead letter but without a separate topic, so you must log or copy the payload yourself before rejecting. A record whose lock (`group.share.record.lock.duration.ms`, default 30 s) expires is treated like RELEASE. The guard against poison loops is broker-side: once a record has been delivered `group.share.delivery.count.limit` times (default 5) it is archived, even if the listener keeps calling `release()`. The count is approximate and not visible to the consumer, so do not build retry logic that reads it. In `ShareAckMode.MANUAL` a forgotten acknowledgment blocks the next poll on that thread, which looks like a stalled consumer rather than an error.
+
+**Q: What changes when a Spring Kafka consumer moves to the KIP-848 rebalance protocol (`group.protocol=consumer`)?**
+**Short:** The broker computes assignments and moves partitions incrementally, so unaffected members keep consuming; client-side assignor and session settings stop applying.
+
+Kafka 4.0 made the KIP-848 protocol GA and enabled it on brokers by default; clients opt in with `group.protocol=consumer`, which in Boot is `spring.kafka.consumer.properties.group.protocol=consumer`. Under the classic protocol every rebalance is a group-wide barrier: all members revoke (eager) or at least pause in a JoinGroup/SyncGroup round, and a client-side leader computes the assignment. Under KIP-848 the group coordinator computes the target assignment (`group.consumer.assignors`, `uniform` or `range`), and each member reconciles toward it through heartbeats, so only the partitions that move are paused. Consequences for Spring config: `partition.assignment.strategy`, `session.timeout.ms`, and `heartbeat.interval.ms` on the client no longer apply (the broker's `group.consumer.session.timeout.ms` and `group.consumer.heartbeat.interval.ms` do), while `max.poll.interval.ms` still evicts a stalled listener. A rolling deploy of 20 instances goes from 20 stop-the-world rebalances to 20 small reassignments.
 
 **Q: How does RabbitMQ's Dead Letter Exchange (DLX) work, and what triggers a message to be dead-lettered?**
 **Short:** A message is dead-lettered on a NACK without requeue, on TTL expiry, or when an overflowing queue rejects it.
@@ -1046,15 +1136,15 @@ A high prefetchCount causes the broker to send that many unacknowledged messages
 
 Use Testcontainers with KafkaContainer to start a real Kafka broker in Docker. Annotate the test class with @Testcontainers and @SpringBootTest. Use @DynamicPropertySource to set spring.kafka.bootstrap-servers to the container's mapped port. Publish messages using KafkaTemplate in the test and verify consumer behavior via assertions on the database or a CountDownLatch that the listener decrements. For unit tests of listener logic, test the handler method directly without Spring context overhead. The EmbeddedKafkaBroker (@EmbeddedKafka) is an alternative that avoids Docker but is less production-representative.
 
-**Q: What is exactly-once semantics in Kafka and how does Spring Kafka's `@Transactional` integration achieve it?**
-**Short:** @Transactional on a @KafkaListener wraps the consume-process-produce cycle in one Kafka transaction for exactly-once semantics.
+**Q: What is exactly-once semantics in Kafka and how does Spring Kafka achieve it?**
+**Short:** The container's KafkaTransactionManager, enabled by transaction-id-prefix, puts consumed offsets and produced records in one Kafka transaction; @Transactional alone does not.
 
-Kafka's exactly-once semantics (EOS) prevents duplicates and lost messages across a produce → consume → produce pipeline. Spring Kafka supports EOS via `KafkaTransactionManager` and Spring's `@Transactional`. When enabled: (1) The `KafkaProducer` is configured as an idempotent transactional producer (`enable.idempotence=true`, `transactional.id=...`). (2) `@Transactional` on a `@KafkaListener` method wraps the entire consume-process-produce in a single Kafka transaction — the consumer offset commit and the downstream produce are both included in the transaction. If the method throws, both the offset commit and any produced messages are rolled back. On retry, the consumer re-processes the same message. Config: `spring.kafka.producer.transaction-id-prefix=tx-` and `spring.kafka.consumer.isolation-level=read_committed` (consumers only see committed messages). Limitation: EOS adds ~20–30% throughput overhead and requires a Kafka broker ≥ 0.11.
+Kafka's exactly-once semantics (EOS) prevents duplicates and lost messages across a produce → consume → produce pipeline. Spring Kafka supports EOS through the listener container's transaction manager. When enabled: (1) The `KafkaProducer` is configured as an idempotent transactional producer (`enable.idempotence=true`, `transactional.id=...`). (2) The container owns the transaction: when it has a `KafkaAwareTransactionManager` (Boot auto-configures a `KafkaTransactionManager` and sets it on the listener container factory once `spring.kafka.producer.transaction-id-prefix` is set), it begins a Kafka transaction before calling the `@KafkaListener`, sends the consumed offsets into it with `sendOffsetsToTransaction`, and commits the offsets and the downstream produce together. A method-level `@Transactional` alone does not add the consumer offsets to the transaction. If the listener throws, the transaction aborts, so the produced messages are discarded and the offsets are not committed. On retry, the consumer re-processes the same message. Config: `spring.kafka.producer.transaction-id-prefix=tx-` and `spring.kafka.consumer.isolation-level=read_committed` (consumers only see committed messages). Limitation: EOS adds ~20-30% throughput overhead and requires a Kafka broker ≥ 0.11.
 
 **Q: What is Spring AMQP's dead letter exchange (DLX) pattern and how do you implement retry with backoff?**
 **Short:** A RetryInterceptor with exponential backoff retries locally before the recoverer publishes the exhausted message to the DLQ.
 
-A dead letter exchange receives messages that are rejected (NACK + requeue=false), expired (TTL), or overflow a queue limit. Configure a per-queue DLX: when a `@RabbitListener` throws and exhausts retries, Spring AMQP sends the message to the DLX with the original exchange/routing key as dead-letter headers. Retry with backoff: configure `RetryInterceptorBuilder.stateless()` (or stateful for commit semantics) on the listener container with exponential back-off (`ExponentialBackOffPolicy`). After max attempts, the interceptor calls the recoverer which publishes to the DLQ. Production pattern:
+A dead letter exchange receives messages that are rejected (NACK + requeue=false), expired (TTL), or overflow a queue limit. Configure a per-queue DLX: when a `@RabbitListener` throws and exhausts retries, Spring AMQP sends the message to the DLX with the original exchange/routing key as dead-letter headers. Retry with backoff: in Boot 4 set `spring.rabbitmq.listener.simple.retry.enabled=true` with `initial-interval`, `multiplier`, `max-interval`, and `max-retries`, and adjust further with a `RabbitListenerRetrySettingsCustomizer` bean. By hand, put `RetryInterceptorBuilder.stateless().maxRetries(3).backOffOptions(1000, 2.0, 10000)` (or `stateful()` for commit semantics) on the listener container; Spring AMQP 4 builds it on Spring Framework's core retry, not Spring Retry. After the last retry, the interceptor calls the recoverer: `RejectAndDontRequeueRecoverer` rejects the message to the DLX, and `RepublishMessageRecoverer` republishes it with the stack trace in headers. Production pattern:
 
 ```yaml
 # Queue definition: original queue with 3-retry DLX
@@ -1257,18 +1347,17 @@ factory.setCommonErrorHandler(
 public void sendConfirmation(OrderEvent e) { /* logs have no traceId; threads explode under load */ }
 ```
 ```java
-// FIXED: bounded pool + TaskDecorator that copies MDC from the caller thread to the worker
+// FIXED: bounded pool + ContextPropagatingTaskDecorator. The worker restores the caller's
+// observation, so Micrometer Tracing puts traceId back into MDC.
 @Bean("notifyExecutor")
 ThreadPoolTaskExecutor notifyExecutor() {
     var ex = new ThreadPoolTaskExecutor();
     ex.setCorePoolSize(8); ex.setMaxPoolSize(32); ex.setQueueCapacity(500);
-    ex.setTaskDecorator(runnable -> {
-        Map<String, String> ctx = MDC.getCopyOfContextMap();
-        return () -> { if (ctx != null) MDC.setContextMap(ctx); try { runnable.run(); } finally { MDC.clear(); } };
-    });
+    ex.setTaskDecorator(new ContextPropagatingTaskDecorator());
     ex.initialize();
     return ex;
 }
+// For the auto-configured @Async executor, set spring.task.execution.propagate-context=true (Boot 4.1).
 ```
 
 ### Interview Q&A
@@ -1281,7 +1370,7 @@ ThreadPoolTaskExecutor notifyExecutor() {
 
 **Why must `@Async` work be fire-and-forget here?** Sending email/SMS is slow and externally rate-limited. Doing it inline would hold the consumer thread, reduce throughput, and couple consumption to a flaky third party. Offloading to a bounded async pool keeps the consumer hot; the notification is best-effort and separately retryable.
 
-**Why does `@Async` lose the trace context, and how do you fix it?** `@Async` runs the method on a different thread, and `MDC` is thread-local, so the worker thread starts with an empty MDC and logs lose the `traceId`. A `TaskDecorator` copies the caller's MDC into the worker before running and clears it afterward.
+**Why does `@Async` lose the trace context, and how do you fix it?** `@Async` runs the method on a different thread, and `MDC` is thread-local, so the worker thread starts with an empty MDC and logs lose the `traceId`. Context propagation is opt-in. For Boot's auto-configured `@Async` executor, set `spring.task.execution.propagate-context=true` (Boot 4.1); for an executor you build yourself, set a `ContextPropagatingTaskDecorator`, which captures the caller's observation with the Micrometer Context Propagation library and restores it on the worker, so Micrometer Tracing writes the `traceId` back into MDC.
 
 **How do you size the consumer's `max.poll.records` and `max.poll.interval.ms`?** Set `max.poll.records` so that batch processing time stays well under `max.poll.interval.ms`; otherwise the broker considers the consumer dead and triggers a rebalance storm. At ~45ms/event, a poll of 50 records (~2.3s) is safely under the default 5-minute interval.
 

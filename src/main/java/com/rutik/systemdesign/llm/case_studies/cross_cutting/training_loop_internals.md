@@ -141,7 +141,7 @@ FORWARD PASS (all-gather):
   GPU 0..7 broadcast their shards -> every GPU briefly holds all 16 GB
   Compute forward activations
   Discard non-owned shards immediately after use
-  
+
 BACKWARD PASS (reduce-scatter):
   Gradients are computed per-GPU
   reduce-scatter: sum gradients across GPUs, scatter result
@@ -161,7 +161,7 @@ OPTIMIZER STATE (sharded):
 Step:   0    100   200   300   400   500   600   700   800   900   1000
         |     |     |     |     |     |     |     |     |     |     |
 Train:  |=====|=====|=====|=====|=====|=====|=====|=====|=====|=====|
-        
+
 Eval:   *     *     *     *     *     *     *     *     *     *     *
         (every 100 steps, ~30s overhead on held-out 500 examples)
 
@@ -174,7 +174,7 @@ Loss spike detected at step 820:
         |                             CKP@500        CKP@500 (bad)  |
         |                                |                          |
         |    rollback to step 500 <------|  [spike: loss 3x mean]   |
-        
+
 After rollback: resume from step 500, skip bad data batch, continue
 ```
 
@@ -766,8 +766,7 @@ Fix: write to a temp path, compute a SHA-256 checksum of the written file, store
 | Hugging Face Trainer | High-level training loop | Correct gradient accumulation, FSDP support, W&B integration |
 | DeepSpeed ZeRO | Distributed optimization | ZeRO-1/2/3; ZeRO-3 ≈ FSDP full sharding; ZeRO-Infinity adds CPU/NVMe offload |
 | Megatron-LM | Frontier pre-training | Tensor + pipeline parallelism; used for GPT-3, LLaMA, Falcon |
-| TRL (Transformer RL) | SFT / DPO / PPO training | Built on Accelerate; `SFTTrainer`, `DPOTrainer`, `PPOTrainer` classes |
-| torchtune | Lightweight fine-tuning | Pure PyTorch; minimal abstractions; LoRA, QLoRA, full fine-tune |
+| TRL (Transformer RL) | SFT / DPO / GRPO / RLOO training | Built on Accelerate; `SFTTrainer`, `DPOTrainer`, `GRPOTrainer`, `RLOOTrainer`; no `PPOTrainer` since v1.13.0, so PPO with a critic runs in OpenRLHF or veRL |
 | Weights & Biases | Experiment tracking | `wandb.log({"loss": loss, "grad_norm": grad_norm})` at each step |
 | PyTorch Lightning | Training framework | `Trainer` class with built-in FSDP strategy; good for research |
 
@@ -776,7 +775,6 @@ Fix: write to a temp path, compute a SHA-256 checksum of the written file, store
 | HF Accelerate | Yes | Yes (plugin) | High | Meta, Mistral, many startups |
 | DeepSpeed | Via plugin | Native | Medium | Microsoft, many research labs |
 | Megatron-LM | Partial | Partial | Low | NVIDIA, frontier labs |
-| torchtune | Yes | No | High | Growing, PyTorch-native teams |
 | PyTorch Lightning | Yes | Via DS plugin | Medium | Research community |
 
 ---
@@ -866,7 +864,7 @@ The training loop uses FSDP with `FULL_SHARD` and the `AsyncCheckpointManager` d
 
 The ChatGPT training pipeline (as described in the InstructGPT paper) has two training loops: one for the reward model (RM) and one for the PPO policy update. The RM training loop is straightforward SFT: binary cross-entropy on (chosen, rejected) pairs with the same gradient accumulation + FSDP structure as Section 6. The PPO loop is significantly more complex: it requires four models in memory simultaneously — the actor (policy, being trained), the critic (value head, being trained), the reference policy (frozen SFT checkpoint), and the reward model (frozen). With 175B parameters per model at FP16, the naive approach requires 4 × 350 GB = 1.4 TB of GPU memory.
 
-Open implementations (TRL's `PPOTrainer`, OpenRLHF) handle this by keeping all four models on GPU but shrinking what has to exist: the reference policy is usually the base weights with the trained LoRA adapter disabled rather than a second copy, the critic shares the actor's trunk with a small value head, and the reward model runs on a separate inference pool addressed over RPC. OpenAI has not published the memory layout it used for InstructGPT, so treat any specific placement attributed to them as inference, not record. What is not viable is CPU-offloading a 175B reference or reward model: the per-batch host-device transfer alone would dominate the step time. The PPO inner loop accumulates a rollout buffer of 1024-4096 (state, action, reward, value) tuples, then performs multiple epochs of PPO gradient updates on the buffer. Gradient clipping is set at norm 1.0 for both actor and critic; the critic's value loss is clipped with `clip_eps=0.2` (standard PPO hyperparameter). Eval-during-training measures reward model score distribution on a held-out prompt set every 50 PPO steps.
+Open implementations (OpenRLHF, which schedules the four models onto Ray-managed GPU groups, and veRL) handle this by keeping all four models on GPU but shrinking what has to exist: with a LoRA actor the reference policy can be the base weights with the adapter disabled rather than a second copy, and the reward model runs on a separate inference pool addressed over RPC. OpenAI has not published the memory layout it used for InstructGPT, so treat any specific placement attributed to them as inference, not record. What is not viable is CPU-offloading a 175B reference or reward model: the per-batch host-device transfer alone would dominate the step time. The PPO inner loop accumulates a rollout buffer of 1024-4096 (state, action, reward, value) tuples, then performs multiple epochs of PPO gradient updates on the buffer. Gradient clipping is set at norm 1.0 for both actor and critic; the critic's value loss is clipped with `clip_eps=0.2` (standard PPO hyperparameter). Eval-during-training measures reward model score distribution on a held-out prompt set every 50 PPO steps.
 
 ### design_legal_ai_platform — Domain-Adaptive Continued Pre-Training on Legal Corpora
 

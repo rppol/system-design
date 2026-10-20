@@ -13,9 +13,11 @@ Key models in this space:
 | Phi-3 Mini | 3.8B | Microsoft | Textbook-quality training data |
 | Phi-3.5 / Phi-4 | 3.8B–14B | Microsoft | Reasoning, instruction following |
 | LLaMA 3.2 1B / 3B | 1B, 3B | Meta | Permissive license, multilingual |
-| Gemma 2B / 9B | 2B, 9B | Google DeepMind | Safety-tuned, open weights |
+| Gemma 4 E2B / E4B | ~2B, ~4B effective | Google DeepMind | On-device multimodal, Apache 2.0 (2026-03-31) |
+| Gemma 3n E2B / E4B | ~2B, ~4B effective | Google DeepMind | Mobile-first multimodal (2025-06-26) |
+| Gemma 3 270M / 1B / 4B | 270M-4B | Google DeepMind | 270M (2025-08-14) is built for task-specific fine-tuning |
 | TinyLlama | 1.1B | Community | Extreme resource efficiency |
-| Qwen2.5 | 0.5B–3B | Alibaba | Strong multilingual, code |
+| Qwen3 0.6B / 1.7B / 4B | 0.6B-4B | Alibaba | Thinking and non-thinking modes, multilingual, Apache 2.0 |
 | Gemini Nano | ~1.8B | Google | Android on-device integration |
 
 The defining insight from Microsoft's Phi series — "textbooks are all you need" — is that training on high-quality, curated synthetic data can produce a 3B model that outperforms 13B models trained on raw web crawls on many benchmarks. Data quality drives capability more than raw parameter count within the SLM range.
@@ -60,7 +62,7 @@ For delivering, updating, and rolling back models on devices the platform team d
 
 ### 4.1 By Primary Use Case
 
-**General-purpose SLMs** handle instruction following, summarization, Q&A, and general text tasks. Examples: Phi-3 Mini (3.8B), Gemma 2B, LLaMA 3.2 3B, Qwen2.5 3B.
+**General-purpose SLMs** handle instruction following, summarization, Q&A, and general text tasks. Examples: Phi-3 Mini (3.8B), Phi-4-mini (3.8B), Gemma 4 E4B, Gemma 3 4B, LLaMA 3.2 3B, Qwen3 4B.
 
 **Code-specialized SLMs** are fine-tuned or pretrained on code corpora. Examples: StarCoder2 3B (The Stack v2 data), Phi-3-small (code-heavy training mix), Qwen2.5-Coder 1.5B/3B.
 
@@ -224,6 +226,102 @@ This is the single most common sizing mistake in edge deployment. Token generati
 ```
 
 Flagship parts with wider memory buses land at the 50-100 tokens/second quoted above — but the answer still tracks bandwidth, not TOPS. **Prefill is the exception**: processing a prompt reuses each loaded weight across every prompt token at once, so prefill really is compute-bound and really does scale with TOPS. That is why the M3 Pro numbers in Section 6.3 show ~200 tokens/sec prefill against ~35-50 tokens/sec decode on identical hardware. Estimate decode from `bandwidth / model size`, estimate prefill from `FLOPs / TOPS`, and never quote one number for both.
+
+### 4.7 OS-Provided On-Device Model APIs
+
+The platform owner now ships the model. Instead of bundling a 1-2 GB GGUF or `.mlpackage`, an app
+calls a model that the operating system or browser downloads once, updates, and shares across apps.
+
+| | Apple Foundation Models framework | Android ML Kit GenAI APIs | Chrome built-in AI |
+|---|---|---|---|
+| Model | Apple's on-device model, about 3B parameters | Gemini Nano, run by the AICore system service | Gemini Nano, downloaded by Chrome |
+| Platform | iOS, iPadOS, macOS and visionOS 26, on Apple Intelligence devices | Supported Pixel, Samsung, OPPO, Xiaomi and other devices; Prompt API depends on the Nano version on the device | Desktop Chrome on Windows 10/11, macOS 13+, Linux, Chromebook Plus; not Android or iOS |
+| Task APIs | Free-form session; content tagging adapter | Summarization, Proofreading, Rewriting, Image description (beta); Speech recognition (alpha) | Summarizer, Translator, Language Detector (stable in Chrome 138); Writer, Rewriter, Proofreader (origin trial) |
+| Free-form prompting | `LanguageModelSession` | Prompt API (beta) | Prompt API: stable for extensions from Chrome 138, origin trial for web pages |
+| Structured output | `@Generable` Swift types; constrained decoding in an OS daemon | JSON via prompting | `responseConstraint` with a JSON Schema |
+| Tool calling | `Tool` protocol, parallel and serial calls | No | No |
+| Custom weights | Rank-32 LoRA adapters from Apple's Python toolkit, retrained for every base-model version | No | No |
+| Limits | 4,096-token context per session | Per-app inference quota (`ErrorCode.BUSY`), daily battery quota, foreground only (`BACKGROUND_USE_BLOCKED`) | 22 GB free disk, GPU over 4 GB VRAM or 16 GB RAM and 4 cores; the model is deleted if free space falls under 10 GB |
+
+Apple's on-device model (June 2025 technical report) stores weights at 2 bits per weight via
+quantization-aware training, with 4-bit embeddings and an 8-bit KV cache, and splits its layers into
+two blocks at a 5:3 depth ratio where the second block reuses the first block's KV cache, cutting KV
+memory by 37.5%. None of that is visible to the app, which is the point: the OS owns compression,
+scheduling and updates.
+
+```swift
+import FoundationModels
+
+@Generable
+struct TicketTriage {
+    @Guide(description: "One of: billing, bug, account, other")
+    var category: String
+    var summary: String
+}
+
+func triage(_ text: String) async throws -> TicketTriage? {
+    guard case .available = SystemLanguageModel.default.availability else { return nil }
+    let session = LanguageModelSession(instructions: "Classify support tickets.")
+    return try await session.respond(to: text, generating: TicketTriage.self).content
+}
+```
+
+```javascript
+// Chrome built-in AI: always check availability; the first create() may trigger a download
+const state = await LanguageModel.availability();
+if (state !== "unavailable") {
+  const session = await LanguageModel.create();
+  const out = await session.prompt(ticketText, { responseConstraint: triageSchema });
+}
+```
+
+Trade-offs against bundling your own model:
+
+- **App size and memory.** Zero model bytes in the binary, and one copy of the weights shared by
+  every app, against 1-2 GB per app that bundles its own.
+- **Coverage.** Each API runs only on its eligible devices. The `availability` check is mandatory and
+  the cloud or a smaller bundled model is the fallback, so the feature still needs two code paths.
+- **Version drift.** The OS updates the model under you. A prompt or adapter tuned against one base
+  version can change behavior after an OS update, and Apple's adapters must be retrained per base
+  version. Pin an on-device eval set and run it against each OS beta.
+- **Control.** No choice of model, quantization, sampler internals or context length beyond what the
+  API exposes. If you need a 32K context or a domain fine-tune on Android, bundle your own model.
+
+### 4.8 MatFormer and Per-Layer Embeddings (Gemma 3n)
+
+Gemma 3n (Google, June 2025) introduced two architecture tricks for phones, and the "E" in E2B and
+E4B means **effective** parameters: the number that must sit in accelerator memory, not the number
+in the checkpoint. E2B has over 5B raw parameters but runs with an effective load of 1.91B.
+
+**Per-Layer Embeddings (PLE).** Each transformer layer has its own embedding table that adds a
+token-specific vector to that layer's input. These tables are a large share of the raw parameters,
+but each token needs only one row per layer, and the rows are looked up, not multiplied. So PLE
+parameters are kept out of accelerator memory, cached on fast storage or CPU RAM, and only the
+needed rows are fetched as each layer runs. In the bandwidth terms of §4.6, the bytes streamed per
+token stay close to a 2B model while quality benefits from the extra parameters.
+
+**MatFormer (Matryoshka Transformer).** The feed-forward blocks are trained so that a prefix of each
+block's hidden units is itself a working smaller model. E4B contains E2B: running only the inner
+slice gives the E2B model with no separate checkpoint, and choosing slice widths per layer
+(Mix-n-Match) yields sizes between 2B and 4B.
+
+```
+One FFN layer, hidden units ordered by importance:
+
+  E4B: |=========== E2B slice ===========|....... extra width .......|
+  E2B: |=========== E2B slice ===========|
+  mid: |=========== E2B slice ===========|.. partial ..|   (Mix-n-Match)
+
+Per-Layer Embeddings, per token:
+
+  accelerator memory  <-- core transformer weights (about 2B effective)
+  flash / CPU RAM     <-- PLE tables (billions of params), one row per layer fetched per token
+```
+
+The first panel shows why one download can serve several device tiers; the second shows why the
+raw parameter count overstates the memory a phone must hold. Gemma 3n also lets the app skip loading
+its audio and vision encoder parameters (MobileNet-V5 for vision) when a session is text-only, and
+supports a 32K context.
 
 ---
 
@@ -811,8 +909,10 @@ A developer builds an on-device writing assistant that continuously generates su
 | Phi-3.5 Mini | 3.8B | MIT | Multilingual, long context (128K) | microsoft/Phi-3.5-mini-instruct |
 | Phi-4 | 14B | MIT | Best-in-class at 14B | microsoft/phi-4 |
 | LLaMA 3.2 1B / 3B | 1B, 3B | Meta LLaMA | Lightweight, permissive | meta-llama/Llama-3.2-1B-Instruct |
-| Gemma 2 2B / 9B | 2B, 9B | Gemma ToS | Safety, instruction following | google/gemma-2-2b-it |
-| Qwen2.5 | 0.5B-3B | Apache 2.0 | Multilingual, code, math | Qwen/Qwen2.5-3B-Instruct |
+| Gemma 4 E2B / E4B | ~2B, ~4B effective | Apache 2.0 | On-device multimodal | google/gemma-4-E4B-it |
+| Gemma 3n E2B / E4B | ~2B, ~4B effective | Gemma ToS | Mobile-first multimodal | google/gemma-3n-E4B-it |
+| Gemma 3 270M | 270M | Gemma ToS | Task-specific fine-tuning at tiny size | google/gemma-3-270m-it |
+| Qwen3 | 0.6B-4B | Apache 2.0 | Multilingual, code, math, thinking mode | Qwen/Qwen3-4B |
 | TinyLlama | 1.1B | Apache 2.0 | Extreme efficiency | TinyLlama/TinyLlama-1.1B-Chat |
 | Moondream 2 | 1.86B | Apache 2.0 | On-device vision | vikhyatk/moondream2 |
 
@@ -827,6 +927,9 @@ A developer builds an on-device writing assistant that continuously generates su
 | Core ML | iOS/macOS | .mlpackage | Apple ANE, highest energy efficiency on Apple |
 | MediaPipe LLM | iOS/Android | TFLite | Google, Gemma-optimized |
 | ExecuTorch | iOS/Android | .pte | Meta's new mobile runtime |
+| Apple Foundation Models framework | iOS/macOS 26+ | OS-provided | Swift API to Apple's ~3B on-device model; `@Generable` structured output, tool calling, LoRA adapters |
+| ML Kit GenAI APIs | Android (AICore devices) | OS-provided | Gemini Nano task APIs plus Prompt API; per-app quota, foreground only |
+| Chrome built-in AI | Desktop Chrome 138+ | Browser-provided | Gemini Nano via Summarizer, Translator, Language Detector and Prompt API (extensions) |
 | TensorRT-LLM | Jetson/edge GPU | TensorRT | NVIDIA edge hardware |
 | llama.cpp Android | Android | GGUF via JNI | Community JNI wrapper |
 | MLX / `mlx-lm` | macOS (Apple silicon) | MLX safetensors | Apple's array framework. Unified memory means no host-to-device copy; also does 4/8-bit quantization and local LoRA fine-tuning |
@@ -836,8 +939,8 @@ A developer builds an on-device writing assistant that continuously generates su
 | Tool | Input | Output | Notes |
 |---|---|---|---|
 | llama.cpp quantize | GGUF FP16 | GGUF Q2-Q8 | Standard quantization CLI |
-| AutoGPTQ | Hugging Face | GPTQ | GPU-required calibration |
-| AutoAWQ | Hugging Face | AWQ | Activation-aware, better quality at Q4 |
+| GPTQModel | Hugging Face | GPTQ, AWQ, FP8 and more | GPU calibration; loads and exports Hugging Face checkpoints |
+| llm-compressor | Hugging Face | GPTQ, AWQ, FP8 (compressed-tensors) | vLLM project; output loads directly in vLLM |
 | BitsAndBytes | PyTorch | NF4/INT8 | Training-time quantization, QLoRA |
 | Optimum | Hugging Face | ONNX/ONNX-INT8 | Production ONNX quantization |
 | coremltools | PyTorch/ONNX | Core ML | Apple ecosystem conversion |
@@ -886,6 +989,14 @@ The decision depends on five factors: privacy requirements (on-device if data ca
 **Short:** A 3B INT4 model needs about 2.2-2.5GB working memory including KV cache and activations, requiring a minimum 4GB-RAM device and 6GB for comfort.
 A 3B parameter INT4 model requires approximately 1.5 GB for weights (3B * 0.5 bytes + overhead for scales and zero points, ~1.7 GB actual). During inference, add the KV cache (~150-300 MB at 2K context) and activations (~200 MB peak), totaling approximately 2.2-2.5 GB working set. Accounting for the OS, app runtime, and headroom to avoid OOM kills, a minimum of 4 GB device RAM is required for a 3B model, with 6 GB recommended for comfortable operation. A 7B INT4 model requires 6 GB minimum, effectively requiring an 8+ GB device.
 
+**Q: A model card says Gemma 3n E2B but the checkpoint holds over 5B parameters. Is the label wrong?**
+**Short:** No, E means effective: Per-Layer Embedding tables and optional audio and vision weights stay out of accelerator memory, so E2B runs with about 1.91B parameters loaded despite 5B+ raw.
+The label is correct because "E" counts effective parameters, the ones that must sit in accelerator memory, not the checkpoint total. Gemma 3n gives each layer its own Per-Layer Embedding table; those tables are a large share of the raw count but are looked up one row per token per layer rather than multiplied, so they can stay on flash or in CPU RAM and be fetched as each layer runs. Audio and vision encoder weights can also be skipped for a text-only session. Google reports E2B at over 5B raw parameters with an effective load of 1.91B. For sizing, this matters twice: memory planning should use the effective count, and decode speed, which is bound by bytes streamed per token, tracks the effective count too, while quality reflects the larger raw model. The gotcha runs the other way on desktop runtimes that do not implement PLE offload: they load everything, and the "2B" model needs the RAM of a 5B one, so check what your runtime actually keeps resident before choosing a device floor.
+
+**Q: What does MatFormer nesting give you that shipping separate small and large checkpoints does not?**
+**Short:** MatFormer trains a model whose inner slice of each feed-forward block is itself a working smaller model, so one download yields E2B, E4B and in-between sizes chosen per device.
+A MatFormer (Matryoshka Transformer) orders each feed-forward block's hidden units so that a prefix of them forms a smaller model trained jointly with the full one. Gemma 3n E4B contains E2B: run only the inner slice and you get E2B with no second checkpoint, or pick slice widths per layer (Mix-n-Match) to build sizes between 2B and 4B. Separate checkpoints would double download size and storage, and the two models would not share weights or behavior, so a prompt tuned on one can act differently on the other. Nesting lets an app ship one file and pick the size at load time from device RAM, thermal state or battery, and the smaller slice behaves like a degraded version of the same model rather than a different one. The limit is that slices must be chosen from what was trained jointly; an arbitrary pruned width is not guaranteed to work, so evaluate each size you plan to serve.
+
 **Q: How does the Apple Neural Engine differ from a CPU for LLM inference, and what are the constraints?**
 **Short:** The Apple Neural Engine delivers roughly 10x the energy efficiency of CPU inference at about 38 TOPS, but requires static tensor shapes and Core-ML compilation.
 The Apple Neural Engine is dedicated matrix multiply hardware optimized for neural network operations, delivering approximately 38 TOPS on A17 Pro compared to the CPU's ~3-5 TOPS equivalent for matrix ops. ANE inference is ~10x more energy efficient than CPU inference, critical for battery-powered devices. However, the ANE requires static tensor shapes (no dynamic sequence lengths without workarounds), supports only a specific set of operations (standard transformer ops are supported; exotic activations or custom ops fall back to CPU), and models must be compiled specifically for ANE using Core ML's compilation pipeline.
@@ -897,6 +1008,10 @@ Flagship smartphones (Snapdragon 8 Elite, A17 Pro) can sustain approximately 5W 
 **Q: How would you architect a hybrid on-device/cloud inference system for a mobile app?**
 **Short:** A hybrid mobile architecture uses a lightweight local classifier to route privacy-sensitive or simple requests on-device and complex ones to the cloud.
 The architecture uses a local routing layer that classifies each request before sending it anywhere. Simple, privacy-sensitive, or latency-critical requests route to the on-device SLM. Complex, knowledge-intensive, or long-context requests route to the cloud API. The routing classifier itself is extremely lightweight (a fine-tuned BERT-tiny or simple rule-based system). The system includes a cloud fallback for when the on-device model fails (returns low confidence or hits context limits), graceful degradation when offline (on-device only), and telemetry to measure which tasks were handled locally vs remotely to tune the routing threshold over time.
+
+**Q: When should a mobile or web app use the OS-provided model (Foundation Models, ML Kit GenAI, Chrome built-in AI) instead of bundling its own SLM?**
+**Short:** Use the OS model when its task APIs fit and you can tolerate device coverage gaps and silent model updates; bundle your own when you need a fine-tune, a long context or a pinned model version.
+The OS model costs zero app bytes, shares one copy of the weights across all apps, and is updated and scheduled by the platform: Apple's Foundation Models framework exposes a ~3B on-device model with `@Generable` structured output, tool calling and rank-32 adapters; ML Kit GenAI exposes Gemini Nano through AICore with Summarization, Proofreading, Rewriting, Image description and a Prompt API; Chrome exposes Gemini Nano through Summarizer, Translator, Language Detector and a Prompt API stable for extensions since Chrome 138. The costs are real. Coverage is limited to eligible hardware, so every call starts with an availability check and needs a fallback path. Limits are fixed by the platform: a 4,096-token session context on Apple; per-app quotas and foreground-only inference on Android; 22 GB free disk and a 4 GB-VRAM GPU or 16 GB RAM on desktop Chrome. And the model changes under you on OS updates, with Apple adapters needing retraining per base version. Bundle your own GGUF, Core ML or ExecuTorch model when you need a domain fine-tune on Android or web, a longer context, background inference, or reproducible behavior across OS versions; otherwise start with the OS model and keep a pinned eval set to run on every OS beta.
 
 **Q: What privacy guarantees does on-device inference actually provide, and what are the limits?**
 **Short:** On-device inference only guarantees that data doesn't leave the device for inference, not protection against a malicious app, memory access, or prompt injection.

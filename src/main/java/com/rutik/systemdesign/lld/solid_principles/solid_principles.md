@@ -283,6 +283,21 @@ SRP: small, focused classes are easy to test in isolation. OCP: extension via in
 
 LSP violations are the hardest to detect because they don't show up as a structural error — the code compiles and often passes unit tests. A subclass that weakens a postcondition (returns a narrower set of values than the parent promises), strengthens a precondition (requires more than the parent accepts), or throws an exception the parent never throws — all violate LSP silently. They cause failures at call sites that use polymorphism, which are often far from the class definition. Clue: a test that passes for the parent type but fails when you substitute the subclass.
 
+**Q: Which GoF patterns are the usual mechanism for each SOLID principle?**
+**Short:** Strategy and Decorator deliver OCP, factories and Adapter deliver DIP, role interfaces deliver ISP, and LSP is a precondition every polymorphic pattern relies on.
+
+A principle states a goal; a pattern is a reusable shape that meets it. OCP: Strategy, Decorator, and Template Method hooks add behaviour as new classes instead of edits. DIP: Factory Method, Abstract Factory, and constructor injection keep `new ConcreteType()` out of policy code, and Adapter turns a third-party API into an interface the domain owns (ports and adapters). ISP: role interfaces, plus an Adapter or Facade that exposes a narrow view of a wide class. SRP: Facade and Command pull a coordination or an operation out of a class that was doing too much. LSP has no pattern of its own; Strategy, State, Composite, and Observer all assume any implementation can stand in for another, so an LSP break breaks all of them. In an interview, name the principle first and the pattern second.
+
+**Q: Can a build gate enforce SOLID, and what can it not catch?**
+**Short:** ArchUnit tests fail the build on wrong dependency direction and package cycles (DIP), but no tool can tell whether a class has one reason to change (SRP).
+
+Partly. Dependency direction is structural, so ArchUnit rules written as JUnit tests can fail the build when a `..domain..` package imports a `..infrastructure..` type or when packages form a cycle; that enforces DIP at module level. Checkstyle and PMD put ceilings on class length, method count, and coupling, which flag SRP and ISP candidates. Error Prone catches some contract bugs that lead to LSP breaks, such as an `equals` override without `hashCode`. What no tool sees is responsibility: a 300-line class can serve one stakeholder and a 30-line class can serve three. Use the rules as a gate for direction and cycles, and use the size metrics only as a list of classes for a person to read.
+
+**Q: Which SOLID principles still apply to a Java record?**
+**Short:** A record cannot be subclassed, so inheritance-based OCP drops out, but LSP still binds it to every interface it implements, and SRP and ISP apply as they do to any class.
+
+A record cannot extend a class and cannot be extended (JLS 8.10), so no subclass can override its behavior and inheritance-based OCP drops out. LSP does not drop out: a `Circle` record that implements `Shape` is a subtype of `Shape` and must honor that interface's contract like any class, and a record that overrides the generated `equals` must still keep the `Object` contract. SRP still applies: a record that groups a customer's address with their payment limits has two reasons to change and should be two records. ISP applies to the interfaces a record implements; a record implementing a wide `Exportable` interface with five methods still has to provide all five. DIP applies to the code that uses the record, not to the record: a service should depend on a `PriceSource` interface even when the values it returns are records. OCP returns through composition: a sealed interface with record implementations closes the set on purpose, and a pattern `switch` over it with no `default` must handle every case.
+
 ---
 
 ## Recommended Further Reading

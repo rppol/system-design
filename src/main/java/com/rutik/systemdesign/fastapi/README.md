@@ -14,7 +14,7 @@ This section covers:
 - **Production Concerns** — async SQLAlchemy 2.0, Alembic migrations, N+1 avoidance; JWT/OAuth2 auth; WebSockets/SSE; Celery/ARQ task queues; `httpx`/`aiohttp` clients; `aiokafka` event-driven patterns
 - **Deployment, Observability & Scale** — Gunicorn+Uvicorn worker sizing, K8s probes, graceful shutdown; OpenTelemetry tracing; Prometheus metrics; Redis caching; OWASP API Top 10 hardening
 
-**Primary stack:** FastAPI + Python 3.13/3.14, Pydantic v2, SQLAlchemy 2.0. Version tags mark features introduced in earlier or later releases.
+**Primary stack:** FastAPI + Python 3.13/3.14, Pydantic v2, SQLAlchemy 2.1. Version tags mark features introduced in earlier or later releases.
 
 ---
 
@@ -22,25 +22,27 @@ This section covers:
 
 | # | Module Directory | Phase | Difficulty | Key Topics |
 |---|-----------------|-------|-----------|-----------|
-| 1 | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md) | 1 — FastAPI Core & ASGI | Intermediate | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI/Swagger |
-| 2 | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) | 1 — FastAPI Core & ASGI | Advanced | Validation, serialization, `@field_validator`/`@model_validator`, `pydantic-core` Rust, v1→v2, `BaseSettings` |
-| 3 | [routing_and_request_handling](routing_and_request_handling/routing_and_request_handling.md) | 1 — FastAPI Core & ASGI | Intermediate | Path operations, path/query/body/form params, `APIRouter`, response models, status codes, content neg. |
-| 4 | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/dependency_injection_in_fastapi.md) | 1 — FastAPI Core & ASGI | Advanced | `Depends`, sub-dependencies, `yield` deps (setup/teardown), caching/scopes, class-based deps, overrides |
-| 5 | [middleware_and_lifecycle](middleware_and_lifecycle/middleware_and_lifecycle.md) | 1 — FastAPI Core & ASGI | Intermediate | Middleware stack order, `BackgroundTasks`, CORS/GZip, custom middleware, exception handler positioning |
-| 6 | [configuration_and_settings_management](configuration_and_settings_management/configuration_and_settings_management.md) | 1 — FastAPI Core & ASGI | Intermediate | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings, per-env overrides |
-| 7 | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) | 2 — Production Concerns | Advanced | SQLAlchemy 2.0 async, `AsyncSession`, async engine, pool sizing, Alembic, SQLModel, N+1 avoidance |
-| 8 | [authentication_and_security](authentication_and_security/authentication_and_security.md) | 2 — Production Concerns | Advanced | OAuth2 password flow, JWT (PyJWT), scopes, passlib/bcrypt/argon2, OIDC, CSRF/CORS |
-| 9 | [error_handling_and_validation](error_handling_and_validation/error_handling_and_validation.md) | 2 — Production Concerns | Intermediate | `HTTPException`, custom exception handlers, `RequestValidationError`, RFC 9457 Problem Details |
-| 10 | [testing_fastapi](testing_fastapi/testing_fastapi.md) | 2 — Production Concerns | Intermediate | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
-| 11 | [websockets_sse_and_streaming](websockets_sse_and_streaming/websockets_sse_and_streaming.md) | 2 — Production Concerns | Advanced | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
-| 12 | [background_jobs_and_task_queues](background_jobs_and_task_queues/background_jobs_and_task_queues.md) | 2 — Production Concerns | Advanced | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, scheduling, idempotency, retries, DLQ |
-| 13 | [http_clients_and_external_apis](http_clients_and_external_apis/http_clients_and_external_apis.md) | 2 — Production Concerns | Intermediate | `httpx`/`aiohttp` async clients, connection pooling, retries/backoff, circuit breakers, timeouts |
-| 14 | [message_queues_and_event_driven](message_queues_and_event_driven/message_queues_and_event_driven.md) | 2 — Production Concerns | Advanced | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
-| 15 | [production_deployment_and_scaling](production_deployment_and_scaling/production_deployment_and_scaling.md) | 3 — Deployment, Observability & Scale | Advanced | Gunicorn+Uvicorn workers, worker tuning, container/K8s, graceful shutdown, ASGI scaling |
-| 16 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | 3 — Deployment, Observability & Scale | Advanced | Structured logging, OpenTelemetry tracing, Prometheus metrics, health/readiness probes |
-| 17 | [caching_and_performance](caching_and_performance/caching_and_performance.md) | 3 — Deployment, Observability & Scale | Advanced | Redis caching, response/in-process caching, connection pooling, profiling FastAPI, async pitfalls |
-| 18 | [api_design_and_versioning](api_design_and_versioning/api_design_and_versioning.md) | 3 — Deployment, Observability & Scale | Intermediate | REST best practices, versioning strategies, cursor pagination, rate limiting, idempotency keys |
-| 19 | [security_hardening_and_owasp](security_hardening_and_owasp/security_hardening_and_owasp.md) | 3 — Deployment, Observability & Scale | Advanced | OWASP API Top 10 in FastAPI, injection/SSRF, deserialization risk, secrets handling, pip-audit |
+| 1 | [python_api_framework_landscape](python_api_framework_landscape/python_api_framework_landscape.md) | 1 — FastAPI Core & ASGI | Intermediate | FastAPI vs Django/DRF vs Flask vs Litestar vs Starlette, ASGI vs WSGI, Flask async views vs a real event loop, migration strategy, justifying a framework choice |
+| 2 | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md) | 1 — FastAPI Core & ASGI | Intermediate | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI/Swagger |
+| 3 | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/pydantic_v2_deep_dive.md) | 1 — FastAPI Core & ASGI | Advanced | Validation, serialization, `@field_validator`/`@model_validator`, `pydantic-core` Rust, v1→v2, `BaseSettings` |
+| 4 | [routing_and_request_handling](routing_and_request_handling/routing_and_request_handling.md) | 1 — FastAPI Core & ASGI | Intermediate | Path operations, path/query/body/form params, `APIRouter`, response models, status codes, content neg. |
+| 5 | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/dependency_injection_in_fastapi.md) | 1 — FastAPI Core & ASGI | Advanced | `Depends`, sub-dependencies, `yield` deps (setup/teardown), caching/scopes, class-based deps, overrides |
+| 6 | [middleware_and_lifecycle](middleware_and_lifecycle/middleware_and_lifecycle.md) | 1 — FastAPI Core & ASGI | Intermediate | Middleware stack order, `BackgroundTasks`, CORS/GZip, custom middleware, exception handler positioning |
+| 7 | [configuration_and_settings_management](configuration_and_settings_management/configuration_and_settings_management.md) | 1 — FastAPI Core & ASGI | Intermediate | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings, per-env overrides |
+| 8 | [async_database_sqlalchemy](async_database_sqlalchemy/async_database_sqlalchemy.md) | 2 — Production Concerns | Advanced | SQLAlchemy 2.0 async, `AsyncSession`, async engine, pool sizing, Alembic, SQLModel, N+1 avoidance |
+| 9 | [authentication_and_security](authentication_and_security/authentication_and_security.md) | 2 — Production Concerns | Advanced | OAuth2 password flow, JWT (PyJWT), scopes, passlib/bcrypt/argon2, OIDC, CSRF/CORS |
+| 10 | [error_handling_and_validation](error_handling_and_validation/error_handling_and_validation.md) | 2 — Production Concerns | Intermediate | `HTTPException`, custom exception handlers, `RequestValidationError`, RFC 9457 Problem Details |
+| 11 | [testing_fastapi](testing_fastapi/testing_fastapi.md) | 2 — Production Concerns | Intermediate | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
+| 12 | [websockets_sse_and_streaming](websockets_sse_and_streaming/websockets_sse_and_streaming.md) | 2 — Production Concerns | Advanced | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
+| 13 | [serving_llm_and_ai_workloads](serving_llm_and_ai_workloads/serving_llm_and_ai_workloads.md) | 2 — Production Concerns | Advanced | Streaming completions over SSE and JSON Lines, backpressure, cancellation propagation, per-tenant token budgets, MCP servers from FastAPI |
+| 14 | [background_jobs_and_task_queues](background_jobs_and_task_queues/background_jobs_and_task_queues.md) | 2 — Production Concerns | Advanced | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, scheduling, idempotency, retries, DLQ |
+| 15 | [http_clients_and_external_apis](http_clients_and_external_apis/http_clients_and_external_apis.md) | 2 — Production Concerns | Intermediate | `httpx`/`aiohttp` async clients, connection pooling, retries/backoff, circuit breakers, timeouts |
+| 16 | [message_queues_and_event_driven](message_queues_and_event_driven/message_queues_and_event_driven.md) | 2 — Production Concerns | Advanced | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
+| 17 | [production_deployment_and_scaling](production_deployment_and_scaling/production_deployment_and_scaling.md) | 3 — Deployment, Observability & Scale | Advanced | Gunicorn+Uvicorn workers, worker tuning, container/K8s, graceful shutdown, ASGI scaling |
+| 18 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | 3 — Deployment, Observability & Scale | Advanced | Structured logging, OpenTelemetry tracing, Prometheus metrics, health/readiness probes |
+| 19 | [caching_and_performance](caching_and_performance/caching_and_performance.md) | 3 — Deployment, Observability & Scale | Advanced | Redis caching, response/in-process caching, connection pooling, profiling FastAPI, async pitfalls |
+| 20 | [api_design_and_versioning](api_design_and_versioning/api_design_and_versioning.md) | 3 — Deployment, Observability & Scale | Intermediate | REST best practices, versioning strategies, cursor pagination, rate limiting, idempotency keys |
+| 21 | [security_hardening_and_owasp](security_hardening_and_owasp/security_hardening_and_owasp.md) | 3 — Deployment, Observability & Scale | Advanced | OWASP API Top 10 in FastAPI, injection/SSRF, deserialization risk, secrets handling, pip-audit |
 
 ---
 
@@ -51,7 +53,8 @@ flowchart TD
     classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph phase1["Phase 1 - FastAPI Core & ASGI (6 modules)"]
+    subgraph phase1["Phase 1 - FastAPI Core & ASGI (7 modules)"]
+        p1g(["python_api_framework_landscape"])
         p1a(["fastapi_fundamentals_asgi"])
         p1b(["pydantic_v2_deep_dive"])
         p1c(["routing_and_request_handling"])
@@ -60,7 +63,7 @@ flowchart TD
         p1f(["configuration_and_settings_management"])
     end
 
-    subgraph phase2["Phase 2 - Production Concerns (8 modules)"]
+    subgraph phase2["Phase 2 - Production Concerns (9 modules)"]
         p2a(["async_database_sqlalchemy"])
         p2b(["authentication_and_security"])
         p2c(["error_handling_and_validation"])
@@ -69,6 +72,7 @@ flowchart TD
         p2f(["testing_fastapi"])
         p2g(["http_clients_and_external_apis"])
         p2h(["message_queues_and_event_driven"])
+        p2i(["serving_llm_and_ai_workloads"])
     end
 
     subgraph phase3["Phase 3 - Deployment, Observability & Scale (5 modules)"]
@@ -82,7 +86,7 @@ flowchart TD
     phase1 --> phase2 --> phase3
 
     class phase1,phase2,phase3 req
-    class p1a,p1b,p1c,p1d,p1e,p1f,p2a,p2b,p2c,p2d,p2e,p2f,p2g,p2h,p3a,p3b,p3c,p3d,p3e base
+    class p1g,p1a,p1b,p1c,p1d,p1e,p1f,p2a,p2b,p2c,p2d,p2e,p2f,p2g,p2h,p2i,p3a,p3b,p3c,p3d,p3e base
 ```
 
 **Dependencies to note:**
@@ -161,9 +165,9 @@ serving_llm_and_ai_workloads
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 19 modules spanning the full FastAPI request lifecycle, from ASGI internals through production hardening. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 21 modules spanning the full FastAPI request lifecycle, from ASGI internals through production hardening. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (19 modules)
+### Full Path (21 modules)
 
 The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-phase-learning-path). Use it for genuine mastery: every layer of the FastAPI request lifecycle (routing, middleware, configuration, WebSockets/SSE), and the complete production-hardening set (FastAPI-specific testing, external HTTP clients, message-queue consumers, background job queues, API versioning, OWASP hardening). Nothing is dropped.
 
@@ -261,20 +265,21 @@ A 3-week plan over the Senior Path. Each week pairs modules with case studies to
 | FastAPI | 0.110+ | `lifespan` replaces `on_startup`/`on_shutdown` as recommended pattern |
 | FastAPI | 0.134+ | Native JSON Lines streaming — return `AsyncIterable[Model]`, served as `application/jsonl` |
 | FastAPI | 0.135+ | Native SSE — `fastapi.sse.EventSourceResponse` / `ServerSentEvent`, with keep-alive, `X-Accel-Buffering: no` and `Last-Event-ID` handled |
-| Starlette | 1.x (current 1.6.0) | ASGI 3 throughout; `lifespan` event type; requires Python 3.10+ |
+| Starlette | 1.x (1.9.0 on 2026-10-18) | ASGI 3 throughout; `lifespan` event type; requires Python 3.11+ from 1.8.0; `TestClient.stream()` returns before the app finishes from 1.9.0 |
 | SQLAlchemy | 1.4 | Legacy `Query` API + new 2.0-style `select()` statements, both supported |
 | SQLAlchemy | 2.0 (2023) | Unified 2.0-style only; `AsyncSession`/`async_engine` stable; typed ORM models |
-| SQLAlchemy | 2.1 (beta; 2.0.x is current) | greenlet moves into the `[asyncio]` extra — pin `sqlalchemy[asyncio]` (already valid on 2.0) so the upgrade does not drop `AsyncSession` |
+| SQLAlchemy | 2.1 (GA 2026-09-24) | greenlet moved into the `[asyncio]` extra — install `sqlalchemy[asyncio]` (already valid on 2.0) or the upgrade drops `AsyncSession`; requires Python 3.11+; SQLModel supports it from 0.0.48 |
 | SQLModel | 0.0.14+ | Pydantic v2 + SQLAlchemy 2.0 unified models |
 | Alembic | 1.13+ | `--autogenerate` with async support via `run_sync` |
-| httpx | 0.28.1 | `AsyncClient` with connection limits and event hooks. The `app=` shortcut was **removed in 0.28.0** — use `transport=httpx.ASGITransport(app=app)`, which does not run `lifespan` |
+| httpx | 0.28.1 | `AsyncClient` with connection limits and event hooks. The `app=` shortcut was **removed in 0.28.0** — use `transport=httpx.ASGITransport(app=app)`, which does not run `lifespan`. No release since 2024-12-06 |
+| httpx2 | 2.14.0 (2026-10-18) | Pydantic-maintained successor to `httpx` with the same sync and async API; `fastapi[standard]` pulls it since FastAPI 0.143.4; `TestClient` accepts either (Starlette 1.2.0+) |
 | anyio | 3.x / 4.x | Backend-agnostic structured concurrency; FastAPI/Starlette use anyio internally |
 
 ---
 
 ## 5. Case Studies
 
-All 6 case studies live in [case_studies/](case_studies/case_studies.md) and follow the repo-wide 11-section principal template (Intuition, 1. Requirements Clarification, 2. Scale Estimation, 3. High-Level Architecture, 4. Component Deep Dives, 5. Design Decisions & Tradeoffs, 6. Real-World Implementations, 7. Technologies & Tools, 8. Operational Playbook, 9. Common Pitfalls & War Stories, 10. Capacity Planning, 11. Interview Discussion Points).
+All 8 case studies live in [case_studies/](case_studies/case_studies.md) and follow the repo-wide 11-section principal template (Intuition, 1. Requirements Clarification, 2. Scale Estimation, 3. High-Level Architecture, 4. Component Deep Dives, 5. Design Decisions & Tradeoffs, 6. Real-World Implementations, 7. Technologies & Tools, 8. Operational Playbook, 9. Common Pitfalls & War Stories, 10. Capacity Planning, 11. Interview Discussion Points).
 
 | Case Study | Core Concepts | Difficulty |
 |------------|--------------|-----------|
@@ -284,6 +289,8 @@ All 6 case studies live in [case_studies/](case_studies/case_studies.md) and fol
 | [Design an Async Task Queue System](case_studies/design_async_task_queue.md) | ARQ/Celery/Dramatiq/TaskIQ/Temporal comparison, idempotency, retries + exponential backoff with jitter, dead-letter queues | Advanced |
 | [Design an Async Web Scraper](case_studies/design_async_web_scraper.md) | asyncio + aiohttp, `Semaphore` rate limiting, producer/consumer, crawl budget/politeness | Intermediate |
 | [Design an ML Inference API with FastAPI](case_studies/design_ml_inference_api_fastapi.md) | Async model serving, micro-batching, async Redis cache, `lifespan` model loading, SSE streaming | Advanced |
+| [Design an LLM Gateway with FastAPI](case_studies/design_llm_gateway_fastapi.md) | Virtual keys, per-tenant token budgets checked before the call, tokenizer-based estimates, provider routing and failover, two-tier cache, streaming cancellation and usage reconciliation | Advanced |
+| [Design a File Upload and Media API](case_studies/design_file_upload_and_media_api.md) | `UploadFile` spill threshold, multipart DoS limits, presigned S3 PUT, S3 multipart and resumable uploads, content sniffing, virus scanning before promotion, off-request post-processing | Advanced |
 
 ---
 

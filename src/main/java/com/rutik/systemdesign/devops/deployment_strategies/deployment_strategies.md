@@ -72,6 +72,8 @@ quadrantChart
 | Blue-green | No | Instant (switch) | 2x during cutover | 100% at switch | Medium |
 | Canary | No | Fast (shift back) | ~1x + canary | Small (X%) | High (needs metrics) |
 | Feature flags | No | Instant (toggle) | 1x | Controlled per cohort | Medium (flag mgmt) |
+| Traffic shadowing (mirroring) | No | Nothing to roll back; users never see v2 | ~1x extra for the shadow fleet | 0% of user responses (side effects can still leak) | High (side-effect isolation, response diffing) |
+| Cell / wave rollout with bake time | No | Fast per cell; stop the pipeline | ~1x | One cell, AZ, or Region at a time | High (cell routing, long pipeline) |
 
 ### Progressive delivery (automated canary)
 
@@ -294,6 +296,48 @@ return old_checkout(user)
 # Bad behavior? flip the flag off instantly (sub-second) -- no rollback deploy needed.
 ```
 
+### Traffic shadowing (dark traffic)
+
+A shadow deploy copies live requests to the new version and throws its responses away, so v2 sees production traffic shape and volume before any user depends on it. Istio does it in the `VirtualService`; Envoy calls it `request_mirror_policies`.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: pricing}
+spec:
+  hosts: [pricing]
+  http:
+    - route:
+        - destination: {host: pricing, subset: v1}
+          weight: 100
+      mirror: {host: pricing, subset: v2}
+      mirrorPercentage: {value: 10.0}   # copy 10% of requests to v2
+```
+
+The proxy sends the copy fire-and-forget: the caller gets v1's response, v2's response is discarded, and v2's latency never reaches the user. Istio appends `-shadow` to the `Host`/`:authority` header of the copy (`pricing` becomes `pricing-shadow`), which v2 or its dependencies can use to recognise dark traffic. What shadowing checks: v2 does not crash, leak memory, or blow its latency budget under real input. What it cannot check on its own is correctness, so teams compare the two responses offline. Twitter's open-source Diffy runs the request against the candidate and two copies of the current version; differences that also appear between the two current copies (timestamps, random IDs) are noise and get filtered out.
+
+The hard part is side effects. A mirrored `POST /charge` charges the card twice, a mirrored signup sends a second email, and v2's writes land in the same database as v1's. Shadow only idempotent reads, or run v2 against stubbed or forked dependencies (a sandbox payment gateway, a copy of the database, a Kafka topic nobody consumes). Mirroring also adds load to every downstream service v2 calls, so start at a low `mirrorPercentage`.
+
+### Cell- and wave-based rollout with bake time
+
+A canary limits how many *requests* see a bad version; a cell-based rollout limits how many *customers or locations* can be hurt at all. A **cell** is a full copy of the stack (compute, data, queues) serving a fixed partition of customers, with a thin router mapping each customer to one cell. A deploy goes to one cell, waits, then the next, so a bad version never reaches more than one cell's share of customers at a time. Without cells the same idea runs over AZs and Regions as **waves**.
+
+AWS's Builders' Library article "Automating safe, hands-off deployments" gives concrete numbers for its pipelines. A one-box stage serves at most 10% of a Region's or AZ's requests, and the pipeline waits at least 1 hour after each one-box stage. The first production wave goes to one AZ (or cell) in a low-traffic Region, followed by at least 12 hours of bake time before the next wave. Later waves get larger and faster, and a change reaches all Regions in about four to five business days. During bake time the pipeline watches the team's high-severity aggregate alarm and rolls back automatically if it fires, and time windows stop new waves from starting outside business hours (many teams also exclude Fridays).
+
+```mermaid
+flowchart LR
+    pre["Pre-prod +<br/>integration tests"] --> ob["One-box<br/>max 10% of one AZ"]
+    ob -->|"bake 1 h+"| w1["Wave 1<br/>1 AZ / cell,<br/>low-traffic Region"]
+    w1 -->|"bake 12 h+"| w2["Wave 2<br/>rest of Region 1"]
+    w2 -->|"bake"| w3["Wave 3<br/>several Regions"]
+    w3 -->|"bake"| w4["Final waves<br/>all Regions<br/>~4-5 business days total"]
+    ob -.->|"alarm"| rb["Automatic rollback,<br/>pipeline stops"]
+    w1 -.->|"alarm"| rb
+    w2 -.->|"alarm"| rb
+```
+
+Bake time exists because some failures need time or traffic to appear: a memory leak, a cache that expires after 6 hours, a nightly batch job, a daily traffic peak in a timezone that has not woken up yet. A canary that runs 10 minutes catches none of these; a 12-hour bake after the first wave covers one peak and one off-peak period.
+
 ### The compatibility constraint
 
 ```mermaid
@@ -342,6 +386,8 @@ flowchart LR
 | Promotion | Manual gate | Automated (metric-gated) | Confidence in metrics/SLOs |
 | Cost | 1x (rolling/canary) | 2x (blue-green cutover) | Budget vs rollback speed |
 | Canary analysis | Time-based (simple) | Metric-based (safe) | Observability maturity |
+| Pre-release validation | Shadow traffic (no user impact) | Canary (real users, real side effects) | Side-effect isolation cost vs testing true end-to-end behavior |
+| Rollout speed | One global rollout in minutes | Cells/waves with hours of bake | Time to ship vs blast radius of a latent bug |
 
 ---
 
@@ -390,72 +436,82 @@ ALTER TABLE orders DROP COLUMN total;
 | Gateway API (Envoy Gateway, Istio, Traefik, NGINX Gateway Fabric) / Linkerd | Traffic weighting for canaries — `HTTPRoute` `backendRefs[].weight` is the portable form (see [`../../backend/service_mesh_and_service_discovery`](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md)) |
 | Prometheus | Metric source for canary analysis (see [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md)) |
 | Spinnaker | Multi-cloud deployment pipelines |
+| Istio `mirror` / Envoy `request_mirror_policies` | Traffic shadowing to a candidate version |
+| Diffy (open-sourced by Twitter) | Compare candidate vs current responses on shadow traffic, filtering noise with a second current copy |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: Compare rolling, blue-green, and canary.**
+**Q: Compare rolling, blue-green, and canary.**
 **Short:** Rolling replaces instances incrementally at low cost but slow rollback, blue-green switches all traffic instantly at 2x resource cost, and canary shifts traffic gradually with metric gates.
 Rolling replaces instances incrementally (zero downtime with readiness gates, cheap, but blast radius grows as the roll proceeds and rollback means rolling back). Blue-green runs two full environments and switches all traffic at once — instant rollback by switching back, at ~2x resource cost during cutover and 100% blast radius at the switch. Canary routes a small % of traffic to the new version first, limiting blast radius and enabling metric-gated promotion, at the cost of needing traffic-splitting and metric analysis.
 
-**Q2: What is progressive delivery?**
+**Q: You mirror production traffic to v2 before release. What can still go wrong for real users?**
+**Short:** Mirrored writes run for real, so a shadowed POST can charge a card or send an email twice, and the extra load hits shared downstream services; shadow reads only or stub v2's dependencies.
+Mirroring (Istio `mirror` with `mirrorPercentage`, Envoy `request_mirror_policies`) sends a copy of each request to v2 fire-and-forget and discards v2's response, so users never see v2's output or latency. But v2 still executes the request: a mirrored `POST /charge` charges the card a second time, a mirrored signup sends a second welcome email, and v2's writes go into whatever database and queues it is configured with. It also doubles load on every dependency v2 calls, which can degrade v1's own requests through a shared database or rate-limited third-party API. Shadow only idempotent reads, or point v2 at a sandbox payment gateway, a forked database, and topics nobody consumes; key off the `-shadow` suffix Istio adds to the Host header; and start at 1-10% mirroring while watching downstream saturation.
+
+**Q: What is progressive delivery?**
 **Short:** Progressive delivery is automated canary or blue-green where a controller shifts traffic in increments, checks metrics against thresholds, and auto-promotes or rolls back without a human.
 It's automated canary (or blue-green) where a controller (Argo Rollouts/Flagger) shifts traffic in increments, queries success metrics (error rate, latency, custom KPIs) against thresholds at each step, and automatically promotes if healthy or rolls back if not — removing the human from the loop. It turns "deploy and watch dashboards" into a codified, repeatable, metric-gated process.
 
-**Q3: How do deploy and release differ, and why does it matter?**
+**Q: How do deploy and release differ, and why does it matter?**
 **Short:** Deploy means the new code is running in production, while release means users experience it, and feature flags separate the two by toggling exposure at runtime independent of deploy.
 Deploy = the new code is running in production; release = users actually experience it. Feature flags (and canary weighting) separate them: you can deploy code dark and toggle exposure at runtime per cohort. This lets you ship continuously, decouple risky features from deploy cadence, dark-launch for testing, and turn a misbehaving feature off in sub-seconds without a rollback deploy.
 
-**Q4: Why is blue-green's rollback faster than rolling's?**
+**Q: Why is blue-green's rollback faster than rolling's?**
 **Short:** Blue-green keeps the entire previous version running and warm so rollback is just repointing the router, while rolling has already replaced old instances and must redeploy them.
 Blue-green keeps the entire previous version (blue) running and warm; rollback is just pointing the router back to it — effectively instant. Rolling has already replaced old instances incrementally, so rolling back means deploying the old version again (re-pulling images, restarting pods, re-warming), which takes minutes. Blue-green trades 2x resource cost during cutover for that instant rollback.
 
-**Q5: What's the danger of running two versions simultaneously, and how do you handle schema changes?**
+**Q: What's the danger of running two versions simultaneously, and how do you handle schema changes?**
 **Short:** Old and new versions sharing a database can break on a backward-incompatible schema change, so expand-contract adds new fields first and removes old ones only after the old version is gone.
 During any rolling/canary/blue-green transition, v1 and v2 run at once and may share a database, so a backward-incompatible schema change breaks the version that doesn't expect it (500s, data corruption). Use expand-contract: first expand (additive, nullable changes both versions tolerate), deploy code using the new shape, then contract (remove old columns) only after all old pods are gone — never in the same release.
 
-**Q6: How does an automated canary decide to promote or roll back?**
+**Q: How does an automated canary decide to promote or roll back?**
 **Short:** A controller shifts a small traffic weight to the canary and queries metrics like success rate and p95 latency during pauses, advancing if they hold or reverting traffic if they fail.
 A controller shifts a small traffic weight to the canary and, during pauses, queries metric providers (e.g., Prometheus) for success conditions — success rate ≥ 99%, p95 latency < threshold, or business KPIs. If the conditions hold across the analysis, it advances the weight; if they fail (beyond a failure limit), it shifts traffic back to stable and halts, alerting. The gates are codified (AnalysisTemplate), not a human eyeballing dashboards.
 
-**Q7: When is blue-green the wrong choice?**
+**Q: When is blue-green the wrong choice?**
 **Short:** Blue-green is wrong when you can't afford roughly 2x resources, the workload is too large to double, or the database can't support both versions writing, since the switch exposes 100% of users at once.
 When you can't afford ~2x resources during cutover, when the workload is huge (doubling is prohibitively expensive), or when database/state can't support both versions writing — the instant switch still exposes 100% of users at once, so a bad-but-passing-smoke-test version hits everyone. In those cases canary (gradual exposure) limits blast radius better, and rolling is cheaper.
 
-**Q8: What are the risks of feature flags and how do you manage them?**
+**Q: What are the risks of feature flags and how do you manage them?**
 **Short:** Feature flags risk becoming permanent dead code and outage sources from wrong defaults, managed by treating each flag as inventory with an owner, purpose, and expiry.
 Stale flags become permanent dead code paths and a source of "why is prod behaving differently" confusion; a forgotten flag with a wrong default can cause an outage; and flag logic sprinkled everywhere increases complexity. Manage them as inventory: each flag has an owner, a purpose, and an expiry; remove flags once a feature is fully rolled out; and centralize evaluation through a flag service with audit/targeting.
 
-**Q9: How does a service mesh or ingress enable canaries?**
+**Q: How does a service mesh or ingress enable canaries?**
 **Short:** A service mesh or ingress provides weighted traffic routing so a controller can send a small percentage to the canary, typically through the Gateway API's `HTTPRoute` weights or a mesh's own API.
 They provide weighted traffic routing: the mesh/ingress can send, say, 5% of requests to the canary Service and 95% to stable, and adjust the weights as the rollout progresses. Argo Rollouts and Flagger drive these weights through whichever router is in front of the workload — the Gateway API's `HTTPRoute` (`backendRefs[].weight`, the portable option that works across Envoy Gateway, Istio, NGINX Gateway Fabric and the rest), or a mesh's own API (Istio `VirtualService`, Linkerd). The Ingress API is feature-frozen and never gained weighted routing, so annotation-based "canary" support was always a per-controller extension — Gateway API is where weighted splitting is actually specified. Without traffic-splitting capability, "canary" degrades to replica-ratio approximations, which are coarser and less precise.
 
-**Q10: What's a complete rollback strategy, and why isn't "redeploy the old version" always enough?**
+**Q: What's a complete rollback strategy, and why isn't "redeploy the old version" always enough?**
 **Short:** Redeploying the old version can be slow and may not even work after an incompatible schema change, so a complete strategy needs a fast, tested path like blue-green switch-back or a flag toggle.
 A complete strategy has a *fast, tested* path to the previous good state: blue-green switch-back, canary shift-to-zero, or feature-flag toggle — ideally automated and exercised regularly. "Redeploy the old version" can be slow (image pulls, restarts), and if the bad release made an incompatible schema change, redeploying old code may not even work. Rollback must account for data/schema and be proven, not assumed.
 
-**Q11: How do you choose a strategy for a high-traffic payment service?**
+**Q: Why do large providers roll out by cell, AZ, and Region in waves with hours of bake time instead of one fast canary?**
+**Short:** Some bugs only show after hours or at a daily peak, and a cell or AZ wave caps the customers a bad version can reach; AWS bakes at least 1 hour after one-box and 12 hours after the first wave.
+A canary limits the fraction of requests exposed, but every customer still shares the same fleet, and a 10-minute analysis cannot catch a slow memory leak, a cache that expires after hours, a nightly job, or the next timezone's peak. Waves split production along fault boundaries (one cell, then one AZ, then one Region, then many), so a latent bug reaches one boundary's customers before the pipeline sees it. AWS's Builders' Library describes its pipelines: a one-box stage takes at most 10% of an AZ's or Region's traffic and bakes at least 1 hour, the first wave goes to one AZ in a low-traffic Region and bakes at least 12 hours, an aggregate high-severity alarm triggers automatic rollback during bake, and a change reaches every Region in about four to five business days. The cost is speed, so pair waves with feature flags for urgent fixes, and keep cells independent so a failure in one cannot spread to the next.
+
+**Q: How do you choose a strategy for a high-traffic payment service?**
 **Short:** A payment service should favor canary or progressive delivery gated on strict metrics like error rate and payment-success KPIs with automated rollback and expand-contract schema discipline.
 Favor canary/progressive delivery to minimize blast radius (a payment bug must not hit 100% of users), gated on strict metrics (error rate, latency, and payment-success KPIs) with automated rollback. Combine with feature flags for risky logic (toggle off instantly) and strict expand-contract schema discipline. Blue-green is an option if instant full rollback is required and 2x cost is acceptable, but gradual exposure is usually safer for money flows.
 
-**Q12: How do deployment strategies relate to GitOps?**
+**Q: How do deployment strategies relate to GitOps?**
 **Short:** Under GitOps, the Rollout or canary spec lives in Git and a controller like ArgoCD plus Argo Rollouts reconciles it, so promotion or rollback becomes a Git change or automated step.
 Under GitOps, the desired state (including the Rollout/canary spec) lives in Git, and a controller (ArgoCD + Argo Rollouts) reconciles it; a promotion or rollback can be a Git change or an automated metric-gated step. The strategy (canary/blue-green) is declared as a Rollout CR, and rollback is `git revert` or the controller's auto-abort — combining progressive delivery with Git as the audited source of truth (see [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md)).
 
-**Q13: In a Kubernetes rolling update, what do `maxUnavailable` and `maxSurge` control?**
+**Q: In a Kubernetes rolling update, what do `maxUnavailable` and `maxSurge` control?**
 **Short:** `maxUnavailable` bounds how many pods can be down at once and `maxSurge` bounds extra pods above the desired count, with `maxUnavailable: 0` guaranteeing capacity never drops.
 They bound how many pods can be down at once (`maxUnavailable`) and how many extra pods can run above the desired count (`maxSurge`) during the rollout. Setting `maxUnavailable: 0` guarantees capacity never drops below the desired replica count, since Kubernetes must start a new, ready pod (via `maxSurge: 1`) before terminating an old one — the mechanism behind a zero-downtime rolling update. Neither field alone prevents a broken new pod from receiving traffic, though; that guarantee comes from readiness probes gating when a pod joins the Service's endpoints. Set both explicitly and pair them with readiness probes rather than relying on Kubernetes' rolling-update defaults.
 
-**Q14: In Argo Rollouts blue-green, what do `previewService`, `activeService`, and `scaleDownDelaySeconds` do?**
+**Q: In Argo Rollouts blue-green, what do `previewService`, `activeService`, and `scaleDownDelaySeconds` do?**
 **Short:** `activeService` sends production traffic to the live version while `previewService` lets the new version be smoke-tested first, and `scaleDownDelaySeconds` keeps old pods warm after promotion for instant rollback.
 `activeService` sends production traffic to the live version, while `previewService` points only at the new (green) pods so they can be smoke-tested before cutover. Promotion switches `activeService` to green; `scaleDownDelaySeconds` (e.g., 300) then keeps the old blue pods running and warm for that long afterward, so a bad release rolls back instantly by flipping `activeService` back instead of waiting for blue to be recreated from scratch. `autoPromotionEnabled: false` forces a human or external gate to approve that switch rather than promoting automatically once smoke tests pass. Set `scaleDownDelaySeconds` to cover your realistic detection window, not just the duration of an automated smoke test.
 
-**Q15: When, if ever, should you use the Recreate strategy in production?**
+**Q: When, if ever, should you use the Recreate strategy in production?**
 **Short:** Recreate should be limited to non-production or accepted maintenance windows since it kills all old instances first, causing full downtime and slow rollback with nothing left running.
 Recreate should be limited to non-production environments or accepted maintenance windows, since it kills all old instances before starting new ones and causes full downtime. It sits at the worst point on both the blast-radius and rollback-speed axes — 100% of users are affected simultaneously, and rollback means a slow redeploy because no old version is left running to fall back to. The rare production exception is a singleton stateful workload that cannot run two versions at once, where downtime is unavoidable regardless of strategy. Default to rolling or canary for anything that can tolerate two versions coexisting briefly, and reserve Recreate for cases where coexistence is genuinely impossible.
 
-**Q16: Why can a canary release that "passes" its checks still take down the entire service once promoted to 100%?**
+**Q: Why can a canary release that "passes" its checks still take down the entire service once promoted to 100%?**
 **Short:** A canary can pass because its small traffic slice happens to miss the specific pattern that triggers a bug, which is why real metric-gated analysis and representative sizing matter before full promotion.
 A canary can pass because its small traffic slice happened to miss the specific request pattern that triggers the bug, so the failure only appears once real full traffic hits 100%. In the module's case study, a canary held 5% of traffic for a 2-minute time-based pause with no metric analysis, that 5% slice never included the rare cart type that broke checkout, and the release was promoted straight to 100%, where errors spiked to 30% and needed a manual 8-minute rollback to fix. The fix combines two changes: add real metric-gated analysis at each step (checkout-success ≥ 99.5%, p95 latency < 400ms, `failureLimit: 1`) so a bad signal auto-aborts, and extend the canary's duration and traffic share so rare-but-important paths actually get exercised before promotion. After the fix, the same class of bug was caught and auto-rolled-back within 3 minutes at about 5% blast radius instead of 8 minutes at 100%. Size and duration your canary steps to be representative of production traffic, not just long enough to satisfy a timer.
 

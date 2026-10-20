@@ -328,6 +328,28 @@ type Chars<S extends string, Acc extends string[] = []> =
 type L = Chars<"abc">["length"];      // 3
 ```
 
+TypeScript 7.0 infers template placeholders by Unicode code point, the way `for...of` iterates a
+string. 6.0 matched UTF-16 code units, so an astral character such as an emoji split into two
+surrogate halves:
+
+```ts
+type E = Split<"😀abc", "">;           // 7.0: ["😀", "a", "b", "c"]
+type First<S extends string> = S extends `${infer C}${infer R}` ? [C, R] : never;
+type F = First<"😀abc">;               // 7.0: ["😀", "abc"]   6.0: ["\ud83d", "\ude00abc"]
+
+// BROKEN: a type-level length cap assumed to match the runtime check
+type Len<S extends string> = Chars<S>["length"];
+type T = Len<"😀">;                    // 1 on 7.0
+"😀".length;                           // 2: UTF-16 code units, so a 1-char cap rejects at runtime
+
+// FIX: count code points at runtime too, so both sides agree
+[..."😀"].length;                      // 1
+```
+
+A database column or API limit measured in UTF-16 units (JavaScript `.length`, SQL Server
+`NVARCHAR`) still needs the runtime check; the type-level count no longer matches it for any string
+outside the Basic Multilingual Plane.
+
 The accumulator rewrite is a five-character structural change with a 20x effect, and it is the single
 most useful optimisation in this whole module. The rule for TRE: the recursive reference must be the
 **entire** true or false branch of the conditional. Wrap it in a tuple, an object, a template
@@ -694,6 +716,15 @@ one split therefore returns `"tar.gz"` from `"archive.tar.gz"`; the fix is to re
 remainder — `` S extends `${infer _}.${infer R}` ? Ext<R> : S `` — until it stops matching. Assume
 first-match semantics whenever a delimiter can repeat, and write a type test that uses a
 three-segment input, since a two-segment one passes either way.
+
+**Q: Why does `Chars<"😀">["length"]` give 1 on TypeScript 7.0 when `"😀".length` is 2?**
+**Short:** TypeScript 7.0 infers template placeholders by Unicode code point, while `.length` counts UTF-16 code units, so the two disagree on every astral character.
+
+6.0 matched one UTF-16 code unit per `${infer C}`, so `"😀abc"` split as `["\ud83d", "\ude00abc"]`.
+7.0 (GA 2026-07-08) follows `for...of` semantics and yields `["😀", "abc"]`. A type-level length cap
+written against 6.0 now counts one less unit per emoji than the runtime check. Count with
+`[...s].length` at runtime when you want parity with the type, and keep `.length` where the limit is
+defined in UTF-16 units, such as a column width.
 
 **Q: What is tail-recursion elimination in TypeScript and how do you restructure to get it?**
 **Short:** Tail-recursion elimination applies only when the recursive reference is the entire true or false branch of a conditional, which raises the ceiling from about 47 steps to about 999.

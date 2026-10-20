@@ -306,9 +306,9 @@ class InventoryListener {
 ```
 
 `@ApplicationModuleListener` is the important one: it is shorthand for
-`@TransactionalEventListener(phase = AFTER_COMMIT)` + `@Async` + `@Transactional`, so
-the listener runs *after* the publisher's transaction commits, asynchronously, in its
-own transaction. That gives loose, eventually-consistent coupling.
+`@TransactionalEventListener` (default phase `AFTER_COMMIT`) + `@Async` +
+`@Transactional(propagation = REQUIRES_NEW)`, so the listener runs *after* the
+publisher's transaction commits, asynchronously, in its own new transaction. That gives loose, eventually-consistent coupling.
 
 ### 6.4 The event publication registry (reliable in-process events)
 
@@ -319,14 +319,62 @@ listener execution. The event publication registry fixes this:
 // build.gradle: spring-modulith-starter-jpa (or jdbc/mongodb)
 // Modulith persists each published event + intended listener in an
 // EVENT_PUBLICATION table within the publisher's transaction, and marks it
-// completed when the listener succeeds. Incomplete publications are
-// re-submitted on restart -> at-least-once in-process delivery.
+// completed when the listener succeeds. Incomplete publications stay in the
+// table until resubmitted: FailedEventPublications / IncompleteEventPublications,
+// or on restart with spring.modulith.events.republish-outstanding-events-on-restart=true.
+// -> at-least-once in-process delivery.
 ```
 
 This is the transactional-outbox pattern applied *inside* the monolith: the event row
 commits with the business data, and recovery replays unfinished events. (See
 [../../java/microservices_patterns/](../../java/microservices_patterns/microservices_patterns.md) for the cross-
 service outbox.)
+
+**Publication lifecycle (Modulith 2.0+).** Each row in `event_publication` carries a
+`status`, a `completion_attempts` counter, and a `last_resubmission_date`:
+
+```
+  publisher tx commits
+        |
+        v
+   PUBLISHED --listener claimed--> PROCESSING --returns--> COMPLETED
+        ^                              |
+        |                              +--throws---------> FAILED
+        |                                                    |
+   RESUBMITTED <---- FailedEventPublications.resubmit() -----+
+        |
+        +--listener claimed--> PROCESSING (completion_attempts + 1)
+
+  staleness monitor (every spring.modulith.events.staleness.check-interval, 1 min):
+     PUBLISHED   older than staleness.published   -> FAILED
+     PROCESSING  older than staleness.processing  -> FAILED
+     RESUBMITTED older than staleness.resubmitted -> FAILED
+     (all three default to 0 = monitor off)
+```
+
+`completion_attempts` is incremented on the move to `PROCESSING`, so a crash in the middle
+of a listener still counts as an attempt. A pod killed mid-listener leaves its row in
+`PROCESSING` forever unless a staleness duration is set; set
+`spring.modulith.events.staleness.processing` above the slowest listener's p99 (for
+example `5m`) so the monitor turns abandoned rows into `FAILED`, then a scheduled job
+calls `FailedEventPublications.resubmit(ResubmissionOptions.defaults().withBatchSize(100))`.
+`ResubmissionOptions` also takes `withMinAge(...)` and `withFilter(...)`, for example to
+skip rows whose `completionAttempts` exceeds 5 and alert on them instead.
+
+**Completion modes** (`spring.modulith.events.completion-mode`, since 1.3):
+
+| Mode | On success | Table growth | `CompletedEventPublications` |
+|------|-----------|--------------|------------------------------|
+| `UPDATE` (default) | Sets `completion_date`, keeps the row | Unbounded until you purge | Returns completed rows |
+| `DELETE` | Deletes the row | Only in-flight and failed rows remain | Returns nothing |
+| `ARCHIVE` | Moves the row to `event_publication_archive` | Hot table stays small; archive grows | Reads the archive |
+
+Under `UPDATE` at 200 events/sec the table gains about 17 million rows a day, and every
+resubmission scan reads past them. Either schedule
+`CompletedEventPublications.deletePublicationsOlderThan(Duration.ofDays(7))` or switch to
+`DELETE`/`ARCHIVE`. `republish-outstanding-events-on-restart` (default `false`) republishes
+every incomplete row on each instance at startup, so with three replicas the same row can be
+picked up three times; the reference docs advise against it for multi-instance deployments.
 
 ### 6.5 Isolated module testing
 
@@ -491,8 +539,9 @@ clean microservices anyway, so this order is rarely wasted work.
 
 4. **Losing events on crash.** Relying on a plain async after-commit listener without
    the event publication registry means a crash between commit and listener loses the
-   event. *Fix:* enable a Modulith persistence starter so publications are durable and
-   replayed. *War story:* a "send invoice email after payment" listener silently
+   event. *Fix:* enable a Modulith persistence starter so publications are durable, and
+   resubmit them via `IncompleteEventPublications` or
+   `republish-outstanding-events-on-restart=true`. *War story:* a "send invoice email after payment" listener silently
    dropped emails on the rare pod restart until the registry was enabled.
 
 5. **Expecting fault isolation.** Assuming module boundaries give microservice-style
@@ -508,6 +557,14 @@ clean microservices anyway, so this order is rarely wasted work.
    it into the build lets architecture docs drift. *Fix:* run `Documenter` in the
    verification test so diagrams regenerate every build.
 
+8. **Never cleaning the publication table.** The default `UPDATE` completion mode keeps
+   every completed row, so `event_publication` grows by millions of rows a week and
+   incomplete-publication queries slow down. Rows from killed pods sit in `PROCESSING`
+   indefinitely because the staleness monitor is off by default. *Fix:* set
+   `completion-mode=delete` or `archive` (or purge with `CompletedEventPublications`), set
+   `staleness.processing`, and resubmit `FAILED` rows from one scheduled job instead of
+   `republish-outstanding-events-on-restart` on every replica.
+
 ---
 
 ## 11. Technologies & Tools
@@ -520,6 +577,7 @@ clean microservices anyway, so this order is rarely wasted work.
 | Reliable events | `spring-modulith-events-jpa` / `-jdbc` / `-mongodb`, event publication registry; `-kafka`/`-amqp`/`-jms`/`-messaging` externalization |
 | True outbox externalization (2.1+) | `spring-modulith-starter-namastack` (relational databases only) |
 | True outbox externalization (2.1+) | `spring-modulith-starter-jobrunr` |
+| Registry operations | `IncompleteEventPublications`, `FailedEventPublications` (2.0+), `CompletedEventPublications`, `ResubmissionOptions`; `spring.modulith.events.completion-mode`, `spring.modulith.events.staleness.*` |
 | Testing | `spring-modulith-starter-test`, `@ApplicationModuleTest`, `Scenario` |
 | Module + Boot slice testing (2.1+) | `@ModuleSlicing` — combine with `@DataJpaTest`/`@WebMvcTest`/etc. for a module-scoped Boot slice test |
 | Documentation | `Documenter` (PlantUML/C4, module canvas), `spring-modulith-docs` |
@@ -576,22 +634,25 @@ DAG.
 **Short:** @ApplicationModuleListener runs asynchronously after commit in its own transaction, unlike the synchronous @EventListener.
 
 `@ApplicationModuleListener` is a composed annotation equivalent to
-`@TransactionalEventListener(phase = AFTER_COMMIT)` + `@Async` + `@Transactional`: the
-listener runs asynchronously, only after the publishing transaction commits, and in
-its own transaction. A plain `@EventListener` runs synchronously in the publisher's
+`@TransactionalEventListener` (default phase `AFTER_COMMIT`) + `@Async` +
+`@Transactional(propagation = REQUIRES_NEW)`: the listener runs asynchronously, only
+after the publishing transaction commits, and in its own new transaction. A plain `@EventListener` runs synchronously in the publisher's
 thread and transaction, so it blocks the publisher and a failure rolls the publisher
 back. Use `@ApplicationModuleListener` for decoupled, eventually-consistent side
 effects between modules; use `@EventListener` only when you genuinely want synchronous,
 same-transaction handling.
 
 **Q: What is the event publication registry and what problem does it solve?**
-**Short:** It persists each published event with the transaction as a durable outbox, replaying incomplete ones after a crash.
+**Short:** It persists each published event in the publisher's transaction as a durable outbox, so an incomplete publication survives a crash and can be resubmitted.
 
 It is Modulith's durability mechanism: when you add a persistence starter
 (`spring-modulith-events-jpa`/`-jdbc`/`-mongodb`), each published event and its
 intended listener are written to an event-publication table *within the publisher's
-transaction*, then marked complete when the listener succeeds; incomplete publications
-are re-submitted on application restart. This prevents the loss of an after-commit
+transaction*, then marked complete when the listener succeeds. Incomplete publications are not
+replayed by default: resubmit them through the `FailedEventPublications` (2.0+) or
+`IncompleteEventPublications` beans, or set
+`spring.modulith.events.republish-outstanding-events-on-restart=true` to republish them
+at startup. This prevents the loss of an after-commit
 async event if the app crashes between commit and listener execution — it is the
 transactional-outbox pattern applied in-process, giving at-least-once delivery to
 in-process listeners.
@@ -686,11 +747,19 @@ between the modular-monolith stage and the distributed stage: you can start with
 in-process events, then externalize the ones a future microservice will need, easing
 extraction without rewriting the publishing code.
 
+**Q: After a pod is killed mid-listener, its event publication never completes and is never retried. Why, and how do you fix it?**
+**Short:** The row stays PROCESSING because the staleness monitor is off by default; set spring.modulith.events.staleness.processing, then resubmit FAILED rows.
+Since Modulith 2.0, a listener claiming a publication moves it to `PROCESSING` and increments `completion_attempts`; only the listener's return (`COMPLETED`) or exception (`FAILED`) moves it on. A `SIGKILL` produces neither, so the row is stuck. The staleness monitor runs every `spring.modulith.events.staleness.check-interval` (1 minute) and marks rows older than `staleness.published`, `staleness.processing`, or `staleness.resubmitted` as `FAILED`, but all three default to zero, which disables it. Set `staleness.processing` above the slowest listener's runtime, then resubmit with `FailedEventPublications.resubmit(ResubmissionOptions.defaults())` from a single scheduled job (batch size, minimum age, and a filter on `completionAttempts` let you park rows that keep failing). Resubmitted rows go to `RESUBMITTED` and then back through `PROCESSING`, so the listener must still be idempotent.
+
+**Q: What do the `UPDATE`, `DELETE`, and `ARCHIVE` completion modes of the event publication registry change?**
+**Short:** UPDATE keeps completed rows with a completion date, DELETE removes them, and ARCHIVE moves them to event_publication_archive so the hot table stays small.
+`spring.modulith.events.completion-mode` (since 1.3) decides what happens to a publication when its listener succeeds. `UPDATE`, the default, sets `completion_date` and keeps the row, so `event_publication` grows without bound (200 events/sec is about 17 million rows a day) until you purge with `CompletedEventPublications.deletePublicationsOlderThan(...)`. `DELETE` removes the row, which keeps the table to in-flight and failed work but means `CompletedEventPublications` returns nothing, so you lose the audit trail. `ARCHIVE` copies the row into `event_publication_archive` with its completion date and deletes the original, keeping the hot table small while completed history stays queryable. Choose `DELETE` when the table is only an outbox, `ARCHIVE` when operators or auditors query past deliveries.
+
 **Q: Does the event publication registry guarantee exactly-once handling?**
 **Short:** No, the registry guarantees only at-least-once delivery, so listeners must still be idempotent.
 
 No — it guarantees at-least-once in-process delivery: events are persisted with the
-transaction and incomplete ones are replayed on restart, but a crash after a listener's
+transaction and incomplete ones are resubmitted after a failure, but a crash after a listener's
 side effect but before the publication is marked complete will cause the listener to run
 again on recovery. As with any at-least-once system, the listener must therefore be
 idempotent. The registry solves *lost* events, not *duplicate* handling — idempotency
@@ -745,7 +814,9 @@ scaling need to actually distribute. They adopted Spring Modulith (Boot 4.1).
    async), so order placement no longer depends on those modules' beans.
 
 3. **Durable events.** `spring-modulith-events-jpa` persists publications in the order
-   transaction; unfinished ones replay on restart. Listeners made idempotent.
+   transaction; one scheduled job calls
+   `IncompleteEventPublications.resubmitIncompletePublicationsOlderThan(Duration.ofMinutes(5))`
+   to replay unfinished ones, so replicas do not race at startup. Listeners made idempotent.
 
 4. **Living docs.** `Documenter` runs in the verify test, emitting PlantUML component
    diagrams each build.
@@ -781,7 +852,8 @@ class ConfirmationEmailListener {
     @ApplicationModuleListener                          // after-commit, async, own TX
     void on(OrderPlaced e) { emailService.sendConfirmation(e.orderId()); }  // idempotent
 }
-// + spring-modulith-events-jpa => the publication survives a restart and is replayed.
+// + spring-modulith-events-jpa and a scheduled resubmit of incomplete publications
+//   => the publication survives a restart and is replayed.
 ```
 
 **Outcomes (measured).**

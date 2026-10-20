@@ -346,7 +346,7 @@ Two consequences fall straight out of this. First, going from 100M to 1B rows ad
 - Used by: Redis, some memory-optimized tables.
 
 ### Composite Index
-- Index on (col_a, col_b). Usable for queries on col_a alone OR (col_a, col_b). NOT col_b alone (leftmost prefix rule).
+- Index on (col_a, col_b). Usable for queries on col_a alone OR (col_a, col_b). NOT col_b alone (leftmost prefix rule), except via skip scan: PostgreSQL 18 and MySQL 8.0.13+ can use it for a col_b filter when col_a has few distinct values.
 
 ### Covering Index
 - Index contains all columns needed for a query — no table row lookup needed. Very fast.
@@ -637,9 +637,9 @@ A: OLTP (Online Transaction Processing): high-throughput short transactions, nor
 A: Denormalize when read latency matters more than write simplicity, by storing a computed aggregate or duplicating data to avoid an expensive join. Section 5 frames the tradeoff directly: normalization eliminates redundancy and keeps updates cheap (change one row), while denormalization duplicates that data across rows or tables so a read never has to join, at the cost that every update must now propagate to every duplicate or risk inconsistency. A common middle ground is normalizing the write path (source of truth) while maintaining a denormalized read-optimized copy updated asynchronously — exactly what a cache-aside layer or a materialized view does. Denormalize only the specific fields a hot query path actually needs, not entire tables, so the blast radius of an inconsistency stays small.
 
 **Q14: Why doesn't a composite index on `(col_a, col_b)` speed up a query that filters only on `col_b`?**
-**Short:** A composite index on (col_a, col_b) cannot serve a col_b-only filter due to the leftmost-prefix rule.
+**Short:** The index is sorted by col_a first, so col_b values scatter; only a skip scan (PostgreSQL 18, MySQL 8.0.13+) helps, and only when col_a has few distinct values.
 
-A: A composite B-tree index is physically sorted by the first column, then the second within each first-column value. This is the leftmost-prefix rule from Section 6: a query on `col_a` alone, or on `(col_a, col_b)` together, can use the index directly since both match a contiguous range of the sorted structure, but a query on `col_b` alone has to check every distinct `col_a` value's sub-range, which degrades toward a full index scan. If both single-column lookups are common, you generally need two separate indexes — one on `(col_a, col_b)` and one on `(col_b)` alone — rather than expecting one composite index to serve both directions. Always confirm with `EXPLAIN ANALYZE` (Section 6's Index Pitfalls) rather than assuming a composite index covers a query it doesn't.
+A: A composite B-tree index is physically sorted by the first column, then the second within each first-column value. This is the leftmost-prefix rule from Section 6: a query on `col_a` alone, or on `(col_a, col_b)` together, can use the index directly since both match a contiguous range of the sorted structure, but a query on `col_b` alone has to check every distinct `col_a` value's sub-range, which degrades toward a full index scan. PostgreSQL 18 and MySQL 8.0.13+ add a skip scan that jumps to each distinct `col_a` value and probes for `col_b`; that is cheap when `col_a` has a handful of values (a status or region column) and no better than a full scan when it has millions. If both single-column lookups are common, you generally need two separate indexes — one on `(col_a, col_b)` and one on `(col_b)` alone — rather than expecting one composite index to serve both directions. Always confirm with `EXPLAIN ANALYZE` (Section 6's Index Pitfalls) rather than assuming a composite index covers a query it doesn't.
 
 **Q15: Why would you vertically split a table into "hot" and "cold" columns instead of keeping everything in one row?**
 **Short:** Splitting hot and cold columns keeps frequently-accessed data small enough to stay resident in the buffer pool.

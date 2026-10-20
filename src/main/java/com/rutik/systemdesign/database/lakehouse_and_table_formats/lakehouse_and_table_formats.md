@@ -1,11 +1,11 @@
 # Lakehouse and Table Formats
 
-> **Version anchor — August 2026.** **Apache Iceberg** table spec **v3** is ratified and shipped
-> (usable from Iceberg Java **1.10.0**, 11 Sep 2025); the current Java library is **1.11.0**
-> (19 May 2026) and PyIceberg is **0.11.1**. Spec **v4** is in design (milestone open; community
+> **Version anchor (2026-10-19).** **Apache Iceberg** table spec **v3** is ratified and shipped
+> (usable from Iceberg Java **1.10.0**, 11 Sep 2025); the current Java library is **1.12.0**
+> (September 2026) and PyIceberg is **0.12.0** (1 Sep 2026). Spec **v4** is in design (milestone open; community
 > timeline puts production availability at late 2027 at the earliest). **Delta Lake 4.4.0**
-> (20 Aug 2026) is current, pairing with Apache Spark 4.2. **Apache Hudi 1.0** GA'd 16 Dec 2024
-> and **1.1** was announced 25 Nov 2025. **DuckLake 1.0** shipped 13 Apr 2026. **Apache Polaris**
+> (20 Aug 2026) is current, pairing with Apache Spark 4.2. **Apache Hudi 1.0** GA'd 16 Dec 2024;
+> the current line is **1.2** (1.2.0 on 23 May 2026, 1.2.1 on 24 Sep 2026). **DuckLake 1.0** shipped 13 Apr 2026. **Apache Polaris**
 > graduated to an Apache Top-Level Project on 18 Feb 2026. Version-dependent behaviour is tagged
 > inline like `[v3]`.
 >
@@ -296,9 +296,16 @@ worth knowing:
 - **Geometry and geography types.**
 - **Default column values**, so adding a non-null column no longer requires a rewrite.
 
+**Position delete files with row data** (a v2 option where each delete also stores a copy of
+the deleted row) are no longer written by Iceberg Java 1.12.0 (29 Sep 2026). Existing ones
+still read, but `rewrite_position_delete_files` and `rewrite_table_path` fail with
+`IllegalArgumentException` on a table that holds them (apache/iceberg PR 17706).
+
 **Spec v4** is in design, targeting metadata efficiency (adaptive metadata trees, single-file
-commits). Community discussion puts production availability at late 2027 at the earliest, so
-it is context, not a plan.
+commits). Iceberg Java 1.12.0 ships the first v4 code: a v4 manifest reader (projection and
+partition pruning, without content stats or metadata inheritance) and an option to write
+manifests in the v4 layout. The spec is not ratified, and community discussion puts production
+availability at late 2027 at the earliest, so it is context, not a plan.
 
 ### 4.3 Delta Lake
 
@@ -340,8 +347,10 @@ the source format and the write path stays Delta. It is not bidirectional intero
 ### 4.4 Apache Hudi
 
 Uber-originated and the oldest of the three, built from the start around *upserts* and
-incremental processing rather than around append-mostly analytics. **1.0** GA'd 16 Dec 2024 and
-**1.1** was announced 25 Nov 2025.
+incremental processing rather than around append-mostly analytics. **1.0** GA'd 16 Dec 2024.
+**1.2.0** (23 May 2026) added `VECTOR`, `VARIANT` and `BLOB` logical types, a
+`hudi_vector_search()` Spark table-valued function for k-nearest-neighbour search over a Hudi
+table, and Lance as a base-file format alongside Parquet, ORC and HFile (Spark only).
 
 Distinctive properties:
 
@@ -697,8 +706,8 @@ versus Unity versus Glue versus a REST implementation you run yourself) got loud
 
 | Engine | Iceberg read | Iceberg write |
 |---|---|---|
-| Apache Spark | yes | yes — full DML, the reference implementation |
-| Apache Flink | yes | yes — streaming sink |
+| Apache Spark | yes | yes, full DML, the reference implementation; Iceberg 1.12.0 dropped the Spark 3.4 runtime |
+| Apache Flink | yes | yes, streaming sink; Iceberg 1.12.0 ships Flink 1.20, 2.1, 2.2 and 2.3 runtimes (2.0 dropped) |
 | Trino / Presto | yes | yes — `MERGE`, `UPDATE`, `DELETE` |
 | DuckDB | yes | yes — `INSERT` from `[1.4]`, `UPDATE`/`DELETE` from `[1.4.2]`, `MERGE INTO` and v3 from `[1.5.3]` |
 | ClickHouse | yes | append only, and immature |

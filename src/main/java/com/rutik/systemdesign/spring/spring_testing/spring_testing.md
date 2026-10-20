@@ -76,6 +76,7 @@ Key insight: @MockitoBean is the single biggest performance enemy in test suites
 - **@Mock**: Mockito annotation, initialized by MockitoExtension. No Spring.
 - **@MockitoBean**: Creates a Mockito mock AND registers it in the Spring ApplicationContext, replacing any existing bean of that type.
 - **@MockitoSpyBean**: Creates a Mockito spy wrapping the REAL bean. Real methods execute unless stubbed.
+- **@TestBean** (Framework 6.2+): Replaces a bean with the object returned by a static factory method in the test class. Pure Spring, no Mockito; use it for a hand-written fake (an in-memory gateway, a fixed `Clock`).
 - **MockRestServiceServer**: Mocks RestTemplate calls at the HTTP client level, without a real server.
 - **WireMock**: Starts a real HTTP mock server. Use when testing HTTP client behavior including retries, timeouts.
 
@@ -245,6 +246,62 @@ class OrderControllerIntegrationTest {
 }
 ```
 
+### MockMvcTester: AssertJ-style MockMvc (Framework 6.2+)
+
+`MockMvcTester` wraps the same `MockMvc` pipeline (no server, no socket) but returns a
+result that AssertJ's `assertThat()` understands. No static imports of
+`MockMvcRequestBuilders`/`MockMvcResultMatchers`, no `throws Exception`, and async requests
+are complete before assertions run. Boot's `@AutoConfigureMockMvc` and `@WebMvcTest` inject
+a `MockMvcTester` when AssertJ is on the classpath; outside Boot use
+`MockMvcTester.from(wac)`, `MockMvcTester.of(controller)`, or `MockMvcTester.create(mockMvc)`.
+
+```java
+@WebMvcTest(OrderController.class)
+class OrderControllerTesterTest {
+
+    @Autowired
+    MockMvcTester mvc;
+
+    @MockitoBean
+    OrderService orderService;
+
+    @Test
+    void createOrder_returnsCreated() {
+        given(orderService.create(any())).willReturn(new Order(42L, "CONFIRMED"));
+
+        assertThat(mvc.post().uri("/orders")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"itemId":"item-1","qty":3}"""))
+            .hasStatus(HttpStatus.CREATED)
+            .bodyJson().extractingPath("$.status").isEqualTo("CONFIRMED");
+    }
+
+    @Test
+    void getOrder_mapsToTypedObject() {
+        assertThat(mvc.get().uri("/orders/{id}", 42))
+            .hasStatusOk()
+            .bodyJson().convertTo(OrderResponse.class)
+            .satisfies(o -> assertThat(o.status()).isEqualTo("CONFIRMED"));
+    }
+
+    @Test
+    void negativeId_isRejected() {
+        assertThat(mvc.get().uri("/orders/{id}", -1))
+            .hasFailed()                                  // handler threw, resolved to 400
+            .hasStatus(HttpStatus.BAD_REQUEST)
+            .failure().hasMessageContaining("positive");
+    }
+}
+```
+
+| | `MockMvc` | `MockMvcTester` |
+|--|-----------|-----------------|
+| Request | `perform(post(...))` | `mvc.post().uri(...)` |
+| Assertions | `andExpect(status().isCreated())` Hamcrest matchers | `assertThat(...).hasStatus(...)` AssertJ chain |
+| Checked exceptions | `throws Exception` on every test | None |
+| Async (`DeferredResult`, `Callable`) | Needs `asyncDispatch(...)` | Result is complete before assertions |
+| JSON to object | Manual `ObjectMapper` read | `bodyJson().convertTo(Type.class)` |
+
 ### @WebMvcTest — Controller Slice
 
 ```java
@@ -354,10 +411,42 @@ class AuditServiceTest {
 }
 ```
 
+### @TestBean: replace a bean with a hand-written fake (Framework 6.2+)
+
+```java
+@SpringBootTest
+class InvoiceSchedulerTest {
+
+    @TestBean                        // overrides the Clock bean; field name picks the factory
+    Clock clock;
+
+    static Clock clock() {           // static, no args, same name as the field
+        return Clock.fixed(Instant.parse("2026-01-31T23:59:00Z"), ZoneOffset.UTC);
+    }
+
+    @TestBean(methodName = "com.acme.test.Fakes#inMemoryPaymentGateway", enforceOverride = true)
+    PaymentGateway paymentGateway;   // fail the test if no PaymentGateway bean exists
+
+    @Autowired
+    InvoiceScheduler scheduler;
+
+    @Test
+    void monthEndRun_bills() { /* ... */ }
+}
+```
+
+`@TestBean`, `@MockitoBean`, and `@MockitoSpyBean` share one bean-override mechanism and
+take part in the context cache key, so the same override set reuses a cached context.
+A `@TestBean` or `@MockitoBean` override is a finished singleton, so the container's post-processing
+does not run on it: no `@Transactional`, `@Cacheable`, `@Retryable`, or method-security
+proxy wraps a `@TestBean` or `@MockitoBean` replacement. `@MockitoSpyBean` wraps the original
+bean before proxy creation, so its spy still sits behind the AOP proxy.
+
 ### TestRestTemplate — RANDOM_PORT End-to-End
 
 ```java
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureTestRestTemplate   // Boot 4: @SpringBootTest alone no longer provides it
 class OrderApiE2ETest {
 
     @Autowired
@@ -427,6 +516,8 @@ connection property Boot needs — URL, username, password, and the properties t
 migration tool reads — so there is nothing to keep in step by hand:
 
 ```java
+import org.testcontainers.postgresql.PostgreSQLContainer;   // testcontainers-postgresql 2.x
+
 @Testcontainers
 @SpringBootTest
 @ActiveProfiles("integration")
@@ -434,7 +525,7 @@ class OrderRepositoryContainerTest {
 
     @Container
     @ServiceConnection                       // Boot derives every connection property
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
 
     @Autowired
     private OrderRepository orderRepository;
@@ -454,7 +545,7 @@ config the test silently keeps using the old value.
 class OrderRepositoryDynamicPropsTest {
 
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine")
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine")
         .withDatabaseName("orders_test")
         .withUsername("test")
         .withPassword("test");
@@ -483,6 +574,48 @@ class OrderRepositoryDynamicPropsTest {
     }
 }
 ```
+
+### Testcontainers at development time: `SpringApplication.from(...).with(...)`
+
+The same container definitions can back a local run of the app, so `./gradlew bootTestRun`
+(or `mvn spring-boot:test-run`) starts PostgreSQL and Kafka in Docker and wires them in
+through `@ServiceConnection`, with no local install and no `application-local.yml`:
+
+```java
+// src/test/java/com/acme/TestOrderApplication.java
+public class TestOrderApplication {
+    public static void main(String[] args) {
+        SpringApplication.from(OrderApplication::main)       // reuse the real main()
+            .with(DevContainers.class)                       // add test-only configuration
+            .run(args);
+    }
+}
+
+// src/test/java/com/acme/DevContainers.java
+@TestConfiguration(proxyBeanMethods = false)
+@ImportTestcontainers(SharedContainers.class)   // static @Container fields from an interface
+class DevContainers {
+
+    @Bean
+    @ServiceConnection
+    @RestartScope                                // DevTools restart keeps the container and its data
+    KafkaContainer kafka() {
+        return new KafkaContainer("apache/kafka-native:4.2.0");
+    }
+}
+
+interface SharedContainers {
+    @Container
+    @ServiceConnection
+    PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
+}
+```
+
+`@ImportTestcontainers` imports static `@Container` fields declared elsewhere, so the
+integration tests and the dev launcher share one definition. Container beans start before
+all other beans and stop after them. With Gradle, `@RestartScope` needs
+`spring-boot-devtools` in `testAndDevelopmentOnly` instead of `developmentOnly`, otherwise
+`bootTestRun` does not see code changes.
 
 ### @Sql — Data Setup and Teardown
 
@@ -705,7 +838,7 @@ class OrderRepositoryTest {
 class OrderRepositoryTest {
 
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) {
@@ -862,11 +995,14 @@ class OrderServiceTest {
 | `RestTestClient` | Fluent HTTP test client for the servlet stack | Framework 7's non-reactive `WebTestClient`; no reactive dependency needed |
 | `@AutoConfigureMockMvc` | Adds MockMvc to a `@SpringBootTest` | **Required** in Boot 4 — `@SpringBootTest` alone no longer provides MockMvc |
 | `@ServiceConnection` | Wires a Testcontainer's connection details into the context | Replaces hand-maintained `@DynamicPropertySource` for supported containers |
+| `MockMvcTester` | AssertJ entry point for MockMvc | Framework 6.2+; injected by `@AutoConfigureMockMvc`/`@WebMvcTest` when AssertJ is present |
+| `@TestBean` | Replace a bean with a static factory's result | Framework 6.2+; Spring-only, no Mockito |
+| `SpringApplication.from(...).with(...)` | Run the app locally against Testcontainers | `bootTestRun` / `spring-boot:test-run`; `@ImportTestcontainers`, `@RestartScope` |
 | spring-test | MVC test, context management, bean overrides | MockMvc, @Sql, @DirtiesContext, @MockitoBean, @MockitoSpyBean |
 | JUnit 6 (Jupiter) | Test runner | @Test, @ParameterizedTest, @BeforeEach, @ExtendWith |
 | Mockito | Mocking and verification | @Mock, @Spy, BDDMockito; the inline mock maker is the default since 5.0, so `final` classes mock with plain mockito-core |
 | AssertJ | Fluent assertions | Preferred over Hamcrest in Spring Boot tests |
-| Testcontainers | Real external services in Docker | PostgreSQLContainer, KafkaContainer, RedisContainer |
+| Testcontainers 2.x | Real external services in Docker | `testcontainers-postgresql` etc.; classes live in `org.testcontainers.<module>` (e.g. `org.testcontainers.postgresql.PostgreSQLContainer`); JUnit 4 support removed |
 | WireMock | HTTP mock server | Mocking external REST APIs with real HTTP |
 | H2 | Embedded in-memory DB | @DataJpaTest default; avoid for PostgreSQL-specific features |
 | @EmbeddedKafka | In-process Kafka broker | Lighter than Testcontainers for basic Kafka tests |
@@ -876,6 +1012,18 @@ class OrderServiceTest {
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: A `@TestBean` replaces a `@Transactional` service in a test, and its writes are no longer rolled back on exception. Why?**
+**Short:** @TestBean and @MockitoBean register the replacement as a manual singleton that skips post-processing, so no transaction, cache, retry, or security proxy wraps it.
+`@TestBean` and `@MockitoBean` (Framework 6.2+) use the `REPLACE` strategy and register their replacement directly as a manual singleton. That bypasses the bean post-processors that create AOP proxies, so `@Transactional`, `@Cacheable`, `@Retryable`, and `@PreAuthorize` on the replaced bean's class do nothing for the replacement. `@MockitoSpyBean` differs: its `WRAP` strategy runs before proxy creation, so the AOP proxy is still built and wraps the spy. A fake that writes through a repository therefore runs each repository call in its own transaction, and a later exception does not undo earlier writes. Keep `@TestBean` for leaf collaborators with no cross-cutting behavior (a `Clock`, a payment gateway, an HTTP client), and test transactional behavior against the real bean with Testcontainers. `@TestBean` finds a static no-arg factory named after the field, or the one named in `methodName` (including `com.acme.Fakes#method`), and `enforceOverride = true` fails the test when no bean of that type exists.
+
+**Q: What does `MockMvcTester` change compared with `MockMvc.perform(...).andExpect(...)`?**
+**Short:** MockMvcTester (Framework 6.2+) builds requests fluently and asserts with AssertJ, with no throws Exception, completed async results, and typed JSON conversion.
+`MockMvcTester` runs the same in-process `DispatcherServlet` as `MockMvc`; only the API differs. Requests are built with `mvc.get().uri(...)` and passed straight to `assertThat(...)`, which offers `hasStatusOk()`, `hasStatus(HttpStatus.CREATED)`, `bodyJson().extractingPath("$.x")`, and `bodyJson().convertTo(Order.class)`. Tests need no static Hamcrest imports and no `throws Exception`, and a `DeferredResult` or `Callable` handler is complete before assertions run, so no `asyncDispatch`. A failed request does not throw: assert `hasFailed()` and inspect `failure()`. That holds for an unresolved handler exception too, but then status and body assertions throw because the exchange never completed. Boot's `@AutoConfigureMockMvc` and `@WebMvcTest` inject a `MockMvcTester` when AssertJ is present; otherwise create it with `MockMvcTester.from(wac)` or `MockMvcTester.of(controller)`. Both APIs can live in one suite.
+
+**Q: How do you run a Spring Boot app locally against the same Testcontainers your integration tests use?**
+**Short:** Add a test-scoped main that calls SpringApplication.from(App::main).with(ContainersConfig.class) and run it with bootTestRun or spring-boot:test-run.
+Create `src/test/java/.../TestMyApplication` whose `main` calls `SpringApplication.from(MyApplication::main).with(MyContainers.class).run(args)`. `MyContainers` is a `@TestConfiguration` with `@Bean @ServiceConnection` container methods, or `@ImportTestcontainers(SharedContainers.class)` to reuse static `@Container` fields that the integration tests already declare. Run it with Gradle `bootTestRun` or Maven `spring-boot:test-run`; Boot starts the containers before other beans and wires their connection details, so no developer installs PostgreSQL or Kafka and no `application-local.yml` drifts from test config. Mark container beans `@RestartScope` so a DevTools restart keeps the running container and its data; with Gradle that needs devtools in `testAndDevelopmentOnly`.
 
 **Q: What is the difference between @MockitoBean and @Mock in Spring Boot tests?**
 **Short:** @Mock creates a plain Mockito mock with no Spring context; @MockitoBean also registers it into the context.
@@ -1060,8 +1208,8 @@ public abstract class BaseIntegrationTest {
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 public abstract class BaseRepositoryTest {
     @Container
-    static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:18-alpine").withReuse(true); // Testcontainers reuse
+    static final PostgreSQLContainer POSTGRES =
+        new PostgreSQLContainer("postgres:18-alpine").withReuse(true); // Testcontainers reuse
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) {
         r.add("spring.datasource.url", POSTGRES::getJdbcUrl);
@@ -1219,8 +1367,8 @@ class OrderControllerTest {
 class OrderRepositoryTest {
 
     @Container
-    static PostgreSQLContainer<?> postgres =
-        new PostgreSQLContainer<>("postgres:18")
+    static PostgreSQLContainer postgres =
+        new PostgreSQLContainer("postgres:18")
             .withDatabaseName("oms_test");
 
     @DynamicPropertySource

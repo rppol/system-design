@@ -88,7 +88,7 @@ A `Lane` is one bit; `Lanes` is a set of them. React reserves 31 bits so the val
 | `IdleLane` | 27 | Work with no deadline |
 | `OffscreenLane` | 28 | A hidden `Activity` subtree |
 
-A **lower bit number is higher priority**. There are fourteen distinct transition lanes rather than one so that two unrelated transitions started 200 ms apart do not get fused into a single batch that finishes only when the slower one does.
+A **lower bit number is higher priority**. There are fourteen distinct transition lanes rather than one so that each transition can carry its own bit. Through React 19.2 the reconciler still entangled concurrent transitions into one render, which is the `useTransition` caveat that multiple ongoing Transitions are batched together. React 19.3 turns on `enableParallelTransitions` (PR #37290, merged 2026-08-14), so two unrelated transitions started 200 ms apart render independently instead of in one batch that finishes only when the slower one does.
 
 ### 4.4 Diffing strategies
 
@@ -454,7 +454,7 @@ const mergeLanes = (a: Lanes, b: Lanes): Lanes => a | b;
 
 When you call `setState`, React picks a lane from the current update context, ORs it into `fiber.lanes`, then walks `return` pointers to the root ORing it into every ancestor's `childLanes`. That upward walk is what makes the downward bailout test possible.
 
-**Why lanes replaced expiration times.** Through React 16 each update carried a single expiration timestamp and React rendered everything at or above a threshold. A total order cannot express a *set*: React could not render a low-priority transition while a higher-priority update sat suspended, could not keep two unrelated transitions from fusing, and had no way to say "include this offscreen work but not that retry". A bitmask makes selection, exclusion and entanglement all one machine instruction.
+**Why lanes replaced expiration times.** Through React 16 each update carried a single expiration timestamp and React rendered everything at or above a threshold. A total order cannot express a *set*: React could not render a low-priority transition while a higher-priority update sat suspended, could not track two unrelated transitions as separate sets, and had no way to say "include this offscreen work but not that retry". A bitmask makes selection, exclusion and entanglement all one machine instruction.
 
 ### 6.9 The commit phase
 
@@ -720,10 +720,11 @@ checks it: still false means React calls `bailoutHooks` and skips the children e
 **Q: What are lanes and why did they replace expiration times?**
 **Short:** Lanes are a 31-bit priority bitmask, and a set can express selection and entanglement that a single ordered expiration number could not.
 
-Each priority is one bit — `SyncLane` at bit 1, `InputContinuousLane`, `DefaultLane`, fourteen transition lanes, four retry lanes, `IdleLane`, `OffscreenLane`
-— and a lower bit is higher priority, so `getHighestPriorityLane` is `lanes & -lanes`. Expiration times were a total order: React rendered everything above a
+Each priority is one bit (`SyncLane` at bit 1, `InputContinuousLane`, `DefaultLane`, fourteen transition lanes, four retry lanes, `IdleLane`, `OffscreenLane`),
+and a lower bit is higher priority, so `getHighestPriorityLane` is `lanes & -lanes`. Expiration times were a total order: React rendered everything above a
 threshold and could not say "include these two updates but not that one". A set can. That is what allows a transition to keep rendering while a
-higher-priority update is suspended, keeps two unrelated transitions from fusing into one slow batch, and makes entanglement expressible. The 31-bit cap keeps
+higher-priority update is suspended, lets two unrelated transitions render independently (on by default from React 19.3; through 19.2 concurrent transitions
+were entangled into one render), and makes entanglement expressible. The 31-bit cap keeps
 the value a V8 small integer.
 
 **Q: Describe how React reconciles a keyed array of children.**

@@ -1,6 +1,6 @@
 # AI Regulations and Compliance
 
-A senior AI engineer's complete reference for global AI regulatory frameworks, compliance engineering, and building AI systems that are legally deployable. Covers the EU AI Act, GDPR, US Executive Order on AI, NIST AI RMF, and the practical architecture required to meet each framework's obligations.
+A senior AI engineer's complete reference for global AI regulatory frameworks, compliance engineering, and building AI systems that are legally deployable. Covers the EU AI Act, GDPR, US federal AI executive orders, NIST AI RMF, and the practical architecture required to meet each framework's obligations.
 
 ---
 
@@ -14,14 +14,19 @@ The global AI regulatory landscape is maturing rapidly. Multiple overlapping fra
 |-----------|-------------|-----------|-------|
 | EU AI Act (2024) | EU + extra-territorial | Phased 2024-2026 | First comprehensive AI law; risk-based tiered approach |
 | GDPR + AI | EU + extra-territorial | 2018 (AI guidance ongoing) | Data law directly applicable to AI; Art. 22 automated decisions |
-| US Executive Order on AI (EO 14110, Oct 2023) | USA | Immediate | Safety testing for frontier models; NIST AI RMF mandate |
+| US federal AI executive orders (EO 14179, Jan 2025; EO 14365, Dec 2025; EO 14409, Jun 2026) | USA | On signing | Deregulatory: no federal AI statute, DOJ challenges to state AI laws, voluntary pre-release government access to frontier models. EO 14110 (Oct 2023) was revoked on 2025-01-20 |
 | NIST AI RMF 1.0 | USA | 2023 | Govern, Map, Measure, Manage — voluntary but de facto standard |
 | China Generative AI Regulations (2023) | China | Aug 2023 | Algorithm filing, training data sourcing requirements |
 | UK AI Approach (DSIT guidance) | UK | Ongoing | Pro-innovation; sector-specific guidance, not comprehensive law |
 | EU Digital Markets Act (DMA) | EU | 2023-2024 | Applies to AI recommendation algorithms used by gatekeepers |
 | US State AI Laws (Colorado SB 26-189) | Colorado, USA | Jan 2027 | Disclosure-and-rights framework for automated decision-making technology (ADMT); replaced the EU-style, risk-tiered SB 24-205 in May 2026 before that law ever took effect |
+| California SB 53, Transparency in Frontier AI Act | California, USA | 2026-01-01 | Frontier developers (>10^26 FLOPs; "large" above $500M revenue): published safety framework, transparency reports, critical-incident reporting, whistleblower protection |
+| New York RAISE Act | New York, USA | 2027-01-01 | Large frontier developers: published safety protocols, incident reporting within 72 hours, DFS oversight office, fines up to $1M / $3M |
+| ISO/IEC 42001:2023 | International standard | Dec 2023 | Certifiable AI management system (AIMS); the audit evidence base buyers and EU conformity work increasingly reference |
+| Korea AI Basic Act | South Korea + extra-territorial | 2026-01-22 | High-impact and generative AI duties: notice, labelling, risk management, domestic representative for foreign providers |
+| China AI-content labelling measures | China | 2025-09-01 | Explicit (visible) and implicit (metadata) labels on all AI-generated content; platforms must detect and label |
 
-**Critical extra-territorial reality**: A US company deploying AI systems to EU residents faces both US EO 14110 and EU AI Act obligations simultaneously. The EU AI Act replicates GDPR's extra-territorial model — jurisdiction follows the user, not the company.
+**Critical extra-territorial reality**: A US company deploying AI systems to EU residents faces EU AI Act obligations plus US sector regulators (FTC, CFPB, EEOC) and state AI laws simultaneously. The EU AI Act replicates GDPR's extra-territorial model: jurisdiction follows the user, not the company.
 
 **Enforcement timeline** (as amended by the Digital Omnibus on AI, Regulation (EU) 2026/1744, in force since 27 July 2026):
 - Feb 2025: Prohibited AI practices bans took effect (EU AI Act); Art. 4 AI-literacy duty applies to providers and deployers regardless of risk tier
@@ -47,6 +52,13 @@ incomplete — it also *added* an obligation and *narrowly relaxed* another:
   synthetic-content systems **already on the market** at that date have until **2 December 2026**,
   and the grace covers Art. 50(2) only — not the rest of Art. 50. So "Art. 50 did not move" is the
   right headline and the wrong compliance answer if your system predates August 2026.
+- **What Art. 50(2) marking looks like when a model vendor ships it.** Since 2026-09-01 Anthropic
+  marks outputs on the Claude API with no request changes: text from Claude Fable 5.1 and Mythos
+  5.1 carries Anthropic's text watermark, and image, video, and audio files produced through the
+  code execution tool carry C2PA Content Credentials when retrieved through the Files API. Text
+  from other Claude models is not covered by that note. If you build a generative system on such a
+  model, the Art. 50(2) duty for your system stays with you: confirm which of your outputs are
+  marked and that your post-processing (re-encoding, cropping, paraphrasing) does not strip the mark.
 
 For the operational controls that turn these regulations into release and audit steps, see [AI Governance and Model Risk Operations](../../mlops/ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md).
 
@@ -130,13 +142,19 @@ Required before processing when: systematic and extensive profiling with signifi
 - Right to erasure (Art. 17): "right to be forgotten" applies to training data in some circumstances
 - Right to object to profiling (Art. 21): individuals can object to automated profiling
 
-### 4.3 US Executive Order on AI (EO 14110, October 2023)
+**Model and feature choice sets the retention posture.** A Zero Data Retention (ZDR) agreement with a model vendor does not cover every model or feature. On the Claude API, Claude Fable 5.1 and Mythos 5.1 (like Fable 5) require 30-day data retention and are not available under ZDR unless Anthropic expressly authorizes it, and Claude Managed Agents, which stores session history and sandbox state server-side, is not eligible for ZDR or HIPAA BAA coverage. Record the retention terms per model and per feature in the DPIA and the record of processing, and gate model upgrades on them: switching a workflow to a model that needs 30-day retention changes the processing even when no code changes.
 
-**Scope**: Applies to US federal agencies and companies with federal contracts; includes requirements for frontier model developers.
+### 4.3 US Federal AI Executive Orders
 
-**Frontier model safety reporting**: Companies training models using more than 10^26 FLOPs of compute must report safety test results to the US government before deployment.
+**No federal AI statute**: US federal AI policy is set by executive orders, which bind federal agencies, not private companies. EO 14110 (October 2023), with its 10^26 FLOP frontier-model reporting duty, was revoked by EO 14148 on 2025-01-20, so no federal compute-threshold reporting obligation applies to private developers.
 
-**NIST AI Safety Institute (AISI)**: Tasked with developing standards, guidelines, and evaluation methods for AI safety. Coordinating with international counterparts (UK AISI, EU AI Office).
+**EO 14179 (2025-01-23), "Removing Barriers to American Leadership in AI"**: orders agencies to review and drop actions taken under EO 14110 that conflict with a pro-innovation policy.
+
+**EO 14365 (2025-12-11), "Ensuring a National Policy Framework for AI"**: directs the Attorney General to set up an AI Litigation Task Force whose sole job is to challenge state AI laws (on interstate-commerce and preemption grounds), and directs Commerce to publish a list of "onerous" state AI laws, with states on it made ineligible for non-deployment BEAD broadband funds. The order cites Colorado's algorithmic-discrimination law by name.
+
+**EO 14409 (2026-06-02), "Promoting Advanced AI Innovation and Security"**: has NSA set a classified cyber-capability benchmark that designates "covered frontier models", and sets up a voluntary framework under which developers give the government access to such a model for up to 30 days before release to other trusted partners. Section 3(c) states that nothing in it creates a mandatory licensing or preclearance requirement.
+
+**NIST CAISI**: the NIST AI Safety Institute was renamed the Center for AI Standards and Innovation (CAISI) in June 2025; it runs voluntary model evaluations and agreements with developers. Its UK counterpart is the AI Security Institute (renamed from the AI Safety Institute in February 2025).
 
 **Sector-specific agency guidance**:
 - FDA: guidance on AI/ML-based software as a medical device (SaMD)
@@ -145,6 +163,23 @@ Required before processing when: systematic and extensive profiling with signifi
 - EEOC: disparate impact theory applies to AI-based hiring tools under Title VII
 
 **US State AI Laws — Colorado as the bellwether**: With no comprehensive federal AI statute, state law fills the gap, and Colorado is the case to know. SB 24-205 ("Colorado AI Act") was signed in 2024 as an EU-AI-Act-style, risk-tiered framework — annual impact assessments, broad algorithmic-discrimination duties on deployers — but it never took effect as written. The legislature postponed it twice (originally 1 Feb 2026, then to 30 Jun 2026), a federal court stayed enforcement in April 2026 amid a constitutional challenge, and on 14 May 2026 Governor Polis signed SB 26-189, which repeals SB 24-205 outright and replaces it with a narrower framework built around "automated decision-making technology" (ADMT) rather than "high-risk AI system": developer-to-deployer technical disclosure, and a consumer notification within 30 days of an adverse ADMT-driven outcome, with no standalone annual impact-assessment mandate. SB 26-189 takes effect 1 January 2027, contingent on the state Attorney General completing rulemaking. The lesson generalizes beyond Colorado: a state AI bill's framework at introduction is not a reliable predictor of what actually takes effect.
+
+**US State frontier-model laws (California SB 53 and New York RAISE)**: Colorado regulates *deployers* making consequential decisions; these two regulate the *developers* of the largest models, and they do it through transparency rather than licensing.
+
+*California SB 53, the Transparency in Frontier Artificial Intelligence Act* (signed 2025-09-29, in force 2026-01-01). A frontier model is one trained with more than 10^26 integer or floating-point operations, counting fine-tuning; a large frontier developer is a frontier developer with more than $500M annual gross revenue. Large frontier developers must publish a frontier AI framework on their website: how they assess catastrophic risk (a model contributing to more than 50 deaths or serious injuries, or more than $1B in damage), the thresholds and mitigations they use, cybersecurity for unreleased weights, and how they handle the risk of a model evading oversight; material changes are republished within 30 days with a justification. Before deploying a new or substantially modified frontier model, a developer publishes a transparency report. Critical safety incidents go to the California Office of Emergency Services within 15 days, or within 24 hours to an appropriate authority when there is imminent risk of death or serious injury. Employees who report catastrophic risk are protected from retaliation, and large developers must run an anonymous internal reporting channel. The Attorney General enforces civil penalties of up to $1M per violation. SB 53 also sets up CalCompute, a public compute consortium.
+
+*New York RAISE Act* (S6953B, signed 2025-12-19 with agreed chapter amendments, effective 2027-01-01). The chapter amendments moved it close to SB 53: large frontier developers publish their safety protocols, report safety incidents to the state within 72 hours of determining one occurred (a much shorter clock than California's 15 days), and are overseen by a new office inside the Department of Financial Services that issues annual reports. The Attorney General can seek up to $1M for a first violation and $3M for later ones.
+
+| | California SB 53 | New York RAISE (as amended) |
+|---|---|---|
+| Who | Frontier developers (>10^26 FLOPs); heavier duties above $500M revenue | Large frontier developers |
+| Publish | Frontier AI framework + per-model transparency report | Safety and security protocols |
+| Incident clock | 15 days; 24 hours if imminent risk of death or injury | 72 hours |
+| Regulator | Office of Emergency Services; AG enforces | DFS oversight office; AG enforces |
+| Penalty | Up to $1M per violation | Up to $1M first, $3M subsequent |
+| In force | 2026-01-01 | 2027-01-01 |
+
+Both laws sit under EO 14365's instruction to the DOJ AI Litigation Task Force to challenge state AI laws, so a developer should run the compliance programme while tracking litigation, not wait for it to resolve. The practical design is one incident pipeline that meets the shortest clock (72 hours) and one published framework that satisfies both texts and the EU GPAI Code of Practice's safety and security chapter.
 
 ### 4.4 NIST AI Risk Management Framework (AI RMF 1.0)
 
@@ -188,6 +223,8 @@ flowchart LR
 
 **Content obligations**: AI-generated content must be labeled. Outputs must not undermine "socialist core values" — a broad category with enforcement discretion.
 
+**AI-generated content labelling (in force 2025-09-01)**: The *Measures for Labeling AI-Generated and Synthetic Content*, issued by the CAC, MIIT, the Ministry of Public Security and NRTA (published 2025-03-14), and the companion mandatory national standard GB 45438-2025 turn the labelling duty into an engineering spec. *Explicit labels* are visible to the user: text, audio cues, or graphics at the start, end, or a suitable point of text, audio, images, video, and virtual scenes, and they must survive download, copy, and export. *Implicit labels* go in file metadata: content attributes, the provider's name or code, and a content ID; watermarks are encouraged. Content-distribution platforms must read the metadata, show a visible notice when content is AI-generated or declared or suspected to be, offer users a declaration function, and add their own propagation metadata. App stores must ask apps whether they offer generation services and check their labelling. This is the same two-layer model as EU AI Act Art. 50(2) machine-readable marking plus disclosure, so one C2PA-style metadata pipeline plus visible labels can serve both.
+
 **Practical impact for international companies**: Offering generative AI services in China requires domestic filing and compliance. Most international LLM providers currently limit or exclude China availability to avoid these obligations.
 
 ### 4.6 Compliance Architecture Patterns
@@ -199,6 +236,16 @@ flowchart LR
 **Explainability hooks**: SHAP or LIME integrated into the inference pipeline, not just available as a post-hoc analysis tool. Every prediction that affects a person can generate a human-readable explanation on request.
 
 **Model registry with compliance metadata**: Each model version tagged with training data provenance, bias audit results, accuracy metrics, intended use case, and out-of-scope use cases.
+
+### 4.7 Korea AI Basic Act
+
+The *Framework Act on the Development of Artificial Intelligence and Establishment of a Foundation for Trustworthiness* passed the National Assembly on 2024-12-26 and took effect on 2026-01-22, making Korea the second jurisdiction after the EU with a comprehensive AI statute. It regulates two categories. *High-impact AI* (systems that significantly affect life, physical safety, or fundamental rights in listed areas such as energy, healthcare, hiring, credit, and public services) requires risk management, explanation, human oversight, and documentation, with an impact assessment encouraged. *Generative AI* requires advance notice to users that they are dealing with AI, and labels on outputs, with deepfakes clearly marked. Foreign providers above user or revenue thresholds set by decree must appoint a domestic representative. Fines are capped at KRW 30 million, far below EU levels; the operational cost is the notice, labelling, and documentation work, which largely overlaps with EU AI Act Art. 50 and high-risk duties.
+
+### 4.8 ISO/IEC 42001:2023 AI Management System
+
+ISO/IEC 42001 (published December 2023) is the first certifiable management-system standard for AI, built on the same Plan-Do-Check-Act clause structure as ISO 27001. It does not test a model; it audits the organisation's system for governing AI: AI policy and roles, an AI risk assessment and an *AI system impact assessment*, a Statement of Applicability against the 38 controls in Annex A, data and lifecycle controls, supplier management, internal audit, and management review. Certification is by an accredited third-party body, typically a stage 1 documentation audit, a stage 2 implementation audit, annual surveillance audits, and recertification every three years.
+
+Why it matters to an engineering team: enterprise buyers now ask for 42001 certification the way they ask for SOC 2 or ISO 27001, and its artifacts (risk register, impact assessments, model inventory, monitoring evidence) are the same artifacts the EU AI Act's quality-management (Art. 17) and risk-management (Art. 9) duties need. Certification does not by itself show EU AI Act conformity, but it is the cheapest way to produce the evidence once and reuse it across the EU, NIST AI RMF, and customer audits.
 
 ---
 
@@ -218,7 +265,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     EU{"Deployed to\nEU users?"}
-    OTHER["Other jurisdictions\nUS EO 14110 · FTC/EEOC"]
+    OTHER["Other jurisdictions\nUS state AI laws · FTC/EEOC"]
     RISK{"EU AI Act\nrisk tier?"}
     BANNED["BANNED\nStop — cannot deploy\n(social scoring, real-time biometrics,\nsubliminal manipulation)"]
     HIGH["High Risk (Annex III)\nconformity assessment · QMS docs\ndata governance · 6-month logging\nhuman oversight · CE marking\nregister in EU AI Act database by Dec 2027"]
@@ -839,14 +886,21 @@ Insurance companies using AI for underwriting decisions (premium calculation, ri
 
 ### Jurisdiction Comparison
 
-| Dimension | EU AI Act | GDPR Art. 22 | US EO 14110 | NIST AI RMF |
+| Dimension | EU AI Act | GDPR Art. 22 | US federal (EO 14179 / 14365 / 14409) | NIST AI RMF |
 |-----------|-----------|-------------|-------------|-------------|
-| Mandatory vs voluntary | Mandatory (EU users) | Mandatory (EU personal data) | Mandatory for specific thresholds | Voluntary (de facto standard) |
-| Risk-based approach | Yes — 4 tiers | Not explicit — applies to significant decisions | Threshold-based (compute) | Yes — Map/Measure functions |
-| Fines | Up to €35M or 7% global revenue | Up to €20M or 4% global revenue | Enforcement via existing agency authority | No fines (voluntary) |
+| Mandatory vs voluntary | Mandatory (EU users) | Mandatory (EU personal data) | Binds federal agencies; voluntary for developers | Voluntary (de facto standard) |
+| Risk-based approach | Yes, 4 tiers | Not explicit, applies to significant decisions | None; NSA cyber-capability benchmark for "covered frontier models" | Yes, Map/Measure functions |
+| Fines | Up to €35M or 7% global revenue | Up to €20M or 4% global revenue | None in the orders; existing agency authority (FTC, CFPB, EEOC) | No fines (voluntary) |
 | Extra-territorial | Yes | Yes | USA-focused | USA-focused |
-| Sector coverage | All sectors | All sectors | Federal + frontier models | All sectors |
-| Audit/documentation | Required (conformity assessment) | DPIA required for high-risk | Required for frontier model reports | Recommended |
+| Sector coverage | All sectors | All sectors | Federal agencies, state-law preemption, frontier models | All sectors |
+| Audit/documentation | Required (conformity assessment) | DPIA required for high-risk | None required | Recommended |
+
+| Dimension | California SB 53 / NY RAISE | Korea AI Basic Act | China labelling measures | ISO/IEC 42001 |
+|-----------|-----------------------------|--------------------|--------------------------|---------------|
+| Mandatory vs voluntary | Mandatory for large frontier developers | Mandatory | Mandatory | Voluntary; often contractually required |
+| Target | Model developers, not deployers | High-impact and generative AI providers | All generative-content providers and platforms | Any organisation building or using AI |
+| Core duty | Publish safety framework; report incidents (15 days / 72 hours) | Notice, labelling, risk management | Visible and metadata labels | Certified AI management system |
+| Fines | Up to $1M (CA); $1M / $3M (NY) | Up to KRW 30M | Administrative penalties under existing CAC rules | None; certificate withdrawal |
 
 ### SME vs Large Company Compliance Burden
 
@@ -874,9 +928,9 @@ However, high-risk AI system requirements themselves do not scale down based on 
 - You monitor behavior of EU residents
 - You have an EU establishment and process personal data
 
-**Must comply with US EO 14110 when**:
-- Training a model on more than 10^26 FLOPs of compute (safety report to government required)
-- US federal contractor with AI systems in scope of the executive order
+**US federal executive orders bind you only when**:
+- You sell AI to a federal agency, which passes agency AI-use requirements into the contract
+- EO 14409's frontier-model access framework is voluntary, and no order sets a compute-threshold reporting duty on private developers
 
 **Should treat as mandatory even if technically optional**:
 - FTC unfair/deceptive practice authority applies to AI systems making false claims — a "voluntary" framework that has enforcement teeth
@@ -1057,6 +1111,18 @@ Significant changes that trigger re-assessment include:
 **Short:** The EU AI Act is a risk-tiered law binding on any provider or deployer whose AI system reaches the EU market, wherever they are headquartered.
 The EU AI Act is the world's first comprehensive AI law, passed in 2024, using a risk-based tiered approach to regulate AI systems. It applies to any provider or deployer of AI systems in the EU market or whose AI systems produce effects within the EU — regardless of where the company is headquartered. A US company with no EU offices that sells a hiring AI tool to a German enterprise must comply. The extra-territorial reach mirrors GDPR.
 
+**Q: A model developer with $600M revenue trains a model above 10^26 FLOPs and has a safety incident. Which US state clocks apply?**
+**Short:** California SB 53 requires a report to the Office of Emergency Services within 15 days (24 hours if imminent risk of death or injury), and New York RAISE requires 72 hours from 2027-01-01.
+SB 53 (in force 2026-01-01) covers frontier models above 10^26 operations and puts the heaviest duties on developers with more than $500M revenue: a published frontier AI framework, a transparency report per new model, and critical safety incident reports to Cal OES within 15 days, or to an appropriate authority within 24 hours when there is imminent risk of death or serious injury, with civil penalties up to $1M per violation. The RAISE Act, as amended at signing on 2025-12-19, requires the same class of developer to publish safety protocols and report incidents within 72 hours of determining one occurred, with a DFS oversight office and penalties of $1M then $3M. Build one incident pipeline that meets the shortest clock that applies and file to each regulator from it.
+
+**Q: Does ISO/IEC 42001 certification make a system EU AI Act compliant?**
+**Short:** No: 42001 certifies the organisation's AI management system, while the AI Act requires product-level conformity for each high-risk system, though 42001 artifacts supply much of the evidence.
+ISO/IEC 42001:2023 is a certifiable management-system standard: AI policy and roles, AI risk and impact assessments, a Statement of Applicability against Annex A controls, supplier management, internal audit, and management review, audited by an accredited body with annual surveillance and three-year recertification. The EU AI Act asks a different question about each high-risk system: does this product meet Arts. 9-15 and has it passed conformity assessment. The overlap is large (the Art. 9 risk-management system and Art. 17 quality-management system map onto 42001 clauses), so a certified AIMS shortens the conformity work, but the technical documentation, logging, accuracy, and human-oversight evidence for each system still has to be produced. Treat 42001 as the reusable governance layer and the AI Act file as per-system work on top of it.
+
+**Q: What do China's AI-content labelling rules require, and how do they compare with EU AI Act Art. 50?**
+**Short:** Since 2025-09-01 China requires visible labels plus metadata labels (provider, content ID) on AI-generated content, and platforms must detect and label it, the same two layers as Art. 50.
+The CAC-led *Measures for Labeling AI-Generated and Synthetic Content* and the mandatory standard GB 45438-2025 require explicit labels the user can see (text, audio cues, or graphics placed at the start, end, or a suitable point, kept on export) and implicit labels in file metadata carrying content attributes, the provider name or code, and a content ID. Distribution platforms must check metadata, add a visible notice to AI-generated or suspected content, and append their own propagation metadata; app stores must verify labelling for apps that generate content. EU Art. 50 likewise pairs user disclosure with machine-readable marking (Art. 50(2)), so one pipeline that writes C2PA-style metadata and renders a visible label covers both, provided post-processing does not strip the metadata.
+
 **Q: Your company just deployed an AI hiring tool to EU customers without a conformity assessment. What is the legal exposure?**
 **Short:** Deploying a high-risk hiring AI without a conformity assessment risks EU AI Act fines up to 3% of turnover plus a separate GDPR Art. 22 violation.
 Employment AI is Annex III, Category 4 under the EU AI Act — high-risk. The consequences are: EU AI Act violation for failing to conduct conformity assessment, maintain logs, implement human oversight, and register in the EU database (fines up to €15M or 3% global annual turnover). Simultaneously, GDPR Art. 22 violation for automated decisions affecting employment without valid legal basis (fines up to €20M or 4% global annual turnover). Regulators can pursue both simultaneously. Beyond fines: injunctions forcing immediate cessation, customer breach of contract claims, and reputational damage.
@@ -1129,9 +1195,9 @@ The NIST AI Risk Management Framework (AI RMF 1.0, published January 2023) is a 
 **Short:** EU AI Act fines reach 7% of turnover for prohibited practices and stack separately from GDPR's up-to-4%-of-turnover Art. 83 penalties.
 EU AI Act fines (Regulation 2024/1689, Art. 99): prohibited AI practices — up to €35,000,000 or 7% of global annual turnover, whichever higher; high-risk violations (non-conformity, false documentation, failure to cooperate with authorities) — up to €15,000,000 or 3% of global annual turnover; incorrect/incomplete/misleading information to authorities — up to €7,500,000 or 1% of global annual turnover. GDPR fines (separate regime): Art. 83(5) violations (including Art. 22 automated decisions) — up to €20,000,000 or 4% of global annual turnover. The EU AI Act and GDPR are separate legal instruments enforced by different authorities. A single incident can generate fines under both regimes — though ne bis in idem (double jeopardy) principles may limit total exposure in some member states.
 
-**Q: How does the US Executive Order on AI (EO 14110) differ from the EU AI Act in approach?**
-**Short:** The EU AI Act is binding, risk-tiered legislation, while the US executive order coordinated federal agencies through existing authority instead of new penalties.
-EU AI Act: prescriptive legislation; mandatory obligations tied to risk tiers; binding on all actors in EU market; enforced by national AI authorities + EU AI Office; significant civil fines. US EO 14110: executive order to federal agencies; uses existing regulatory authority (FTC, CFPB, EEOC, FDA) rather than creating new AI-specific enforcement; frontier model safety reporting tied to compute threshold (10^26 FLOPs); delegates to NIST for standard development; no AI-specific federal civil penalty structure. Key practical difference: EU AI Act creates a legal floor for all EU market participants; EO 14110 primarily coordinates federal agency action and targets frontier model risks. A company must comply with EU AI Act obligations regardless of US regulatory posture; NIST AI RMF adoption is incentivized but not mandated for non-federal-contractor companies.
+**Q: How does US federal AI policy differ from the EU AI Act in approach?**
+**Short:** The EU AI Act is binding, risk-tiered law with fines; US federal policy is executive orders that bind agencies, challenge state AI laws, and keep frontier-model review voluntary.
+EU AI Act: prescriptive legislation; mandatory obligations tied to risk tiers; binding on all actors in EU market; enforced by national AI authorities + EU AI Office; significant civil fines. US: no federal AI statute. EO 14110 (October 2023) and its 10^26 FLOP reporting duty were revoked on 2025-01-20. EO 14179 (January 2025) set a pro-innovation policy, EO 14365 (December 2025) created a DOJ AI Litigation Task Force to challenge state AI laws such as Colorado's, and EO 14409 (June 2026) set up voluntary pre-release government access to "covered frontier models", stating that it creates no licensing or preclearance duty. Enforcement against private companies runs through existing authority (FTC, CFPB, EEOC, FDA). Key practical difference: the EU AI Act creates a legal floor for all EU market participants; US federal policy removes obligations and pushes against state-level ones. A company must comply with EU AI Act obligations regardless of US regulatory posture; NIST AI RMF adoption is incentivized but not mandated for non-federal-contractor companies.
 
 **Q: What is a conformity assessment and who can conduct it for EU AI Act high-risk systems?**
 **Short:** A conformity assessment verifies EU AI Act compliance before deployment; most high-risk systems self-assess, but biometric systems need a notified body.
@@ -1158,6 +1224,10 @@ A conformity assessment is the process by which an AI system's compliance with E
 **For GPAI model fine-tuning, track training data provenance from the start.** If you fine-tune a base model on your own data and release the fine-tuned model, you have GPAI provider obligations. Your training data transparency report must cover your fine-tuning data. Start with a data lineage registry that records source, collection date, rights verification, and preprocessing steps — before training begins.
 
 **Establish a vendor due diligence process for third-party AI tools.** If you deploy an external AI tool to make high-risk decisions, you are a deployer with obligations — including verifying the tool has a conformity assessment. Build a standard vendor AI assessment questionnaire: What is the EU AI Act risk classification? Is there a conformity assessment report available? What bias audits have been conducted? What are the logging and human oversight capabilities? This protects your organization from being held responsible for a vendor's non-compliance.
+
+**Run one incident pipeline sized to the shortest clock.** A frontier developer may owe incident reports to California (15 days, 24 hours for imminent harm), New York (72 hours), and the EU AI Office for GPAI models with systemic risk. Detect, triage, and draft once, then file per regulator; a pipeline built for 15 days will miss New York.
+
+**Use ISO/IEC 42001 as the evidence layer.** Build the AI inventory, risk register, and impact assessments to 42001 so the same artifacts serve EU AI Act Arts. 9 and 17, the NIST AI RMF, Korea's high-impact duties, and customer audits.
 
 **Engage with regulatory sandboxes during development.** EU AI Act mandates that member states establish regulatory sandboxes where AI systems can be tested with regulatory oversight before deployment. For novel AI applications in high-risk categories, sandbox engagement de-risks the conformity assessment, provides regulatory relationship building, and may result in lighter-touch initial compliance requirements.
 

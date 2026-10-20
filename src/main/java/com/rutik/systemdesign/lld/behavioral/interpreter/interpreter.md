@@ -625,7 +625,7 @@ Interpreter is the GoF pattern most often replaced by a tool. Hand-write it only
 | ANTLR 4 | A lexer, parser, and generated parse tree from a `.g4` grammar, plus generated visitor and listener base classes | Any real grammar — DSLs, query languages, config formats. This is the default answer |
 | JavaCC / JFlex + CUP | LL(k) and LALR parser generation with grammar embedded in Java actions | Legacy grammars already written for these tools |
 | Spring Expression Language (SpEL) | A ready-made expression interpreter — property access, method invocation, collection projection — via `SpelExpressionParser` and `EvaluationContext` | Expressions inside a Spring application: `@Value`, `@PreAuthorize`, `@Cacheable(condition=...)` |
-| Jakarta Expression Language (EL) 5.0 | The standard `${...}` expression grammar with a pluggable `ELResolver` | Jakarta EE and templating contexts |
+| Jakarta Expression Language (EL) 6.0 | The standard `${...}` expression grammar with a pluggable `ELResolver` | Jakarta EE and templating contexts |
 | Apache Commons JEXL 3 | A small scripting/expression engine with a sandbox (`JexlPermissions`) | User-supplied expressions that must be constrained |
 | MVEL 2 | A fast expression language with compiled expressions | Rule conditions evaluated in a hot loop |
 | Drools | A production rule engine — a DSL plus a Rete-based evaluator, working memory, and agenda | Hundreds of business rules that change independently of the code |

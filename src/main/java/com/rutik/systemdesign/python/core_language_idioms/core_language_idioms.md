@@ -452,7 +452,17 @@ print(cleaned)   # ['hello', 'world']
 # Nested comprehension (matrix transpose)
 matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
 transposed = [[row[i] for row in matrix] for i in range(3)]
+
+# Unpacking in comprehensions [3.15] (PEP 798): the flatten idiom
+lists = [[1, 2], [3, 4], [5]]
+flat = [*L for L in lists]                  # [1, 2, 3, 4, 5]; same as [x for L in lists for x in L]
+merged = {**d for d in [{"a": 1}, {"b": 2}, {"a": 3}]}   # {'a': 3, 'b': 2}; later keys win
+lazy = (*L for L in lists)                  # generator form; async genexps accept it too
 ```
+
+Before 3.15 the same results need the two-`for` nested comprehension, whose clause order reads
+backwards to most people, or `itertools.chain.from_iterable(lists)`. Both still work and are the
+spelling to use when the code must run on 3.14 or earlier.
 
 **Scope isolation is not the same thing as a separate frame [3.12].** The usual explanation for
 "the loop variable does not leak" is "the comprehension runs in its own function frame". That was
@@ -614,6 +624,31 @@ def classify(value: int) -> str:
 # cannot destructure, cannot guard, cannot match structure.
 # match/case: structural destructuring + guards + capture in one construct.
 ```
+
+### 6.8 Sentinel values: `None` vs `sentinel` [3.15]
+
+`None` works as the "argument not passed" marker only when `None` is not itself a valid value.
+When it is (a cache that may store `None`, a `PATCH` handler where `None` means "clear the field"),
+you need a second singleton. Python 3.15 adds the built-in `sentinel` type (PEP 661) for that.
+
+```python
+MISSING = sentinel("MISSING")          # [3.15] built-in, no import
+
+def update(record: dict[str, object], email: str | None | MISSING = MISSING) -> None:
+    if email is MISSING:
+        return                         # caller did not touch the field
+    record["email"] = email            # None here means "clear it"
+
+repr(MISSING)                          # 'MISSING', not '<object object at 0x7f...>'
+```
+
+Compared with the older `_MISSING = object()`, a `sentinel` has a readable `repr`, can appear in
+a type expression with `|` (mypy 2.4 understands it), returns itself from `copy.copy()` and
+`copy.deepcopy()`, and keeps its identity through `pickle` when it is bound at module or class
+scope under its own name. Compare it with `is`; it is always truthy, so `if not email:` is wrong.
+On 3.14 and earlier, `object()` or a one-member `Enum` is still the tool. `dataclasses.MISSING`
+is the same idea inside the stdlib; see
+[Dataclasses, Enums and Data Modeling](../dataclasses_enums_and_data_modeling/dataclasses_enums_and_data_modeling.md).
 
 ---
 
@@ -929,6 +964,29 @@ Yes — CPython emits `SyntaxWarning: "is" with 'str' literal. Did you mean "=="
 **Short:** `sys.intern()` forces a string into CPython's intern table so future equal strings share one object.
 
 `sys.intern(string)` forces a string into CPython's intern table and returns the canonical interned copy, guaranteeing that all future calls with an equal string return the identical object. The main use case is a micro-optimization for large symbol tables or parsers that compare the same strings millions of times — once interned, comparisons can safely use `is` instead of `==`, and duplicate strings share one object in memory instead of many. This differs from the automatic compile-time interning of identifier-like literals (see Q13): `sys.intern()` works on any string, including ones built at runtime, and the guarantee is explicit rather than an implementation accident. Only reach for it after profiling shows string comparison or memory duplication is an actual bottleneck — for typical application code, `==` on regular strings is already fast enough.
+
+**Q: How do you tell "argument not passed" apart from an explicit `None`?**
+**Short:** Use a sentinel default and test it with is: on 3.15 the built-in sentinel("MISSING"), before that a module-level object() or one-member Enum.
+
+`None` as the default cannot distinguish "caller passed `None`" from "caller passed nothing", which
+matters for `PATCH` semantics, caches that store `None`, and `dict.get`-style APIs. The fix is a
+second singleton as the default, checked with `is`. On 3.15 that is `MISSING = sentinel("MISSING")`
+(PEP 661): its `repr` is `MISSING`, it is usable in annotations as `str | None | MISSING`, copying
+returns the same object, and it survives `pickle` with its identity when bound at module scope
+under its own name. Before 3.15, `MISSING = object()` works at runtime but has an opaque repr and
+cannot appear in a type hint, so typed code used a one-member `Enum` and `Literal[Missing.TOKEN]`.
+Sentinels are truthy, so never test them with `if not x`.
+
+**Q: What is the most idiomatic way to flatten a list of lists?**
+**Short:** On 3.15, [*L for L in lists] (PEP 798); on older versions, itertools.chain.from_iterable(lists) or the two-for comprehension.
+
+PEP 798 [3.15] allows `*` and `**` unpacking inside comprehensions, so `[*L for L in lists]`
+flattens one level, `{*s for s in sets}` unions sets, and `{**d for d in dicts}` merges dicts with
+later keys winning. It is equivalent to `[x for L in lists for x in L]`, whose `for` clauses run
+left to right in the order they would nest as loops, which many readers get backwards. Before
+3.15, `list(itertools.chain.from_iterable(lists))` is the clearest choice and avoids building
+intermediate lists. `sum(lists, [])` also flattens but copies the accumulator on every step, which
+is O(n^2) in total elements; never use it on large input. All of these flatten one level only.
 
 **Q: What do `/` and `*` do in a function signature, and why does a library author want both?**
 **Short:** `/` marks parameters positional-only and `*` marks parameters keyword-only, both for a stable API.

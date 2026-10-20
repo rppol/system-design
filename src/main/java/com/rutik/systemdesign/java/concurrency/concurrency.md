@@ -607,6 +607,9 @@ A developer used `CountDownLatch` for a "wait at barrier then continue" pattern 
 ### War Story 4: Livelock in retry logic
 Two threads, each trying to acquire locks A then B with `tryLock()`. Thread 1 acquires A, Thread 2 acquires B. Both fail to get the second lock, release their first, immediately retry — and keep repeating. Neither makes progress. Fix: add randomized backoff (`Thread.sleep(random.nextInt(100))`).
 
+### War Story 5: Locking on a boxed `Integer`, a `Boolean`, or a `LocalDate`
+A job runner did `synchronized (tenantId)` where `tenantId` was an `Integer`. Every tenant id in -128 to 127 boxes to the same cached instance, so unrelated code in another library that also locked on `Integer.valueOf(7)` contended on the same monitor, and ids above 127 got a fresh object per boxing call, so two threads for the same tenant did not exclude each other at all. `Boolean.TRUE` and string literals share the same trap. Under JEP 401 (Value Objects, preview in JDK 28 with `--enable-preview`) the boxes and `LocalDate` become value classes: `synchronized` on a value-typed expression is a compile error, through an `Object` reference it throws `IdentityException`, and `wait`/`notify` throw `IllegalMonitorStateException`. Fix: lock on a `private final Object lock = new Object()`, or a per-key lock from a `ConcurrentHashMap<Integer, ReentrantLock>`.
+
 ---
 
 ## 11. Technologies & Tools

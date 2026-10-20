@@ -121,7 +121,7 @@ backend_security_owasp
   backend_security_owasp.md  senior, principal
 auth_and_authorization_systems
   auth_and_authorization_systems.md  senior, principal
-  passkeys_and_authn_frontier.md  senior, principal
+  authorization_frontier.md  senior, principal
 backend_testing_strategies
   backend_testing_strategies.md  principal
 load_and_performance_testing

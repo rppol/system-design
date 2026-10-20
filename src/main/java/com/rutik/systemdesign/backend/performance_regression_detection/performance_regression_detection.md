@@ -946,7 +946,7 @@ everything. Detection latency is almost always the cheaper thing to spend.
 | **`git bisect run`** | Attribution | Only with a statistical predicate and a working `125` skip path (§6.5) |
 | **Spinnaker / Kayenta** | Automated canary analysis | Concurrent-baseline comparison with statistical scoring |
 | **Argo Rollouts / Flagger** | Progressive delivery | Kubernetes-native canary with metric-based analysis and automatic rollback |
-| **Parca / Pyroscope / Grafana Phlare** | Continuous profiling | The differential-profile follow-up. See [`continuous_profiling.md`](../../hld/observability/continuous_profiling.md) |
+| **Parca / Grafana Pyroscope** | Continuous profiling | The differential-profile follow-up. See [`continuous_profiling.md`](../../hld/observability/continuous_profiling.md) |
 | **`cpupower`, `taskset`, `cset`, cgroup v2** | Noise reduction | The cheapest sensitivity you will ever buy (§6.4) |
 
 ---

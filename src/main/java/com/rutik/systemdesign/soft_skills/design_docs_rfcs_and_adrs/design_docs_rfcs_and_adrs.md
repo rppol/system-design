@@ -355,6 +355,45 @@ rationale — effectively folding a compressed alternatives-considered section i
 itself. Teams adopt MADR over Nygard's original when they want the ADR to stand alone
 without a companion design doc, at the cost of a longer per-decision record.
 
+### 6.6 Specs written for coding agents
+
+Spec-driven development makes a written spec the input a coding agent builds from. GitHub's
+open-source Spec Kit (MIT, September 2025) runs it as a fixed sequence of agent commands:
+`/speckit-constitution` once per project for standing principles, then per feature
+`/speckit-specify` (the what and why), `/speckit-plan` (the technical plan),
+`/speckit-tasks` (a task list), and `/speckit-implement`. AWS's Kiro IDE (preview July
+2025) produces `requirements.md`, `design.md` and `tasks.md` for each spec.
+
+The artifact looks like a design doc and has a different reader:
+
+| | Design doc for reviewers | Spec for a coding agent |
+|---|---|---|
+| Job | get humans to agree on one decision | define what to build precisely enough to check the output |
+| Alternatives considered | central: it is how the doc persuades | short or absent: the decision is already made |
+| Requirements | prose a reviewer interprets | testable acceptance criteria, RFC 2119 MUST and SHOULD (§6.4) |
+| Non-goals | prevent scope arguments between teams | prevent the agent from adding features nobody asked for |
+| Lifetime | read at review, then archived | versioned with the code and re-run when it changes |
+
+Two consequences. A spec needs the ADR's discipline: when a requirement changes, edit the
+spec and regenerate, so the spec and the code do not drift apart, and keep an ADR for why
+the requirement changed. And the design doc still comes first for anything a team must
+agree on, because a spec records a decision and does not make the case for it.
+
+**Weak version** (an agent spec requirement)
+
+> The export should be fast and handle large accounts gracefully.
+
+**Strong version**
+
+> The CSV export MUST stream rows and MUST NOT load more than 10,000 rows into memory at
+> once. An account with 2M rows MUST finish in under 90 s on the `perf-small` runner.
+> Non-goal: XLSX output.
+
+**What changed:** "fast" and "gracefully" give an agent nothing to test and invite it to
+choose its own meaning. The strong version gives memory and time limits a test can assert,
+uses MUST so the requirement level is unambiguous, and names the non-goal the agent would
+otherwise build.
+
 ### Weak version -> Strong version: a doc's opening paragraph
 
 **Weak version**
@@ -542,6 +581,9 @@ this doc should preserve.
   Engineering Blog, 2019.
 - S. Bradner, [RFC 2119, "Key words for use in RFCs to Indicate Requirement Levels"](https://www.rfc-editor.org/rfc/rfc2119), IETF, 1997.
 - B. Leiba, [RFC 8174, "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words"](https://www.rfc-editor.org/rfc/rfc8174), IETF, 2017.
+- GitHub, [Spec Kit](https://github.com/github/spec-kit) (MIT licence): the reference
+  implementation of spec-driven development, with the constitution, specify, plan, tasks
+  and implement commands of §6.6.
 - See also [Executive Communication](../executive_communication/executive_communication.md)
   in this section for how the decision captured in a design doc or ADR gets carried into a
   budget or headcount conversation with people who never read the doc itself.
@@ -596,6 +638,18 @@ named person, a specific question ("I need a decision on the sharding approach i
 and a date — "any feedback welcome" gets ignored because no individual feels the review is
 theirs to do, while a named ask with a deadline creates a specific person who now owns
 responding.
+
+**Q: How does a spec written for a coding agent differ from a design doc written for reviewers?**
+**Short:** A design doc persuades people to agree on a decision; an agent spec states the agreed result as testable MUST and SHOULD criteria with explicit non-goals, and is versioned with the code.
+
+In spec-driven development (GitHub's Spec Kit: constitution, specify, plan, tasks,
+implement) the spec is the agent's input. Its reader cannot ask what "fast" means, so
+every requirement needs a number a test can assert and an RFC 2119 keyword for its level.
+Non-goals matter more than in a design doc, because an agent adds plausible features
+nobody asked for. Alternatives considered mostly drop out, since the decision is already
+made. When a requirement changes, edit the spec and regenerate instead of patching the
+code, and record why in an ADR. Anything a team still has to agree on goes through a
+design doc first.
 
 **Q: What happens to an ADR when the underlying decision changes — do you edit it?**
 **Short:** No — you write a new ADR that supersedes the old one and mark the old one superseded.

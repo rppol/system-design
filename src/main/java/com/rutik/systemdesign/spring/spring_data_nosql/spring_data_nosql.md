@@ -580,6 +580,62 @@ public class OrderReportService {
 Same store, same driver, same collection — the difference between a 41-second heap-busting
 scan and a 6-millisecond lookup is one explicitly created index and one `Pageable`.
 
+### 6.11 Vector Search in Spring Data MongoDB
+
+MongoDB runs similarity search through the `$vectorSearch` aggregation stage against a
+dedicated vector search index. Spring Data MongoDB 4.5 (May 2025) added the template-level
+API (`VectorIndex`, `VectorSearchOperation`) and 5.0 (Boot 4.0) added repository methods
+annotated `@VectorSearch` that return `SearchResults<T>` with a score per hit. The server side
+needs Atlas, a local Atlas deployment (the Atlas CLI or the `mongodb/mongodb-atlas-local`
+Docker image), or a self-managed deployment with search enabled; a plain `mongod` without the
+search component rejects the stage.
+
+```java
+// 1. Create the index once (it is a search index, not a regular B-tree index)
+VectorIndex index = new VectorIndex("comment_vectors")
+    .addVector("embedding", v -> v.dimensions(1536).similarity(COSINE))
+    .addFilter("country");                      // fields usable in the pre-filter
+mongoTemplate.searchIndexOps(Comment.class).createIndex(index);
+// exists() is true immediately; the index serves queries only once status(...) is READY.
+
+// 2a. Template API: full pipeline control
+VectorSearchOperation search = VectorSearchOperation.search("comment_vectors")
+    .path("embedding")
+    .vector(queryEmbedding)
+    .limit(10)
+    .numCandidates(200)                         // ANN candidates examined
+    .withSearchScore("score");
+mongoTemplate.aggregate(newAggregation(Comment.class, search), CommentHit.class);
+
+// 2b. Repository API (Spring Data MongoDB 5.0+)
+interface CommentRepository extends MongoRepository<Comment, String> {
+    @VectorSearch(indexName = "comment_vectors", filter = "{country: ?0}",
+                  limit = "10", numCandidates = "200")
+    SearchResults<Comment> searchByCountryAndEmbeddingNear(String country, Vector embedding, Score min);
+}
+SearchResults<Comment> hits =
+    repo.searchByCountryAndEmbeddingNear("DE", Vector.of(queryEmbedding), Score.of(0.8));
+```
+
+Rules that bite in production:
+
+- `$vectorSearch` must be the first stage of its pipeline, so a `$match` you want applied
+  first belongs in the index `filter` fields and the stage's pre-filter, not before the stage.
+  A pre-filter on a field not declared with `addFilter` fails.
+- `numCandidates` trades recall for latency in ANN (HNSW) search. MongoDB recommends at least
+  20 times `limit`: for `limit = 10`, start at 200 and measure recall against an exact (ENN)
+  run on a sample.
+- The similarity function (cosine, dot product, Euclidean) is fixed in the index definition,
+  so `Score.scoringFunction` on the query is ignored, and changing the function means building
+  a new index.
+- The embedding dimension in the index must equal the model's output (1536 here). Changing the
+  embedding model means re-embedding every document and building a new index, not altering one.
+- Results sort by score by default; an added `Sort` can only use domain properties, not score.
+
+Use this when the vectors belong next to the documents they describe and the corpus fits one
+cluster. Spring AI's `MongoDBAtlasVectorStore` wraps the same stage behind the `VectorStore`
+interface when the caller is a RAG pipeline rather than domain code.
+
 ---
 
 ## 7. Real-World Examples
@@ -649,6 +705,39 @@ a search index.
 | `JdkSerializationRedisSerializer` (default) | None (binary) | None — JVM only | High — `serialVersionUID` breaks on refactor |
 | `StringRedisSerializer` | Full (plain text) | Full | None — you own the format |
 | `GenericJacksonJsonRedisSerializer` | Full (JSON) | Full | Low — tolerant of added/removed fields |
+
+### Redis Server Choice: Licensing and Valkey
+
+The Redis server license changed twice, and the change decides which server a platform team
+may run or embed:
+
+| Server | Versions | License | OSI open source |
+|---|---|---|---|
+| Redis | 7.2.x and earlier | BSD 3-Clause | Yes |
+| Redis | 7.4 (change announced March 20, 2024; 7.4.0 GA July 29, 2024) | RSALv2 or SSPLv1 | No |
+| Redis | 8.0+ (May 2025) | RSALv2, SSPLv1 or AGPLv3 (your choice) | Yes, under AGPLv3 |
+| Valkey | Forked from 7.2.4 (Linux Foundation, March 28, 2024); 8.0 GA September 2024, 9.0 October 2025 | BSD 3-Clause | Yes |
+
+What each option means for a Spring service:
+
+- **Internal use of Redis 8 under RSALv2** is permitted, including production; the license
+  forbids offering Redis as a competing managed service. Most application teams are unaffected.
+- **AGPLv3** obliges you to publish the source of a modified Redis server that users reach over
+  a network. Many legal teams ban AGPL software outright, which makes Redis 8 unusable there
+  even though the AGPL option is OSI-approved.
+- **Valkey** keeps the BSD license and the RESP protocol, and AWS ElastiCache, Google
+  Memorystore and other managed offerings run it. Spring Data Redis, Lettuce and Jedis connect
+  to it unchanged for the command set that predates the fork, so `RedisTemplate`,
+  `@RedisHash` repositories and `RedisCacheManager` work as they are.
+- **Feature drift** is the real migration cost. Redis 8 folds JSON, the query engine, time
+  series and vector sets into the core; Valkey ships those as separate modules or not at all.
+  An app that uses `FT.SEARCH` or `JSON.SET` through Spring AI's Redis vector store or Redis OM
+  is tied to Redis, not to RESP.
+- **Spring Data Valkey** (`valkey-io/spring-data-valkey`, Apache-2.0, 2.0.0 on September 4,
+  2026 for Boot 4.1) is a fork of Spring Data Redis maintained by the Valkey project. It renames
+  the API (`ValkeyTemplate`, `@EnableValkeyRepositories`) and adds the Valkey GLIDE driver.
+  Choose it only for GLIDE features such as AWS IAM authentication; plain Spring Data Redis is
+  the smaller change for a Redis-to-Valkey move.
 
 ### Blocking vs Reactive Repositories
 
@@ -823,10 +912,13 @@ public void credit(String accountId, BigDecimal amount) {
 
 | Tool | Role |
 |---|---|
-| Spring Data MongoDB 4.x | Repository abstraction, `MongoTemplate`, aggregation, index management |
-| Spring Data Redis 3.x | `RedisTemplate`/`ReactiveRedisTemplate`, `@RedisHash` repositories, pub/sub |
+| Spring Data MongoDB 5.x (5.0 with Boot 4.0, 5.1 with Boot 4.1) | Repository abstraction, `MongoTemplate`, aggregation, index management |
+| Spring Data Redis 4.x | `RedisTemplate`/`ReactiveRedisTemplate`, `@RedisHash` repositories, pub/sub |
 | MongoDB Java Driver (sync + reactive streams) | Wire-protocol client `MongoTemplate`/`ReactiveMongoTemplate` delegate to |
 | Lettuce | Default Redis client since Spring Boot 2.0 — Netty-based, thread-safe, reactive-native |
+| Valkey | BSD-licensed Redis 7.2.4 fork (Linux Foundation); Lettuce and Jedis connect to it unchanged |
+| Spring Data Valkey | Valkey-project fork of Spring Data Redis with the Valkey GLIDE driver and `ValkeyTemplate` |
+| MongoDB Vector Search | `$vectorSearch` stage, `VectorIndex`/`VectorSearchOperation`, `@VectorSearch` repository methods |
 | Jedis | Alternative synchronous Redis client; needs `commons-pool2` for connection pooling |
 | Spring Data R2DBC | Reactive relational repositories over R2DBC — the `ReactiveCrudRepository` for SQL |
 | Mongock | Schema/index migration tool for MongoDB — the Flyway/Liquibase equivalent |
@@ -927,6 +1019,11 @@ entirely. Use `@Aggregation` on a repository method for a fixed pipeline, or
 `Aggregation.newAggregation(...)` against `MongoTemplate` when the pipeline's stages depend
 on runtime input.
 
+**Q: Why does a Spring Data MongoDB vector search return poor matches or fail when you add a `$match` before it?**
+**Short:** $vectorSearch must be the pipeline's first stage, so filters go in the index's filter fields and the stage pre-filter; low numCandidates also hurts recall.
+
+`$vectorSearch` must be the first stage of any pipeline it appears in, so a `$match` placed before it is rejected, and a `$match` placed after it filters the top `limit` hits, which can leave two results out of ten. The fix is to declare the filter fields in the vector index (`VectorIndex.addFilter("country")`) and pass the condition as the stage's pre-filter, which in a repository is `@VectorSearch(filter = "{country: ?0}")`. The second cause of poor matches is `numCandidates`: approximate (HNSW) search only examines that many candidates, and MongoDB recommends at least 20 times `limit`, so `limit = 10` needs about 200. Measure recall by comparing against an exact (ENN) run on a sample of queries. Also check that the similarity function and dimensions in the index match the embedding model, because both are fixed when the index is built and `Score.scoringFunction` on the query is ignored.
+
 **Q: What are the hard constraints on MongoDB multi-document transactions (4.0+)?**
 **Short:** MongoDB transactions need a replica set, default to a 60-second lifetime, and can abort with a retryable error.
 They require a replica set or sharded cluster, default to a 60-second lifetime, and abort
@@ -999,6 +1096,11 @@ join three or more tables and must be transactionally consistent by default, sta
 relational; if a single JSON-shaped aggregate is read and written together and horizontal
 scale matters more than joins, MongoDB fits; if the access is "get/set by key" at latency
 budgets JPA can't hit, Redis fits.
+
+**Q: Your company's legal team bans AGPL and SSPL software. Which Redis-compatible server can a Spring service use, and what changes in the code?**
+**Short:** Run Valkey, the BSD-licensed Redis 7.2.4 fork; Spring Data Redis with Lettuce or Jedis connects unchanged unless the app uses Redis 8-only modules.
+
+Redis 7.4 (license change announced March 2024, 7.4.0 GA July 2024) moved from BSD to RSALv2 or SSPLv1, and Redis 8 (May 2025) added AGPLv3 as a third choice. RSALv2 permits internal production use but is not OSI open source, and a ban on AGPL and SSPL leaves RSALv2 as the only Redis 8 path, which many policies also reject. Valkey, launched by the Linux Foundation on March 28, 2024 from Redis 7.2.4, keeps the BSD 3-Clause license and the RESP protocol, and is the engine behind several managed services. For the code, nothing changes for core commands: `RedisTemplate`, `@RedisHash` repositories, `RedisCacheManager` and Spring Session all run on Lettuce or Jedis against Valkey. The work is in features added after the fork: Redis 8 ships JSON, the query engine and vector sets in the core, so an app using `FT.SEARCH` through Spring AI's Redis vector store or Redis OM must keep Redis or move that feature elsewhere. Audit the commands the app sends, for example from `MONITOR` output in staging, before choosing.
 
 **Q: When should Redis be a `@Cacheable` cache versus a Spring Data Redis-backed primary store?**
 **Short:** Use @Cacheable when Redis merely accelerates data that has a durable source of truth elsewhere.

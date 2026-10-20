@@ -23,7 +23,7 @@ Python implementations:
 
 Python version scope: the APIs are 3.11+ (`asyncio.TaskGroup`, `asyncio.timeout()`,
 `ExceptionGroup`, `except*`); all examples use `X | None` union syntax, and runtime behaviour is
-stated for 3.14, the current stable release.
+stated for 3.14.
 
 ---
 
@@ -433,6 +433,38 @@ async def main() -> None:
 
 Use case: search across multiple backends; return as soon as any one succeeds.
 
+On 3.15, `TaskGroup.cancel()` is the supported early exit. It cancels every unfinished child and
+the group body, and the `async with` block exits normally, with no `CancelledError` and no
+`ExceptionGroup`. It is idempotent, and calling it before the block is entered cancels the group on
+entry.
+
+```python
+import asyncio
+from collections.abc import Coroutine
+from typing import Any
+
+async def race[T](*coros: Coroutine[Any, Any, T]) -> T:   # [3.15]
+    """Return the result of the first coroutine to succeed."""
+    winner: list[T] = []
+
+    async with asyncio.TaskGroup() as tg:
+        async def _run(coro: Coroutine[Any, Any, T]) -> None:
+            result = await coro
+            if not winner:
+                winner.append(result)
+                tg.cancel()   # stop the siblings; the group exits cleanly
+
+        for coro in coros:
+            tg.create_task(_run(coro))
+
+    if not winner:
+        raise RuntimeError("All coroutines completed without a result")
+    return winner[0]
+```
+
+On 3.11-3.14 there is no `cancel()`, so the winner raises a private exception into the group and
+the caller catches it with `except*`:
+
 ```python
 import asyncio
 from collections.abc import Coroutine
@@ -477,8 +509,8 @@ async def search_all(query: str) -> dict:
     )
 ```
 
-anyio provides `anyio.create_task_group()` with `tg.cancel_scope.cancel()` for a cleaner early-exit
-pattern that avoids the sentinel-exception trick.
+anyio has had the same early exit for years as `tg.cancel_scope.cancel()` on
+`anyio.create_task_group()`; `TaskGroup.cancel()` brings it to the stdlib.
 
 ### 6.6 Parallel API Calls with Per-Task Timeout
 
@@ -640,9 +672,8 @@ async def parallel_queries(queries: list[str]) -> list[list[dict]]:
 **Use `asyncio.TaskGroup` when:**
 - Running 2+ I/O-bound coroutines that should all complete before proceeding.
 - You need guaranteed exception propagation — no silent failures acceptable.
-- Python 3.11+ is available. Only 3.10 remains below the `TaskGroup` floor among CPython versions
-  still receiving security fixes, and it reaches end-of-life in October 2026 — so for anything with
-  a lifetime beyond that, 3.11 is a floor rather than a constraint.
+- Python 3.11+ is available. 3.10 reached end-of-life on 2026-10-01 (3.10.22 was its final
+  release), so 3.11 is the oldest supported CPython and every supported version has `TaskGroup`.
 - Cancellation of the outer task (e.g., HTTP request timeout) must propagate to all children.
 - Building FastAPI endpoints that fan out to multiple services.
 
@@ -851,6 +882,19 @@ empty, so the group never propagates while a child is still unwinding. The group
 exception plus any raised by tasks that failed before cancellation reached them, and it is still an
 `ExceptionGroup` when exactly one task failed, which is why `except ValueError:` will not catch it
 and `except* ValueError:` will.
+
+**Q: How do you stop a `TaskGroup` early without an `ExceptionGroup`?**
+**Short:** On 3.15 call tg.cancel(): it cancels unfinished children and the body, and the block exits normally; on 3.11-3.14 raise a private exception and catch it with except*.
+
+`TaskGroup.cancel()` [3.15] is a non-exceptional early exit. It calls `cancel()` on every child
+that is not done and on the group body, and `async with` then exits without raising
+`CancelledError` or `ExceptionGroup`. A child can call it once the goal is met (first search
+backend to answer), the body can call it on an event, or code holding a reference to the group or
+its bound `cancel` method can call it from outside. It is idempotent, and calling it before the
+block is entered cancels the group on entry. On 3.11-3.14 the only option is a sentinel exception:
+the winning child raises it, the group cancels the siblings, and the caller unwraps it with
+`except* Sentinel`, which costs an extra class and a handler where `return` is a `SyntaxError`.
+anyio's `tg.cancel_scope.cancel()` gives the same clean exit on any version.
 
 **Q: What is `ExceptionGroup` and how do you handle it with `except*`?**
 **Short:** ExceptionGroup wraps multiple exceptions, and except* catches matching ones recursively without short-circuiting.

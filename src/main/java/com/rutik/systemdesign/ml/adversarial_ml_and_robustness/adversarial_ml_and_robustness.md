@@ -80,6 +80,33 @@ Key insight: adversarial examples exist largely *because* models are too linear 
 | Differential privacy training | Bound per-sample influence | Mitigates poisoning/membership | Accuracy cost |
 | Rate limiting / query monitoring | Limit extraction/black-box | Operational | Cheap, high value |
 
+### 4.5 Standard vocabularies: NIST AI 100-2 E2025 and MITRE ATLAS
+
+Two public references give threat models a shared vocabulary, so a security review, a red-team report, and a model card describe the same attack with the same words.
+
+**NIST AI 100-2 E2025** ("Adversarial Machine Learning: A Taxonomy and Terminology of Attacks and Mitigations", March 2025) classifies every attack on four axes and splits systems into predictive AI (PredAI) and generative AI (GenAI):
+
+| Axis | Values |
+|------|--------|
+| Learning stage | Training (poisoning) or deployment (evasion, privacy, prompt attacks) |
+| Attacker objective | Availability breakdown, integrity violation, privacy compromise; GenAI adds misuse enablement |
+| Attacker capability | Training data control, model control, testing data control, label limit, source code control, query access; GenAI adds resource control (for indirect prompt injection) |
+| Attacker knowledge | White-box, gray-box, black-box |
+
+Under PredAI, the attack classes are evasion, poisoning (availability, targeted, backdoor, and model poisoning), and privacy (data reconstruction, membership inference, property inference, and model extraction), which is the taxonomy in 4.1. Under GenAI, it adds supply-chain attacks, direct prompting (jailbreaks), and indirect prompt injection.
+
+**MITRE ATLAS** (Adversarial Threat Landscape for AI Systems) is the ATT&CK-style matrix for AI. It lists tactics (the attacker's goal at a step, such as Reconnaissance, AI Model Access, AI Attack Staging, Exfiltration, and Impact), techniques with stable IDs, mitigations, and case studies of real incidents. The IDs make findings traceable across reports:
+
+| This module's attack | ATLAS technique |
+|----------------------|-----------------|
+| Evasion (FGSM, PGD, C&W) | AML.T0043 Craft Adversarial Data |
+| Poisoning, backdoor via data | AML.T0020 Poison Training Data |
+| Backdoor via weights | AML.T0018 Manipulate AI Model |
+| Membership inference, inversion, extraction | AML.T0024 Exfiltration via AI Inference API (.000, .001, .002) |
+| Prompt injection (LLM analog of evasion) | AML.T0051 LLM Prompt Injection |
+
+Use NIST to define the threat model (stage, objective, capability, knowledge) and ATLAS IDs to tag each red-team finding and each control in the risk register.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -622,6 +649,8 @@ The 2018 "Obfuscated Gradients" paper broke 7 of 9 ICLR defenses this way. Treat
 
 Crowd-sourced, scraped, or user-contributed training data is an attack surface. A small fraction of poisoned or backdoored samples can implant a trigger with no effect on clean accuracy, so standard validation never catches it. Mitigate with provenance tracking, outlier/influence filtering, and trigger scanning (e.g. Neural Cleanse).
 
+The attacker does not need a fixed fraction of the corpus. Anthropic, the UK AI Security Institute and the Alan Turing Institute (2025) backdoored LLMs from 600M to 13B parameters with about 250 poisoned documents each, even though the 13B model trained on over 20x more data; see [Safety and Alignment](../../llm/safety_and_alignment/safety_and_alignment.md). Size the data-provenance controls for a constant number of bad samples, not a percentage.
+
 ### Pitfall 4: Leaking confidence enables privacy attacks
 
 Returning raw, high-precision softmax probabilities makes membership inference and model inversion much easier. For sensitive models, return top-k labels, round confidences, or add calibrated noise.
@@ -647,6 +676,8 @@ Robustness is not a train-once property. Attackers adapt, data drifts, and new a
 | RobustBench | Standardized leaderboard + pretrained robust models | Reproducible comparison |
 | Opacus / TF Privacy | Differentially private training | Mitigates poisoning/membership |
 | Neural Cleanse | Backdoor/trigger detection | Scans for trojaned behavior |
+| MITRE ATLAS Navigator | Map threats and red-team findings to ATLAS tactic and technique IDs | ATT&CK-style matrix for AI systems |
+| NIST AI 100-2 E2025 | Reference taxonomy and terminology for adversarial ML | Defines stage, objective, capability, and knowledge axes |
 
 ---
 
@@ -656,6 +687,11 @@ Robustness is not a train-once property. Attackers adapt, data drifts, and new a
 **Short:** Adversarial examples exploit models' near-linear behavior in high dimensions, where many tiny aligned perturbations sum across the decision boundary.
 
 An adversarial example is an input modified by a small, often imperceptible perturbation that causes a model to misclassify it while a human still sees the original class. They exist largely because models behave too linearly in high-dimensional space: many tiny per-feature changes, each nudging the output in the same direction, sum to a large shift across the decision boundary. They are not rare glitches — they exist densely around almost every input.
+
+**Q: Why is "poisoning needs 1% of the data" the wrong threat model for a large training set?**
+**Short:** Backdoor success depends on a near-constant count of poisoned samples, about 250 documents across LLMs from 600M to 13B parameters, so bigger corpora do not dilute the attack.
+
+A percentage model implies that growing the corpus makes poisoning harder, because the attacker must inject proportionally more. The 2025 study by Anthropic, the UK AI Security Institute and the Alan Turing Institute found the opposite for backdoors: about 250 poisoned documents implanted a trigger in models from 600M to 13B parameters, although the 13B model saw over 20x more clean data. A fixed count of a few hundred items is within reach of anyone who can publish web pages or submit user content. Controls must therefore cap and audit any single source's contribution, not rely on dilution.
 
 **Q: Explain FGSM and how PGD improves on it.**
 **Short:** FGSM takes one gradient-sign step of size epsilon, while PGD iterates many such steps with projection, making it the standard strong attack.
@@ -736,6 +772,11 @@ Adversarial examples crafted on one model often fool a *different* model trained
 **Short:** Evasion, poisoning, extraction, and membership inference in classical ML map directly to prompt injection, RAG poisoning, distillation, and data extraction in LLMs.
 
 The threat-model vocabulary transfers directly. Evasion (crafting inputs that bypass a classifier) maps to prompt injection and jailbreaks (crafting prompts that bypass an LLM's guardrails); data poisoning maps to training-data and RAG-corpus poisoning; model extraction maps to distilling a proprietary LLM via its API; membership/inversion maps to training-data extraction from LLMs. The defenses also rhyme: input validation, robust training/alignment, monitoring, and rate limiting. See `../../llm/llm_security/` and `../../llm/guardrails_and_content_safety/`.
+
+**Q: How do NIST AI 100-2 and MITRE ATLAS divide the work in an AI threat model?**
+**Short:** NIST AI 100-2 defines the taxonomy (stage, objective, capability, knowledge) used to scope the threat model; MITRE ATLAS gives technique IDs and case studies used to tag findings and controls.
+
+NIST AI 100-2 E2025 is a taxonomy and glossary. It classifies attacks by learning stage (training or deployment), attacker objective (availability, integrity, privacy, and for GenAI misuse), attacker capability (training data, model, test data, labels, source code, query access, resources), and attacker knowledge (white, gray, black box). That is the scoping step. MITRE ATLAS is an ATT&CK-style matrix of tactics and techniques with IDs such as AML.T0043 Craft Adversarial Data and AML.T0020 Poison Training Data, plus documented real incidents. A team uses NIST terms to state which attacks are in scope and ATLAS IDs to tag each red-team finding and map it to a mitigation.
 
 **Q: A deployed fraud model's accuracy is fine but fraud is rising. How do you reason about adversarial adaptation?**
 **Short:** Rising fraud despite stable accuracy signals adaptive adversarial drift, addressed with frequent retraining, adversarial training, and human review of the risky tail.
@@ -821,6 +862,7 @@ defended = model(jpeg_compress(x))   # white-box PGD struggles -> looks robust
 
 - `../../llm/llm_security/` — prompt injection, jailbreaks, training-data extraction (the LLM analog)
 - `../../llm/guardrails_and_content_safety/` — input/output filtering for generative systems
+- [Safety and Alignment](../../llm/safety_and_alignment/safety_and_alignment.md): LLM backdoors and the near-constant poison-count result
 - [model_evaluation_and_selection](../model_evaluation_and_selection/model_evaluation_and_selection.md) — calibration and honest metric reporting
 - [monitoring_and_drift_detection](../monitoring_and_drift_detection/monitoring_and_drift_detection.md) — detecting adversarial/abuse drift in production
 - [convolutional_neural_networks](../convolutional_neural_networks/convolutional_neural_networks.md) — the vision models most studied for evasion

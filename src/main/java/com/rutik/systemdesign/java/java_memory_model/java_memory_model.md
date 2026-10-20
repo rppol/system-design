@@ -369,6 +369,22 @@ class Singleton {
 }
 ```
 
+### `LazyConstant` (JEP 531, preview in JDK 27)
+
+The volatile DCL field is correct but stays a mutable field, so the JIT reloads it on every `getInstance()` call. The holder-class idiom folds to a constant but works only for `static` fields and needs one nested class per field. JEP 531 (third preview, delivered in JDK 27, needs `--enable-preview`) adds `java.lang.LazyConstant` to cover both cases:
+
+```java
+// Computing function runs at most once, even under concurrent get() calls
+private static final LazyConstant<Singleton> INSTANCE = LazyConstant.of(Singleton::new);
+
+public static Singleton getInstance() { return INSTANCE.get(); }
+
+// One lazily created element per index, size fixed at creation
+private static final List<Connection> POOL = List.ofLazy(8, _ -> openConnection());
+```
+
+`get()` returns only after the content is set, so readers get the same safe-publication guarantee as the volatile version. When the `LazyConstant` sits in a `final` field, the JVM treats its content as a true constant and can fold it at JIT time; a `static final` field gives the full benefit, because core reflection can still change an instance `final` field. JEP 531 also adds `Map.ofLazy` and `Set.ofLazy`, and drops the `isInitialized` and `orElse` methods that JEP 526 still had.
+
 ### Data Race vs Race Condition
 
 ```java
@@ -478,12 +494,14 @@ theUnsafe.fullFence();     // -> VarHandle.fullFence()
 ```
 
 All three carry `@Deprecated(since = "22", forRemoval = true)` and name their `VarHandle`
-replacement in the javadoc. They are memory-access methods under JEP 471 (Java 23), so on
-Java 24 they warn on first use, and **on Java 26 they throw** — the
-`--sun-misc-unsafe-memory-access` default moved to `deny`. If you own the code, the
-migration is a one-to-one rename with no semantic change. If a dependency owns it, that
-dependency has a hard deadline, and the way to find out before your users do is to run your
-test suite with `--sun-misc-unsafe-memory-access=deny`.
+replacement in the javadoc. They are not among the memory-access methods that JEP 471 lists
+(on-heap, off-heap, and bimodal), so the `--sun-misc-unsafe-memory-access` flag does not
+govern them, and that flag's default is still `warn` in the JDK 26 and JDK 27 `java` man
+pages. On Java 27 the fences run unchanged; `javac` reports the deprecation at compile time.
+If you own the code, the migration is a one-to-one rename with no semantic change. If a
+dependency owns it, check that its other `Unsafe` calls (`getInt`, `putLong`,
+`compareAndSwapInt`, `allocateMemory`) still work by running the test suite with
+`--sun-misc-unsafe-memory-access=deny`.
 
 ### Spin-Waiting: `Thread.onSpinWait()`
 
@@ -688,45 +706,50 @@ private static volatile Singleton instance;
 
 Without `volatile`, the JIT/CPU can reorder `instance = new Singleton()` so the reference is written before the constructor finishes. Another thread sees a non-null reference to a partially constructed object and uses it. With `volatile`, the write to `instance` has a StoreLoad barrier — the constructor must fully complete before the reference is published. Modern alternative: use `static final` holder idiom or `enum` singleton — both provide correct lazy initialization without `volatile`.
 
-**Q14: How does `final` field freezing provide visibility guarantees, and how does it differ from `volatile`?**
+**Q14: How do the volatile DCL field, the holder-class idiom, and JDK 27's `LazyConstant` compare for lazy initialization?**
+**Short:** All three publish safely; holder and LazyConstant can be constant-folded, but holder is static-only, and LazyConstant is a JDK 27 preview API.
+
+Volatile DCL works for static and instance fields, but the field stays mutable, so every read is a real volatile load and the JIT cannot fold it. The holder idiom (`private static class Holder { static final Singleton I = new Singleton(); }`) relies on class initialization being lazy and locked by the JVM, needs no `volatile`, and folds to a constant, but it applies only to `static` state and needs one nested class per field. `LazyConstant.of(supplier)` from JEP 531 (third preview, JDK 27) runs the supplier at most once under contention, publishes the value before `get()` returns, and is folded by the JIT when held in a `final` field. It also has collection forms (`List.ofLazy`, `Map.ofLazy`, `Set.ofLazy`). Choose the holder idiom on a released LTS today, and `LazyConstant` only where preview features are allowed.
+
+**Q15: How does `final` field freezing provide visibility guarantees, and how does it differ from `volatile`?**
 **Short:** Final-field freezing publishes constructor writes for free; volatile adds a runtime barrier on every access.
 
 The JMM's "freeze action" for `final` fields: when an object's constructor completes normally, a JMM freeze action fires for every `final` field written in that constructor. Any thread that obtains a reference to the fully-constructed object is guaranteed to see the `final` field values as written — this is a strong publication guarantee with **zero runtime barrier cost** after construction. Contrast with `volatile`: `volatile` guarantees visibility on every read and write (runtime barrier), suitable for fields that change after construction. `final` provides stronger guarantees but only for fields set once in the constructor. Caveat: the guarantee only holds if `this` does not escape the constructor — if the constructor passes `this` to another thread, the freeze action has not yet fired when that thread accesses the `final` fields.
 
-**Q15: What is `jcstress` and what category of JMM violations does it catch that JUnit tests cannot?**
+**Q16: What is `jcstress` and what category of JMM violations does it catch that JUnit tests cannot?**
 **Short:** jcstress stress-tests concurrent code across interleavings to catch JMM violations JUnit can't reach.
 
 `jcstress` (Java Concurrency Stress Test) is an OpenJDK harness for testing memory model outcomes. It runs tests in tight concurrent loops on many CPU cores with various thread interleavings to probe for JMM violations. Unlike JUnit tests, which run sequentially or with controlled `Thread.join()` synchronization, `jcstress` instruments the runtime to observe all possible outcomes of racy concurrent accesses — including outcomes that only manifest on weakly ordered architectures (ARM, Power) but not on x86 (which enforces strong ordering beyond what the JMM requires). It categorises outcomes as: `ACCEPTABLE` (always valid), `FORBIDDEN` (never valid under JMM), `INTERESTING` (valid but surprising). Key uses: (1) Verify that a lock-free data structure is correct under all possible execution orders. (2) Prove that a specific use of `volatile` or `VarHandle` establishes the required happens-before edge. (3) Detect torn reads of `long`/`double` on 32-bit platforms.
 
-**Q16: Why doesn't `volatile` make `count++` thread-safe, and what fixes it?**
+**Q17: Why doesn't `volatile` make `count++` thread-safe, and what fixes it?**
 **Short:** volatile only guarantees visibility, not atomicity, so a racing count++ can still lose an increment.
 
 `volatile` only guarantees visibility and ordering for individual reads and writes — it does not make a compound read-modify-write operation atomic. `count++` is actually three separate steps: read `count`, add 1, write the result back; two threads can both read the same value before either writes, so one increment is silently lost even though every individual read and write of `count` was immediately visible to both threads. This is exactly why `volatile` is correct for a single-writer flag or reference but wrong for a shared counter or any check-then-act sequence. Fix: use `AtomicInteger`/`AtomicLong` (CAS-based atomicity), `LongAdder` for high-contention counters, or wrap the increment in `synchronized`.
 
-**Q17: What does "no out-of-thin-air values" mean in the JMM, and why does it matter even for racy code?**
+**Q18: What does "no out-of-thin-air values" mean in the JMM, and why does it matter even for racy code?**
 **Short:** The JMM bans out-of-thin-air values, so a read can only ever see a value some thread actually wrote.
 
 The JMM guarantees a read can never observe a value that no thread ever wrote — no value can be conjured from nowhere, even under a data race. This matters because without it, an aggressively optimizing JIT or CPU could justify almost any reordering or speculative result as "technically allowed" once a race exists; the out-of-thin-air rule draws a hard boundary so racy, undefined-looking executions still remain traceable to real writes somewhere in the program. A classic example: two threads race to write different constants into the same `int` field — the JMM permits the reader to see either constant, but never a third value neither thread ever assigned, and never a mix of their bits, because reads and writes of `int` (and every type narrower than 64 bits, plus references) are specified as atomic even without `volatile`. The one exception the JMM carves out is `long` and `double`, whose non-volatile accesses may be split into two 32-bit halves — which is exactly the word-tear hazard covered in Section 6. This guarantee doesn't make data races safe to write — it only stops the runtime from making the bug arbitrarily worse — so still eliminate the race with `volatile`, locks, or atomics rather than relying on this bound.
 
-**Q18: Why can code with an unsynchronized read/write "work fine" on x86 but fail on ARM?**
+**Q19: Why can code with an unsynchronized read/write "work fine" on x86 but fail on ARM?**
 **Short:** x86's strong memory model can mask data races that a weaker model like ARM's exposes.
 
 x86 uses a strong memory model (Total Store Order) that preserves most store/load ordering, so many JMM-violating data races still happen to produce the expected result on that hardware. ARM and POWER use weaker memory models that aggressively reorder independent loads and stores unless an explicit memory barrier forbids it, so the same unsynchronized code can expose stale reads or reordered writes that x86 was silently hiding. This is why concurrency bugs are notorious for passing code review, passing tests on a developer's x86 laptop, and then failing intermittently on ARM-based cloud instances or Android phones. Practical guidance: never rely on "it works on my machine" for concurrent code — write to the JMM specification (`volatile`/`synchronized`/atomics) rather than to one architecture's observed behavior, and use `jcstress` or test on ARM hardware to catch model-dependent bugs before production.
 
-**Q19: What does `Thread.onSpinWait()` actually do, and why does adding an instruction make a spin loop react faster?**
+**Q20: What does `Thread.onSpinWait()` actually do, and why does adding an instruction make a spin loop react faster?**
 **Short:** It emits the CPU's pause instruction, which stops speculation in the loop so exiting it does not pay a pipeline-flush penalty.
 
 `Thread.onSpinWait()` (Java 9, JEP 285) is a **hint to the CPU**, not a memory barrier — it adds no happens-before edge and changes nothing about the JMM's guarantees, so it never replaces the `volatile` on the flag you are spinning on. What it does is let the JIT emit the platform's spin-wait instruction: `PAUSE` on x86-64, `YIELD` on AArch64. The apparent paradox resolves once you look at what the processor is doing in a bare `while (!flag) {}` loop: it speculatively issues many loads of the watched location, and when another core finally writes it, the memory-order violation forces a flush of that entire speculative window — tens of cycles — before the loop can exit. `PAUSE` tells the core not to speculate that far ahead, so the *exit* is cheaper even though each iteration does slightly more. Two other wins come with it: on a hyper-threaded core the spinning thread stops starving its SMT sibling of issue slots, and power draw drops, which on a shared host means less thermal throttling of everything around it. Use it for short bounded waits where you expect the flag within a few hundred nanoseconds — a lock's fast path, a lock-free queue waiting for a slot. Past roughly a context switch (1–10 µs) you should `LockSupport.park()` instead, and never spin unbounded where threads can outnumber cores — including on virtual threads, where a spinning virtual thread occupies its carrier and cannot be preempted.
 
-**Q20: What are `VarHandle.acquireFence()` and `releaseFence()` for, when `volatile` already inserts barriers?**
+**Q21: What are `VarHandle.acquireFence()` and `releaseFence()` for, when `volatile` already inserts barriers?**
 **Short:** They give an ordering point without an access, letting you publish plain writes once instead of paying volatile on every field.
 
 They give you the barrier without the access. A `volatile` field couples ordering to a specific read or write, so publishing a 20-field object safely means either 20 volatile writes or one volatile write to a reference. Standalone fences let you write all 20 fields plainly, then place **one** `VarHandle.releaseFence()` before the publishing store, with a matching `VarHandle.acquireFence()` after the reader's load. The pairing is the whole mechanism: a release fence on the writer orders everything before it against stores that follow, an acquire fence on the reader orders everything after it against loads that precede, and **neither one alone establishes anything**. The full set is `acquireFence` (LoadLoad + LoadStore), `releaseFence` (StoreStore + LoadStore), `fullFence` (adds the expensive StoreLoad), plus the narrower `loadLoadFence` and `storeStoreFence`. The practical guidance is to not reach for them: a `volatile` or `final` field gives the same ordering with the compiler checking your work, and the JIT already elides barriers it can prove redundant. Fences are for a measured hot path where you are willing to own the correctness argument yourself — and they are correspondingly easy to get subtly wrong, because a missing fence produces a bug that only appears on weakly-ordered hardware.
 
-**Q21: You inherit a lock-free queue that calls `Unsafe.storeFence()`. What breaks, and when?**
-**Short:** It throws on Java 26 — the Unsafe memory-access methods now deny by default; swap in the one-to-one VarHandle equivalents.
+**Q22: You inherit a lock-free queue that calls `Unsafe.storeFence()`. What breaks, and when?**
+**Short:** Nothing breaks on Java 27: the fences are deprecated for removal since 22 but run; swap in the one-to-one VarHandle fences.
 
-It stops running. `sun.misc.Unsafe.loadFence()`, `storeFence()`, and `fullFence()` are all marked `@Deprecated(since = "22", forRemoval = true)`, and they are memory-access methods under JEP 471 (Java 23), which set the removal path for that whole surface. Java 24 (JEP 498) prints one warning per JVM on first use; **Java 26 throws**, because the `--sun-misc-unsafe-memory-access` default moved from `warn` to `deny`; and removal comes in a release after 26. Note what did *not* change — this is the claim people get wrong: the `Unsafe` class itself is still reachable via the `jdk.unsupported` module, so this is not "Unsafe is gone", it is specifically the memory-access surface becoming fatal. If you own the code the fix is a mechanical rename with identical semantics: `loadFence()` → `VarHandle.acquireFence()`, `storeFence()` → `VarHandle.releaseFence()`, `fullFence()` → `VarHandle.fullFence()`, exactly as each method's own javadoc says. If a *dependency* owns it — lock-free queues, ring buffers, and older Netty and Disruptor-style structures are the common carriers — then that dependency has a hard deadline and you want to find out before your users do: run the test suite with `--sun-misc-unsafe-memory-access=deny` in CI today, which turns a future outage into a build failure.
+Nothing breaks on Java 27, and the reason is a detail people get wrong. `sun.misc.Unsafe.loadFence()`, `storeFence()`, and `fullFence()` carry `@Deprecated(since = "22", forRemoval = true)`, so `javac` warns, but they are not memory-access methods under JEP 471. JEP 471 lists only the on-heap methods (`objectFieldOffset`), the off-heap methods (`allocateMemory`), and the bimodal methods (`getInt(Object, long)`, `compareAndSwapInt`). Those are the methods that `--sun-misc-unsafe-memory-access` controls: Java 24 (JEP 498) prints one warning per JVM on first use, and the `java` man pages for JDK 26 and JDK 27 still give `warn` as the default, not `deny`. The fences are on a separate removal path with no run-time check, so the queue runs as before until a release deletes them. The `Unsafe` class itself stays reachable through the `jdk.unsupported` module. If you own the code, the fix is a mechanical rename with identical semantics: `loadFence()` to `VarHandle.acquireFence()`, `storeFence()` to `VarHandle.releaseFence()`, `fullFence()` to `VarHandle.fullFence()`, as each method's javadoc says. If a dependency owns it, the same queue usually also calls bimodal methods such as `compareAndSwapLong` or `getObjectVolatile`, and those are the calls that throw `UnsupportedOperationException` once `deny` becomes the default. Run the test suite with `--sun-misc-unsafe-memory-access=deny` in CI to find them before that default changes.
 
 ---
 
@@ -900,6 +923,8 @@ The 33x multiplier is real and the 0.04 percent is also real; they are the same 
 
 **Is `volatile` enough to make a counter increment thread-safe?** No. `count++` is read-modify-write, three operations; `volatile` makes each read and write visible but does not make the trio atomic, so two threads can lose an update. Use `AtomicInteger`/`AtomicLong` or a lock.
 
+**Why is the enum singleton preferable to a volatile DCL singleton?** Its `<clinit>` is run exactly once by the JVM, lazily on first active use of the enum type, with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.
+
 ---
 
 ## Related / See Also
@@ -908,5 +933,3 @@ The 33x multiplier is real and the 0.04 percent is also real; they are the same 
 - [JVM Internals](../jvm_internals/jvm_internals.md) — memory barriers, safepoints, how the JIT respects JMM ordering
 - [Structured Concurrency & Loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md) — ScopedValue vs ThreadLocal, virtual thread memory visibility
 - [Computer Architecture & Memory Hierarchy](../../cs_fundamentals/computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — CPU cache coherence and store buffers that the JMM's happens-before rules sit on top of
-
-**Why is the enum singleton preferable to a volatile DCL singleton?** Its `<clinit>` is run exactly once by the JVM, lazily on first active use of the enum type, with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.

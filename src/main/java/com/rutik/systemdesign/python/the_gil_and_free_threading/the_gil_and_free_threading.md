@@ -579,7 +579,10 @@ import sys
 import sysconfig
 
 # Was this interpreter BUILT without the GIL?
-built_free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+if sys.version_info >= (3, 15):
+    built_free_threaded = sys.abi_info.free_threaded   # [3.15] public attribute
+else:
+    built_free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 # Is the GIL actually off right now? A free-threaded build still re-enables it
 # when PYTHON_GIL=1 / -X gil=1 is set, or when an incompatible C extension is
@@ -592,6 +595,13 @@ if sys.version_info >= (3, 13):
 # But: ALL shared mutable state now needs explicit locking — the GIL no longer
 # protects incref/decref, and compound dict/list operations are not atomic.
 ```
+
+`sys.abi_info` [3.15] also carries `pointer_bits`, `debug`, and `byteorder`, the build facts that
+pick which wheel an interpreter can load. The build answer and the runtime answer differ:
+`abi_info.free_threaded` says the binary was built with `--disable-gil`, and
+`sys._is_gil_enabled()` says whether the GIL is off right now. Getting a free-threaded build is
+also simpler on 3.15: the official python.org macOS installers include free-threading support by
+default, where the 3.13 and 3.14 installers needed it ticked as an optional component.
 
 ---
 
@@ -621,7 +631,7 @@ architecture that predates free-threading.
 **asyncio HTTP servers (FastAPI + Uvicorn):** asyncio avoids the GIL issue entirely for I/O-bound
 handlers. There is one thread, one GIL holder, and the event loop cooperatively yields at every
 `await`. CPU-bound handlers block the entire event loop and should be offloaded to a
-`ProcessPoolExecutor` via `asyncio.get_event_loop().run_in_executor`.
+`ProcessPoolExecutor` via `asyncio.get_running_loop().run_in_executor`.
 
 ---
 
@@ -908,6 +918,7 @@ PYTHON_GIL=1 python3.14t -c "import sys; print(sys._is_gil_enabled())"  # True =
 
 # Confirm the BUILD is free-threaded, independently of the runtime state
 python3.14t -c "import sysconfig; print(sysconfig.get_config_var('Py_GIL_DISABLED'))"  # 1
+python3.15t -c "import sys; print(sys.abi_info.free_threaded)"                         # True [3.15]
 ```
 
 ---

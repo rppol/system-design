@@ -24,7 +24,7 @@
 
 NewSQL and Distributed SQL systems provide horizontally scalable databases that preserve the full ACID guarantees and SQL interface of traditional relational databases. They emerged to solve the conflict between two unsatisfactory choices: PostgreSQL/MySQL (strong consistency, limited scale) and NoSQL systems (horizontal scale, weakened consistency and expressiveness). The defining characteristic is distributed ACID transactions — linearizable reads and serializable writes across multiple nodes without the developer burden of application-level sharding.
 
-Key systems: Google Spanner (2012), CockroachDB (2015), TiDB (2015), YugabyteDB (2018), Amazon Aurora (shared storage), PlanetScale (Vitess-based).
+Key systems: Google Spanner (2012), CockroachDB (2015), TiDB (2015), YugabyteDB (2018), Amazon Aurora (shared storage), PlanetScale (Vitess-based MySQL, plus a managed Postgres service GA since September 2025).
 
 ---
 
@@ -55,7 +55,7 @@ Mental model: NewSQL = distributed Raft consensus + SQL planner + MVCC, stacked 
 | System         | Storage Layer          | Consensus | SQL Compat      | CAP Position       |
 |----------------|-------------------------|-----------|-----------------|--------------------|
 | Google Spanner | Colossus (proprietary)  | Paxos     | Google SQL      | CP (TrueTime)      |
-| CockroachDB    | RocksDB + Raft          | Raft      | PostgreSQL      | CP                 |
+| CockroachDB    | Pebble + Raft           | Raft      | PostgreSQL      | CP                 |
 | TiDB           | TiKV (RocksDB+Raft)     | Raft      | MySQL           | CP                 |
 | YugabyteDB     | DocDB (RocksDB+Raft)    | Raft      | PostgreSQL+YCQL | CP                 |
 | Amazon Aurora  | Shared log store        | Custom    | MySQL/Postgres  | CP (regional)      |
@@ -83,25 +83,25 @@ flowchart TD
     gateway --> txn("Transaction Layer<br/>heartbeats long txns")
     txn --> dist("Distribution Layer<br/>range cache + retries")
 
-    subgraph raft["Raft Groups · one per 64MB range"]
+    subgraph raft["Raft Groups · one per range, split at 512MiB"]
         rangeA_l("Range A Leader<br/>Node1") -.->|"replicate"| rangeA_f("Range A Follower<br/>Node2")
         rangeB_l("Range B Leader<br/>Node3") -.->|"replicate"| rangeB_f("Range B Follower<br/>Node1")
     end
 
     dist --> rangeA_l
     dist --> rangeB_l
-    rangeA_f --> rocksdb(["RocksDB<br/>on each node"])
-    rangeB_f --> rocksdb
+    rangeA_f --> pebble(["Pebble<br/>on each node"])
+    rangeB_f --> pebble
 
     class client io
     class gateway,dist mathOp
     class txn req
     class rangeA_l,rangeB_l train
     class rangeA_f,rangeB_f frozen
-    class rocksdb base
+    class pebble base
 ```
 
-Each 64MB range is its own Raft group with an independent leader, so one node can lead Range A while following Range B (Node1 above does both) — writes for a row always route to that row's range leader, never to one fixed "primary" node.
+Each range (split once it passes the 512 MiB `range_max_bytes` default) is its own Raft group with an independent leader, so one node can lead Range A while following Range B (Node1 above does both); writes for a row always route to that row's range leader, never to one fixed "primary" node.
 
 **Google Spanner TrueTime — Commit Protocol**
 
@@ -263,7 +263,7 @@ Every Spanner server has GPS receivers and atomic clocks. TrueTime provides `TT.
 
 ### CockroachDB Raft Ranges
 
-Data is split into 64MB ranges. Each range is a Raft group with its own leader (on one of the 3+ replicas). The distributed SQL planner decomposes a query into sub-plans targeting the ranges that own the relevant data. Each sub-plan executes as a local RocksDB read/write.
+Data is split into ranges of up to 512 MiB (`range_max_bytes` default since v20.1). Each range is a Raft group with its own leader (on one of the 3+ replicas). The distributed SQL planner decomposes a query into sub-plans targeting the ranges that own the relevant data. Each sub-plan executes as a local read/write against Pebble, CockroachDB's LSM storage engine, which replaced RocksDB.
 
 **Transaction heartbeating**: Long-running transactions send periodic heartbeats to their transaction record. If a conflicting transaction detects an expired heartbeat, it can abort the timed-out transaction and proceed. Default heartbeat interval = 2s; default txn expiry = 24h.
 
@@ -453,7 +453,7 @@ The related throughput ceiling matters just as much — at L = 200ms a single se
 chain can complete only `1000 / 200 = 5` commits per second no matter how many nodes the
 cluster has.
 
-**2PC overhead misconception**: Spanner does NOT use two-phase commit for external consistency — it uses commit-wait on TrueTime. But CockroachDB uses a transaction coordinator pattern that can have similar overhead when transactions span many ranges. Minimize range fan-out per transaction.
+**2PC overhead misconception**: TrueTime does not remove two-phase commit. Spanner runs 2PC across Paxos groups for any read-write transaction that touches more than one group, and commit-wait on TrueTime adds external consistency on top. CockroachDB's transaction coordinator has the same cost profile: overhead grows with the number of ranges a transaction spans. Minimize range fan-out per transaction.
 
 **Raft leadership contention**: In CockroachDB, a table's Raft leaders should be co-located with the gateway node handling most writes. If leaders are scattered across regions, every write incurs cross-region Raft replication. Use `ALTER TABLE ... CONFIGURE ZONE USING lease_preferences` to pin leaders.
 
@@ -472,17 +472,17 @@ cluster has.
 | TiDB           | Go/Rust  | Apache 2.0   | TiDB Cloud              | HTAP (TiKV + TiFlash)        |
 | YugabyteDB     | C++      | Apache 2.0   | Yugabyte Managed        | PostgreSQL + Cassandra APIs   |
 | Amazon Aurora  | C++      | Proprietary  | AWS Aurora              | Shared log, fast failover     |
-| PlanetScale    | Go       | Proprietary  | PlanetScale Cloud       | Vitess-based, branch model    |
+| PlanetScale    | Go       | Proprietary  | PlanetScale Cloud       | Vitess-based MySQL and managed Postgres, branch model |
 | Vitess         | Go       | Apache 2.0   | Self-hosted             | MySQL sharding middleware      |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q: How does Google Spanner achieve external consistency without two-phase commit?**
-**Short:** Spanner uses TrueTime commit-wait, waiting out the clock uncertainty interval instead of running cross-datacenter 2PC coordination.
+**Q: How does Google Spanner achieve external consistency, and where does two-phase commit fit in?**
+**Short:** Spanner runs 2PC across Paxos groups for multi-group writes; TrueTime commit-wait then delays the commit until its timestamp has passed on every clock.
 
-Spanner uses TrueTime commit-wait instead of 2PC coordination. After choosing a commit timestamp T using `TT.now().latest`, the leader waits until `TT.now().earliest > T` (the commit-wait period, ~1–7ms). This wait ensures no future transaction can receive a timestamp ≤ T, guaranteeing that any transaction starting after this commit will observe it. The key insight is that the wait is bounded by clock uncertainty (epsilon), not by network round trips to remote sites, so external consistency is maintained without cross-datacenter coordination messages.
+A read-write transaction that touches one Paxos group commits through that group's leader; one that touches several runs two-phase commit, with one group leader acting as coordinator and the others as participants, each participant's prepare record replicated through its own Paxos group. External consistency comes from TrueTime commit-wait layered on top: after choosing a commit timestamp T using `TT.now().latest`, the leader waits until `TT.now().earliest > T` (the commit-wait period, about 1 to 7 ms). This wait ensures no future transaction can receive a timestamp ≤ T, guaranteeing that any transaction starting after this commit will observe it. The key insight is that the wait is bounded by clock uncertainty (epsilon), not by network round trips to remote sites, so commit-wait adds no coordination messages beyond what 2PC and Paxos already send.
 
 **Q: What is the TrueTime API and why is it necessary for Spanner?**
 **Short:** TrueTime returns a bounded time interval instead of a single timestamp, letting Spanner assign globally ordered commit timestamps without a central oracle.
@@ -552,7 +552,7 @@ Applications must implement exponential backoff with jitter for transaction retr
 **Q: What is PlanetScale's vitess-based approach and how does it differ from Spanner?**
 **Short:** PlanetScale shards MySQL via Vitess without native cross-shard ACID, while Spanner supports cross-shard ACID transactions with external consistency.
 
-PlanetScale uses Vitess, which is a sharding middleware for MySQL. Each shard is a strongly consistent MySQL instance (with Raft via Orchestrator or external HA). Cross-shard transactions are NOT ACID in the traditional sense — PlanetScale discourages cross-shard foreign keys and joins, pushing developers to design schemas that avoid cross-shard operations. Spanner, by contrast, supports cross-shard ACID transactions natively with external consistency. PlanetScale's tradeoff: better MySQL compatibility and lower cost; Spanner's: true distributed ACID at the cost of flexibility.
+PlanetScale uses Vitess, which is a sharding middleware for MySQL. Each shard is a strongly consistent MySQL instance, with failover handled by VTOrc. Cross-shard transactions are NOT ACID in the traditional sense: PlanetScale discourages cross-shard foreign keys and joins, pushing developers to design schemas that avoid cross-shard operations. Spanner, by contrast, supports cross-shard ACID transactions natively with external consistency. PlanetScale's tradeoff: better MySQL compatibility and lower cost; Spanner's: true distributed ACID at the cost of flexibility. This describes PlanetScale's MySQL product; PlanetScale for Postgres (GA 22 September 2025) runs on PlanetScale's own proprietary operator, not Vitess.
 
 ---
 

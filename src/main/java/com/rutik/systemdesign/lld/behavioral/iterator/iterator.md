@@ -166,6 +166,43 @@ sequenceDiagram
 - **External iterator** (most common): Client controls the loop (`while(it.hasNext()) it.next()`).
 - **Internal iterator**: Collection controls the loop, client provides a callback (`collection.forEach(elem -> ...)`).
 
+### JDK answers before a custom iterator: `SequencedCollection` and Stream Gatherers
+
+Two JDK additions remove most of the reasons to hand-write an iterator class.
+
+**`SequencedCollection` (JEP 431, JDK 21)** gives every collection with a defined encounter order one interface: `getFirst()`, `getLast()`, `addFirst()`, `addLast()`, `removeFirst()`, `removeLast()` and `reversed()`. `List`, `Deque`, `LinkedHashSet` and `SortedSet` sit under it, and `SequencedMap` (`LinkedHashMap`, `SortedMap`) adds `firstEntry()`, `lastEntry()`, `pollFirstEntry()`, `putFirst()`, `putLast()` and `sequencedKeySet()`. `reversed()` returns a **view**, not a copy: a reverse iterator over an `ArrayList` of 10 million elements costs one small object, and writes through the view land in the backing list. Before JDK 21 a reverse traversal of a `LinkedHashSet` needed a copy into a list, which is exactly the "multiple traversal algorithms" case this pattern was used for. `SortedSet.addFirst()` throws `UnsupportedOperationException`, because the comparator, not the caller, decides position.
+
+```java
+SequencedSet<String> recent = new LinkedHashSet<>(List.of("a.txt", "b.txt", "c.txt"));
+for (String f : recent.reversed()) { ... }          // c.txt, b.txt, a.txt, no copy
+String newest = recent.getLast();                     // replaces an iterate-to-end loop
+SequencedMap<String, Integer> lru = new LinkedHashMap<>(16, 0.75f, true);
+Map.Entry<String, Integer> eldest = lru.pollFirstEntry();
+```
+
+**Stream Gatherers (JEP 485, final in JDK 24)** add one intermediate operation, `Stream.gather(Gatherer)`, for stateful stages that `map`/`filter`/`flatMap` cannot express: windows, running state, dedupe of runs, early stop. A `Gatherer` has an optional initializer (private state), an integrator (called per element, pushes zero or more results downstream, returns `false` to short-circuit), an optional combiner (for parallel streams) and an optional finisher (flushes state at end of input). `java.util.stream.Gatherers` ships five: `windowFixed(int)`, `windowSliding(int)`, `fold(Supplier, BiFunction)`, `scan(Supplier, BiFunction)` and `mapConcurrent(int, Function)`, the last running the mapper on virtual threads up to the limit while keeping encounter order. Gatherers compose with `andThen`, so `s.gather(a).gather(b)` equals `s.gather(a.andThen(b))`.
+
+```java
+// Custom stage: drop consecutive duplicates (Unix `uniq`), lazily, one element of state
+static <T> Gatherer<T, ?, T> uniq() {
+    class Last { T value; boolean seen; }
+    return Gatherer.ofSequential(
+        Last::new,
+        Gatherer.Integrator.ofGreedy((state, element, downstream) -> {
+            if (state.seen && Objects.equals(state.value, element)) return true;
+            state.seen = true;
+            state.value = element;
+            return downstream.push(element);
+        }));
+}
+
+Stream.of(1, 1, 2, 2, 2, 3, 1).gather(uniq()).toList();             // [1, 2, 3, 1]
+Stream.of(1, 2, 3, 4, 5).gather(Gatherers.windowFixed(2)).toList(); // [[1, 2], [3, 4], [5]]
+Stream.of(1, 2, 3).gather(Gatherers.windowSliding(6)).toList();     // [[1, 2, 3]]
+```
+
+The same `uniq` as a decorator iterator needs a lookahead field, a `hasNext()` that must stay free of side effects, and a wrapper `Iterable`. Keep a custom `Iterator` or `Spliterator` for the **source** (a tree, a paged cursor, a ring buffer); write a `Gatherer` for a **stage** applied to any source.
+
 ---
 
 ## 7. Key Components
@@ -609,6 +646,16 @@ flowchart LR
 **Short:** Iterator lets Java traverse any collection uniformly via hasNext()/next() without exposing its internal structure.
 A: Iterator provides a uniform way to traverse collections without exposing their internal structure. Java uses it so that arrays, linked lists, trees, and hash sets are all traversable with identical `hasNext()`/`next()` code, and for-each loops work with any `Iterable`.
 
+**Q: Does `reversed()` on a `SequencedCollection` copy the collection?**
+**Short:** No, reversed() returns a live view in reverse order, so it costs O(1) to create and writes through it change the original collection.
+
+A: No. JEP 431 (JDK 21) defines `reversed()` as a reverse-ordered view of the original collection, so creating it allocates one small wrapper regardless of size, iterating it walks the backing structure backwards, and `reversed().addFirst(x)` is the same as `addLast(x)` on the original. Two consequences matter in practice. A structural change to the backing list during iteration of the view still triggers the fail-fast `ConcurrentModificationException`, because the view uses the backing iterator. And `SortedSet.addFirst()` or `addLast()` throws `UnsupportedOperationException`, because a comparator owns element position. Use `List.copyOf(list.reversed())` when you need a snapshot instead of a view.
+
+**Q: When does a stream stage need a `Gatherer` rather than `map`, `filter`, or a decorator `Iterator`?**
+**Short:** When the stage keeps state across elements or stops early, such as windows or run dedupe; a Gatherer adds it to any stream, while an Iterator or Spliterator defines a source.
+
+A: An `Iterator` or `Spliterator` defines where elements come from: a tree walk, a paged database cursor, a ring buffer. A `Gatherer` (JEP 485, final in JDK 24) defines what happens between source and terminal operation when `map`, `filter` and `flatMap` cannot express it because the stage needs state or can stop early. Its integrator receives `(state, element, downstream)`, pushes zero or more results, and returns `false` to short-circuit; the optional finisher flushes buffered state at the end, which is how `Gatherers.windowFixed(2)` emits the trailing `[5]` from `1..5`. Before gatherers, the same stage was a decorator iterator with a lookahead field, or a collector that broke laziness by consuming the whole stream. Check the five built-ins in `Gatherers` (`windowFixed`, `windowSliding`, `fold`, `scan`, `mapConcurrent`) before writing one.
+
 **Q: What's `Iterable` vs `Iterator`?**
 **Short:** Iterable is the collection side that creates Iterators, while Iterator itself holds the traversal state.
 A: `Iterable` is the collection side — it has `iterator()` that creates a new Iterator. `Iterator` is the traversal state — it has `hasNext()` and `next()`. Implementing `Iterable` enables for-each loops. You can have multiple active Iterators on one Iterable simultaneously.
@@ -699,6 +746,8 @@ A: `entrySet()` yields the key and value together in a single pass, whereas `key
 |-----------|-------------------|---------------------|
 | `java.util.Iterator` / `Iterable` | The language-level protocol: implementing `Iterable` makes a type usable in an enhanced `for` loop | Any custom collection; this is the contract to implement, not to reinvent |
 | `java.util.Spliterator` + `StreamSupport.stream(spliterator, parallel)` | A splittable iterator with size and characteristic hints (`ORDERED`, `DISTINCT`, `IMMUTABLE`), which is what makes parallel streams possible | Exposing a custom source to the Stream API, especially when it can be partitioned |
+| `SequencedCollection` / `SequencedSet` / `SequencedMap` (JDK 21, JEP 431) | `getFirst`/`getLast`, `addFirst`/`addLast`, `removeFirst`/`removeLast`, and a `reversed()` view on every ordered collection | Reverse or end-anchored traversal of a `List`, `Deque`, `LinkedHashSet` or `LinkedHashMap` without a copy or a custom iterator |
+| `Stream.gather` + `java.util.stream.Gatherers` (JDK 24, JEP 485) | Custom stateful intermediate stages; built-ins `windowFixed`, `windowSliding`, `fold`, `scan`, `mapConcurrent` | Windowing, running totals, run dedupe or bounded concurrent mapping over any stream source |
 | Guava `AbstractIterator` / `Iterators` / `Iterables` | `computeNext()` + `endOfData()` removes the classic hasNext/next state-machine boilerplate; plus `concat`, `partition`, `peekingIterator` | Writing a lazy iterator by hand without the two-field lookahead dance |
 | Apache Commons Collections 4 `IteratorUtils` | Filtering, chaining, and looping iterator decorators | Codebases already on Commons Collections |
 | `java.sql.ResultSet` | A forward-only database cursor — iteration whose backing data never lands in memory at once | Streaming large result sets; pair with `setFetchSize` |

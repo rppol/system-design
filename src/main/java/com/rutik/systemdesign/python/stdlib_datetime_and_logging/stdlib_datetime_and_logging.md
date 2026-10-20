@@ -523,6 +523,12 @@ if __name__ == "__main__":
     main()
 ```
 
+Since 3.15, `ArgumentParser(suggest_on_error=True)` is the default, so a mistyped choice or
+subcommand gets a "maybe you meant" hint (`invalid choice: 'serv', maybe you meant 'serve'?`). Pass
+`suggest_on_error=False` for a CLI whose stderr is parsed by other tools. `BooleanOptionalAction`
+also accepts single-dash long options in 3.15, and description, epilog, and help text render
+backtick-quoted code highlighted when color output is on.
+
 ### 6.6 subprocess — safe invocation and async streaming
 
 ```python
@@ -949,6 +955,33 @@ surfaces later, whenever something needs to know *which* timezone those numbers 
 `datetime.now(UTC)` and `utcfromtimestamp(ts)` with `datetime.fromtimestamp(ts, UTC)` — both
 return aware datetimes that carry their own timezone instead of relying on the caller to
 remember it.
+
+### Pitfall 7 - BROKEN: `strptime` with a day but no year
+
+```python
+# BROKEN: works 365 days a year, then fails on February 29 input
+from datetime import datetime
+
+birthday = datetime.strptime("02-29", "%m-%d")
+# 3.12 and earlier: ValueError: day is out of range for month
+#   (no year given, so strptime fills in 1900, which is not a leap year)
+# 3.13-3.14: the same ValueError, plus a DeprecationWarning on every call
+# 3.15: ValueError: Day of month directive '%d' may not be used without a year directive
+```
+
+```python
+# FIX: parse with an explicit leap year, then apply the real year
+from datetime import datetime
+
+LEAP = 2000
+parsed = datetime.strptime(f"{LEAP}-02-29", "%Y-%m-%d")
+birthday_this_year = parsed.replace(year=2028)   # still check replace() for non-leap years
+```
+
+The bug is silent in tests written outside February and pages someone on the 29th. Since 3.15,
+`strptime()` refuses `%d` without a year directive in every call, so the mistake fails on the first
+test run instead of once every four years. `%e` without a year only emits a `DeprecationWarning`
+in 3.15; it is scheduled to raise in 3.17.
 
 ---
 

@@ -190,6 +190,74 @@ public class UserController {
 }
 ```
 
+### API Versioning on Request Mappings (Framework 7 / Boot 4)
+
+Framework 7 adds a `version` attribute to `@RequestMapping` and its shortcuts. Versioning is
+off until a resolver is configured; then every request passes through an `ApiVersionStrategy`
+that resolves the raw version, parses it (`SemanticApiVersionParser`: `major.minor.patch`,
+missing parts become 0), validates it, and hands it to handler mapping as one more condition
+next to path, method, `consumes` and `produces`.
+
+```properties
+# Boot 4: header strategy, default when the header is absent
+spring.mvc.apiversion.use.header=API-Version
+spring.mvc.apiversion.default=1.0
+# versions not declared on any mapping; 1.1, 1.2 and 1.5 are detected from the mappings
+spring.mvc.apiversion.supported=1.0,1.3,1.6
+# other resolvers: use.query-parameter, use.path-segment (index), use.media-type-parameter.<type>=<param>
+# required, detect-supported (versions found on mappings count as supported, default on)
+```
+
+```java
+// Same thing in code; needed when you combine resolvers and care about their order
+@Configuration
+class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void configureApiVersioning(ApiVersionConfigurer configurer) {
+        configurer.useRequestHeader("API-Version")
+                  .useQueryParam("version")
+                  .setDefaultVersion("1.0")
+                  .addSupportedVersions("1.0", "1.3", "1.6");   // versions no mapping declares
+    }
+}
+
+@RestController
+@RequestMapping("/accounts/{id}")
+class AccountController {
+    @GetMapping                       AccountV0 get()     { ... }  // any version, lowest priority
+    @GetMapping(version = "1.1")      AccountV1 get11()   { ... }  // exactly 1.1
+    @GetMapping(version = "1.2+")     AccountV2 get12()   { ... }  // 1.2 and supported versions above
+    @GetMapping(version = "1.5")      AccountV5 get15()   { ... }  // exactly 1.5
+}
+```
+
+Among the mappings whose version is at or below the request version, the highest one is the
+only candidate; the others are superseded, including the unversioned one.
+
+| `API-Version` sent | Handler | Why |
+|---|---|---|
+| (none) | `get()` via default 1.0 | Default version applied, only the unversioned mapping covers 1.0 |
+| `1.1` | `get11()` | Fixed match beats unversioned |
+| `1.3` | `get12()` | Highest mapping at or below 1.3 is the `1.2+` baseline |
+| `1.5` | `get15()` | Fixed 1.5 is higher than the 1.2 baseline |
+| `1.6` (supported) | 400 `NotAcceptableApiVersionException` | Highest mapping at or below 1.6 is fixed `1.5`, which does not match 1.6 |
+| `1.4` (not supported) | 400 `InvalidApiVersionException` | Rejected before mapping because 1.4 is neither declared nor configured |
+| (none), no default, `required` | 400 `MissingApiVersionException` | Versioning on, version absent |
+
+Two consequences follow from the table. A new fixed version caps the baseline below it: adding
+`version = "1.5"` turned every request above 1.5 into a 400, so add new contracts as
+baselines (`"1.5+"`) unless a version really is a dead end. And supported-version validation
+runs before mapping, so a typo such as `1.10` for `1.1` fails with a clear 400 instead of
+landing on the unversioned handler.
+
+An `ApiVersionDeprecationHandler` (the built-in `StandardApiVersionDeprecationHandler`) adds
+`Deprecation` (RFC 9745), `Sunset` (RFC 8594) and `Link` headers to responses for versions
+you plan to remove. Clients use the same model:
+`RestClient.builder().defaultApiVersion("1.2").apiVersionInserter(ApiVersionInserter.useHeader("API-Version"))`, with the same
+support in `WebClient`, HTTP service clients, MockMvc and `WebTestClient`. WebFlux has the
+same feature under `spring.webflux.apiversion.*`. For choosing between header, path and
+media-type strategies, see [Spring HATEOAS and REST Maturity](../spring_hateoas_rest_maturity/spring_hateoas_rest_maturity.md).
+
 ### ResponseEntity — Full Control
 
 ```java
@@ -493,6 +561,8 @@ server.tomcat.max-http-form-post-size=10MB
 | `@Validated` | Spring's group-aware validation annotation |
 | `ContentCachingRequestWrapper` | Cache request body for multiple reads |
 | `WebDataBinder` | Binds request parameters to Java objects |
+| `ApiVersionConfigurer` / `spring.mvc.apiversion.*` | Configure version resolution, default, required and supported versions (Framework 7 / Boot 4) |
+| `StandardApiVersionDeprecationHandler` | Adds `Deprecation`, `Sunset` and `Link` headers for retiring versions |
 
 ---
 
@@ -505,6 +575,16 @@ server.tomcat.max-http-form-post-size=10MB
 **Q: What happens when @Valid validation fails on a @RequestBody?**
 **Short:** Spring throws MethodArgumentNotValidException before the controller runs, carrying field and object errors.
 Spring throws `MethodArgumentNotValidException` before the controller method executes. The exception contains `BindingResult` with all field and object errors. Without a `@ExceptionHandler` for it, Spring's `DefaultHandlerExceptionResolver` returns a generic 400 response. In a `@ControllerAdvice`, catch `MethodArgumentNotValidException`, iterate `ex.getBindingResult().getFieldErrors()`, and return a structured JSON error response with field names and messages. Constraint annotations placed directly on `@RequestParam`/`@PathVariable` parameters are handled by Spring MVC's built-in method validation and raise `HandlerMethodValidationException`, whose `getParameterValidationResults()` groups the errors per parameter — catch that, not `ConstraintViolationException`. Note that a class-level `@Validated` on the controller opts you out of the built-in support and back into the older `ConstraintViolationException` path, so remove it.
+
+**Q: With mappings for version `1.2+` and `1.5`, why does a request for version 1.6 get a 400?**
+**Short:** Only the highest mapping at or below the request version is considered; for 1.6 that is fixed 1.5, which does not match, so the 1.2+ baseline is superseded.
+
+Framework 7 version matching is not "any mapping that accepts the version wins". Among the mappings whose version is less than or equal to the request version, the highest and closest one supersedes the rest, and that includes the unversioned mapping and lower baselines. For a 1.6 request the candidates are the unversioned handler, `1.2+` and `1.5`; `1.5` is the highest, it is a fixed version that matches only 1.5, and so the request fails with `NotAcceptableApiVersionException` and a 400 even though `1.2+` would have accepted 1.6. The fix is to declare the newest contract as a baseline (`version = "1.5+"`), so it keeps serving 1.6 and later until a newer contract replaces it. Keep fixed versions for releases that really end, and test the version table with MockMvc, which supports an API version on the request.
+
+**Q: Which errors does Spring MVC API versioning raise for a missing, unsupported, or unmatched version?**
+**Short:** MissingApiVersionException when required and absent, InvalidApiVersionException when not supported, NotAcceptableApiVersionException when no mapping matches; all return 400.
+
+The `ApiVersionStrategy` checks the version in order. If the resolver finds none and versioning is required (the default once a resolver is configured, unless `spring.mvc.apiversion.default` is set), it raises `MissingApiVersionException`. If the parsed version is not in the supported set, which by default is every version declared on a mapping plus `spring.mvc.apiversion.supported`, it raises `InvalidApiVersionException` before handler mapping runs. If the version is supported but the best mapping rejects it, handler mapping raises `NotAcceptableApiVersionException`. All three map to 400 and render as `ProblemDetail` when RFC 9457 responses are enabled. Setting `detect-supported=false` makes only the configured list count, which stops a stray `version = "9.9"` on a test controller from widening what production accepts.
 
 **Q: What is ResponseBodyAdvice and when would you use it?**
 **Short:** ResponseBodyAdvice intercepts a controller's return value before it's written, letting you modify the body.
@@ -559,8 +639,8 @@ throw new ResponseStatusException(HttpStatus.NOT_FOUND,
 `@ResponseBody` (included in `@RestController`) instructs Spring MVC to write the return value directly to the HTTP response body via a `HttpMessageConverter`, bypassing view resolution. The converter is selected by content negotiation: (1) Check the `Accept` header from the client; (2) Match against the `produces` attribute of `@RequestMapping`; (3) Find the first registered `HttpMessageConverter` that supports the return type AND the accepted media type. Built-in converters (in order): `ByteArrayHttpMessageConverter` → `StringHttpMessageConverter` → `JacksonJsonHttpMessageConverter` (for JSON, if Jackson is on classpath) → others. If no converter matches, Spring returns `406 Not Acceptable`. Custom converters: implement `HttpMessageConverter<T>` and register via `WebMvcConfigurer.configureMessageConverters()`.
 
 **Q: What is `@RequestBody` deserialization and what exception is thrown for malformed JSON?**
-**Short:** Malformed JSON raises JsonParseException, wrapped by Spring as HttpMessageNotReadableException (400).
-`@RequestBody` reads the HTTP request body and deserialises it using a `HttpMessageConverter`. For JSON bodies, `JacksonJsonHttpMessageConverter` uses Jackson 3's `JsonMapper` (package `tools.jackson.databind`). If the JSON is syntactically invalid (not well-formed JSON), Jackson throws `JsonParseException`, wrapped by Spring as `HttpMessageNotReadableException` — resulting in a `400 Bad Request`. If the JSON is valid but the type does not match the annotated parameter (e.g., a string where an integer is expected), Jackson throws `InvalidDefinitionException` or `MismatchedInputException`, also wrapped as `HttpMessageNotReadableException`. Handle it in `@ExceptionHandler(HttpMessageNotReadableException.class)` to return a structured error response with details about the malformed input.
+**Short:** Malformed JSON raises Jackson 3's StreamReadException, wrapped by Spring as HttpMessageNotReadableException (400).
+`@RequestBody` reads the HTTP request body and deserialises it using a `HttpMessageConverter`. For JSON bodies, `JacksonJsonHttpMessageConverter` uses Jackson 3's `JsonMapper` (package `tools.jackson.databind`). If the JSON is syntactically invalid (not well-formed JSON), Jackson throws `tools.jackson.core.exc.StreamReadException`, wrapped by Spring as `HttpMessageNotReadableException`, resulting in a `400 Bad Request`. If the JSON is valid but the type does not match the annotated parameter (e.g., a string where an integer is expected), Jackson throws `InvalidDefinitionException` or `MismatchedInputException`, also wrapped as `HttpMessageNotReadableException`. Handle it in `@ExceptionHandler(HttpMessageNotReadableException.class)` to return a structured error response with details about the malformed input.
 
 **Q: How does Spring MVC's `@CrossOrigin` annotation compare to a global CORS configuration?**
 **Short:** @CrossOrigin configures CORS per endpoint, while WebMvcConfigurer.addCorsMappings() sets a global policy.
@@ -579,7 +659,7 @@ throw new ResponseStatusException(HttpStatus.NOT_FOUND,
 7. **Handle `MethodArgumentNotValidException` globally** — don't let Spring return its default ugly 400.
 8. **Use `ContentCachingRequestWrapper` in filters** if you need to log request bodies.
 9. **Use custom `HandlerMethodArgumentResolver`** for cross-cutting parameters (current user, tenant, trace ID).
-10. **Version your APIs** (`/api/v1/`, `/api/v2/`) — use `@RequestMapping` at class level for clean versioning.
+10. **Version through the mapping, not the class path**: configure one resolver (`spring.mvc.apiversion.use.header` or `use.path-segment`), declare `version = "1.2+"` baselines on handlers, list supported versions, and mark retiring versions with a deprecation handler so clients receive `Deprecation` and `Sunset` headers.
 
 ---
 

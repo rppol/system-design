@@ -60,7 +60,7 @@ Key insight: the validation gates between steps are more important than the trai
 | Prefect | Modern Python API, dynamic DAGs, easy local testing | Newer, smaller community | Python-first teams |
 | Metaflow | Data scientist-friendly, AWS integration | AWS-centric | Data scientist self-service |
 | MLflow Projects | Simple, experiment tracking built-in | Limited orchestration features | Simple pipelines, experiment tracking |
-| Vertex AI Pipelines | Managed on GCP, KFP-compatible | GCP lock-in | GCP-native teams |
+| Agent Platform Pipelines (formerly Vertex AI Pipelines) | Managed on GCP, KFP-compatible | GCP lock-in | GCP-native teams |
 
 ### Retraining Strategy Patterns
 
@@ -856,10 +856,10 @@ Training is `6 / 30 = 20%` of the elapsed time. **The other 80% is scheduling ri
 | HPO | Ray Tune | Distributed HPO; integration with all major frameworks |
 | Experiment Tracking | MLflow | Open-source; experiment + model registry; wide adoption |
 | Experiment Tracking | Weights & Biases | Rich UI; team collaboration; hyperparameter sweeps |
-| Model Registry | MLflow Model Registry | Staging/production promotion; versioning; lineage |
-| Model Registry | Vertex AI Model Registry | GCP-native; deployment integration |
+| Model Registry | MLflow Model Registry | Promotion by alias move (`@champion`, `@challenger`) plus tags; versioning; lineage |
+| Model Registry | Agent Platform Model Registry (formerly Vertex AI Model Registry) | GCP-native; deployment integration |
 | Training Infrastructure | AWS SageMaker | Managed training; spot instances; built-in HPO |
-| Training Infrastructure | Vertex AI Training | GCP-native; TPU support; managed hyperparameter tuning |
+| Training Infrastructure | Agent Platform Managed Training (formerly Vertex AI Training) | GCP-native; TPU support; managed hyperparameter tuning |
 
 ---
 

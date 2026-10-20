@@ -60,6 +60,7 @@ These patterns come from *Effective Java* by Joshua Bloch (the essential Java en
 | `Integer.valueOf(127).equals(Integer.valueOf(127))` | `true` | Value equality |
 | `127 == 127` (primitives) | `true` | Primitive comparison |
 | `(Integer)127 == (Integer)127` | `true` | Both auto-box via valueOf → cached |
+| `Integer x = 1996, y = 1996; x == y` on JDK 28 with `--enable-preview` | `true` | JEP 401 makes `Integer` a value class; `==` compares field values |
 
 ---
 
@@ -621,10 +622,22 @@ Builder solves the "telescoping constructor" problem: when a class has many opti
 
 Three reasons: (1) Serialization-safe — Java's enum serialization mechanism guarantees that each constant is only deserialized to the existing instance (using the name, not constructor); no need for `readResolve()`. (2) Reflection-safe — `Constructor.newInstance()` on an enum type throws `IllegalArgumentException`; the JVM prevents reflection-based instantiation. (3) Thread-safe — class initialization is guaranteed single-execution by the JVM. On laziness, correct the common myth: the enum type is *initialized on first active use*, exactly like the holder idiom, so `INSTANCE` is not built until something reads it — loading the class is not enough. What you give up is per-constant control: every constant of the enum is constructed together in `<clinit>`, and you cannot defer one of them past the first touch of the type.
 
-**Q4: What is the Integer cache and what bugs can it cause?**
-**Short:** Integer caches values -128 to 127, so == comparisons silently fail outside that range.
+**Q4: What is the Integer cache, what is its exact range, and what bug does it cause?**
+**Short:** Integer.valueOf caches -128 to 127, so == between two boxed Integers is true inside that range and false outside it.
 
-`Integer.valueOf(n)` caches `Integer` objects for values in [-128, 127]. Values outside this range always create new objects. Bug: comparing cached Integer with `==` works (same instance), but comparing larger values with `==` returns `false` even when values are equal. The fix: always use `.equals()` for `Integer` (and all boxed types). The cache exists as a performance optimization — these small integers are used very frequently (loop counters, small IDs, boolean flags).
+`Integer.valueOf(n)`, which autoboxing calls, returns a shared instance for values -128 to 127 inclusive: a fixed pool of 256 objects, built when the private `Integer.IntegerCache` class initializes on first boxing. Values outside the range get a fresh object each time. So `Integer.valueOf(127) == Integer.valueOf(127)` is `true` and `Integer.valueOf(128) == Integer.valueOf(128)` is `false`. The bug appears when both operands are boxed; if one side is an `int`, the other side unboxes and `==` compares values correctly:
+
+```java
+// BROKEN: passes in tests with small values, fails in production above 127
+Integer a = someService.getCount();  // e.g. returns 200
+Integer b = otherService.getCount(); // also returns 200
+if (a == b) { ... }  // false: two distinct Integer objects
+
+// FIXED
+if (a.equals(b)) { ... }   // or Objects.equals(a, b) when either can be null
+```
+
+`Long`, `Short` and `Byte` cache the same -128 to 127 range and `Character` caches 0 to 127; `Double` and `Float` cache nothing. Only the `Integer` upper bound can be raised, with `-XX:AutoBoxCacheMax=N`, and code that relies on it is still broken on a JVM started without the flag. The cache bug is an identity artifact: JEP 401 (Value Objects, preview in JDK 28) makes `Integer` and the other boxes value classes under `--enable-preview`, and `==` on value objects compares field values, so `1996 == 1996` boxed is `true` there. Without the preview flag JDK 28 behaves like JDK 27. Rule: compare boxed values with `.equals()`, never `==`.
 
 **Q5: How do you correctly implement `equals()` — what is the full contract?**
 **Short:** equals() must be reflexive, symmetric, transitive, consistent, and false for null.
@@ -666,24 +679,7 @@ A variable is effectively final if it's initialized once and never reassigned �
 
 Three approaches: (1) `Objects.requireNonNull(param, "name")` in constructor/method — fails fast with a clear NPE message. (2) Return `Optional<T>` from methods that may have no result — forces callers to handle the absence case. (3) Use `@NonNull`/`@Nullable` annotations (Lombok, IntelliJ, JetBrains) for static analysis documentation. Avoid: passing `null` as a sentinel value — use `Optional` or overloading instead. Never swallow `NullPointerException` — it indicates a programming error that should be fixed.
 
-**Q13: What is the Integer cache, what is its exact range, and what common bug does it cause?**
-**Short:** The JDK caches Integer objects from -128 to 127, causing == to fail above that range.
-
-The JDK caches `Integer` objects for values −128 to 127 (inclusive) — a fixed pool of 256 instances, allocated once when the private `Integer.IntegerCache` class is initialized on first boxing. `Integer.valueOf(127) == Integer.valueOf(127)` is `true` (same cached object). `Integer.valueOf(128) == Integer.valueOf(128)` is `false` (two distinct heap objects). This causes real bugs when developers compare autoboxed `Integer` values with `==` instead of `.equals()`:
-
-```java
-// BROKEN: works for small values (returns from cache), fails for large ones
-Integer a = someService.getCount();  // e.g. returns 200
-Integer b = otherService.getCount(); // also returns 200
-if (a == b) { ... }  // false! Different Integer objects above 127
-
-// FIXED: always use .equals() for object comparison
-if (a.equals(b)) { ... }
-```
-
-The same cache applies to `Long` (same range), `Short` (−128 to 127), `Byte` (entire range −128 to 127), and `Character` (0 to 127). The upper bound for `Integer` can be raised with `-XX:AutoBoxCacheMax=N` but this is rarely advisable. Practical rule: never use `==` for `Integer`, `Long`, `Double`, `Boolean` — always `.equals()`.
-
-**Q14: What is defensive copying and when is it required to maintain class immutability?**
+**Q13: What is defensive copying and when is it required to maintain class immutability?**
 **Short:** Defensive copying clones mutable inputs and outputs so callers can't mutate internal state.
 
 Defensive copying means creating a copy of a mutable input or output so the caller cannot affect the class's internal state through a shared reference. Required in two places: (1) **constructor** — if a mutable object is passed in (e.g., `Date`, `byte[]`, `List`), copy it before storing; (2) **getter** — if you return a mutable field, return a copy so callers cannot mutate your state:
@@ -704,27 +700,27 @@ public Date getSignedOn() { return new Date(signedOn.getTime()); }   // copy on 
 
 In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`. For collections: use `List.copyOf()` (Java 10) or `Collections.unmodifiableList()`. Effective Java Item 50: *Make defensive copies when needed*.
 
-**Q15: When should a class implement `Comparable<T>` vs. using an external `Comparator<T>`?**
+**Q14: When should a class implement `Comparable<T>` vs. using an external `Comparator<T>`?**
 **Short:** Implement Comparable for a class's single natural ordering; use Comparator for alternate ones.
 
 `Comparable<T>` expresses the **natural ordering** — the single most obvious ordering for the class (e.g., `String` lexicographically, `Integer` numerically, `LocalDate` chronologically). Classes that have a natural ordering should implement `Comparable`. When the ordering is contextual, situational, or you need multiple orderings (e.g., sort people by name OR by age OR by salary), use external `Comparator` instances. Key rule from Effective Java Item 14: *The natural ordering should be consistent with `equals()`* — `a.compareTo(b) == 0` should imply `a.equals(b)`. Violating this causes subtle bugs in `TreeSet`, `TreeMap`, and `SortedSet` (which use `compareTo` for equality, not `equals`). Example violation: `BigDecimal("1.0").compareTo(BigDecimal("1.00")) == 0` but `BigDecimal("1.0").equals(BigDecimal("1.00"))` is `false` — a `TreeSet` treats them as the same element; a `HashSet` treats them as different.
 
-**Q16: Where does auto-unboxing throw a `NullPointerException`, and why does a ternary operator trigger it even when you are assigning to a wrapper type?**
+**Q15: Where does auto-unboxing throw a `NullPointerException`, and why does a ternary operator trigger it even when you are assigning to a wrapper type?**
 **Short:** A ternary mixing a primitive branch unboxes both operands, NPEing on a null Integer branch.
 
 Auto-unboxing throws whenever a `null` wrapper reaches a context that needs a primitive, because the compiler inserts an invisible `intValue()` call. The common shape is `Integer x = map.get(k); if (x > 0)` — `get` returns `null` for an absent key and the comparison dereferences it, so the stack trace points at a line containing no explicit method call. The conditional operator is the version that catches experienced developers: in `Integer v = flag ? maybeNull : 0`, the `0` is an `int`, so binary numeric promotion unboxes **both** branches before the result is re-boxed into `v` — the null branch is dereferenced even though the target type is `Integer` and even though the value would have been assignable as null. Writing `Integer.valueOf(0)` in the other branch keeps both operands reference-typed, no unboxing happens, and `v` is simply `null`. Fixes that remove the class rather than the instance: use primitives for anything you do arithmetic on, use `Map.getOrDefault(k, 0)` instead of `get` plus a null check, use `Objects.requireNonNullElse` when the wrapper type must survive, and keep both ternary branches at the same boxedness.
 
-**Q17: An interviewer asks the size of a Java object header — what is the correct 2026 answer, and why is "12 bytes" only half of it?**
+**Q16: An interviewer asks the size of a Java object header — what is the correct 2026 answer, and why is "12 bytes" only half of it?**
 **Short:** 12 bytes by default on Java 25, 8 bytes with compact headers, and 8 bytes by default from Java 27.
 
 "12 bytes" is the size of today's default header — an 8-byte mark word plus a 4-byte compressed class pointer — on the Java 25 LTS baseline, and stopping there answers the question for exactly one JVM configuration. `-XX:+UseCompactObjectHeaders` (JEP 519, a supported product feature since Java 25) packs the mark word and class pointer into a single 8-byte header, and JEP 534 makes that 8-byte header the *default* starting in Java 27, with the 12-byte layout kept only as an opt-out (`-XX:-UseCompactObjectHeaders`) on a path to eventual deprecation. So the complete answer names both numbers and the two JEPs that connect them, rather than a single memorized constant — the true header size on any given deployment depends on the JVM version and the flags it runs with, and the only way to know for certain is to measure it with JOL (`ClassLayout.parseClass(Foo.class).toPrintable()`) rather than assume. The follow-up question worth anticipating is whether the 4-byte shrink always saves memory — it does not, because 8-byte object alignment can absorb it entirely (a class with one `int` field is 16 bytes under both header sizes) or turn it into a full 8-byte win (a class with no other 4-byte-aligned field to share the padding with) — so "it depends on the class's field layout" is the sharper answer than a flat percentage.
 
-**Q18: You turn a class into a `record` — is it now immutable?**
+**Q17: You turn a class into a `record` — is it now immutable?**
 **Short:** Only shallowly — a record's accessor exposes any mutable component, like a List, verbatim.
 
 A `record`'s fields are `final` and its canonical constructor and accessors are generated for you, but that only guarantees the record's own reference fields cannot be reassigned — it says nothing about whether an object one of those fields points to can be mutated by someone else who holds a reference to it. `record Order(String id, List<Item> items) {}` is the textbook case: `order.items()` returns the exact `List` instance passed to the constructor, so a caller who kept a reference to that list can still call `.add()` on it and change what `order.items()` returns next time, with no compiler warning and no exception. The fix is a compact constructor that defensively copies mutable components — `items = List.copyOf(items);` — which both copies and wraps the result as unmodifiable in one call; without that line, "the record is immutable" is only true for components that were already immutable types (`int`, `String`, another record), not for a `List`, array, or mutable reference type held inside it.
 
-**Q19: When would you still hand-write a Builder instead of using a record, in 2026?**
+**Q18: When would you still hand-write a Builder instead of using a record, in 2026?**
 **Short:** When a type has many optional components, since a record's canonical constructor takes every field.
 
 A record's canonical constructor takes every component as a required positional argument, so a record with a dozen components — most of them optional with sensible defaults — forces every call site to supply all twelve in the right order, which is exactly the telescoping-constructor problem the Builder pattern exists to solve; a record buys nothing there. Reach for a Builder when a type has many optional fields, when several parameters share a type and are easy to transpose positionally, or when construction needs multi-field cross-validation that reads better as a fluent chain than as one dense compact-constructor block. The two aren't rivals: a common pattern is a Builder whose `build()` method's last line is `new SomeRecord(...)` — mutable, fluent construction on the outside, an immutable, value-correct record as the actual product.

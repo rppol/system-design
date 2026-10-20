@@ -37,7 +37,8 @@ of this context? Only if all caches miss do you pay the full inference cost.
 questions — plan on 40-70% as a sizing heuristic, then measure your own logs, since nobody publishes
 these — are semantically equivalent to previously answered questions. For multi-user agents sharing
 a common system prompt, the identical prefix routinely dominates the input token count and is
-cache-read at 0.1x the base input price (0.025x on Claude Fable 5.1 and Mythos 5.1). Caching is
+cache-read at 0.1x the base input price (0.05x on Claude Opus 5.5 and Sonnet 5.5, 0.025x on
+Claude Fable 5.1 and Mythos 5.1). Caching is
 usually the highest-ROI optimization available.
 
 **Key insight:** The right cache for your workload depends on query distribution. Power-law query
@@ -105,22 +106,23 @@ with the same prefix skip the attention computation for the cached portion.
 
 | Provider | Feature | Cache-read price | Min cacheable tokens |
 |----------|---------|------------------|---------------------|
-| Anthropic | `cache_control: {"type": "ephemeral"}` | 0.1x base input (90% off) on every model **except Claude Fable 5.1 and Mythos 5.1, which read at 0.025x — $0.25/1M against a $10/1M base**; writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
-| OpenAI | Automatic (no API change needed) | 0.1x base input on current models (`gpt-5.6-terra`: $2.00 in / $0.20 cached, $12.00 out, after OpenAI's 2026-07-30 cut). Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
-| Google Gemini | Implicit caching (on by default) plus explicit cache objects | 0.1x base input (Gemini 3.5 Flash: $1.50 in / $0.15 cached; **Gemini 3.6 Flash is cheaper — $0.75 in / $0.075 cached through 2026-12-31, doubling to $1.50 / $0.15 on 2027-01-01**; 2.5 Pro: $1.25 / $0.125 under 200k, $2.50 / $0.25 above), **plus a storage rent no other provider charges** — $1.00 per 1M cached tokens per hour, $4.50 on 2.5 Pro. Flash-Lite on 3.5 has no caching at all | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
+| Anthropic | `cache_control: {"type": "ephemeral"}` | **Per model**: 0.1x base input on most models, including Haiku 5.5 and Sonnet 5; **0.05x on Opus 5.5 ($0.20/1M against $4) and Sonnet 5.5 ($0.10/1M against $2)**; **0.025x on Fable 5.1 and Mythos 5.1 ($0.25/1M against $10)**. Writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
+| OpenAI | Automatic, plus explicit prompt-caching controls from GPT-5.6 (2026-07-09); Prompt Cache Diagnostics in the Responses API (GA 2026-09-08) | 0.1x base input on gpt-5.x and gpt-6 models (`gpt-5.6-terra`: $2.00 in / $0.20 cached, $12.00 out); **0.05x on `gpt-6.1-sol` ($2.00 in / $0.10 cached, $2.50 cache write)**. Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
+| Google Gemini | Implicit caching (on by default) plus explicit cache objects | Gemini 3.8 Flash and 3.6 Flash: $0.75 in / $0.075 cached through 2026-12-31, doubling to $1.50 / $0.15 on 2027-01-01. 3.1 Pro: $2.00 / $0.20 under 200k, $4.00 / $0.40 above. **Gemini 4 Argon: implicit caching only, $0.10 cached against $2.00 base (0.05x)** through 2026-11-30, $0.20 / $4.00 from 2026-12-01. Explicit caches add **a storage rent no other provider charges**: $0.50 per 1M cached tokens per hour on 3.8/3.6 Flash through 2026-12-31 ($1.00 from 2027-01-01 and on Flash-Lite), $4.50 on 3.1 Pro | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
 
 Two traps live in that last column. First, Anthropic's minimum is **per model and not monotonic in
-model size** — Opus 5 caches from 512 tokens while the older Opus 4.5 and Haiku 4.5 need 4,096, so
-"bigger model, smaller minimum" is a real ordering and you cannot infer it. Second, an undersized
+model size**: Opus 5.5 and Haiku 5.5 cache from 512 tokens, Sonnet 5 needs 1,024, and the older
+Opus 4.5 and Haiku 4.5 need 4,096, so neither model size nor generation predicts the floor. Second, an undersized
 prefix **fails silently**: no error, the request is simply processed uncached. The only way to know
 is to read `cache_creation_input_tokens` and `cache_read_input_tokens` back off the response — if
 both are 0, your `cache_control` did nothing.
 
 A third trap lives in the price column, and only on Gemini: an explicit cache object is **rented
-by the hour**, at $1.00 per 1M cached tokens per hour ($4.50 on 2.5 Pro), on top of the per-read
-discount. Anthropic and OpenAI bill a one-off write premium and nothing thereafter, so a
-cost model ported across providers silently drops a term. A 200k-token system prefix parked on
-Gemini 2.5 Pro for a day costs `0.2 x 4.50 x 24 = $21.60` in rent before a single request reads
+by the hour**, at $0.50 per 1M cached tokens per hour on 3.8/3.6 Flash through 2026-12-31 ($1.00
+from 2027-01-01) and $4.50 on 3.1 Pro, on top of the per-read discount. Anthropic and OpenAI bill
+a one-off write premium and nothing thereafter, so a cost model ported across providers silently
+drops a term. A 200k-token system prefix parked on Gemini 3.1 Pro for a day costs
+`0.2 x 4.50 x 24 = $21.60` in rent before a single request reads
 it — fine at high hit rates, ruinous for a cache that sits idle overnight.
 
 **The formula hiding behind that cache-read price.** The discount is a ceiling, not a bill. What
@@ -143,7 +145,7 @@ constant handed to you.
 |--------|---------------------|
 | `h` | Fraction of input tokens served from cache. A number from 0 to 1 |
 | `1 - h` | The share you still pay full freight on. Always the expensive half |
-| `p_cached` | Price per 1M cache-*read* tokens. $0.20/1M on Claude Sonnet 5; $1.25/1M on the legacy 0.5x-tier gpt-4o |
+| `p_cached` | Price per 1M cache-*read* tokens. $0.20/1M on Claude Sonnet 5; $0.10/1M on Sonnet 5.5; $1.25/1M on the legacy 0.5x-tier gpt-4o |
 | `p_full` | List price per 1M uncached input tokens. The number on the pricing page |
 | `E` | The blended price per 1M — the number that actually shows up on the invoice |
 | `S` | How much of the list price you avoided. What you should report, not the discount |
@@ -175,10 +177,11 @@ because reads and writes are fixed multiples of the base input price.)
 
   Same 70% hit rate, very different outcomes: the 0.1x tier converts it into 63%
   savings, the 0.5x tier into 35%. Check which tier your model is on before
-  promising a number -- current OpenAI models are also 0.1x (gpt-5.6-terra is
-  $2.00 in / $0.20 cached), so both major providers now land near 63% at h = 0.70;
-  but gpt-5.6 and later additionally bill cache WRITES at 1.25x, which the
-  gpt-4o-era models did not.
+  promising a number -- gpt-5.x and gpt-6 models are also 0.1x (gpt-5.6-terra is
+  $2.00 in / $0.20 cached) and land near 63% at h = 0.70; the 0.05x tier
+  (Claude Sonnet 5.5 and Opus 5.5, gpt-6.1-sol) gives
+  0.70 x $0.10 + 0.30 x $2.00 = $0.670, 66.5% off. gpt-5.6 and later also bill
+  cache WRITES at 1.25x, which the gpt-4o-era models did not.
 ```
 
 **Why the `(1 - h)` term is the one that bites.** Because `p_full` is 10x `p_cached` on Claude, the
@@ -350,7 +353,7 @@ The "from the very beginning" clause is the entire reason Pitfall 4 exists. A pr
 |--------|---------------------|
 | `L` | Tokens that match from position 0 until the first difference |
 | `B` | Cache granularity. 16 tokens per block in vLLM (`DEFAULT_BLOCK_SIZE = 16` in `vllm/config/cache.py`); `--block-size` is unset by default and some backends pick 32/64/128 |
-| `M` | Provider floor below which nothing is cached. 1,024 on OpenAI; **per-model** on Anthropic (512 to 4,096 — see the §4.3 table); 2,048-4,096 on Gemini |
+| `M` | Provider floor below which nothing is cached. 1,024 on OpenAI; **per-model** on Anthropic (512 to 4,096, see the §4.3 table); 2,048-4,096 on Gemini |
 | `floor(L/B) x B` | L rounded down to a whole number of blocks. The partial trailing block is recomputed |
 | `cached` | What you get billed at `p_read`. Reported as `cache_read_input_tokens` |
 
@@ -601,7 +604,7 @@ def call_with_prompt_cache(
 ) -> str:
     response = _client.messages.create(
         # Sonnet 5: $2/$10 per MTok, minimum cacheable prefix 1,024 tokens.
-        # The minimum is per-model — Opus 5 caches from 512, Opus 4.5 and
+        # The minimum is per-model: Opus 5.5 caches from 512, Opus 4.5 and
         # Haiku 4.5 need 4,096. Check before assuming your prefix qualifies.
         model="claude-sonnet-5",
         max_tokens=1_024,
@@ -771,8 +774,8 @@ than a duplicate generation.
 | Qdrant | Semantic cache store | Standalone; filtering; high-throughput |
 | LiteLLM | Proxy with built-in cache | Drop-in OpenAI-compatible; exact + semantic cache |
 | GPTCache | Semantic cache library | Open source; multiple backends and embedding models |
-| Anthropic API | Provider prompt caching | cache_control blocks; reads at 0.1x, writes at 1.25x (5-min TTL) or 2.0x (1-hour TTL); per-model minimum prefix |
-| OpenAI API | Provider prompt caching | Automatic; reads at 0.1x on current models (0.5x on gpt-4o-era); 1,024-token minimum; writes billed at 1.25x from gpt-5.6 on |
+| Anthropic API | Provider prompt caching | cache_control blocks; reads at 0.1x (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1), writes at 1.25x (5-min TTL) or 2.0x (1-hour TTL); per-model minimum prefix |
+| OpenAI API | Provider prompt caching | Automatic, plus explicit controls from gpt-5.6; reads at 0.1x on gpt-5.x and gpt-6 (0.05x on gpt-6.1-sol, 0.5x on gpt-4o-era); 1,024-token minimum; writes billed at 1.25x from gpt-5.6 on; Prompt Cache Diagnostics in the Responses API |
 | vLLM | Self-hosted KV prefix cache | Automatic prefix caching (APC); TTFT reduction |
 | SGLang | Self-hosted KV prefix cache | RadixAttention; multi-level cache |
 | Memcached | Exact-match store | Simpler than Redis; horizontal scale; no persistence |
@@ -787,8 +790,9 @@ than a duplicate generation.
 savings for identical queries. (2) Semantic cache: returns a cached response when the input is
 semantically similar above a cosine threshold; handles paraphrased queries. (3) Provider prompt
 caching (Anthropic cache_control, OpenAI automatic): caches KV-attention tensors for a stable
-context prefix; cache reads bill at 0.1x the base input rate on current Anthropic and OpenAI models
-(0.025x on Claude Fable 5.1 and Mythos 5.1; 0.5x on the legacy gpt-4o tier), so shared system prompts get 50-90% off their cached tokens. (4) Self-hosted
+context prefix; cache reads bill at 0.1x the base input rate on most Anthropic models and on gpt-5.x
+and gpt-6 (0.05x on Claude Opus 5.5, Sonnet 5.5 and gpt-6.1-sol; 0.025x on Claude Fable 5.1 and
+Mythos 5.1; 0.5x on the legacy gpt-4o tier), so shared system prompts get 50-97.5% off their cached tokens. (4) Self-hosted
 KV-prefix caching (vLLM APC, SGLang RadixAttention): GPU-resident LRU cache of KV tensors;
 reduces time-to-first-token for requests sharing a prefix. (5) Embedding cache: avoids re-embedding
 unchanged documents; critical for RAG performance.
@@ -819,6 +823,20 @@ decision: system prompt and tool definitions first, retrieved context next, user
 ordered from most to least stable. Audit prompt-assembly code for anything dynamic (timestamps,
 request IDs, shuffled few-shot examples) that sneaks in before the intended cache breakpoint.
 
+**Q: Why does a model cascade (cheap model first, escalate on failure) lose most of its prompt-cache savings?**
+**Short:** KV tensors depend on model weights, so each tier keeps its own cache; a rare escalation finds the big model's cache expired and pays a 1.25x write, not a 0.025x read.
+KV tensors are a function of the model's weights, so a prefix cached on one model is useless to
+another: every tier in a cascade has its own cache and its own warm-up cost. The read multipliers
+also differ 4x across Anthropic tiers (2026-10 pricing page): Claude Haiku 5.5 reads at $0.01/1M
+against $0.10 (0.1x), Sonnet 5.5 at $0.10 against $2 (0.05x), Fable 5.1 at $0.25 against $10
+(0.025x). Take a 50K-token shared prefix and a 5% escalation rate from Haiku to Fable. The Haiku
+pass reads the prefix for 0.05 x $0.01 = $0.0005. If escalations to that prefix arrive less than
+once per 5-minute TTL, every one is a cold write: 0.05 x $12.50 = $0.625, 50x the $0.0125 a warm
+Fable read would cost. The cheapest tier is cached well and the expensive tier, where the money is,
+is almost never cached. Fixes: route by a classifier up front so each tier sees steady traffic,
+buy the 1-hour TTL (2x write) on the top tier when escalations arrive 5-60 minutes apart, and
+track `cache_read_input_tokens` per tier, not as one blended hit rate.
+
 **Q: Does response caching break sampling semantics when temperature > 0?**
 **Short:** Yes, replaying a stored response makes a supposedly-sampled endpoint deterministic on repeat queries, which harms creative or brainstorming use cases.
 Yes — a cached response replays a single draw from the output distribution, making the endpoint
@@ -830,17 +848,18 @@ for endpoints where output diversity is part of the product. Prompt (KV) caching
 problem — it reuses input computation while the model still samples fresh output.
 
 **Q: How does Anthropic prompt caching work and how do you maximize hit rate?**
-**Short:** It caches KV tensors for `cache_control`-marked blocks above a per-model minimum prefix, with a 5-minute default TTL, billing reads at 0.1x the input price.
+**Short:** It caches KV tensors for `cache_control`-marked blocks above a per-model minimum prefix, with a 5-minute default TTL, billing reads at 0.025-0.1x the input price by model.
 Anthropic caches the KV-attention tensors for any content block marked with
 `cache_control: {"type": "ephemeral"}`. The minimum cacheable prefix is per-model and non-monotonic
-— 512 tokens on Opus 5 and Fable 5, 1,024 on Sonnet 5 and Sonnet 4.6, 2,048 on Opus 4.7, 4,096 on
-Opus 4.6, Opus 4.5 and Haiku 4.5 — and the default TTL is 5 minutes, with a 1-hour tier available
+(512 tokens on Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5 and Fable 5; 1,024 on Sonnet 5 and
+Sonnet 4.6; 2,048 on Opus 4.7; 4,096 on Opus 4.6, Opus 4.5 and Haiku 4.5), and the default TTL is 5 minutes, with a 1-hour tier available
 via `"ttl": "1h"`. To maximize hit rate: place the system prompt and tool definitions in cached
 blocks at the front of every request; ensure these blocks are byte-identical across requests — no
 timestamps, user IDs, or dynamic content; track `cache_read_input_tokens` vs
 `cache_creation_input_tokens` in usage metadata. Cache reads bill at 0.1x the base input price
-($2.00 → $0.20/1M on Sonnet 5), with one documented exception: Claude Fable 5.1 and Mythos 5.1 read
-at 0.025x ($10.00 → $0.25/1M). A prefix under the minimum fails silently — both usage
+on most models ($2.00 to $0.20/1M on Sonnet 5, $0.10 to $0.01/1M on Haiku 5.5), 0.05x on Opus 5.5
+and Sonnet 5.5 ($2.00 to $0.10/1M on Sonnet 5.5), and 0.025x on Claude Fable 5.1 and Mythos 5.1
+($10.00 to $0.25/1M). A prefix under the minimum fails silently: both usage
 counters come back 0 and you are billed full price with no error.
 
 **Q: How does vLLM automatic prefix caching (APC) work?**

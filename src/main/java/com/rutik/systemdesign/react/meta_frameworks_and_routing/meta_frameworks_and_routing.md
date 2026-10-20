@@ -65,17 +65,17 @@ This module covers the routing and application-shell layer: file-based routing, 
 | Parallel slot | `app/@modal/...` | nested outlets | renders two trees at one URL |
 | Interception | `app/feed/(..)photo/[id]/page.tsx` | manual | modal over the current page |
 
-### 4.3 The landscape, as of September 2026
+### 4.3 The landscape, as of October 2026
 
 | Framework | Version | Server model | Where it wins |
 |-----------|---------|--------------|---------------|
-| Next.js | **16.3.x**, released 2025-10-21 | Node or edge runtime, RSC-first | app-shaped products needing SSR, ISR and RSC in one stack |
-| React Router | **v8**, released 2026-06-17 | optional — three modes | migrating an SPA, or wanting a server without RSC-first design |
-| TanStack Start | **Release Candidate**, not 1.0 | Vite plus Nitro | type-inference-first teams already on TanStack Query and Router |
+| Next.js | **16.4.x**; 16.0 released 2025-10-21, 16.4 on 2026-10-06 | Node or edge runtime, RSC-first | app-shaped products needing SSR, ISR and RSC in one stack |
+| React Router | **v8**, released 2026-06-17; 8.4.0 on 2026-09-15 | optional, three modes; RSC mode still unstable | migrating an SPA, or wanting a server without RSC-first design |
+| TanStack Start | **1.0**, stable since 2026-10-13 | Vite plus Nitro; RSC opt-in | type-inference-first teams already on TanStack Query and Router |
 | Astro | **7**, released 2026-06-22 | static-first with optional SSR | content-heavy sites where React is one island among many |
 | Waku | minimal, RSC-first | Node | learning RSC, or a small RSC app without Next.js |
 
-`@vitejs/plugin-rsc` and Parcel also implement Server Components, which is the answer to "is RSC a Next.js feature" — it is not, though the RSC-safe library ecosystem outside Next.js is thinner.
+`@vitejs/plugin-rsc` and Parcel also implement Server Components, which is the answer to "is RSC a Next.js feature": it is not, though the RSC-safe library ecosystem outside Next.js is thinner. The two Next.js alternatives treat RSC as optional. TanStack Start 1.0 integrates RSC without changing its application model, and its author stopped using RSC on tanstack.com. React Router's RSC framework mode still ships under `unstable_` APIs in 8.4.
 
 ### 4.4 The Remix lineage, because it is the most-confused fact here
 
@@ -84,7 +84,7 @@ This module covers the routing and application-shell layer: file-based routing, 
 | Remix v1 and v2 | the React framework, now merged away |
 | **React Router v7** | what would have shipped as Remix v3 — the merge that moved Remix v2's bundler and server runtime into React Router as **framework mode** |
 | **React Router v8** | the current React framework, released 2026-06-17 |
-| **Remix v3** | a **separate, non-React framework on a Preact fork**, beta preview 2026-04-30, focused on web-platform primitives |
+| **Remix v3** | a **separate, non-React framework with its own UI runtime**, release candidate 2026-08-31 and `remix@3.0.0` on npm 2026-10-01, focused on web-platform primitives |
 
 **Remix v3 is not an upgrade path from Remix v2 and is not a React framework.** A Remix v2 application upgrades to React Router v7 and then v8. This is the single easiest factual error in the whole front-end ecosystem, and it appears in interviews precisely because it separates people who read release notes from people who read headlines.
 
@@ -381,6 +381,8 @@ export async function renameCategory(id: string, name: string) {
 
 `revalidateTag()` taking a `cacheLife` profile as a mandatory second argument is a genuine breaking change, and a one-argument call from a Next.js 15 codebase is a type error. `updateTag()` is the one that solves a long-standing annoyance: after a Server Action mutates data, `revalidateTag` marks the cache stale but the response being streamed back may already have read the old value, so the user submits a rename and sees the old name for one render. `updateTag` makes the current request see its own write. `after()` moves non-blocking work — analytics, logging, cache warming — off the response path without a floating promise the runtime might kill.
 
+**Navigation is the other half of the model.** Next.js 16.4 recommends Cache Components as two flags, `cacheComponents: true` and `partialPrefetching: true`. With Partial Prefetching (16.3), the router extracts a loading shell from any route's cached UI and Suspense fallbacks and prefetches it, so a click paints at once instead of waiting on the server. Two 16.4 APIs tune the cost: `export const ensureStatic = "navigation"` on a layout fails the build if a page beneath it would render at request time, and `await navigation()` from `next/cache` keeps a component's cached content out of every prefetch until the user actually navigates. The rendering-side mechanics are in [Rendering Strategies, Hydration and SEO](../rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md).
+
 ### 6.6 `proxy.ts` — code that runs before routing
 
 Next.js 16 renamed `middleware.ts` to **`proxy.ts`** and runs it on the **Node runtime**, which is the more consequential half of the change: the old edge-runtime middleware could not use most of the Node standard library, so a session check that needed a database driver or a crypto library had to be duplicated or deferred. `middleware.ts` still works on the edge runtime, but new code goes in `proxy.ts`.
@@ -449,6 +451,8 @@ import { RouterProvider, HydratedRouter } from "react-router/dom";
 
 Most of v8 is otherwise uneventful, because the behavioural changes shipped as opt-in future flags across v7. That is the point of the release: if you had already enabled the flags, the upgrade is an import rewrite and a Node bump.
 
+**8.4.0 (2026-09-15) cut re-renders.** The data router splits its internal state across four contexts: current location (`useLocation`, `useSearchParams`, `useMatches`), pending navigation and revalidation (`useNavigation`, `useRevalidator`), loader and action data, and fetchers. A component that only calls `useLocation` no longer re-renders when `navigation.state` turns to `loading`. Code that read the exported `UNSAFE_` contexts has breaking changes. 8.4 also adds `future.unstable_routePatternMatching`, a Data Mode matcher built on `@remix-run/route-pattern` that cut navigation and fetcher completion time by about 19-38% with 100 routes and 71-88% with 1,000 routes in synthetic Chromium benchmarks. It is an unstable flag, and `matchRoutes`, `matchPath` and `useMatch` keep the old matcher, so results can differ.
+
 The upgrade path matters as much as the feature list. A Remix v2 application becomes a React Router v7 application, then v8; a v6 SPA can stay in library mode indefinitely, adopt data mode when waterfalls hurt, and adopt framework mode only if it turns out to need a server. That gradient is React Router's real differentiator against Next.js, where the App Router is the entry price.
 
 **A SPA with a data router is the right answer more often than framework marketing suggests.** An authenticated internal tool — an admin console, a support desk, a trading dashboard — has no SEO stake, no cold-load first-paint story worth optimising because users keep a tab open all day, and an existing API. Adding a server rendering tier buys nothing and costs a deployment target, a Node process to operate and a second place where environment variables must be correct.
@@ -504,6 +508,20 @@ export default function proxy(request: NextRequest) {
 ```
 
 Negotiate on the server, never in a `useEffect`. A client-side redirect ships the wrong locale's HTML first, causes a visible flash, and gives crawlers a page whose language does not match its URL.
+
+**Reading the locale without prop-drilling.** A `[lang]` segment above the root layout is effectively global, yet page `params` reach only the page and its layouts, so every nested formatter used to receive `lang` as a prop. Next.js 16.3 root params read it from any Server Component:
+
+```tsx
+// app/[lang]/orders/order-total.tsx -- a Server Component three levels down
+import { lang } from "next/root-params";
+
+export async function OrderTotal({ cents }: { cents: number }) {
+  const locale = await lang();
+  return <span>{new Intl.NumberFormat(locale, { style: "currency", currency: "EUR" }).format(cents / 100)}</span>;
+}
+```
+
+Root params also work inside `"use cache"` scopes, where `cookies()` and headers are forbidden. They are available in Server Components only, so a route handler still reads the segment from `params` and a Server Action takes the locale as an argument.
 
 **Catalog splitting is where the bytes are.** A 40-locale application with an 18 KB catalog each is 720 KB if every locale is in one bundle, and 18 KB if the import is dynamic and keyed by the negotiated locale.
 
@@ -584,9 +602,9 @@ new Intl.PluralRules("ru").select(3);                                       // "
 **Do NOT reach for one when:**
 
 - The deliverable is a static marketing site of mostly prose. Astro 7 ships zero JavaScript by default and hydrates only the islands you mark; a React framework ships a runtime to render text.
-- You are choosing on version numbers. TanStack Start is a **Release Candidate**, not 1.0, and putting a payment flow on a pre-1.0 router is a decision to make with open eyes.
 - The whole application is one canvas, one editor or one game loop. There is one route; the framework is overhead.
 - You cannot operate a server. That constraint is legitimate and it forecloses SSR, ISR and RSC — decide it first, not after choosing a framework that assumes them.
+- Server Components are the requirement and the candidate is TanStack Start or React Router. Start 1.0 treats RSC as an opt-in its own author stopped using on tanstack.com, and React Router's RSC mode is still `unstable_` in 8.4, so Next.js is the stack where RSC is the primary model.
 
 ---
 
@@ -643,9 +661,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
 | Tool | Purpose |
 |------|---------|
-| Next.js | 16.3.x App Router, Cache Components, `proxy.ts`, Turbopack by default |
-| React Router | v8 in library, data or framework mode |
-| TanStack Start | Release Candidate full-stack React framework on Vite and Nitro |
+| Next.js | 16.4.x App Router, Cache Components (on in new `create-next-app` projects since 16.4), `proxy.ts`, Turbopack by default |
+| React Router | v8 (8.4.0) in library, data or framework mode |
+| TanStack Start | Full-stack React framework on Vite and Nitro, 1.0 since 2026-10-13 |
 | Astro | 7, islands architecture, Rust compiler, running on Vite 8 |
 | Waku | Minimal RSC-first React framework |
 | Parcel | Bundler with first-class React Server Components support |
@@ -661,9 +679,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 ## 12. Interview Questions with Answers
 
 **Q: How do Remix v3, Remix v2 and React Router v7 relate to each other?**
-**Short:** What shipped as React Router v7 was the Remix merge, while Remix v3 is a separate non-React framework built on a Preact fork.
+**Short:** What shipped as React Router v7 was the Remix merge, while Remix v3 is a separate non-React framework with its own UI runtime.
 
-The React lineage runs Remix v1 to v2, then into React Router v7 — Remix v2's bundler and server runtime became React Router's **framework mode** — and on to React Router v8, released 2026-06-17. Remix v3's beta preview landed 2026-04-30 (the widely-cited July date is when the press coverage ran, not the release) as an entirely different project on a Preact fork, oriented around web-platform primitives, and it is **not an upgrade path from Remix v2 and not a React framework**. So a Remix v2 application upgrades to React Router v7 and then v8; adopting Remix v3 would be a rewrite onto a different runtime. Getting this backwards is the single most common factual error in the front-end ecosystem, which is exactly why it is asked.
+The React lineage runs Remix v1 to v2, then into React Router v7 (Remix v2's bundler and server runtime became React Router's **framework mode**), and on to React Router v8, released 2026-06-17. Remix v3 is an entirely different project with its own UI runtime, oriented around web-platform primitives: its release candidate shipped 2026-08-31 and `remix@3.0.0` reached npm on 2026-10-01. It is **not an upgrade path from Remix v2 and not a React framework**. So a Remix v2 application upgrades to React Router v7 and then v8; adopting Remix v3 would be a rewrite onto a different runtime. Getting this backwards is the single most common factual error in the front-end ecosystem, which is exactly why it is asked.
 
 **Q: What did Cache Components and the "use cache" directive change in Next.js 16?**
 **Short:** An explicit directive replaced the experimental ppr and dynamicIO flags, so cacheability is now declared per function rather than inferred from which APIs a component happened to call.

@@ -287,14 +287,14 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
 ### Structured Logging Configuration
 
 ```yaml
-# application.yaml — pattern carries traceId/correlationId into every line
+# application.yaml: Spring Boot writes JSON logs natively (formats: ecs, gelf, logstash).
+# MDC entries such as traceId and correlationId become JSON fields on every line.
 logging:
-  pattern:
-    console: "%d{ISO8601} [%thread] %-5level %logger{36} traceId=%X{traceId} correlationId=%X{correlationId} - %msg%n"
-
-# For JSON structured logging, add logstash-logback-encoder:
-# <encoder class="net.logstash.logback.encoder.LogstashEncoder"/>
-# Outputs: {"@timestamp":"...","level":"INFO","traceId":"abc123","correlationId":"req456","message":"..."}
+  structured:
+    format:
+      console: ecs
+      file: logstash
+# ecs output: {"@timestamp":"...","log":{"level":"INFO"},"traceId":"abc123","correlationId":"req456","message":"..."}
 ```
 
 ### OpenTelemetry Manual Instrumentation

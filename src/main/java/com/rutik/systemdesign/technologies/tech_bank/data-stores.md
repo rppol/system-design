@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-stores -->
 
-The 125 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 131 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Databases** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -48,6 +48,12 @@ Reach for it when the working set is far too large for RAM but you still need su
 botocore builds and signs AWS requests and parses responses, but sends them over a blocking HTTP client. aiobotocore replaces that layer with aiohttp while keeping botocore's model-driven API generation, so every service and operation is still available and the calls look like boto3 with `await` and an async context manager around the client. The aioboto3 package layers boto3's higher-level resource interfaces on top of it.
 
 Reach for it when an asyncio service makes many AWS calls — S3 uploads, SQS polling, DynamoDB reads — and pushing them onto a thread pool has become the bottleneck. The cost is coupling: it pins to particular botocore versions and can lag new SDK releases, so upgrades are less free than with boto3. For a handful of calls, running boto3 in an executor is simpler and perfectly adequate.
+
+### Amazon Athena
+**Short:** AWS serverless, pay-per-query SQL service over data in S3; engine version 3 runs on Trino.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/warehouse-and-olap @1, platform-delivery/cloud-platform-and-cost @2
 
 ### Amazon FSx for Lustre
 **Short:** AWS managed Lustre parallel file system with throughput provisioned per TiB, often linked to S3 and used for training data and checkpoints.
@@ -101,6 +107,12 @@ A table is a tree of metadata files over immutable data files: each commit write
 
 It is engine-neutral -- Spark, Flink, Trino, Snowflake and others read and write the same tables -- which is the main reason to prefer a table format over a proprietary warehouse for a shared lake. Reach for it when several engines must share one dataset with correctness guarantees; the cost is that snapshot expiry, small-file compaction and manifest maintenance become jobs somebody has to schedule.
 
+### Apache Paimon
+**Short:** Apache lakehouse table format built on an LSM tree for streaming upserts, with Flink CDC ingestion and changelog producers.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/warehouse-and-olap @1, data-movement/event-streaming-and-processing @2
+
 ### Apache Parquet on S3
 **Short:** Columnar Parquet files kept in S3 as the offline store for training data, backfills and analytical scans.
 **Kind:** tech
@@ -110,6 +122,12 @@ It is engine-neutral -- Spark, Flink, Trino, Snowflake and others read and write
 This is the plain-files pattern underneath every lakehouse: columnar Parquet objects laid out in Hive-style partition prefixes, so a query engine lists only the prefixes it needs, reads only the columns the projection names, and skips row groups using the min and max statistics in each file's footer. Nothing coordinates the writers, so a directory is only ever as consistent as the job that last wrote to it.
 
 Reach for it for the offline half of a system — training sets, feature backfills, analytical scans, archives — where compute is transient and storage should be cheap and engine-neutral. Its limits are exactly what table formats exist to fix: no atomic multi-file commit, no row-level update or delete, no schema enforcement, and a small-files problem that quietly destroys scan performance. Add Iceberg, Delta Lake or Hudi when those start to hurt.
+
+### Apache Polaris
+**Short:** Apache top-level Iceberg REST catalog with storage credential vending and role-based access control over tables.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/warehouse-and-olap @1, security/authorization-and-policy @3
 
 ### APOC
 **Short:** Neo4j's standard procedure and function library: graph algorithms, import/export, refactoring and utilities.
@@ -836,6 +854,12 @@ A reconnecting replica presents the replication ID it last followed and the offs
 
 The operational consequence is that the backlog size is a durability-adjacent setting, not a memory footnote: at the shipped default a busy primary holds well under a second of history, so any network blip forces the expensive path. A promoted replica also keeps its former primary's ID in a second slot, which is what lets sibling replicas resync partially rather than all at once after a failover.
 
+### PyIceberg
+**Short:** Python client for Iceberg catalogs and tables that reads, appends, overwrites and evolves schema without a JVM.
+**Kind:** tech
+**Lang:** python
+**Roles:** data-stores/warehouse-and-olap @1
+
 ### Qdrant
 **Short:** Rust-based vector database with rich payload filtering, sparse vectors and server-side hybrid fusion; OSS or cloud.
 **Kind:** tech
@@ -1028,6 +1052,12 @@ SQLite is a C library linked into your process, so a query is a function call ag
 
 It is the right answer for an embedded or on-device store, an application file format, a test fixture, or a local cache. It is the wrong answer for concurrent write traffic from many clients, which needs a server-based engine.
 
+### Starburst
+**Short:** Commercial Trino vendor, selling the self-managed Starburst Enterprise and the Starburst Galaxy SaaS.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/warehouse-and-olap @1
+
 ### Synapse
 **Short:** Azure Synapse Analytics: managed data warehouse with dedicated/serverless SQL pools and integrated Spark.
 **Kind:** tech
@@ -1077,6 +1107,12 @@ It is a CNCF project and the storage layer beneath TiDB, but usable on its own t
 A hypertable looks like an ordinary table but is transparently partitioned into chunks by time (and optionally by a space dimension such as device id), so inserts concentrate in the newest chunk where the indexes are still small, and a query with a time predicate prunes whole chunks instead of scanning history. Older chunks can be converted to a compressed columnar form, which is where the large storage reductions come from, and continuous aggregates maintain hourly or daily rollups incrementally rather than recomputing them.
 
 The reason to pick it over a purpose-built time-series database is that it is still PostgreSQL: your metrics can be joined to customer and product tables, you keep SQL, transactions, and every driver, extension and backup tool you already run. The reason not to is that a dedicated system like Prometheus is a better fit when the data is pure operational metrics with its own query language and retention model.
+
+### Trino
+**Short:** Distributed MPP SQL query engine that federates one query across lakehouse tables, warehouses and databases through connectors.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/warehouse-and-olap @1, data-movement/batch-and-distributed-compute @2
 
 ### uuid_extract_timestamp
 **Short:** PostgreSQL function recovering the embedded creation time from a v1 or v7 UUID, handy for triage.

@@ -787,11 +787,9 @@ action_b()   # Labels: ['called', 'called']   ← WRONG
 
 The same list object is reused across all calls to `tag_with_labels()` because Python evaluates default arguments once at function definition time.
 
-**FIX — use a sentinel and create a new list inside the factory:**
+**FIX: default to `None` and create a new list inside the factory:**
 ```python
 from typing import Sequence
-
-_SENTINEL = object()
 
 def tag_with_labels(labels: Sequence[str] | None = None) -> ...:
     resolved: list[str] = list(labels) if labels is not None else []
@@ -805,6 +803,8 @@ def tag_with_labels(labels: Sequence[str] | None = None) -> ...:
 ```
 
 Each call to `tag_with_labels()` creates a fresh `resolved` list captured in a new closure cell.
+When `None` is itself a meaningful argument, default to a `sentinel` instead; see
+[Core Language Idioms](../core_language_idioms/core_language_idioms.md).
 
 ---
 

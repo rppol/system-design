@@ -102,7 +102,7 @@ each Python cell. All three are generally available and need no beta header.
 
 ```python
 resp = client.messages.create(
-    model="claude-sonnet-5",
+    model="claude-sonnet-5-5",
     max_tokens=4096,
     tools=[{"type": "code_execution_20250825", "name": "code_execution"}],
     messages=[{"role": "user", "content": "Chart the revenue trend in this CSV."}],
@@ -222,7 +222,7 @@ async def execute_agent_code(user_request: str) -> str:
     
     # Step 1: Generate code with Claude
     response = client.messages.create(
-        model="claude-sonnet-5",
+        model="claude-sonnet-5-5",
         max_tokens=2048,
         system=(
             "You are a data analysis agent. When given a task, write Python code "
@@ -510,22 +510,22 @@ if len(result) > 50_000:
 | chars | Bytes of stdout the sandbox produced. `10_000_000` in the broken case |
 | `chars / 4` | Rough chars-per-token for English and code — the conversion that makes it money |
 | `50_000` | The cap, in characters, from the resource-limit table above |
-| `$3.00/M` | Claude Sonnet 5 list input price per million tokens |
-| 1M | Sonnet 5's context window, for comparison against the token count |
+| `$2.00/M` | Claude Sonnet 5.5 list input price per million tokens |
+| 1M | Sonnet 5.5's context window, for comparison against the token count |
 | `[Truncated: N chars total]` | Tells the agent output was cut, so it narrows the query instead of retrying |
 
 **Walk one example.** Price `print('x' * 10_000_000)` against the same run with the cap in place:
 
 ```
-  uncapped   10,000,000 chars  ->  2,500,000 tok  ->  $7.50 at $3.00/M
-  capped         50,000 chars  ->     12,500 tok  ->  $0.0375
+  uncapped   10,000,000 chars  ->  2,500,000 tok  ->  $5.00 at $2.00/M
+  capped         50,000 chars  ->     12,500 tok  ->  $0.025
 
   ratio                            200x fewer tokens, 200x cheaper
 
   2,500,000 tok / 1,000,000 window =   2.5x   -> the call cannot even be made
 ```
 
-The comment in the broken snippet says `$5 wasted`, which brackets correctly — `$5.00` at a `$2.00/M` input rate, `$7.50` at Sonnet 5's `$3.00/M`. But the money is the smaller problem: at `2.5×` the context window the request fails outright even on a 1M-token model, and on a model with a large enough window it would succeed and then re-send those 2.5M tokens on every subsequent turn of the loop. That is the compounding failure — one unbounded `print` poisons the entire remaining agent run, not just the call that produced it.
+The comment in the broken snippet says `$5 wasted`, which matches: 2.5M tokens at Sonnet 5.5's `$2.00/M` input rate is `$5.00`. But the money is the smaller problem: at `2.5×` the context window the request fails outright even on a 1M-token model, and on a model with a large enough window it would succeed and then re-send those 2.5M tokens on every subsequent turn of the loop. That is the compounding failure — one unbounded `print` poisons the entire remaining agent run, not just the call that produced it.
 
 ### Pitfall 3: Secrets in sandbox environment
 

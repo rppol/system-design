@@ -219,6 +219,97 @@ scaffolds they were measured under.
   in [Reasoning Models](../reasoning_models/reasoning_models.md) — catches these, at the cost of
   needing a PRM you have to train first.
 
+#### On-Policy Distillation (GKD)
+
+Every recipe above is **off-policy**: the student trains on sequences the teacher (or a dataset)
+wrote. At inference the student conditions on its *own* earlier tokens, so a small early mistake
+puts it in a state the training data never showed it, and nothing taught it to recover. On-policy
+distillation, Generalized Knowledge Distillation (Agarwal et al., arXiv 2306.13649), closes that
+gap: the student samples completions, the teacher scores every token of those samples with its
+full next-token distribution, and the loss pulls the student toward the teacher on the states the
+student actually visits.
+
+TRL ships this as `DistillationTrainer`, stable in the top-level `trl` package since v1.10.0
+(2026-08-13), with vision-language models supported end to end:
+
+```python
+from datasets import load_dataset
+from trl import DistillationConfig, DistillationTrainer
+
+# Prompt-only data: the student writes its own completions.
+dataset = load_dataset("trl-lib/ultrafeedback-prompt", split="train")
+
+args = DistillationConfig(
+    output_dir="qwen-0.5b-distilled",
+    beta=1.0,                    # 0.0 forward KL, 0.5 JSD, 1.0 reverse KL (the default)
+    temperature=1.0,             # used for both sampling and the loss
+    max_completion_length=512,
+    use_vllm=True,               # student generation is the bottleneck; colocated vLLM by default
+)
+trainer = DistillationTrainer(
+    model="Qwen/Qwen2.5-0.5B-Instruct",
+    teacher_model="Qwen/Qwen2.5-1.5B-Instruct",
+    args=args,
+    train_dataset=dataset,
+)
+trainer.train()
+```
+
+The loss is a generalized Jensen-Shannon divergence computed in chunks over the vocabulary, so
+the teacher's full `vocab x seq_len` logit tensor is never held in memory at once. The default
+`beta=1.0` is reverse KL, which is mode-seeking: a small student puts its mass on the teacher's
+main mode instead of spreading thin over modes it cannot represent. `AsyncDistillationTrainer`
+(PEFT support from v1.15.0) decouples generation from training and scores against a teacher
+served over HTTP, which is the shape to use when the teacher needs its own GPUs.
+
+**Forward KL versus reverse KL, on one bimodal teacher.** Classic logit distillation minimises
+forward KL, `KL(p_T || q_S)`, which charges the student heavily wherever the teacher has mass and
+the student has none. A student too small to fit both modes spreads itself across them, and the
+valley between the modes, where the teacher puts almost nothing, gets real probability. At
+sampling time those valley tokens are exactly the fluent-but-wrong continuations. Reverse KL,
+`KL(q_S || p_T)`, charges the student wherever *it* has mass and the teacher has none, so the
+cheapest fit is to sit on one mode and leave the other empty.
+
+```
+  teacher p_T (two good continuations)      p_T:   _/\_______/\_
+                                                     A         B
+
+  forward KL  KL(p_T || q_S)   "cover every mode"   q_S:  _/~~~~~~~~~\_
+      student mass spills into the valley between A and B;
+      samples from the valley are low-probability under the teacher
+
+  reverse KL  KL(q_S || p_T)   "pick a mode"        q_S:  _/\__________
+      student commits to A, ignores B;
+      every sample is one the teacher rates as likely
+```
+
+Reverse KL is only computable on student samples, because its expectation is over `q_S`. That
+is why it and on-policy training arrive together.
+
+**MiniLLM (Gu, Dong, Wei and Huang, arXiv 2306.08543, ICLR 2024)** is the other on-policy recipe,
+submitted to arXiv in the same month as GKD (June 2023). It minimises sequence-level reverse KL and treats it as a
+reinforcement learning problem: the per-token reward is `log p_T(y_t) - log q_S(y_t)`, optimised
+with a policy gradient. Plain policy gradient fails here in three ways, and the paper adds one fix
+for each:
+
+| Problem | MiniLLM fix |
+|---------|-------------|
+| High-variance gradient; early-token errors compound over the sequence | Single-step decomposition: the immediate token term is computed exactly by summing over the vocabulary instead of sampled |
+| Reward hacking: the student finds degenerate, repetitive text the teacher scores highly | Teacher-mixed sampling: draw tokens from `0.2 x p_T + 0.8 x q_S` (alpha = 0.2), importance-weighted |
+| Long sequences accumulate small rewards, pushing toward short or empty answers | Length normalisation: average the log-ratio over remaining tokens |
+
+Students ran from 120M to 13B (GPT-2 1.5B, OPT-13B and LLaMA-13B teachers). The gains over
+standard word-level KD are largest on the smallest students: a 760M GPT-2 student scored 37.7
+Rouge-L on Unnatural Instructions against 31.7 for KD and 32.9 for sequence-level KD, while a
+LLaMA-7B student reached a GPT-4 feedback score of 76.4 on DollyEval against 73.7 for KD and a
+teacher at 79.0.
+
+**GKD versus MiniLLM.** Both train on student samples. GKD keeps the loss a plain per-token
+divergence against the teacher's full distribution and backpropagates it directly, with no reward,
+no baseline and no importance weights; MiniLLM pays for the policy-gradient machinery to optimise
+the sequence-level objective. TRL implements the GKD form, which is the simpler one to run and
+the one to start with.
+
 ### 4.2 Model Merging
 
 Every method below operates on **task vectors** — the delta a fine-tune adds to the
@@ -934,13 +1025,14 @@ A team trains a student at T=1 (standard temperature). The student learns hard l
 | **mergekit** | Merging | SLERP, TIES, DARE, linear, passthrough merges | Standard open-source toolkit; CLI and Python API |
 | **LazyMergeKit** | Merging | Google Colab wrapper for mergekit | One-click merging, no local GPU needed |
 | **HuggingFace PEFT** | Distillation/Fine-tuning | LoRA, adapter management during distillation | Adapter merging with merge_and_unload() |
+| **TRL `DistillationTrainer`** | Distillation | On-policy (GKD) distillation with a chunked generalized JSD loss; optional vLLM generation | Stable since TRL v1.10.0; VLM support; `AsyncDistillationTrainer` for a teacher served over HTTP |
 | **TextBrewer** | Distillation | PyTorch distillation framework | Multi-teacher, multi-task distillation |
 | **NVIDIA NeMo** | Distillation | Enterprise distillation pipeline | Nemotron-style teacher-student training |
-| **SparseML** | Pruning | Neural Magic's pruning + quantization toolkit | Integrates with DeepSparse runtime for CPU inference |
+| **llm-compressor** | Pruning | vLLM project's pruning + quantization library (SparseGPT, Wanda, 2:4 sparsity, GPTQ, AWQ) | Writes compressed-tensors checkpoints that vLLM loads directly |
 | **SparseGPT** | Pruning | One-shot Hessian-based LLM pruning | GitHub implementation; calibration-only, no retraining |
 | **Wanda** | Pruning | Weight-and-activation pruning | Simpler than SparseGPT; comparable quality |
 | **torch.nn.utils.prune** | Pruning | PyTorch built-in pruning utilities | Basic magnitude pruning; not LLM-optimized |
-| **DeepSparse** | Runtime | Neural Magic's sparse inference engine | CPU-only; 4-8x speedup from sparsity on CPU |
+| **vLLM** | Runtime | Serves llm-compressor checkpoints | 2:4 sparse and quantized kernels on NVIDIA GPUs |
 | **cuSPARSELt** | Runtime | NVIDIA sparse GEMM library | 2:4 sparsity on Ampere+ GPUs |
 
 ---
@@ -958,6 +1050,36 @@ Logit-level distillation uses the teacher's full probability distribution (soft 
 **Q: Why can a distilled student hallucinate more than its teacher, and how do you prevent it?**
 **Short:** A student can hallucinate more than its teacher because it inherits every teacher error as confident ground truth and loses the teacher's calibrated uncertainty.
 The student inherits every teacher error as a confident ground-truth label, and its smaller capacity means it cannot represent the uncertainty the teacher expressed around those errors. Two mechanisms compound: first, teacher mistakes are amplified — a team distilling GPT-3.5 into a 7B medical Q&A model saw the student's hallucination rate reach 3x the teacher's on the same queries; second, distilling on hard labels (teacher's top-1 token) instead of soft distributions destroys calibration — in one production case the student hedged with "I'm not sure" on only 12% of ambiguous queries versus the teacher's 34%, producing confidently wrong answers. Prevention: validate the teacher on your task distribution before distilling, use soft targets (KL at T=2-8) rather than hard labels to transfer calibration, and gate deployment on Expected Calibration Error (target ECE < 0.05) measured against a human-labeled set.
+
+**Q: Why does a student distilled on teacher-written outputs drift on long generations, and what does on-policy distillation change?**
+**Short:** Off-policy training never shows the student its own mistakes; on-policy distillation lets the student sample and has the teacher score every token of those samples.
+Off-policy distillation, logit or data level, trains on prefixes the teacher wrote. At inference
+the student conditions on its own prefixes, so the first token where it diverges from the teacher
+puts it in a state it never trained on, and errors compound over a long generation (exposure
+bias). On-policy distillation (GKD, Agarwal et al.) generates completions from the student, runs
+the teacher over those completions, and minimises a divergence between the two next-token
+distributions at every position, so the student learns what the teacher would do from the
+student's own mistakes. The cost is generation inside the training loop, which dominates step
+time; TRL's `DistillationTrainer` (stable since v1.10.0) addresses it with vLLM generation,
+colocated or on a separate server. Choose reverse KL (`beta=1.0`, the TRL default) when the
+student is much smaller than the teacher, since it concentrates the student's mass on the
+teacher's main mode rather than averaging over modes it cannot fit.
+
+**Q: Why does a small student distilled with forward KL produce fluent but wrong text, and what does reverse KL change?**
+**Short:** Forward KL makes a small student cover every teacher mode, spilling mass into low-probability gaps; reverse KL makes it commit to one mode.
+Forward KL, `KL(p_T || q_S)`, is the classic distillation loss and penalises the student wherever
+the teacher has probability and the student does not. When the student lacks the capacity to fit
+every mode of the teacher's distribution, the minimum-loss solution spreads mass across all of
+them, including the gaps between modes that the teacher rates as unlikely. Sampling from that
+student draws tokens from the gaps, which reads as fluent text the teacher would never write.
+Reverse KL, `KL(q_S || p_T)`, penalises the student wherever it puts mass the teacher does not, so
+the student concentrates on one mode and every sample is one the teacher considers likely. It is
+only computable on sequences the student samples, which ties it to on-policy training. MiniLLM
+(Gu et al., ICLR 2024) optimises it with a policy gradient plus three stabilisers (single-step
+decomposition, 20% teacher-mixed sampling, length normalisation) and beat word-level KD by 6
+Rouge-L points on a 760M GPT-2 student; GKD and TRL's `DistillationTrainer` reach it with
+`beta=1.0` and a direct per-token loss. The cost is diversity: a mode-seeking student gives
+narrower answers, which is the right trade for task models and the wrong one for creative ones.
 
 **Q: What is model merging and why does it work despite not involving any training?**
 **Short:** Model merging works because fine-tuned models from the same base create approximately orthogonal task vectors that can be added without destructive interference.
@@ -997,7 +1119,7 @@ FrankenMerge takes different layers from different models and stacks them into a
 
 **Q: How does structured pruning differ from unstructured pruning in terms of hardware requirements?**
 **Short:** Unstructured pruning's scattered zeros need specialized sparse hardware to speed up, while structured pruning removes whole neurons or heads for speedup on any hardware.
-Unstructured pruning removes individual weights, creating a sparse matrix with zeros scattered throughout. Standard GPU hardware (CUDA cores) still performs the same number of multiply-accumulate operations because they process dense matrix blocks — the zeros do not save computation. Speedup requires specialized sparse hardware: NVIDIA A100+ with 2:4 sparsity support, or CPU-based sparse runtimes like DeepSparse. Structured pruning removes entire neurons, attention heads, or layers, producing a smaller but still dense matrix. This gives immediate speedup on any hardware because the matrix dimensions are physically smaller. Trade-off: structured pruning is coarser (you remove entire heads, not individual weights) so it typically causes more quality degradation at the same compression ratio. At 30% structured pruning, expect 2-5% quality loss; at 50% unstructured pruning, expect 1-3% loss — but the structured version runs faster on commodity GPUs.
+Unstructured pruning removes individual weights, creating a sparse matrix with zeros scattered throughout. Standard GPU hardware (CUDA cores) still performs the same number of multiply-accumulate operations because they process dense matrix blocks — the zeros do not save computation. Speedup requires specialized sparse hardware: NVIDIA A100+ with 2:4 sparsity support (llm-compressor writes 2:4 checkpoints that vLLM serves). Structured pruning removes entire neurons, attention heads, or layers, producing a smaller but still dense matrix. This gives immediate speedup on any hardware because the matrix dimensions are physically smaller. Trade-off: structured pruning is coarser (you remove entire heads, not individual weights) so it typically causes more quality degradation at the same compression ratio. At 30% structured pruning, expect 2-5% quality loss; at 50% unstructured pruning, expect 1-3% loss — but the structured version runs faster on commodity GPUs.
 
 **Q: What is N:M sparsity and which hardware supports it?**
 **Short:** 2:4 semi-structured sparsity zeros exactly two of every four weights and gets a hardware-guaranteed 2x speedup on NVIDIA Ampere-and-later Sparse Tensor Cores.

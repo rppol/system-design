@@ -1,6 +1,6 @@
 # Agents & Tool Use
 
-## Sub-Files — Deep Dives (15 total)
+## Sub-Files — Deep Dives (17 total)
 
 | File | Topic | Q&As |
 |------|-------|------|
@@ -19,6 +19,8 @@
 | [agent_ux_patterns.md](agent_ux_patterns.md) | Streaming, interrupt/resume, approval gates, artifacts, confidence | 15+ |
 | [durable_long_running_agents.md](durable_long_running_agents.md) | Temporal, Inngest, Restate, LangGraph checkpointing, idempotency | 15+ |
 | [agent_cost_and_token_budget.md](agent_cost_and_token_budget.md) | Per-task budgets, model cascading, compaction, caching, batch APIs | 15+ |
+| [agent_skills_and_progressive_disclosure.md](agent_skills_and_progressive_disclosure.md) | Agent Skills spec, SKILL.md, three-level progressive loading, Skills vs MCP | 15+ |
+| [reasoning_models_vs_scaffolds.md](reasoning_models_vs_scaffolds.md) | Native extended thinking vs hand-built scaffolds, when to combine them | 15+ |
 
 ---
 
@@ -584,7 +586,7 @@ System Prompt Structure for Agents:
 ### Claude Code (Anthropic)
 - Terminal-based agent that reads/writes files, executes commands
 - Tools: read_file, write_file, bash, list_directory
-- Context: inherits the model's window — 1M tokens on current Claude models (200K on Haiku 4.5); can hold entire codebases
+- Context: inherits the model's window: 1M tokens on every current Claude model (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5); can hold entire codebases
 - Can refactor multi-file projects, run tests, debug errors autonomously
 - Human-in-the-loop: asks permission for destructive operations
 
@@ -594,6 +596,12 @@ System Prompt Structure for Agents:
 - Custom function calling via `{"type": "function", ...}` tool entries
 - Conversation state: chain turns with `previous_response_id`, or attach a durable `conversation` object; `store: true` retains responses for 30 days
 - Note that even with `previous_response_id`, every earlier input token in the chain is re-billed as input on each turn
+- The Assistants API shut down on 2026-08-26; Responses plus the Conversations API replace it
+
+### OpenAI Agents API
+- Public beta since 2026-09-10: a managed Codex harness where OpenAI runs orchestration, compaction, and recovery
+- Durable sessions across turns; runs in OpenAI-hosted sandboxes or your own; computer use with hosted browsers since 2026-09-29
+- Server-side counterpart to the in-process [OpenAI Agents SDK](../agentic_frameworks/openai_agents_sdk.md)
 
 ### Devin (Cognition AI)
 - Full autonomous software engineering agent
@@ -648,7 +656,7 @@ System Prompt Structure for Agents:
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | **OpenAI Responses API** | Managed agent infra | Hosted tools (web/file search, code interpreter), remote MCP, computer use, server-side conversation state |
-| **Anthropic API** | Tool use + Claude | Strong instruction following; current models are Opus 5 / Opus 4.7-4.8 / Sonnet 4.6 / Haiku 4.5 |
+| **Anthropic API** | Tool use + Claude | Strong instruction following; current models are Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5 |
 | **LangGraph** | Stateful agent graphs | Complex multi-agent flows |
 | **LlamaIndex Agents** | RAG-focused agents | Data agents, query planning |
 | **Tavily Search** | Agent-optimized search | LLM-friendly search results |
@@ -691,7 +699,7 @@ A: Tool descriptions are a form of prompting that directly governs selection acc
 
 **Q: What is the cost model for an agentic system — what drives token usage?**
 **Short:** Agent cost is input plus output tokens summed per call, driven mainly by growing history and large tool results.
-A: Token cost = sum over all LLM calls of (input_tokens × input_price + output_tokens × output_price). What drives input token growth: (1) accumulated conversation history and tool results — each step adds 500-2000 tokens; (2) large tool responses — a 5KB JSON API response is roughly 1,300 tokens, and because it is re-sent on every later call it costs far more than its one-time price suggests; (3) context repetition — the system prompt is re-sent on every call. Cost drivers by example: a 15-step agent averaging 3K input tokens/step at Sonnet 4.6's $3/1M input costs $0.135 in input, and that is the *flat-context* floor — the real bill is higher because context grows (see the O(N²) section above). Mitigations: truncate tool results to 500 words, compress old conversation history, route simple steps to cheaper models.
+A: Token cost = sum over all LLM calls of (input_tokens × input_price + output_tokens × output_price). What drives input token growth: (1) accumulated conversation history and tool results — each step adds 500-2000 tokens; (2) large tool responses — a 5KB JSON API response is roughly 1,300 tokens, and because it is re-sent on every later call it costs far more than its one-time price suggests; (3) context repetition — the system prompt is re-sent on every call. Cost drivers by example: a 15-step agent averaging 3K input tokens/step at Sonnet 5.5's $2/1M input costs $0.09 in input, and that is the *flat-context* floor — the real bill is higher because context grows (see the O(N²) section above). Mitigations: truncate tool results to 500 words, compress old conversation history, route simple steps to cheaper models.
 
 **Q: How do you implement human-in-the-loop in a production agent?**
 **Short:** LangGraph's interrupt hooks pause execution before high-risk actions until a human approves via update_state.
@@ -740,6 +748,8 @@ In-depth coverage of specific agent topics. Each file follows the standard modul
 | Agent Evaluation & Benchmarking | [agent_evaluation_and_benchmarking.md](./agent_evaluation_and_benchmarking.md) | GAIA, SWE-bench, AgentBench, trajectory eval, LLM-as-judge, cost metrics |
 | Computer Use & Browser Agents | [computer_use_and_browser_agents.md](./computer_use_and_browser_agents.md) | Anthropic Computer Use, browser-use, Playwright, vision+action loop, grounding |
 | Agent Reliability | [agent_reliability.md](./agent_reliability.md) | Timeout/circuit breaker, retry backoff, progress checkpointing, dead-loop detection, human handoff |
+| Agent Skills & Progressive Disclosure | [agent_skills_and_progressive_disclosure.md](./agent_skills_and_progressive_disclosure.md) | SKILL.md format, metadata/body/resources loading levels, Skills vs MCP vs tools |
+| Reasoning Models vs Scaffolds | [reasoning_models_vs_scaffolds.md](./reasoning_models_vs_scaffolds.md) | In-model search vs code-level search, cost and latency, picking or stacking the two |
 
 Related standalone modules:
 
@@ -778,7 +788,7 @@ Related standalone modules:
   Incident Intake: classify known vs novel (runbook vector search)
          |
          v
-  ReAct Agent (Claude claude-sonnet-4-6):
+  ReAct Agent (Claude claude-sonnet-5-5):
 
   Observation → Thought → Action → Observation → ... (max 20 steps)
 
@@ -947,15 +957,15 @@ async def run_incident_agent(
             break
 
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5-5",
             max_tokens=2048,
             system=SYSTEM_PROMPT,
             tools=tool_defs,
             messages=messages,
         )
 
-        # Sonnet 4.6 list price: $3 / 1M input, $15 / 1M output -> divide by 1e6, not 1e9
-        total_cost += (response.usage.input_tokens * 3 + response.usage.output_tokens * 15) / 1e6
+        # Sonnet 5.5 list price: $2 / 1M input, $10 / 1M output -> divide by 1e6, not 1e9
+        total_cost += (response.usage.input_tokens * 2 + response.usage.output_tokens * 10) / 1e6
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]

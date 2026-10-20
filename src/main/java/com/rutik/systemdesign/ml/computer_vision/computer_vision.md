@@ -8,6 +8,7 @@
 | [image_segmentation.md](image_segmentation.md) | Semantic, instance, panoptic; U-Net; SAM; Dice loss | 15+ |
 | [vision_transformers.md](vision_transformers.md) | ViT, DeiT, Swin, CLIP; patch embeddings; attention | 15+ |
 | [self_supervised_vision.md](self_supervised_vision.md) | SimCLR, MoCo, DINO, MAE, BYOL; linear probing | 15+ |
+| [open_vocabulary_and_vision_foundation.md](open_vocabulary_and_vision_foundation.md) | OWLv2, Grounding DINO, SAM prompting, DINOv2 backbones; zero-shot detection | 15+ |
 
 ---
 
@@ -63,7 +64,8 @@ The core mental model:
 | Model | Type | Speed | mAP COCO | Notes |
 |-------|------|-------|----------|-------|
 | Faster R-CNN | Two-stage | ~5 fps GPU | 37.4 | High accuracy, slower |
-| YOLOv8-L | One-stage | ~100 fps GPU | 52.9 | Real-time standard |
+| YOLOv8-L | One-stage | ~100 fps GPU | 52.9 | Real-time standard through 2024 |
+| YOLO26-L | One-stage, optional end-to-end | ~160 fps T4 TensorRT | 54.4 | No DFL; NMS-free with `nms=False` (54.4 e2e, 55.0 with NMS); released January 2026 |
 | DETR | Transformer | ~28 fps GPU | 42.0 | No NMS, Hungarian matching |
 | FCOS | Anchor-free | ~40 fps GPU | 44.7 | No anchor hyperparameters |
 
@@ -512,7 +514,7 @@ all ten thresholds, so they are not comparable to a quoted `mAP@0.5` such as the
 
 **Medical imaging**: U-Net variants dominate radiology segmentation. A chest X-ray pneumonia detection model fine-tuned from DenseNet-121 on CheXpert achieves AUC ~0.91. The same backbone serves multiple pathology classifiers via multi-label heads.
 
-**Content moderation**: Instagram/Meta runs EfficientNet-B5 inference to classify uploaded images for nudity, violence, and spam at ~50M images/day. Inference is batched on A10G GPUs; models serve from TorchServe behind an internal API.
+**Content moderation**: Instagram/Meta runs EfficientNet-B5 inference to classify uploaded images for nudity, violence, and spam at ~50M images/day. Inference is batched on A10G GPUs; models serve behind an internal inference API.
 
 **Industrial inspection**: PCB defect detection uses YOLO models fine-tuned on 10k–50k annotated boards. mAP@0.5 of 0.92+ is routinely achieved; false-negative rate below 0.1% is the production SLA.
 
@@ -582,7 +584,7 @@ When fine-tuning with a small batch (< 16) on a new domain, BatchNorm running st
 |----------|------|-------|
 | Framework | PyTorch 2.x | Default for research and production CV |
 | Model zoo | torchvision, timm | timm has 700+ pretrained models |
-| Detection | Ultralytics YOLOv8, Detectron2 | YOLOv8 for speed; Detectron2 for research |
+| Detection | Ultralytics YOLO26, Detectron2 | YOLO26 for speed; Detectron2 for research |
 | Segmentation | mmsegmentation, huggingface | SAM via `segment-anything` package |
 | Training | PyTorch Lightning, Hugging Face Trainer | Reduces boilerplate |
 | Data | Albumentations | Fast augmentation library (10x faster than torchvision) |

@@ -30,7 +30,7 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 | `error_handling_and_validation/` | 2 | `HTTPException`, custom handlers, `RequestValidationError`, RFC 9457 Problem Details |
 | `testing_fastapi/` | 2 | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, rollback |
 | `websockets_sse_and_streaming/` | 2 | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
-| `serving_llm_and_ai_workloads/` | 4 | Streaming completions over SSE, backpressure, cancellation propagation, per-tenant token budgets, MCP servers from FastAPI |
+| `serving_llm_and_ai_workloads/` | 2 | Streaming completions over SSE, backpressure, cancellation propagation, per-tenant token budgets, MCP servers from FastAPI |
 | `background_jobs_and_task_queues/` | 2 | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, DLQ |
 | `http_clients_and_external_apis/` | 2 | `httpx`/`aiohttp`, connection pooling, retries/backoff, circuit breakers |
 | `message_queues_and_event_driven/` | 2 | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
@@ -42,12 +42,14 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 
 ---
 
-## Sub-Files (2 total — 14-section template, 15+ Q&As each)
+## Sub-Files (4 total — 14-section template, 15+ Q&As each)
 
 | File | Parent Module |
 |------|--------------|
 | `pydantic_v2_deep_dive/pydantic_core_and_performance.md` | pydantic_v2_deep_dive/ |
 | `dependency_injection_in_fastapi/yield_dependencies_and_scopes.md` | dependency_injection_in_fastapi/ |
+| `api_design_and_versioning/openapi_31_and_client_generation.md` | api_design_and_versioning/ |
+| `serving_llm_and_ai_workloads/mcp_servers_from_fastapi.md` | serving_llm_and_ai_workloads/ |
 
 ---
 
@@ -84,8 +86,8 @@ correct MCQ option.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 19 modules = "3-Phase Learning Path") plus
-two curated tiers: **Senior** (13 modules) and **Principal** (8). They are different
+`README.md` documents the **Full Path** (all 21 modules = "3-Phase Learning Path") plus
+two curated tiers: **Senior** (16 modules) and **Principal** (8). They are different
 cuts, not nested depths — senior is the craft (build the endpoint, fix the blocking call
 on the event loop), principal is the judgment (which deployment shape at what cost, what
 you tell a team *not* to do), so principal is the smaller list and much of it is material
@@ -97,14 +99,14 @@ in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 `questions/paths.json`, which the game fetches at boot. The tier tables in `README.md`
 sit between `<!-- study-path-table <tier> -->` markers and are **generated** — regenerate
 with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
-`extract.py --strict` and the Pages deploy. Case studies are tiered the same way from a
-block in `case_studies/case_studies.md` (5 senior / 2 principal), driving the Level filter on
+`extract.py --strict` and the Pages deploy. Case studies are tiered in the same `README.md` block,
+under `case_studies` (7 senior / 4 principal), driving the Level filter on
 the game's Case Studies tab. The README also carries a Knowledge-Question Map and a
 3-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 6 Total
+## Case Studies — 8 Total
 
 `case_studies/` — every file uses the **11-section principal case-study template** defined in
 root `CLAUDE.md` (Intuition → 1. Requirements Clarification → 2. Scale Estimation →
@@ -119,7 +121,7 @@ numbers**, never a generic "a large e-commerce site"; §9 quantifies the impact 
 story; §11 carries 10+ Q&As. Case-study Q&As are excluded from the MCQ bank by design
 (`extract.py` skips every `case_studies/` path) — do not "rescue" them into a module.
 
-design_rate_limited_api_fastapi, design_multi_tenant_saas_api, design_realtime_chat_fastapi, design_async_task_queue, design_async_web_scraper, design_ml_inference_api_fastapi
+design_rate_limited_api_fastapi, design_multi_tenant_saas_api, design_realtime_chat_fastapi, design_async_task_queue, design_async_web_scraper, design_ml_inference_api_fastapi, design_llm_gateway_fastapi, design_file_upload_and_media_api
 
 ---
 
@@ -133,6 +135,8 @@ When covering a feature, include the version it was introduced:
   multiplier only with a measurement beside it — the speedup is model-shaped (measured ~2.7x on a mixed model,
   ~2.9x on a 3-field flat model, ~13x on one with a dict and a list), so a blanket "5-50x" is not a fact
 - SQLAlchemy 2.0 (2023): unified 2.0-style only; `AsyncSession`/`async_engine` stable
+- SQLAlchemy 2.1 (GA 2026-09-24): greenlet only via the `[asyncio]` extra; requires Python 3.11+
+- Starlette 1.8.0+ (2026-10-13): requires Python 3.11+, the practical floor for a FastAPI stack
 
 Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 
@@ -166,7 +170,7 @@ abstract governs the `hld/` twins.
 1. Create `<module_name>/<module_name>.md` — 14-section clean template
 2. All code in Python 3.13/3.14 + FastAPI with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
 3. Add version tags for features introduced in specific FastAPI/Pydantic/SQLAlchemy versions
-4. Meet the Q&A minimum for the module's depth level (15-Q&A floor; 15-18 for the four deep modules above)
+4. Meet the Q&A minimum for the module's depth level (15-Q&A floor; 18+ for the four deep modules above)
 5. Update this file's Module List table
 6. Update `README.md` §2 Module Table and §3 Phase Learning Path diagram
 7. Add the module dir to `STUDY_ORDER.fastapi` in `game/app.js` at its phase position — a

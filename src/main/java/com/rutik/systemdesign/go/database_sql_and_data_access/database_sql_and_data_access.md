@@ -448,7 +448,9 @@ routine, so a custom `Scanner` can delegate to exactly the same coercion rules
 `database/sql` applies internally instead of reimplementing them and drifting. And
 `driver.RowsColumnScanner` lets a driver take over scanning for a specific column, which is
 how a driver exposes a native type — a Postgres array, a `jsonb`, a range — into a Go value
-without the generic conversion path flattening it to `[]byte` first.
+without the generic conversion path flattening it to `[]byte` first. `pgx/v5/stdlib` v5.11.0
+(2026-09-07) implements it, so on Go 1.27 PostgreSQL arrays and ranges scan straight into Go
+values through `*sql.DB`, which used to need `pgx`'s native interface or a wrapper type.
 
 ### Transactions
 
@@ -953,6 +955,21 @@ nothing, and the two cases that genuinely need structure (identifiers and `IN` l
 have safe patterns in §6. Enable `golangci-lint`'s `gosec` G201/G202 rules and treat every
 hit as a blocker.
 
+### A `pgx` upgrade that changed what the connection string meant
+
+`pgx` v5.11.0 parses connection strings exactly as libpq does, and three behaviours moved
+with it. In a URI, `+` in a query value is now a literal plus, so
+`?application_name=billing+worker` names the client `billing+worker`, not `billing worker`;
+encode a space as `%20`. In a keyword/value string a backslash escapes the next character and
+is dropped, so `sslcert=C:\path\to\cert` is read as `C:pathtocert` and the TLS setup fails
+at startup; write `sslcert=C:\\path\\to\\cert`. And `timestamptz` values
+scanned from the text format now come back in `time.Local`, or in the codec's `ScanLocation`
+when set, so a container whose `TZ` differs from the one CI ran in returns different
+`Location`s for the same row. Set `ScanLocation` to `time.UTC` to pin it, and re-test every
+DSN from config before taking the upgrade. v5.10.0 (2026-06-03) also added `require_auth`, which
+lets the client refuse authentication methods it did not ask for, for example
+`require_auth=scram-sha-256` to reject a server that falls back to cleartext password.
+
 ---
 
 ## 11. Technologies & Tools
@@ -961,7 +978,7 @@ hit as a blocker.
 |------|--------------------------------|
 | `database/sql` | The pool, the query API, `Null*` types, `ConvertAssign` `[1.27]` |
 | `database/sql/driver` | The driver contract; `RowsColumnScanner` `[1.27]` lets a driver own a column's scan |
-| `github.com/jackc/pgx/v5` | The Postgres driver; `stdlib` sub-package for `database/sql`, `pgxpool` for native |
+| `github.com/jackc/pgx/v5` v5.11.0 | The Postgres driver; `stdlib` sub-package for `database/sql` (implements `RowsColumnScanner` `[1.27]`), `pgxpool` for native; libpq-exact DSN parsing |
 | `github.com/go-sql-driver/mysql` | The MySQL driver; needs `parseTime=true` and `loc` in the DSN |
 | `modernc.org/sqlite` | Pure-Go SQLite — no cgo, so `CGO_ENABLED=0` static builds keep working |
 | `github.com/jmoiron/sqlx` | `StructScan`, `Get`, `Select`, `In`, `Rebind` over an unmodified `*sql.DB` |

@@ -804,6 +804,8 @@ print("mean NDCG@10:", sum(per_query_ndcg) / len(per_query_ndcg))   # 0.61 -- th
 
 **Pitfall 6 -- Aggressive query rewriting collapsing distinct intents.** A query-understanding layer stemmed and synonym-expanded every query, including proper nouns -- "cats the musical tickets" was stemmed and expanded with pet-supply synonyms, burying the actual Broadway listing under cat-food results. Fix: gate aggressive rewriting behind an intent or entity check (a capitalized multi-word phrase or a recognized title should skip stemming and synonym expansion), and A/B test any change to query understanding the same way a ranking model change would be tested, since it alters retrieval just as much as a new scoring function does.
 
+**Pitfall 7 -- A bf16 cross-encoder reranker ranking at near-random quality.** A team loaded a sentence-transformers `CrossEncoder` in bfloat16 to halve reranker memory. Before sentence-transformers 6.0 the sigmoid ran in bf16, saturated, and collapsed the top candidates onto a few tied scores: `cross-encoder/ettin-reranker-32m-v1` scored mean NDCG@10 0.18 on three NanoBEIR datasets under v5.7.0 against 0.68 under v6.0.0, which upcasts scoring to float32. Fix: upgrade to 6.x (requires `transformers` 5.x), or keep the reranker in float32, and gate any dtype change on an offline NDCG check.
+
 ---
 
 ## 11. Technologies & Tools

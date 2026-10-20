@@ -18,6 +18,8 @@ Core capabilities covered in this module:
 - OIDC and third-party OAuth2 (Google, GitHub): authorization code flow
 - CSRF protection: SameSite cookies, double-submit cookie pattern
 - Token blacklisting with Redis for explicit logout
+- Passkeys (WebAuthn) for phishing-resistant login with `webauthn` (py_webauthn)
+- Sender-constrained tokens: DPoP (RFC 9449) and mTLS-bound tokens (RFC 8705)
 - Cross-links: `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md`, `../configuration_and_settings_management/configuration_and_settings_management.md`
 
 Python version: 3.13/3.14. FastAPI version: 0.140+. Pydantic version: v2.
@@ -79,9 +81,49 @@ Static long-lived keys issued per client. Simpler than OAuth2, no token refresh 
 
 Stateless tokens signed by the server. The payload carries claims (`sub`, `exp`, `iat`, `scopes`). Verification requires only the public key (RS256) or shared secret (HS256) — no database round-trip per request. Trade-off: no revocation without a blocklist.
 
+The same security dependencies (`OAuth2PasswordBearer`, `HTTPBearer`, `APIKeyCookie`, and the rest) work on WebSocket routes since FastAPI 0.144.0. Browsers cannot send an `Authorization` header on a WebSocket upgrade, so see [WebSockets, SSE, and Streaming](../websockets_sse_and_streaming/websockets_sse_and_streaming.md) for the cookie and ticket options.
+
 ### 4.5 Session Cookies
 
 Server-side sessions stored in Redis or a database. The cookie carries only a session ID. Full revocation is trivial (delete the session). Higher per-request overhead (one Redis lookup). Appropriate for server-rendered HTML apps.
+
+### 4.6 Passkeys (WebAuthn)
+
+A passkey replaces the password step, not the token. At registration the user's authenticator
+(platform authenticator, phone, or security key) creates a key pair scoped to your RP ID (for
+example `example.com`) and your server stores the credential ID, public key and signature
+counter. At login the server sends a random challenge; the browser builds `clientDataJSON`
+containing the challenge and **the origin it is actually on**, and the authenticator signs
+`authenticatorData || SHA-256(clientDataJSON)`. The server checks the signature, the challenge,
+the origin, the RP ID hash and the user-verification flag, then issues the same session or JWT
+pair as any other login.
+
+That is why passkeys resist phishing where TOTP codes and push approvals do not: the user never
+types a secret, the browser writes the origin rather than the user, and a credential for
+`example.com` is never offered to `examp1e.com`. A real-time phishing proxy cannot replay a
+code it never sees. The FastAPI side is two endpoint pairs (registration options/verify, login
+options/verify) around the `webauthn` library (py_webauthn, 3.0.1); see Section 6.11.
+
+### 4.7 Sender-Constrained Tokens (DPoP, mTLS)
+
+A bearer token works for whoever holds it, so a token copied from a log, a proxy, a browser
+extension or a compromised device is a full credential until it expires. A sender-constrained
+token is bound to a key the client holds, and the resource server rejects it without proof of
+that key.
+
+- **DPoP** (RFC 9449, September 2023). The client generates a key pair (usually ES256), and every
+  request carries a `DPoP` header: a short JWT with `typ: dpop+jwt`, the public key in the `jwk`
+  header, and claims `jti`, `htm` (method), `htu` (URL without query), `iat` and `ath` (base64url
+  SHA-256 of the access token). The authorization server puts the key's RFC 7638 thumbprint in
+  the access token as `cnf.jkt`, and the API sends it as `Authorization: DPoP <token>`. Works at
+  the application layer, so it fits browsers and mobile apps behind any proxy.
+- **mTLS-bound tokens** (RFC 8705, February 2020). The token carries `cnf["x5t#S256"]`, the
+  SHA-256 thumbprint of the client certificate used on the TLS connection. Fits service-to-service
+  traffic that already has client certificates; the API must receive the verified certificate
+  from whatever terminates TLS, usually as a header your ingress sets and strips from client input.
+
+The FAPI 2.0 Security Profile requires one of the two for access tokens. Section 6.12 shows a DPoP
+check as a FastAPI dependency.
 
 ---
 
@@ -184,7 +226,7 @@ stateDiagram-v2
     FamilyRevoked --> [*] : entire token family deleted
 ```
 
-*Rotation is what makes reuse detectable: a legitimate refresh always retires the old token into a fresh `Active` one, so a second use of the same raw value can only mean the token already leaked (see Q5 and Q19).*
+*Rotation is what makes reuse detectable: a legitimate refresh always retires the old token into a fresh `Active` one, so a second use of the same raw value can only mean the token already leaked (see Q5 and Q22).*
 
 ### Scope-Based Authorization
 
@@ -275,6 +317,13 @@ claims = jwt.decode(
     issuer="https://accounts.google.com",
 )
 ```
+
+Since PyJWT 2.14.0 `PyJWKClient` refuses HTTP redirects when it fetches the JWKS (a redirect target is not a trusted key source) and limits how often an unknown `kid` can force a refetch, so a stream of tokens with random `kid` values can no longer turn your API into a load generator against the identity provider.
+
+With a JWKS, take the algorithm from the key, not from the token header:
+`algorithms=[signing_key.algorithm_name]`. `PyJWK.algorithm_name` comes from the key's `alg`
+member (or its key type), so a token whose header claims a different algorithm than the key it
+names fails, which closes the mixed-allowlist form of key confusion described in Pitfall 1.
 
 Decoding raises `jwt.ExpiredSignatureError` on an expired token and `jwt.InvalidSignatureError` on a tampered one; both subclass `jwt.PyJWTError`, so catch that at the dependency boundary and translate to a single generic 401.
 
@@ -686,6 +735,148 @@ async def get_api_key(
     return client
 ```
 
+### 6.11 Passkey Login Endpoints with `webauthn`
+
+The challenge is the replay defense, so it must be random, stored server-side, bound to the
+browser that asked for it, and usable once. Redis `GETDEL` (Redis 6.2+) gives the single use:
+
+```python
+import secrets
+from typing import Annotated
+
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from webauthn import (
+    generate_authentication_options,
+    options_to_json,
+    verify_authentication_response,
+)
+from webauthn.helpers.structs import UserVerificationRequirement
+
+RP_ID = "example.com"
+ORIGIN = "https://example.com"
+router = APIRouter(prefix="/passkeys")
+
+
+@router.post("/login/options")
+async def login_options(redis: Redis = Depends(get_redis)) -> Response:
+    opts = generate_authentication_options(
+        rp_id=RP_ID, user_verification=UserVerificationRequirement.REQUIRED
+    )
+    challenge_id = secrets.token_urlsafe(16)
+    await redis.set(f"webauthn:chal:{challenge_id}", opts.challenge, ex=300)
+    resp = Response(options_to_json(opts), media_type="application/json")
+    resp.set_cookie("chal_id", challenge_id, httponly=True, secure=True,
+                    samesite="strict", max_age=300)
+    return resp
+
+
+@router.post("/login/verify")
+async def login_verify(
+    credential: dict,
+    chal_id: Annotated[str, Cookie()],
+    redis: Redis = Depends(get_redis),
+    db: AsyncSession = Depends(get_db),
+) -> TokenPair:
+    challenge = await redis.getdel(f"webauthn:chal:{chal_id}")      # single use
+    stored = await get_passkey(db, credential["id"])                 # by credential ID
+    if challenge is None or stored is None:
+        raise HTTPException(status_code=401, detail="Login failed")
+    verified = verify_authentication_response(
+        credential=credential,
+        expected_challenge=challenge,
+        expected_rp_id=RP_ID,
+        expected_origin=ORIGIN,
+        credential_public_key=stored.public_key,
+        credential_current_sign_count=stored.sign_count,
+        require_user_verification=True,      # library default is False
+    )
+    stored.sign_count = verified.new_sign_count
+    await db.commit()
+    return issue_token_pair(stored.user_id)   # the same access + refresh pair as Section 6.6
+```
+
+Three details carry the security. `require_user_verification` defaults to `False` in
+`verify_authentication_response`, which accepts a touch without PIN or biometric; for a
+passwordless login that makes the passkey a single possession factor, so set it to `True`.
+`expected_origin` is compared exactly, so list every real origin (web and any
+`android:apk-key-hash:` origin for an Android app) and nothing else. The sign counter is checked
+only when it is non-zero: synced passkeys usually report 0 every time, and the library accepts
+that, while a hardware key whose counter goes backwards raises, which flags a cloned key.
+
+### 6.12 DPoP Check as a FastAPI Dependency
+
+The resource-server half of RFC 9449, using PyJWT and Redis for `jti` replay protection (tested
+on PyJWT 2.15.1: a valid proof returns 200; a replayed proof, a stolen token with the attacker's
+own key, and the same token sent as `Bearer` each return 401):
+
+```python
+import base64, hashlib, json, time
+from typing import Annotated
+
+import jwt
+from fastapi import Depends, Header, HTTPException, Request
+
+DPOP_ALGS = {"ES256", "EdDSA", "PS256"}
+THUMBPRINT_MEMBERS = {"EC": ("crv", "kty", "x", "y"), "RSA": ("e", "kty", "n"),
+                      "OKP": ("crv", "kty", "x")}
+PRIVATE_MEMBERS = {"d", "p", "q", "dp", "dq", "qi"}
+
+
+def b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def jwk_thumbprint(jwk: dict) -> str:                    # RFC 7638
+    members = {k: jwk[k] for k in THUMBPRINT_MEMBERS[jwk["kty"]]}
+    canonical = json.dumps(members, separators=(",", ":"), sort_keys=True)
+    return b64url(hashlib.sha256(canonical.encode()).digest())
+
+
+def reject(error: str) -> HTTPException:
+    return HTTPException(401, detail=error,
+                         headers={"WWW-Authenticate": f'DPoP error="{error}"'})
+
+
+async def dpop_claims(
+    request: Request,
+    authorization: Annotated[str, Header()],
+    dpop: Annotated[str, Header()],
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    scheme, _, access_token = authorization.partition(" ")
+    if scheme != "DPoP":
+        raise reject("invalid_token")                    # a bound token sent as Bearer
+    header = jwt.get_unverified_header(dpop)
+    jwk = header.get("jwk", {})
+    if (header.get("typ") != "dpop+jwt" or header.get("alg") not in DPOP_ALGS
+            or not jwk or PRIVATE_MEMBERS & jwk.keys()):
+        raise reject("invalid_dpop_proof")
+    try:
+        proof = jwt.decode(dpop, jwt.PyJWK(jwk).key, algorithms=[header["alg"]],
+                           options={"require": ["jti", "htm", "htu", "iat"]})
+    except jwt.PyJWTError:
+        raise reject("invalid_dpop_proof")
+    htu = str(request.url.replace(query="", fragment=""))
+    ath = b64url(hashlib.sha256(access_token.encode("ascii")).digest())
+    if (proof["htm"] != request.method or proof["htu"] != htu
+            or abs(time.time() - proof["iat"]) > 60 or proof.get("ath") != ath):
+        raise reject("invalid_dpop_proof")
+    if not await redis.set(f"dpop:jti:{proof['jti']}", 1, nx=True, ex=120):
+        raise reject("invalid_dpop_proof")               # replayed proof
+    claims = verify_access_token(access_token)           # normal RS256/ES256 verification
+    if claims.get("cnf", {}).get("jkt") != jwk_thumbprint(jwk):
+        raise reject("invalid_token")                    # token bound to another key
+    return claims
+```
+
+`htu` must equal the URL the client called, so behind a proxy run Uvicorn with
+`--proxy-headers` and the right `--forwarded-allow-ips` (and `root_path` for a path prefix), or
+every proof fails on scheme or host. The `jti` store needs a TTL a little longer than the `iat`
+window (120 s against 60 s here) and must be shared by all replicas, which is why it is Redis and
+not process memory. To make clients use fresh server-chosen values instead of their own clock,
+answer with `WWW-Authenticate: DPoP error="use_dpop_nonce"` and a `DPoP-Nonce` header, and then
+require the `nonce` claim.
+
 ---
 
 ## 7. Real-World Examples
@@ -796,7 +987,7 @@ flowchart LR
 
 ## 10. Common Pitfalls
 
-### Pitfall 1: Algorithm confusion — accepting "none"
+### Pitfall 1: Algorithm confusion: accepting "none" or mixing HS and RS
 
 ```python
 # BROKEN: no algorithm allowlist — the shape that lets an attacker send alg: "none"
@@ -812,6 +1003,20 @@ decoded = jwt.decode(
 ```
 
 The `alg: none` attack: an attacker strips the signature and sets `"alg": "none"` in the header. A library that does not enforce an algorithm allowlist will accept the unsigned token. PyJWT 2.x refuses to guess — the broken call above raises `jwt.exceptions.DecodeError: It is required that you pass in a value for the "algorithms" argument when calling decode()`, and once you pass `algorithms=["HS256"]`, an `alg: none` token raises `InvalidAlgorithmError`. Pass the allowlist explicitly on every decode; other JWT libraries are less strict.
+
+The second form is HS/RS key confusion:
+
+```python
+# BROKEN: one decode call accepts both families, keyed with the RSA public key
+claims = jwt.decode(token, PUBLIC_KEY_PEM, algorithms=["RS256", "HS256"])
+# The public key is public. An attacker signs a token with HMAC-SHA256 using the
+# PEM bytes as the HMAC secret, sets "alg": "HS256", and it verifies.
+
+# FIX: one algorithm family per key; the allowlist matches the key type
+claims = jwt.decode(token, PUBLIC_KEY_PEM, algorithms=["RS256"])
+```
+
+PyJWT refuses PEM and SSH public keys as HMAC secrets, and 2.13.0 and 2.14.0 (2026-09-11) closed bypasses where the public key arrived as a JWK, a JWKS, DER, an encoded string, or a BOM-prefixed PEM (GHSA-xgmm-8j9v-c9wx, GHSA-r6x4-923q-g947 and others). Do not rely on that guard: the bug is the mixed allowlist, and the library check is the second line. Pin `PyJWT>=2.14`.
 
 ### Pitfall 2: Timing oracle in password comparison
 
@@ -885,7 +1090,7 @@ Returning 401 (Unauthenticated) when the user is authenticated but lacks permiss
 
 | Tool | Role | Notes |
 |---|---|---|
-| `PyJWT` (jwt 2.x) | JWT encode/decode + JWKS | What FastAPI's own security tutorial uses; ships `PyJWKClient`, so OIDC needs no extra library |
+| `PyJWT` (jwt 2.x) | JWT encode/decode + JWKS | What FastAPI's own security tutorial uses; ships `PyJWKClient`, so OIDC needs no extra library. Pin `>=2.14` for the HMAC key-confusion and JWKS redirect fixes; 2.15.1 released 2026-09-28 |
 | `python-jose` | JWT + JWK + JWE | Reach for it only when you need JWE (encrypted tokens); PyJWT covers signing and JWKS |
 | `pwdlib[argon2,bcrypt]` | Password hashing | The maintained front end FastAPI's tutorial uses; `PasswordHash.recommended()` is argon2id, `verify_and_update()` rehashes legacy hashes |
 | `argon2-cffi` | argon2 hashing | Lower-level argon2id binding; defaults `m=65536, t=3, p=4`; used by pwdlib under the hood |
@@ -893,6 +1098,8 @@ Returning 401 (Unauthenticated) when the user is authenticated but lacks permiss
 | `fastapi.security` | OAuth2/APIKey schemes | Built-in — `OAuth2PasswordBearer`, `APIKeyHeader`, `HTTPBearer` |
 | `redis.asyncio` | Refresh token store, blocklist | Sub-millisecond TTL operations; the async client ships inside `redis-py` itself (no separate `aioredis`) |
 | `authlib` | OAuth2 client / OIDC | Full OAuth2/OIDC client for third-party login flows |
+| `webauthn` (py_webauthn) | Passkey registration and login | 3.0.1 (2026-09-25), Python 3.10+; `generate_*_options` and `verify_*_response`; set `require_user_verification=True` |
+| `joserfc` | JOSE / JWK toolkit | JWK thumbprints and JWE when you would otherwise hand-roll them, for example in a DPoP verifier |
 | `Starlette CORS middleware` | CORS | Already in FastAPI; list `allow_origins` explicitly — browsers reject `allow_origins=["*"]` together with `allow_credentials=True` |
 
 ---
@@ -923,55 +1130,95 @@ On each use of a refresh token, the server deletes the old token and issues a ne
 **Short:** PyJWT 2.x blocks the alg:none attack by requiring an explicit algorithms allowlist and rejecting mismatched algorithms.
 An attacker strips the JWT signature, sets `"alg": "none"` in the header, and sends it. JWT libraries that do not enforce an algorithm allowlist may accept the unsigned token as valid. PyJWT 2.x closes this two ways: omitting `algorithms` raises `DecodeError` ("It is required that you pass in a value for the 'algorithms' argument"), and presenting an `alg: none` token against `algorithms=["HS256"]` raises `InvalidAlgorithmError`. Always pass `algorithms=["HS256"]` (or `["RS256"]` for asymmetric). Never pass `algorithms=jwt.algorithms.get_default_algorithms()` unless you fully understand what it includes.
 
-**Q7: When should you use RS256 instead of HS256?**
+**Q7: A verifier accepts `algorithms=["RS256", "HS256"]` and passes the RSA public key as the key. How can an attacker forge a token?**
+**Short:** They HMAC-sign a token using the public key bytes as the secret and set alg to HS256; the verifier runs HMAC with that same public key, so the forgery verifies.
+
+This is HS/RS key confusion. The public key is published, often on a JWKS endpoint. With HS256
+allowed, the verifier treats whatever key it was given as a shared HMAC secret, so a token
+whose header says `"alg": "HS256"` and whose signature is HMAC-SHA256 over the PEM bytes
+verifies as genuine, with any `sub` or `scopes` the attacker likes. The fix is one algorithm
+family per key: an RSA key gets `algorithms=["RS256"]` and nothing else. PyJWT also refuses
+public-key material as an HMAC secret, and 2.14.0 (2026-09-11) closed bypasses where the key
+was supplied as JWK, JWKS, DER, or a BOM-prefixed PEM, so pin `PyJWT>=2.14`. Treat the
+library check as the backstop and the allowlist as the real fix.
+
+**Q8: When should you use RS256 instead of HS256?**
 **Short:** Use RS256 when multiple services must verify tokens without holding the signing secret, and HS256 only within a single trusted service.
 Use RS256 when multiple independent services need to verify tokens, or when tokens are consumed by third parties. With RS256, the private key stays on the auth server; services fetch the public key from a JWKS endpoint. A compromised microservice cannot forge tokens because it only has the public key. Use HS256 for single-service applications where the secret can be kept on one server. Never share HS256 secrets across untrusted boundaries.
 
-**Q8: What is `SecurityScopes` and why use it over a plain `Depends`?**
+**Q9: What is `SecurityScopes` and why use it over a plain `Depends`?**
 **Short:** SecurityScopes lets one get_current_user dependency enforce different per-route scopes and emit correct WWW-Authenticate headers.
 `SecurityScopes` is a FastAPI-specific class injected into dependencies declared via `Security()`. It carries the list of scopes required by the current route, allowing a single `get_current_user` function to handle different permission requirements across routes without duplicating the function. It also generates correct `WWW-Authenticate` response headers listing required scopes, which is part of the RFC 6750 Bearer token spec. A plain `Depends` cannot carry this route-specific scope metadata.
 
-**Q9: How would you implement explicit logout for a JWT-based API?**
+**Q10: How would you implement explicit logout for a JWT-based API?**
 **Short:** Explicit JWT logout blacklists the token's jti in Redis with a TTL matching its remaining expiry.
 Add a `jti` (JWT ID) claim — a UUID — to every issued access token. On logout, compute the remaining TTL from the `exp` claim and store the `jti` in Redis with that TTL as the key expiry. On every authenticated request, check whether the `jti` exists in the Redis blacklist before completing auth. The Redis key auto-expires when the token would have expired naturally, so the blocklist does not grow unboundedly. Logout also revokes the refresh token by deleting it from the refresh token store.
 
-**Q10: What is the difference between `OAuth2PasswordBearer` and `HTTPBearer`?**
+**Q11: What is the difference between `OAuth2PasswordBearer` and `HTTPBearer`?**
 **Short:** OAuth2PasswordBearer renders an interactive login form in /docs, while HTTPBearer just extracts a raw bearer token.
 Both extract a Bearer token from the `Authorization` header. `OAuth2PasswordBearer` declares an OAuth2 password flow in the OpenAPI spec, which renders a username/password form in `/docs`. `HTTPBearer` is a simpler scheme that just extracts the token and declares a generic HTTP Bearer scheme in OpenAPI — it shows a raw token field in `/docs`. Use `OAuth2PasswordBearer` when you want the interactive `/docs` login form. Use `HTTPBearer` for API key or custom token schemes where the token acquisition flow is external.
 
-**Q11: How do you store API keys securely?**
+**Q12: How do you store API keys securely?**
 **Short:** Store only a SHA-256 hash of an API key and compare incoming keys with a constant-time comparison.
 Never store the raw API key. On issuance, return the raw key to the user once (it will not be shown again — like GitHub personal access tokens). Immediately compute and store `SHA-256(raw_key)`. On each request, compute `SHA-256(incoming_key)` and compare against stored hashes. Use a constant-time comparison (`hmac.compare_digest`) to prevent timing attacks. For rotation: issue a new key, allow a grace period where both are valid, then revoke the old one.
 
-**Q12: Explain the CSRF risk with cookie-based auth and how to mitigate it.**
+**Q13: Explain the CSRF risk with cookie-based auth and how to mitigate it.**
 **Short:** Cookie-based auth is vulnerable to CSRF because browsers auto-attach cookies; mitigate with SameSite cookies or a double-submit token.
 When using `HttpOnly` cookies for session IDs or refresh tokens, the browser automatically attaches the cookie to same-origin and cross-origin requests. A malicious site can craft a form that submits to your API — the browser includes the cookie, so the request appears authenticated. Mitigation: set `SameSite=Strict` (or `Lax` for OAuth flows requiring redirects). For APIs consumed by SPAs on different origins, use the double-submit cookie pattern: the server sets a non-HttpOnly CSRF token cookie; the client reads it via JavaScript and sends it in a header; the server validates header matches cookie. CSRF does not apply to JWT-in-Authorization-header flows because browsers do not auto-attach custom headers.
 
-**Q13: What is PKCE and when is it required?**
+**Q14: What is PKCE and when is it required?**
 **Short:** PKCE prevents authorization-code interception for public clients that can't hold a secret, and is mandatory for SPAs and mobile apps.
 PKCE (Proof Key for Code Exchange, RFC 7636) prevents authorization code interception attacks in public clients (SPAs, mobile apps) that cannot safely store a client secret. The client generates a random `code_verifier`, computes `code_challenge = SHA-256(code_verifier)`, and sends the challenge with the authorization request. When exchanging the code for tokens, the client sends the raw `code_verifier`; the server verifies the hash matches. An attacker who intercepts the code cannot exchange it without the verifier. PKCE is mandatory for SPAs and mobile apps per OAuth 2.1 draft.
 
-**Q14: How does OIDC differ from plain OAuth2?**
+**Q15: How does OIDC differ from plain OAuth2?**
 **Short:** OAuth2 issues access tokens for API authorization, while OIDC adds an id_token carrying verified user identity claims.
 OAuth2 is an authorization framework — it issues access tokens that say "you may call this API." It does not define how to get user identity. OIDC (OpenID Connect) is a thin identity layer on top of OAuth2: the token response includes an `id_token` (JWT) containing user claims (`sub`, `email`, `name`, `picture`). Your app verifies the `id_token` signature using the provider's public key from its JWKS endpoint. OIDC also standardizes the discovery endpoint (`/.well-known/openid-configuration`) so you can fetch all configuration automatically.
 
-**Q15: Why should you use `SecretStr` from pydantic for secrets?**
+**Q16: Why should you use `SecretStr` from pydantic for secrets?**
 **Short:** SecretStr masks a secret's value in str() and repr(), preventing accidental exposure in logs or serialized output.
 `SecretStr` stores the underlying string value but masks it in both `str()` (which returns `**********`) and `repr()` (which returns `SecretStr('**********')`). This means that if a `Settings` object is accidentally logged, printed in a traceback, or serialized to JSON, the secret value is never exposed. The raw value is only accessible via `.get_secret_value()`, which forces an explicit intent to use the secret. This provides a thin but effective defence-in-depth layer against accidental secret leakage in logs.
 
-**Q16: What are the security implications of long-lived JWTs?**
+**Q17: What are the security implications of long-lived JWTs?**
 **Short:** Long-lived JWTs widen a stolen token's exposure window; short-lived tokens with refresh rotation limit it to minutes.
 A stolen JWT with a 24-hour or 7-day expiry gives an attacker a large window of access. If you use short-lived access tokens (15 min) with refresh token rotation, the maximum exposure window for a stolen access token is 15 minutes. The attacker cannot silently extend access via the refresh endpoint because they do not have the refresh token (or if they do, rotation detects reuse). Long-lived JWTs are never appropriate for user-facing APIs. Use them only for inter-service calls where the services are in the same trust boundary.
 
-**Q17: How do you migrate a password store from bcrypt to argon2id without logging anyone out?**
+**Q18: How do you migrate a password store from bcrypt to argon2id without logging anyone out?**
 **Short:** Migrate hashes on successful login by calling verify_and_update and persisting the returned rehash whenever it is not None.
 Rehash on successful login, using a hasher list whose first entry is the new algorithm. In `pwdlib`, construct `PasswordHash((Argon2Hasher(), BcryptHasher()))` — the first hasher is the one used for new hashes, and the rest are kept only so old hashes still verify. Then call `verify_and_update(plain, stored)` instead of `verify()`: it returns a `(valid, new_hash)` tuple where `new_hash` is a fresh argon2id hash when the stored one used a legacy hasher, and `None` when the stored hash is already current. Persist `new_hash` whenever it is not `None`, and the store converts itself one login at a time. Note the split: `verify()` returns a plain bool, so a migration that calls it will silently never upgrade anything.
 
-**Q18: How do you prevent JWT secret leakage via error messages?**
+**Q19: How do you prevent JWT secret leakage via error messages?**
 **Short:** Keep JWT error responses generic and log detailed decode failure reasons only server-side, never in the response body.
 Never include token decoding details in HTTP error responses. The response body should be generic (`"detail": "Could not validate credentials"`) regardless of whether the failure was an expired token, wrong signature, or missing claim. Detailed JWT errors belong in server-side structured logs at DEBUG level — and even then, log the failure reason (e.g., `"jwt_error": "ExpiredSignatureError"`) without logging the raw token. Include a correlation ID in the response so operators can trace the specific request in logs if needed.
 
-**Q19: What is token family tracking and why does it matter for refresh tokens?**
+**Q20: Why are passkeys phishing-resistant when TOTP codes and push approvals are not, and what must the FastAPI verify endpoint check?**
+**Short:** The browser writes the real origin into the signed clientDataJSON and the key is scoped to the RP ID, so a look-alike site cannot obtain a usable assertion.
+
+With TOTP or push MFA the user hands a secret or an approval to whatever page is in front of
+them, so a real-time phishing proxy relays it to the real site. With a passkey the authenticator
+signs `authenticatorData || SHA-256(clientDataJSON)`, and the browser, not the user, puts the
+origin it is on and the server's challenge into `clientDataJSON`; the credential is also bound
+to an RP ID, so the browser never offers it on a different domain. The verify endpoint must
+check: a server-issued, single-use challenge (store it with a TTL and delete it on read),
+`expected_origin` and `expected_rp_id` exactly, the signature against the stored public key, and
+the user-verification flag. py_webauthn's `verify_authentication_response` defaults
+`require_user_verification` to `False`, which accepts a touch without PIN or biometric, so set
+it to `True` for passwordless login. Then issue the normal session or token pair.
+
+**Q21: What is a sender-constrained access token, and how does a FastAPI API verify a DPoP-bound one?**
+**Short:** It is bound to a client key; with DPoP the API checks a per-request signed proof and that the token's cnf.jkt equals the thumbprint of the proof's key.
+
+A bearer token is usable by anyone who copies it. A sender-constrained token is unusable without
+proof of a key the client holds: DPoP (RFC 9449) proves it per request at the application layer,
+and mTLS-bound tokens (RFC 8705) prove it with the TLS client certificate (`cnf["x5t#S256"]`).
+For DPoP the request carries `Authorization: DPoP <token>` and a `DPoP` header JWT with
+`typ: dpop+jwt` and the public `jwk`. The dependency verifies the proof's signature with that
+`jwk`, checks `htm` and `htu` against the request method and URL, a short `iat` window, `ath`
+(base64url SHA-256 of the access token) and a never-seen `jti` stored in Redis with a TTL, then
+verifies the access token itself and compares `cnf.jkt` with the RFC 7638 thumbprint of the
+proof key. A token stolen without the private key fails that last check. Behind a proxy, set
+Uvicorn's proxy headers so `request.url` matches the `htu` the client signed.
+
+**Q22: What is token family tracking and why does it matter for refresh tokens?**
 **Short:** Token family tracking revokes every refresh token from a login session at once when reuse of any one of them is detected.
 Token family tracking groups all refresh tokens issued in a single login session under a family ID. When a refresh token is presented that has already been used (indicating potential theft), the server invalidates the entire family — all refresh tokens from that login session. Without family tracking, an attacker who steals a refresh token can keep rotating it independently of the legitimate client. With family tracking, the first detected reuse triggers a full session revocation, forcing the legitimate user to log in again. Implement by storing a `family_id` with each refresh token in Redis and using a Lua script to atomically check-and-revoke.
 
@@ -981,7 +1228,7 @@ Token family tracking groups all refresh tokens issued in a single login session
 
 1. **Use `SecretStr` for all secrets in `pydantic-settings`.** Prevents accidental logging. Load from environment variables, never from `.env` files committed to version control.
 
-2. **Always pass `algorithms=["HS256"]` explicitly to `jwt.decode()`.** Prevents algorithm confusion attacks including `alg: none`.
+2. **Always pass `algorithms=["HS256"]` explicitly to `jwt.decode()`.** Prevents algorithm confusion attacks including `alg: none`. List one algorithm family per key, never `["RS256", "HS256"]` together, and pin `PyJWT>=2.14`.
 
 3. **Use argon2id via `pwdlib[argon2]`, or bcrypt at cost 12 or above if you must.** Measure hash time in your production environment — aim for 200–300 ms for interactive login.
 
@@ -1001,7 +1248,9 @@ Token family tracking groups all refresh tokens issued in a single login session
 
 11. **Rotate signing keys without downtime using JWKS.** For RS256, publish the public key set at a discoverable URL. Maintain `kid` (key ID) in the JWT header. Keep the old public key in the JWKS set for the duration of the longest-lived token after rotation.
 
-12. **Rate-limit the `/auth/token` endpoint.** Brute-force protection is not optional. Even with bcrypt at cost 12, an attacker with a botnet can try common passwords. Use `slowapi` (Redis-backed rate limiter for FastAPI) or a reverse proxy rate limit of 5 requests/minute per IP on auth endpoints.
+12. **Use passkeys for interactive login and sender-constrained tokens for high-value APIs.** Verify WebAuthn assertions with `require_user_verification=True` and single-use challenges; bind access tokens with DPoP for public clients and mTLS for services that already hold certificates.
+
+13. **Rate-limit the `/auth/token` endpoint.** Brute-force protection is not optional. Even with bcrypt at cost 12, an attacker with a botnet can try common passwords. Use `slowapi` (Redis-backed rate limiter for FastAPI) or a reverse proxy rate limit of 5 requests/minute per IP on auth endpoints.
 
 ---
 

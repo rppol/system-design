@@ -36,10 +36,10 @@ error, no warning, just latency and handshake CPU that nobody attributes correct
 The third is `resp.Body`. It is an `io.ReadCloser` you must close on **every** path —
 including the error paths and the non-2xx paths where there is "nothing to read" — or you leak
 a file descriptor and a connection. And closing alone is not sufficient for reuse: an
-unread body means the connection cannot be handed back to the pool. Go `[1.27]` narrowed this
-sharp edge substantially by making HTTP/1 response bodies **auto-drain unread content on
-Close**, up to a conservative limit, which turns many close-but-do-not-drain bugs into
-non-events. It did not remove the obligation to close.
+unread body means the connection cannot be handed back to the pool. Since Go `[1.27]` the
+`Transport` **drains an unread HTTP/1 body in the background on Close**, for up to 50 ms or
+256 KB, so a plain `Close` keeps the connection in the common case. It did not remove the
+obligation to close.
 
 This module covers all of that plus what you build on top: the timeout ladder from
 `DialContext` up to `Client.Timeout`, what Go's client retries on its own and what it
@@ -95,8 +95,9 @@ the remaining budget before each attempt rather than after it.
   concurrency to one host.
 - **`defer resp.Body.Close()` immediately after checking `err`**, on every path, for every
   status code.
-- **Drain before closing** when you intend to reuse the connection and want deterministic
-  behaviour across Go versions.
+- **Do not drain `resp.Body` by hand on Go 1.27+.** The `Transport` drains unread HTTP/1
+  bodies itself; a manual `io.Copy` drain blocks the caller and costs more than a new
+  connection once the body is large.
 - **Never use `http.DefaultClient` or `http.Get` in a service.** They have no timeout, so a
   hung server hangs your goroutine forever.
 - **`Client.Timeout` is a whole-request ceiling, per `Do`.** Per-attempt control comes from
@@ -372,17 +373,14 @@ turns HTTP/2 off whenever you supply your own `TLSClientConfig`, `Dial`, `DialTL
 `DialContext`, on the theory that your custom code may not expect it. `DefaultTransport` sets
 `ForceAttemptHTTP2: true`, and `Clone()` carries that across.
 
-### 6.2 The response body: close everywhere, drain when it matters
+### 6.2 The response body: close everywhere, let the Transport drain
 
 ```go
 resp, err := c.http.Do(req)
 if err != nil {
     return nil, fmt.Errorf("fetch item: %w", err) // resp is nil, nothing to close
 }
-defer func() {
-    io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10)) // drain a bounded amount
-    resp.Body.Close()
-}()
+defer resp.Body.Close()
 
 if resp.StatusCode != http.StatusOK {
     return nil, fmt.Errorf("fetch item: unexpected status %d", resp.StatusCode)
@@ -398,20 +396,21 @@ until the garbage collector runs a finalizer, which is not a schedule you can pl
 common shape of this leak, and it only shows up when the downstream starts erroring — that
 is, during an incident.
 
-**Close is not the same as drain.** For connection reuse the remaining bytes have to come off
-the socket. Historically, closing a partially read body meant the `Transport` gave up on the
-connection and closed it. Go `[1.27]` changed this: **HTTP/1 response bodies now
-automatically drain unread content on Close, up to a conservative limit**, which recovers
-reuse for the common case of a small unread body. Two caveats keep the explicit drain worth
-writing. The limit is conservative, so a large unread body is still discarded along with its
-connection. And the same release notes point out the flip side — code that had been
-*benefiting* from connections being thrown away, because it kept far too many idle
-connections around, can see a regression; the honest fix there is to size the pool properly
-rather than to disable keep-alives.
+**Close is not the same as drain.** HTTP/1 sends responses back to back on one connection, so
+the remaining body bytes have to come off the socket before the next response can be read.
+Through Go 1.26, closing a partially read body made the `Transport` drop the connection. Since
+Go `[1.27]` the `Transport` **drains an unread HTTP/1 body asynchronously on Close, for up to
+50 ms or 256 KB**, and skips the drain when the response carries `Connection: close`. HTTP/2
+multiplexes streams, so an unread body there never blocked reuse. The Go blog measured 100
+sequential HTTP/1 requests that never read the body at about 710 ms on Go 1.26 and 150 ms on
+Go 1.27. Code that had been *benefiting* from connections being thrown away, because it kept
+far too many idle connections around, can see a regression; the fix is to size the pool, not
+to disable keep-alives.
 
-**Bound the drain.** `io.Copy(io.Discard, resp.Body)` on an error path will happily read a
-hostile or buggy server's 4 GB body. `io.LimitReader` caps what you are willing to spend to
-save a connection.
+**Do not drain by hand.** A manual `io.Copy(io.Discard, resp.Body)` blocks the caller on bytes
+the `Transport` would drain in the background, and an unbounded one will read a hostile or
+buggy server's 4 GB body. Past 256 KB a new connection is cheaper than the download.
+`defer resp.Body.Close()` is the whole idiom.
 
 ### 6.3 Timeouts, and why retries and `Client.Timeout` compose badly
 
@@ -465,7 +464,6 @@ func attemptOnce(ctx context.Context, c *http.Client, mk func(context.Context) *
     defer resp.Body.Close()
 
     if resp.StatusCode >= 500 {
-        io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10)) // drain, keep the connection
         return nil, fmt.Errorf("upstream returned %s", resp.Status)
     }
     return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -519,7 +517,7 @@ customer twice. The fix is an **idempotency key** — a client-generated UUID se
 which the server stores and uses to return the original response instead of re-executing:
 
 ```go
-key := uuid.NewString() // generated ONCE, outside the retry loop
+key := uuid.New().String() // stdlib uuid [1.27]; generated ONCE, outside the retry loop
 req.Header.Set("Idempotency-Key", key)
 ```
 
@@ -931,7 +929,6 @@ if err != nil {
 }
 defer resp.Body.Close()  // FIRST, before any status check
 if resp.StatusCode != http.StatusOK {
-    io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
     return fmt.Errorf("status %d", resp.StatusCode)
 }
 return json.NewDecoder(resp.Body).Decode(out)
@@ -959,7 +956,7 @@ for attempt := 0; attempt < 3; attempt++ {
 }
 
 // FIX: one key per logical operation, generated OUTSIDE the loop.
-key := uuid.NewString()
+key := uuid.New().String()
 for attempt := 0; attempt < 3; attempt++ {
     req := newPaymentRequest(ctx, body)
     req.Header.Set("Idempotency-Key", key) // same key on every attempt
@@ -1095,19 +1092,19 @@ ephemeral ports. The fix is `MaxIdleConnsPerHost` set to your peak concurrency t
 and it must be paired with a `MaxIdleConns` large enough to cover every host, or the global
 cap simply moves the same problem one level up.
 
-**Q: You must close resp.Body — but why is closing it not enough for connection reuse?**
-**Short:** Unread bytes are still framed on the socket, so the transport cannot hand it back to the pool until the remaining content has been consumed.
+**Q: Why can an unread resp.Body block connection reuse, and should you drain it before Close?**
+**Short:** HTTP/1 frames responses back to back, so unread bytes block reuse; since Go 1.27 the Transport drains up to 256 KB or 50 ms on Close, so just close it.
 
 Closing releases the file descriptor and stops the leak; reuse additionally requires that the
 response has been fully read off the wire, because HTTP/1.1 has no way to skip ahead to the
-next response on the same connection. Historically, closing a partially read body meant the
-connection was discarded, which is why the idiom is
-`io.Copy(io.Discard, resp.Body)` before `Close`. Go 1.27 softened this considerably: HTTP/1
-response bodies now auto-drain unread content on `Close`, up to a conservative limit, so the
-common case of a small unread body recovers reuse automatically. Keep the explicit drain
-anyway, bounded by an `io.LimitReader`, because the automatic limit is deliberately small and
-because an unbounded drain of a hostile server's body is its own problem. What has not
-changed at all is the obligation to close on every path, including non-2xx and error returns.
+next response on the same connection. Through Go 1.26, closing a partially read body discarded
+the connection, which is why `io.Copy(io.Discard, resp.Body)` before `Close` spread as an
+idiom. Since Go 1.27 the `Transport` drains an unread HTTP/1 body asynchronously on `Close`,
+for up to 50 ms or 256 KB, and skips the drain when the response says `Connection: close`;
+HTTP/2 never needed a drain. The Go blog measured 100 sequential requests that ignore the body
+at about 710 ms on 1.26 and 150 ms on 1.27. A manual drain adds nothing on 1.27: it blocks
+the caller, and past 256 KB a new connection is cheaper than the download. What has not
+changed is the obligation to close on every path, including non-2xx and error returns.
 
 **Q: How does Client.Timeout interact with retries, and what should you use instead?**
 **Short:** It applies per Do call rather than per logical operation, so three retries against a three-second client is a nine-second worst case plus backoff.
@@ -1321,7 +1318,7 @@ number you can read before you ship any instrumentation at all.
 - **Keep `IdleConnTimeout` strictly below the server's `IdleTimeout`.** 90 against 120 is a
   reasonable pair.
 - **`defer resp.Body.Close()` on the line after the error check**, before any status
-  inspection, and drain through an `io.LimitReader` on paths you abandon.
+  inspection. The `Transport` drains what you leave unread `[1.27]`.
 - **Drive budgets from the context, not `Client.Timeout`.** Total budget from the caller,
   per-attempt ceiling derived with `WithTimeout`, `ctx.Err()` checked before each attempt.
 - **Use `ResponseHeaderTimeout` to bound server think time** without capping a large
@@ -1465,7 +1462,7 @@ func (s *Checkout) Place(ctx context.Context, o Order) error {
     }
 
     // One key per logical payment, generated OUTSIDE the retry loop.
-    key := uuid.NewString()
+    key := uuid.New().String()
     payload := body(o, price)
 
     for attempt := 0; attempt < 3; attempt++ {
@@ -1482,10 +1479,7 @@ func (s *Checkout) Place(ctx context.Context, o Order) error {
         resp, err := s.pay.Do(req)
         if err == nil {
             func() {
-                defer func() {
-                    io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-                    resp.Body.Close() // closed on EVERY path
-                }()
+                defer resp.Body.Close() // closed on EVERY path
                 if resp.StatusCode == http.StatusOK {
                     err = json.NewDecoder(resp.Body).Decode(&o.Receipt)
                 } else if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {

@@ -159,6 +159,30 @@ sequenceDiagram
 
 The `TrustManager` decides whether to trust the server's certificate chain; hostname verification (SAN match) is a *separate* step that `SSLSocket` skips by default — the classic MITM hole covered in Section 10.
 
+### TLS 1.3 Handshake (1-RTT, RFC 8446)
+
+```mermaid
+sequenceDiagram
+    participant C as Client (SSLEngine)
+    participant S as Server (SSLContext)
+    C->>S: ClientHello + key_share (x25519 public) + supported_versions
+    S->>C: ServerHello + key_share (server x25519 public)
+    Note over C,S: both run ECDHE now and derive handshake keys via HKDF<br/>everything below is encrypted
+    S->>C: {EncryptedExtensions}
+    opt mTLS
+        S->>C: {CertificateRequest}
+    end
+    S->>C: {Certificate} + {CertificateVerify} + {Finished}
+    Note over C: TrustManager validates chain + hostname
+    opt mTLS
+        C->>S: {Certificate} + {CertificateVerify}
+    end
+    C->>S: {Finished} + first application data
+    Note over C,S: one round trip before the request, against two in TLS 1.2
+```
+
+The client guesses the key-exchange group and sends its public key in the first message, so the server can derive keys and encrypt from its first reply. If the guess is wrong (the server supports none of the offered key shares), the server sends a `HelloRetryRequest` and the handshake costs two round trips.
+
 ### Envelope Encryption (KEK / DEK)
 
 ```mermaid
@@ -532,6 +556,67 @@ try (SSLSocket s = (SSLSocket) sf.createSocket("api.example.com", 443)) {
 
 `HttpClient` (Java 11) and `HttpsURLConnection` do hostname verification for you; a raw `SSLSocket` does not until you set `setEndpointIdentificationAlgorithm("HTTPS")`. See [Networking & HTTP Client](../networking_and_http_client/networking_and_http_client.md) for the transport layer that sits on top of this.
 
+### TLS 1.3 in SunJSSE [JEP 332, Java 11]
+
+SunJSSE implements TLS 1.3 since Java 11 and negotiates it by default on both client and server. The protocol removes most of what made TLS 1.2 configuration dangerous:
+
+| Aspect | TLS 1.2 | TLS 1.3 |
+|--------|---------|---------|
+| Full handshake | 2 round trips | 1 round trip (2 after a `HelloRetryRequest`) |
+| Key exchange | RSA key transport, static DH, or (EC)DHE | (EC)DHE only, so every session has forward secrecy |
+| Server certificate on the wire | Plaintext, visible to any observer | Encrypted under handshake keys |
+| Cipher suites | Key exchange + auth + cipher + MAC, hundreds registered with IANA | AEAD + hash only: `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256` (plus two CCM suites the JDK does not enable) |
+| Removed | - | CBC suites, RC4, compression, renegotiation, SHA-1 and MD5 handshake signatures |
+| Resumption | Session IDs or session tickets | PSK from a `NewSessionTicket`, optionally with 0-RTT early data |
+
+RSA key transport is the key removal. In TLS 1.2 the client could encrypt the premaster secret with the server's RSA public key, so anyone who later obtained that private key could decrypt every recorded session. TLS 1.3 accepts only ephemeral Diffie-Hellman, so a stolen certificate key lets an attacker impersonate the server from then on but does not decrypt past traffic.
+
+**0-RTT early data.** On a resumed connection, RFC 8446 lets the client send application data in its first flight, encrypted under a key derived from the PSK alone. The server's random value plays no part in that key, so an attacker who records the first flight can send it again and the server accepts it again. RFC 8446 §8 limits early data to replay-safe (idempotent) requests. SunJSSE does not implement 0-RTT (it is a non-goal of JEP 332), so a Java client never sends early data and a Java server never accepts it. The risk reaches a Java service when a TLS-terminating proxy or CDN in front of it accepts 0-RTT: the proxy forwards the replayed request over a normal connection. Such proxies mark these requests with the `Early-Data: 1` header (RFC 8470), and the service must answer `425 Too Early` for any non-idempotent request that carries it.
+
+```java
+// Pin a client to TLS 1.3 only, e.g. for a partner that dropped 1.2.
+SSLContext ctx = SSLContext.getInstance("TLSv1.3");
+ctx.init(null, tmf.getTrustManagers(), null);
+SSLParameters p = ctx.getDefaultSSLParameters();
+p.setProtocols(new String[] {"TLSv1.3"});
+p.setCipherSuites(new String[] {"TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"});
+p.setEndpointIdentificationAlgorithm("HTTPS");
+```
+
+JVM-wide, `-Djdk.tls.client.protocols=TLSv1.3` does the same for client sockets. The JDK sends TLS 1.3 in middlebox compatibility mode (`legacy_version` 0x0303 and a dummy `ChangeCipherSpec`) so that older firewalls that inspect TLS 1.2 framing let the handshake through.
+
+### JAAS: `LoginContext`, `LoginModule`, `Subject`
+
+The Java Authentication and Authorization Service (`javax.security.auth`, in the JDK since 1.4) is a pluggable login framework. A `LoginContext` reads a named entry from a JAAS configuration file, runs the `LoginModule`s that entry lists, and on success returns a `Subject` that holds the authenticated `Principal`s plus public and private credentials (for example a Kerberos ticket). The login runs as a two-phase commit: every module's `login()` runs first, then each module's `commit()` if the overall result succeeds or `abort()` if it fails. A control flag on each module decides the overall result:
+
+| Flag | Module must succeed? | On success | On failure |
+|------|---------------------|------------|------------|
+| `required` | Yes | Continue down the list | Continue, overall login fails |
+| `requisite` | Yes | Continue down the list | Stop at once, overall login fails |
+| `sufficient` | No | Stop, login succeeds if no earlier `required`/`requisite` failed | Continue down the list |
+| `optional` | No | Continue | Continue |
+
+```text
+// jaas.conf, passed with -Djava.security.auth.login.config=/etc/app/jaas.conf
+KafkaClient {
+    com.sun.security.auth.module.Krb5LoginModule required
+        useKeyTab=true
+        keyTab="/etc/security/keytabs/app.keytab"
+        principal="app/host01.example.com@EXAMPLE.COM"
+        storeKey=true;
+};
+```
+
+```java
+LoginContext lc = new LoginContext("KafkaClient", callbackHandler);
+lc.login();                                  // runs Krb5LoginModule: keytab -> TGT
+Subject subject = lc.getSubject();           // KerberosPrincipal + KerberosTicket credential
+String result = Subject.callAs(subject, () -> callKerberizedService());
+lc.logout();
+```
+
+JAAS authentication is alive in Kerberos-based stacks: SPNEGO and GSS-API, Kafka SASL (`sasl.jaas.config` holds one JAAS entry inline), ZooKeeper, and Hadoop's `UserGroupInformation`. JDK modules include `Krb5LoginModule`, `LdapLoginModule`, `KeyStoreLoginModule`, and `UnixLoginModule`. The authorization half (permissions granted to a `Subject` through a policy file and `Subject.doAsPrivileged`) depended on the Security Manager, which JEP 486 disabled permanently in JDK 24. `Subject.getSubject(AccessControlContext)` throws `UnsupportedOperationException`, and `Subject.doAs` is deprecated for removal. Use `Subject.callAs(subject, callable)` to bind a subject to an action and `Subject.current()` (both Java 18) to read it inside the action. A child thread inherits the current subject only when it starts and ends inside the parent's action through structured concurrency, so a task submitted to a plain `ExecutorService` sees `Subject.current() == null` and needs the subject passed explicitly.
+
 ---
 
 ## 7. Real-World Examples
@@ -751,6 +836,19 @@ if (MessageDigest.isEqual(computedTag, providedTag)) { ... }  // FIX: constant-t
 ```
 `Arrays.equals` short-circuits on the first differing byte, so response time reveals how many leading bytes matched — enough to forge a tag byte-by-byte over many requests. `MessageDigest.isEqual` is implemented to run in time independent of where the mismatch is.
 
+### Pitfall: JDK 27 TLS defaults that break handshakes after an upgrade
+
+JDK 27 changed four TLS and PKIX defaults. Each one can turn a working connection into an `SSLHandshakeException` or a failed path validation with no code change:
+
+| Change (JDK 27) | Who breaks | Restore or adjust |
+|---|---|---|
+| TLS 1.3 key agreement stores the DH shared secret under the `Generic` key algorithm instead of `TlsPremasterSecret` (JDK-8377550) | A third-party JCE provider that does the TLS key derivation and does not accept `Generic` keys; the handshake fails with "Could not generate secret". SunJSSE alone is unaffected | `-Djdk.tls.t13KeyDerivationAlgorithm=TlsPremasterSecret` |
+| `ffdhe6144` and `ffdhe8192` removed from the default named groups (JDK-8373426) | A peer that offers only those finite-field groups | `jdk.tls.namedGroups` or `SSLParameters.setNamedGroups` |
+| TLS 1.3 certificate compression with `zlib` (RFC 8879) on by default (JDK-8372526) | A peer or inspecting proxy with a faulty `compress_certificate` implementation | `-Djdk.tls.client.disableExtensions=compress_certificate` and the same value for `jdk.tls.server.disableExtensions` |
+| `com.sun.security.crl.maxSize` caps a CRL downloaded from a CRL Distribution Point at 20 MiB of DER | A CA whose CRL is larger; the CRL is discarded during path validation | Raise the property, or a negative value to remove the cap; `-Djava.security.debug=certpath` logs each discarded CRL |
+
+Run the TLS integration tests against the real peers, HSM provider, and proxies on JDK 27 before the rollout, because a SunJSSE-to-SunJSSE test server on default settings hits none of these cases.
+
 ---
 
 ## 11. Technologies & Tools
@@ -763,6 +861,8 @@ if (MessageDigest.isEqual(computedTag, providedTag)) { ... }  // FIX: constant-t
 | `jarsigner` | Sign and verify JARs |
 | `SecureRandom` (DRBG) | NIST SP 800-90A CSPRNG; `getInstanceStrong()` for keys |
 | `-Djavax.net.debug=ssl,handshake` | Trace the TLS handshake for debugging cert/trust issues |
+| `-Djdk.tls.client.protocols`, `jdk.tls.namedGroups` | JVM-wide TLS protocol and key-exchange group lists |
+| JAAS (`javax.security.auth.login`) | `LoginContext` + `Krb5LoginModule` for Kerberos keytab login (SPNEGO, Kafka SASL/GSSAPI) |
 | Java KMS SDKs (AWS KMS, GCP KMS) | Externalize the KEK to a managed HSM; envelope encryption |
 | Tink (Google) | Misuse-resistant high-level wrapper over JCA (AEAD, key rotation) |
 | `jshell` | Quickly prototype `Cipher`/`MessageDigest` snippets |
@@ -832,25 +932,37 @@ The `TrustManager` builds and validates the server's certificate chain up to a t
 **Short:** Mutual TLS has both the client and server present certificates that each side validates against its own truststore.
 Mutual TLS has both sides present certificates: the server authenticates to the client as usual, and the client also presents a certificate the server validates against its truststore. In Java you configure the client's `SSLContext` with a `KeyManager` (from a KeyStore holding the client's private key + cert) in addition to a `TrustManager`, and configure the server to require client auth (`SSLParameters.setNeedClientAuth(true)`). It's the standard for service-to-service auth where both endpoints must prove identity.
 
-**Q16: Why is RSA-OAEP preferred over RSA PKCS#1 v1.5 padding?**
+**Q16: Why is TLS 1.3 0-RTT early data replayable, and how does it affect a Java service?**
+**Short:** Early data is keyed only from the resumption PSK, so a recorded first flight replays; SunJSSE never uses 0-RTT, but a proxy in front of Java may.
+On a resumed connection the client sends early data in its first flight, encrypted under a key derived from the PSK alone. The server's random value is not part of that key, so an attacker who records the flight can send it again and the server decrypts and accepts it a second time. RFC 8446 §8 therefore limits early data to idempotent requests. SunJSSE does not implement 0-RTT (a non-goal of JEP 332), so Java-to-Java TLS never carries early data. The exposure comes from a TLS-terminating proxy or CDN that accepts 0-RTT and forwards the request: reject any non-idempotent request that carries `Early-Data: 1` with `425 Too Early` (RFC 8470).
+
+**Q17: What does TLS 1.3 change compared to TLS 1.2, and how does Java support it?**
+**Short:** One-round-trip handshake, ephemeral (EC)DHE only, encrypted certificates, AEAD-only suites; SunJSSE has negotiated it by default since Java 11 (JEP 332).
+The client sends its key share in the ClientHello, so the full handshake takes one round trip instead of two, and everything after the ServerHello, including the server certificate, is encrypted. RSA key transport and static DH are gone, so every session has forward secrecy: a stolen server key does not decrypt recorded traffic. Cipher suites name only the AEAD and hash (`TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`), and CBC, RC4, compression, and renegotiation are removed. SunJSSE has implemented it since Java 11 (JEP 332) and prefers it by default. Pin it with `SSLParameters.setProtocols(new String[]{"TLSv1.3"})` or `-Djdk.tls.client.protocols=TLSv1.3`.
+
+**Q18: Why is RSA-OAEP preferred over RSA PKCS#1 v1.5 padding?**
 **Short:** RSA-OAEP uses randomized hash-based padding that resists the Bleichenbacher attack PKCS#1 v1.5 padding is vulnerable to.
 PKCS#1 v1.5 encryption padding is vulnerable to Bleichenbacher's adaptive chosen-ciphertext attack — a padding oracle over many queries can recover the plaintext without the private key. OAEP (Optimal Asymmetric Encryption Padding) uses a randomized, hash-based construction that is provably secure against that attack. In Java, request `RSA/ECB/OAEPWithSHA-256AndMGF1Padding` rather than `RSA/ECB/PKCS1Padding` for any new encryption.
 
-**Q17: Why prefer PKCS12 over JKS for keystores?**
+**Q19: Why prefer PKCS12 over JKS for keystores?**
 **Short:** PKCS12 is a standardized, interoperable keystore format that can hold secret keys, unlike the proprietary Java-only JKS.
 PKCS12 is a standardized, interoperable format (RFC 7292) that can store secret keys and is the JDK default since Java 9, unlike the proprietary Java-only JKS. JKS has weaker integrity protection and cannot store `SecretKey` entries at all. PKCS12 files interoperate with OpenSSL and other tooling, whereas JKS is Java-only. Migrate legacy JKS stores with `keytool -importkeystore -srcstoretype JKS -deststoretype PKCS12`.
 
-**Q18: What does the GCM authentication tag protect, and what's `updateAAD` for?**
+**Q20: What does the GCM authentication tag protect, and what's `updateAAD` for?**
 **Short:** The GCM authentication tag detects any tampering with the ciphertext, while updateAAD authenticates unencrypted context data.
 The tag (128-bit here) authenticates the ciphertext — decryption throws `AEADBadTagException` if a single bit was flipped, so you get tamper detection for free. `updateAAD` adds Additional Authenticated Data — bytes that are authenticated but *not* encrypted (e.g., a record ID, header, or key version) — so the same ciphertext can't be replayed in a different context. If the AAD on decrypt doesn't match the AAD on encrypt, the tag check fails just as if the ciphertext were tampered.
 
-**Q19: You need to encrypt 10 MB of data with a recipient's RSA public key. What's wrong with that, and what's the right approach?**
+**Q21: You need to encrypt 10 MB of data with a recipient's RSA public key. What's wrong with that, and what's the right approach?**
 **Short:** RSA can only encrypt a payload smaller than its modulus, so bulk data needs hybrid encryption with an RSA-wrapped AES key.
 RSA can only encrypt a payload smaller than its modulus (a 3072-bit key handles ~318 bytes with OAEP), so you can't encrypt 10 MB directly. The right approach is hybrid/envelope encryption: generate a random AES-256 DEK, encrypt the 10 MB with AES-GCM, then RSA-OAEP-wrap only the small DEK with the recipient's public key and ship both. This is exactly how TLS and PGP work — asymmetric crypto moves the symmetric key, symmetric crypto moves the bulk data.
 
-**Q20: How do you rotate a KEK without re-encrypting all your data?**
+**Q22: How do you rotate a KEK without re-encrypting all your data?**
 **Short:** Rotating a KEK only requires re-wrapping the small DEKs with the new key, leaving the bulk ciphertext completely untouched.
 With envelope encryption you only re-wrap the DEKs, never the ciphertext: unwrap each stored DEK with the old KEK and re-wrap it with the new KEK, updating the wrapped-DEK column and a key-version tag. The bulk ciphertext is untouched because it was encrypted under the per-record DEK, which didn't change. Keep the old KEK available (marked decrypt-only) until every row is re-wrapped, then retire it — this makes rotation an O(number of keys) operation instead of O(bytes of data).
+
+**Q23: What is JAAS, and how do `LoginContext`, `LoginModule`, and `Subject` fit together?**
+**Short:** A pluggable login framework: LoginContext runs the LoginModules named in a JAAS config entry and returns a Subject holding principals and credentials.
+`LoginContext` reads a named entry from the JAAS configuration (`-Djava.security.auth.login.config`), runs each listed `LoginModule` in a two-phase commit (`login()` on all, then `commit()` or `abort()`), and returns a `Subject` holding `Principal`s and credentials. The `required`, `requisite`, `sufficient`, and `optional` flags decide how one module's result affects the whole login. Its main use is Kerberos: `Krb5LoginModule` turns a keytab into a TGT for SPNEGO, Kafka SASL/GSSAPI (`sasl.jaas.config`), ZooKeeper, and Hadoop. The policy-based authorization half died with the Security Manager (JEP 486, JDK 24), so `Subject.getSubject` throws `UnsupportedOperationException`. Bind a subject with `Subject.callAs` and read it with `Subject.current()`; a task on a plain executor does not inherit it.
 
 ---
 
@@ -866,7 +978,9 @@ With envelope encryption you only re-wrap the DEKs, never the ciphertext: unwrap
 8. **Prefer authenticated encryption**; if you must use CBC, do encrypt-then-MAC with a separate key and verify before decrypting.
 9. **Use RSA-OAEP (not PKCS#1 v1.5) and RSA-PSS** for encryption/signatures; prefer EC (P-256) for new asymmetric work.
 10. **Use PKCS12 keystores**, externalize the KEK to a KMS/HSM where possible, and enable hostname verification on every TLS client (`setEndpointIdentificationAlgorithm("HTTPS")`).
-11. **Keep the JDK patched** — crypto bugs like CVE-2022-21449 (psychic signatures) live in the platform, not just your code.
+11. **Reject non-idempotent requests marked `Early-Data: 1`** with `425 Too Early` when a proxy in front of the service accepts TLS 1.3 0-RTT.
+12. **Use `Subject.callAs` and `Subject.current()` for JAAS subjects**, and pass the subject explicitly to work handed to a thread pool.
+13. **Keep the JDK patched**: crypto bugs like CVE-2022-21449 (psychic signatures) live in the platform, not just your code.
 
 ---
 

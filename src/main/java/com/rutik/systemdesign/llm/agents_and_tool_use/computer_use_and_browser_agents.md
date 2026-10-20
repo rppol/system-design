@@ -154,101 +154,64 @@ def take_screenshot() -> str:
     screenshot.save(buf, format='PNG')
     return base64.standard_b64encode(buf.getvalue()).decode('utf-8')
 
-# Computer use is a beta feature and requires a beta header.
-#   computer_20251124 + "computer-use-2025-11-24": Claude Opus 5, Sonnet 5,
-#     Opus 4.8/4.7/4.6, Sonnet 4.6, Opus 4.5
-#   computer_20250124 + "computer-use-2025-01-24": Claude Sonnet 4.5, Haiku 4.5
+# computer_toolset_20260801: GA, no beta header, one entry with no name or display
+# size. On the Claude API, 5.5 models reject computer_20251124 and computer_20250124.
+COMPUTER = {"type": "computer_toolset_20260801"}
 
-def run_computer_use_step(task: str, screenshot_b64: str) -> dict:
-    response = client.beta.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=1024,
-        betas=["computer-use-2025-11-24"],
-        tools=[
-            {
-                "type": "computer_20251124",
-                "name": "computer",
-                "display_width_px": 1280,
-                "display_height_px": 800,
-                "display_number": 1,   # optional; X11 display number
-            }
-        ],
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64",
-                                              "media_type": "image/png",
-                                              "data": screenshot_b64}},
-                {"type": "text", "text": task}
-            ]
-        }]
+def screenshot_block(screenshot_b64: str) -> dict:
+    return {"type": "image", "source": {"type": "base64",
+                                        "media_type": "image/png",
+                                        "data": screenshot_b64}}
+
+def run_computer_use_step(task: str, screenshot_b64: str):
+    return client.messages.create(
+        model="claude-sonnet-5-5",
+        max_tokens=4096,
+        tools=[COMPUTER],
+        messages=[{"role": "user",
+                   "content": [screenshot_block(screenshot_b64),
+                               {"type": "text", "text": task}]}],
     )
-    return response
 
-# Supported action types (basic set, present in every tool version):
-ACTION_TYPES = {
-    "screenshot":         "Take a screenshot of the current screen",
-    "left_click":         "Left click at coordinate [x, y]",
-    "type":               "Type a string of text",
-    "key":                "Press a keyboard key or combination",
-    "mouse_move":         "Move mouse to [x, y] without clicking",
-}
-# The rest of the computer_20251124 action set:
-#   scroll, left_click_drag, right_click, middle_click, double_click,
-#   triple_click, left_mouse_down, left_mouse_up, hold_key, wait
-#   zoom — inspect region [x1, y1, x2, y2] at full resolution
-#          (requires enable_zoom: true on the tool)
+# The toolset's 17 member tools. Each call is its own tool_use block named after
+# the action, e.g. {"name": "left_click", "toolset_name": "computer",
+# "input": {"coordinate": [640, 60]}}, with coordinates in screenshot pixels.
+MEMBER_TOOLS = [
+    "screenshot", "zoom", "left_click", "right_click", "middle_click",
+    "double_click", "triple_click", "left_click_drag", "mouse_move",
+    "left_mouse_down", "left_mouse_up", "cursor_position", "scroll",
+    "type", "key", "hold_key", "wait",
+]
 
 # Agent loop for computer use
 def computer_use_loop(task: str, max_steps: int = 50):
-    messages = []
+    messages = [{"role": "user",
+                 "content": [screenshot_block(take_screenshot()),
+                             {"type": "text", "text": task}]}]
     for step in range(max_steps):
-        screenshot = take_screenshot()
-
-        # Build messages with screenshot + task
-        if not messages:
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64",
-                                                  "media_type": "image/png",
-                                                  "data": screenshot}},
-                    {"type": "text", "text": task}
-                ]
-            }]
-        else:
-            # Append new screenshot as tool result
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "tool_result",
-                     "tool_use_id": last_tool_use_id,
-                     "content": [{"type": "image",
-                                  "source": {"type": "base64",
-                                             "media_type": "image/png",
-                                             "data": screenshot}}]}
-                ]
-            })
-
-        response = client.beta.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=1024,
-            betas=["computer-use-2025-11-24"],
-            tools=[{"type": "computer_20251124", "name": "computer",
-                    "display_width_px": 1280, "display_height_px": 800}],
-            messages=messages
+        response = client.messages.create(
+            model="claude-sonnet-5-5",
+            max_tokens=4096,
+            tools=[COMPUTER],
+            messages=messages,
         )
+        messages.append({"role": "assistant", "content": response.content})
 
-        # Check for stop condition
-        if response.stop_reason == "end_turn":
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        if not tool_uses:
             return response.content[-1].text
 
-        # Execute computer action
-        tool_use = next(b for b in response.content if b.type == "tool_use")
-        last_tool_use_id = tool_use.id
-        execute_computer_action(tool_use.input)
-
-        messages.append({"role": "assistant", "content": response.content})
+        # One turn can batch several actions: run them in order, answer each.
+        results = []
+        for tu in tool_uses:
+            execute_computer_action(tu.name, tu.input)
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": tu.id,
+                "toolset_name": "computer",  # the API rejects a result without it
+                "content": [screenshot_block(take_screenshot())],
+            })
+        messages.append({"role": "user", "content": results})
 ```
 
 ### browser-use Python Library
@@ -262,7 +225,7 @@ from browser_use import Agent, ChatAnthropic
 agent = Agent(
     task="Go to amazon.com, search for 'mechanical keyboard', "
          "filter by 4+ stars and under $100, return the top 3 results",
-    llm=ChatAnthropic(model="claude-sonnet-5"),
+    llm=ChatAnthropic(model="claude-sonnet-5-5"),
 )
 
 result = await agent.run()
@@ -428,7 +391,7 @@ The five components are strictly serial: nothing can be overlapped, because each
 
 | Symbol | What it is |
 |--------|------------|
-| screenshot + encode | Capturing and base64-ing the frame. Grows with resolution, `1280 x 800` here |
+| screenshot + encode | Capturing and base64-ing the frame. Grows with resolution, e.g. a `1280 x 800` display |
 | LLM API call | The dominant term. One full inference per action, with an image in the prompt |
 | action execution | The click or keystroke itself. Genuinely fast |
 | page load / settle | Waiting for the next element to appear. The most variable term — the site controls it, not you |
@@ -536,14 +499,19 @@ agent's poisoned output becomes another's trusted input, is in
 
 ### Anthropic Computer Use
 
-A beta feature of the Claude API: tool version `computer_20251124` behind the
-beta header `computer-use-2025-11-24` on Claude Opus 5, Sonnet 5, Opus
-4.8/4.7/4.6, Sonnet 4.6 and Opus 4.5; `computer_20250124` on Sonnet 4.5 and
-Haiku 4.5.
+A generally available Claude API tool: the `computer_toolset_20260801` toolset,
+declared with no beta header, on Claude Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable
+5.1, Mythos 5.1, Opus 5, Sonnet 5, Fable 5, Mythos 5, and Opus 4.8. On the Claude
+API and Google Cloud, 5.5 models reject the earlier `computer_20251124` and
+`computer_20250124` versions; Amazon Bedrock still accepts `computer_20251124`.
+Opus 4.7/4.6, Sonnet 4.6, and Opus 4.5 use only the beta `computer_20251124`.
 
-- Action space: screenshot, `left_click`, `type`, `key`, `mouse_move`, scroll,
-  drag, right/middle/double/triple click, `left_mouse_down`/`left_mouse_up`,
-  `hold_key`, `wait`, and `zoom` for reading small on-screen text
+- Action space: 17 member tools, each a separate `tool_use` name: `screenshot`,
+  `zoom`, `left_click`, `right_click`, `middle_click`, `double_click`,
+  `triple_click`, `left_click_drag`, `mouse_move`, `left_mouse_down`,
+  `left_mouse_up`, `cursor_position`, `scroll`, `type`, `key`, `hold_key`, `wait`
+- Screenshots: up to 2576 px on the long edge; the API does not downscale, so an
+  oversized `tool_result` image is rejected
 - Use cases: software testing, RPA automation, data entry, web scraping
 - Latency: ~3-8 seconds per action step at typical network conditions
 - Benchmark anchor: Anthropic's published OSWorld figures for its computer-use
@@ -566,9 +534,10 @@ OpenAI ships computer use in two places. For consumers it lives inside **ChatGPT
 agent**, which completes autonomous web tasks — food ordering, travel booking,
 form completion — and pauses for user confirmation on payment steps. For
 developers it is the built-in **`computer`** tool on the Responses API
-(`tools=[{"type": "computer"}]`, models `gpt-5.6` and `gpt-5.4`): you send a
-screenshot plus the task, the model returns a `computer_call` output item with
-the action, your code executes it and returns the next screenshot.
+(`tools=[{"type": "computer"}]`; the guide's examples use `gpt-6.1-sol`, and the
+models catalog also lists GPT-6 Astra and GPT-6 Luna): you send a screenshot plus
+the task, the model returns a `computer_call` output item with an ordered
+`actions` array, your code executes it and returns the next screenshot.
 
 ---
 
@@ -627,11 +596,11 @@ the action, your code executes it and returns the next screenshot.
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **Anthropic Computer Use API** | Screen-based agent | Beta; `computer_20251124` on Opus 5 / Sonnet 5 |
+| **Anthropic Computer Use API** | Screen-based agent | GA; `computer_toolset_20260801`, no beta header, on the 5.5 and 5 generations |
 | **browser-use** | Web automation library | Python; LLM-driven Chromium; open source |
 | **Playwright** | Browser automation | Microsoft; Chromium/Firefox/WebKit |
 | **Selenium** | Browser automation | W3C WebDriver protocol; widest language coverage |
-| **OpenAI `computer` tool** | CUA for developers | Responses API; `gpt-5.6` / `gpt-5.4` |
+| **OpenAI `computer` tool** | CUA for developers | Responses API; `gpt-6.1-sol`, GPT-6 Astra, GPT-6 Luna |
 | **SomAgent** | Web navigation research | Grounding model for web elements |
 | **WebArena** | Web agent benchmark | 812 tasks; realistic web environments |
 | **OSWorld** | OS-level agent benchmark | Ubuntu VM; GUI tasks |
@@ -648,7 +617,7 @@ A: Computer use enables an LLM agent to interact with software through its graph
 
 **Q: How does the Anthropic Computer Use API work at a protocol level?**
 **Short:** The model sees a screenshot each turn and emits click or type actions as a tool_use block your code executes and re-screenshots.
-A: The model is given a computer tool in its tool spec — `computer_20251124` on current models, behind the `computer-use-2025-11-24` beta header. Each conversation turn includes a screenshot (base64 PNG) of the current screen. The model responds with a normal `tool_use` block naming that tool: `{"type": "tool_use", "id": "toolu_...", "name": "computer", "input": {"action": "left_click", "coordinate": [490, 335]}}`. Your application code intercepts this, executes the action via OS APIs or Playwright, takes a new screenshot, and injects it as the tool result. This screenshot-action loop repeats until the model produces a text response without a tool call (task complete) or the step limit is reached. The model never executes actions directly — it only describes them.
+A: The request declares the computer toolset in its tool spec: `{"type": "computer_toolset_20260801"}`, generally available with no beta header on current models (on the Claude API, 5.5 models reject the older `computer_20251124`). Each conversation turn includes a screenshot (base64 PNG) of the current screen. The model responds with one or more `tool_use` blocks, each named after a member action: `{"type": "tool_use", "id": "toolu_...", "name": "left_click", "toolset_name": "computer", "input": {"coordinate": [490, 335]}}`. Your application code runs the actions in order via OS APIs or Playwright, takes a new screenshot, and returns one `tool_result` per block, each carrying `"toolset_name": "computer"`. This screenshot-action loop repeats until the model produces a text response without a tool call (task complete) or the step limit is reached. The model never executes actions directly — it only describes them.
 
 **Q: What is UI element grounding and why is it the core technical challenge?**
 **Short:** Grounding maps an intent like clicking Submit to a coordinate or DOM element, and accessibility trees beat raw pixel guessing.

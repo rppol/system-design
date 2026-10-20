@@ -886,11 +886,11 @@ A team built and trained an excellent model but did not set up monitoring. Three
 |---|---|---|
 | Training framework | PyTorch, TensorFlow, JAX | Deep learning models |
 | Tabular ML | XGBoost, LightGBM, CatBoost | Structured data |
-| Feature store | Feast, Tecton, Vertex Feature Store | Training-serving consistency |
-| Experiment tracking | MLflow, Weights & Biases, Neptune | Hyperparameter and metric logging |
+| Feature store | Feast, Tecton, Agent Platform Feature Store | Training-serving consistency |
+| Experiment tracking | MLflow, Weights & Biases, Comet | Hyperparameter and metric logging |
 | Model serving | BentoML, NVIDIA Triton, Ray Serve | Production inference |
 | Pipeline orchestration | Airflow, Prefect, Kubeflow | Training pipelines |
-| Monitoring | Evidently AI, Arize Phoenix, Whylogs | Drift detection |
+| Monitoring | Evidently AI, Arize Phoenix | Drift detection |
 | A/B testing | Statsig, Optimizely, Eppo | Experiment platforms |
 | Data validation | Great Expectations, Pandera | Schema and distribution checks |
 | Hyperparameter tuning | Optuna, Ray Tune, Hyperopt | Automated HPO |

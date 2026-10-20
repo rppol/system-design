@@ -2,7 +2,7 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Advanced
 
-> **Version anchor (2026-09-04).** **Argo CD v3.5.2** (2026-08-27); **Flux v2.9.5** (2026-08-31); **Argo Rollouts v1.10.0** (2026-08-27); **Gateway API v1.6.2** (2026-09-03), the API Argo Rollouts and Flagger drive traffic through for GitOps-managed progressive delivery. Argo CD 3.x has **not** removed ApplicationSet fasttemplate — `goTemplate: true` remains opt-in.
+> **Version anchor (2026-10-19).** **Argo CD v3.5.5** (2026-10-12); run at least 3.5.4, 3.4.10 or 3.3.15, the releases that fix CVE-2026-55797 (repo-server command injection through SSH repository proxy settings, CVSS 8.8, affects 2.11.0 onward); **Flux v2.9.6** (2026-10-01); **Argo Rollouts v1.10.1** (2026-10-12); **Gateway API v1.6.3** (2026-10-06), the API Argo Rollouts and Flagger drive traffic through for GitOps-managed progressive delivery. Argo CD 3.x has **not** removed ApplicationSet fasttemplate; `goTemplate: true` remains opt-in.
 
 GitOps makes **Git the single source of truth for the desired state of your infrastructure**, and an in-cluster agent continuously reconciles reality to match it. Instead of a pipeline pushing `kubectl apply` with cluster credentials, an operator (ArgoCD or Flux) *pulls* from Git, detects drift, and self-heals. The result: every change is a reviewed, audited Git commit; rollback is `git revert`; and the cluster can never silently diverge from what's declared.
 
@@ -80,7 +80,13 @@ Canary rollout and rollback of model servers are covered in [Progressive Deliver
 | App-of-apps (ArgoCD) | One root Application manages many child Applications |
 | ApplicationSets | Templated apps across many clusters/environments |
 
----
+### What the agent syncs from
+
+| Source | Agent reads | Strength | Cost |
+|--------|-------------|----------|------|
+| Git branch with Helm/Kustomize (DRY) | Templates, rendered in-cluster by the agent | One source, no build step | Reviewers see template diffs, not what changes in the cluster |
+| OCI artifact (Flux `OCIRepository`, Argo CD `oci://` source, GA in Flux 2.6 and added in Argo CD 3.1) | A tarball of manifests pushed by CI to a container registry | Immutable digest, cosign or Notation signatures, registry replication, no Git credentials in the cluster | Git is no longer what the cluster reads; the link back is the artifact's annotations |
+| Hydrated branch (rendered-manifest pattern; Argo CD source hydrator, alpha in 2.14, beta in 3.5) | Plain YAML that a renderer committed to an environment branch | The PR diff is the exact cluster diff | Extra commits; rendering must be deterministic and secret-free |
 
 ## 5. Architecture Diagrams
 
@@ -180,6 +186,88 @@ spec:
   prune: true               # delete objects removed from Git
   wait: true                # wait for resources to become Ready
 ```
+
+### OCI artifacts as the GitOps source
+
+CI renders or packages the manifests, pushes them to a registry as an OCI artifact, and the cluster pulls the artifact instead of cloning Git. With Flux:
+
+```bash
+flux push artifact oci://ghcr.io/org/manifests/orders:$(git rev-parse --short HEAD) \
+  --path=./deploy/prod \
+  --source="$(git config --get remote.origin.url)" \
+  --revision="main@sha1:$(git rev-parse HEAD)"
+cosign sign ghcr.io/org/manifests/orders@sha256:<digest>
+flux tag artifact oci://ghcr.io/org/manifests/orders:$(git rev-parse --short HEAD) --tag prod
+```
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata: {name: orders, namespace: flux-system}
+spec:
+  interval: 5m
+  url: oci://ghcr.io/org/manifests/orders
+  ref: {tag: prod}                 # or semver: ">=1.4.0", or digest: sha256:...
+  verify:
+    provider: cosign               # or notation
+    secretRef: {name: cosign-pub}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: {name: orders, namespace: flux-system}
+spec:
+  interval: 10m
+  sourceRef: {kind: OCIRepository, name: orders}
+  path: ./
+  prune: true
+```
+
+Argo CD takes the same artifact with an `oci://` `repoURL`; `targetRevision` is a tag or digest, and the layer must be `application/vnd.oci.image.layer.v1.tar+gzip` (what `oras push` produces from a directory) or a Helm chart layer:
+
+```yaml
+spec:
+  source:
+    repoURL: oci://ghcr.io/org/manifests/orders
+    targetRevision: 1.4.0
+    path: .
+```
+
+What changes: the cluster needs registry pull credentials (often none, through workload identity on ECR, Artifact Registry, or ACR) instead of a Git deploy key; the reconciled unit is an immutable digest, so "what is running" is a sha256, not a moving branch; signatures are verified before apply; and registries already replicate across Regions and air-gapped sites, which Git servers often do not. Git stays the place people review and merge; the artifact records `--source` and `--revision` so `flux` and the UI can link a running digest back to its commit.
+
+### Source hydrator: the rendered-manifest pattern
+
+With Helm or Kustomize in the repo, a pull request shows a change to `values.yaml`, and nobody sees the 40 lines of Deployment it changes until the agent renders it in the cluster. The **rendered-manifest pattern** commits the rendered output to Git so review happens on what will be applied. Argo CD's **source hydrator** does the rendering for you: an Application names a `drySource` (Helm, Kustomize, or plain manifests on `main`) and a `syncSource` (an environment branch), and Argo CD renders the dry source, commits the result to the target branch through its commit-server component, and syncs from that branch.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: orders-prod, namespace: argocd}
+spec:
+  project: default
+  destination: {server: https://kubernetes.default.svc, namespace: orders}
+  sourceHydrator:
+    drySource:
+      repoURL: https://github.com/org/config
+      targetRevision: main
+      path: apps/orders/overlays/prod
+    syncSource:
+      targetBranch: environments/prod
+      path: apps/orders            # must be a non-root directory
+    # hydrateTo: {targetBranch: environments/prod-next}   # stage here; your tooling promotes
+```
+
+```mermaid
+flowchart LR
+    dev["PR to main<br/>(values.yaml change)"] --> dry["Dry source<br/>main: Helm / Kustomize"]
+    dry --> hyd["Argo CD hydrator<br/>renders + commit-server pushes"]
+    hyd --> br["environments/prod branch<br/>manifest.yaml, README.md,<br/>hydrator.metadata (drySha)"]
+    br --> sync["Argo CD sync<br/>applies plain YAML"]
+    sync --> k8s["Cluster"]
+    hyd -.->|"hydrateTo set"| stage["environments/prod-next<br/>promotion PR merges it"]
+    stage -.-> br
+```
+
+The hydrator was alpha in Argo CD 2.14 and is beta since 3.5, disabled by default (`hydrator.enabled: "true"` in `argocd-cmd-params-cm` plus the commit server). Each hydrated commit carries a `hydrator.metadata` file with the dry commit SHA, and state is kept in a git note so a dry commit that renders identically adds no new commit. Limits to plan for: Argo CD 3.5 does not sign hydrated commits, so signature verification or branch protection that requires signed commits rejects them; rendering must be deterministic, so pin chart and remote-base versions and avoid `randAlphaNum` or `lookup`, or every run produces a diff; never let a secret injector run during hydration, because its output is committed to Git; and two Argo CD instances writing the same branch is unsupported.
 
 ### Decoding the two intervals
 
@@ -315,6 +403,8 @@ You can't commit plaintext secrets to Git. Options:
 | Self-heal | On (strict, no drift) | Off (allow temporary manual) | Strictness vs operational flexibility |
 | Secrets | SOPS/Sealed (in Git) | External Secrets (refs) | In-Git encryption vs external store |
 | Multi-cluster | ApplicationSets/Flux fleet | Per-cluster manual | Scale vs simplicity |
+| Source | Git repo | OCI artifact in a registry | Fewer moving parts vs immutable signed digests and registry replication |
+| Rendering | In-cluster by the agent (DRY) | Hydrated branch (rendered manifests in Git) | No extra commits vs reviewing the exact cluster diff |
 
 ---
 
@@ -360,72 +450,87 @@ kubectl scale deploy/orders --replicas=10
 | Kustomize / Helm | Manifest templating/overlays (see [helm_and_package_management](../helm_and_package_management/helm_and_package_management.md)) |
 | ArgoCD Image Updater / Flux image automation | Auto-bump image tags in Git |
 | ApplicationSets | Templated apps across clusters/envs |
+| Flux `OCIRepository` / `flux push artifact` / Argo CD `oci://` sources | Manifests and charts delivered as signed OCI artifacts |
+| Argo CD source hydrator | Render Helm/Kustomize and commit plain manifests to an environment branch before sync |
+| ORAS | Push and pull arbitrary OCI artifacts (manifest tarballs for Argo CD) |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is GitOps and what are its core principles?**
+**Q: What is GitOps and what are its core principles?**
 **Short:** GitOps stores desired state declaratively and immutably in Git, and an in-cluster agent pulls and continuously reconciles the cluster to match it.
 GitOps is an operational model where the desired state of the system is declared in Git (the single source of truth) and an in-cluster agent continuously reconciles the actual state to match. Its four principles: the state is declarative, versioned/immutable in Git, pulled automatically by an agent, and continuously reconciled (drift is detected and corrected). Deploy = commit; rollback = revert; the cluster is downstream of Git.
 
-**Q2: Push-based CD vs pull-based GitOps — what's the difference and why prefer pull?**
+**Q: Push-based CD vs pull-based GitOps: what's the difference and why prefer pull?**
 **Short:** Push-based CD exposes cluster credentials in CI with no drift detection, while pull-based GitOps has an in-cluster agent reconcile, keeping credentials internal and drift self-correcting.
 In push-based CD the pipeline holds cluster credentials and runs `kubectl apply` — credentials are exposed in CI, there's no drift detection, and the audit trail is just pipeline logs. In pull-based GitOps an in-cluster agent watches Git and reconciles, so no external system needs cluster access, drift is continuously detected and corrected, and Git history is a complete audit log. Pull improves security (no external creds), auditability, and recoverability.
 
-**Q3: How does drift detection and self-healing work?**
+**Q: How does drift detection and self-healing work?**
 **Short:** The GitOps agent continuously diffs Git's desired state against the live cluster and, with self-heal enabled, re-applies the Git state to correct any drift.
 The GitOps agent continuously diffs the desired state (Git) against the actual cluster state. If they differ — because someone made an out-of-band change or a resource was deleted — it marks the app OutOfSync and, with self-heal enabled, re-applies the Git state to correct the drift. This guarantees the cluster matches Git and that manual changes don't silently persist; the only durable change is a Git change.
 
-**Q4: How do you roll back under GitOps?**
+**Q: How do you roll back under GitOps?**
 **Short:** Roll back by `git revert`-ing the offending commit and pushing, or, in ArgoCD, by running `argocd app rollback` to a previously synced revision.
 `git revert` the offending commit and push — the agent reconciles the cluster back to the previous good state, and the revert is itself an audited commit. ArgoCD also offers `argocd app rollback` to revert the live Application to a previously synced revision for immediate relief. Either way, the rollback is declarative and traceable, unlike re-running a push pipeline.
 
-**Q5: Why shouldn't you `kubectl edit` production under GitOps?**
+**Q: Why shouldn't you `kubectl edit` production under GitOps?**
 **Short:** A `kubectl edit` becomes drift that self-heal reverts on the next sync, undoing your fix — the only durable change is a commit to Git.
 Because Git, not the cluster, is the source of truth. A manual `kubectl` change is drift that the agent (with self-heal) reverts on the next sync — so your fix is undone, often reigniting the incident. The correct action is to change the Git repo (commit the fix), which the agent then applies durably. For emergencies you can temporarily pause auto-sync, but you must reconcile Git promptly.
 
-**Q6: ArgoCD vs Flux — how do they differ?**
+**Q: ArgoCD vs Flux: how do they differ?**
 **Short:** ArgoCD is app-centric with a rich UI and the `Application` CRD, while Flux is a set of composable GitOps Toolkit controllers driven via CRDs and CLI.
 ArgoCD is app-centric with a rich web UI, the `Application` CRD, app-of-apps and ApplicationSets, and strong visualization/diffing — popular where teams want a GUI and clear sync status. Flux is a set of composable GitOps Toolkit controllers (source, kustomize, helm, notification, and the two image-automation controllers) driven via CRDs/CLI, favoring a more GitOps-native, automation-first style with minimal UI. Both implement the same pull-based reconciliation; choice is largely workflow/UI preference.
 
-**Q7: How do you handle secrets in GitOps if everything is in Git?**
+**Q: Why would a team point Flux or Argo CD at an OCI artifact in a registry instead of a Git repo?**
+**Short:** An OCI artifact is an immutable, signable digest that registries replicate and clusters pull with registry credentials, so the cluster applies exactly what CI built and verified, not a moving branch.
+With a Git source the cluster holds a deploy key, follows a branch that can move at any time, and renders templates itself. With an OCI source, CI renders or packages the manifests, runs `flux push artifact` (or `oras push`) to a registry, signs the digest with cosign, and the cluster reconciles that digest: Flux's `OCIRepository` (`source.toolkit.fluxcd.io/v1`, GA in Flux 2.6) with `verify.provider: cosign` refuses unsigned or tampered artifacts, and Argo CD (3.1+) accepts `repoURL: oci://...` with a tag or digest as `targetRevision`. Registries already replicate across Regions and into air-gapped networks, and pulls can use workload identity instead of a Git token. The cost is indirection: people still review in Git, so the artifact must record its source URL and commit (`--source`, `--revision`) for a running digest to be traced back.
+
+**Q: What is the rendered-manifest pattern, and what does Argo CD's source hydrator change?**
+**Short:** Commit the fully rendered YAML to an environment branch so reviews and audits see the exact cluster diff; Argo CD's source hydrator renders the dry Helm or Kustomize source and pushes that branch itself.
+In a DRY repo a one-line `values.yaml` change can alter a dozen resources, but the pull request shows only the one line, and the agent renders the result inside the cluster where nobody reviewed it. The rendered-manifest pattern adds a step that renders each environment and commits plain YAML to a branch such as `environments/prod`, so the diff on that branch is the cluster change. Teams used to build this in CI; Argo CD's source hydrator (alpha in 2.14, beta since 3.5, off by default) does it from the Application spec: `sourceHydrator.drySource` names the templates, `syncSource.targetBranch` the rendered branch, and an optional `hydrateTo` branch lets a promotion PR decide when rendered output goes live. Each hydrated commit records the dry SHA in `hydrator.metadata`, so the link to the source change survives.
+
+**Q: Argo CD's hydrator pushes a new commit to the prod branch on every run even when nothing changed, and one commit contained a database password. What went wrong?**
+**Short:** The render is not deterministic (unpinned charts or bases, `randAlphaNum`, `lookup`), and a secret injector ran during hydration; hydrated output is committed to Git, so it must be reproducible and secret-free.
+The hydrator commits whatever the render produces, so the output must depend only on the dry commit. Unpinned Helm dependencies or Kustomize remote bases, `randAlphaNum`, and `lookup` (which reads live cluster state) make two renders of the same commit differ, so every run looks like a change and the environment branch fills with noise, or worse, ships a chart version nobody chose. Pin chart versions and remote base refs, and remove functions that read the clock, randomness, or the cluster. A plugin that injects secrets at render time, such as a vault-substitution step, writes plaintext into a Git commit; keep secrets out of hydration and use External Secrets Operator or CSI secret mounts so only a reference is rendered. Also expect Argo CD 3.5 hydrator commits to be unsigned, so exempt the hydrated branch from a signed-commit rule or sign in a later step.
+
+**Q: How do you handle secrets in GitOps if everything is in Git?**
 **Short:** Never commit plaintext secrets — use SOPS-encrypted manifests, Sealed Secrets, or the External Secrets Operator to reference a value that stays in Vault.
 You never commit plaintext secrets. Options: SOPS-encrypted manifests (the agent decrypts via a KMS key), Sealed Secrets (encrypted to a cluster-specific key only the in-cluster controller can decrypt), or the External Secrets Operator (commit a *reference*; ESO fetches the real value from Vault/cloud at runtime). The Git repo holds ciphertext or references, never the secret value itself.
 
-**Q8: What is the app-of-apps pattern?**
+**Q: What is the app-of-apps pattern?**
 **Short:** App-of-apps is an ArgoCD pattern where one root `Application` manages a directory of child Applications, so a single commit onboards or removes many apps at once.
 An ArgoCD pattern where a single root `Application` points at a directory of child `Application` definitions, so one Application manages many. Committing to that directory onboards or removes entire applications declaratively — used to bootstrap a whole cluster (gateway controller, monitoring, cert-manager, team apps) from one root. ApplicationSets generalize this further with templating across clusters/environments.
 
-**Q9: How does CI hand off to GitOps CD?**
+**Q: How does CI hand off to GitOps CD?**
 **Short:** CI builds and pushes the image, then only writes a tag-bump commit into the config repo (directly or via an image updater) — it never touches the cluster.
 CI builds and pushes the artifact (image), then updates the *config* repo — either by committing a new image tag into the manifests, or via an image-update controller (Argo CD Image Updater / Flux image automation) that watches the registry and commits the bump automatically. The GitOps agent then reconciles the config repo and deploys. Crucially, CI never touches the cluster — it only writes to Git.
 
-**Q10: What's the risk of `prune` and how do you mitigate it?**
+**Q: What's the risk of `prune` and how do you mitigate it?**
 **Short:** With `prune: true`, removing a manifest from Git deletes the matching live resource, so an accidental deletion or bad refactor can wipe production.
 With prune enabled, removing a manifest from Git deletes the corresponding live resource — so an accidental deletion or bad refactor can wipe production resources. Mitigate with config-repo protections (required reviews, CODEOWNERS), diff previews before sync, sync windows, and options like `PruneLast`/manual confirmation for critical apps. Prune is powerful (keeps the cluster matching Git) but demands repo discipline.
 
-**Q11: How does GitOps improve disaster recovery?**
+**Q: How does GitOps improve disaster recovery?**
 **Short:** Because desired state lives entirely in Git, recovering a cluster is pointing a fresh ArgoCD or Flux at the repo and letting it reconcile everything back.
 Because the entire desired state lives in Git, recovering a cluster is "deploy a fresh ArgoCD/Flux and point it at the repo" — the agent reconciles everything back. The cluster is reproducible from Git rather than a hand-tuned snowflake. Combined with etcd/PVC backups for stateful data, GitOps makes the *configuration* portion of DR fast and deterministic (see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md)).
 
-**Q12: How does GitOps relate to progressive delivery?**
+**Q: How does GitOps relate to progressive delivery?**
 **Short:** GitOps supplies the reconciled source of truth while Argo Rollouts or Flagger layer metric-gated canary or blue-green analysis on top, all declared in Git.
 GitOps provides the source of truth and reconciliation; progressive delivery (Argo Rollouts/Flagger) provides metric-gated canary/blue-green. They compose: you declare a Rollout CR in Git, ArgoCD/Flux reconciles it, and the Rollouts controller executes the canary with automated analysis and rollback. The release strategy is declarative and audited in Git, and an auto-abort is reflected as the controller reverting to the stable version (see [deployment_strategies](../deployment_strategies/deployment_strategies.md)).
 
-**Q13: How do ApplicationSets scale GitOps to many clusters without per-cluster copy-paste?**
+**Q: How do ApplicationSets scale GitOps to many clusters without per-cluster copy-paste?**
 **Short:** An ApplicationSet uses a generator like `clusters: {}` to template one `Application` per registered cluster automatically, instead of hand-writing each one.
 An ApplicationSet uses a generator, such as `clusters: {}`, to template one `Application` per matching cluster instead of hand-writing each one. Each generated Application substitutes variables like `{{name}}` and `{{server}}` into the template, so a single ApplicationSet with a `clusters/{{name}}` path can fan out to 25 per-cluster Applications from one repo, as in this module's fleet case study. Adding a cluster to the fleet means registering it and letting the generator produce its Application automatically, rather than writing new YAML by hand. Use ApplicationSets instead of manually maintained Applications once you're managing more than a handful of clusters or environments from one repo.
 
-**Q14: Why do teams keep the config repo separate from the application code repo?**
+**Q: Why do teams keep the config repo separate from the application code repo?**
 **Short:** Separating them lets CI push only image and tag-bump changes into the config repo while CD watches config alone with zero visibility into application source.
 Separating them decouples the deploy concern (what version runs where) from the code-change concern (what the app does). CI owns the app repo and only pushes a built image plus a tag-bump commit into the config repo; CD (ArgoCD/Flux) watches only the config repo, so it never needs read access to application source at all. This also lets one config repo hold per-environment or per-cluster overlays, and lets platform teams gate config changes (CODEOWNERS, required reviews) independently of the app repo's own review rules. Split app and config repos once you have more than one environment, or want the CD agent to have zero visibility into application source.
 
-**Q15: Does the GitOps agent see a Git push instantly, or does it poll?**
+**Q: Does the GitOps agent see a Git push instantly, or does it poll?**
 **Short:** It polls Git on an interval by default — Flux's fetch and apply intervals compose, so a push can take minutes to reach the cluster without a webhook.
 By default it polls Git on an interval rather than reacting instantly, though a webhook can shorten the delay. Flux's `GitRepository` source polls every `interval: 1m` and its `Kustomization` reconciles every `interval: 5m` in this module's example, so a commit can take minutes to reach the cluster without a webhook configured. ArgoCD works the same way — periodic polling plus an optional webhook — so "pull-based" means the agent decides when to check, not that it's notified the instant you `git push`. Configure a Git webhook to the agent's endpoint if you need near-instant reconciliation instead of relying on the polling interval alone.
 
-**Q16: What does the `retry`/`backoff` block in an ArgoCD Application spec do?**
+**Q: What does the `retry`/`backoff` block in an ArgoCD Application spec do?**
 **Short:** It makes ArgoCD retry a failed sync with exponential backoff, spacing attempts further apart, instead of giving up after a single try.
 It controls how ArgoCD retries a failed sync instead of giving up after one attempt, spacing retries with exponential backoff. With `limit: 5` and `backoff: {duration: 5s, factor: 2}`, retries land at 5s, 10s, 20s, 40s, then 80s apart — about 2.5 minutes of total retry window — before ArgoCD gives up and marks the Application degraded. This absorbs transient failures, like a momentarily unreachable admission webhook or a CRD that hasn't registered yet, without a human needing to manually re-trigger sync. Raise `limit` and `backoff` for Applications with known-flaky dependencies rather than leaving every app on the same default.
 

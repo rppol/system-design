@@ -702,6 +702,14 @@ behaviour change into a reviewable diff. The discipline that makes it work is re
 diff rather than reflexively running `-update` to make CI green, which is the failure mode
 that turns golden files into no tests at all.
 
+Golden-compare the content, not its encoding. Go 1.27 changed the `compress/flate` encoder,
+and the release notes warn that its exact output, and therefore the bytes from
+`compress/gzip`, `compress/zlib`, `archive/zip` and `image/png`, may differ from 1.26. A
+golden file holding compressed bytes fails on the toolchain bump with no behaviour change.
+Decompress `got` and compare that to an uncompressed golden file, or decode a PNG and compare
+pixels. The same rule makes a build reproducible only for a fixed toolchain; see
+[Build, Deployment and Supply Chain](../build_deployment_and_supply_chain/build_deployment_and_supply_chain.md).
+
 `testdata/` is ignored by the Go tool, so anything in it is invisible to the build.
 
 ### 6.6 The race detector
@@ -999,6 +1007,25 @@ The eleventh regeneration silently accepted a change that dropped an entire flag
 output, and the flag went undocumented for three releases. `-update` is a tool for *reviewing*
 a diff, not for producing one — if you cannot explain every line of the resulting `git diff`,
 the change is a bug and not an update.
+
+**9. A toolchain bump that failed every gzip golden file.**
+
+An export service golden-tested its `.csv.gz` output byte for byte. The Go 1.26 to 1.27 bump
+failed all 40 cases with identical CSV inside, because the 1.27 `compress/flate` encoder
+produces different (valid) DEFLATE streams. The team ran `-update`, which hid the cause and
+would also have hidden a real change in the CSV.
+
+```go
+// BROKEN: pins the compressor's output, which the Go release notes say can change.
+if !bytes.Equal(gotGz, wantGz) { t.Fatal("output changed") }
+
+// FIX: compare what the user reads.
+zr, err := gzip.NewReader(bytes.NewReader(gotGz))
+if err != nil { t.Fatal(err) }
+got, err := io.ReadAll(zr)
+if err != nil { t.Fatal(err) }
+if !bytes.Equal(got, wantCSV) { t.Fatalf("csv differs:\n%s", got) }
+```
 
 ---
 

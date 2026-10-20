@@ -747,7 +747,7 @@ Evaluating a thought in isolation (without the path so far) produces scores that
 | Tool / Library | Role | Notes |
 |---|---|---|
 | OpenAI GPT-5.6 (`gpt-5.6-sol` / `-terra` / `-luna`) | Generator + evaluator LLM | Strong instruction following; `temperature=0` for eval; use the cheaper `-luna` tier for the evaluator |
-| Anthropic Claude Sonnet 5 / Opus 5 | Alternative LLM | Comparable quality; 1M-token context on Claude 4.6 and later for deep paths |
+| Anthropic Claude Sonnet 5.5 / Opus 5.5 | Alternative LLM | Comparable quality; 1M-token context on every current Claude model for deep paths |
 | [LangGraph](../agentic_frameworks/langgraph.md) | Graph-based agent orchestration | Native support for branching and backtracking via conditional edges |
 | LlamaIndex | RAG + agent framework | `TreeSummarize` uses ToT-like aggregation; custom agent steps |
 | Guidance (Microsoft) | Constrained generation | Forces structured thought proposals (JSON, numbered lists) |

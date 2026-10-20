@@ -86,22 +86,22 @@ Token-based pricing requires granular cost tracking:
 | **Per-user** | How much does this user cost per month? | Aggregate by user_id |
 | **Per-team** | Which team is consuming the most budget? | Aggregate by team/department tag |
 | **Per-feature** | Is the summarization feature or the chat feature more expensive? | Aggregate by feature/endpoint tag |
-| **Per-model** | What would it cost to switch from GPT-4o to Claude Sonnet 5? | Track model per request, compare costs |
+| **Per-model** | What would it cost to switch from GPT-4o to Claude Sonnet 5.5? | Track model per request, compare costs |
 
 Cost calculation at the gateway layer:
 
 ```python
-# Per-model pricing table, per 1M tokens (list prices as of July 2026 --
+# Per-model pricing table, per 1M tokens (list prices on 2026-10-19 --
 # treat this table as configuration, not a constant: providers reprice often)
 PRICING = {
-    "gpt-5.6-sol":         {"input": 5.00, "output": 30.00},
-    "gpt-5.6-terra":       {"input": 2.50, "output": 15.00},
-    "gpt-5.6-luna":        {"input": 1.00, "output": 6.00},
-    "gpt-4o":              {"input": 2.50, "output": 10.00},   # legacy, still served
-    "gpt-4o-mini":         {"input": 0.15, "output": 0.60},    # legacy, still served
-    "claude-opus-5":       {"input": 5.00, "output": 25.00},
-    "claude-sonnet-5":     {"input": 2.00, "output": 10.00},  # introductory through 2026-08-31, then 3.00 / 15.00
-    "claude-haiku-4.5":    {"input": 1.00, "output": 5.00},
+    "gpt-6-astra":         {"input": 10.00, "output": 50.00},
+    "gpt-6.1-sol":         {"input": 2.00, "output": 10.00},
+    "gpt-6-luna":          {"input": 0.10, "output": 0.50},
+    "gpt-4o":              {"input": 2.50, "output": 10.00},   # snapshots shut down 2027-01-14
+    "gpt-4o-mini":         {"input": 0.15, "output": 0.60},    # shuts down 2027-01-14
+    "claude-opus-5-5":     {"input": 4.00, "output": 20.00},
+    "claude-sonnet-5-5":   {"input": 2.00, "output": 10.00},
+    "claude-haiku-5-5":    {"input": 0.10, "output": 0.50},    # prompts <= 100K tokens; 0.50 / 2.50 above
 }
 
 def calculate_cost(model, input_tokens, output_tokens):
@@ -332,7 +332,7 @@ Trace: "book me a flight to NYC next Tuesday"
 
 ### OpenTelemetry for LLMs
 
-OpenTelemetry (OTel) is the standard for distributed tracing. LLM observability extends OTel with LLM-specific semantic conventions. The OpenLLMetry project and the OTel GenAI SIG define standardized attribute names:
+OpenTelemetry (OTel) is the standard for distributed tracing. LLM observability extends OTel with LLM-specific semantic conventions. The OpenLLMetry project and the OTel GenAI SIG define standardized attribute names. They live in the `open-telemetry/semantic-conventions-genai` repository: semconv v1.42.0 (2026-06-12) deprecated every `gen_ai.*` attribute, metric, event and span in the core `semantic-conventions` repository, so set the GenAI repository's `schema_url` on your instrumentation, not the core one:
 
 ```python
 from opentelemetry import trace
@@ -690,7 +690,7 @@ Enterprise APM vendor's LLM offering (now surfaced as "Agent Observability"). Au
 
 **3. Not attributing costs to features, leading to invisible budget overruns.** A mid-size SaaS company shared a single OpenAI API key across 6 product features. Monthly bill: $45K. After instrumenting per-feature cost attribution, they discovered that an internal document summarization tool used by 12 people was consuming 60% ($27K) of the budget because it sent entire 50-page documents as context for every query. The fix: implement chunking for the summarization tool (reduced its cost to $4K/month) and set per-feature budget caps with alerts at 80% of cap.
 
-**4. Quality scoring pipeline that is slower than inference, causing queue backup.** A healthcare company ran synchronous LLM-as-judge evaluation on 100% of responses using GPT-5.6 sol as the judge. Judge latency: 1.5-3 seconds. At 2K requests/hour, the scoring queue backed up within 2 hours and reached a 6-hour delay by end of day. Stale quality scores meant alerts fired on data that was half a day old. The fix: switch to async scoring with a small, cheap judge model, calibrated against the large judge on a held-out set before rollout, sample at 10%, and use a dedicated scoring worker pool that auto-scales based on queue depth.
+**4. Quality scoring pipeline that is slower than inference, causing queue backup.** A healthcare company ran synchronous LLM-as-judge evaluation on 100% of responses using GPT-6.1 Sol as the judge. Judge latency: 1.5-3 seconds. At 2K requests/hour, the scoring queue backed up within 2 hours and reached a 6-hour delay by end of day. Stale quality scores meant alerts fired on data that was half a day old. The fix: switch to async scoring with a small, cheap judge model, calibrated against the large judge on a held-out set before rollout, sample at 10%, and use a dedicated scoring worker pool that auto-scales based on queue depth.
 
 **5. Dashboard overload -- 50 metrics, nobody looks at any of them.** A platform team built a comprehensive Grafana dashboard with 50+ panels covering every conceivable LLM metric. Usage analytics showed the dashboard had 3 views per week, all from the person who built it. Nobody else could find the signal in the noise. The fix: create two focused dashboards. Ops dashboard: 6 panels (request volume, error rate, P95 latency, cost burn rate, active alerts, provider status). Product dashboard: 6 panels (quality score trend, user satisfaction, top failure modes, feature usage, cost per conversation, prompt version comparison). Total views jumped to 40+ per week.
 

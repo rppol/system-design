@@ -418,10 +418,10 @@ ts(1209)`; exhaustiveness over unions is
 
 ### 6.7 Decorators: the modern form, and why legacy persists
 
-**The proposal is at Stage 2.7, not Stage 3.** It reached Stage 3 in 2022; TC39 later inserted
-2.7 as an intermediate checkpoint and re-slotted the existing proposals into it — a **process
-change, not a rejection on the merits**, and why nearly every blog post still says Stage 3.
-Decorators are therefore not ECMAScript yet, so something must compile them.
+**The proposal is at Stage 2.7, not Stage 3.** It reached Stage 3 in March 2022. On 2026-05-19
+TC39 moved it back to 2.7: no engine had shipped it, three spec issues were open, the Test262
+semantics PR was unmerged, and V8 halted its implementation. Decorator Metadata moved to 2.7 with
+it. Decorators are therefore not ECMAScript yet, so something must compile them.
 
 ```ts
 // Modern [5.0]: (value, context) => replacement | void
@@ -498,6 +498,12 @@ of them, `defer()` for cleanup owning no object, `adopt(value, fn)` for a non-st
 `SuppressedError` whose `.error` is the disposal failure and `.suppressed` the original, instead
 of a `finally` silently replacing your real exception. `Symbol.dispose` needs `lib` at `esnext`;
 Node has had the symbols since 20.5 and runs the syntax natively on 24 and 26.
+
+Explicit Resource Management (`using`, `await using`, `DisposableStack`, `SuppressedError`) is
+Stage 4. TC39 granted conditional Stage 4 in May 2025, and on 2026-05-19 the champion reported
+every condition met (Test262 tests merged, ECMA-262 PR approved by the editors). TC39's finished
+proposals list it for ES2027. Decorators went the other way at the same meeting, back to Stage
+2.7, so of the two class-adjacent features in this module only `using` is a finished standard.
 
 ### 6.9 When a class is the wrong tool
 
@@ -671,12 +677,14 @@ them with `ts(1294)`. The replacement is a union of string literals — zero emi
 exhaustiveness — or `const X = {…} as const` when you also need the runtime list.
 
 **Q: What stage are decorators actually at in TC39?**
-**Short:** Decorators sit at Stage 2.7 after TC39 inserted that checkpoint below Stage 3 and re-slotted existing proposals into it, so they are still not ECMAScript.
+**Short:** Stage 2.7. TC39 moved decorators back from Stage 3 on 2026-05-19 because no engine shipped them and the spec and Test262 tests were incomplete.
 
-They reached Stage 3 in 2022, then TC39 added 2.7 as an intermediate gate — tests written and
-signed off by the editors before returning to 3 — and re-slotted several proposals into it. It is
-a **process change, not a rejection on the merits**, though most blog posts still say Stage 3.
-The consequence: some compiler must still transform them, so a decorator is never free.
+They sat at Stage 3 from March 2022 with no shipping engine. At the 2026-05-19 meeting the
+committee demoted them: three spec issues were open, the Test262 semantics PR was unmerged, V8
+halted its implementation (which was also slower than Babel output), and SpiderMonkey and
+JavaScriptCore will not resume until another engine ships. The committee noted the proposal could
+drop to Stage 2 if the design changes. Decorator Metadata moved to 2.7 with it. The consequence:
+some compiler must still transform them, so a decorator is never free.
 
 **Q: What exactly does a `using` declaration guarantee?**
 **Short:** Scope exit calls Symbol.dispose on every declared resource in reverse acquisition order, on a normal return, an early break, and a thrown exception alike.

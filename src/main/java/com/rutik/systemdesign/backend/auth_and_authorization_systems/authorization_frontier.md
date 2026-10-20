@@ -6,7 +6,7 @@ The parent module ([Authentication and Authorization Systems](auth_and_authoriza
 
 ## 1. Concept Overview
 
-Seven extension specifications, all published or finalized between 2015 and late 2025, close gaps the original OAuth 2.0 / OIDC core left open: **PAR** (RFC 9126) hardens the authorization *request* itself; **RAR** (RFC 9396) replaces coarse scope strings with structured, transaction-level authorization data; **Token Exchange** (RFC 8693) standardizes how one party trades a token for another, distinguishing delegation from impersonation; **CIBA** decouples authentication from the device making the request; **SD-JWT** (RFC 9901) lets a credential holder disclose only some of its claims; **SCIM 2.0** (RFC 7643/7644) automates the identity lifecycle — provisioning and, more importantly, deprovisioning; and the **MCP authorization specification** applies OAuth 2.1 to the newest class of client: an AI agent acting with a user's delegated authority. All seven are in production use today, not speculative drafts — this file states each one's actual standardization status because getting that wrong is worse than not mentioning it.
+Seven extension specifications, all published or finalized between 2015 and late 2025, close gaps the original OAuth 2.0 / OIDC core left open: **PAR** (RFC 9126) hardens the authorization *request* itself; **RAR** (RFC 9396) replaces coarse scope strings with structured, transaction-level authorization data; **Token Exchange** (RFC 8693) standardizes how one party trades a token for another, distinguishing delegation from impersonation; **CIBA** decouples authentication from the device making the request; **SD-JWT** (RFC 9901) lets a credential holder disclose only some of its claims; **SCIM 2.0** (RFC 7643/7644) automates the identity lifecycle — provisioning and, more importantly, deprovisioning; and the **MCP authorization specification** applies OAuth 2.1 to the newest class of client: an AI agent acting with a user's delegated authority. All seven are in production use today, not speculative drafts — this file states each one's actual standardization status because getting that wrong is worse than not mentioning it. §4.9 covers identity inside a call chain: Transaction Tokens and ID-JAG, both IETF Internet-Drafts, and Kubernetes pod certificates, stable since Kubernetes 1.37.
 
 ---
 
@@ -76,7 +76,9 @@ A REST protocol for provisioning and deprovisioning identities across systems: `
 
 ### 4.7 Agent / MCP Authorization
 
-The Model Context Protocol's authorization specification (verified against `modelcontextprotocol.io/specification/draft/basic/authorization`) builds on the **OAuth 2.1 Internet-Draft** (`draft-ietf-oauth-v2-1`, still not an RFC), not a bespoke scheme. An MCP server is classified as an **OAuth 2.1 resource server**; it **MUST** publish **OAuth 2.0 Protected Resource Metadata (RFC 9728)** so a client can discover which authorization server(s) protect it, typically surfaced via a `WWW-Authenticate: Bearer resource_metadata="..."` header on a 401. MCP clients **MUST** send the **RFC 8707 `resource` parameter** on both the authorization and token requests, naming the exact canonical MCP server URI the token is for — this is what stops a token minted for one MCP server being replayed against another. **Dynamic Client Registration (RFC 7591)** is supported but explicitly **deprecated** in the current spec in favor of **OAuth Client ID Metadata Documents**, where the client's HTTPS URL itself serves as its `client_id` and the authorization server fetches client metadata from that URL. The **confused-deputy problem** is named directly in the spec's security considerations: an MCP client holding a user-delegated token, driven by content from an untrusted tool result, can be steered into calling a downstream MCP server or action the user never actually authorized — the RFC 8707 audience binding, strict token-passthrough prohibitions ("MCP servers MUST NOT accept or transit any other tokens"), and per-operation scope challenges (`insufficient_scope` triggering a step-up re-authorization rather than a silent broader grant) are the spec's controls against it, not a substitute for the agent framework's own tool-output distrust.
+The Model Context Protocol's authorization specification (revision 2026-07-28, `modelcontextprotocol.io/specification/2026-07-28/basic/authorization`) builds on the **OAuth 2.1 Internet-Draft** (`draft-ietf-oauth-v2-1`, still not an RFC), not a bespoke scheme. An MCP server is classified as an **OAuth 2.1 resource server**; it **MUST** publish **OAuth 2.0 Protected Resource Metadata (RFC 9728)** so a client can discover which authorization server(s) protect it, typically surfaced via a `WWW-Authenticate: Bearer resource_metadata="..."` header on a 401. MCP clients **MUST** send the **RFC 8707 `resource` parameter** on both the authorization and token requests, naming the exact canonical MCP server URI the token is for — this is what stops a token minted for one MCP server being replayed against another. **OAuth Client ID Metadata Documents** (CIMD) are the **SHOULD**-level registration mechanism: the client's HTTPS URL itself serves as its `client_id` and the authorization server fetches client metadata from that URL. **Dynamic Client Registration (RFC 7591)** is **MAY** and deprecated, kept for authorization servers without CIMD. Pre-registered or DCR-issued credentials **MUST** be keyed to the authorization server's `issuer`, and a client **MUST NOT** reuse them when protected resource metadata points to a different server. Before sending the code to any token endpoint, the client **MUST** apply RFC 9207 §2.4 validation, comparing the `iss` in the authorization response to the issuer it recorded from validated metadata, which blocks mix-up attacks. Enterprise-managed authorization and other add-ons live in the separate MCP authorization extensions repository (`modelcontextprotocol/ext-auth`), not the core spec. The **confused-deputy problem** is named directly in the spec's security considerations: an MCP client holding a user-delegated token, driven by content from an untrusted tool result, can be steered into calling a downstream MCP server or action the user never actually authorized — the RFC 8707 audience binding, strict token-passthrough prohibitions ("MCP servers MUST NOT accept or transit any other tokens"), and per-operation scope challenges (`insufficient_scope` triggering a step-up re-authorization rather than a silent broader grant) are the spec's controls against it, not a substitute for the agent framework's own tool-output distrust.
+
+The **Enterprise-Managed Authorization** extension (stable in `modelcontextprotocol/ext-auth`) removes the per-server consent screen inside a company. The user signs in once to the MCP client through enterprise SSO (OIDC or SAML). The client then trades that ID token at the enterprise IdP with an **RFC 8693 token exchange** for an **ID-JAG** (Identity Assertion JWT Authorization Grant, `typ: oauth-id-jag+jwt`), whose `aud` is the MCP authorization server's issuer and whose `resource` names the MCP server. The IdP issues it only if admin policy lets that user reach that server. The client presents the ID-JAG to the MCP authorization server as an **RFC 7523 JWT bearer** grant and gets an access token audience-restricted to that MCP server. Clients detect support through `urn:ietf:params:oauth:grant-profile:id-jag` in `authorization_grant_profiles_supported`. The IdP controls which servers each user can reach but never sees the MCP traffic.
 
 ### 4.8 The Sender-Constraining Decision
 
@@ -88,6 +90,53 @@ The parent module explains DPoP (RFC 9449) and mTLS-bound tokens (RFC 8705) mech
 | Financial-grade API (FAPI 2.0) deployment, or a service mesh that already terminates mTLS between hops | **mTLS-bound tokens** — reuses certificate infrastructure already present; FAPI 2.0 accepts either, but mTLS is the more common financial-sector choice |
 | Public API with low-value, short-lived tokens (5–15 min) and no PKI budget | **Bearer, unconstrained** — the short expiry is already doing most of the work; sender-constraining adds real operational cost (client key management, or certificate issuance/rotation) for tokens that are stolen-and-useless in minutes anyway |
 | Service-to-service call chain crossing a token-exchange hop | **DPoP or mTLS carried through the exchange** — an unconstrained bearer token minted mid-chain reintroduces exactly the theft risk sender-constraining removed at the edge |
+
+### 4.9 Call-Chain and Workload Identity: Transaction Tokens, ID-JAG, and Pod Certificates
+
+Token Exchange (§4.3) narrows a token at every hop, but it costs one authorization-server round trip per hop, and the first hop still sends a user-facing access token into the internal network. Three mechanisms split the identity work of a call chain into separate layers.
+
+**Transaction Tokens** (`draft-ietf-oauth-transaction-tokens-11`, July 30, 2026, an IETF Internet-Draft, not an RFC). The first workload inside a trust domain, usually the gateway, presents the external access token to a **Transaction Token Service (TTS)** with an RFC 8693 token exchange: `requested_token_type=urn:ietf:params:oauth:token-type:txn_token`, `audience` set to the trust domain name, and a required `scope` that describes the transaction. The TTS returns a JWT with header `typ: txntoken+jwt`, `token_type=N_A`, no refresh token, and a lifetime the draft puts at minutes or less. Every downstream hop forwards that token unchanged in a `Txn-Token` request header; the draft forbids carrying it in `Authorization`. The external access token stops at the gateway.
+
+| Claim | Status | Meaning |
+|-------|--------|---------|
+| `aud` | required | The trust domain where the token is valid, not a single service |
+| `txn` | required | Unique transaction ID, the join key for logs across every hop |
+| `sub` | required | The principal, unique within the trust domain |
+| `scope` | required | What the transaction may do |
+| `req_wl` | required | The workload that requested the token |
+| `iat`, `exp` | required | Issue and expiry times |
+| `tctx` | recommended | Immutable transaction details, such as the order amount |
+| `rctx` | recommended | Request context, such as the caller IP |
+
+A workload may present a Txn-Token as a `subject_token` to get a **replacement**. The TTS may narrow permitted actions and add asserted values, but it must not expand permitted actions, must not change `txn`, `sub`, or `aud`, and must not replace an expired token.
+
+| | Token Exchange per hop (§4.3) | Transaction Token |
+|---|---|---|
+| Authorization-server round trips | One per hop | One at the edge, plus any replacements |
+| What crosses internal hops | A new audience-bound access token per hop | One Txn-Token, forwarded unchanged |
+| Scope across the chain | Narrowed at each hop | Fixed at the edge; a replacement can only narrow it |
+| Where the token is valid | The named audience | Only inside the trust domain in `aud` |
+| What it records | The actor chain in `act` | The transaction ID `txn`, immutable `tctx`, and requesting workload `req_wl` |
+
+**ID-JAG and Cross-App Access** (`draft-ietf-oauth-identity-assertion-authz-grant-04`, May 21, 2026, an IETF Internet-Draft). ID-JAG moves a user's enterprise SSO identity into a different application's trust domain without a per-app consent screen. The client exchanges an ID token, a SAML 2.0 assertion, or (where the IdP allows it) a refresh token at the IdP's token endpoint with `requested_token_type=urn:ietf:params:oauth:token-type:id-jag` and `audience` set to the resource authorization server's issuer. The IdP applies admin policy and returns a JWT with `typ: oauth-id-jag+jwt` and required claims `iss`, `sub`, `aud`, `client_id`, `jti`, `exp`, and `iat`; the draft's example lifetime is 300 seconds. The client presents it to the resource authorization server with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` (RFC 7523) and gets an ordinary access token. The draft defines this pattern as **Cross-App Access (XAA)**; MCP's Enterprise-Managed Authorization extension (§4.7) is one profile of it. Access is granted and revoked by IdP policy, so offboarding a user removes their agents' access to every connected app at once.
+
+**Kubernetes pod certificates** (`PodCertificateRequest` and the `podCertificate` projected volume, first available in 1.34, stable in 1.37). These give each pod an X.509 private key and certificate chain for mTLS, which is the workload identity a TTS checks before it issues a token naming that workload in `req_wl`. The kubelet generates the key on the node (`keyType` is one of `ED25519`, `ECDSAP256`, `ECDSAP384`, `ECDSAP521`, `RSA3072`, or `RSA4096`), files a request to the named `signerName`, writes the chain into the volume, and refreshes it at the signer's `beginRefreshAt`. `maxExpirationSeconds` defaults to 86400 (24 hours), with a minimum of 3600 and a maximum of 7862400 (91 days); the built-in signers cap at 86400. Core Kubernetes ships no production signer, so a cluster still runs its own signer controller. Mechanics and the comparison with SPIRE are in [Kubernetes Security](../../devops/kubernetes_security/kubernetes_security.md) and its `workload_identity_and_federation.md` sub-file.
+
+```
+                          trust domain: shop.internal
+  +--------+  access   +---------+  Txn-Token hdr  +--------+  Txn-Token hdr  +----------+
+  | client |---------->| gateway |---------------->| orders |---------------->| payments |
+  +--------+  token    +---------+  mTLS, pod cert +--------+  mTLS, pod cert +----------+
+      ^                     |
+      | ID-JAG from         | RFC 8693 exchange
+      | enterprise IdP      | requested_token_type=...:txn_token
+      | (cross-app entry)   v
+                       +---------+
+                       |   TTS   |  signs txn, sub, scope, req_wl, tctx; lifetime in minutes
+                       +---------+
+```
+
+*ID-JAG gets the caller into the app, the TTS converts the external token into a Txn-Token at the edge, and pod certificates authenticate every hop on the wire; the external access token never travels past the gateway.*
 
 ---
 
@@ -272,6 +321,50 @@ Decoded payload of the issued token (illustrative):
 }
 ```
 
+### Transaction Token request at the edge (draft-ietf-oauth-transaction-tokens-11)
+
+The gateway authenticates to the TTS as a workload (here with its pod certificate over mTLS) and exchanges the external access token:
+
+```http
+POST /txn-token HTTP/1.1
+Host: tts.shop.internal
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange
+&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Atxn_token
+&audience=shop.internal
+&scope=orders.place
+&subject_token=eyJhbGciOiJFUzI1NiIs...(external access token, sub=alice)
+&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token
+```
+
+Decoded header and payload of the returned Txn-Token (illustrative values, 300-second lifetime):
+
+```json
+{ "typ": "txntoken+jwt", "alg": "ES256", "kid": "tts-2026-10" }
+{
+  "iat": 1792368000,
+  "exp": 1792368300,
+  "aud": "shop.internal",
+  "txn": "97053963-771d-49cc-a4e3-20aad399c312",
+  "sub": "alice",
+  "scope": "orders.place",
+  "req_wl": "spiffe://shop.internal/ns/edge/sa/gateway",
+  "tctx": { "order_total": "45.00", "currency": "EUR" },
+  "rctx": { "req_ip": "203.0.113.7" }
+}
+```
+
+Every internal hop forwards it in its own header:
+
+```http
+POST /payments HTTP/1.1
+Host: payments.shop.internal
+Txn-Token: eyJ0eXAiOiJ0eG50b2tlbitqd3QiLCJhbGciOiJFUzI1NiJ9...
+```
+
+`payments` verifies the TTS signature, checks that `aud` is its own trust domain and `exp` has not passed, and authorizes against `scope` and `tctx`: it refuses to charge more than `tctx.order_total`, whatever the request body says.
+
 ### SCIM PATCH — the deprovisioning call every HR-to-app integration depends on
 
 ```http
@@ -292,10 +385,10 @@ This single, atomic (RFC 7644 §3.5.2) call is the entirety of what stands betwe
 
 ### Spring Authorization Server — enabling PAR and validating `authorization_details`
 
-Spring Authorization Server added native RFC 9126 PAR support in the 1.5.x line (verified: `spring-authorization-server` PR #1925, merged into the 1.5.0 milestone).
+Spring Authorization Server has native RFC 9126 PAR support (added in 1.5.0, `spring-authorization-server` PR #1925). It ships as part of Spring Security since 7.0: the `groupId` and `artifactId` are unchanged, the version follows Spring Security (7.1.1 on Maven Central), and a few packages moved.
 
 ```java
-// Dependency: org.springframework.security:spring-security-oauth2-authorization-server:1.5.x
+// Dependency: org.springframework.security:spring-security-oauth2-authorization-server:7.1.x
 @Bean
 public SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http) throws Exception {
     OAuth2AuthorizationServerConfigurer authorizationServerConfigurer =
@@ -407,6 +500,8 @@ public final class RarValidatingParAuthenticationProvider implements Authenticat
 
 **Pitfall 3 — treating RAR's `authorization_details` as advisory metadata instead of an enforcement contract.** A resource server logged `authorization_details` for audit purposes but authorized requests based on the token's coarse `scope` claim as before, on the reasoning that the fine-grained data was "nice to have." An attacker who obtained a token issued for a €10 authorization_details grant discovered the resource server would honor any amount, because the enforcement point never actually read the structured field. Fix: if you issue RAR-shaped tokens, the resource server must be the thing enforcing them — logging `authorization_details` without checking it against the actual request is worse than not implementing RAR at all, because it looks compliant in an audit while providing zero additional protection.
 
+**Pitfall 4 - the user's access token forwarded through every internal hop.** A retail platform's gateway validated a 60-minute user access token and then forwarded the same `Authorization: Bearer` header to 9 internal services, so each one could read `sub`. One of those services logged full request headers to a shared log index that about 400 engineers could search. A contractor copied a token from the logs and replayed it against the public API from outside the network, where it was valid for the rest of its hour, because the token's audience was the public API that every internal hop also accepted. Fix: stop the external token at the gateway, exchange it for a Transaction Token (§4.9) whose `aud` is the internal trust domain and whose lifetime is minutes, forward that in the `Txn-Token` header, and strip `Authorization` before any internal call. A leaked Txn-Token is rejected by the public API and expires before most log searches would find it.
+
 ---
 
 ## 11. Technologies & Tools
@@ -417,10 +512,13 @@ public final class RarValidatingParAuthenticationProvider implements Authenticat
 | Authlete | Commercial AS backend with first-class PAR, RAR, CIBA, and Token Exchange support; frequently cited in RFC 9126/9396 implementer guidance |
 | Curity Identity Server | FAPI 2.0-certified AS with PAR, RAR, CIBA support, aimed at financial-grade deployments |
 | Auth0 / Okta | Both document and support CIBA as a production grant type; Okta is a common SCIM 2.0 identity source for downstream provisioning |
-| Spring Authorization Server 1.5.x | Native RFC 9126 PAR support (`pushedAuthorizationRequestEndpoint`); RAR and RFC 8693 Token Exchange require custom `AuthenticationProvider`s — not built in |
+| Spring Authorization Server (part of Spring Security 7.x) | Native RFC 9126 PAR support (`pushedAuthorizationRequestEndpoint`) and RFC 8693 Token Exchange grant; RAR `authorization_details` needs a custom `AuthenticationProvider` |
 | openid4vc / sd-jwt libraries (e.g. `sd-jwt-js`, `authlete` SD-JWT libraries) | SD-JWT issuance, disclosure selection, and verification |
 | OpenID Foundation FAPI conformance suite | Certification test suite for FAPI 2.0 Security Profile compliance, including mandatory-PAR enforcement |
 | SCIM client/server libraries (e.g. `pingidentity/scim2-sdk-java`) | RFC 7643/7644-compliant SCIM implementations for both provisioning sources and downstream apps |
+| Transaction Tokens (`draft-ietf-oauth-transaction-tokens-11`) | Internet-Draft for short-lived, trust-domain-scoped JWTs (`typ: txntoken+jwt`) carried in the `Txn-Token` header across internal hops |
+| ID-JAG (`draft-ietf-oauth-identity-assertion-authz-grant-04`) | Internet-Draft for Cross-App Access: trade an SSO identity assertion at the IdP for a JWT grant another app's authorization server accepts |
+| Kubernetes pod certificates (stable in 1.37) | `podCertificate` projected volume and `PodCertificateRequest`: kubelet-generated keys and signer-issued X.509 chains for pod mTLS |
 | MCP SDKs (TypeScript, Python) | Reference implementations of the MCP authorization flow — Protected Resource Metadata discovery, Client ID Metadata Documents, RFC 8707 resource binding |
 
 ---
@@ -484,13 +582,28 @@ mTLS-bound tokens (RFC 8705) make sense when the deployment already terminates m
 It creates the appearance of fine-grained authorization without the substance: an audit trail shows the specific transaction the user consented to, but the enforcement decision never reads that field, so any request within the coarser scope succeeds regardless of whether it matches the granted `authorization_details`. This is worse than not implementing RAR at all in one specific way — it passes a compliance review that checks for RAR's presence in the token, while providing none of the protection RAR is meant to provide, because the resource server that must be the actual enforcement point never was.
 
 **Q: What's the difference between MCP's Dynamic Client Registration support and Client ID Metadata Documents, and which does the spec prefer?**
-**Short:** DCR self-registers a new client per AS; Client ID Metadata Documents use a fetchable HTTPS URL as the client_id instead.
-Dynamic Client Registration (RFC 7591) lets a client `POST /register` to get a `client_id` issued per authorization server it talks to — supported by the MCP spec but explicitly marked deprecated, retained only for backward compatibility. The preferred mechanism is OAuth Client ID Metadata Documents: the client's own HTTPS URL serves directly as its `client_id`, and the authorization server fetches a JSON metadata document from that URL to learn the client's registered redirect URIs and other properties, removing the need for a separate per-AS registration call and the state that comes with it.
+**Short:** The spec prefers Client ID Metadata Documents (SHOULD): a fetchable HTTPS URL is the client_id. DCR (MAY, deprecated) registers a separate client per AS.
+Dynamic Client Registration (RFC 7591) lets a client `POST /register` to get a `client_id` issued per authorization server it talks to. It is a **MAY** in the 2026-07-28 MCP spec, marked deprecated and kept for authorization servers that lack CIMD support. A DCR-issued or pre-registered credential **MUST** be keyed to that server's `issuer` and never reused against a different one. The preferred (**SHOULD**) mechanism is OAuth Client ID Metadata Documents: the client's own HTTPS URL serves directly as its `client_id`, and the authorization server fetches a JSON metadata document from that URL to learn the client's registered redirect URIs and other properties, removing the need for a separate per-AS registration call and the state that comes with it. A CIMD `client_id` is portable: when protected resource metadata points to a new authorization server, no re-registration is needed.
 
 **Q: An SD-JWT holder discloses two of eight claims. What can the verifier still infer about the six it never sees?**
 **Short:** It can count them — the _sd digest array reveals how many claims exist, which is why the spec allows issuers to insert decoy digests.
 
 It can infer the *number* of undisclosed claims, and often what they are. Selective disclosure hides claim values, not the shape of the credential: the signed payload carries one salted digest per selectively-disclosable claim in the `_sd` array, so an eight-claim credential presents eight digests whether the holder reveals two of them or all eight. A verifier that receives two Disclosures alongside eight digests learns immediately that six claims were withheld. That leaks more than it looks: if every credential of a given type from a given issuer has a fixed claim set, the verifier can map position and count onto specific claim names, and "this holder chose not to reveal their address" is itself information. The mitigation in the specification is **decoy digests** — the issuer adds digests to `_sd` that correspond to no real claim at all, and because a digest is indistinguishable from a hash of anything else, a verifier cannot tell a decoy from a withheld claim. The cost is credential size, so issuers pad to a plausible fixed width rather than at random. The practical guidance is to treat claim *count* as metadata you must deliberately protect, not as something selective disclosure gives you for free, and to standardise the padded width across every credential of a type so the padding itself does not become a fingerprint.
+
+**Q: Can a service in a call chain widen a Transaction Token's scope by asking the TTS for a replacement?**
+**Short:** No. A replacement Txn-Token may narrow permitted actions or add asserted values, but it must keep txn, sub, and aud and never expand what is allowed.
+
+No. The Transaction Tokens draft (`draft-ietf-oauth-transaction-tokens-11`) lets a workload present a Txn-Token as the `subject_token` of a new exchange to get a replacement, for example to add a value it computed or to drop a permission before calling a less trusted service. The TTS may reduce the permitted actions and may add asserted values, but it must not expand the permitted actions, must not change `txn`, `sub`, or `aud`, and must not issue a replacement for an expired token. That keeps the scope fixed at the edge, where the external token was checked: a compromised `orders` service cannot turn an `orders.place` transaction into a refund. The draft also says the TTS should limit how many times one token is replaced, because each replacement may extend the lifetime under TTS policy. If a downstream step needs more authority than the edge granted, that is a new transaction, started from a token the edge validated.
+
+**Q: What problem do Transaction Tokens solve that forwarding the user's access token to every internal service does not?**
+**Short:** A Txn-Token keeps the external access token at the edge and gives internal hops a minutes-long token, valid only in the trust domain, that pins the user, scope, and transaction.
+
+Forwarding the user's access token has three costs. The token's audience is the public API, so a copy leaked from any internal log or service is replayable from outside for its whole lifetime, commonly 15 to 60 minutes. Every internal service must accept that public audience, which blurs where external authorization ends. And nothing ties the hops of one request together except whatever correlation ID the services agree on. A Transaction Token fixes each: the gateway exchanges the external token once at the TTS, and the returned JWT has `aud` set to the internal trust domain, a lifetime of minutes or less, a unique `txn` ID for every hop to log, the `sub` and `scope` of the original request, the requesting workload in `req_wl`, and immutable transaction details in `tctx`. It travels in a `Txn-Token` header, not `Authorization`. Compared with RFC 8693 Token Exchange at every hop, it costs one TTS round trip instead of one per hop, at the price of no per-hop narrowing unless a service requests a replacement.
+
+**Q: How do ID-JAG, Transaction Tokens, and Kubernetes pod certificates divide identity work in an agent's call chain?**
+**Short:** ID-JAG gets the agent into another app from enterprise SSO, a Txn-Token carries user and transaction context across internal hops, and pod certificates authenticate each workload's TLS connection.
+
+They answer three different questions. ID-JAG (`draft-ietf-oauth-identity-assertion-authz-grant-04`) answers "may this user's client reach that other application": the client exchanges the user's ID token at the enterprise IdP for a short-lived `oauth-id-jag+jwt`, and the target app's authorization server trades it for an access token through the RFC 7523 JWT bearer grant, with IdP policy deciding which apps are allowed. A Transaction Token answers "on whose behalf and for which transaction is this internal call": the target app's gateway exchanges that access token at its TTS for a token scoped to its trust domain and forwards it in the `Txn-Token` header. A Kubernetes pod certificate (stable in 1.37) answers "which workload is on the other end of this connection": the kubelet-issued X.509 chain authenticates each mTLS hop, and the TTS uses that workload identity for `req_wl`. Dropping any layer leaves a gap: without ID-JAG the agent needs a per-app consent or a shared API key, without a Txn-Token internal hops pass around the public token, and without workload identity any pod that can reach the TTS can mint tokens.
 
 ---
 
@@ -500,9 +613,10 @@ It can infer the *number* of undisclosed claims, and often what they are. Select
 - Define `authorization_details` `type`s narrowly and version them — a resource server must reject a `type` it doesn't recognize outright, never silently ignore it and fall back to coarse scope enforcement.
 - In Token Exchange, always populate `actor_token` for genuine delegation and read `act.sub` in downstream audit logs — never rely on `sub` alone to reconstruct who actually initiated a multi-hop call chain.
 - Set CIBA `interval` and `expires_in` conservatively, and treat a still-pending `auth_req_id` past its expiry as a hard failure requiring a fresh backchannel request, not an indefinitely retryable one.
-- Author `**Short:**`-style, self-contained SD-JWT Disclosures per claim — do not bundle unrelated claims into a single Disclosure just because they're usually revealed together; that removes the holder's ability to disclose one without the other later.
+- Issue one SD-JWT Disclosure per claim — do not bundle unrelated claims into a single Disclosure just because they're usually revealed together; that removes the holder's ability to disclose one without the other later.
 - Alert on SCIM call failure rate per downstream application, not just on total connector outages, and periodically reconcile the SCIM-managed user list against the identity source of truth — see Pitfall 1.
 - Grant MCP agent tokens the narrowest scope the immediate task needs and let genuinely broader operations trigger the spec's step-up re-authorization — never pre-provision the union of every scope a tool might someday need.
+- Stop the external access token at the edge of the trust domain: exchange it once for a Transaction Token, forward that in the `Txn-Token` header, and strip `Authorization` before internal calls.
 - Pick DPoP or mTLS binding based on what PKI infrastructure the deployment already has, not by default — an unbound bearer token with a short expiry is a legitimate choice for low-value APIs, and sender-constraining has real operational cost.
 
 ---

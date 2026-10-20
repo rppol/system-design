@@ -12,6 +12,10 @@ Key production numbers:
 |---|---|---|---|---|
 | Mixtral 8x7B | 46.7B | 12.9B | 8 | 2 |
 | DeepSeek-V3 | 671B | 37B | 256 + 1 shared | 8 |
+| DeepSeek-V4-Pro | 1.6T | 49B | 384 + 1 shared | 6 |
+| DeepSeek-V4-Flash | 284B | 13B | 256 + 1 shared | 6 |
+| Kimi K2 | 1.04T | 32B | 384 + 1 shared | 8 |
+| Qwen3-Next-80B-A3B | 80B | 3B | 512 + 1 shared | 10 |
 | Qwen3-235B-A22B | 235B | 22B | 128 | 8 |
 | Llama 4 Scout | ~109B | 17B | 16 + 1 shared | 1 |
 | Llama 4 Maverick | ~400B | 17B | 128 + 1 shared | 1 |
@@ -22,10 +26,13 @@ published directly: the paper reports 890B FLOPs/sequence for Switch-C versus 6.
 FLOP-matched Switch-XXL/T5-XXL pair, and the released config (d_model 2080, 15 encoder +
 15 decoder layers, top-1 of 2048) works out to roughly 1.6B parameters touched per token —
 so Switch-C is a *trillion*-parameter model with the per-token cost of a small dense one.
+The 2025-2026 rows show the direction of travel: more and smaller experts (384-512), more of them
+active (6-10), one shared expert, and an active fraction that keeps falling, from 5.5% for
+DeepSeek-V3 to about 3% for Kimi K2 and DeepSeek-V4-Pro and 3.75% for Qwen3-Next.
 Reported architectures for closed models (GPT-4 and others) are second-hand and mutually
 inconsistent; they are not used as numbers anywhere in this module.
 
-The central promise of MoE: several times (Mixtral 3.6x) to ~18x (DeepSeek-V3) more total
+The central promise of MoE: several times (Mixtral 3.6x) to ~33x (DeepSeek-V4-Pro) more total
 parameters at roughly the same inference FLOP cost as a dense model of active-parameter size. More parameters = more capacity to store knowledge; same active compute = similar latency and throughput.
 
 For serving MoE models across many GPUs with expert parallelism, see [Distributed Inference and Disaggregation](../../mlops/distributed_inference_and_disaggregation/distributed_inference_and_disaggregation.md).
@@ -567,6 +574,37 @@ The first widely-deployed open-source sparse MoE LLM. Apache 2.0 license. 8 expe
 
 671B total parameters, 37B active. Multi-head Latent Attention (MLA) combined with fine-grained MoE (256 expert FFNs + 1 shared expert, top-8 routing). Auxiliary-loss-free load balancing using dynamic bias terms; the paper reports that no tokens are dropped during training or inference. Full training took 2.788M H800 GPU-hours — the widely quoted "$5.5M" is that figure priced at the paper's own assumed $2 per GPU-hour, not a disclosed spend. Reported as comparable to leading closed models on many benchmarks. Demonstrated that MoE at scale can be trained efficiently with careful engineering.
 
+### DeepSeek-V4-Pro and V4-Flash (April 2026)
+
+V4-Pro is 1.6T total and 49B active; V4-Flash is 284B total and 13B active. Both are on Hugging
+Face under MIT with a 1M-token context. The released `config.json` for V4-Pro sets 61 layers,
+384 routed experts plus 1 shared, top-6 routing, a `sqrtsoftplus` router score and
+`topk_method: noaux_tc`, so the auxiliary-loss-free bias balancing of V3 carries over. Two MoE
+changes stand out. First, `num_hash_layers: 3`: the first three MoE layers route by a fixed
+token-id-to-expert table (`tid2eid` in the reference `inference/model.py`), not a learned router,
+which is hash routing (§4.4) used exactly where early-layer routing is least stable. Second, expert
+weights ship in FP4 while most other weights are FP8, so the 1.6T experts cost about 0.5 byte per
+parameter in memory. Pre-training used more than 32T tokens with the Muon optimizer.
+
+### Kimi K2, Moonshot AI (July 2025)
+
+1.04T total, 32B active, 61 layers (1 dense), MLA attention, 384 routed experts with 8 selected
+plus 1 shared, expert hidden size 2048. Against DeepSeek-V3 it raises the expert count from 256 to
+384 at the same top-8, so sparsity (total over active experts) rises from 32 to 48, and it halves
+attention heads from 128 to 64 to cut long-context inference cost. Moonshot reports a sparsity
+scaling result: at fixed active parameters, more total experts kept lowering loss. It was
+pre-trained on 15.5T tokens with MuonClip (Muon plus QK-clip on attention logits) and no loss spike.
+
+### Qwen3-Next-80B-A3B, Alibaba (September 2025)
+
+80B total, about 3B active (3.75%), 48 layers, 512 routed experts with 10 selected plus 1 shared,
+trained on 15T tokens, 262k native context. The MoE change is extreme granularity; the
+architecture change is attention: the layout is `12 x (3 x (Gated DeltaNet -> MoE) -> 1 x (Gated
+Attention -> MoE))`, so three of every four layers use linear-time Gated DeltaNet and keep no
+growing KV cache. Sparse FFNs plus mostly linear attention cut both halves of per-token cost. See
+[state_space_models_and_linear_attention.md](../foundations_and_architecture/state_space_models_and_linear_attention.md)
+for Gated DeltaNet.
+
 ### Switch Transformer — Google (2021)
 
 First paper to demonstrate that scaling to 1.6T parameters via MoE (with top-1 routing) improved task performance. Used 2048 experts across TPU pods. Introduced the capacity factor concept and load balancing loss. Established MoE as viable at language model scale.
@@ -622,7 +660,8 @@ Meta's current open-weight flagship, and both variants are MoE with alternating 
 |---|---|---|---|---|
 | Coarse (Switch) | 64-2048 | 1 | Large | Low |
 | Standard (Mixtral) | 8 | 2 | Medium | Medium |
-| Fine-grained (DeepSeek) | 256 | 8 | Small | High |
+| Fine-grained (DeepSeek-V3) | 256 | 8 | Small | High |
+| Very fine-grained (Kimi K2, DeepSeek-V4-Pro, Qwen3-Next) | 384-512 | 6-10 | Smaller | Highest; all-to-all and router cost grow |
 
 ---
 
@@ -790,6 +829,11 @@ Only the FFN is replicated eight times; attention and embeddings are shared and 
 
 Fine-grained MoE uses many more, smaller experts with a correspondingly higher k. DeepSeek-V3 uses 256 expert FFNs with top-8 routing plus 1 shared expert that always runs. Compared to 8 experts top-2, this provides exponentially more possible expert combinations (256 choose 8 vs 8 choose 2), giving the model far greater flexibility in routing. The shared expert ensures every token has a stable "general knowledge" path regardless of routing. Fine-grained MoE also provides smoother gradient flow across experts since each expert is smaller and more tokens touch each expert per batch.
 
+**Q: Why do 2025-2026 MoE models such as Kimi K2, DeepSeek-V4 and Qwen3-Next use 384-512 experts with only 3-4% of parameters active, and what does that cost?**
+**Short:** At fixed active compute, raising total experts keeps lowering loss, so sparsity rose to 48+; the cost is memory for all weights and heavier all-to-all traffic.
+
+Because at a fixed active-parameter budget, adding experts kept improving quality. Kimi K2's report defines sparsity as total over activated experts and finds loss keeps falling as it rises, then stops at 48 (8 of 384, plus 1 shared) as the point where infrastructure cost outweighs the gain, giving 1.04T total and 32B active. DeepSeek-V4-Pro takes 384 routed experts at top-6 for 1.6T total and 49B active, and Qwen3-Next-80B-A3B takes 512 at top-10 for 80B total and about 3B active, against DeepSeek-V3's 256 at top-8 and 5.5% active. The cost lands on serving: every expert must sit in GPU memory even though only 3-4% of the weights run per token, so V4 ships expert weights in FP4 to halve that footprint versus FP8; more experts per token means more destinations in the expert-parallel all-to-all; and smaller experts lower arithmetic intensity at small batch, so decode is memory-bound unless batches are large. Kimi K2 also cut attention heads from 128 to 64 to pay for the sparsity at long context. The practical read: these models are cheap per token only on a fleet sized for their total weights.
+
 **Q: What is MoE upcycling and when would you use it?**
 **Short:** Upcycling copies a trained dense model's FFN weights N times to initialize MoE experts and adds a random gate, reaching MoE quality with far fewer training tokens than starting from scratch.
 
@@ -903,8 +947,7 @@ Each token: router selects top-2 experts. All-to-All: tokens go to the GPU holdi
 ```python
 # vLLM launch command per replica (4x A100 80GB with NVLink)
 
-python -m vllm.entrypoints.openai.api_server \
-    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
+vllm serve mistralai/Mixtral-8x7B-Instruct-v0.1 \
     --tensor-parallel-size 4 \       # 4 GPUs in one NVLink domain
     --enable-expert-parallel \       # MoE layers use EP, not TP sharding
     --max-model-len 8192 \

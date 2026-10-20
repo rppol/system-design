@@ -945,7 +945,7 @@ The claimed 12% cleared the floor, but only barely — and the original claim ca
 single sequential run of each side, which is exactly the setup that manufactures a
 one-sided bias. The result was not yet trustworthy.
 
-**Step 2 — Reduce the floor before re-measuring.** Rather than repeat the benchmark 64
+**Step 2 — Reduce the floor before re-measuring.** Rather than repeat the benchmark 117
 times per side on the noisy runner (`16 × (8.1/3)² ≈ 117` per side to resolve 3%), the team
 moved to a dedicated instance and spent 30 minutes on environment control:
 

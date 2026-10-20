@@ -481,6 +481,43 @@ Three rules make this survive. React must never render children into the host no
 
 StrictMode is what catches the missing teardown, on render 1. Its development double-invoke runs setup, cleanup, setup, so a component with no `destroy()` mounts two chart instances into the same node before you have looked at it once — usually visible as a doubled canvas or a "container already initialized" error from the library itself. In production the same defect leaks one instance per theme change instead, where nobody is watching. [Effects and Synchronization](../effects_and_synchronization/effects_and_synchronization.md) owns the cleanup contract in full.
 
+### 6.10 Fragment refs and `FragmentInstance` `[19.3]`
+
+A ref on a single element covers one node. A focus scope, a visibility tracker or a click-outside check usually needs a *group* of siblings, and before React 19.3 the only handle on a group was a wrapper `<div>` plus `querySelectorAll`. The wrapper breaks CSS grid and flex layouts, adds a node to every row, and the query sees only what was in the DOM when it ran. React 19.3 makes Fragment refs stable: `<Fragment ref>` hands you a `FragmentInstance` that acts on the fragment's children with no extra DOM node.
+
+| Methods | What they do |
+|---------|--------------|
+| `focus`, `focusLast`, `blur` | move focus to the first or last focusable descendant, depth-first |
+| `addEventListener`, `removeEventListener`, `dispatchEvent` | manage listeners on the first-level children |
+| `observeUsing`, `unobserveUsing` | attach an `IntersectionObserver` or `ResizeObserver` to every first-level child |
+| `getClientRects`, `getRootNode`, `compareDocumentPosition`, `scrollIntoView` | measure and scroll the first-level children |
+
+```tsx
+import { Fragment, useLayoutEffect, useRef, type FragmentInstance } from "react";
+
+// Tracks which feed rows are on screen without a wrapper div breaking the grid.
+function VisibleRows({ rows, onSeen }: { rows: Row[]; onSeen: (id: string) => void }) {
+  const group = useRef<FragmentInstance>(null);
+
+  useLayoutEffect(() => {
+    const fragment = group.current!;
+    const observer = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) onSeen((e.target as HTMLElement).dataset.id!);
+    }, { threshold: 0.5 });
+    fragment.observeUsing(observer);            // one observer, every child row
+    return () => { fragment.unobserveUsing(observer); observer.disconnect(); };
+  }, [onSeen]);
+
+  return (
+    <Fragment ref={group}>
+      {rows.map((r) => <FeedRow key={r.id} data-id={r.id} row={r} />)}
+    </Fragment>
+  );
+}
+```
+
+The same ref gives a wrapper-less focus scope: `group.current.focus()` lands on the first focusable child and `focusLast()` on the last, which is the pair a focus trap needs for Tab and Shift+Tab wrap. The `FragmentInstance` type comes from `react`, and `@types/react-dom` 19.3.0 (2026-09-09) adds the DOM methods to it.
+
 ---
 
 ## 7. Real-World Examples
@@ -582,7 +619,7 @@ Restoring in an effect cleanup instead misses the case where the dialog closes b
 
 | Tool | Purpose |
 |------|---------|
-| React | 19 makes `ref` an ordinary prop and lets a ref callback return a cleanup |
+| React | 19 makes `ref` an ordinary prop and lets a ref callback return a cleanup, and 19.3 adds Fragment refs |
 | ResizeObserver | Batched element-size observation with no forced synchronous layout |
 | IntersectionObserver | Viewport entry without measuring geometry at all |
 | Floating UI | Positions overlays with collision detection and correct read-write ordering |
@@ -682,6 +719,11 @@ The cost is that the body sits on the critical path of the frame and `getBoundin
 A layout effect measures once per commit, so it cannot see a change caused by a font load, a container query, a sibling's growth, or a window resize. `ResizeObserver` sees all of them, never blocks paint, and delivers at most one callback per frame.
 
 Two details save real CPU. Round the measured value before calling `setState`, because sub-pixel changes during an animation can otherwise push 60 updates a second where 4 suffice. And a callback that resizes the element it observes logs `ResizeObserver loop completed with undelivered notifications.` — the browser telling you a measurement feedback loop exists.
+
+**Q: Why use a Fragment ref instead of a wrapper div and querySelectorAll?**
+**Short:** A Fragment ref in React 19.3 returns a FragmentInstance that focuses, observes and measures a group of siblings with no extra DOM node to break grid or flex layout.
+
+A wrapper `<div>` becomes a grid or flex item itself, so the children stop laying out as siblings of the parent, and it adds one node per group to every list. `querySelectorAll` on it is a snapshot of the DOM at the moment it ran, written against selectors rather than the component tree. `<Fragment ref>` gives `focus()` and `focusLast()` for a focus scope, `observeUsing()` to attach one `IntersectionObserver` or `ResizeObserver` to every first-level child, and `getClientRects()` and `scrollIntoView()` for measuring. Use it when the behavior belongs to a group of siblings; a single node still takes an ordinary element ref.
 
 **Q: How do you mount a non-React chart or map library correctly?**
 **Short:** Mounting a third-party widget means giving it one empty div React never renders children into, plus the library's real teardown in the cleanup.

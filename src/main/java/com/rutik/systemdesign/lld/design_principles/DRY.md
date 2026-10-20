@@ -284,9 +284,9 @@ Without it, every DAO class would duplicate the same connection-acquisition, exc
 **Short:** Three copies of the same email-regex are a violation; two similarly-shaped tax functions for different roles are not.
 The email-validation example is a genuine violation because all three services encode literally the same business rule — "what counts as a valid email" — and a rule change should touch one place. `calculateEmployeeTax()` and `calculateContractorTax()` look alike today but represent independently-evolving rules for different roles, so merging them creates false coupling rather than removing real duplication. The distinguishing question is always whether the two pieces of code would need to change together for the same reason.
 
-**Q: Why does root CLAUDE.md's content guidance pair DRY with "show broken code, then the fix" as its own teaching pattern?**
-**Short:** Seeing the WET version and its DRY fix side by side makes the abstraction's payoff concrete rather than abstract.
-Showing three duplicated `validateEmail` implementations first makes the cost of duplication visible — three places to remember, three chances to miss one when the rule changes. Following it with the `ValidationUtils` extraction shows exactly what changed and why every caller now depends on one authoritative method. The pairing turns "avoid duplication" from an abstract slogan into a concrete before/after a reader can verify against the code.
+**Q: Once you confirm two copies encode the same rule, where should the single authoritative copy live?**
+**Short:** In the module that owns the business concept the rule describes, such as an `EmailAddress` value type, not in a generic `utils` class every layer imports.
+Put the rule next to the concept it defines. An email-format rule belongs in an `EmailAddress` value type whose constructor rejects bad input, so no caller can hold an unvalidated address and no caller needs to remember to call `ValidationUtils.validateEmail()`. A `CommonUtils` or shared library that every service imports is the usual wrong answer: it gathers unrelated rules, so a change to one forces every consumer to upgrade, and it couples teams that share nothing but the jar. Across service boundaries, the single copy is often a contract instead of code, such as an OpenAPI schema or a Protobuf message, owned by the service that owns the data. The test is the same one DRY uses everywhere: when the rule changes, which team makes the change, and does the change reach every caller from one edit.
 
 ---
 

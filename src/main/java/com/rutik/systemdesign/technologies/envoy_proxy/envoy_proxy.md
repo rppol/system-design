@@ -1,6 +1,6 @@
 # Envoy — The L7 Proxy and Service-Mesh Data Plane
 
-> **Version anchor (2026-08-04).** **Envoy 1.39.0** (released 2026-07-14), Apache 2.0, CNCF **graduated** (November 2018). Envoy ships **quarterly on the 15th** of each quarter; **1.40.0 is scheduled for 2026-10-13**. Each release line gets roughly **12 months** of backported security and stability fixes, so the currently supported lines are **1.39, 1.38, 1.37 and 1.36**. Ecosystem versions studied: **Kubernetes Gateway API 1.6.1** (2026-07-16; 1.6.0 GA'd UDPRoute and promoted TCPRoute to v1), **Istio 1.30.3** (2026-07-16; the 1.30.0 feature line landed 2026-05-18), **Envoy Gateway 1.8.3** (2026-07-22, bundling Gateway API CRDs v1.5.1), **Contour 1.33.5** (2026-05-28), **Envoy AI Gateway 1.0** (June 2026). Version-specific behaviour is tagged inline as `[1.39]`, `[1.34]`, `[Istio 1.24]`, `[Gateway API 1.6]`; nothing in this module is described as current without naming the release it landed in.
+> **Version anchor (2026-10-19).** **Envoy 1.40.0** (released 2026-10-13), Apache 2.0, CNCF **graduated** (November 2018). Envoy ships a minor release **each quarter, around the 15th**. Each release line gets roughly **12 months** of backported security and stability fixes; 1.36 took its final-window patch (1.36.13) on 2026-10-12, so the supported lines are **1.40, 1.39, 1.38 and 1.37**. Ecosystem versions: **Envoy Gateway 1.9.2** (2026-09-28; the 1.9 line requires Gateway API v1.6 CRDs), **Agent Router v1.2.0** (2026-10-07; the release that renamed Envoy AI Gateway, which reached 1.0 in June 2026). **Kubernetes Gateway API 1.6.3** (2026-10-06; 1.6.0 GA'd UDPRoute and promoted TCPRoute to v1), **Gateway API Inference Extension 1.6.2** (2026-09-17), **Istio 1.31.2** (2026-10-16; the 1.31.0 feature line landed 2026-08-31), **Contour 1.33.7** (2026-09-07). Version-specific behaviour is tagged inline as `[1.40]`, `[1.39]`, `[1.34]`, `[Istio 1.24]`, `[Gateway API 1.6]`; nothing in this module is described as current without naming the release it landed in.
 
 Envoy is an L3/L4/L7 proxy written in C++ whose **entire configuration surface is an API rather than a file**. One binary runs at the edge, as a sidecar, as a per-node DaemonSet, as an egress gateway, and compiled into a mobile app — and in every one of those placements it is configured by a control plane streaming it typed protobuf over gRPC. That single design decision is why Istio, Envoy Gateway, Contour, kgateway, Consul and Google Cloud Service Mesh are all, underneath, the same process with different config sources.
 
@@ -33,8 +33,8 @@ Three practical consequences fall straight out:
 | Name | What it is | Relationship to this page |
 |---|---|---|
 | **Envoy** | The proxy. This page. | — |
-| **Envoy Gateway** | A CNCF project that implements the Kubernetes **Gateway API** by running and configuring Envoy. v1.8.3 (2026-07-22). | A **control plane over** Envoy, not a fork of it. §4.7, §8.7, §14. |
-| **Envoy AI Gateway** | An additive layer on Envoy Gateway giving an OpenAI-compatible API across providers, token-based rate limiting and MCP routing. **v1.0, June 2026.** | A control plane *on top of a control plane*; the data plane is still Envoy. §4.7. |
+| **Envoy Gateway** | A CNCF project that implements the Kubernetes **Gateway API** by running and configuring Envoy. v1.9.2 (2026-09-28). | A **control plane over** Envoy, not a fork of it. §4.7, §8.7, §14. |
+| **Agent Router** (formerly Envoy AI Gateway) | An additive layer on Envoy Gateway giving an OpenAI-compatible API across providers, token-based rate limiting and MCP routing. **1.0 in June 2026; v1.2.0 (2026-10-07) renamed it and made it an Agentic AI Foundation project.** | A control plane *on top of a control plane*; the data plane is still Envoy. §4.7. |
 | **Envoy Mobile** | The same C++ core compiled into an iOS/Android client library, so a phone app gets the same retries, TLS and stats as a server. The standalone `envoyproxy/envoy-mobile` repo folded into `envoyproxy/envoy` under `/mobile`. | The same binary in a fifth placement. §4.2. |
 
 And one that is not a proxy at all: **Envoy** (`envoy.com`) is a well-known visitor-management and workplace SaaS company. It is entirely unrelated, it owns the shorter domain, and it is the top non-technical search result for the word. Say "Envoy proxy" out loud when the context is ambiguous.
@@ -49,7 +49,7 @@ And one that is not a proxy at all: **Envoy** (`envoy.com`) is a well-known visi
 | 2019–2021 | Wasm/proxy-wasm extensibility; HTTP/3 support; xDS formalized as a versioned, independently-implementable protocol under `cncf/xds` |
 | 2022 | **Envoy Gateway** announced as the CNCF-native Gateway API control plane, explicitly to stop every vendor rewriting the same Envoy-management layer |
 | 2024 | Istio **ambient mode reaches GA** in `[Istio 1.24]` (November 2024), splitting the data plane into a per-node `ztunnel` for L4/mTLS and an optional per-service `waypoint` (an Envoy) for L7 |
-| 2025–2026 | **Dynamic Modules** land `[1.34]` with an official Rust SDK and expand substantially `[1.39]`; **Envoy AI Gateway 1.0** ships (June 2026); **ingress-nginx is retired (March 2026)**, leaving Gateway API — and therefore Envoy — as the mainstream Kubernetes ingress path |
+| 2025–2026 | **Dynamic Modules** land `[1.34]` with an official Rust SDK and expand substantially `[1.39]`; **Envoy AI Gateway 1.0** ships (June 2026) and is renamed **Agent Router** in v1.2.0 (October 2026); **ingress-nginx is retired (March 2026)**, leaving Gateway API — and therefore Envoy — as the mainstream Kubernetes ingress path |
 
 ### Why this page exists now
 
@@ -225,6 +225,7 @@ The *algorithms* are taught in [`hld/load_balancing`](../../hld/load_balancing/l
 | `MAGLEV` | Fixed **65537-entry** lookup table, Google's Maglev algorithm | Near-minimal remap, better balance than ring hash at a fraction of the memory | O(1) table lookup | Affinity at scale — the better default of the two hash policies |
 | `RANDOM` | Uniform random | N/A | O(1) | When you have no health signal and want to avoid herd effects |
 | `CLUSTER_PROVIDED` | The cluster type picks (e.g. `ORIGINAL_DST`) | N/A | — | Transparent proxying |
+| `load_aware_locality` `[1.40]` | Picks a locality by the headroom backends report through ORCA (CPU or utilization in response trailers or out-of-band), then balances within it | N/A | O(localities) | Zones with uneven load where static `load_balancing_weight` goes stale |
 | `load_balancing_policy` (extension form) | The newer extensible field superseding the `lb_policy` enum, letting a policy be a typed extension with its own config and letting policies be *nested* (e.g. locality-aware wrapping least-request) | — | — | Anything the enum cannot express |
 
 ### 4.6 Health and failure detection — five independent mechanisms
@@ -247,12 +248,12 @@ The interactions are where outages live: outlier detection ejects a host that ac
 |---|---|---|---|---|
 | **Istio** (sidecar) | Full mesh | Istio CRDs + Gateway API | **Envoy** | The most complete; the most operational weight |
 | **Istio** (ambient) | Full mesh | Same | **ztunnel** (Rust, L4/mTLS) + **waypoint** (Envoy, L7) | L7 becomes opt-in per service `[Istio 1.24]` |
-| **Envoy Gateway** | Ingress | Gateway API + its own policy CRDs | **Envoy** | The CNCF-native answer; v1.8.3 |
-| **Contour** | Ingress | Gateway API + `HTTPProxy` | **Envoy** | Long-standing, VMware-originated, v1.33.5 |
+| **Envoy Gateway** | Ingress | Gateway API + its own policy CRDs | **Envoy** | The CNCF-native answer; v1.9.2 |
+| **Contour** | Ingress | Gateway API + `HTTPProxy` | **Envoy** | Long-standing, VMware-originated, v1.33.7 |
 | **kgateway** | Ingress / AI gateway | Gateway API | **Envoy** | CNCF sandbox; the renamed donation of Solo.io's Gloo Gateway (Gloo OSS reaches end of life 31 December 2026) |
 | **Consul** service mesh | Full mesh | Consul config entries | **Envoy** | Strong multi-runtime (VM + Kubernetes) story |
 | **Google Cloud Service Mesh** | Full mesh | GCP APIs + Gateway API | **Envoy**, and proxyless gRPC | Managed xDS, formerly Traffic Director |
-| **Envoy AI Gateway** | LLM traffic | `AIGatewayRoute`, `AIServiceBackend`, `BackendSecurityPolicy`, `MCPRoute` | **Envoy**, via Envoy Gateway | v1.0, June 2026, additive on Envoy Gateway |
+| **Agent Router** | LLM traffic | `AIGatewayRoute`, `AIServiceBackend`, `BackendSecurityPolicy`, `MCPRoute` | **Envoy**, via Envoy Gateway | v1.2.0 (2026-10-07), additive on Envoy Gateway; CRDs and the `aigateway.envoyproxy.io` API group kept their names |
 | **`go-control-plane`** | Whatever you build | Yours | **Envoy** | The DIY library. Correct choice more often than people think, and wrong more often than they hope |
 | **Traefik** | Ingress | Gateway API + its own CRDs | **its own Go proxy** | Genuinely not Envoy |
 | **NGINX Gateway Fabric** | Ingress | Gateway API | **NGINX** | Genuinely not Envoy; F5-maintained, unaffected by the ingress-nginx retirement |
@@ -283,7 +284,7 @@ The in-tree API surface is deliberately small, and it got smaller at **v1.6.0**:
 
 Note that these are **two separate migrations** that are easy to conflate: the *CRDs* moved out of the standard, and the *implementations* (the full-featured EPP, Body-Based Routing, the Latency Predictor) moved out of the reference repo. §10 has the pitfall this creates.
 
-**Where this sits against Envoy AI Gateway**, since both are "Envoy for LLM traffic" and they solve different halves: AI Gateway is about the **client-facing contract** — an OpenAI-compatible API across providers, token-aware rate limiting, credential handling, MCP routing — while the Inference Extension is about **which replica of your own self-hosted model gets the request**. Fronting a fleet of hosted-provider APIs is AI Gateway. Running vLLM on your own GPUs is the Inference Extension. Doing both is both, and they compose because underneath they are the same proxy.
+**Where this sits against Agent Router (formerly Envoy AI Gateway)**, since both are "Envoy for LLM traffic" and they solve different halves: Agent Router is about the **client-facing contract** — an OpenAI-compatible API across providers, token-aware rate limiting, credential handling, MCP routing — while the Inference Extension is about **which replica of your own self-hosted model gets the request**. Fronting a fleet of hosted-provider APIs is Agent Router. Running vLLM on your own GPUs is the Inference Extension. Doing both is both, and they compose because underneath they are the same proxy.
 
 ---
 ## 5. Architecture Diagrams
@@ -768,6 +769,8 @@ Match types worth knowing: `prefix` (naive string prefix — `/api` matches `/ap
 
 Actions besides `cluster`: `weighted_clusters` (the canary primitive — and note the weights are relative, not required to sum to 100 in current versions), `redirect`, `direct_response`, and `cluster_header` (take the cluster name from a request header, which is powerful and a foot-gun). Header manipulation is available at route, virtual-host and route-config level via `request_headers_to_add` / `response_headers_to_remove`, with `append_action` controlling overwrite-versus-append.
 
+**`route_specifiers` `[1.40]`.** A new extension point runs after the match and can refine, drop or synthesize the matched route, configured at route-config, virtual-host or route level. A dynamic-module route specifier ships on top of it, so custom routing logic acts on the resolved route itself instead of a Lua filter rewriting headers to steer `cluster_header`. The same release adds a separate priority-group cluster specifier, which sends each retry attempt to the next named group of clusters (used with `refresh_cluster_on_retry`).
+
 ### 6.6 Clusters, endpoints and discovery types
 
 | `type` | How hosts are found | Cost | When it lies to you |
@@ -1045,7 +1048,7 @@ The other one people miss: **`request_headers_timeout` is disabled by default**,
 |---|---|---|
 | HTTP/1 | `max_requests_per_connection` (0 = unlimited), `max_connections` circuit breaker | One request per connection at a time; concurrency = connection count |
 | HTTP/2 | `max_concurrent_streams`, `initial_stream_window_size` and `initial_connection_window_size` (Envoy defaults both to **256 MiB**, deliberately large — tune down when memory per connection matters), `max_requests_per_connection` for periodic recycling | One connection multiplexes many streams; concurrency = stream count |
-| HTTP/3 | QUIC transport socket, ALPN `h3`, `[1.39]` adds TLS key logging and session-ticket resumption upstream | UDP, per-stream loss recovery |
+| HTTP/3 | QUIC transport socket, ALPN `h3`, `[1.39]` adds TLS key logging and session-ticket resumption upstream; `[1.40]` marks HTTP/3 and QUIC stable, upstream included, with client certificates (mTLS) on QUIC listeners and upstream QUIC, and P-384/P-521 ECDSA | UDP, per-stream loss recovery |
 
 Protocol selection lives in `typed_extension_protocol_options`, and three shapes are worth recognizing:
 
@@ -1105,6 +1108,8 @@ The identity model in a mesh is **SPIFFE**: the certificate's URI SAN is `spiffe
 `validation_context` versus `combined_validation_context` is a small but load-bearing distinction: the combined form lets *part* of the validation context be delivered over SDS (the CA bundle) while the rest stays inline (the SAN matchers), which is exactly what you need when the CA rotates but your authorization rules do not.
 
 **SDS is why mesh certificate rotation is a non-event.** Certificates and keys arrive as xDS resources over the same stream as everything else and are swapped into the transport socket atomically. No file mount, no inotify, no `SIGHUP`, no pod restart. That is what makes a 24-hour or even 1-hour workload certificate lifetime practical, and short lifetimes are what make revocation largely unnecessary. Mounting certs as files and restarting to rotate them is the anti-pattern SDS exists to delete.
+
+**Post-quantum key exchange by default `[1.40]`.** Envoy 1.40 adds the `X25519MLKEM768` hybrid group to the default ECDH curves for both downstream and upstream TLS, FIPS builds included. A TLS 1.3 peer that offers it gets a post-quantum key exchange with no config change; one that does not falls back to classical X25519. The cost is a larger ClientHello (the ML-KEM-768 key share adds about 1.2 KB), which can split it across two packets and trip middleboxes that expect one. Set the runtime flag `envoy.reloadable_features.pqc_default_ecdh_curves` to false to revert, or pin `ecdh_curves` in `tls_params`. The same release removed AWS-LC as a selectable SSL library.
 
 The mTLS *theory*, the trust model and the Istio `PERMISSIVE` to `STRICT` migration runbook belong to [`backend/service_mesh_and_service_discovery`](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md).
 
@@ -1585,7 +1590,7 @@ Rules of thumb that hold across deployments:
 - **Airbnb — SmartStack to Kubernetes-native discovery.** Airbnb ran SmartStack (a client-side discovery system built on ZooKeeper, HAProxy and local agents) for years before moving to Kubernetes with Envoy sidecars. The migration shape is the interesting part rather than the endpoint: a home-grown discovery layer is not replaced in one cutover, it is shadowed, then dual-run with both paths live, then retired per service. The mesh-adoption side of this story is covered in [`backend/service_mesh_and_service_discovery`](../../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md).
 - **Dropbox — nginx to Envoy at the edge.** Dropbox publicly documented replacing nginx with Envoy on their edge tier. The motivation they gave was not raw performance — nginx was fast enough — it was the L7 traffic-management and observability surface: per-route retries and timeouts, gRPC support, request-level statistics, and configuration that a control plane could generate rather than a template engine.
 - **AWS — App Mesh, and the cautionary tale.** App Mesh was AWS's Envoy-based managed mesh. It **closed to new customers on 24 September 2024** and reaches **end of support on 30 September 2026**, with AWS directing customers to ECS Service Connect or VPC Lattice. The lesson is specific and worth carrying into any adoption review: an open data plane does not protect you from a proprietary control plane's end of life. Your Envoy knowledge transfers; your App Mesh CRDs do not.
-- **Bloomberg, Tetrate and Nutanix — Envoy as the LLM traffic layer.** The **Envoy AI Gateway v1.0** release (June 2026) came out of a coalition of these companies plus the Envoy maintainers, and it exists because LLM traffic broke the assumptions of ordinary gateways: you cannot rate-limit on requests when one request costs 200 tokens and the next costs 200,000, and you cannot route on headers when the routing signal is inside a streaming body. That is an `ext_proc` problem, which is why it is an Envoy problem.
+- **Bloomberg, Tetrate and Nutanix — Envoy as the LLM traffic layer.** The **Envoy AI Gateway v1.0** release (June 2026) came out of a coalition of these companies plus the Envoy maintainers (v1.2.0 renamed the project Agent Router in October 2026), and it exists because LLM traffic broke the assumptions of ordinary gateways: you cannot rate-limit on requests when one request costs 200 tokens and the next costs 200,000, and you cannot route on headers when the routing signal is inside a streaming body. That is an `ext_proc` problem, which is why it is an Envoy problem.
 - **gRPC itself — the protocol escaped the proxy.** A proxyless gRPC client consuming CDS and EDS from Istio or Cloud Service Mesh does Envoy's load balancing with none of Envoy's process. xDS is now specified independently under `cncf/xds`, with multiple implementations. When a protocol outlives its original implementation, it has become infrastructure.
 
 ---
@@ -1657,7 +1662,7 @@ So the honest framing is **not** "ambient replaces sidecars". It is that **ambie
 | Control plane | Scope | API | Operational weight | Upgrade coupling |
 |---|---|---|---|---|
 | **Istio** | Full mesh | Istio CRDs + Gateway API | High — the largest surface of any option | Istio pins the Envoy version it ships |
-| **Envoy Gateway** | Ingress | Gateway API + its own policy CRDs | Low to moderate | Tracks Envoy closely; v1.8.3 bundles Gateway API CRDs v1.5.1 |
+| **Envoy Gateway** | Ingress | Gateway API + its own policy CRDs | Low to moderate | Tracks Envoy closely; the 1.9 line (1.9.2) requires Gateway API v1.6 CRDs |
 | **Contour** | Ingress | Gateway API + `HTTPProxy` | Low | Mature, conservative release cadence |
 | **kgateway** | Ingress and AI | Gateway API | Moderate | CNCF sandbox; the Gloo Gateway donation |
 | **Consul** | Full mesh, multi-runtime | Consul config entries | Moderate to high | Strong VM plus Kubernetes story |
@@ -1705,7 +1710,7 @@ The DIY option deserves a fair hearing rather than a reflex dismissal. If your r
 |---|---|
 | TLS plus path routing for one app | Cloud load balancer |
 | Kubernetes ingress in 2026 | Gateway API, implemented by Envoy Gateway or Contour |
-| Ingress plus an OpenAI-compatible LLM front door | Envoy Gateway plus Envoy AI Gateway |
+| Ingress plus an OpenAI-compatible LLM front door | Envoy Gateway plus Agent Router |
 | mTLS everywhere, minimal cost | Istio ambient (ztunnel) |
 | Rich L7 policy on some services | Ambient plus waypoints, or sidecars |
 | Mesh across VMs and Kubernetes | Consul, or Istio with VM support |
@@ -1739,7 +1744,7 @@ The DIY option deserves a fair hearing rather than a reflex dismissal. If your r
 
 ### 11.1 Envoy itself
 
-- **Core:** **Envoy** — the Apache 2.0, CNCF-graduated L3/L4/L7 proxy, at 1.39.0, shipping quarterly on the 15th with roughly twelve months of support per line.
+- **Core:** **Envoy** — the Apache 2.0, CNCF-graduated L3/L4/L7 proxy, at 1.40.0, shipping quarterly on the 15th with roughly twelve months of support per line.
 - **The configuration protocol:** **xDS** — the gRPC streaming APIs (LDS, RDS, CDS, EDS, SDS, plus SRDS, VHDS, ECDS, RTDS, LEDS) that carry every listener, route, cluster, endpoint and secret to the proxy, now specified independently under `cncf/xds` and consumed by non-Envoy clients.
 - **Embedded form:** **Envoy Mobile** — the same core compiled into an iOS and Android client library so a phone gets the same retries, mTLS and stats as a server; the standalone repo folded into `envoyproxy/envoy` under `/mobile`.
 - **Transport:** **gRPC** — every xDS stream, ext_authz call, ext_proc session and rate-limit query is gRPC, so anything between Envoy and its control plane must tolerate very long-lived streams.
@@ -1754,9 +1759,9 @@ The DIY option deserves a fair hearing rather than a reflex dismissal. If your r
 
 ### 11.3 Gateway API implementations and edge deployments
 
-- **Envoy-based:** **Envoy Gateway**, **Contour**, **kgateway**, **Istio Ingress Gateway** — the mainstream successors to a retired ingress-nginx, all driving Envoy. Envoy Gateway is at 1.8.3 and bundles Gateway API CRDs v1.5.1; Contour is at 1.33.5; kgateway is the CNCF sandbox donation of Solo.io's Gloo Gateway, whose open-source predecessor reaches end of life on 31 December 2026.
-- **The API itself:** **Gateway API** — at 1.6.1, the GA successor to a feature-frozen Ingress, with 1.6.0 taking UDPRoute to GA and promoting TCPRoute to v1.
-- **LLM traffic, client-facing:** **Envoy AI Gateway** — v1.0 since June 2026, additive on Envoy Gateway, giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
+- **Envoy-based:** **Envoy Gateway**, **Contour**, **kgateway**, **Istio Ingress Gateway** — the mainstream successors to a retired ingress-nginx, all driving Envoy. Envoy Gateway is at 1.9.2 and requires Gateway API v1.6 CRDs; Contour is at 1.33.7; kgateway is the CNCF sandbox donation of Solo.io's Gloo Gateway, whose open-source predecessor reaches end of life on 31 December 2026.
+- **The API itself:** **Gateway API** — at 1.6.3, the GA successor to a feature-frozen Ingress, with 1.6.0 taking UDPRoute to GA and promoting TCPRoute to v1.
+- **LLM traffic, client-facing:** **Agent Router** — v1.2.0, renamed from Envoy AI Gateway in October 2026, additive on Envoy Gateway, giving an OpenAI-compatible API across providers, token-aware rate limiting and MCP routing.
 - **LLM traffic, backend-facing:** **Gateway API Inference Extension** — an `ext_proc` Endpoint Picker that routes on model-server state (prefix/KV-cache, queue depth, loaded LoRA adapters) rather than least-request, with an `InferencePool` (v1, stable) standing in for a plain Service backend and its `endpointPickerRef` naming the picker. Extends 25+ Gateway API implementations including Envoy Gateway, kgateway and GKE Gateway (§4.8).
 - **East-west routing:** **GAMMA** — the Gateway API initiative that lets an `HTTPRoute` attach to a `Service` for mesh-internal traffic, so mesh and ingress share one API instead of vendor CRDs plus Gateway API.
 - **Not Envoy, and useful to know as counterexamples:** **Traefik**, **Nginx**, **HAProxy**, **Caddy**, **Linkerd**, **Cilium Service Mesh** — genuinely different data planes, except Cilium, which runs Envoy for its L7 policy path while keeping L4 in eBPF.
@@ -1880,11 +1885,11 @@ A service mesh needs at least four things Envoy does not provide: a control plan
 
 **Q: Istio, Envoy Gateway, Contour, Consul, kgateway — which are control planes over the same data plane?**
 **Short:** All five are Envoy control planes; the genuine non-Envoy data planes in this space are Traefik, NGINX Gateway Fabric and Linkerd's Rust proxy.
-Istio (sidecar and ambient waypoints), Envoy Gateway, Contour, Consul service mesh, kgateway, Google Cloud Service Mesh and Envoy AI Gateway all compile their own API into xDS and stream it to Envoy. They differ enormously in scope, API shape and operational weight, and not at all in what is actually proxying your bytes. The honest exceptions matter for comparison: Traefik has its own Go proxy, NGINX Gateway Fabric uses NGINX, Linkerd uses the purpose-built `linkerd2-proxy` in Rust, and Cilium is a hybrid that keeps L4 in eBPF while launching Envoy for its L7 policy path. Istio ambient is the interesting middle case — `ztunnel` is Rust and not Envoy, but the waypoints that handle L7 are.
+Istio (sidecar and ambient waypoints), Envoy Gateway, Contour, Consul service mesh, kgateway, Google Cloud Service Mesh and Agent Router all compile their own API into xDS and stream it to Envoy. They differ enormously in scope, API shape and operational weight, and not at all in what is actually proxying your bytes. The honest exceptions matter for comparison: Traefik has its own Go proxy, NGINX Gateway Fabric uses NGINX, Linkerd uses the purpose-built `linkerd2-proxy` in Rust, and Cilium is a hybrid that keeps L4 in eBPF while launching Envoy for its L7 policy path. Istio ambient is the interesting middle case — `ztunnel` is Rust and not Envoy, but the waypoints that handle L7 are.
 
 **Q: Gateway API replaced Ingress. What does that have to do with Envoy?**
 **Short:** Most Gateway API implementations are Envoy-based, so a fleet migrating off the retired ingress-nginx is usually migrating onto Envoy without deciding to.
-The Kubernetes Ingress API is feature-frozen and its reference controller, ingress-nginx, was retired in March 2026 with no further releases or CVE fixes. Gateway API is the GA successor, at 1.6.1, with a role-oriented model of `GatewayClass`, `Gateway` and `HTTPRoute` that natively expresses traffic splitting, header matching and cross-namespace routing — the things that were previously forty vendor-specific annotations. Envoy Gateway, Istio, Contour and kgateway are the mainstream implementations, and all four drive Envoy; the notable non-Envoy ones are Traefik and F5's NGINX Gateway Fabric. So the practical consequence of the retirement is a large migration onto a data plane whose defaults — the 15-second route timeout, `UO` versus `UH`, `enforcing_*` at zero — nobody on the team has read yet.
+The Kubernetes Ingress API is feature-frozen and its reference controller, ingress-nginx, was retired in March 2026 with no further releases or CVE fixes. Gateway API is the GA successor, at 1.6.3, with a role-oriented model of `GatewayClass`, `Gateway` and `HTTPRoute` that natively expresses traffic splitting, header matching and cross-namespace routing — the things that were previously forty vendor-specific annotations. Envoy Gateway, Istio, Contour and kgateway are the mainstream implementations, and all four drive Envoy; the notable non-Envoy ones are Traefik and F5's NGINX Gateway Fabric. So the practical consequence of the retirement is a large migration onto a data plane whose defaults — the 15-second route timeout, `UO` versus `UH`, `enforcing_*` at zero — nobody on the team has read yet.
 
 **Q: What is a waypoint proxy and how does it differ from a sidecar?**
 **Short:** A waypoint is an Envoy deployed per service or namespace rather than per pod, used only by workloads that need L7 policy in Istio ambient mode.
@@ -1922,9 +1927,9 @@ Because least-request assumes requests are comparable units of work, and for inf
 **Short:** Only InferencePool; the other two are not Gateway API resources — v1.6.0 removed InferenceObjective to the llm-d project, and InferenceModel was its long-dead alpha name.
 `InferencePool`, and nothing else from that list. `InferencePool` is **v1 and stable**: a group of Pods serving one base model with the same accelerator and model-server configuration, standing in for a plain `Service` as the route backend, with `InferencePoolImport` for one exposed from another cluster, and a `spec.endpointPickerRef` that became **optional at v1.6.0**. `InferenceObjective` was never stable — it lived at `inference.networking.x-k8s.io/v1alpha2` and was **removed from the project at v1.6.0 and migrated to llm-d**, along with `InferenceModelRewrite` and `EndpointPickerConfig`; if you need per-request priority and criticality today you get it from llm-d, not from the Gateway API. `InferenceModel` is older still, the original alpha name `InferenceObjective` itself replaced. So a manifest naming either of the last two is written against a resource your cluster does not have, and applying it fails on a missing CRD rather than doing something subtly wrong — which is the good outcome. Because the extension is ext_proc rather than a fork, `InferencePool` works on any conforming Gateway API implementation, 25+ of them, with Envoy Gateway, kgateway and GKE Gateway among the named ones.
 
-**Q: Envoy AI Gateway or the Gateway API Inference Extension — which do you need?**
-**Short:** AI Gateway handles the client-facing contract across providers; the Inference Extension picks which replica of your self-hosted model serves a request.
-They solve different halves and compose, because underneath they are the same proxy. **Envoy AI Gateway** owns the **client-facing contract**: an OpenAI-compatible API across multiple providers, token-aware rate limiting (you cannot rate-limit on request count when one request is 200 tokens and the next is 200,000), credential handling per backend, MCP routing. The **Inference Extension** owns **backend selection** for models you host yourself — which vLLM replica takes this request, given cache state and queue depth. So: fronting a fleet of hosted-provider APIs is AI Gateway; running your own GPUs is the Inference Extension; a platform that does both runs both. If someone presents them as alternatives, that is the tell they have not deployed either.
+**Q: Agent Router (formerly Envoy AI Gateway) or the Gateway API Inference Extension: which do you need?**
+**Short:** Agent Router handles the client-facing contract across providers; the Inference Extension picks which replica of your self-hosted model serves a request.
+They solve different halves and compose, because underneath they are the same proxy. **Agent Router** owns the **client-facing contract**: an OpenAI-compatible API across multiple providers, token-aware rate limiting (you cannot rate-limit on request count when one request is 200 tokens and the next is 200,000), credential handling per backend, MCP routing. The **Inference Extension** owns **backend selection** for models you host yourself — which vLLM replica takes this request, given cache state and queue depth. So: fronting a fleet of hosted-provider APIs is Agent Router; running your own GPUs is the Inference Extension; a platform that does both runs both. If someone presents them as alternatives, that is the tell they have not deployed either.
 
 ---
 ## 13. Best Practices

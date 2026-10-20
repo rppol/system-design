@@ -105,6 +105,16 @@ Build a similarity graph over *all* points (labeled + unlabeled) — usually kNN
 - **Co-training (Blum & Mitchell, 1998):** requires two conditionally-independent feature *views* (e.g. a web page's text and its inbound-link text). Train one classifier per view; each labels the unlabeled examples it is most confident about and hands them to the *other* classifier. Works only when the two views are genuinely complementary and each is sufficient on its own. **Tri-training** relaxes the view requirement using three models and majority agreement.
 - **Entropy minimization (Grandvalet & Bengio, 2005):** add `-Σ p log p` on unlabeled predictions to the loss so the model is *confident* on unlabeled data, pushing the boundary into low-density regions. Rarely used alone (it can collapse to a single class); it is a component inside MixMatch (via sharpening) and is implicit in FixMatch's hard pseudo-labels.
 
+### 4.8 Foundation-feature baselines (frozen encoder + linear probe or kNN)
+
+FixMatch-era results (2020) start from a randomly initialized WideResNet. A 2026 project starts from a frozen foundation encoder such as DINOv2, DINOv3, CLIP, or SigLIP, and that changes what SSL has to beat. The encoder already places same-class images close together, so the cluster and manifold assumptions that SSL relies on are satisfied by the features before any SSL loss runs.
+
+- **Linear probe:** embed every image once with the frozen encoder, then fit logistic regression on the labeled embeddings. DINOv2 ViT-g/14 reaches 86.5% ImageNet top-1 this way and 83.5% with a 20-nearest-neighbor classifier, with no fine-tuning (Oquab et al., 2023).
+- **kNN pseudo-labels:** label each unlabeled embedding by a vote of its k labeled neighbors, keep the confident ones, and train the probe on both. This is label propagation in a good feature space and runs in minutes on a CPU.
+- **Zero-shot:** a CLIP-family model can classify from class names alone, about 95% on CIFAR-10 for CLIP ViT-L/14 (Radford et al., 2021), which is above the 40-label FixMatch result in 5.4.
+
+The USB benchmark (Wang et al., NeurIPS 2022) reran classic SSL methods on pretrained ViTs and found they need far fewer iterations and the gap between methods shrinks. In practice the frozen-feature baseline often gets within a few points of full FixMatch at less than 1% of its training compute. SSL still adds value when the domain is far from web images (medical scans, satellite, industrial inspection) and the frozen features do not separate the classes, or when the last few points of accuracy pay for a full fine-tuning run.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -477,6 +487,28 @@ The first quarter of the ramp delivers only 6% of the weight — the model train
 
 ---
 
+### 6.7 Frozen-feature baseline: linear probe plus kNN pseudo-labels
+
+```python
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+
+
+def frozen_feature_baseline(
+    z_lab: np.ndarray, y_lab: np.ndarray, z_unl: np.ndarray, k: int = 10, tau: float = 0.8
+) -> LogisticRegression:
+    """z_* are L2-normalized embeddings from a frozen encoder (DINOv2, CLIP, SigLIP)."""
+    knn = KNeighborsClassifier(n_neighbors=k, metric="cosine", weights="distance").fit(z_lab, y_lab)
+    proba = knn.predict_proba(z_unl)
+    keep = proba.max(axis=1) >= tau
+    z = np.vstack([z_lab, z_unl[keep]])
+    y = np.concatenate([y_lab, knn.classes_[proba[keep].argmax(axis=1)]])
+    return LogisticRegression(max_iter=2000, C=1.0).fit(z, y)
+```
+
+Embedding 1M images with a ViT-L takes a few GPU-hours once; every experiment after that is a scikit-learn fit on cached vectors. Run this before writing any FixMatch code. If FixMatch does not beat it by more than the seed-to-seed variance on the same labeled set, ship the probe.
+
 ## 7. Real-World Examples
 
 **Image classification with scarce labels (FixMatch/Noisy Student).** The canonical benchmark: CIFAR-10 with 40–250 labels, SVHN, STL-10. FixMatch hits ~88–94% on CIFAR-10 with 40 labels; Noisy Student pushed ImageNet to 88.4% top-1 by self-training a student on ~300M unlabeled JFT images with the teacher's pseudo-labels plus heavy student noise. This is the standard playbook when you have a large unlabeled image pool and a small annotation budget. See `../computer_vision/self_supervised_vision.md` for the pretraining alternative.
@@ -598,6 +630,10 @@ Label Propagation/Spreading are transductive: `transduction_` labels only the po
 
 Because SSL sometimes *hurts*, a good-looking absolute number is meaningless without the supervised-only comparison on the identical labeled set and test set. Always report both; the SSL claim is the *delta*.
 
+### Pitfall 8: Comparing SSL against a from-scratch baseline
+
+A team reported that FixMatch on a ResNet-50 lifted a 250-label product classifier from 48% to 81% and spent two weeks of GPU time tuning it. A linear probe on frozen DINOv2 ViT-L/14 features, fit in under a minute on the same 250 labels, scored 79%. The from-scratch supervised baseline made SSL look like a 33-point win when the real gain over the right baseline was 2 points. Fix: the baseline for any SSL claim is a frozen foundation encoder with a linear probe or kNN on the same labels.
+
 ---
 
 ## 11. Technologies & Tools
@@ -606,12 +642,12 @@ Because SSL sometimes *hurts*, a good-looking absolute number is meaningless wit
 |------|---------|-------|
 | PyTorch | Custom SSL losses (FixMatch, Mean Teacher, consistency) | Full control; the research default |
 | USB (Unified SSL Benchmark) | Reference implementations of FixMatch, FlexMatch, UDA, Mean Teacher | Fair, comparable baselines |
-| TorchSSL | PyTorch library of modern SSL algorithms | FixMatch/FlexMatch/MixMatch out of the box |
 | sklearn `LabelPropagation` / `LabelSpreading` | Graph-based transductive SSL | kNN or RBF kernel; small-to-mid `N` |
 | sklearn `SelfTrainingClassifier` | Wraps any probabilistic estimator for self-training | Confidence threshold + `k_best` per round |
 | Hugging Face + back-translation | UDA-style text augmentation | Consistency SSL for NLP |
 | PyTorch Geometric | Graph SSL / GNNs (learnable label propagation) | See `../graph_neural_networks/graph_neural_networks.md` |
 | cleanlab | Detect wrong pseudo-labels / label errors | Guards against confirmation bias |
+| DINOv2 / DINOv3, open_clip, timm | Frozen encoders for linear-probe and kNN baselines | Embed once, cache, fit scikit-learn on top |
 
 ---
 
@@ -656,6 +692,16 @@ Mean Teacher keeps a "teacher" network whose weights are an exponential moving a
 **Short:** SSL jointly trains on labels and unlabeled data for one task, while self-supervised pretraining first learns a reusable label-free representation.
 
 SSL uses labels and unlabeled data jointly in one training objective; self-supervised pretraining first learns a task-agnostic representation from unlabeled data via a pretext task and only sees labels when fine-tuning. Self-supervised produces a reusable representation across many downstream tasks; SSL produces one task-specific model. In practice they stack: pretrain self-supervised, then fine-tune with SSL consistency when labels are scarce.
+
+**Q: You have 500 labeled and 1M unlabeled images. Why might FixMatch not be worth training?**
+**Short:** A linear probe or kNN on frozen DINOv2 or CLIP features often lands within a few points of FixMatch at under 1% of the compute, so it is the baseline to beat first.
+
+Foundation encoders already cluster same-class images, so the assumptions SSL exploits are met by the features before any SSL loss. Embed all images once with a frozen DINOv2, DINOv3, or CLIP encoder, fit logistic regression on the 500 labeled vectors, and optionally add kNN pseudo-labels from the 1M unlabeled vectors. That costs a few GPU-hours of embedding and seconds per experiment. The USB benchmark showed that with pretrained ViTs the gaps between SSL methods shrink. FixMatch is worth it when the domain is far from web images and the frozen features separate classes poorly, or when the last few points justify full fine-tuning.
+
+**Q: How do kNN pseudo-labels on frozen embeddings differ from FixMatch pseudo-labels?**
+**Short:** kNN labels come from neighbors in a fixed feature space computed once, while FixMatch labels come from the model being trained and move with it, which allows confirmation bias.
+
+With frozen embeddings, each unlabeled point is labeled by a vote of its k nearest labeled points, so the labels do not depend on the classifier being trained and cannot drift toward its own mistakes. That is label propagation in a pretrained space, and it costs one nearest-neighbor search. FixMatch generates pseudo-labels from the network's own weak-view predictions every step, which is why it needs a high threshold such as 0.95 to limit confirmation bias, but it also adapts the representation to the task. Frozen kNN is cheap and stable; FixMatch can exceed it when the features need to change.
 
 **Q: When does semi-supervised learning hurt performance?**
 **Short:** SSL hurts when labeled and unlabeled data come from different distributions, since out-of-distribution pseudo-labels inject systematic bias.
@@ -725,6 +771,7 @@ Start the consistency weight near zero and ramp it up over the first epochs, bec
 7. Treat label propagation as transductive — train an inductive model on its propagated labels if you need to score new points.
 8. Stack paradigms when it fits: self-supervised pretraining for a representation, SSL for the task with scarce labels, active learning to spend the gold budget at the boundary.
 9. Invest in augmentation quality — consistency SSL is only as strong as the label-preserving transforms (RandAugment for vision, back-translation for text).
+10. Fit a linear probe or kNN on frozen foundation-model embeddings before any SSL run, and report the SSL delta against that baseline, not against a from-scratch model.
 
 ---
 

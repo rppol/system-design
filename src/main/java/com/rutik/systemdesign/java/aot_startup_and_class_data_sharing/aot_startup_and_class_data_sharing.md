@@ -37,7 +37,7 @@ CDS attacks expense 1 by storing the *parsed* metadata in a memory-mappable form
 - **Correctness must never depend on the cache.** The JVM is free to ignore it, and under the default modes it does so without failing. Code that only works when the cache loads is code with a latent production bug.
 - **Fallback is silent by design, which makes verification your job.** `-Xshare:auto` "silently ignores the error and loads classes normally"; `-XX:AOTMode=auto` warns and continues. Neither takes your deploy red.
 - **The cache is a build artifact, not a runtime artifact.** Produce it once, in CI, in the same stage that assembles the classpath, and ship it in the image. Generating it per-pod at startup pays the training cost on every launch to save the linking cost on the same launch — a net loss.
-- **Caching classes is not caching code.** Even the AOT cache does not ship compiled native code; it ships loaded/linked classes and (JDK 25+) method profiles. The JIT still compiles, it just starts from a warm profile instead of a cold one.
+- **Caching classes is not caching code, until JDK 28.** Through JDK 27 the AOT cache ships loaded/linked classes and (JDK 25+) method profiles, not compiled native code; the JIT still compiles, it just starts from a warm profile instead of a cold one. JEP 544 (JDK 28) adds native code to the same cache, and the JIT stays on to replace it.
 - **Every rung preserves the open world.** Reflection, dynamic proxies, agents, classloaders, and `Class.forName` all keep working exactly as before. This is the entire reason to prefer this ladder over native image when it suffices.
 
 ---
@@ -56,7 +56,8 @@ CDS attacks expense 1 by storing the *parsed* metadata in a memory-mappable form
 | 6 | **AOT command-line ergonomics** | **JEP 514, JDK 25** | `-XX:AOTCacheOutput=`, `JDK_AOT_VM_OPTIONS`, `%p` PID substitution |
 | 7 | **AOT method profiling** | **JEP 515, JDK 25** | *(no new flag — folded into the cache)* |
 | 8 | **AOT object caching with any GC** | **JEP 516, JDK 26** | *(no new flag — removes a GC restriction)* |
-| 9 | **GraalVM native image** | — | see [GraalVM Native Image](../graalvm_native_image/graalvm_native_image.md) |
+| 9 | **AOT code compilation** | **JEP 544, JDK 28** (Project Leyden) | *(no new flag; `-XX:+UnlockDiagnosticVMOptions -XX:-AOTCodeCaching` turns it off)* |
+| 10 | **GraalVM native image** | separate toolchain | see [GraalVM Native Image](../graalvm_native_image/graalvm_native_image.md) |
 
 Rung 1 is already on in every JDK 12+ installation: the JDK ships a prebuilt `classes.jsa` at `$JAVA_HOME/lib/server/classes.jsa`, generated at JDK-build time from a default class list, and `-Xshare:auto` maps it without being asked. Everything you do beyond that is about getting *your* classes, not just the JDK's, into an archive.
 
@@ -69,9 +70,10 @@ Rung 1 is already on in every JDK 12+ installation: the JDK ships a prebuilt `cl
 | AOT cache (JEP 483) | ✓ | ✓ | ✓ | ✗ | ✗ |
 | + JEP 515 (JDK 25) | ✓ | ✓ | ✓ | **✓** | ✗ |
 | + JEP 516 (JDK 26) | ✓ | ✓ | ✓ **under any GC, ZGC included** | ✓ | ✗ |
+| + JEP 544 (JDK 28) | ✓ | ✓ | ✓ | ✓ | **✓** (same CPU features and GC as training, else skipped) |
 | Native image | n/a — done at build time | n/a | n/a | via PGO | **✓** |
 
-The single most useful row to internalise is the last column. **No rung short of native image caches compiled code.** Caching native code alongside the AOT cache exists only as an unnumbered OpenJDK draft (`8335368`, status Submitted, no JEP number, no target release) — it is a direction, not a feature, and should not be planned around.
+The single most useful row to internalise is the last column. **On JDK 25 to 27, no rung short of native image caches compiled code.** JEP 544 (Ahead-of-Time Code Compilation, integrated for JDK 28) changes that: the same `-XX:AOTCacheOutput` training run now stores C1/C2 code for hot methods by default, with no new flag. The code loads only when the production run uses the same CPU architecture and feature set (AVX-512 code does not load on a CPU without AVX-512) and the same GC, because the code embeds GC barriers; otherwise HotSpot warns, skips the code, and still uses the cached classes and profiles. JEP 544 measures startup cut by 65 to 80% with AOT code, against 50 to 70% for the cache without it, on five framework benchmarks on a two-core x64 box.
 
 The JEP 516 row is the one that changes an operational decision. Before JDK 26, heap-object caching worked by mapping archive bytes straight into the GC-managed heap in a GC-specific binary layout, which **did not work with ZGC**. JEP 516 replaces that with a GC-neutral primordial heap whose objects are allocated and linked individually through the Access API, so object caching now works under any collector. A team on ZGC for pause reasons no longer has to choose between their collector and their startup cache.
 
@@ -84,7 +86,8 @@ The JEP 516 row is the one that changes an operational decision. Before JDK 26, 
 | Pre-JDK-24, want it to be self-maintaining | Rung 4 (`+AutoCreateSharedArchive`) — regenerates itself when stale |
 | **JDK 25+, the current default recommendation** | **Rung 6** — `-XX:AOTCacheOutput=` to train, `-XX:AOTCache=` to run |
 | ZGC and want heap objects cached too | JDK 26 (rung 8) |
-| Startup must be ~15 ms and a closed world is acceptable | Rung 9 |
+| JDK 28, warmup matters as much as startup | Rung 9: the same training run also caches C1/C2 code |
+| Startup must be ~15 ms and a closed world is acceptable | Rung 10 |
 
 ---
 
@@ -286,6 +289,7 @@ The general lesson: **because the fallback is silent, the only way to know a cac
 | Application code recompiled | ✓ | The classes themselves differ |
 | **CPU/ISA mismatch between training and runtime host** | ✓ | Cached state can encode ISA assumptions — e.g. trained on an AVX-512 build agent, run on a node without it |
 | GC choice (heap-object caching, pre-JDK-26) | ✓ | Object layout was GC-specific until JEP 516 |
+| CPU features or GC differ from training (JDK 28 AOT code) | AOT code only | HotSpot warns and skips the cached native code, since it embeds CPU-specific instructions and GC barriers; classes and profiles still load |
 | Heap size, thread count, JVM tuning flags | ✗ | These do not affect what was loaded and linked |
 | Application config, environment variables | ✗ | Same |
 
@@ -406,6 +410,9 @@ A team reported "no improvement" from the AOT cache. Their benchmark measured `t
 | `-XX:AOTCache=<file>` | Use the cache in production |
 | `-XX:AOTMode=record\|create\|auto\|on\|off` | Explicit mode control (JEP 483); `auto` is the production choice |
 | `-XX:AOTConfiguration=<file>` | The intermediate recording, for the JDK 24 two-step flow |
+| `-XX:AOTMode=required` | JDK 27+ name for `-XX:AOTMode=on` (`on` stays as an alias, JDK-8383031): exit with an error when the cache violates a constraint, instead of warning and continuing; a CI assertion, not a production setting |
+| `-XX:+UnlockDiagnosticVMOptions -XX:-AOTCodeCaching` | JDK 28: stop creating AOT code in training, or stop loading it in production, while keeping the rest of the cache |
+| `-XX:+PrintCompilation` | JDK 28: reports AOT code loads alongside JIT compilations |
 | `JDK_AOT_VM_OPTIONS` | Options applied only while the cache is created |
 | `-XX:ArchiveClassesAtExit=<file>` | Dynamic CDS archive (JEP 350, JDK 13) — the pre-24 path |
 | `-XX:+AutoCreateSharedArchive` | Self-maintaining archive (JDK 19); regenerates when stale |
@@ -434,9 +441,9 @@ Under the default modes it silently ignores the cache and loads classes normally
 The cache records a fingerprint of the exact classpath it was trained against. Adding, removing, reordering, or version-bumping any jar invalidates it, as does recompiling the application or upgrading the JDK. A cache produced nightly against a jar produced per-commit is guaranteed to diverge the first time a dependency moves — and because rejection is silent, nobody notices. The fix is structural rather than procedural: generate the cache in the **same CI stage that assembles the classpath**, so they cannot drift, and add a build step that runs the app with `-Xlog:aot` and fails if the cache was not loaded.
 
 **Q: Does the AOT cache store compiled native code?**
-**Short:** No — it stores loaded and linked classes and, since JDK 25, method profiles, but the JIT still compiles at runtime.
+**Short:** Not through JDK 27, which caches only linked classes and profiles; JDK 28 (JEP 544) adds C1/C2 native code, used only if the CPU features and GC match the training run.
 
-It does not. JEP 483 caches the results of class loading and linking; JEP 515 (JDK 25) adds the training run's method-execution profiles so the JIT can begin compiling hot methods immediately rather than re-profiling from cold. The JIT still runs and still produces the native code, which is precisely why peak throughput is unaffected — you keep adaptive recompilation and all the profile-driven optimisation a long-running JVM depends on. Caching native code alongside the cache exists only as an unnumbered OpenJDK draft with no JEP number and no target release, so it should not be planned around. GraalVM native image is the only option today that ships compiled code, and it pays for that by giving up the runtime JIT entirely.
+Not on JDK 25, 26 or 27. JEP 483 caches the results of class loading and linking; JEP 515 (JDK 25) adds the training run's method-execution profiles so the JIT can begin compiling hot methods immediately rather than re-profiling from cold. The JIT still runs and still produces the native code, which is precisely why peak throughput is unaffected: you keep adaptive recompilation and all the profile-driven optimisation a long-running JVM depends on. JEP 544 (JDK 28) adds the native code: the training run stores optimized code for hot methods in the same cache by default, and production loads it when the CPU feature set and the GC match the training run, otherwise warning and falling back to the interpreter and JIT while keeping the cached classes and profiles. The JIT stays on and can deoptimize and replace AOT code when the workload shifts. GraalVM native image is the option that gives up the runtime JIT entirely in exchange for compiled code with no JVM warmup at all.
 
 **Q: Your service's startup did not improve after enabling the AOT cache. What do you check?**
 **Short:** Whether the cache actually loaded, whether the training run was representative, and whether startup is even class-loading-bound.
@@ -461,7 +468,7 @@ The host. Cached state can encode instruction-set assumptions, so a cache produc
 **Q: Is the AOT cache an alternative to GraalVM native image, or a step toward it?**
 **Short:** An alternative with a completely different contract — it keeps the open world, native image trades it away for a 15 ms start.
 
-An alternative, and usually the one to try first. The AOT cache preserves everything: reflection, dynamic proxies, arbitrary classloaders, Java agents, JFR, JDWP debugging, your choice of GC, and full JIT peak throughput. It costs one training step in CI. Native image gives a startup roughly two orders of magnitude better, but requires a closed world with reachability metadata for every reflective call, forbids agents, replaces the runtime with Substrate VM, and typically lowers peak throughput. The right question is not "which is faster" but "does this service need 15 ms, or does it need 8 s to become 3 s" — and for the large majority of services it is the latter, at a fraction of the cost.
+An alternative, and usually the one to try first. The AOT cache preserves everything: reflection, dynamic proxies, arbitrary classloaders, Java agents, JFR, JDWP debugging, your choice of GC, and full JIT peak throughput. It costs one training step in CI. Native image gives a startup roughly two orders of magnitude better, but requires a closed world with reachability metadata for every reflective call, forbids agents, replaces the runtime with Substrate VM, and typically lowers peak throughput. JDK 28 (JEP 544) narrows the warmup gap without closing the startup one: the same cache now carries C1/C2 code for hot methods, which JEP 544 measures at a 65 to 80% startup cut on five framework benchmarks, while the JIT stays on for peak throughput. The right question is not "which is faster" but "does this service need 15 ms, or does it need 8 s to become 3 s", and for the large majority of services it is the latter, at a fraction of the cost.
 
 **Q: Which JDK release made a CDS archive available by default, and what does it actually contain?**
 **Short:** JEP 341 in JDK 12 — a prebuilt archive of JDK platform classes shipped inside the JDK image itself.

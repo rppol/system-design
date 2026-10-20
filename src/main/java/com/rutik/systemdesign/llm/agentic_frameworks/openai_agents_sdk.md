@@ -8,6 +8,8 @@ The OpenAI Agents SDK (released March 2025) is OpenAI's production-grade replace
 
 The SDK's value proposition is a minimal, opinionated set of primitives — `Agent`, `Runner`, `handoff`, `guardrail`, `RunContext` — that compose into multi-agent systems without the layer cake of [LangChain](langchain_and_lcel.md) or the role-play heaviness of [CrewAI](crewai.md). It uses the OpenAI Responses API under the hood but supports other model providers via adapters.
 
+The SDK runs the agent loop in your own process. Its hosted counterpart is the OpenAI Agents API (public beta, 2026-09-10): a managed Codex harness where OpenAI runs session orchestration, context compaction, and recovery, keeps durable sessions across turns, and executes in OpenAI-hosted sandboxes or in your own or a supported provider's sandbox. Computer use with OpenAI-hosted browsers was added to the Agents API on 2026-09-29.
+
 For OpenAI-centric stacks, the Agents SDK is the natural choice. For mixed-provider stacks or teams already invested in LangGraph, it's worth comparing — but the SDK's tracing dashboard is a significant operational advantage that other frameworks require additional setup to match.
 
 ---
@@ -57,6 +59,10 @@ Set `output_type=MyPydanticModel` to force the agent to return validated structu
 ### 4.5 Guardrails Around an Agent
 
 Input guardrails (run before LLM) reject inappropriate inputs. Output guardrails (run after LLM) validate output meets policy. Both can be sync or async.
+
+### 4.6 Hosted Agent Session (Agents API)
+
+Instead of `Runner.run()` in your process, you create a server-run agent session through the Agents API. OpenAI owns the loop, compaction, and crash recovery; your code sends turns and reads results. Use it for long-running coding or computer-use work where you do not want to operate a sandbox or a durable workflow engine. See [Durable Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md) for how this compares with Temporal or LangGraph checkpointing.
 
 ---
 
@@ -341,6 +347,17 @@ analysis: OrderAnalysis = result.final_output_as(OrderAnalysis)
 | Lock-in | OpenAI-leaning | None | None | None | Anthropic |
 | Best for | OpenAI prod stacks | Complex stateful workflows | Role-play simulations | Research code agents | Cost-critical Anthropic |
 
+**Agents SDK vs Agents API:**
+
+| Dimension | Agents SDK (`openai-agents`) | Agents API (public beta) |
+|---|---|---|
+| Where the loop runs | Your process | OpenAI's servers |
+| Crash recovery | Yours to build (sessions store, checkpoints) | OpenAI handles recovery; durable sessions |
+| Sandbox | Yours, or hosted tools via Responses | OpenAI-hosted, or your own or a supported provider's |
+| Harness | Your agents, tools, handoffs, guardrails | Managed Codex harness |
+| Model providers | OpenAI plus adapters (LiteLLM, others) | OpenAI models |
+| Best for | Custom multi-agent logic, typed guardrails | Long-running coding or computer-use tasks with no infra to run |
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -440,6 +457,7 @@ quality_checker = Agent(
 | `agents.tracing.processors` | Custom trace exporters | Send to Honeycomb, Datadog, etc |
 | `agents.extensions.models` | Non-OpenAI model adapters | LiteLLM adapter, Anthropic adapter |
 | OpenAI Responses API | Underlying API | The SDK calls Responses, not Chat Completions |
+| OpenAI Agents API | Hosted agent sessions | Public beta 2026-09-10; managed Codex harness, durable sessions, hosted or own sandbox |
 | Pydantic v2 | Schema validation | Required for output_type and structured tools |
 
 ---
@@ -453,6 +471,10 @@ A tool call returns a result to the calling agent, which then continues processi
 **Q: How does the Runner decide when an agent is done?**
 **Short:** It loops until the active agent returns output with no tool calls or handoff, or `max_turns` is exceeded, validating `output_type` if set.
 The Runner loops until the active agent returns a final output (not a tool call or handoff), or `max_turns` is exceeded. A "final output" is detected when the agent's response contains no tool_call blocks and no handoff. If `output_type` is set, the runner additionally validates the output against the Pydantic schema.
+
+**Q: What is the difference between the Agents SDK and the Agents API?**
+**Short:** The SDK runs the agent loop in your process; the Agents API runs a managed Codex harness on OpenAI's servers with durable sessions.
+The Agents SDK is a library: `Runner.run()` executes the loop in your process, so you own state, retries, sandboxing, and crash recovery, and you can mix providers through adapters. The Agents API (public beta since 2026-09-10) is a hosted service: OpenAI runs session orchestration, context compaction, and recovery in a managed Codex harness, sessions persist across turns, and execution happens in an OpenAI-hosted sandbox or your own. Pick the SDK for custom multi-agent logic with typed guardrails and handoffs; pick the API when the job is a long-running coding or computer-use task and you do not want to run a sandbox or a durable workflow engine. The tradeoff is the usual hosted one: less control, OpenAI-only models, and session state stored by the provider.
 
 **Q: What is RunContextWrapper and why is it generic?**
 **Short:** A typed wrapper passed to every tool and guardrail whose generic parameter gives static type checking across context, tools, and agents.
@@ -503,8 +525,8 @@ Every Runner.run automatically emits trace events to the OpenAI tracing dashboar
 Wrap the tool with an explicit confirmation pattern: the tool first returns a "preview" without executing, the agent shows the preview to the user (in your UI), and only on user approval does the tool execute. Implement via two tools (`preview_expensive_op` and `execute_expensive_op`), or via a confirmation argument in one tool. Combine with guardrails to enforce per-conversation cost caps.
 
 **Q: What is the recommended pattern for shared state across multiple runs (e.g., conversation memory)?**
-**Short:** The SDK is stateless, so you persist conversation history and long-lived memory yourself and pass it back in as input.
-The Agents SDK is stateless — each `Runner.run()` is a fresh execution. For multi-turn conversations, you maintain conversation history yourself and pass it as input to each run. For long-lived state, use a database (Postgres, Redis) and access it via tools or context dependencies. The SDK does not provide built-in memory primitives.
+**Short:** Pass a built-in Session such as `SQLiteSession` or `RedisSession` to `Runner.run(..., session=...)`; it loads and saves turn history.
+Conversation history belongs in a Session. Create one with an ID per conversation, for example `SQLiteSession("user_42")`, and pass it as `Runner.run(agent, user_input, session=session)`. The runner reads the stored items before the run and appends the new ones after it, so you do not thread `result.to_input_list()` between turns by hand. `openai-agents` 0.24.0 (2026-10-15) ships `SQLiteSession` and an async variant, `AdvancedSQLiteSession`, `RedisSession`, `SQLAlchemySession` (Postgres and other SQL databases), Dapr and MongoDB sessions, `OpenAIConversationsSession` (history stored server-side by the Conversations API), `OpenAIResponsesCompactionSession` (compacts long histories), and an `EncryptedSession` wrapper. Use `SQLiteSession` for local development and a shared store such as Redis or Postgres when several workers serve the same conversation. Sessions hold turn history only: long-lived facts about a user (preferences, account data) still belong in your own database, read through tools or the run context.
 
 **Q: How does the Agents SDK handle rate limits?**
 **Short:** The underlying OpenAI SDK retries 429s with exponential backoff by default, configurable via `max_retries` for stricter throughput needs.

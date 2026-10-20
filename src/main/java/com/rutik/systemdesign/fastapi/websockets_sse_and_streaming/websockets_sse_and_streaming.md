@@ -270,6 +270,8 @@ Both are non-blocking from the event loop's perspective.
 ```python
 from collections import defaultdict
 
+from starlette.websockets import WebSocketDisconnect, WebSocketDisconnected
+
 class ConnectionManager:
     def __init__(self) -> None:
         self._rooms: dict[str, set[WebSocket]] = defaultdict(set)
@@ -288,7 +290,7 @@ class ConnectionManager:
         for ws in list(self._rooms[room]):
             try:
                 await ws.send_text(message)
-            except Exception:
+            except (WebSocketDisconnect, WebSocketDisconnected):
                 dead.append(ws)
         for ws in dead:
             self.disconnect(room, ws)
@@ -425,6 +427,11 @@ What the framework handles that hand-rolled `StreamingResponse` does not:
 | Per-event framing | `data:` / `event:` / `id:` / `retry:` lines and the blank terminator |
 | `Last-Event-ID` | readable from the request header for resume (Section 6.5) |
 | Multi-line `data` | split across repeated `data:` lines per the spec |
+
+Pin FastAPI 0.140.13+ if the endpoint declares a non-200 `status_code` (or a dependency sets
+one on `Response`): before that release SSE and JSONL streams always returned 200 while OpenAPI
+documented the declared code. 0.143.3 writes `NaN` and `Infinity` in non-model stream items as
+`null`; earlier versions emitted bare `NaN` tokens that `JSON.parse` rejects.
 
 Third-party `sse-starlette` predates this and is still the only option on a pin older than
 0.135.0; its `EventSourceResponse` takes a generator argument rather than a response class
@@ -754,12 +761,24 @@ async def ws_with_heartbeat(websocket: WebSocket, client_id: str) -> None:
 
 ### 6.10 JWT Authentication in WebSockets
 
-The browser `WebSocket` API does not allow setting custom headers. JWT must be sent as a
-query parameter or as the first message after connection:
+Since FastAPI 0.144.0 the security dependencies (`OAuth2PasswordBearer`, `HTTPBearer`,
+`APIKeyHeader`, `APIKeyQuery`, `APIKeyCookie`, `OpenIdConnect`) work on `@app.websocket`
+routes: their `__call__` takes Starlette's `HTTPConnection`, the base class of both `Request`
+and `WebSocket`. Dependencies resolve before the handler body runs, so a missing credential
+raises `HTTPException(401)` before `accept()`. Starlette sends that error as a WebSocket denial
+response (the ASGI `websocket.http.response` extension, which uvicorn supports), and the client
+gets an HTTP 401 instead of `101 Switching Protocols`.
+
+The browser `WebSocket` API cannot set headers, so `OAuth2PasswordBearer` and `HTTPBearer`
+only serve non-browser clients (mobile apps, services). A browser can send a cookie, which the
+browser attaches to the upgrade request, or a query parameter:
 
 ```python
-from fastapi import Query, HTTPException
-from jose import jwt, JWTError
+from typing import Annotated
+
+import jwt
+from fastapi import Depends, HTTPException, WebSocket, status
+from fastapi.security import APIKeyCookie, OAuth2PasswordBearer
 
 SECRET = "change-me"
 ALGORITHM = "HS256"
@@ -768,29 +787,41 @@ ALGORITHM = "HS256"
 def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, SECRET, algorithms=[ALGORITHM])
-    except JWTError as exc:
+    except jwt.InvalidTokenError as exc:
         raise HTTPException(status_code=403, detail="Invalid token") from exc
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")       # Authorization: Bearer (non-browser)
+session_cookie = APIKeyCookie(name="access_token")           # browser: cookie rides the upgrade
+
+
+@app.websocket("/ws/service")
+async def service_ws(
+    websocket: WebSocket, token: Annotated[str, Depends(oauth2_scheme)]
+) -> None:
+    ...
 
 
 @app.websocket("/ws/secure")
 async def secure_ws(
-    websocket: WebSocket,
-    token: str = Query(...),   # ?token=<jwt>
+    websocket: WebSocket, token: Annotated[str, Depends(session_cookie)]
 ) -> None:
     try:
         payload = decode_token(token)
     except HTTPException:
-        await websocket.close(code=4001)  # custom close code for auth failure
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-
-    user_id = payload["sub"]
     await websocket.accept()
+    user_id = payload["sub"]
     # ...
 ```
 
-Security note: query params appear in server access logs. For sensitive environments,
-accept the connection first, receive the JWT as the first message, then close with 4001 if
-invalid. This prevents tokens from leaking into log files.
+The dependency only extracts the credential; validating it is still your code. A cookie-authed
+socket is open to cross-site WebSocket hijacking, because browsers send cookies on cross-origin
+upgrades and WebSockets have no CORS check, so compare `websocket.headers["origin"]` with an
+allowlist before `accept()`. `APIKeyQuery` puts the token in the URL, where access logs record
+it: use it only with a short-lived single-use ticket minted by an authenticated REST call, or
+accept first and read the token as the first message (Pitfall 7).
 
 ---
 
@@ -808,8 +839,7 @@ The frontend uses `EventSource` or the Fetch API with `ReadableStream`. Each tok
 by the model is flushed immediately rather than waiting for the full response, reducing
 perceived latency from several seconds to near-instant first-token display.
 
-**GitHub Copilot** streams code completions using HTTP/2 server push in some configurations
-and SSE in others. The streaming keeps the IDE's UI responsive for longer completions.
+**GitHub Copilot** streams code completions as SSE responses over ordinary HTTP requests. The streaming keeps the IDE's UI responsive for longer completions.
 
 **Figma** uses WebSockets for its live collaborative editing engine. Each client holds an
 open WebSocket to a regional gateway. Operational transforms (or CRDTs) are broadcast over
@@ -1054,6 +1084,15 @@ async def clean_ws(websocket: WebSocket) -> None:
         manager.disconnect("default", websocket)   # always runs
 ```
 
+Two exceptions mean "this socket is gone", and they are unrelated types. `WebSocketDisconnect`
+(an `Exception`) is raised when a receive gets the peer's close frame, or when the first send
+to a dropped peer fails at the socket. `WebSocketDisconnected` (a `RuntimeError` subclass,
+Starlette 1.7.0+, import from `starlette.websockets`) is raised by any send or receive on a
+socket Starlette already marked closed, for example a broadcast to a client whose handler has
+already called `close()`. An `except WebSocketDisconnect` in a fan-out loop misses the second
+one; it escapes, aborts the loop for every remaining client, and the dead entry stays in the
+registry. Catch both where you evict.
+
 ### Pitfall 3 — Blocking code inside a WebSocket handler freezes all connections
 
 ```python
@@ -1206,7 +1245,7 @@ async def secure_ws(websocket: WebSocket) -> None:
 | Tool / Library | Role | Notes |
 |---------------|------|-------|
 | FastAPI / Starlette | WebSocket, StreamingResponse, and JSON Lines primitives | Built-in; JSONL is an `AsyncIterable[Model]` return type served as `application/jsonl` [FastAPI 0.134+] |
-| `fastapi.sse` | `EventSourceResponse` and `ServerSentEvent` — SSE in core | Built-in [FastAPI 0.135+]; handles keep-alive, headers, `Last-Event-ID` |
+| `fastapi.sse` | `EventSourceResponse` and `ServerSentEvent`: SSE in core | Built-in [FastAPI 0.135+]; handles keep-alive, headers, `Last-Event-ID`; custom `status_code` honored from 0.140.13, non-finite floats serialized as `null` from 0.143.3 |
 | `sse-starlette` | SSE for pins older than FastAPI 0.135 | `pip install sse-starlette`; unnecessary on a current FastAPI |
 | `anyio.CapacityLimiter` | Admission control for GPU-backed or otherwise scarce work | Built-in via anyio; resizable at runtime, unlike `asyncio.Semaphore` |
 | `redis.asyncio` (redis-py v4+) | Async Redis client for pub/sub | Replaces `aioredis` (merged in v4.2) |
@@ -1240,14 +1279,19 @@ pub/sub is the canonical choice). Every pod subscribes to relevant channels; any
 publish; Redis delivers to all subscribers; each pod then pushes to its local connections.
 
 **Q3: How do you authenticate a WebSocket connection in FastAPI?**
-**Short:** Send the JWT as the first message after connecting rather than in the URL, keeping tokens out of access logs.
+**Short:** Declare a security dependency on the route (FastAPI 0.144+); browsers cannot set headers, so they send a cookie, a short-lived query ticket, or a first-message token.
 
-Two approaches: (a) JWT in query parameter — simplest but leaks the token into server access
-logs. Decoded before `websocket.accept()` is called; close with code 4001 if invalid. (b) JWT
-as first message — accept the connection first, `await receive_json()` with a timeout (5 s),
-decode the token, close 4001 if invalid. The second approach keeps tokens out of logs and is
-preferred for production. The browser `WebSocket` API does not support custom headers, so
-the Authorization header approach used in REST APIs is not available.
+Since FastAPI 0.144.0 the security classes (`OAuth2PasswordBearer`, `HTTPBearer`,
+`APIKeyCookie`, `APIKeyQuery`, and the rest) accept an `HTTPConnection`, so
+`token: Annotated[str, Depends(scheme)]` works on an `@app.websocket` route. A missing
+credential raises 401 before `accept()`, and the client gets an HTTP 401 denial instead of a
+101. The browser `WebSocket` API cannot set an `Authorization` header, so bearer schemes only
+serve non-browser clients. Browsers have three options: (a) a cookie (`APIKeyCookie`), which
+rides the upgrade request but needs an `Origin` allowlist against cross-site WebSocket
+hijacking; (b) a query parameter (`APIKeyQuery`), which leaks into access logs, so make it a
+short-lived single-use ticket; (c) accept first, read the token from the first message with a
+5 s timeout, and close with 1008 if it is invalid. Validate the token yourself in every case;
+the dependency only extracts it.
 
 **Q4: What is the difference between SSE and WebSocket, and when would you choose SSE?**
 **Short:** SSE is unidirectional and auto-reconnecting over plain HTTP; WebSocket is bidirectional and needs Upgrade support.
@@ -1369,7 +1413,9 @@ The next call to `receive_text()` / `receive_json()` raises `WebSocketDisconnect
 handler is currently awaiting, it raises immediately. If the handler is executing synchronous
 code (e.g., processing a message), the exception is raised at the next `await` point after
 the disconnect is detected. Always wrap the receive loop in a `try/except WebSocketDisconnect`
-and clean up in a `finally` block.
+and clean up in a `finally` block. A send or receive on a socket Starlette already marked
+closed raises a different type, `WebSocketDisconnected` (a `RuntimeError` subclass, Starlette
+1.7.0+), so a broadcast loop must catch both to evict the dead client.
 
 **Q15: How would you implement a chat room where messages sent to a room are received by all
 members, even if they are connected to different pods?**

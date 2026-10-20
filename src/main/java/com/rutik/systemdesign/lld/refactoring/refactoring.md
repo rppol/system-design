@@ -85,6 +85,7 @@ This is the pattern-facing complement to the table above: which GoF pattern a sm
 - **Simplifying conditional logic** — Decompose Conditional, Replace Conditional with Polymorphism, Replace Nested Conditional with Guard Clauses. The most common live-coding interview ask.
 - **Making method calls simpler** — Rename Method, Introduce Parameter Object, Replace Constructor with Factory Method, Separate Query from Modifier. Fixes Mysterious Name and Long Parameter List.
 - **Dealing with generalization** — Pull Up Method, Push Down Method, Extract Superclass, Replace Subclass with Delegate, Collapse Hierarchy. Fixes Refused Bequest and inheritance misuse.
+- **Changing a widely used interface or component**: Parallel Change (expand, migrate, contract), Branch by Abstraction, and the Mikado method for ordering prerequisite steps. Fixes the change that is too large for one commit because it touches hundreds of callers (§6.9, §6.10).
 
 ---
 
@@ -433,6 +434,98 @@ void legacyDiscountCalculator_currentBehavior_isPinnedDownBeforeTouchingIt() {
 ```
 
 Kent Beck's sequencing rule for adding a feature to code that isn't shaped for it: **"for each desired change, make the change easy (warning: this may be hard), then make the easy change."** Concretely: if adding a sixth discount type means editing a ten-branch if-else, do not add the branch. First refactor the if-else into Strategy (the "make the change easy" commit, behavior-preserving, tested against characterization tests). Then add `SeniorDiscount` as one new class (the "easy change" commit, a genuine feature, reviewed and tested on its own). Two commits, two intents, each independently revertable — never one commit that is both.
+
+**Approval (golden master) tests** scale characterization past a handful of asserts. Instead of writing one `assertEquals` per observed value, the test serializes the whole output (a rendered invoice, a JSON response, the state of every item after a simulated day) and compares it with an approved file checked into the repo. ApprovalTests (Llewellyn Falco; `com.approvaltests:approvaltests` on the JVM) writes `Name.received.txt` on a mismatch next to `Name.approved.txt` and opens a diff tool; approving means copying received over approved. `CombinationApprovals.verifyAllCombinations` runs the code over the cross product of input lists, so three lists of 5, 4 and 6 values pin 120 cases in one test. Two rules keep them honest: scrub nondeterministic output (timestamps, UUIDs, hash-map iteration order) before comparison, and check the coverage report, because a golden master over inputs that never reach a branch pins nothing about it.
+
+```java
+@Test
+void invoiceRendering_isPinned() {
+    Approvals.verify(new LegacyInvoiceRenderer().render(sampleOrder()));
+}
+
+@Test
+void discount_allCombinations_arePinned() {
+    CombinationApprovals.verifyAllCombinations(
+        (type, amount) -> new LegacyDiscountCalculator().calculate(type, amount),
+        new String[] {null, "REGULAR", "PREMIUM", "VIP", "UNKNOWN"},
+        new Double[] {0.0, 99.99, 100.0, 1000.0});
+}
+```
+
+### 6.9 Parallel Change and Branch by Abstraction
+
+Rename a method with 3 callers and the IDE updates all of them in one commit. Change the signature of `PaymentGateway.charge(String, long)` with 400 callers across six teams' modules, or replace the ORM under 200 repository classes, and one commit is either unreviewable or impossible, because other branches keep adding callers of the old form while yours is open. Two techniques split such a change into many small commits that each leave the build green on trunk.
+
+**Parallel Change, also called expand / migrate / contract** (Danilo Sato, martinfowler.com, 2014), changes an interface in three phases:
+
+```mermaid
+flowchart LR
+    classDef expand fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef migrate fill:#e5c07b,stroke:#f39c12,color:#1a1a1a,font-weight:bold
+    classDef contract fill:#98c379,stroke:#27ae60,color:#1a1a1a,font-weight:bold
+
+    E(["Expand<br/>add charge(ChargeRequest)<br/>old method delegates"]) --> M(["Migrate<br/>move callers in batches<br/>many small commits"])
+    M --> C(["Contract<br/>delete charge(String, long)<br/>when caller count is 0"])
+
+    class E expand
+    class M migrate
+    class C contract
+```
+
+*Both forms coexist for the whole migrate phase; each batch of callers is its own green, revertable commit.*
+
+```java
+public interface PaymentGateway {
+    void charge(ChargeRequest request);                     // expand: the new form
+
+    @Deprecated(forRemoval = true)                          // compiler warning finds every remaining caller
+    default void charge(String orderId, long amountCents) { // old form delegates, so behavior stays single-sourced
+        charge(new ChargeRequest(orderId, amountCents, Currency.getInstance("USD")));
+    }
+}
+```
+
+The same three phases apply to data: add the new column and write both, backfill and move readers, then drop the old column. That is the expand/contract migration in [Zero-Downtime Database Migrations](../../database/database_migrations_zero_downtime/database_migrations_zero_downtime.md). For a published library or REST API the contract phase waits for external callers, so it is gated on usage metrics or a deprecation window rather than on a compiler warning count reaching zero.
+
+**Branch by Abstraction** (Paul Hammant, 2007; written up by Jez Humble and Martin Fowler) replaces a whole component rather than one signature:
+
+1. Introduce an abstraction (an interface) over the part of the old component that callers use.
+2. Move callers onto the abstraction, one commit at a time. The old component is the only implementation.
+3. Build the new implementation behind the same abstraction, merged to trunk but switched off with a feature flag or wiring choice.
+4. Switch callers to the new implementation, per caller or per percentage of traffic, with the flag as the rollback.
+5. Delete the old implementation. Optionally inline the abstraction if it has one implementation left.
+
+The difference from a long-lived feature branch is where the unfinished work lives: on trunk, compiled and tested on every commit, behind an interface. A six-week ORM swap on a branch accumulates six weeks of merge conflicts; the same swap behind an abstraction merges daily and conflicts only on the lines it touches that day. Strangler Fig is the same idea one level out, routing requests at the system boundary instead of calls inside one codebase; see [Microservices](../../hld/microservices/microservices.md).
+
+### 6.10 The Mikado method: ordering the prerequisites
+
+Some refactorings fail for a reason you discover only by trying: move `OrderService` to a new module and 40 compile errors appear, each pointing at a different missing prerequisite. The Mikado method (Ola Ellnestam and Daniel Brolund, *The Mikado Method*, Manning, 2014) turns that discovery into a graph instead of a broken branch:
+
+1. Write the goal at the root of a graph.
+2. Try the change naively.
+3. If it breaks, write each prerequisite the errors reveal as a child node, then **revert the attempt completely** (`git reset --hard`).
+4. Pick a leaf (a node with no unexplored prerequisites) and repeat steps 2 and 3 for it.
+5. When a leaf change succeeds with the tests green, commit it and tick the node. Work upward until the root goal succeeds.
+
+```mermaid
+flowchart TD
+    classDef goal fill:#c678dd,stroke:#9b59b6,color:#fff,font-weight:bold
+    classDef todo fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef done fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    G(["Goal: move OrderService<br/>to module orders"]) --> P1(["Extract interface<br/>InventoryPort"])
+    G --> P2(["Remove static call<br/>to AppConfig.get()"])
+    P1 --> L1(["Move StockLevel record<br/>to shared module"])
+    P2 --> L2(["Inject Config through<br/>constructor"])
+
+    class G goal
+    class P1,P2 todo
+    class L1,L2 done
+```
+
+*Green leaves are committed; yellow nodes become doable once their children are green; the root is the last commit, not the first.*
+
+The revert in step 3 is the rule people skip and the one that makes the method work: the codebase never stays broken for longer than one experiment, every commit is a small green change from a leaf, and the graph on paper or in a text file records what is left, so the work can stop at any commit and resume later or move to another developer.
 
 ---
 
@@ -846,6 +939,9 @@ Ask these questions about the code — the decision tree in §5 is this same log
 | Manual refactoring | Handles anything, including transformations no tool automates | Slower; each step is a chance for a copy-paste or rename mistake the compiler won't always catch |
 | Refactor toward a GoF pattern | Removes the specific pain the smell caused; well-known vocabulary for the team | A pattern applied without a driving smell is Speculative Generality — indirection with no payoff |
 | Refactor toward `sealed` + `switch` (Java 21+) | Compiler-enforced exhaustiveness; no per-branch `.java` file; less boilerplate | Only fits closed, data-shaped variation — not a fit when a branch needs its own dependencies or runtime-swappable lifecycle |
+| Parallel Change (expand / migrate / contract) | Each caller batch is a small green commit; no big-bang merge | Two forms coexist for weeks; needs a tracked contract step or the old form never leaves |
+| Branch by Abstraction | Long component swaps merge to trunk daily behind an interface and a flag | An interface and a flag that exist only for the migration, and must be removed after |
+| Approval (golden master) tests | Pins large outputs and input combinations with little test code | Brittle on nondeterministic output until scrubbed; pins whatever the inputs reach, nothing more |
 | Characterization tests before refactoring | A verifiable baseline for messy, undocumented legacy code | Takes real time up front; the tests pin down bugs too, which must be fixed in a *separate*, later commit |
 
 **The core tradeoff**: refactoring trades design-quality speed for safety. Every rule in §3 exists to keep that trade in your favor — small steps mean a bad step costs you one revert, not a week.
@@ -911,7 +1007,8 @@ class SeniorDiscount implements DiscountStrategy {
 | **Eclipse JDT** | Extract Method, Extract Class, Move, Rename, Pull Up/Push Down, Introduce Parameter Object | Comparable automated coverage to IntelliJ for the mechanical, single-class-boundary refactorings; predates IntelliJ's refactor tooling and pioneered much of it in the Java ecosystem. |
 | **SonarQube / SonarLint** | Static detection of smells, not refactoring itself | Rule `S3776` (Cognitive Complexity) flags methods whose control flow is too tangled to follow — the direct static-analysis signal for "Extract Method here." Other rules flag long parameter lists and duplicated blocks, feeding the same smell catalog in §4. |
 | **OpenRewrite** | Automated, scriptable, repo-wide refactoring via recipes (LST-based, not text-based) | Ships migration recipes including "Adopt switch pattern matching (JEP 441)," which mechanically rewrites eligible `if`/`instanceof` chains to the sealed+switch form in §6.4 across an entire codebase in one run — the industrial-scale version of a refactoring an IDE does one file at a time. |
-| **JUnit 5 / Mockito** | Characterization and regression test infrastructure | The safety net every refactoring in this page depends on; a refactor with no test suite behind it is an unverified edit wearing a refactoring's name. |
+| **JUnit 6 / Mockito** | Characterization and regression test infrastructure | The safety net every refactoring in this page depends on; a refactor with no test suite behind it is an unverified edit wearing a refactoring's name. |
+| **ApprovalTests** (`com.approvaltests:approvaltests`) | Golden master / approval tests: `Approvals.verify`, `CombinationApprovals.verifyAllCombinations`, received vs approved file diffs | The fastest way to build a characterization net over code with large or combinatorial outputs (§6.8). |
 | **git** | Bisectability | Small, single-purpose refactoring commits are what makes `git bisect` useful when a regression is found weeks later. |
 
 ---
@@ -937,6 +1034,26 @@ Small steps only pay off if you verify after each one — the whole reason to ta
 **Short:** A characterization test pins down current behavior, bugs included, rather than asserting what the code should do.
 
 A normal unit test asserts what the code *should* do, derived from a spec. A characterization test records what the code *actually* does today, including any bugs, so you have a baseline you can refactor against without accidentally "fixing" a behavior someone downstream may be depending on. It's written by running the untouched legacy code and observing its output, not by reasoning from requirements. Fixing a bug the characterization test pinned down happens in a separate, later commit — never folded into the refactor.
+
+**Q: How do you change the signature of an interface method that has 400 callers across several teams without one huge commit?**
+**Short:** Use Parallel Change: add the new form beside the old with the old delegating to it, move callers over in small commits, then delete the old form.
+
+Parallel Change runs in three phases. Expand adds `charge(ChargeRequest)` and turns the old `charge(String, long)` into a deprecated default method that delegates to the new one, so behavior lives in one place. Migrate moves callers in batches, each its own green commit, with `@Deprecated(forRemoval = true)` warnings counting what is left. Contract deletes the old method once the count reaches zero. A single atomic rename fails here for a practical reason: other branches keep adding calls to the old signature while yours is in review. For a public library or REST API the contract step waits for external consumers, so gate it on usage data and an announced removal date.
+
+**Q: What is Branch by Abstraction, and why use it instead of a long-lived feature branch?**
+**Short:** Put an interface in front of the component, move callers onto it, build the replacement behind it on trunk under a flag, switch over, then delete the old one.
+
+Branch by Abstraction (Paul Hammant, 2007) replaces a component such as an ORM or a payment provider in steps that each merge to trunk: introduce the abstraction, migrate callers to it, add the new implementation switched off, flip callers over with a flag as the rollback, and delete the old implementation. The unfinished work is compiled and tested on every commit, so a six-week swap conflicts only with that day's edits, while a six-week branch collects six weeks of conflicts in one merge. The cost is the temporary interface and flag, which must be removed afterwards or they become permanent indirection. Strangler Fig applies the same idea at the system boundary by routing requests instead of method calls.
+
+**Q: What is the Mikado method, and why does it insist on reverting a failed attempt?**
+**Short:** Try the goal, record each prerequisite it breaks on in a graph, revert fully, then fix leaves first and commit each green step until the goal succeeds.
+
+The Mikado method (Ellnestam and Brolund, 2014) handles a refactoring whose prerequisites only show up when you try it, such as moving a class to a new module and getting 40 compile errors. Each failure adds child nodes to a graph and the attempt is reverted with `git reset --hard`; work then starts at a leaf, and every successful leaf change is a small commit with tests green. The revert is the point: the code is never left broken while you fix the next error, the history is a series of safe commits, and the graph records what remains, so the work can pause at any commit. Without the revert it degrades into the "fix 40 errors on a broken branch" approach it was invented to replace.
+
+**Q: What is an approval (golden master) test, and when is it better than hand-written assertions?**
+**Short:** It stores the full serialized output in an approved file and diffs every later run against it, pinning large or combinatorial behavior with very little test code.
+
+An approval test calls the code, serializes the result (a rendered report, a JSON payload, a game state), and compares it with a checked-in `.approved.txt`; a mismatch writes `.received.txt` and shows a diff, and approving a change means accepting the received file. ApprovalTests' `CombinationApprovals.verifyAllCombinations` runs every combination of the given inputs, so 5 x 4 x 6 inputs pin 120 cases in one test. It suits legacy code with wide outputs where writing one assert per field would take days. Two traps: scrub timestamps, UUIDs and unordered collections or the test fails on every run, and read the coverage report, because the file only pins branches the chosen inputs reach.
 
 **Q: A subclass overrides most of its parent's methods to throw `UnsupportedOperationException`. Name the smell and the fix.**
 **Short:** That's Refused Bequest; the fix is Replace Subclass with Delegate or Replace Superclass with Delegate.
@@ -1022,6 +1139,7 @@ Stopping at bundling — a record with fields and no methods — fixes the Data 
 8. **Let static analysis point at the smell, not decide the refactoring** — a SonarQube cognitive-complexity flag (§11) tells you *where*; the smell catalog in §4 tells you *which* named refactoring, and your judgment decides whether it's worth doing today.
 9. **Prefer the IDE's automated refactoring over hand-editing when one exists** (§11) — it updates every call site atomically, which a manual find-and-replace cannot guarantee.
 10. **Don't refactor toward a pattern with no smell behind it** — every refactoring in this page should be traceable to a row in the §4 tables, not to "this might be useful later."
+11. **Change a widely used interface in phases, not in one commit**: expand, migrate callers in batches, contract (§6.9); for a whole component, put it behind an abstraction and switch on trunk.
 
 ---
 

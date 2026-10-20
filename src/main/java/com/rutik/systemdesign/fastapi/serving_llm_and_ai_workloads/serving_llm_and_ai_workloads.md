@@ -571,7 +571,7 @@ may differ by a negation. The worked treatment — including why a brute-force s
 embeddings stops scaling and what the egress arithmetic looks like — is in
 [`../case_studies/design_ml_inference_api_fastapi.md`](../case_studies/design_ml_inference_api_fastapi.md)
 §5. Current implementations worth knowing: **GPTCache** (Zilliz, v0.1.44, 2024-08-01), **RedisVL**'s
-`SemanticCache` (v0.18.2, 2026-05-12), and Redis's managed **LangCache** service for teams that would
+`SemanticCache` (v0.28.0, 2026-10-09), and Redis's managed **LangCache** service for teams that would
 rather not run the index.
 
 The third tier is the free one. Providers cache a stable prompt *prefix* on their side and charge
@@ -695,16 +695,16 @@ entirely; it is the cheapest correct rule.
 
 ## 7. Real-World Examples
 
-**vLLM as the sidecar standard.** vLLM (v0.27.1, 2026-08-11) exposes an OpenAI-compatible server via
+**vLLM as the sidecar standard.** vLLM (v0.32.0, 2026-10-18) exposes an OpenAI-compatible server via
 `vllm serve`, with continuous batching as a core design property rather than an option. Its adoption
 is why "OpenAI-compatible" has become the de-facto interface for self-hosted serving — Ollama and
 NVIDIA Triton both ship compatible frontends too — and why the failover code in §6.4 can treat a
 self-hosted target as just another entry in the list.
 
-**The provider SDKs' streaming shapes.** The `anthropic` Python SDK (v1.0.0, 2026-08-20) streams via
+**The provider SDKs' streaming shapes.** The `anthropic` Python SDK (v1.15.0, 2026-10-15) streams via
 `client.messages.stream(...)`, and its SSE events are typed: `message_start`, `content_block_start`,
 `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`, plus `ping` keep-alives.
-The `openai` SDK (v3.3.1, 2026-08-19) streams via `client.chat.completions.create(stream=True)`, and
+The `openai` SDK (v3.35.1, 2026-10-18) streams via `client.chat.completions.create(stream=True)`, and
 its chat-completions wire format still terminates with the `data: [DONE]` sentinel. **The two are not
 interchangeable at the byte level**, which is precisely why the normalization layer in §6.4 exists —
 and why a gateway that leaks one provider's event names to its own clients has quietly made that
@@ -952,14 +952,14 @@ ships rather than at month end.
 |---|---|---|
 | `fastapi.sse` | `EventSourceResponse`, `ServerSentEvent` | built in [FastAPI 0.135+]; `raw_data=` emits an unencoded `data:` payload such as `[DONE]` |
 | `AsyncIterable[Model]` return | JSON Lines streaming as `application/jsonl` | built in [FastAPI 0.134+]; the right shape for machine consumers |
-| `httpx` | streaming upstream client | 0.28.1; `Timeout(default, read=...)` makes `read` a per-chunk idle gap |
+| `httpx2` | streaming upstream client | 2.14.0; Pydantic-maintained successor to `httpx` (last release 0.28.1, 2024-12-06), same API; `Timeout(default, read=...)` makes `read` a per-chunk idle gap |
 | `anyio` | `fail_after`, `CapacityLimiter` | already a FastAPI dependency; `CapacityLimiter` is resizable at runtime |
-| vLLM | self-hosted OpenAI-compatible server | 0.27.1; continuous batching by design, prefix caching via `--enable-prefix-caching` |
+| vLLM | self-hosted OpenAI-compatible server | 0.32.0 (2026-10-18); continuous batching by design, prefix caching on by default (`--no-enable-prefix-caching` disables it) |
 | Ollama | local/dev model server | native `/api/chat` plus an OpenAI-compatible layer at `:11434/v1` |
 | NVIDIA Triton | multi-framework model server | ships an OpenAI-compatible frontend; see [`../../technologies/nvidia_triton_inference_server/nvidia_triton_inference_server.md`](../../technologies/nvidia_triton_inference_server/nvidia_triton_inference_server.md) |
-| `anthropic` / `openai` SDKs | provider clients | 1.0.0 / 3.3.1; different streaming event shapes — normalize at your boundary |
-| GPTCache | semantic cache | v0.1.44 (2026-08-01) |
-| RedisVL `SemanticCache` | semantic cache over Redis | v0.26.0 (2026-08-19); Redis also offers LangCache as a managed service |
+| `anthropic` / `openai` SDKs | provider clients | 1.15.0 / 3.35.1; different streaming event shapes, so normalize at your boundary |
+| GPTCache | semantic cache | v0.1.44 (2024-08-01), no release since |
+| RedisVL `SemanticCache` | semantic cache over Redis | v0.28.0 (2026-10-09); Redis also offers LangCache as a managed service |
 | `prometheus-client` | TTFT / inter-token / token counters | label by model, never by tenant |
 | LiteLLM, Kong AI Gateway, Envoy AI Gateway | off-the-shelf AI gateways | evaluate before writing §6.3-§6.6 a fifth time |
 

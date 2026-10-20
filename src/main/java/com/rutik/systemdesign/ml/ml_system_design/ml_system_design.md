@@ -467,16 +467,16 @@ def _choose_monitoring(req: MLSystemRequirements) -> str:
 
 | Category | Options | Notes |
 |----------|---------|-------|
-| Feature Store | Feast, Databricks-Tecton, Vertex AI Feature Store, Hopsworks | Feast (open-source, self-hosted) / Databricks-Tecton (managed, real-time) / Hopsworks / cloud-native (Vertex AI Feature Store, SageMaker Feature Store) |
+| Feature Store | Feast, Databricks-Tecton, Agent Platform Feature Store, Hopsworks | Feast (open-source, self-hosted) / Databricks-Tecton (managed, real-time) / Hopsworks / cloud-native (Agent Platform Feature Store on GCP, formerly Vertex AI Feature Store; SageMaker Feature Store) |
 | Training Orchestration | Kubeflow Pipelines, Airflow, Prefect, Metaflow | Kubeflow tightly integrated with K8s |
-| Experiment Tracking | MLflow, Weights & Biases, Neptune | MLflow is open-source standard |
+| Experiment Tracking | MLflow, Weights & Biases, Comet | MLflow is open-source standard |
 | Model Serving | TF Serving, NVIDIA Triton, BentoML, Ray Serve | NVIDIA Triton best for multi-framework GPU serving |
 | ANN Search | FAISS, ScaNN, Milvus, Weaviate, Pinecone | FAISS for self-hosted; Pinecone managed |
 | Stream Processing | Apache Flink, Kafka Streams, Spark Structured Streaming | Flink lowest latency |
 | Batch Processing | Apache Spark, Dask, BigQuery | Spark most widely used |
 | Data Validation | Great Expectations, deequ, TFDV | Great Expectations most mature |
-| Model Registry | MLflow Model Registry, Vertex AI, SageMaker Model Registry | |
-| Monitoring | Evidently AI, WhyLogs, Arize Phoenix, Fiddler | Evidently is open-source |
+| Model Registry | MLflow Model Registry, Agent Platform Model Registry (formerly Vertex AI), SageMaker Model Registry | |
+| Monitoring | Evidently AI, Arize Phoenix, Fiddler | Evidently is open-source |
 
 ---
 

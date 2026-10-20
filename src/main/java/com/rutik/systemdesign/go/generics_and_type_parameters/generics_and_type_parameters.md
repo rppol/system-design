@@ -533,6 +533,12 @@ the syntax that makes it iterable. Generics are what made a single `iter.Seq` us
 - **`errors.AsType[T]` `[1.26]`** — the generic form of `errors.As`, replacing the
   two-step `var target *MyErr; errors.As(err, &target)` dance with
   `target, ok := errors.AsType[*MyErr](err)`.
+- **`hash/maphash.Hasher[T]` `[1.27]`**: the standard contract between a hash-keyed
+  container and its elements: `Hash(*maphash.Hash, T)` plus `Equal(x, y T) bool`, with the
+  rule that equal values must hash the same. A generic hash table or Bloom filter takes a
+  `Hasher[K]` type parameter instead of requiring `K comparable`, so it can key on a
+  case-insensitive string or a slice-backed type. `maphash.ComparableHasher[T]` is the
+  ready-made implementation whose `Equal` is `==`.
 - **`golang.org/x/sync/errgroup`** — not generic itself, but the ecosystem around it is:
   bounded fan-out helpers over `[]T` returning `[]R` are the single most common
   hand-written generic in production Go services.

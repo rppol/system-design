@@ -1,8 +1,8 @@
 # Regulated Supply Chain — the CRA and Compliance as a Pipeline Property
 
-> **Regulatory anchor (2026-08-26).** **Regulation (EU) 2024/2847**, the Cyber Resilience Act, entered into force **2024-12-10**. Article 71(2) staggers application in three steps: **Chapter IV (Articles 35–51, notified bodies) from 2026-06-11**; **Article 14 (reporting) from 2026-09-11 — sixteen days from today**; and the **full regulation from 2027-12-11**. The reporting clock is **24h early warning / 72h notification / 14-day final report** to the coordinating CSIRT and ENISA. ENISA's **Single Reporting Platform is not yet live** — onboarding instructions were published 2026-07-31 and it is scheduled to go live on 2026-09-11, the same day the obligation starts. **No CRA harmonised standard has been published in the Official Journal yet**; standardisation request M/606 was accepted in April 2025 and CEN/CENELEC JTC 13's first two targets are dated 2026-08-30.
+> **Regulatory anchor (2026-10-19).** **Regulation (EU) 2024/2847**, the Cyber Resilience Act, entered into force **2024-12-10**. Article 71(2) staggers application in three steps: **Chapter IV (Articles 35-51, notified bodies) from 2026-06-11**; **Article 14 (reporting) from 2026-09-11**; and the **full regulation from 2027-12-11**. The reporting clock is **24h early warning / 72h notification / final report** to the coordinating CSIRT and ENISA. The final report is due **14 days after a corrective measure is available** for an actively exploited vulnerability, and **one month after the 72h notification** for a severe incident. ENISA's **Single Reporting Platform has been operational since 2026-09-11** and carries every Article 14 submission. **No CRA harmonised standard is cited in the Official Journal**. Standardisation request M/606 was accepted in April 2025; a draft amendment, not adopted as of 2026-09-08, moves the horizontal Type A and Type B standards to 2026-10-31 and the product-specific Type C standards to 2026-12-31.
 
-> **Tooling anchor (checked 2026-08-26).** **Syft v1.51.0** and **Grype v0.117.0** (both 2026-08-10), **Trivy v0.74.0** (2026-08-14), **Dependency-Track v5.0** (GA 2026-06-09), **GUAC v1.1.0** (2026-03), **cosign v3.1.3** (2026-06-09). **Rekor v2** reached GA in December 2025 on a tile-based backend, sharded by year; **Rekor v1 is not sunset** and its eventual freeze carries a year's notice. **CycloneDX v1.7** is ratified as **ECMA-424, 2nd Edition** (December 2025); **SPDX 3.0.1** (December 2024) is current with 3.1 at release candidate. **OpenVEX v0.2.0**; **CSAF 2.0** remains the ratified version — **CSAF 2.1 is still a draft**.
+> **Tooling anchor (checked 2026-08-26).** **Syft v1.51.0** and **Grype v0.117.0** (both 2026-08-10), **Trivy v0.74.0** (2026-08-14), **Dependency-Track v5.0** (GA 2026-06-09), **GUAC v1.1.0** (2026-03), **cosign v3.1.3** (2026-08-06). **Rekor v2** reached GA on 2025-10-10 on a tile-based backend, sharded by year; signing clients do not switch to it automatically, **Rekor v1 runs in parallel and is not sunset**, and its eventual freeze carries a year's notice. **CycloneDX v1.7** is ratified as **ECMA-424, 2nd Edition** (December 2025); **SPDX 3.0.1** (December 2024) is current with 3.1 at release candidate. **OpenVEX v0.2.0**; **CSAF 2.0** remains the ratified version; **CSAF 2.1 is still a draft**.
 
 This page sits under [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security.md). The parent owns the *engineering* of supply-chain security — the scanning categories, keyless signing with Sigstore, SLSA Build levels, provenance, admission policy. This page owns what changes when those controls stop being good practice and become **a legal obligation with a date, a clock, and a fine**. The pipeline is largely the same; the artefacts it must produce, retain and be able to hand over are not.
 
@@ -22,7 +22,7 @@ Three consequences reshape how a platform team builds pipelines:
 2. **Vulnerability response acquires a clock.** Under Article 14 an actively exploited vulnerability triggers a 24-hour early warning. Twenty-four hours is shorter than most organisations' triage-to-decision path, which means the reporting decision cannot be invented during the incident.
 3. **Compliance becomes a property of the pipeline, not of a document.** You cannot retrofit provenance for an artefact already shipped. Either the build recorded what went into it, or the evidence does not exist.
 
-**The date that matters right now is 2026-09-11**, when Article 14 starts applying. That is sixteen days from this page's anchor, and it is more than a year ahead of the rest of the regulation — the EU deliberately front-loaded reporting because it wanted visibility into actively exploited vulnerabilities before the full conformity regime arrives in December 2027.
+**Article 14 has applied since 2026-09-11**, more than a year ahead of the rest of the regulation. The EU front-loaded reporting because it wanted visibility into actively exploited vulnerabilities before the full conformity regime arrives in December 2027.
 
 ---
 
@@ -90,7 +90,7 @@ The practical reading: **SLSA gives you build integrity, SSDF gives you a practi
 
 ## 5. Architecture Diagrams
 
-The Article 14 clock — the diagram to internalise before 2026-09-11:
+The Article 14 clock, which has applied since 2026-09-11:
 
 ```mermaid
 timeline
@@ -98,7 +98,8 @@ timeline
     T+0h : Manufacturer becomes aware of an actively exploited<br/>vulnerability or a severe incident
     T+24h : EARLY WARNING to the coordinating CSIRT and ENISA<br/>An alert, not an investigation. Type, name, product, title
     T+72h : NOTIFICATION with description, severity, impact<br/>and any corrective or mitigating measures available
-    T+14d : FINAL REPORT. Full description, malicious-actor<br/>involvement if known, the correction shipped
+    Fix + 14d : FINAL REPORT for an exploited vulnerability<br/>due 14 days after a corrective measure is available
+    T+72h + 1 month : FINAL REPORT for a severe incident<br/>due one month after the 72h notification
 ```
 
 *The 24-hour step is deliberately cheap to satisfy — it is an alert, not a report. The failure mode is treating it as a report and missing the deadline while assembling detail that is not due until 72 hours.*
@@ -164,11 +165,11 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # 1. BUILD, and capture the DIGEST. The tag is not the artefact.
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           push: true
           tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
@@ -285,14 +286,17 @@ T_plus_72h:
           mitigating measures taken or available
   inputs: SBOM for the affected digest, VEX statement, patch status
 
-T_plus_14d:
+final_report:
   action: final report -- full description, malicious-actor involvement if
           known, the correction shipped, mitigating measures
+  due:
+    exploited_vulnerability: 14 days after a corrective or mitigating measure is available
+    severe_incident: one month after the T_plus_72h notification
 
 pre_staged:
   - evidence store queryable by digest AND by released version
   - PSIRT contact registered with the coordinating CSIRT
-  - SRP onboarding completed (instructions published 2026-07-31)
+  - SRP account onboarded (platform operational since 2026-09-11)
 ```
 
 ---
@@ -300,7 +304,7 @@ pre_staged:
 ## 7. Real-World Examples
 
 - **The Trivy compromise, March 2026.** A malicious **Trivy v0.69.4** was published and disclosed around 2026-03-19. The scanner used to inspect the supply chain was itself a supply-chain attack. Under a regulatory regime this is not merely embarrassing — a compromised scanner can emit an SBOM that omits exactly what an attacker wants omitted, and that SBOM becomes your legal evidence. Pin and verify your security tooling with the same discipline you apply to application dependencies.
-- **Rekor v2, GA December 2025.** Sigstore's transparency log was rebuilt on a tile-based backend, sharded by year (`log2026-1.rekor.sigstore.dev`) and fully CDN-cacheable. Rekor v1 continues running in parallel and its eventual freeze carries a year's notice — so there is no urgent migration, only a client-version floor (cosign v2.6.0+ / v3.0.1+).
+- **Rekor v2, GA October 2025.** Sigstore's transparency log was rebuilt on a tile-based backend, sharded by year (`log2026-1.rekor.sigstore.dev`) and fully CDN-cacheable. Signing clients do not move to v2 automatically, Rekor v1 continues running in parallel, and its eventual freeze carries a year's notice, so there is no urgent migration, only a client-version floor (cosign v2.6.0+ / v3.0.1+).
 - **Dependency-Track v5.0** (GA 2026-06-09, "Hyades") — a rearchitecture with a CEL policy engine and portfolio access control. This is the class of tool the CRA implicitly requires: something that holds SBOMs for *every version ever shipped* and can answer "which released products contain this component" rather than "what is in production now."
 - **CycloneDX as ECMA-424** — CycloneDX 1.7 is a ratified ECMA standard, which matters for a regulation that asks for "a commonly used, machine-readable format." It is evidence of common use, not a legal designation.
 - **The harmonised-standards gap.** M/606 was accepted in April 2025 and targets roughly 41 standards. **None has been published in the Official Journal.** For Annex III Class I products this is consequential: the self-assessment route is conditional on applying a harmonised standard in full, and until one exists that route is not actually available.
@@ -317,7 +321,7 @@ pre_staged:
 | Signing | Keyless (Fulcio/Rekor) | KMS long-lived key | Keyless for CI-built artefacts; KMS where an air-gapped or offline verification path is required |
 | Vulnerability triage | Fix everything | VEX the inapplicable | VEX, unavoidably, once the SBOM is transitive |
 | Evidence store | Registry attestations | Separate archive | Both. The registry is convenient and mutable-ish; the archive survives registry migration and meets retention |
-| Timing | Prepare now | Wait for harmonised standards | Article 14 applies 2026-09-11 regardless of whether any standard exists |
+| Timing | Prepare now | Wait for harmonised standards | Article 14 has applied since 2026-09-11 regardless of whether any standard exists |
 
 **The one asymmetry worth naming:** producing evidence is cheap and continuous; producing it *retroactively* is impossible. Every month you defer, you accumulate shipped artefacts for which the evidence can never exist. That makes this unusual among compliance workstreams — the cost of delay is not linear, it is a permanently missing back-catalogue.
 
@@ -387,22 +391,22 @@ pre_staged:
 | Trivy | v0.74.0 | Scanning — image, filesystem, IaC, SBOM | Pin and verify: a malicious v0.69.4 shipped in March 2026 |
 | Dependency-Track | v5.0 (2026-06-09) | SBOM repository and continuous analysis | Answers "which shipped versions contain X" — the CRA question |
 | GUAC | v1.1.0 | Graph over SBOM, provenance and VEX | OpenSSF incubating |
-| cosign | v3.1.1 | Signing and attestation | Keyless via Fulcio, logged to Rekor |
+| cosign | v3.1.3 | Signing and attestation | Keyless via Fulcio, logged to Rekor |
 | Rekor | v2 (GA Oct 2025) | Transparency log | Tile-backed, sharded by year; v1 still running |
 | CycloneDX | 1.7 / ECMA-424 2nd Ed | SBOM + VEX format | Ratified standard; strong VEX integration |
 | SPDX | 3.0.1 (3.1 at RC) | SBOM format | Stronger licence modelling |
 | OpenVEX | v0.2.0 | VEX statements | Four statuses, fixed justification vocabulary |
 | CSAF | **2.0** ratified | Security advisory format with a VEX profile | **2.1 is still a draft** — do not build on it |
-| ENISA Single Reporting Platform | Not yet live | Article 14 submissions | Onboarding published 2026-07-31, live 2026-09-11 |
+| ENISA Single Reporting Platform | Operational since 2026-09-11 | Article 14 submissions | One submission point for every Member State |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q: What changes on 11 September 2026, and what does not?**
-**Short:** Article 14's reporting obligations start — the 24h/72h/14-day clock for actively exploited vulnerabilities — while the rest of the CRA waits until 11 December 2027.
+**Short:** Article 14 reporting starts: a 24h early warning, 72h notification and final report for exploited vulnerabilities and severe incidents, while the rest of the CRA waits until 11 December 2027.
 
-Article 71(2) of Regulation (EU) 2024/2847 staggers application deliberately. Chapter IV, covering notified bodies, applied from 11 June 2026 so that assessment capacity exists before it is needed. **Article 14 applies from 11 September 2026**, obliging manufacturers to report actively exploited vulnerabilities and severe incidents on a 24-hour early warning, 72-hour notification and 14-day final report cadence to the coordinating CSIRT and ENISA. Everything else — the Annex I essential requirements, conformity assessment, CE marking, the SBOM in technical documentation — applies from 11 December 2027. The EU front-loaded reporting because it wanted visibility into exploitation before the full regime landed. The practical consequence is that a team can be fully liable for reporting more than a year before it is liable for the product requirements the report would describe.
+Article 71(2) of Regulation (EU) 2024/2847 staggers application deliberately. Chapter IV, covering notified bodies, applied from 11 June 2026 so that assessment capacity exists before it is needed. **Article 14 applies from 11 September 2026**, obliging manufacturers to report actively exploited vulnerabilities and severe incidents to the coordinating CSIRT and ENISA with a 24-hour early warning and a 72-hour notification. The final report is due 14 days after a corrective measure is available for a vulnerability, and one month after the 72-hour notification for a severe incident. Everything else (the Annex I essential requirements, conformity assessment, CE marking, the SBOM in technical documentation) applies from 11 December 2027. The EU front-loaded reporting because it wanted visibility into exploitation before the full regime landed. The practical consequence is that a team can be fully liable for reporting more than a year before it is liable for the product requirements the report would describe.
 
 **Q: Why can't you generate CRA evidence retroactively?**
 **Short:** A scan reports what is in a shipped artefact, but provenance — which commit, which builder, which identity authorised it — existed only while the build ran.
@@ -455,9 +459,9 @@ SLSA organises requirements into independent tracks, and a level in one says not
 They overlap on artefacts and diverge on force. SLSA v1.2 specifies provenance integrity and says nothing about vulnerabilities, disclosure or reporting. NIST SP 800-218 v1.1 is a descriptive set of roughly forty practices with no levels and no attestation format, becoming binding only through US federal contract terms; SP 800-218A overlays generative-AI development. PCI DSS 4.0.1 requirement 6.3.2 mandates an inventory of bespoke and third-party components — an SBOM in all but name — but only within the cardholder data environment. The CRA is actual law with fines to €15M or 2.5% of turnover, and it specifies outcomes and evidence rather than controls. One pipeline emitting SBOM, provenance, signature and VEX serves all four; the sequencing driver is the CRA, because it is the only one with a date.
 
 **Q: What is the ENISA Single Reporting Platform, and is it live?**
-**Short:** It is ENISA's Article 16 platform for Article 14 submissions — not yet live as of late August 2026, scheduled to go live on 11 September 2026.
+**Short:** It is ENISA's Article 16 platform for Article 14 submissions, operational since 11 September 2026, the day the reporting obligation started.
 
-Article 16 obliges ENISA to establish and operate a single reporting platform so manufacturers submit once rather than to each national authority separately. As of this page's anchor it is not publicly live: ENISA published step-by-step onboarding instructions and a factsheet on 2026-07-31, with functional and security testing under way, and it is scheduled to go live on **the same day the obligation starts**. Two consequences follow. First, complete onboarding now rather than during an incident, because the first 24-hour clock you face is not the moment to discover an account provisioning delay. Second, the list of designated national CSIRT coordinators was still pending publication, so identify your coordinating CSIRT as part of the runbook rather than assuming it is obvious.
+Article 16 obliges ENISA to establish and operate a single reporting platform so manufacturers submit once rather than to each national authority separately. It became operational on **11 September 2026, the same day Article 14 started to apply**, and every early warning, notification and final report goes through it. Two consequences follow. First, complete onboarding before the first reportable event, because the first 24-hour clock you face is not the moment to discover an account provisioning delay. Second, a submission is routed to the CSIRT designated as coordinator for the Member State of your main establishment, so name that CSIRT in the runbook rather than assuming it is obvious.
 
 **Q: Why bind evidence to a digest rather than a tag?**
 **Short:** Tags are mutable — signing a tag and deploying a digest lets them diverge, so your evidence would describe an artefact you did not actually ship.
@@ -482,7 +486,7 @@ Trivy shipped a malicious v0.69.4, disclosed around 19 March 2026, which is the 
 - **Archive outside the registry.** Registries get migrated, repos get deleted, CI platforms get replaced. Retention outlives all three.
 - **Index the evidence store by released version as well as by digest.** The question will arrive in version form.
 - **Write the Article 14 runbook now**, with the decision owner named. The 24-hour clock is not when you choose who decides.
-- **Complete ENISA SRP onboarding before 2026-09-11.** Account provisioning during an incident is an avoidable delay.
+- **Complete ENISA SRP onboarding before the first reportable event.** Account provisioning during an incident is an avoidable delay.
 - **Run VEX from day one** if your SBOM is transitive. Retrofitting justifications across hundreds of CVEs is far harder than producing them as you go.
 - **Audit for EOL and abandoned dependencies on a schedule**, so the unfixable ones are known before they are urgent.
 - **Enforce digest-only image references at admission.** It closes the sign-a-tag-deploy-a-digest divergence structurally.
@@ -524,7 +528,7 @@ They rebuilt v4.2.0 from the tag to generate an SBOM. The rebuild produced a **d
 ```yaml
 # BROKEN: SBOM as a CI artifact. 90-day retention, indexed by run ID,
 # unrelated to the released version. Gone before the product was.
-- uses: actions/upload-artifact@v4
+- uses: actions/upload-artifact@v7
   with: {name: sbom, path: sbom.cdx.json, retention-days: 90}
 ```
 
@@ -570,7 +574,7 @@ And the preparation that turned an unfixable dependency into a 72-hour answer:
 
 That paragraph is what Article 14's 72-hour notification means by "mitigating measures available." Written in advance it is a lookup; written during the incident it competes with the clock.
 
-**Outcome.** The early warning landed at T+22h — inside the window, with two hours to spare and no margin for anything going wrong. The 72-hour notification carried the feature-flag mitigation. The final report at 14 days documented the removal of the dependency entirely.
+**Outcome.** The early warning landed at T+22h, inside the window, with two hours to spare and no margin for anything going wrong. The 72-hour notification carried the feature-flag mitigation. The final report, filed within 14 days of the fix shipping, documented the removal of the dependency entirely.
 
 The lasting change was not a security control. Every security control they needed was already in place; **the signatures in Rekor were the only artefact that survived seven months**, precisely because they were written to a durable external log rather than to CI storage. What was missing was retention, indexing, and a definition of awareness that matched where reports actually arrive.
 

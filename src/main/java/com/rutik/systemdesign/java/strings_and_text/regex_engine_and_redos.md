@@ -95,7 +95,7 @@ in code review, and the second one looks like a perfectly ordinary validator.
 
 ---
 
-## 4. Quantifiers and Groups — Greedy, Lazy, Possessive, Atomic
+## 4. Types / Architectures / Strategies: Greedy, Lazy, Possessive, and Atomic Quantifiers
 
 | Form | Name | Behavior | Backtracks? |
 |------|------|----------|-------------|
@@ -382,7 +382,7 @@ Pattern p = Pattern.compile("^error:.*$", Pattern.MULTILINE | Pattern.CASE_INSEN
 
 ---
 
-## 7. Catastrophic Backtracking and ReDoS
+## 7. Real-World Examples: Catastrophic Backtracking and ReDoS
 
 ### First, the optimization that makes the textbook example lie
 
@@ -611,60 +611,6 @@ matcher = pattern.matcher(new InterruptibleCharSequence(userInput));
    backtrack, so it is immune to ReDoS. It drops backreferences and lookaround,
    which is an acceptable trade when the pattern comes from users or config.
 
-### 7.1 Two Outages Worth Knowing By Name
-
-Neither of these is a toy example. Both are published post-mortems from companies with
-serious engineering, both were caused by a regex an experienced person wrote and reviewed,
-and in both cases the pattern looks obviously fine.
-
-**Stack Overflow, 2016-07-20 — 34 minutes, whole site down.**
-The regex was `^[\s‌]+|[\s‌]+$`, trimming Unicode whitespace from the ends of a
-line. The simplified form with the same defect is `\s+$` — "all the spaces at the end of
-the string", which reads as trivially safe. A user posted a comment line containing roughly
-**20,000 consecutive whitespace characters**, and because that post reached the home-page
-list, the trim ran on every home-page render. The backtracking blew CPU on the web servers,
-the home page stopped responding, and — this is the part worth stealing — **the home page
-was what the load balancer used for its health check**, so the balancer pulled every server
-out of rotation and took down the entire site rather than one page. It took 10 minutes to
-identify, 14 to write the fix, and 10 to deploy.
-
-The lessons Stack Overflow drew are the ones to carry: audit regexes at the *input
-validation* boundary, and do not let your health check depend on your most expensive page.
-The second one is the deeper bug. The regex caused a slow page; the health-check coupling
-turned a slow page into a total outage.
-
-**Cloudflare, 2019-07-02 — 27 minutes, global 502s.**
-A single WAF rule deployed globally contained:
-
-```
-(?:(?:\"|'|\]|\}|\\|\d|(?:nan|infinity|true|false|null|undefined|symbol|math)|\`|\-|\+)+[)]*;?((?:\s|-|~|!|{}|\|\||\+)*.*(?:.*=.*)))
-```
-
-The whole failure lives in the tail: `.*(?:.*=.*)`, which reduces to `.*.*=.*` — "match
-anything, then match anything, then a literal `=`, then anything." Two adjacent greedy
-`.*` mean the engine has a free choice about where to split the input between them, and it
-must try every split before it can conclude a failure. Against `x=x` the match takes 23
-steps; the step count grows quadratically in input length for a match and explodes for a
-near-miss. CPU went to 100% across Cloudflare's global network, and because the WAF sits in
-the request path, everything behind it returned 502.
-
-The transferable rule: **two `.*` in sequence in one pattern is a defect on sight**, no
-matter how legitimate the surrounding expression looks. Any pattern that asks the engine to
-"match anything followed by anything" is asking it to enumerate splits.
-
-**What both have in common, and what to do about it.** In each case the pattern was
-reviewed by competent people and looked fine, because backtracking cost is not visible in
-the syntax — it is a property of the pattern *and* the input, and the dangerous inputs are
-the ones that *almost* match. So code review is not a control here. The controls that work
-are structural: cap input length before matching, prefer possessive quantifiers and atomic
-groups where you never want backtracking, run untrusted patterns on RE2/J where the
-guarantee is linear time by construction, and put a timeout on any match against
-user-supplied text. A `static final Pattern` compiled once also matters for a different
-reason — `String.matches`, `String.split` with a real pattern, and `Pattern.compile` inside
-a loop all recompile the pattern on every call, which is the JDK's own textbook case of
-[Effective Java Item 6: "Avoid creating unnecessary objects"]; hoisting it does not make an
-exponential pattern safe, but it removes a needless constant factor from a hot path.
-
 ---
 
 ## 8. Tradeoffs
@@ -791,18 +737,22 @@ in the replacement must be `\\$`, or use `Matcher.quoteReplacement(str)`.
 
 ---
 
-## 11. Best Practices
+## 11. Technologies & Tools
 
-1. **Compile once**: `private static final Pattern` — never `String.matches` in hot paths.
-2. **One `Matcher` per thread/use** — `Pattern` is shared, `Matcher` is not thread-safe.
-3. **Anchor validators** with `^...$` or `matches()`.
-4. **Make greedy sub-expressions possessive** (`a++`) or atomic (`(?>...)`) in any validator.
-5. **Cap input length** before matching untrusted strings — a hard DoS ceiling.
-6. **Audit every regex for nested quantifiers** (`(x+)+`, `(x*)*`, `(x+)*`) and overlapping alternation.
-7. **Use `Pattern.quote`** whenever a pattern embeds user-supplied text.
-8. **Use RE2/J** (`com.google.re2j`) for user- or config-supplied patterns and DoS-sensitive endpoints.
-9. **Prefer `UNICODE_CHARACTER_CLASS`** when input may be non-ASCII.
-10. **Test with adversarial input** — feed each validation regex a run of its "cheap" character plus a failing suffix and assert it returns in single-digit milliseconds.
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.util.regex` (`Pattern`, `Matcher`) | The full feature set — backreferences, lookaround, possessive and atomic groups — on a backtracking NFA whose worst case is exponential | Developer-authored patterns you have audited; compile once into a `static final Pattern` |
+| RE2/J (`com.google.re2j`) | Linear-time matching with the same `Pattern` / `Matcher` API shape, at the price of no backreferences and no lookaround | User- or config-supplied patterns, and any endpoint where a hang is a denial of service |
+| `Pattern.quote` / `Matcher.quoteReplacement` | Escaping of user-supplied text on the pattern side and the replacement side respectively — two different problems with two different methods | Any time untrusted text is embedded in a pattern or a replacement string |
+| `redos-detector` | Static proof that a regex is safe, or a concrete attack string when it is not | Reviewing a new validator before it merges |
+| SonarQube rule `S5852` | A CI gate that flags super-linear regular expressions | Continuous scanning of the whole codebase |
+| CodeQL `java/redos` | Dataflow-aware detection that connects an untrusted source to a vulnerable pattern | GitHub code scanning, where reachability matters as much as the pattern shape |
+| Possessive quantifiers (`a++`) and atomic groups (`(?>...)`) | A language-level guarantee that the engine will not backtrack into that sub-expression | The cheapest fix for a known-vulnerable validator, and the one that needs no new dependency |
+| `Pattern.compile(p, Pattern.UNICODE_CHARACTER_CLASS)` | `\d`, `\w`, and `\b` matching the Unicode definitions rather than the ASCII ones | Any input that can be non-ASCII |
+| JMH | A measured match time against input length, so a rewrite is proven rather than assumed | Confirming the blowup is gone — feed the failing suffix, not just the happy path |
+| regex101 (Java flavour) | Step-by-step match visualisation with a backtracking step counter | Understanding why a specific pattern explodes on a specific input |
+
+Two operational controls belong beside the tooling. **Cap input length before matching** untrusted strings — a hard ceiling turns an unbounded blowup into a bounded one regardless of the pattern — and where rewriting is not possible, run the match against an interrupt-aware `CharSequence` so a watchdog can abort it, since `Matcher` does not honour thread interruption on its own.
 
 ---
 
@@ -882,22 +832,76 @@ In the replacement argument, `$` introduces a group reference (`$1`) and `\` esc
 
 ---
 
-## 13. Technologies and Tools
+## 13. Best Practices
 
-| Technology | What it gives you | When to reach for it |
-|-----------|-------------------|---------------------|
-| `java.util.regex` (`Pattern`, `Matcher`) | The full feature set — backreferences, lookaround, possessive and atomic groups — on a backtracking NFA whose worst case is exponential | Developer-authored patterns you have audited; compile once into a `static final Pattern` |
-| RE2/J (`com.google.re2j`) | Linear-time matching with the same `Pattern` / `Matcher` API shape, at the price of no backreferences and no lookaround | User- or config-supplied patterns, and any endpoint where a hang is a denial of service |
-| `Pattern.quote` / `Matcher.quoteReplacement` | Escaping of user-supplied text on the pattern side and the replacement side respectively — two different problems with two different methods | Any time untrusted text is embedded in a pattern or a replacement string |
-| `redos-detector` | Static proof that a regex is safe, or a concrete attack string when it is not | Reviewing a new validator before it merges |
-| SonarQube rule `S5852` | A CI gate that flags super-linear regular expressions | Continuous scanning of the whole codebase |
-| CodeQL `java/redos` | Dataflow-aware detection that connects an untrusted source to a vulnerable pattern | GitHub code scanning, where reachability matters as much as the pattern shape |
-| Possessive quantifiers (`a++`) and atomic groups (`(?>...)`) | A language-level guarantee that the engine will not backtrack into that sub-expression | The cheapest fix for a known-vulnerable validator, and the one that needs no new dependency |
-| `Pattern.compile(p, Pattern.UNICODE_CHARACTER_CLASS)` | `\d`, `\w`, and `\b` matching the Unicode definitions rather than the ASCII ones | Any input that can be non-ASCII |
-| JMH | A measured match time against input length, so a rewrite is proven rather than assumed | Confirming the blowup is gone — feed the failing suffix, not just the happy path |
-| regex101 (Java flavour) | Step-by-step match visualisation with a backtracking step counter | Understanding why a specific pattern explodes on a specific input |
+1. **Compile once**: `private static final Pattern` — never `String.matches` in hot paths.
+2. **One `Matcher` per thread/use** — `Pattern` is shared, `Matcher` is not thread-safe.
+3. **Anchor validators** with `^...$` or `matches()`.
+4. **Make greedy sub-expressions possessive** (`a++`) or atomic (`(?>...)`) in any validator.
+5. **Cap input length** before matching untrusted strings — a hard DoS ceiling.
+6. **Audit every regex for nested quantifiers** (`(x+)+`, `(x*)*`, `(x+)*`) and overlapping alternation.
+7. **Use `Pattern.quote`** whenever a pattern embeds user-supplied text.
+8. **Use RE2/J** (`com.google.re2j`) for user- or config-supplied patterns and DoS-sensitive endpoints.
+9. **Prefer `UNICODE_CHARACTER_CLASS`** when input may be non-ASCII.
+10. **Test with adversarial input** — feed each validation regex a run of its "cheap" character plus a failing suffix and assert it returns in single-digit milliseconds.
 
-Two operational controls belong beside the tooling. **Cap input length before matching** untrusted strings — a hard ceiling turns an unbounded blowup into a bounded one regardless of the pattern — and where rewriting is not possible, run the match against an interrupt-aware `CharSequence` so a watchdog can abort it, since `Matcher` does not honour thread interruption on its own.
+---
+
+## 14. Case Study
+
+### Stack Overflow 2016-07-20 and Cloudflare 2019-07-02 regex outages
+
+Neither of these is a toy example. Both are published post-mortems from companies with
+serious engineering, both were caused by a regex an experienced person wrote and reviewed,
+and in both cases the pattern looks obviously fine.
+
+**Stack Overflow, 2016-07-20 — 34 minutes, whole site down.**
+The regex was `^[\s‌]+|[\s‌]+$`, trimming Unicode whitespace from the ends of a
+line. The simplified form with the same defect is `\s+$` — "all the spaces at the end of
+the string", which reads as trivially safe. A user posted a comment line containing roughly
+**20,000 consecutive whitespace characters**, and because that post reached the home-page
+list, the trim ran on every home-page render. The backtracking blew CPU on the web servers,
+the home page stopped responding, and — this is the part worth stealing — **the home page
+was what the load balancer used for its health check**, so the balancer pulled every server
+out of rotation and took down the entire site rather than one page. It took 10 minutes to
+identify, 14 to write the fix, and 10 to deploy.
+
+The lessons Stack Overflow drew are the ones to carry: audit regexes at the *input
+validation* boundary, and do not let your health check depend on your most expensive page.
+The second one is the deeper bug. The regex caused a slow page; the health-check coupling
+turned a slow page into a total outage.
+
+**Cloudflare, 2019-07-02 — 27 minutes, global 502s.**
+A single WAF rule deployed globally contained:
+
+```
+(?:(?:\"|'|\]|\}|\\|\d|(?:nan|infinity|true|false|null|undefined|symbol|math)|\`|\-|\+)+[)]*;?((?:\s|-|~|!|{}|\|\||\+)*.*(?:.*=.*)))
+```
+
+The whole failure lives in the tail: `.*(?:.*=.*)`, which reduces to `.*.*=.*` — "match
+anything, then match anything, then a literal `=`, then anything." Two adjacent greedy
+`.*` mean the engine has a free choice about where to split the input between them, and it
+must try every split before it can conclude a failure. Against `x=x` the match takes 23
+steps; the step count grows quadratically in input length for a match and explodes for a
+near-miss. CPU went to 100% across Cloudflare's global network, and because the WAF sits in
+the request path, everything behind it returned 502.
+
+The transferable rule: **two `.*` in sequence in one pattern is a defect on sight**, no
+matter how legitimate the surrounding expression looks. Any pattern that asks the engine to
+"match anything followed by anything" is asking it to enumerate splits.
+
+**What both have in common, and what to do about it.** In each case the pattern was
+reviewed by competent people and looked fine, because backtracking cost is not visible in
+the syntax — it is a property of the pattern *and* the input, and the dangerous inputs are
+the ones that *almost* match. So code review is not a control here. The controls that work
+are structural: cap input length before matching, prefer possessive quantifiers and atomic
+groups where you never want backtracking, run untrusted patterns on RE2/J where the
+guarantee is linear time by construction, and put a timeout on any match against
+user-supplied text. A `static final Pattern` compiled once also matters for a different
+reason — `String.matches`, `String.split` with a real pattern, and `Pattern.compile` inside
+a loop all recompile the pattern on every call, which is the JDK's own textbook case of
+[Effective Java Item 6: "Avoid creating unnecessary objects"]; hoisting it does not make an
+exponential pattern safe, but it removes a needless constant factor from a hot path.
 
 ---
 

@@ -217,6 +217,16 @@ public class Service {
 // constructor finishes. volatile write establishes happens-before.
 ```
 
+**Lazy constants (preview).** JEP 531 (third preview, JDK 27, `--enable-preview`) adds
+`LazyConstant<T>`: `static final LazyConstant<Service> SERVICE = LazyConstant.of(Service::new);`
+runs the supplier at most once on the first `SERVICE.get()`, from any thread. The value sits
+in a JDK-internal `@Stable` field, so when the `LazyConstant` is held in a `static final`
+field the JIT can constant-fold it like a plain `static final`. DCL's `volatile` read
+cannot be folded, and the holder idiom folds but needs one nested class per value. `List.ofLazy`,
+`Map.ofLazy` and `Set.ofLazy` do the same per element. It is still a preview API whose
+methods changed in each round (JDK 27 removed `isInitialized()` and `orElse()`), so production
+code keeps the holder idiom or the enum.
+
 ### Builder Pattern — Fluent + Validation
 
 ```java

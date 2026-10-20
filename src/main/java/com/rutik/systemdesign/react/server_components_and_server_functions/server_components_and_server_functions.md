@@ -386,6 +386,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
 The layout is a Server Component with a client provider *inside* it, not a client layout. The distinction is worth 200-400 KB on a typical application.
 
+`Providers.tsx` is needed here because `QueryClient` lives in client state. A context that only forwards a value the server already has needs no wrapper file: from React 19.3 a Server Component renders a context created in a `"use client"` module directly, as `<UserContext value={user}>{children}</UserContext>`, and the value crosses the boundary like any other serializable prop. Reading context is still client-only.
+
 ### 6.6 Server Functions, `useActionState`, `useFormStatus`, `useOptimistic`
 
 The settled naming, as of React 19: the feature is a **Server Function**; a Server Function passed to an `action` prop is a **Server Action**. Both names are current, they are not synonyms, and interviewers ask about the distinction because it signals whether you learned the model before or after the rename.
@@ -484,15 +486,31 @@ Next.js 16 encrypts closed-over values by default with a per-build key, which st
 
 Third, **CSRF is in scope precisely because the browser invokes it.** A Server Function call is a POST with cookies attached, which is the exact shape of a cross-site forgery. Next.js compares the `Origin` header against `Host` and rejects mismatches, with `serverActions.allowedOrigins` for legitimate proxy setups; behind a proxy that rewrites `Host`, that check silently stops matching and must be configured. Do not disable it, and do not assume a non-Next RSC setup has it — verify.
 
-Finally, patch. The `react-server-dom-*` packages carried **three separate advisories**, and they are routinely conflated — each has its own CVE and its own patch line:
+Finally, patch. The `react-server-dom-*` packages carried **ten separate advisories** between 2025-12-03 and 2026-10-14, and they are routinely conflated. Each has its own patch line, and each later line supersedes the earlier ones:
 
 | Advisory | CVE | Class | CVSS | Disclosed | Patched in |
 |----------|-----|-------|------|-----------|-----------|
+| GHSA-fv66-9v8q-g76r | CVE-2025-55182 | Remote code execution | 10.0 | 2025-12-03 | 19.0.1 / 19.1.2 / 19.2.1 |
 | GHSA-925w-6v3x-g4j4 | CVE-2025-55183 | Source code exposure | 5.3 | 2025-12-11 | 19.0.2 / 19.1.3 / 19.2.2 |
+| GHSA-2m3v-v2m8-q956 | CVE-2025-55184 | Denial of service | 7.5 | 2025-12-11 | 19.0.2 / 19.1.3 / 19.2.2 |
+| GHSA-7gmr-mq3h-m5h9 | CVE-2025-67779 | Denial of service, incomplete fix of CVE-2025-55184 | 7.5 | 2025-12-12 | 19.0.3 / 19.1.4 / 19.2.3 |
 | GHSA-83fc-fqcc-2hmg | CVE-2026-23864 | Multiple denial of service | 7.5 | 2026-01-26 | 19.0.4 / 19.1.5 / 19.2.4 |
 | GHSA-479c-33wc-g2pg | CVE-2026-23869 | Denial of service, cyclic deserialization | 7.5 | 2026-04-08 | 19.0.5 / 19.1.6 / 19.2.5 |
+| GHSA-rv78-f8rc-xrxh | CVE-2026-23870 | Denial of service | 7.5 | 2026-05-06 | 19.0.6 / 19.1.7 / 19.2.6 |
+| GHSA-wx67-qw84-cm4g | CVE-2026-44907 | Denial of service in Server Functions | 7.5 | 2026-07-21 | 19.0.8 / 19.1.9 / 19.2.8 |
+| GHSA-h3gv-c5rc-p453 | none | Denial of service in Server Functions | 8.2 (CVSS 4.0) | 2026-10-14 | 19.0.9 / 19.1.10 / 19.2.9 / 19.3.1 |
+| GHSA-xqc2-xf4c-x3h3 | none | Unauthenticated remote code execution | 9.5 (CVSS 4.0) | 2026-10-14 | 19.0.9 / 19.1.10 / 19.2.9 / 19.3.1 |
 
-**Source exposure** (CVE-2025-55183) is the sharper one for this section: a request to a Server Function that stringifies an argument could come back carrying that function's own compiled source, which turns every hard-coded value in your server code into a disclosed value. Only literals in source are exposed — `process.env.SECRET` read at runtime is not. **The two DoS advisories** (CVE-2026-23864, CVE-2026-23869) are crafted payloads to a Server Function endpoint that crash the process, exhaust memory, or burn CPU for up to a minute; the endpoint is public and unauthenticated on many routes, and the second was found because the first fix was incomplete. The intermediate 19.0.3 / 19.1.4 / 19.2.3 releases are incomplete and do not count as patched. Pin the whole `react`/`react-dom`/`react-server-dom-*` set to one version at or above **19.2.5** (or 19.0.5 / 19.1.6 on an older line) and keep them in step.
+**Remote code execution** is the worst class. CVE-2025-55182 (CVSS 10.0) let a crafted request to a Server Function endpoint run code on the server through the payload decoder, and GHSA-xqc2-xf4c-x3h3 is a second RCE that needs a response carrying multiple typed arrays plus an attacker-controlled value. **Source exposure** (CVE-2025-55183) is the sharpest one for this section's model: a request to a Server Function that stringifies an argument could come back carrying that function's own compiled source, which turns every hard-coded value in your server code into a disclosed value. Only literals in source are exposed; `process.env.SECRET` read at runtime is not. **The seven DoS advisories** are crafted payloads to a Server Function endpoint that crash the process, exhaust memory, or burn CPU; the endpoint is public and unauthenticated on many routes, and several were found because the previous fix was incomplete. 19.3.0 is open to the 2026-10-14 RCE as well. Pin the whole `react`/`react-dom`/`react-server-dom-*` set to one version at or above **19.3.1** (or 19.2.9 / 19.1.10 / 19.0.9 on an older line) and keep them in step.
+
+**Next.js has its own floor.** It ships a compiled copy of the RSC packages, so a Next.js app is patched by upgrading `next`, not `react-server-dom-*`. Two releases matter for this module, both listed in the [Next.js security advisories](https://github.com/vercel/next.js/security/advisories):
+
+| Release | Date | RSC and `"use cache"` advisories it fixes |
+|---------|------|-------------------------------------------|
+| 16.3.8 (15.5 not affected) | 2026-09-30 | GHSA-h694-7cp9-m8p3 (CVE-2026-103004), a nested `"use cache"` function whose key omits a root param serves one root param value's content for another; CVE-2026-94544, a pending `"use cache"` fill shared with a Draft Mode request leaks unpublished content into regular responses and prerendered pages |
+| 16.4.1 / 15.5.28 | 2026-10-14 | GHSA-673q-mjm6-r5xr (critical, 16 line only), unauthenticated RCE when a `"use cache"` function returns multiple typed arrays, the Next.js side of GHSA-xqc2-xf4c-x3h3; GHSA-p3m5-59mp-jv5r (high), Server Actions CPU denial of service, the Next.js side of GHSA-h3gv-c5rc-p453 |
+
+The floor is **16.4.1** on the 16 line and **15.5.28** on 15.5. The 2026-10-14 release also fixed CVE-2026-96889, an RCE in Image Optimization through `sharp` on glibc Linux, so the same upgrade covers routes with no Server Functions at all.
 
 ### 6.8 Where RSC actually runs
 
@@ -592,7 +610,7 @@ export async function deleteOrder(rawId: string) {
 
 **`"use client"` on a leaf, expecting it to contain the leaf.** It contains nothing; it opens a door. Every module the leaf imports, and every module those import, is now client code — including the 240 KB constant nobody thought about.
 
-**`"use client"` on a layout to fix a context error.** It works, and it converts the entire subtree to client code with no warning. Extract a `Providers.tsx` instead; the layout stays a Server Component.
+**`"use client"` on a layout to fix a context error.** It works, and it converts the entire subtree to client code with no warning. Extract a `Providers.tsx` for a provider that holds client state, or render the `"use client"` context directly from the layout when it only passes a server value `[19.3]`; either way the layout stays a Server Component.
 
 **Passing a class instance across the boundary.** An ORM row, a `Decimal`, a `URL`, a domain model — all class instances, all rejected with `Only plain objects, and a few built-ins, can be passed to Server Functions.` Map to a DTO at the boundary.
 
@@ -606,7 +624,7 @@ export async function deleteOrder(rawId: string) {
 
 **Calling `useFormStatus` in the component that renders the `<form>`.** It returns `pending: false` forever. The hook must run in a descendant of the form element.
 
-**Running an unpatched `react-server-dom-*`.** Three advisories, three patch lines, and the common mistake is pinning to the middle one: source exposure (CVE-2025-55183) landed in 19.0.2 / 19.1.3 / 19.2.2, the first DoS set (CVE-2026-23864) in 19.0.4 / 19.1.5 / 19.2.4, and the cyclic-deserialization DoS (CVE-2026-23869) in 19.0.5 / 19.1.6 / 19.2.5. Only the last of those is fully patched. Pin the whole React set together at or above 19.2.5; a mixed set is how one package stays behind.
+**Running an unpatched `react-server-dom-*`.** Ten advisories hit the RSC transport between 2025-12-03 and 2026-10-14, two of them remote code execution, and each patch line supersedes the last. The common mistake is pinning to the version that cleared the advisory someone remembers: 19.2.5 cleared CVE-2026-23869 but is open to three later DoS advisories and the 2026-10-14 RCE, and 19.3.0 is open to that RCE too. Pin the whole React set together at or above 19.3.1 (19.2.9 / 19.1.10 / 19.0.9 on an older line); a mixed set is how one package stays behind. On Next.js, which bundles its own copy, the floor is `next` 16.4.1 or 15.5.28.
 
 ---
 
@@ -717,9 +735,9 @@ The server starts the work without awaiting it, passes the promise as a prop, an
 The model needs a build that can produce two module graphs plus a server that can serve the payload, which is why it cannot be dropped into a plain SPA build or a static export. Next.js 16 remains the reference implementation and where the semantics are pinned down in practice, with Turbopack as its default bundler. `@vitejs/plugin-rsc` is a two-line config away from a working Vite setup, and Waku and Parcel give the same answer from different directions. The practical caveat is ecosystem maturity: RSC-safe library coverage and documentation are thinner outside Next, so a team adopting the Vite path should expect to debug third-party packages that assume a client environment.
 
 **Q: What were the react-server-dom advisories and why do they matter more than a typical CVE?**
-**Short:** Three distinct advisories hit the RSC transport: source exposure CVE-2025-55183, then DoS CVE-2026-23864 and CVE-2026-23869, so the safe floor is 19.2.5 and not the widely quoted 19.2.4.
+**Short:** Ten advisories hit the RSC transport from 2025-12-03 to 2026-10-14, two of them remote code execution, and each fix supersedes the last, so the floor is 19.3.1 or 19.2.9.
 
-They are usually described as one incident and they are not. CVE-2025-55183 (CVSS 5.3, 2025-12-11) is **source exposure**: a request to a Server Function that stringifies an argument could return that function's compiled source, patched in 19.0.2 / 19.1.3 / 19.2.2. CVE-2026-23864 (CVSS 7.5, 2026-01-26) is a set of **denial-of-service** flaws patched in 19.0.4 / 19.1.5 / 19.2.4. CVE-2026-23869 (CVSS 7.5, 2026-04-08) is a further DoS via cyclic deserialization in the Flight reply parser, patched in 19.0.5 / 19.1.6 / 19.2.5. Source exposure is worse than most front-end vulnerabilities precisely because RSC's premise is that server code never reaches the browser — every hard-coded connection string, internal hostname and business rule in a Server Component was written under that assumption, though a value read from `process.env` at runtime is not in scope. The DoS half matters because the payload endpoint is public and unauthenticated on many routes. The remediation is mechanical: pin `react`, `react-dom` and every `react-server-dom-*` package to the same version at or above 19.2.5, since a mixed set is how one transport package silently stays behind. Add a dependency-audit gate to CI rather than relying on someone reading release notes.
+They are usually described as one incident and they are not. Two are **remote code execution**: CVE-2025-55182 (CVSS 10.0, 2025-12-03), fixed in 19.0.1 / 19.1.2 / 19.2.1, and GHSA-xqc2-xf4c-x3h3 (CVSS 4.0 score 9.5, 2026-10-14, no CVE), an unauthenticated RCE that needs a response carrying multiple typed arrays plus an attacker-controlled value. One is **source exposure**: CVE-2025-55183 (CVSS 5.3, 2025-12-11) let a request to a Server Function that stringifies an argument return that function's compiled source. The other seven are **denial of service** through crafted payloads to Server Function endpoints, from CVE-2025-55184 (2025-12-11) to GHSA-h3gv-c5rc-p453 (2026-10-14), and several exist because the previous fix was incomplete. That chain is why pinning to a remembered patch fails: 19.2.5 cleared CVE-2026-23869 and is still open to four later advisories, and 19.3.0 is open to the 2026-10-14 RCE. These matter more than most front-end CVEs because RSC's premise is that server code never reaches the browser and the endpoint is public and unauthenticated on many routes. The remediation is mechanical: pin `react`, `react-dom` and every `react-server-dom-*` package to the same version at or above 19.3.1 (19.2.9 / 19.1.10 / 19.0.9 on an older line), since a mixed set is how one transport package silently stays behind, and add a dependency-audit gate to CI rather than relying on someone reading release notes. Next.js bundles its own copy of these packages, so there the fix is `next` 16.4.1 or 15.5.28.
 
 ---
 
@@ -735,7 +753,7 @@ They are usually described as one incident and they are not. CVE-2025-55183 (CVS
 - Guard server-only modules with the `server-only` package so a mistaken import fails the build instead of the bundle report.
 - Give every form field a real `name` and test one submit with JavaScript disabled, which is the only proof progressive enhancement exists.
 - Track per-route First Load JS in CI and treat a 100 KB jump as a moved boundary until proven otherwise.
-- Pin `react`, `react-dom` and every `react-server-dom-*` package to the same patched version, at or above 19.2.5 (19.0.5 or 19.1.6 on an older line).
+- Pin `react`, `react-dom` and every `react-server-dom-*` package to the same patched version, at or above 19.3.1 (19.2.9, 19.1.10 or 19.0.9 on an older line).
 
 ---
 
@@ -798,7 +816,7 @@ export async function voidInvoice(rawId: string) {
 }
 ```
 
-The list rows became Server Components again, so the currency table, the PDF library and the ORM types left the client graph with them. `VoidButton` stayed a `"use client"` leaf receiving the plain id it needed. The `react-server-dom-webpack` package was moved from 19.2.1 to 19.2.5 in the same release, which is the first version past all three advisories.
+The list rows became Server Components again, so the currency table, the PDF library and the ORM types left the client graph with them. `VoidButton` stayed a `"use client"` leaf receiving the plain id it needed. The `react-server-dom-webpack` package was moved from 19.2.1 to 19.2.9 in the same release, the 19.2 patch that clears every RSC advisory published through 2026-10-14.
 
 **Results.**
 

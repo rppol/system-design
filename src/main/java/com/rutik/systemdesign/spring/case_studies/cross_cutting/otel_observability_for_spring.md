@@ -116,9 +116,12 @@ management:
   tracing:
     sampling:
       probability: 0.1           # 10% sample rate in production; 1.0 in dev
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: http://otel-collector:4318/v1/traces
+      export:
+        otlp:
+          endpoint: http://otel-collector:4318/v1/traces
+  otlp:
     metrics:
       export:
         url: http://otel-collector:4318/v1/metrics
@@ -319,29 +322,28 @@ public void processEventAsync(Event event) {
 }
 ```
 
-**Fixed (Spring Boot 4.1+) — nothing to write.** Micrometer's context — trace span, MDC,
-and baggage — is propagated to `@Async` methods automatically. The identical method above
-carries a populated `traceId` with no executor configuration, no `TaskDecorator`, and no
-`AsyncConfigurer` override:
+**Fixed: turn on context propagation for the executor.** It is off by default. For Spring
+Boot's auto-configured executor, one property applies `ContextPropagatingTaskDecorator`,
+which restores trace span, MDC, and baggage on the worker thread:
 
-```java
-@Async
-public void processEventAsync(Event event) {
-    log.info("Processing event {}", event.id());   // traceId now present — no wiring needed
-}
+```yaml
+spring:
+  task:
+    execution:
+      propagate-context: true   # default false
 ```
 
-**The narrow case that still needs manual propagation** is an executor Spring does not
-manage — one built and submitted to directly, outside `@Async`, or a raw `Thread`:
+A `ThreadPoolTaskExecutor` bean you define yourself is not touched by the property; call
+`executor.setTaskDecorator(new ContextPropagatingTaskDecorator())` on it instead.
+
+**A plain `ExecutorService` or a raw `Thread`** has no decorator hook and needs a wrapper:
 
 ```java
 @Configuration
 public class UnmanagedExecutorConfig {
 
-    // Only for an executor OUTSIDE Spring's async management — e.g. a pool built inside a
-    // static utility or handed to a third-party callback's own thread. A @Bean
-    // ThreadPoolTaskExecutor used via @Async already propagates context automatically
-    // above; wrapping that one is redundant.
+    // For a plain ExecutorService, which has no TaskDecorator hook. A ThreadPoolTaskExecutor
+    // takes ContextPropagatingTaskDecorator instead.
     @Bean
     public ExecutorService rawWorkerPool(ObservationRegistry registry) {
         ExecutorService raw = Executors.newFixedThreadPool(8);
@@ -587,12 +589,11 @@ built so the dangerous option has to be chosen deliberately.
 
 ### Pitfall 2 — Missing context propagation in `@Async`
 
-Historically the most common observability bug in Spring services — see §6.3. Since Spring
-Boot 4.1, `@Async` methods propagate trace context automatically, so this pitfall now only
-bites an executor Spring does not manage (a hand-built `ExecutorService` invoked directly,
-or a raw `Thread`), where the fix is still an explicit `ContextExecutorService.wrap()` call.
-Without it, that executor's log lines have no `traceId`, making log search by trace ID miss
-lines for whatever fraction of async work runs outside Spring's management.
+The most common observability bug in Spring services, see §6.3. Propagation to `@Async` is
+off by default (`spring.task.execution.propagate-context=false`), so until it is turned on,
+or a `ContextPropagatingTaskDecorator` is set on a custom executor, every async log line has
+no `traceId` and log search by trace ID misses it. A plain `ExecutorService` or raw `Thread`
+needs an explicit `ContextExecutorService.wrap()` call.
 
 ---
 
@@ -692,12 +693,12 @@ like sampling and tag enrichment. Use `@Observed` for simple method-level instru
 use manual `Observation` when you need to add event markers or high-cardinality span attributes.
 
 **Q4. How do you propagate trace context through a `@Async` method in Spring?**
-Since Spring Boot 4.1, this is automatic: Micrometer's context — trace span, MDC, and
-baggage — is propagated to `@Async` methods with no configuration, so the `traceId` that
-was active on the calling thread is already present when the method runs on its
-`ThreadPoolTaskExecutor` thread. Manual propagation is still required only for an executor
-Spring does not manage — one built and submitted to directly outside `@Async`, or a raw
-`Thread` — where the fix is to capture a `ContextSnapshot` on the submitting thread and
+Turn propagation on, because it is off by default. For Spring Boot's auto-configured
+executor, set `spring.task.execution.propagate-context=true`, which applies
+`ContextPropagatingTaskDecorator`; for a `ThreadPoolTaskExecutor` bean you define, set that
+decorator yourself. Either way the `traceId` active on the calling thread is restored when the
+method runs on the worker. A plain `ExecutorService` or a raw `Thread` has no decorator hook,
+so the fix there is to capture a `ContextSnapshot` on the submitting thread and
 restore it on the worker: `ContextExecutorService.wrap(executor, () ->
 ContextSnapshot.captureAll(registry))`, or `ContextSnapshot.captureAll(registry).wrap(runnable)`
 for a single `CompletableFuture` stage built outside `@Async`. Without propagation on those
@@ -792,8 +793,9 @@ assert that the exporter captured a span with the expected name, attributes, and
 
 ## 13. Best Practices
 
-- **`@Async` context propagation is automatic since Boot 4.1** — verify it in tests rather
-  than hand-wiring it. Still propagate explicitly across boundaries Spring does not manage:
+- **Turn on `@Async` context propagation** (`spring.task.execution.propagate-context=true`,
+  or a `ContextPropagatingTaskDecorator` on a custom executor) and assert a non-empty
+  `traceId` in a test. Also propagate explicitly across boundaries no decorator covers:
   Kafka producers/consumers, `CompletableFuture` chains built outside `@Async`, and any
   executor constructed and submitted to directly. Missing propagation there creates
   orphaned traces.

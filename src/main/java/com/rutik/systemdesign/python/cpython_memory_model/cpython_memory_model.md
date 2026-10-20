@@ -512,6 +512,46 @@ these scale with tracked-object count and pointer-chasing depth, not with heap b
 - Gen0 collection: ~0.5–2 ms for heaps with tens of thousands of objects
 - Gen2 collection: ~50–200 ms for heaps with millions of tracked objects
 
+#### Which collector a 3.14 process runs depends on the patch release
+
+The three-generation collector above is the one in 3.13, in 3.14.5 and later, and in 3.15.
+Python 3.14.0 through 3.14.4 shipped a different design, Mark Shannon's incremental collector
+(gh-108362): two generations (young and old), and each automatic collection scans the young
+generation plus one increment of the old generation instead of the whole old generation at
+once. That cut maximum pause times on large heaps "by an order of magnitude or more" per the
+3.14 What's New, and changed `gc.collect(1)` to mean "run one increment" rather than "collect
+generation 1".
+
+Production reports of steady RSS growth after moving from 3.13 to 3.14 followed
+(gh-142516, opened 2025-12-10: services using `ssl` through `httpx` and `requests`, where "rss
+just keeps growing while the heap stays somewhat constant"). The core team decided to put the
+3.13 generational collector back in both 3.14 and 3.15 (gh-148726, closed 2026-05-05), and
+3.14.5 (2026-05-10) shipped the revert. The reporter confirmed memory profiles matching 3.13.x
+after a week on 3.14.5.
+
+```mermaid
+timeline
+    title Cyclic GC by CPython release
+    3.13 : three generations : thresholds (2000, 10, 10)
+    3.14.0 to 3.14.4 : incremental GC : young + old increments : gc.collect(1) = one increment
+    3.14.5 (2026-05-10) : 3.13 generational GC restored
+    3.15 : generational GC : same as 3.14.5
+```
+
+*The revert happened inside a minor release, so "Python 3.14" names two collectors. Check
+`sys.version_info` (or the image tag) before reading GC numbers or `gc.collect(1)` behaviour.*
+
+What this means in practice:
+
+- **Pin the patch release in images.** `FROM python:3.14-slim` moved from the incremental to the
+  generational collector on a rebuild with no code change. Pin `python:3.14.5-slim` or later so
+  the collector is a choice you can see in a diff.
+- **Re-baseline GC metrics across the 3.14.4 to 3.14.5 boundary.** Pause-time and RSS graphs from
+  3.14.0 to 3.14.4 describe a different algorithm; compare against 3.13 numbers instead.
+- **Keep tuning code version-neutral.** `gc.set_threshold()`, `gc.freeze()`, and full
+  `gc.collect()` behave as in 3.13 again; code that relied on `gc.collect(1)` running a small
+  increment now triggers a generation-1 collection.
+
 ### 6.4 CPython Allocator Hierarchy
 
 `pymalloc` is CPython's private allocator for objects 1–512 bytes:
@@ -616,6 +656,18 @@ import sys
 large_bytes = b"x" * 600      # 600 > 512: bypasses pymalloc, goes to OS malloc
 print(sys.getsizeof(large_bytes))   # 633 (33-byte bytes header + 600 data bytes)
 ```
+
+**Allocator changes in 3.15.** The raw domain (`PyMem_RawMalloc()`, used for memory that can be
+allocated without a thread state, such as interpreter-internal buffers) now uses mimalloc by
+default instead of the C library `malloc`, which mainly helps free-threaded builds. Object and
+`PyMem_Malloc()` allocations below 512 bytes still go through pymalloc on the default build.
+
+A build configured with `--with-pymalloc-hugepages` (`build.bat --pymalloc-hugepages` on Windows)
+can back pymalloc arenas with huge pages: the arena grows from 1 MiB to 2 MiB and is allocated
+with `MAP_HUGETLB` on Linux or `MEM_LARGE_PAGES` on Windows, falling back to regular pages when
+none are available. The feature stays off at runtime until `PYTHON_PYMALLOC_HUGEPAGES=1` is set.
+It cuts TLB misses for allocation-heavy processes, but it doubles the arena size, and with it the
+memory that one surviving object can pin from the OS.
 
 ### 6.5 Object Interning
 
@@ -1102,6 +1154,28 @@ gc.collect()  # prints two "Finalizing ..." lines but pause is longer than witho
 
 Prefer `weakref.finalize` over `__del__` to avoid complicating GC cycle resolution.
 
+### Pitfall 6: An unpinned 3.14 base image changes the garbage collector
+
+A service built `FROM python:3.14-slim` in late 2025 got the incremental collector (3.14.0 to
+3.14.4). Its RSS climbed over days on workloads with many short-lived `ssl` objects, the
+pattern reported in gh-142516, and the team added `gc.collect()` calls on a timer to hold it
+down. A routine rebuild after 2026-05-10 pulled 3.14.5, which restored the 3.13 generational
+collector, and the timer-driven full collections were now an extra pause every few seconds on
+top of the normal gen2 schedule. Neither change appeared in the application diff.
+
+```dockerfile
+# BROKEN: the patch release, and with it the GC algorithm, floats
+FROM python:3.14-slim
+```
+
+```dockerfile
+# FIX: pin the patch release; upgrade it deliberately and re-baseline GC metrics
+FROM python:3.14.8-slim
+```
+
+Remove workarounds written for one collector when the patch release changes, and log
+`sys.version` at startup so a memory graph can be matched to the interpreter that produced it.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1120,6 +1194,18 @@ Prefer `weakref.finalize` over `__del__` to avoid complicating GC cycle resoluti
 ---
 
 ## 12. Interview Questions with Answers
+
+**Q: Does Python 3.14 use an incremental or a generational cyclic GC?**
+**Short:** Both: 3.14.0 to 3.14.4 shipped an incremental GC, and 3.14.5 (May 2026) reverted to the 3.13 generational GC after production memory-growth reports; 3.15 keeps it.
+
+Python 3.14.0 shipped Mark Shannon's incremental collector (gh-108362) with two generations,
+young and old: each automatic collection scans the young generation plus one increment of the
+old one, which reduced maximum pause times on large heaps by an order of magnitude or more,
+and `gc.collect(1)` ran one increment. After reports of RSS growing under 3.14 while the heap
+stayed flat (gh-142516), the core team reverted to the 3.13 three-generation collector in both
+3.14 and 3.15 (gh-148726, closed 2026-05-05), shipped in 3.14.5 on 2026-05-10. So the answer
+depends on the patch release: pin it in container images, and compare GC metrics from 3.14.5
+and later against 3.13, not against 3.14.0 to 3.14.4.
 
 **Q1: What is the `PyObject` C struct and why does it matter for Python memory?**
 **Short:** Every Python object carries a 16-byte `PyObject` header of refcount plus type pointer.

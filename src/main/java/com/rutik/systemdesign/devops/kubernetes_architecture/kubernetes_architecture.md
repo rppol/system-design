@@ -338,7 +338,7 @@ etcdctl alarm disarm               # required — the alarm does not clear itsel
 
 The pitfall to avoid: raising `--quota-backend-bytes` without compacting or defragging first just buys a larger window before the same unbounded-growth cause fills it again.
 
-### Why the scheduler is separate
+### Watch streams and list-watch load
 
 ```bash
 # Controllers and kubelets use long-lived watch streams (HTTP/2) on the API server,
@@ -346,6 +346,34 @@ The pitfall to avoid: raising `--quota-backend-bytes` without compacting or defr
 # on the apiserver + etcd, and why "list-watch" efficiency dominates scalability.
 kubectl get pods --watch        # the same primitive controllers use
 ```
+
+**Watch cache warm-up after an API server restart.** Each API server serves most watches and lists from an in-memory watch cache, not from etcd. Two KEP-4568 gates govern a restarting API server. With `ResilientWatchCacheInitialization` (on by default since 1.31, stable since 1.34), a cache that is still warming answers watches and most lists with HTTP 429 instead of hanging them or sending them all to etcd; GETs and unfiltered lists that carry a `limit` still go to etcd. With `WatchCacheInitializationPostStartHook` (on by default in 1.36, stable and locked on in 1.37), the API server also holds readiness until the caches for built-in resources are filled. A controller that treats 429 as fatal, or retries it in a tight loop without backoff, crash-loops or adds load after every control-plane restart; client-go's default retry and backoff already handles it.
+
+### Read-path scaling: consistent reads from cache and streaming lists
+
+APF bounds how many requests run at once, but it bounds CPU better than memory: a LIST makes the API server fetch every object, decode it, and serialize the whole response before sending the first byte. Two features change what a LIST costs.
+
+**Consistent reads from the watch cache** (`ConsistentListFromCache`, beta and on by default in 1.31, GA in 1.34). A LIST with `resourceVersion` unset asks for a consistent read, which used to mean a quorum read from etcd, and any label or field selector (the kubelet listing only its own node's pods) still made etcd return every pod for the API server to filter. Now the API server asks etcd for a **progress notification**, learns etcd's current revision, waits until its watch cache has applied at least that revision, and answers from memory. It needs etcd 3.4.31+ or 3.5.13+; with an older etcd it detects the gap and falls back to etcd. The upstream 5,000-node scalability test measured 30% less kube-apiserver CPU, 25% less etcd CPU, and pod LIST P99 latency falling from 5 s to 1.5 s.
+
+```mermaid
+sequenceDiagram
+    participant C as kubelet
+    participant A as kube-apiserver
+    participant W as watch cache
+    participant E as etcd
+    C->>A: LIST pods?fieldSelector=spec.nodeName=n1 (resourceVersion unset)
+    A->>E: watch progress request
+    E-->>A: progress notification, revision 9041
+    A->>W: wait until cache revision >= 9041
+    W-->>A: ready
+    A-->>C: filtered list from memory, resourceVersion 9041
+```
+
+**Streaming lists** (`WatchList`, alpha 1.27, beta 1.32, on by default again from 1.34 after being turned off in 1.33). An informer sends a watch with `sendInitialEvents=true&resourceVersionMatch=NotOlderThan` instead of a LIST. The API server streams each existing object as a synthetic `ADDED` event from the watch cache, then a `BOOKMARK` annotated `k8s.io/initial-events-end: "true"`, then normal watch events. Memory per request becomes roughly one object, not the whole collection. In the upstream test with many informers listing large Secrets, API server memory held at about 2 GB with the feature on and climbed to about 20 GB with it off; in the first manual run the server crashed at 16 informers. Clients opt in through client-go's `WatchListClient` gate (on by default since 1.35), and fall back to LIST against a server that does not support it.
+
+### Coordinated leader election
+
+Classic leader election is first-come: whichever kube-controller-manager replica grabs the `Lease` first leads. During a rolling control-plane upgrade that can be a new-version controller running against an API server that is still one version back, which the version-skew policy does not allow. **Coordinated leader election** (`CoordinatedLeaderElection`, alpha 1.31, beta 1.33, still off by default and requiring `coordination.k8s.io/v1beta1`) adds a `LeaseCandidate` object per replica carrying its binary and emulation version. An election coordinator in the API server picks the leader with the strategy `OldestEmulationVersion`: lowest emulation version, then lowest binary version, then oldest candidate. In 1.37 kube-controller-manager and kube-scheduler use it automatically once the gate and API group are on.
 
 ### etcd: the source of truth
 
@@ -402,7 +430,7 @@ The scheduler's only job: for each Pod with no `nodeName`, score feasible nodes 
 
 **Kubernetes fits when:** you run many containerized services needing self-healing, horizontal scaling, rolling deploys, and declarative ops at scale; you have or can build the operational maturity.
 
-**Kubernetes is overkill when:** you run a single app or a handful of services (a PaaS like Cloud Run/App Runner/Fargate is simpler), the team lacks ops capacity, or the workload is a managed-service fit (databases, queues). The control-plane and operational complexity is a real cost — don't adopt it for a monolith.
+**Kubernetes is overkill when:** you run a single app or a handful of services (a managed container service like Cloud Run or Amazon ECS Express Mode on Fargate is simpler), the team lacks ops capacity, or the workload is a managed-service fit (databases, queues). The control-plane and operational complexity is a real cost; don't adopt it for a monolith.
 
 ---
 
@@ -456,86 +484,99 @@ informer.AddEventHandler(handlers)                    // react to deltas, not po
 | metrics-server | Resource metrics for `kubectl top`/HPA |
 | client-go / controller-runtime | Build controllers/operators |
 | kube-state-metrics | Object-state metrics for Prometheus |
+| KYAML (`kubectl get -o kyaml`) | Stable in 1.37: a strict subset of YAML (quoted strings, flow-style maps and lists) that avoids YAML's type-guessing traps such as `no` parsing as false; every KYAML file is still valid YAML |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q1: Describe the Kubernetes control plane components and their roles.**
+**Q: Describe the Kubernetes control plane components and their roles.**
 **Short:** The API server is the sole hub to etcd, which stores all cluster state via Raft; the scheduler binds pods to nodes; the controller-manager runs reconciliation loops.
 The **API server** is the front door and sole hub — it authenticates, authorizes, admits, validates, and persists every change, and is the only component that talks to etcd. **etcd** is the Raft-based key-value store holding all cluster state (the source of truth). The **scheduler** binds unscheduled pods to nodes. The **controller-manager** runs the reconciliation loops (Deployment, ReplicaSet, Node, etc.). The **cloud-controller-manager** integrates with the cloud (LBs, volumes, node lifecycle).
 
-**Q2: Walk through exactly what happens when you `kubectl apply` a Deployment with 3 replicas.**
+**Q: Walk through exactly what happens when you `kubectl apply` a Deployment with 3 replicas.**
 **Short:** The API server admits and persists the Deployment, the Deployment/ReplicaSet controllers create Pods, the scheduler binds them, and each node's kubelet starts the containers.
 kubectl POSTs to the API server, which runs authn → authz (RBAC) → mutating/validating admission → schema validation, then writes the Deployment to etcd. The Deployment controller observes it and creates a ReplicaSet; the ReplicaSet controller sees desired=3, actual=0 and creates 3 Pod objects (Pending). The scheduler picks nodes and writes each Pod's `nodeName`. Each node's kubelet sees its bound Pod, calls the CRI runtime to pull the image and start the container, then reports status; the EndpointSlice controller adds ready pod IPs to the Service.
 
-**Q3: What does "declarative" and "level-triggered" mean, and why does it matter?**
+**Q: What does "declarative" and "level-triggered" mean, and why does it matter?**
 **Short:** Declarative means specifying desired end state rather than steps, and level-triggered means reconciling current-vs-desired rather than reacting to events — together making the system self-healing.
 Declarative means you specify the desired end state (`spec`), not the steps to get there; controllers compute and apply the diff. Level-triggered means controllers act on the *current* state rather than reacting to a specific event. Together they make the system self-healing: a controller that crashes, misses an event, or restarts simply re-reconciles current vs desired on its next pass and converges anyway — no lost-event fragility.
 
-**Q4: Why do components communicate only through the API server?**
+**Q: Why do components communicate only through the API server?**
 **Short:** Routing every call through it centralizes authn, authz, admission, and audit, and gives every component a consistent, watchable view of state via etcd.
 It centralizes authentication, authorization, admission, validation, and auditing in one place, and gives every component a consistent, watchable view of state via etcd. Direct component-to-component calls would fragment security and consistency. The cost is that the API server (and etcd) is the scalability and reliability bottleneck — which is why protecting it (rate limits, efficient watches) is critical.
 
-**Q5: What is etcd, and what happens if it fails or fills up?**
+**Q: What is etcd, and what happens if it fails or fills up?**
 **Short:** etcd is the Raft-based key-value store holding all cluster state, and once it exceeds its default 2 GiB quota it goes read-only, halting all writes including self-healing.
 etcd is the strongly-consistent, Raft-based key-value store holding all cluster state. Lose it without a backup and you lose the cluster's desired state (Deployments, Secrets, everything). It has a default DB size quota of 2 GiB (`--quota-backend-bytes`, with 8 GiB the suggested ceiling); exceeding it raises a NOSPACE alarm and puts etcd read-only, so the cluster stops accepting writes — including self-healing — until you compact/defragment and clear the alarm. Hence: HA (3/5 nodes), scheduled snapshots, tested restores, and size monitoring.
 
-**Q6: Why 3 or 5 etcd nodes and not 2 or 4?**
+**Q: Why 3 or 5 etcd nodes and not 2 or 4?**
 **Short:** Quorum is ⌊N/2⌋+1, so an even node count like 4 tolerates the same one failure as 3 while adding write latency and split-vote risk — hence always odd counts.
 etcd needs a majority quorum to commit writes (Raft). With N nodes, quorum is ⌊N/2⌋+1: 3 → quorum 2 (tolerates 1 failure), 5 → quorum 3 (tolerates 2). An even count adds no extra fault tolerance (4 still only tolerates 1, same as 3) while adding write latency and split-vote risk — so you always use odd numbers.
 
-**Q7: What's the difference between `spec` and `status` on an object?**
+**Q: What's the difference between `spec` and `status` on an object?**
 **Short:** `spec` is the user's declared desired state, `status` is the system's observed actual state, and a controller's entire job is closing the gap between them.
 `spec` is the user's declared desired state (e.g., `replicas: 3`); `status` is the system's observed actual state (e.g., `readyReplicas: 2`), written by controllers. The entire job of a controller is to drive `status` toward `spec`. When you debug "why isn't this happening," you compare the two and find which controller isn't closing the gap.
 
-**Q8: How does the kubelet fit in — does it talk to etcd?**
+**Q: How does the kubelet fit in: does it talk to etcd?**
 **Short:** No — the kubelet only watches the API server for Pods bound to its node and reports status back to it; it never touches etcd directly.
 No. The kubelet watches the API server for Pods bound to its node, then uses the CRI to pull images and start/stop containers via the runtime, runs probes, and reports Pod status back to the API server. It never touches etcd directly — only the API server does. It's the node-level reconciler ensuring its node's actual containers match the PodSpecs assigned to it.
 
-**Q9: What does kube-proxy do?**
+**Q: What does kube-proxy do?**
 **Short:** kube-proxy programs node-level networking, via iptables, the recommended nftables mode, or an eBPF dataplane, so a Service's virtual IP load-balances to current pod IPs.
 kube-proxy programs node-level networking so that a Service's stable virtual IP load-balances to the current set of backing pod IPs. It watches Services/EndpointSlices and installs rules via iptables (the default mode) or nftables (the recommended mode on Linux — it scales far better with large Service counts), or is replaced entirely by eBPF dataplanes (Cilium). It implements Service routing; it does not proxy most traffic itself in iptables/nftables modes (the kernel does).
 
-**Q10: How does the scheduler decide where a pod goes?**
+**Q: How does the scheduler decide where a pod goes?**
 **Short:** It filters nodes for feasibility, such as resources, taints and affinity, then scores the feasible ones and binds the Pod to the top-ranked node.
 For each unscheduled Pod it runs a two-phase process: **filtering** (which nodes are feasible — enough CPU/memory, tolerations match taints, node selectors/affinity satisfied) and **scoring** (rank feasible nodes by spread, resource balance, affinity preferences), then binds the Pod to the top node by writing `nodeName`. It only schedules; the kubelet then starts the containers.
 
-**Q11: A controller you wrote is slowing the whole cluster. What's likely wrong?**
+**Q: A controller you wrote is slowing the whole cluster. What's likely wrong?**
 **Short:** It's almost certainly overloading the API server with full `List()` polling instead of watch-backed informers, missing selectors, or unbounded hot-looping.
 It's almost certainly overloading the API server: polling with full `List()` calls instead of using a watch-backed informer cache, lacking field/label selectors, hot-looping without rate-limited backoff, or doing unbounded reconciles. Fix with shared informers (single watch + local cache), label/field selectors, a rate-limited workqueue, and exponential backoff on errors.
 
-**Q12: Managed vs self-managed control plane — tradeoffs?**
+**Q: Managed vs self-managed control plane: tradeoffs?**
 **Short:** Managed control planes offload API server and etcd operations and backups to the cloud for a fee, while self-managed gives full control but full ownership of etcd HA and upgrades.
 Managed (EKS/GKE/AKS) offloads API server + etcd operation, scaling, patching, and backups to the cloud, removing the riskiest ops burden, at a per-cluster fee and with less control over control-plane internals/versions. Self-managed (kubeadm) gives full control and avoids the fee but makes you responsible for etcd HA/backups, upgrades, and availability — the failure modes most teams shouldn't own.
 
-**Q13: What are admission controllers and where do they run in the request path?**
+**Q: What are admission controllers and where do they run in the request path?**
 **Short:** They intercept authorized requests before persistence to etcd, running mutating webhooks first, then schema validation, then validating webhooks.
 Admission controllers intercept authorized requests *before* they're persisted to etcd, after authn/authz: first **mutating** webhooks (e.g., sidecar injection, defaulting), then schema validation, then **validating** webhooks (e.g., policy checks). They're how OPA Gatekeeper/Kyverno enforce policy and how service meshes inject sidecars — a powerful, cluster-wide enforcement point (and a latency/availability risk if a webhook is slow or down).
 
-**Q14: How does Kubernetes self-heal when a node dies?**
+**Q: How does Kubernetes self-heal when a node dies?**
 **Short:** The node lifecycle controller taints the dead node NoExecute, and once the pod's toleration expires its owning controller creates replacements on healthy nodes.
 The node lifecycle controller stops receiving heartbeats, marks the node `NotReady` after a grace period, and applies a `node.kubernetes.io/not-ready` or `node.kubernetes.io/unreachable` `NoExecute` taint; pods carry a default 300-second `tolerationSeconds` for those taints, so once it elapses they are marked for deletion. Their owning controllers (ReplicaSet/StatefulSet) observe replicas below desired and create replacement pods, which the scheduler places on healthy nodes. The level-triggered loops make recovery automatic — no human action needed.
 
-**Q15: Why might a cluster be "slow" even though apps have spare CPU/memory?**
+**Q: Why might a cluster be "slow" even though apps have spare CPU/memory?**
 **Short:** The bottleneck is usually the control plane itself — an overloaded API server, etcd near its size quota, or saturated CoreDNS — not the workloads.
 The bottleneck is usually the control plane, not the workloads: an overloaded API server (heavy list-watch traffic, slow/failing admission webhooks), etcd under disk pressure or near its size quota (slow writes, defrag pauses), or DNS (CoreDNS) saturation. Symptoms are slow `kubectl`, laggy rollouts, and delayed self-healing. You diagnose via API server/etcd latency metrics and request rates, not app dashboards.
 
-**Q16: A single client is flooding the API server. How does Kubernetes contain that without an admin intervening?**
+**Q: API Priority and Fairness is on, yet a burst of informer relists still OOM-kills the API server. Why, and what fixes it?**
+**Short:** APF limits concurrent requests, not their memory; a classic LIST builds the full response in memory, so a few big LISTs exhaust RAM, and streaming lists (`WatchList`) cap memory per request.
+APF gives each priority level a share of concurrency, which caps CPU well because the CPU a single request can use at any moment is bounded. Memory is different: for a LIST the API server reads every object, decodes it, and serializes the whole response before sending any byte, so a handful of concurrent LISTs of large Secrets or ConfigMaps can allocate gigabytes, and after a network blip every informer relists at once. The fix is to stop sending LISTs. With streaming lists (`WatchList`, on by default in 1.34+) an informer opens a watch with `sendInitialEvents=true`, and the server streams objects one at a time from the watch cache, followed by a bookmark marking the end of initial state; the upstream test held memory near 2 GB where classic LISTs reached about 20 GB. client-go uses it when `WatchListClient` is on (default since 1.35), so the action item for a custom controller is often just upgrading client-go.
+
+**Q: A single client is flooding the API server. How does Kubernetes contain that without an admin intervening?**
 **Short:** API Priority and Fairness classifies every request into a FlowSchema-selected priority level with its own concurrency share, so a flooding client queues or gets 429s instead of starving everyone else.
 **API Priority and Fairness (APF)** assigns every request to a `PriorityLevelConfiguration` via a matching `FlowSchema`, and each `Limited` level gets a fixed slice (`nominalConcurrencyShares`) of the API server's total concurrency budget. A client that exceeds its level's share either waits in a bounded queue or is rejected with HTTP 429 — it cannot borrow capacity from the `system` or `leader-election` levels, which is exactly what keeps a hot-looping operator (§14) from starving the scheduler and `kubectl`. Diagnose it with `apiserver_flowcontrol_rejected_requests_total` and `apiserver_flowcontrol_current_inqueue_requests` per FlowSchema, not with generic API server latency alone.
 
-**Q17: etcd hit its NOSPACE alarm. Why doesn't raising `--quota-backend-bytes` fix it?**
+**Q: etcd hit its NOSPACE alarm. Why doesn't raising `--quota-backend-bytes` fix it?**
 **Short:** Raising the quota just delays the same alarm, because the fix is compacting old revisions and defragmenting the file, not giving the same unbounded growth more room.
 Raising the quota buys a bigger window but does not address why the DB filled up — if the cause was unconditional writes or a disabled compaction retention, the larger quota fills again on the same trajectory. The actual fix is `etcdctl compact <revision>` (permitted even while NOSPACE is set, since it's the sanctioned recovery path), then `etcdctl defrag` per member to reclaim the file space compaction only freed internally, then `etcdctl alarm disarm` — compaction alone does not shrink the file, and the alarm does not clear itself. Prevent recurrence with `--auto-compaction-mode=periodic --auto-compaction-retention=1h` (kubeadm's default) and alerts on `etcd_mvcc_db_total_size_in_bytes` well before the quota.
 
-**Q18: How do leader election and quorum interact for the controller-manager and scheduler in an HA control plane?**
+**Q: How do leader election and quorum interact for the controller-manager and scheduler in an HA control plane?**
 **Short:** Every replica runs, but only the Lease-holding leader is active; losing quorum blocks the Lease renewal itself, so the whole control loop stalls, not just fails over.
 kube-controller-manager and kube-scheduler run active-passive in HA: every replica starts, but only the one holding a `Lease` object (via `--leader-elect`) does work, defaulting to a 15-second lease duration and a 10-second renew deadline before a standby takes over. Because the Lease itself is an etcd-backed object, losing etcd quorum doesn't just stall reconciliation — it also blocks lease renewal, so a stuck leader can't be replaced until quorum returns; there is no failover path that bypasses etcd. This is why HA control-plane resilience is really etcd resilience wearing a different hat.
 
-**Q19: What's the Kubernetes version-skew policy, and what does it constrain during an upgrade?**
+**Q: How can the API server answer a consistent LIST from its watch cache without returning stale data?**
+**Short:** It asks etcd for a progress notification carrying the current revision, waits until the watch cache has applied that revision, then serves the list from memory.
+A LIST with `resourceVersion` unset must reflect every write committed before the request, which historically meant a quorum read from etcd, and for a selector such as `spec.nodeName=n1` etcd still returned every pod for the API server to filter. With `ConsistentListFromCache` (beta 1.31, GA 1.34) the API server sends a watch progress request to etcd, gets back the current revision, blocks until its watch cache has caught up to at least that revision, and serves the filtered result from memory. The guarantee is the same as a quorum read; only the data path changes. It requires etcd 3.4.31+ or 3.5.13+, because earlier versions had bugs in progress notifications, and the API server falls back to etcd reads when it detects an older etcd.
+
+**Q: What problem does coordinated leader election solve during a control-plane upgrade?**
+**Short:** Plain Lease election lets any replica lead, including a newer controller-manager talking to an older API server; coordinated election picks the candidate with the oldest emulation version so skew rules hold.
+With plain `--leader-elect`, the first replica to take the `Lease` leads, so during a rolling upgrade from 1.36 to 1.37 a 1.37 kube-controller-manager can become leader while some API servers still run 1.36, breaking the rule that controllers never run ahead of the API server. Coordinated leader election (beta since 1.33, off by default, needs the `coordination.k8s.io/v1beta1` API) has each replica publish a `LeaseCandidate` with its binary and emulation version, and a coordinator in the API server assigns the Lease using `OldestEmulationVersion`: lowest emulation version first, then lowest binary version, then oldest candidate. Leadership moves to the new version only once every candidate has been upgraded. It changes who leads, not how fast failover happens; lease duration and renew deadline still govern that.
+
+**Q: What's the Kubernetes version-skew policy, and what does it constrain during an upgrade?**
 **Short:** kube-apiserver leads the upgrade; kubelet may trail it by up to three minor versions, and every HA apiserver instance must stay within one minor version of the others.
-kube-apiserver is upgraded first and is the ceiling every other component tracks: kube-controller-manager, kube-scheduler, and cloud-controller-manager may be up to one minor version older; kubelet may be up to three minor versions older (two, for kubelet versions before 1.25); and kubectl may be one minor version older or newer. In an HA cluster the newest and oldest kube-apiserver replicas must themselves stay within one minor version during a rolling upgrade, which is what makes "upgrade the whole control plane, then the nodes, oldest kubelets last" the only supported order — skipping straight from N to N+2 anywhere in the chain is unsupported and can desync RBAC/API behavior mid-rollout.
+kube-apiserver is upgraded first and is the ceiling every other component tracks: kube-controller-manager, kube-scheduler, and cloud-controller-manager may be up to one minor version older; kubelet may be up to three minor versions older (two, for kubelet versions before 1.25); and kubectl may be one minor version older or newer. In an HA cluster the newest and oldest kube-apiserver replicas must themselves stay within one minor version during a rolling upgrade, which is what makes "upgrade the whole control plane, then the nodes, oldest kubelets last" the only supported order; skipping straight from N to N+2 anywhere in the chain is unsupported and can desync RBAC/API behavior mid-rollout. Skew is not the only upgrade gate; read each release's removals first. For 1.37: static Pods may no longer reference Secrets or ConfigMaps (for example via `configMapRef` or `secretRef`), and the `PreventStaticPodAPIReferences` gate that allowed opting out is gone, so such a static Pod no longer runs after the kubelet upgrade; `kube-dns` is deprecated in favor of CoreDNS, with no kube-dns packages expected after 1.40; and since 1.35 the kubelet refuses to start on cgroup v1 nodes by default (see [Linux and OS fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md)).
 
 ---
 

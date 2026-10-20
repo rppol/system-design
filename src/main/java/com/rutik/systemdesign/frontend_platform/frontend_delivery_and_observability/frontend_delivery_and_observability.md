@@ -33,7 +33,8 @@ user complained about is the same request as the slow query in the database log.
 
 **Verified 2026-09-02:** Core Web Vitals thresholds are LCP under **2.5 s**, INP under
 **200 ms**, CLS under **0.1**, all at the **75th percentile** of real users via CrUX. `web-vitals`
-is at **v5**, which removed the FID export entirely. OpenTelemetry's browser SDK
+is at **v6** (6.2.3, 2026-10-05), which reports soft navigations where the browser supports
+them; the FID export was removed in v5. OpenTelemetry's browser SDK
 (`@opentelemetry/sdk-trace-web`) is stable for tracing; browser **metrics** and **logs** are not.
 
 ---
@@ -416,24 +417,29 @@ part of flagging that reliably rots.
 ### 6.5 RUM: measuring the users you actually have
 
 ```ts
-import { onLCP, onINP, onCLS, onTTFB } from "web-vitals/attribution";
+import { onLCP, onINP, onCLS, onTTFB, type MetricWithAttribution } from "web-vitals/attribution";
 
-const send = (m: { name: string; value: number; rating: string; attribution: unknown }) => {
+const send = (m: MetricWithAttribution) => {
   const body = JSON.stringify({
-    metric: m.name, value: Math.round(m.value), rating: m.rating,
-    route: routePattern(),                     // "/product/:id", NEVER the raw URL
+    metric: m.name, value: Math.round(m.value), rating: m.rating, navType: m.navigationType,
+    route: routePattern(m.navigationURL ?? location.href),  // "/product/:id", NEVER the raw URL
     release: __BUILD_ID__, attribution: m.attribution,
   });
   navigator.sendBeacon("/rum", body);          // survives the page being closed
 };
 
-onLCP(send); onINP(send); onCLS(send); onTTFB(send);
+const opts = { reportSoftNavs: true };
+onLCP(send, opts); onINP(send, opts); onCLS(send, opts); onTTFB(send);
 ```
 
-Three details carry the whole implementation. **`sendBeacon`** because vitals finalise at
+Four details carry the whole implementation. **`sendBeacon`** because vitals finalise at
 `pagehide` — a `fetch` issued then is cancelled by the navigation, so you silently lose exactly
 the sessions that left, which are the slow ones. **`routePattern()`** because grouping by raw URL
-gives you one bucket per product id and no p75 for anything. And **the attribution build**, which
+gives you one bucket per product id and no p75 for anything. **`reportSoftNavs`** because in an
+SPA every in-app route change is a soft navigation: in Chromium 151+ each one reports its own
+LCP, INP and CLS with `navigationType: 'soft-navigation'`, and `navigationURL` names the route the
+metric belongs to. A metric for the previous route can finalize after the URL has changed, so
+derive the route from `navigationURL`, not `location`. And **the attribution build**, which
 is the difference between a number and a fix:
 
 | Metric | What attribution adds |
@@ -677,7 +683,7 @@ layout shift.
 
 | Tool | Role | Relevance |
 |------|------|-----------|
-| web-vitals | RUM library | v5, attribution build, ~3 KB gzipped |
+| web-vitals | RUM library | v6, attribution build, soft-navigation reporting, ~3 KB gzipped |
 | Amazon CloudFront | CDN | invalidations, behaviours per path prefix |
 | Fastly | CDN | instant purge, surrogate keys, VCL |
 | Cloudflare Pages | Static hosting | atomic deploys, per-branch previews |

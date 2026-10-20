@@ -347,6 +347,15 @@ try:
 except json.JSONDecodeError as e:
     print(f"Bad JSON at line {e.lineno} col {e.colno}: {e.msg}")
 
+# [3.15] array_hook: decode into an immutable, hashable structure
+frozen = json.loads(
+    '{"roles": ["admin", "ops"], "limits": {"rps": 50}}',
+    object_pairs_hook=frozendict,   # every JSON object -> frozendict
+    array_hook=tuple,               # every JSON array  -> tuple
+)
+# frozendict({'roles': ('admin', 'ops'), 'limits': frozendict({'rps': 50})})
+hash(frozen)   # works: safe as a cache key or to share across threads
+
 # Fast path: orjson drops in for standard json on hot paths
 # import orjson
 # serialized: bytes = orjson.dumps(data, default=str)
@@ -441,6 +450,13 @@ memory (the original array plus its serialized copy) and copying 800 MB of bytes
 need to copy. With it, `data` is a small opcode stream and the 800 MB stays as a single
 `PickleBuffer` referencing the array's existing memory — nothing is copied unless the receiving
 process is on another machine and must go over a socket.
+
+**What pickle can reference.** Pickle stores functions, classes, and bound methods by import path,
+not by value, so the receiving process must be able to import the same name. Since 3.15 that
+lookup also handles name-mangled members: a bound private method (`obj._Outer__helper` reached as
+`self.__helper`) and a private nested class (`Outer.__Inner`) pickle and load correctly, where 3.14
+and earlier raised `AttributeError` or `PicklingError`. Lambdas and functions defined inside
+another function still cannot be pickled.
 
 ### 6.6 `io.StringIO` and `io.BytesIO`
 
@@ -638,6 +654,17 @@ started = 2024-06-04T09:15:42Z
 parsed = tomllib.loads(toml_text)
 assert parsed["tool"]["app"]["max_connections"] == 100
 
+# [3.15] tomllib parses TOML 1.1.0: multi-line inline tables with trailing commas,
+# \xHH and \e escapes, and times without seconds
+v11 = tomllib.loads("""
+db = {
+    host = "localhost",
+    port = 5432,
+}
+backup_at = 02:30
+""")
+assert v11["db"]["port"] == 5432
+
 # There is no stdlib TOML writer — use tomli-w to write
 # import tomli_w
 # with open("pyproject.toml", "wb") as f:
@@ -650,6 +677,11 @@ and `[section.subsection]` headers for unambiguous nesting — none of which `js
 also has the trailing-comma trap: a stray comma after the last array or object element is a
 hard parse error with no forgiving mode. TOML is why `pyproject.toml` (not `pyproject.json`)
 is the standard Python project config file.
+
+TOML 1.1.0 is backwards compatible: every valid 1.0.0 document parses the same way. The reverse
+does not hold. A config file that uses a multi-line inline table, a trailing comma inside one,
+`\e`, or `14:15` without seconds parses on 3.15 and raises `TOMLDecodeError` on 3.11-3.14, so keep
+shared config files to TOML 1.0 syntax until every reader is on 3.15 or uses a TOML 1.1 parser.
 
 ### 6.10 `zipfile` and `tarfile` — Archives
 

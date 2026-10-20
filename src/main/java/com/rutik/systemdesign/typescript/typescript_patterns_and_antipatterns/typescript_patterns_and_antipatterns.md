@@ -552,7 +552,9 @@ its own subject is advertising. Three real ones:
 - **A team that does not want it.** TypeScript is a discipline enforced by review, not a compiler
   flag. Where people add `any` to close the build you get no safety and real friction — decorative
   types and slower CI. Fix the agreement first, or use JSDoc types with `checkJs`, which gets most
-  of the value with no build step and no syntax anyone can object to.
+  of the value with no build step and no syntax anyone can object to. Write that JSDoc in the
+  TypeScript dialect: 7.0 dropped `@enum`, `@class`, postfix `!`, standalone `?`, and Closure-style
+  `function(string): void` types, so Closure-era annotations error after the upgrade.
 
 ---
 
@@ -697,7 +699,7 @@ Return `unknown` and narrow, or take a schema and return `z.infer<S>`.
 A plugin host or a `Proxy`-backed ORM ends up `unknown` plus a parse at every edge, which is the same
 program a JS file with the same parse would be. A team that does not want the discipline produces
 decorative types and slower CI — `checkJs` with JSDoc types gets most of the value with no build
-step. Naming these honestly is what separates using a tool from advocating one.
+step, provided the JSDoc avoids the Closure-era forms TypeScript 7.0 no longer reads. Naming these honestly is what separates using a tool from advocating one.
 
 **Q: Why is `unknown` better than `any` for foreign data?**
 **Short:** Foreign data typed `unknown` fails at the assignment that misuses it, whereas `any` produces no error at all and infects everything it flows into.

@@ -187,6 +187,44 @@ Full cgroup mechanics, the OOM scoring formula, and the namespace model are in [
 
 On a multi-socket server, memory is physically attached to a specific socket. A core reading memory attached to *its own* socket pays roughly 80-100 ns; reading memory attached to the *other* socket pays 140-200 ns and consumes interconnect bandwidth, so a process whose threads and memory land on different sockets can lose 20-40% of its memory throughput for reasons invisible to every application-level metric. Check with `numactl --hardware` and `numastat -p <pid>`; pin with `numactl --cpunodebind=0 --membind=0` for latency-critical single-socket workloads; and note that most cloud instances smaller than roughly 32 vCPUs are single-socket, which makes this a large-instance and bare-metal concern rather than a universal one. The architecture underneath — cache coherence, MESI, false sharing, and why interleaved allocation is sometimes better than binding — belongs to [Computer Architecture and Memory Hierarchy](../../cs_fundamentals/computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) and is not repeated here.
 
+### 4.7 Task Selection: EEVDF, and sched_ext
+
+"CFS" names two separate things in the kernel, and only one of them was replaced.
+
+| Part | Job | Status |
+|---|---|---|
+| Task selection in the fair class | Which runnable `SCHED_NORMAL` task runs next on a CPU | EEVDF since Linux 6.6 (October 2023), completed in 6.12 |
+| CFS bandwidth control | Enforces `cpu.max` quota per cgroup period, the throttling in §6.7 | Unchanged; still in the fair class |
+| `cpu.weight` shares | Proportional CPU under contention | Unchanged; EEVDF uses the same weights |
+
+**EEVDF (Earliest Eligible Virtual Deadline First).** Every task still has a weight from its nice value (or its cgroup's `cpu.weight`) and a `vruntime` that advances more slowly for heavier tasks. EEVDF adds two numbers:
+
+- **Lag**: the CPU a task is owed. It is the weighted average `vruntime` of the queue minus the task's own. A task with lag of zero or more is *eligible*; a task that has run ahead of its share is not.
+- **Virtual deadline**: `vruntime + slice / weight`. Among eligible tasks the scheduler runs the one with the earliest deadline.
+
+Weight decides how much CPU a task gets. Slice decides how soon it gets it. A task with a short slice gets an earlier deadline, so it runs sooner after waking and in shorter bursts, but it does not get more total CPU. CFS had no separate latency input; it picked the smallest `vruntime` and relied on wakeup heuristics.
+
+```
+  two runnable tasks, equal weight, both at vruntime 100 (both eligible)
+    A: batch job,  slice 3.0 ms -> deadline = 100 + 3.0 = 103.0
+    B: RPC thread, slice 0.5 ms -> deadline = 100 + 0.5 = 100.5
+
+  pick 1: B (earliest deadline). B runs 0.5 ms -> vruntime 100.5
+  pick 2: B is now ahead of the queue average (lag < 0), not eligible -> A runs
+  long run: equal weights, so equal CPU. The short slice buys B a shorter
+            wait from wakeup to running, not a bigger share.
+```
+
+The tunables changed. `sched_latency_ns`, `sched_min_granularity_ns`, and `sched_wakeup_granularity_ns` are gone; the one global knob is `base_slice_ns` in `/sys/kernel/debug/sched/`, which defaults to 0.75 ms x (1 + log2(min(CPUs, 8))), so 3 ms on a machine with 8 or more CPUs. From 6.12 a task can ask for its own slice through `sched_setattr()` with `sched_attr.sched_runtime`, which is how a latency-sensitive thread asks for short slices without a nice change. The proposed "latency-nice" interface was not merged; the per-task slice replaced it.
+
+**sched_ext (Linux 6.12, `CONFIG_SCHED_CLASS_EXT`).** A scheduler class whose policy is a BPF program loaded at run time. Loading one (from the `sched-ext/scx` project: `scx_rusty`, `scx_lavd`, `scx_bpfland`, Meta's `scx_layered`) moves all `SCHED_NORMAL` tasks to it, or only `SCHED_EXT` tasks with `SCX_OPS_SWITCH_PARTIAL`. Unloading needs no reboot. If the BPF scheduler errors, or a runnable task stalls past the watchdog limit, the kernel aborts it and moves every task back to the fair class; SysRq-S does the same by hand. `/sys/kernel/sched_ext/state` reads `enabled` while one runs.
+
+What this means for a backend team:
+
+- On a 6.6+ kernel, "CFS throttling" in a dashboard still means `cpu.max` bandwidth control. Everything in §6.7 applies as written.
+- Old tuning guides and `tuned` profiles that write `sched_min_granularity_ns` or `sched_wakeup_granularity_ns` do nothing on 6.6+ because the files no longer exist.
+- sched_ext is a tool for teams that own the node: a layered policy that keeps a latency tier on dedicated cores while batch work fills the rest, tried and rolled back without a kernel rebuild. Whether a given BPF scheduler enforces `cpu.max` depends on the scheduler and kernel, so check that `nr_throttled` still moves before relying on Kubernetes limits under it.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -637,6 +675,8 @@ env:
 
 **Removing the limit entirely is legitimate and often correct.** CPU *requests* already guarantee a share under contention via `cpu.weight`; the *limit* only adds the ability to freeze you when the node has idle cores sitting right there. For a latency-sensitive service, trading a hard cap for a tail-latency win is usually the right call — with the caveat that you then depend on honest requests and on neighbours behaving, which is a scheduling and capacity discipline rather than a free lunch.
 
+**The scheduler swap did not change this.** Linux 6.6 replaced the fair class's task selection with EEVDF (§4.7), but `cpu.max` enforcement is the separate CFS bandwidth controller, and it still freezes the cgroup when the period's quota runs out. The arithmetic above holds on 6.x and 7.x kernels.
+
 **One historical trap worth knowing.** Before Linux 5.4, the CFS bandwidth controller distributed quota in 5 ms per-CPU slices that could expire unused, so a multi-threaded process on a many-core machine leaked quota and throttled at as little as 30% of its limit. This was a genuine kernel bug, fixed in 5.4 (`de53fd7aedb1`). If you are on an older kernel and the arithmetic above does not explain your throttling, that is why — and the fix is the upgrade, not the config.
 
 ### 6.8 Memory Pressure — Swap, THP, and the Cliff
@@ -993,6 +1033,7 @@ systemd-run --scope -p IOWeight=10 -p CPUWeight=10 pg_dump ...
 | CPU pressure and throttling | `/sys/fs/cgroup/cpu.stat`, PSI (`/proc/pressure/*`), `cAdvisor`, `runqlat` | PSI is free, always on, and almost never scraped |
 | Network | `tcpdump -ttt`, `ss -tmi`, `tcpretrans`, `tcplife`, `mtr`, `iperf3` | `ss -tmi` shows per-socket RTT, cwnd, retransmits, and buffer occupancy |
 | NUMA | `numactl --hardware`, `numastat -p <pid>`, `lscpu` | Mostly a large-instance and bare-metal concern |
+| CPU scheduler | `/sys/kernel/debug/sched/base_slice_ns`, `chrt`, `sched_setattr()`, `/sys/kernel/sched_ext/state`, `scx_*` from `sched-ext/scx` | EEVDF slice per task from 6.12; sched_ext loads a BPF scheduler without a reboot |
 | Kernel tunables | `sysctl -a`, `/sys/kernel/mm/transparent_hugepage/*`, `/sys/block/*/queue/*` | Persist in `/etc/sysctl.d/`; in Kubernetes via a privileged init container or node config |
 | Memory pressure | `/sys/fs/cgroup/memory.pressure`, `memory.high`, `vmstat 1` | `memory.high` turns an OOM kill into a stall, which is often preferable |
 
@@ -1004,6 +1045,16 @@ systemd-run --scope -p IOWeight=10 -p CPUWeight=10 pg_dump ...
 **Short:** Nagle's algorithm on the sender is deadlocked against delayed ACK on the receiver, and the receiver's 40ms ACK timer is what breaks it.
 
 A: The client is doing write-write-read: two small `write()` calls followed by a read. Nagle refuses to send the second small segment while the first is still unacknowledged. The receiver has the first segment but its application is blocked waiting for the rest of the message, so it has no response to piggyback an ACK onto, and delayed ACK holds the bare ACK for up to `TCP_DELACK_MIN`, which is 40ms on Linux. Neither algorithm is malfunctioning — the deadlock is in their interaction, and it resolves only when the timer fires. The signature is unmistakable in a histogram: a spike at exactly 40ms with a clean gap below it, because physics does not produce round numbers and timers do. The fix is `TCP_NODELAY` on the socket, plus coalescing the two writes into one (a buffered stream, or `writev`) so there is only one segment and nothing for Nagle to hold. Modern RPC frameworks set `TCP_NODELAY` by default, which is why this bug lives almost exclusively in hand-rolled protocol code.
+
+**Q: Linux 6.6 replaced CFS with EEVDF. Does CFS throttling still cause Kubernetes latency tails on a 6.6+ kernel?**
+**Short:** Yes. EEVDF replaced only task selection; cpu.max quota is still enforced by the CFS bandwidth controller, which freezes the cgroup when the period's quota runs out.
+
+A: "CFS" covered two mechanisms. Task selection, which runnable task gets the CPU next, became EEVDF in 6.6: it picks the eligible task (lag of zero or more) with the earliest virtual deadline, `vruntime + slice / weight`. Bandwidth control, which enforces `cpu.max = <quota> <period>` per cgroup, was not touched and still throttles every thread in the cgroup until the next 100 ms period once quota is spent. So the 8-threads-on-a-4-core-limit stall works the same on a 6.12 or 7.x node, `nr_throttled` in `cpu.stat` still detects it, and the fixes are the same: fewer threads, a higher limit, or no limit. EEVDF changes wakeup latency between tasks that are allowed to run; it cannot run a task the bandwidth controller has frozen.
+
+**Q: A tuning guide tells you to lower sched_wakeup_granularity_ns for a latency-sensitive service. What happens on a 6.6+ kernel, and what replaces it?**
+**Short:** Nothing happens because the knob was removed with EEVDF; set a short per-task slice with sched_setattr (6.12+) or change base_slice_ns instead.
+
+A: EEVDF removed `sched_latency_ns`, `sched_min_granularity_ns`, and `sched_wakeup_granularity_ns`, so a script or `tuned` profile writing them fails or writes nothing. Under EEVDF, weight sets a task's share of CPU and slice sets how soon it runs: a shorter slice gives an earlier virtual deadline, so the task is picked sooner after wakeup, without getting more total CPU. The global default is `base_slice_ns` in `/sys/kernel/debug/sched/`, 0.75 ms x (1 + log2(min(CPUs, 8))), which is 3 ms on 8+ CPUs. From 6.12 a thread can request its own slice through `sched_setattr()` with `sched_runtime`, the per-task control that took the place of the unmerged latency-nice proposal. Measure the effect with `runqlat` before and after, since run-queue wait is what the slice changes.
 
 **Q: Why does a syscall cost 300-500 nanoseconds today when it was 60-80 nanoseconds before 2018, and what do you do about it?**
 **Short:** Spectre and Meltdown mitigations sit exactly on the user/kernel boundary, and the fix is to make fewer syscalls rather than to disable them.
@@ -1094,6 +1145,11 @@ A: The latency ladder has a hard boundary between roughly 1us and 100us: below i
 **Short:** Every difference is environmental, so enumerate the environment: cgroup limits, real storage, real RTT, real memory pressure, and neighbours on the node.
 
 A: Identical code plus different latency means the difference is in what the code is running *on*, and there is a short list. Check CFS throttling first (`nr_throttled / nr_periods` in `cpu.stat`) since it is the most common and the most invisible — a laptop has no quota. Check storage: the laptop has local NVMe at 50us, production may have network-attached storage at 900us, an 18x difference on every read, measurable with `fio` and `biolatency`. Check the network: a laptop's dependencies are on localhost at 50us, production's are cross-AZ at 1-2ms and possibly cross-region at 65ms, and any per-item loop multiplies that difference. Check memory: the laptop is not near a `memory.max`, so it never sees the reclaim ramp that degrades latency long before anything is OOM-killed. Check page cache: the laptop's dataset fits in RAM and production's does not, which is a 10-20x difference that a warm local benchmark actively hides. Check neighbours: production shares a node, so run-queue latency and PSI are real there and zero locally. Each of these has a one-command check, and running all six takes minutes.
+
+**Q: What is sched_ext, and when would a backend team use it?**
+**Short:** A Linux 6.12 scheduler class whose policy is a BPF program loaded at run time, used to try node-level scheduling policies without a kernel rebuild and with automatic fallback.
+
+A: With `CONFIG_SCHED_CLASS_EXT`, a user-space loader attaches a BPF scheduler (for example `scx_rusty`, `scx_lavd`, or Meta's `scx_layered` from the `sched-ext/scx` project) and normal tasks move to it; with `SCX_OPS_SWITCH_PARTIAL` only tasks set to `SCHED_EXT` move. Safety comes from the fallback: if the program errors or a runnable task stalls past the watchdog limit, the kernel aborts it and returns every task to the fair class, and SysRq-S does the same by hand. The use case is a team that owns its nodes and has a mixed workload, such as keeping request threads on reserved cores while batch jobs fill the rest, where it wants to A/B a policy on a few hosts and roll it back in seconds. It is not a fix for Kubernetes throttling, and whether a given BPF scheduler enforces `cpu.max` depends on the scheduler, so verify `nr_throttled` before trusting limits under it.
 
 ---
 

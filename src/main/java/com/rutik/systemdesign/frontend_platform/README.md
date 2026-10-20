@@ -56,10 +56,11 @@ game — which is used throughout as a worked example of the platform without a 
 | 14 | [modules_bundling_and_the_build_pipeline](modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md) | 3 — Runtimes, Build & Toolchain | Advanced | ESM semantics, tree-shaking and what defeats it, code splitting, Vite 8 on Rolldown, Turbopack, HMR, source maps |
 | 15 | [package_management_and_supply_chain](package_management_and_supply_chain/package_management_and_supply_chain.md) | 3 — Runtimes, Build & Toolchain | Intermediate | npm/pnpm/yarn resolution, lockfiles, workspaces and task graphs, peer deps and duplicate React, provenance |
 | 16 | [linting_formatting_and_code_quality](linting_formatting_and_code_quality/linting_formatting_and_code_quality.md) | 3 — Runtimes, Build & Toolchain | Intermediate | ESLint 10 flat config, typescript-eslint type-aware rules and their cost, Biome, oxlint, Prettier |
-| 17 | [web_performance_and_core_web_vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | 4 — Quality & Delivery | Advanced | LCP, INP, CLS at p75 via CrUX; lab vs field; resource hints; images and fonts; the performance budget |
-| 18 | [accessibility_and_wcag](accessibility_and_wcag/accessibility_and_wcag.md) | 4 — Quality & Delivery | Intermediate | WCAG 2.2 AA, the accessibility tree, semantic HTML first, ARIA as last resort, keyboard and focus, axe in CI |
-| 19 | [pwa_service_workers_and_offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | 4 — Quality & Delivery | Advanced | Storage APIs and quotas, SW lifecycle and scope traps, caching strategies, background sync, install and update UX |
-| 20 | [frontend_delivery_and_observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | 4 — Quality & Delivery | Advanced | Static hosting and edge, immutable hashed assets, the post-deploy chunk 404, RUM, source-map upload, client OpenTelemetry |
+| 17 | [frontend_testing_and_ci](frontend_testing_and_ci/frontend_testing_and_ci.md) | 3 — Runtimes, Build & Toolchain | Advanced | jsdom vs happy-dom vs a real browser, Vitest 5 browser mode, MSW 3 at the network boundary, Playwright traces and sharding, flake taxonomy and quarantine, visual regression economics, CI budget gates |
+| 18 | [web_performance_and_core_web_vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | 4 — Quality & Delivery | Advanced | LCP, INP, CLS at p75 via CrUX; lab vs field; resource hints; images and fonts; the performance budget |
+| 19 | [accessibility_and_wcag](accessibility_and_wcag/accessibility_and_wcag.md) | 4 — Quality & Delivery | Intermediate | WCAG 2.2 AA, the accessibility tree, semantic HTML first, ARIA as last resort, keyboard and focus, axe in CI |
+| 20 | [pwa_service_workers_and_offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | 4 — Quality & Delivery | Advanced | Storage APIs and quotas, SW lifecycle and scope traps, caching strategies, background sync, install and update UX |
+| 21 | [frontend_delivery_and_observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | 4 — Quality & Delivery | Advanced | Static hosting and edge, immutable hashed assets, the post-deploy chunk 404, RUM, source-map upload, client OpenTelemetry |
 
 ---
 
@@ -68,7 +69,7 @@ game — which is used throughout as a worked example of the platform without a 
 ```mermaid
 flowchart LR
     p1(["Phase 1<br/>The Browser<br/>6 modules"]) --> p2(["Phase 2<br/>The Network from<br/>the Client<br/>5 modules"])
-    p2 --> p3(["Phase 3<br/>Runtimes, Build<br/>and Toolchain<br/>5 modules"])
+    p2 --> p3(["Phase 3<br/>Runtimes, Build<br/>and Toolchain<br/>6 modules"])
     p3 --> p4(["Phase 4<br/>Quality and<br/>Delivery<br/>4 modules"])
     classDef brow fill:#2c313a,stroke:#61afef,color:#abb2bf
     classDef netw fill:#2c313a,stroke:#e06c75,color:#abb2bf
@@ -101,7 +102,7 @@ flowchart LR
 | 10 | [Auth in the Browser](auth_in_the_browser/auth_in_the_browser.md) | Where the token actually lives, and what that costs you |
 | 11 | [Realtime in the Browser](realtime_in_the_browser/realtime_in_the_browser.md) | Reconnect, ordering and presence from the client's side |
 
-### Phase 3 — Runtimes, Build & Toolchain (5 modules)
+### Phase 3 — Runtimes, Build & Toolchain (6 modules)
 
 | # | Module | Why it is here |
 |---|--------|----------------|
@@ -110,25 +111,26 @@ flowchart LR
 | 14 | [Modules, Bundling & the Build Pipeline](modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md) | What actually ships, and why it is bigger than you think |
 | 15 | [Package Management & Supply Chain](package_management_and_supply_chain/package_management_and_supply_chain.md) | Resolution, lockfiles, and the attack surface of `node_modules` |
 | 16 | [Linting, Formatting & Code Quality](linting_formatting_and_code_quality/linting_formatting_and_code_quality.md) | And the classes of bug a linter structurally cannot catch |
+| 17 | [Front-End Testing & CI](frontend_testing_and_ci/frontend_testing_and_ci.md) | Which environment owns each fact under test, and how CI keeps the suite fast and trusted |
 
 ### Phase 4 — Quality & Delivery (4 modules)
 
 | # | Module | Why it is here |
 |---|--------|----------------|
-| 17 | [Web Performance & Core Web Vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | The metrics you are measured on, and the incident narrative behind them |
-| 18 | [Accessibility & WCAG](accessibility_and_wcag/accessibility_and_wcag.md) | A legal requirement, a quality bar, and an interview topic |
-| 19 | [PWA, Service Workers & Offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | Storage, caching strategy, and the update trap that bricks a deploy |
-| 20 | [Frontend Delivery & Observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | Shipping it, and knowing what happened after you did |
+| 18 | [Web Performance & Core Web Vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | The metrics you are measured on, and the incident narrative behind them |
+| 19 | [Accessibility & WCAG](accessibility_and_wcag/accessibility_and_wcag.md) | A legal requirement, a quality bar, and an interview topic |
+| 20 | [PWA, Service Workers & Offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | Storage, caching strategy, and the update trap that bricks a deploy |
+| 21 | [Frontend Delivery & Observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | Shipping it, and knowing what happened after you did |
 
 **Dependencies to note:**
 
 - **Phase 1 is a prerequisite for [`../react/`](../react/README.md).** React's styling,
   performance and rendering modules all assume the pipeline, the DOM and the cascade.
-- Module 6 (event loop) precedes module 12 (memory/perf debugging) and module 17 (Web
+- Module 6 (event loop) precedes module 12 (memory/perf debugging) and module 18 (Web
   Vitals) — INP is a scheduling problem before it is anything else.
-- Module 14 (bundling) precedes module 20 (delivery): you cannot reason about cache
+- Module 14 (bundling) precedes module 21 (delivery): you cannot reason about cache
   invalidation without knowing what a content hash is over.
-- Modules 5 and 18 are deliberately adjacent in concern: `prefers-reduced-motion` is an
+- Modules 5 and 19 are deliberately adjacent in concern: `prefers-reduced-motion` is an
   accessibility requirement, not a nicety.
 
 ---
@@ -139,7 +141,7 @@ This section is exhaustive by design. That is right for a reference and wrong fo
 two weeks from an interview, so there are **three ways through it**; the game's Study view
 surfaces them as a Full / Senior / Principal toggle.
 
-### Full Path (20 modules)
+### Full Path (21 modules)
 
 The complete curriculum in the order above — see
 [4-Phase Learning Path](#3-4-phase-learning-path). Nothing is dropped.
@@ -149,7 +151,7 @@ can you build it, debug it at 3am, and say why it broke. Principal is the judgme
 approach at what cost, what the failure modes are, and what you tell a team *not* to do.
 
 <!-- study-path-table senior -->
-### Senior Path (20 modules)
+### Senior Path (21 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -169,14 +171,15 @@ approach at what cost, what the failure modes are, and what you tell a team *not
 | 14 | [modules_bundling_and_the_build_pipeline](modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md) | module page only |
 | 15 | [package_management_and_supply_chain](package_management_and_supply_chain/package_management_and_supply_chain.md) | module page only |
 | 16 | [linting_formatting_and_code_quality](linting_formatting_and_code_quality/linting_formatting_and_code_quality.md) | module page only |
-| 17 | [web_performance_and_core_web_vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | module page only |
-| 18 | [accessibility_and_wcag](accessibility_and_wcag/accessibility_and_wcag.md) | module page only |
-| 19 | [pwa_service_workers_and_offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | module page only |
-| 20 | [frontend_delivery_and_observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | module page only |
+| 17 | [frontend_testing_and_ci](frontend_testing_and_ci/frontend_testing_and_ci.md) | module page only |
+| 18 | [web_performance_and_core_web_vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | module page only |
+| 19 | [accessibility_and_wcag](accessibility_and_wcag/accessibility_and_wcag.md) | module page only |
+| 20 | [pwa_service_workers_and_offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | module page only |
+| 21 | [frontend_delivery_and_observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | module page only |
 <!-- /study-path-table -->
 
 <!-- study-path-table principal -->
-### Principal Path (12 modules)
+### Principal Path (13 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -189,32 +192,33 @@ approach at what cost, what the failure modes are, and what you tell a team *not
 | 13 | [the_node_and_edge_runtimes](the_node_and_edge_runtimes/the_node_and_edge_runtimes.md) | module page only |
 | 14 | [modules_bundling_and_the_build_pipeline](modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md) | module page only |
 | 15 | [package_management_and_supply_chain](package_management_and_supply_chain/package_management_and_supply_chain.md) | module page only |
-| 17 | [web_performance_and_core_web_vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | module page only |
-| 19 | [pwa_service_workers_and_offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | module page only |
-| 20 | [frontend_delivery_and_observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | module page only |
+| 17 | [frontend_testing_and_ci](frontend_testing_and_ci/frontend_testing_and_ci.md) | module page only |
+| 18 | [web_performance_and_core_web_vitals](web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) | module page only |
+| 20 | [pwa_service_workers_and_offline](pwa_service_workers_and_offline/pwa_service_workers_and_offline.md) | module page only |
+| 21 | [frontend_delivery_and_observability](frontend_delivery_and_observability/frontend_delivery_and_observability.md) | module page only |
 
-**Not in this path** (8 of 20, Full Path only): `javascript_language_semantics`, `browser_architecture_and_the_rendering_pipeline`, `the_dom_and_web_apis`, `css_layout_and_the_cascade`, `css_animation_and_motion`, `realtime_in_the_browser`, `linting_formatting_and_code_quality`, `accessibility_and_wcag`
+**Not in this path** (8 of 21, Full Path only): `javascript_language_semantics`, `browser_architecture_and_the_rendering_pipeline`, `the_dom_and_web_apis`, `css_layout_and_the_cascade`, `css_animation_and_motion`, `realtime_in_the_browser`, `linting_formatting_and_code_quality`, `accessibility_and_wcag`
 <!-- /study-path-table -->
 
 ---
 
 ## 4. Version Notes
 
-Verified 2026-09-02. Re-check against each project's own release page before writing a
+Verified 2026-10-18 against each project's registry dist-tags or release page. Re-check against each project's own release page before writing a
 version number into prose — this section pins faster-moving things than any other in the repo.
 
 | Area | Pin | Note |
 |------|-----|------|
 | Node.js | **26 Current**, **24 "Krypton" Active LTS** | 24 started 2025-05-06, 30-month window |
-| Vite | **8**, on **Rolldown** | Rolldown is the default bundler; the old esbuild-dev / Rollup-build split is gone |
+| Vite | **8**, on **Rolldown** | Rolldown bundles both dev and build; Oxc transforms and minifies JS and Lightning CSS minifies CSS |
 | ESLint | **10** | flat config only — `eslintrc` fully removed. ESLint 9 reached EOL 2026-08-06 |
-| typescript-eslint | **8.69.0** | does not yet support TypeScript 7 / tsgo |
+| typescript-eslint | **8.71.2** | does not yet support TypeScript 7 / tsgo |
 | Biome / oxlint | **2.5** / type-aware **GA 2026-07-22** | oxlint's type-aware linting is no longer alpha; docs still note incomplete rule coverage |
-| esbuild / swc | **0.28.2** / **1.16.1** | neither is declared legacy; Rolldown displaces esbuild's dev-server role only |
-| pnpm / npm / Yarn Berry | **11.25.0** / **12.0.2** / **4.18.0** | pnpm 12 (Rust rewrite) went stable 2026-08-26 under the `next-12` tag |
-| Turborepo / Nx | **2.10.12** / **23.2.0** | |
-| Prettier | **3.9.6** | |
-| Deno / Bun | **2.9** / **1.4.0** | |
+| esbuild / swc | **0.28.2** / **1.16.18** | neither is declared legacy; Vite 8 calls esbuild only on opt-in (`build.minify: 'esbuild'`), so it is an optional peer dependency |
+| pnpm / npm / Yarn Berry | **12.14.0** / **12.2.0** / **4.18.1** | pnpm 12 (Rust rewrite) is `latest` since 2026-10-15, 11.x is `latest-11` (11.28.6); npm 12 blocks dependency lifecycle scripts unless `allowScripts` permits them |
+| Turborepo / Nx | **2.11.9** / **23.3.0** | |
+| Prettier | **3.9.10** | |
+| Deno / Bun | **2.9** / **1.4.3** | |
 
 ### The metric and standard pins that answers are graded against
 
@@ -223,11 +227,13 @@ version number into prose — this section pins faster-moving things than any ot
 URL must pass all three to pass overall. **INP fully replaced FID in March 2024**; do not
 teach FID as current. INP is the most commonly failed of the three.
 
-**Accessibility.** **WCAG 2.2 AA is the operative standard** — ADA, Section 508 and the
-European Accessibility Act all reference it, and it is what an audit tests against.
-**WCAG 3.0 is a W3C Working Draft** (latest 2026-03-03): 174 "requirements" rather than
-success criteria, and a Bronze/Silver/Gold model in place of A/AA/AAA, where Bronze is
-roughly today's 2.2 AA. Candidate Recommendation is targeted for **Q4 2027** and legal
+**Accessibility.** **WCAG 2.2 AA is the engineering target** and what an audit tests
+against. The laws cite older versions: the ADA Title II rule adopts 2.1 AA, Section 508
+incorporates 2.0 AA, and the European Accessibility Act applies through EN 301 549 v3.2.1,
+which maps to 2.1 AA. Content that meets 2.2 AA meets all three.
+**WCAG 3.0 is a W3C Working Draft** (latest 2026-09-10): 180 requirements (106 core, 74
+supplemental) plus 35 assertions; conformance means every core requirement is met, and
+Bronze/Silver/Gold are reporting tiers above it. Candidate Recommendation is targeted for **Q4 2027** and legal
 adoption is estimated 2030 or later. Teach 2.2 AA as actionable; mention 3.0 as direction
 only.
 
@@ -321,40 +327,30 @@ delivery pipeline as the system under design, with no framework in the problem s
    VoiceOver; axe-in-CI as a ratchet rather than a gate; writing the VPAT/ACR; and the
    roughly 30-40% of real barriers that no automated tool can see.
 
-### Planned modules (5, ranked)
+### Planned modules (4, ranked)
 
-1. **`frontend_testing_and_ci`** — sibling of `linting_formatting_and_code_quality`.
-   **The section's largest structural hole.** This section's own `CLAUDE.md` names front-end
-   testing as one of the repo hard-zeros the section exists to close, and then never writes
-   it: section-wide grep gives Vitest **0**, "unit test" **0**, MSW **0**, "test pyramid"
-   **0**, "visual regression" **0**. `react/testing_and_frontend_ci` does not cover it —
-   that module is framework-scoped by construction. Cover: jsdom versus a real browser and
-   when the difference bites; Vitest browser mode; MSW at the network boundary instead of
-   module mocks; Playwright as a platform tool (traces, fixtures, sharding); a flake
-   taxonomy and a quarantine policy; the false-positive economics of visual regression; and
-   budget gates in CI.
-2. **`images_media_and_fonts`** — sibling of `web_performance_and_core_web_vitals`, which
+1. **`images_media_and_fonts`** — sibling of `web_performance_and_core_web_vitals`, which
    currently rents the entire topic. Cover: `sizes`/`srcset` arithmetic and the specific
    ways it goes wrong; art direction versus resolution switching; AVIF/WebP/JPEG-XL with
    byte math rather than adjectives; how `loading`, `decoding` and `fetchpriority` interact;
    video and HLS basics; variable fonts; subsetting and `unicode-range` (**0** hits
    repo-wide); `size-adjust` and `ascent-override`; and the CLS that is attributable to
    media specifically.
-3. **`internationalization_and_intl`** — sibling of `css_layout_and_the_cascade`, which owns
+2. **`internationalization_and_intl`** — sibling of `css_layout_and_the_cascade`, which owns
    logical properties and RTL today and has nothing to hand off to. Near-total zero:
    `Intl.` **2** hits, "i18n" **0**, "pluraliz" **0**, "hreflang" **0**. Cover: locale
    negotiation; the `Intl` formatter family; ICU message format and why string concatenation
    breaks under plurals and gender; per-locale bundle splitting — the bundling module's own
    §14 uses a locale glob as its BROKEN example and never explains i18n; `lang`/`dir` and
    bidi isolation; and currency and timezone traps.
-4. **`web_workers_and_client_threading`** — sibling of `the_event_loop_and_scheduling`.
+3. **`web_workers_and_client_threading`** — sibling of `the_event_loop_and_scheduling`.
    Cover: worker lifecycle and its real cost; `postMessage` structured clone versus
    transferables with measured copy cost; SharedArrayBuffer and Atomics under cross-origin
    isolation (COOP/COEP is taught in the security module and currently has nowhere to land);
    worker pools; OffscreenCanvas; and SharedWorker plus cross-tab leader election — which is
    also the fix for the 30-open-sockets problem `realtime_in_the_browser` raises in its own
    §10 and §12.
-5. **`client_storage_and_indexeddb`** — sibling of `pwa_service_workers_and_offline`. All
+4. **`client_storage_and_indexeddb`** — sibling of `pwa_service_workers_and_offline`. All
    23 IndexedDB hits in the section sit inside the PWA module, and `the_dom_and_web_apis`
    mentions it **zero** times. Cover: choosing among localStorage, IndexedDB, the Cache API
    and OPFS; transaction and index semantics; quota estimation and eviction (Chromium at
@@ -368,8 +364,7 @@ Every row was verified at zero or near-zero mentions section-wide.
 | Gap | Belongs in |
 |---|---|
 | FedCM | `auth_in_the_browser` |
-| Third-party-cookie deprecation status (Chrome's 2025 reversal to user choice) | `cors_cookies_and_the_same_origin_model` |
-| Storage Access API; Private Network Access | `cors_cookies_and_the_same_origin_model` |
+| Storage Access API; Local Network Access (prose in §6) | `cors_cookies_and_the_same_origin_model` |
 | DOM clobbering | `browser_security_and_the_client_threat_model` |
 | Speculation Rules API | `web_performance_and_core_web_vitals`, `http_in_the_browser_and_fetch` |
 | Early Hints (103) | `http_in_the_browser_and_fetch` |
@@ -384,13 +379,14 @@ Every row was verified at zero or near-zero mentions section-wide.
 | Feature detection / progressive enhancement / Baseline-as-method | currently ownerless; "Baseline" is cited 24 times across 5 modules as a *fact* and never taught as a *method* |
 | Client-side routing and the Navigation API | homeless between this section and `react/meta_frameworks_and_routing` — needs an owner decision before anyone writes it |
 
-**Pair FedCM with the third-party-cookie row and fix them in one edit.** They are the two
-halves of the same story — why the platform is retiring ambient third-party credentials —
-and today neither module mentions either topic or points at the other.
+**FedCM pairs with the third-party-cookie status.** `cors_cookies_and_the_same_origin_model`
+§6.5 states that status: Safari blocks third-party cookies, Firefox partitions them, and
+Chrome keeps them after Google retired most Privacy Sandbox APIs on 2025-10-17, keeping CHIPS
+and FedCM. `auth_in_the_browser` does not mention FedCM, and neither module links the other.
 
-Storage Access API and Private Network Access were added to
-`cors_cookies_and_the_same_origin_model` §12 on 2026-09-04; both still deserve prose
-treatment in §6, which is why the row stays.
+The Storage Access API and Local Network Access (which replaced Private Network Access in
+Chrome 142) are Q&As in `cors_cookies_and_the_same_origin_model` §12; both still need prose
+in §6, which is why the row stays.
 
 ### Planned section-level expansions
 
@@ -425,26 +421,27 @@ carrying an authored `**Short:**` line), all 14 template sections.
 
 | # | File | Phase | Status | Q&As | Lines |
 |---|------|-------|--------|-----:|------:|
-| 1 | `javascript_language_semantics/javascript_language_semantics.md` | 1 | **done** | 18 | 900 |
+| 1 | `javascript_language_semantics/javascript_language_semantics.md` | 1 | **done** | 20 | 1004 |
 | 2 | `browser_architecture_and_the_rendering_pipeline/browser_architecture_and_the_rendering_pipeline.md` | 1 | **done** | 18 | 880 |
-| 3 | `the_dom_and_web_apis/the_dom_and_web_apis.md` | 1 | **done** | 18 | 880 |
+| 3 | `the_dom_and_web_apis/the_dom_and_web_apis.md` | 1 | **done** | 18 | 885 |
 | 4 | `css_layout_and_the_cascade/css_layout_and_the_cascade.md` | 1 | **done** | 18 | 873 |
-| 5 | `css_animation_and_motion/css_animation_and_motion.md` | 1 | **done** | 16 | 900 |
+| 5 | `css_animation_and_motion/css_animation_and_motion.md` | 1 | **done** | 16 | 937 |
 | 6 | `the_event_loop_and_scheduling/the_event_loop_and_scheduling.md` | 1 | **done** | 18 | 883 |
-| 7 | `http_in_the_browser_and_fetch/http_in_the_browser_and_fetch.md` | 2 | **done** | 18 | 880 |
-| 8 | `cors_cookies_and_the_same_origin_model/cors_cookies_and_the_same_origin_model.md` | 2 | **done** | 16 | 845 |
-| 9 | `browser_security_and_the_client_threat_model/browser_security_and_the_client_threat_model.md` | 2 | **done** | 18 | 879 |
-| 10 | `auth_in_the_browser/auth_in_the_browser.md` | 2 | **done** | 16 | 880 |
-| 11 | `realtime_in_the_browser/realtime_in_the_browser.md` | 2 | **done** | 16 | 880 |
+| 7 | `http_in_the_browser_and_fetch/http_in_the_browser_and_fetch.md` | 2 | **done** | 21 | 996 |
+| 8 | `cors_cookies_and_the_same_origin_model/cors_cookies_and_the_same_origin_model.md` | 2 | **done** | 18 | 878 |
+| 9 | `browser_security_and_the_client_threat_model/browser_security_and_the_client_threat_model.md` | 2 | **done** | 20 | 977 |
+| 10 | `auth_in_the_browser/auth_in_the_browser.md` | 2 | **done** | 16 | 882 |
+| 11 | `realtime_in_the_browser/realtime_in_the_browser.md` | 2 | **done** | 17 | 969 |
 | 12 | `client_memory_and_performance_debugging/client_memory_and_performance_debugging.md` | 3 | **done** | 18 | 893 |
-| 13 | `the_node_and_edge_runtimes/the_node_and_edge_runtimes.md` | 3 | **done** | 18 | 879 |
-| 14 | `modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md` | 3 | **done** | 18 | 879 |
-| 15 | `package_management_and_supply_chain/package_management_and_supply_chain.md` | 3 | **done** | 18 | 875 |
+| 13 | `the_node_and_edge_runtimes/the_node_and_edge_runtimes.md` | 3 | **done** | 18 | 882 |
+| 14 | `modules_bundling_and_the_build_pipeline/modules_bundling_and_the_build_pipeline.md` | 3 | **done** | 19 | 950 |
+| 15 | `package_management_and_supply_chain/package_management_and_supply_chain.md` | 3 | **done** | 19 | 896 |
 | 16 | `linting_formatting_and_code_quality/linting_formatting_and_code_quality.md` | 3 | **done** | 16 | 887 |
-| 17 | `web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md` | 4 | **done** | 18 | 900 |
-| 18 | `accessibility_and_wcag/accessibility_and_wcag.md` | 4 | **done** | 18 | 881 |
-| 19 | `pwa_service_workers_and_offline/pwa_service_workers_and_offline.md` | 4 | **done** | 18 | 879 |
-| 20 | `frontend_delivery_and_observability/frontend_delivery_and_observability.md` | 4 | **done** | 18 | 941 |
+| 17 | `frontend_testing_and_ci/frontend_testing_and_ci.md` | 3 | **done** | 17 | 899 |
+| 18 | `web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md` | 4 | **done** | 18 | 915 |
+| 19 | `accessibility_and_wcag/accessibility_and_wcag.md` | 4 | **done** | 18 | 940 |
+| 20 | `pwa_service_workers_and_offline/pwa_service_workers_and_offline.md` | 4 | **done** | 19 | 916 |
+| 21 | `frontend_delivery_and_observability/frontend_delivery_and_observability.md` | 4 | **done** | 18 | 995 |
 
 ### Conventions reminder (for future batch agents)
 
@@ -510,4 +507,6 @@ css_animation_and_motion
   css_animation_and_motion.md  senior
 frontend_delivery_and_observability
   frontend_delivery_and_observability.md  senior, principal
+frontend_testing_and_ci
+  frontend_testing_and_ci.md  senior, principal
 -->

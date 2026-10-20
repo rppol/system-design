@@ -737,15 +737,15 @@ In production, base model drift can be masked by the ensemble's average. Track e
 | Tool | Version | Role |
 |------|---------|------|
 | scikit-learn | 1.4+ | RandomForest, ExtraTrees, VotingClassifier, StackingClassifier, GradientBoostingClassifier |
-| XGBoost | 2.0+ | Gradient boosting, GPU support, DART, monotone constraints |
+| XGBoost | 3.0+ | Gradient boosting, GPU support, DART, monotone constraints |
 | LightGBM | 4.0+ | Fast GBDT, GOSS, EFB, categorical support |
 | CatBoost | 1.2+ | Ordered boosting, native categoricals, symmetric trees |
 | SHAP | 0.44+ | TreeSHAP for feature importance explanation across all tree ensembles |
-| Optuna | 3.0+ | Hyperparameter optimisation for ensemble members |
-| MLflow | 2.0+ | Tracking ensemble experiments, registering models |
+| Optuna | 5.0+ | Hyperparameter optimisation for ensemble members |
+| MLflow | 3.0+ | Tracking ensemble experiments, registering models |
 | BentoML / Seldon | latest | Serving multiple models with ensemble logic |
 
-Every default value quoted in this module and its sub-files was checked against **scikit-learn 1.9, XGBoost 3.3, LightGBM 4.7** (the releases current as of July 2026). Defaults in these libraries do move — sklearn's `RandomForestClassifier.max_features` went `"auto"` → `"sqrt"` in 1.1 and `"auto"` was later removed; XGBoost dropped `use_label_encoder` and moved `early_stopping_rounds` from `fit()` to the constructor; LightGBM moved GOSS from `boosting_type` to `data_sample_strategy`. Re-check against your pinned versions before copying a config.
+Every default value quoted in this module and its sub-files was checked against **scikit-learn 1.9, XGBoost 3.4.1, LightGBM 4.7** (checked August 2026). Defaults in these libraries do move: sklearn's `RandomForestClassifier.max_features` went `"auto"` → `"sqrt"` in 1.1 and `"auto"` was later removed; XGBoost dropped `use_label_encoder` and moved `early_stopping_rounds` from `fit()` to the constructor; LightGBM moved GOSS from `boosting_type` to `data_sample_strategy`. Re-check against your pinned versions before copying a config.
 
 ---
 

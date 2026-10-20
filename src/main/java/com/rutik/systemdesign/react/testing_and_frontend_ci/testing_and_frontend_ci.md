@@ -10,7 +10,7 @@ That framing decides the whole design. React Testing Library exists because the 
 
 **This module owns test-runner mechanics for the whole front-end track.** Query selection, `act()`, `userEvent`, network mocking, browser-mode component tests, Playwright, and the CI pipeline that runs all of it. Type-level assertions — `expectTypeOf`, `tsd`, testing that a generic infers what you claimed — belong to [Testing Typed Code](../../typescript/testing_typed_code/testing_typed_code.md), which defers runner mechanics here. WCAG success criteria and axe rule mapping belong to [Accessibility and WCAG](../../frontend_platform/accessibility_and_wcag/accessibility_and_wcag.md); the React-level ARIA patterns the tests here assert on belong to [Accessible Component Patterns](../accessible_component_patterns/accessible_component_patterns.md).
 
-The versions this module is written against, verified 2026-09-04: `@testing-library/react` **16.3.3** (React 19 compatible), **Vitest 4.1.11**, **Jest 30.4.2**, **MSW v2**, **Storybook 10** (ESM-only). Playwright and Cypress move fast enough that pinning a number here would be wrong within a quarter, so this module describes their capabilities and not their release numbers.
+The versions this module is written against, verified 2026-10-18: `@testing-library/react` **16.3.3** (React 19 compatible), **Vitest 5.0.5**, **Jest 30.5.2**, **MSW 3.0.3**, **Storybook 10** (ESM-only). Vitest 5 (2026-09-03) needs Node 22.12+ and Vite 6.4+, defaults `clearMocks` to `true`, and fails a test whose `resolves`, `rejects` or `toMatchFileSnapshot` assertion is not awaited. MSW 3 (2026-09-28) is ESM-only and needs Node 22+ and TypeScript 5.9+. Playwright and Cypress move fast enough that pinning a number here would be wrong within a quarter, so this module describes their capabilities and not their release numbers.
 
 ---
 
@@ -309,7 +309,7 @@ test("shows the order total", async () => {
 
 The second shape is the component's fault: a `setState` in a `.then()` with no cancellation, firing after unmount. React 18 removed the "cannot update an unmounted component" warning because it produced too many false positives, but the underlying pattern is still a leak, and an `AbortController` or a mounted-flag in the effect cleanup is the fix. [Effects and Synchronization](../effects_and_synchronization/effects_and_synchronization.md) owns that cleanup contract.
 
-### 6.4 MSW v2: intercepting the network
+### 6.4 MSW 3: intercepting the network
 
 MSW registers a request interceptor — `http`/`https` module patching plus `fetch` in Node, a Service Worker in the browser — so the request leaves your application code completely and is answered at the transport boundary. Your client, your cache, your retry policy and your error mapping all execute.
 
@@ -339,7 +339,7 @@ export const server = setupServer(...handlers);
 
 // 'error' is the important flag: an un-handled request fails the test instead of
 // escaping to the real network, which is how a suite silently starts calling staging.
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 ```
@@ -360,11 +360,12 @@ The compounding win is reuse. The same `handlers` array feeds `setupWorker` for 
 
 jsdom implements the DOM API, not a browser. It has **no layout engine**: `getBoundingClientRect()` returns zeros, `offsetHeight` is 0, `IntersectionObserver` never fires, `scrollIntoView` is a no-op stub, and `getComputedStyle` returns only inline styles because no stylesheet was ever cascaded. Anything you want to assert about size, position, overflow, sticky headers, `:focus-visible` rings, container queries or contrast is not merely awkward in jsdom — it is absent.
 
-Vitest 4 browser mode runs the same test file in a real browser driven by Playwright, with the same `describe`/`expect` and a Testing-Library-shaped locator API.
+Vitest 5 browser mode runs the same test file in a real browser driven by Playwright, with the same `describe`/`expect` and a Testing-Library-shaped locator API. Locators match the full, case-sensitive text by default (`browser.locators.exact`), so `getByText("Item")` does not match `Item 1`. Setting `browser.traceView: true`, or running `vitest --browser.traceView`, records every interaction, assertion and `page.mark` into a Trace View you step through when a browser test fails in CI.
 
 ```ts
 // vitest.config.ts — two projects, one command, different environments
 import { defineConfig } from "vitest/config";
+import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
   test: {
@@ -378,7 +379,7 @@ export default defineConfig({
           include: ["**/*.browser.test.tsx"],
           browser: {
             enabled: true,
-            provider: "playwright",
+            provider: playwright(),
             headless: true,
             instances: [{ browser: "chromium" }, { browser: "webkit" }],
           },
@@ -614,7 +615,19 @@ expect(await screen.findByRole("status")).toHaveTextContent("Preparing export");
 
 **A fixed `setTimeout` as a wait.** `await new Promise(r => setTimeout(r, 500))` passes on a laptop and fails on a loaded CI runner, and it costs 500 ms every run even when the DOM settled in 12 ms.
 
-**Un-handled requests escaping to the real network.** Without `onUnhandledRequest: "error"`, a request MSW has no handler for goes out for real. Suites have been discovered calling staging from CI on every run, which is slow, non-deterministic, and occasionally writes data.
+**Un-handled requests escaping to the real network.** Without `onUnhandledFrame: "error"`, a request MSW has no handler for goes out for real. Suites have been discovered calling staging from CI on every run, which is slow, non-deterministic, and occasionally writes data.
+
+**Browser-mode locators written for substring matching.** Vitest 5 turns on `browser.locators.exact`, so a locator that only passed because it matched part of a longer string finds nothing after the upgrade, and the assertion waits out its timeout.
+
+```tsx
+// BROKEN: under Vitest 4 this matched the toast "Saved 3 changes". Under Vitest 5
+// locators match the whole text, so nothing matches and the test times out.
+await expect.element(screen.getByText("Saved")).toBeVisible();
+
+// FIX: assert the full text the user reads, or use a regex when the count varies.
+await expect.element(screen.getByText("Saved 3 changes")).toBeVisible();
+await expect.element(screen.getByText(/^Saved \d+ changes$/)).toBeVisible();
+```
 
 **Not resetting handlers between tests.** A `server.use()` override without `server.resetHandlers()` in `afterEach` leaks into every subsequent test in the file, producing a failure whose cause is in a different test entirely.
 
@@ -632,8 +645,8 @@ expect(await screen.findByRole("status")).toHaveTextContent("Preparing export");
 |------|---------|
 | Testing Library | Role-based DOM queries; `@testing-library/react` 16.3.3 for React 19 |
 | user-event | Realistic event sequences, keyboard traversal and pointer simulation |
-| Vitest | Vite-native runner, 4.1.11, with stable browser mode and blob-report sharding |
-| Jest | 30.4.2, still the default in React Native and older CRA-era codebases |
+| Vitest | Vite-native runner, 5.0.5, with stable browser mode, Trace View and blob-report sharding |
+| Jest | 30.5.2, still the default in React Native and older CRA-era codebases |
 | jsdom | The default DOM implementation, with no layout engine |
 | happy-dom | A faster, less complete jsdom alternative |
 | MSW | Network-layer request interception shared by tests, Storybook and E2E |
@@ -662,7 +675,7 @@ The warning names a component and says the update should be wrapped in `act(...)
 **Q: Why mock at the network layer with MSW instead of mocking `fetch` or the data hook?**
 **Short:** Intercepting at the transport boundary leaves the client, cache, retry policy and error mapping running, while mocking a hook deletes all of that code from the suite.
 
-`vi.mock("./useOrders")` covers the component's markup and nothing else — one team shipped a `staleTime` of 40 seconds instead of 4 for eleven days because their query configuration was never executed in a test. Stubbing `globalThis.fetch` is better but makes you hand-maintain a partial `Response`. MSW's `http` handlers returning `HttpResponse.json` answer the real request, and the same handler array feeds Storybook stories and a Playwright run, so the API is described once. Set `onUnhandledRequest: "error"` so an unmatched request fails instead of escaping to the real network.
+`vi.mock("./useOrders")` covers the component's markup and nothing else: one team shipped a `staleTime` of 40 seconds instead of 4 for eleven days because their query configuration was never executed in a test. Stubbing `globalThis.fetch` is better but makes you hand-maintain a partial `Response`. MSW's `http` handlers returning `HttpResponse.json` answer the real request, and the same handler array feeds Storybook stories and a Playwright run, so the API is described once. Set `onUnhandledFrame: "error"` so an unmatched request fails instead of escaping to the real network.
 
 **Q: What belongs in an E2E test versus a component test?**
 **Short:** Component tests own branching logic and rendering behaviour, E2E owns wiring between systems — auth, redirects, cross-page flows and real API contracts.
@@ -722,7 +735,7 @@ Extract the async work into a plain function and test it with no React involved;
 **Q: Vitest or Jest for a React codebase today?**
 **Short:** Vitest shares the Vite config and transform pipeline the app already uses, so there is no second build to keep in step, and it adds browser mode in the same runner.
 
-Vitest 4.1.11 is ESM-native, watches with Vite's HMR graph so a change reruns only the affected files, and its `expect` is Jest-compatible enough that most suites migrate with a find-and-replace of `jest.` to `vi.`. Jest 30.4.2 remains the right answer where the build is not Vite — React Native, a Metro or webpack app, a large CRA-era codebase — and its ecosystem of matchers and reporters is still the deepest. The decision is what builds your app, not which runner is newer, and a mixed repo running both is a genuinely bad outcome.
+Vitest 5.0.5 is ESM-native, watches with Vite's HMR graph so a change reruns only the affected files, and its `expect` is Jest-compatible enough that most suites migrate with a find-and-replace of `jest.` to `vi.`. It needs Node 22.12+ and Vite 6.4+. Jest 30.5.2 remains the right answer where the build is not Vite (React Native, a Metro or webpack app, a large CRA-era codebase), and its ecosystem of matchers and reporters is still the deepest. The decision is what builds your app, not which runner is newer, and a mixed repo running both is a genuinely bad outcome.
 
 **Q: What belongs in CI besides the test suite?**
 **Short:** Pixel diffs catch styling regressions no assertion describes, a standalone type-check fails in under a minute, and a bundle budget catches a size class of regression nothing else sees.
@@ -737,7 +750,7 @@ Run `tsc --noEmit` as its own job so a type error does not wait four minutes beh
 - Use `screen`, not the destructured return of `render`, so portaled dialogs and toasts stay queryable.
 - Call `userEvent.setup()` once per test before `render`, and await every interaction.
 - Use `findBy*` to wait for appearance and `queryBy*` only for synchronous absence, never `queryBy*` inside `waitFor`.
-- Mock the network with MSW handlers, run with `onUnhandledRequest: "error"`, and reset handlers in `afterEach`.
+- Mock the network with MSW handlers, run with `onUnhandledFrame: "error"`, and reset handlers in `afterEach`.
 - Share one handler array across tests, Storybook and E2E, and back it with one contract test against the real service.
 - Send layout, focus, scroll and computed-style assertions to a browser test, and keep it to 5-10% of the component suite.
 - Give each of the three to five critical journeys one Playwright test, authenticated from a stored state file, with `trace: "on-first-retry"`.

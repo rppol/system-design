@@ -4,7 +4,7 @@
 
 `import x` looks like a declaration. It is actually a function call. When the interpreter reaches that statement it invokes `__import__("x", globals(), locals(), [], 0)`, which delegates to `importlib._bootstrap._find_and_load`, and that function does five distinct things in a fixed order: check a cache, ask a chain of finder objects where the module lives, build a spec describing how to load it, bind an (initially empty) module object into that cache, and only then execute the module's top-level code to populate it. The name that ends up bound in your namespace is not "the file's contents" — it is a reference to whatever object is sitting in `sys.modules["x"]` at the moment the statement finishes.
 
-`sys.modules` is the authoritative cache, and it is an ordinary, mutable `dict`. Every import of the same fully-qualified name after the first one is a single dictionary lookup — the module's body does not run again, no matter how many files say `import x`. This module is the deep treatment of that machinery: the finder/loader protocol (`sys.meta_path`, `sys.path_hooks`, `ModuleSpec`), how to write a custom `MetaPathFinder`, why circular imports fail the way they do, what `importlib.reload()` actually does (and does not) fix, how `importlib.metadata.entry_points()` turns installed packages into a plugin registry, how to read `-X importtime` output, and PEP 810's explicit `lazy import` syntax shipping in Python 3.15. `metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md` §4.8 and §5.6 introduce the import system as an example of the same "interpreter calls a hook, hook returns something the interpreter builds an object from" shape that a metaclass uses for classes; this module is where that machinery gets the full, standalone treatment.
+`sys.modules` is the authoritative cache, and it is an ordinary, mutable `dict`. Every import of the same fully-qualified name after the first one is a single dictionary lookup — the module's body does not run again, no matter how many files say `import x`. This module is the deep treatment of that machinery: the finder/loader protocol (`sys.meta_path`, `sys.path_hooks`, `ModuleSpec`), how to write a custom `MetaPathFinder`, why circular imports fail the way they do, what `importlib.reload()` actually does (and does not) fix, how `importlib.metadata.entry_points()` turns installed packages into a plugin registry, how to read `-X importtime` output, and PEP 810's explicit `lazy import` syntax, available since Python 3.15.0. `metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md` §4.8 and §5.6 introduce the import system as an example of the same "interpreter calls a hook, hook returns something the interpreter builds an object from" shape that a metaclass uses for classes; this module is where that machinery gets the full, standalone treatment.
 
 ---
 
@@ -227,6 +227,11 @@ print(plugins.greeter.hello())  # "hi" — never touched the filesystem
 
 Inserting at the **front** of `sys.meta_path` gives `RegistryFinder` first refusal on every import in the process; returning `None` for anything it does not own lets `PathFinder` fall through to the normal filesystem search unchanged. `create_module` returning `None` is the documented way to say "use the default `ModuleType` allocation" — only override it when a loader needs a subclass of `ModuleType` or some other custom allocation step.
 
+`exec_module` is the only way to run a module body. `Loader.load_module()`, which created,
+registered, and ran the module in one call, is removed in 3.15 and the import system no longer calls
+it even when a custom loader defines it. A loader that implements only `load_module()` now fails to
+load anything; port it to `create_module` plus `exec_module` as above.
+
 ### 6.2 `importlib.util.find_spec` and what a `ModuleSpec` carries
 
 `find_spec` runs the finder chain **without executing anything** — useful for "is this importable" checks and for tooling that wants to inspect a module before committing to running it.
@@ -257,6 +262,11 @@ module = importlib.util.module_from_spec(spec)
 sys.modules["plugin_x"] = module   # do this BEFORE exec_module, matching step 4 of §5.1
 spec.loader.exec_module(module)
 ```
+
+The spec is also where a module's import metadata lives. Since 3.15 the import system no longer
+sets `__cached__`; read `module.__spec__.cached`. `__loader__` and `__package__` are deprecated and
+scheduled for removal; read `__spec__.loader` and `__spec__.parent`.
+Code that still reads `module.__cached__` gets `AttributeError` on 3.15.
 
 ### 6.3 Why `importlib.reload()` lies
 
@@ -419,6 +429,29 @@ print(mod.__name__)   # "x.y.z" — this IS the leaf module, no extra attribute 
 ```
 
 Both eventually call into `importlib._bootstrap._find_and_load` — there is exactly one resolution machinery, not two competing ones. The difference is purely in what gets *returned* and how a dotted name in a *string* (as opposed to source-level syntax) is handled: `__import__` mirrors the historically low-level C-API contract the `import` statement's bytecode expects, while `import_module` is the function to reach for whenever a module name is only known at runtime as a string — building a plugin loader (§6.4), or writing a `find_spec`-based tool.
+
+### 6.10 `.pth` import lines and PEP 829 `.start` files `[3.15]`
+
+Before any user code runs, `site` reads every `name.pth` file in each site-packages directory. A
+line holding a path is appended to `sys.path`; a line starting with `import` is passed to `exec()`.
+That second form is how editable installs, coverage hooks, and some instrumentation agents run code
+at startup, and it is also how a malicious wheel gets code execution in every Python process on the
+machine without being imported.
+
+PEP 829 adds `name.start` files. Each non-comment line is an entry point, `pkg.mod:callable`, that
+`site` resolves with `pkgutil.resolve_name()` and calls with no arguments:
+
+```text
+# site-packages/myagent.start
+myagent.bootstrap:install_hooks
+```
+
+`site` applies every path line from every `.pth` file first and only then calls the `.start` entry
+points, so startup code always sees the full `sys.path`. In 3.15, `import` lines in `.pth` files
+are deprecated: they still run, with a diagnostic only under `-v`, except that they are ignored when
+a `name.start` file with the same `name` exists. The `site` docs state that 3.18 and 3.19 will
+ignore them silently and 3.20 will warn. For auditing, a `.start` file names exactly which callable
+runs, where a `.pth` import line can hold any one-line statement. `python -S` skips both file types.
 
 ---
 
@@ -726,6 +759,19 @@ def _get_json_module():
     return json
 ```
 
+### Pitfall 7 - Two threads deadlock importing a package and its submodule (before 3.15)
+
+`pkg/sub/__init__.py` contains `from pkg.sub import mod`. Thread A runs `import pkg.sub` while
+thread B runs `import pkg.sub.mod` in the same instant. Before 3.15, each thread could take the
+per-module lock of the name it started with, then wait for the other's: A holds `pkg.sub` and needs
+`pkg.sub.mod`, B holds `pkg.sub.mod` and needs `pkg.sub` to finish. The process either hangs, or
+CPython's import-lock deadlock detection breaks the cycle by handing one thread a partly
+initialised module, which surfaces as an `AttributeError` or `ImportError` that never reproduces
+locally. Since 3.15 the import
+system takes per-module locks in hierarchical order, parent package before submodule, so this
+cycle cannot form. On older versions, import plugin packages on the main thread before starting
+worker threads.
+
 ---
 
 ## 11. Technologies & Tools
@@ -744,6 +790,7 @@ def _get_json_module():
 | `-X lazy_imports=<mode>` `[3.15]` | Forces `normal`/`all`/`none` lazy-import behavior process-wide | Also `PYTHON_LAZY_IMPORTS` env var; §6.6 |
 | `tuna` | Flame-chart visualizer for `-X importtime` output | `python -X importtime script.py 2> t.log && tuna t.log` |
 | `python -v` | Verbose import trace to stderr — every finder consulted, every file touched | Noisier and lower-level than `-X importtime`; useful for debugging *which finder* served a module |
+| `name.start` files `[3.15]` | `pkg.mod:callable` entry points that `site` calls at startup | PEP 829; replaces `import` lines in `.pth` files; §6.10 |
 
 ---
 
@@ -795,9 +842,9 @@ Do not guess — `-X importtime` (§6.5) prints every module's self and cumulati
 Each line reports two numbers in microseconds: `self` is time spent purely in that module's own top-level body, excluding any module it in turn imports; `cumulative` is `self` plus the recursively summed cost of everything it imported. Indentation encodes the import tree — a line indented one level deeper than another was imported *by* that shallower line, not by the top-level script directly (§6.5). A module can show small `self` but huge `cumulative` — that pattern flags a module whose own code is cheap but which drags in an expensive dependency tree, exactly the shape worth targeting with a function-local or `lazy import`.
 
 **Q: What are PEP 810 lazy imports, and what exactly can they not do?**
-**Short:** PEP 810's lazy import, final for 3.15, defers a module's resolution and execution until the bound name's first use, but only at module top level.
+**Short:** PEP 810's lazy import, available on Python 3.15+, defers a module's resolution and execution until the bound name's first use, but only at module top level.
 
-`lazy import json` and `lazy from pathlib import Path` (PEP 810, Final, ships in Python 3.15) bind the name immediately but defer both the finder/loader lookup and the cost of executing the target module's body until the first time the name is actually used (§6.6). `lazy` is a soft keyword, so it never collides with ordinary identifiers named `lazy` elsewhere in the code. The restriction that matters most in practice: `lazy import` is a **module-top-level-only** construct — it cannot appear inside a function body, a class body, or a `try`/`except` block, and it cannot be used with `import *` or with `from __future__ import`. That last restriction is why the classic `try: import ujson / except ImportError: import json` optional-dependency pattern cannot be made lazy — there is no lazy form of a conditional import (§10, Pitfall 6).
+`lazy import json` and `lazy from pathlib import Path` (PEP 810, Final, available since Python 3.15.0) bind the name immediately but defer both the finder/loader lookup and the cost of executing the target module's body until the first time the name is actually used (§6.6). `lazy` is a soft keyword, so it never collides with ordinary identifiers named `lazy` elsewhere in the code. The restriction that matters most in practice: `lazy import` is a **module-top-level-only** construct — it cannot appear inside a function body, a class body, or a `try`/`except` block, and it cannot be used with `import *` or with `from __future__ import`. That last restriction is why the classic `try: import ujson / except ImportError: import json` optional-dependency pattern cannot be made lazy — there is no lazy form of a conditional import (§10, Pitfall 6).
 
 **Q: How is `lazy import`'s failure behavior different from a normal import's failure, and why does that matter?**
 **Short:** A failed lazy reification is never cached, so every subsequent use retries the import instead of raising the same cached ImportError.
@@ -823,6 +870,18 @@ A function-local import (`import x` inside a `def` body) pays its cost the first
 **Short:** LazyLoader is a pre-3.15 stdlib loader wrapper achieving similar deferral, while lazy import is compiler-level syntax with defined failure semantics.
 
 `importlib.util.LazyLoader` (§6.7, available since 3.5) wraps an existing loader so the wrapped module's body executes only on first real attribute access, but it operates at the loader/module level: a caller has to build the spec, wrap the loader, and register the module in `sys.modules` by hand for every module it wants deferred, and the result is a proxy object with its own edge cases around code that inspects `sys.modules` directly. PEP 810's `lazy import` (§6.6) is language syntax the compiler recognizes, with failure-retry semantics defined by the PEP itself and a project-wide `-X lazy_imports`/`PYTHON_LAZY_IMPORTS` toggle that `LazyLoader` has no equivalent for. `LazyLoader` remains the only option on Python versions before 3.15; `lazy import` is the better choice once 3.15+ is the minimum supported version.
+
+**Q: How can an installed package run code at interpreter startup without ever being imported?**
+**Short:** site runs import lines from .pth files in site-packages at startup; 3.15 adds .start files naming a pkg.mod:callable and deprecates .pth import lines.
+
+At startup the `site` module reads every `name.pth` file in each site-packages directory. Path
+lines extend `sys.path`, and any line beginning with `import` is passed to `exec()`, so a package
+that ships a `.pth` file runs code in every Python process on the machine, whether or not anything
+imports it. Editable installs and coverage hooks use this, and so does malware in a compromised
+wheel. PEP 829 [3.15] adds `name.start` files whose lines are entry points, `pkg.mod:callable`,
+called with no arguments after all `.pth` path lines are applied. `.pth` import lines are deprecated
+in 3.15 and ignored when a matching `.start` file exists. When auditing an environment, list both
+file types in site-packages; `python -S` disables both.
 
 **Q: What is the difference between `Loader.create_module` returning `None` and returning a `ModuleType` instance?**
 **Short:** Returning None from create_module tells the import machinery to allocate the default ModuleType itself, while returning an object uses that object instead.
@@ -945,7 +1004,7 @@ import time:       850 |       3060 | mytool.cli
 **Step 5 — PEP 810 alternative on 3.15+.**
 
 ```python
-# mytool/subcommands/export.py — same effect, explicit syntax, ships in Python 3.15
+# mytool/subcommands/export.py — same effect, explicit syntax, Python 3.15+
 lazy import cloud_sdk
 
 def run() -> None:

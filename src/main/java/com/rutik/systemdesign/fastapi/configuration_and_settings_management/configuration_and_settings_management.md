@@ -19,7 +19,7 @@ Core capabilities covered in this module:
 - Feature flags as typed boolean settings fields
 - Alternatives: `dynaconf`, `python-dotenv`, raw `os.environ`
 
-Python version: 3.11/3.12. pydantic-settings: 2.x. FastAPI: 0.110+.
+Python version: 3.13/3.14. pydantic-settings: 2.16. FastAPI version: 0.140+.
 
 ---
 
@@ -344,6 +344,21 @@ stateDiagram-v2
 
 Every request served by the same worker process shares the one `Cached` instance; only a `cache_clear()` call — in the `lifespan` shutdown hook or a test fixture's teardown — resets the cycle so the next call re-validates from scratch.
 
+pydantic-settings 2.16.0 (2026-10-14) builds the same cache into the class, so the `get_settings` wrapper is optional:
+
+```python
+from typing import Annotated
+
+from fastapi import Depends
+
+SettingsDep = Annotated[Settings, Depends(Settings.settings_cached)]
+
+# tests
+Settings.settings_clear_cache()
+```
+
+`settings_cached()` builds the instance on first call and returns it afterwards, one per class per process. It takes a per-class lock, so two threads (sync `def` routes run in the threadpool) cannot both construct it, and it builds outside the global guard, so a slow cloud secret source does not block other settings classes. Subclasses get their own cache entries, and `settings_clear_cache()` clears only the class it is called on. Calling `Settings()` directly still builds a fresh, uncached instance.
+
 ### 6.2 SecretStr in practice
 
 ```python
@@ -494,8 +509,9 @@ def client(mock_settings: Settings) -> TestClient:
 | Factor | pydantic-settings | dynaconf |
 |---|---|---|
 | Pydantic integration | Native | Via plugin |
-| Multi-format (TOML, YAML, JSON) | `.env` + env vars | Yes |
-| Vault / AWS Secrets Manager | Manual | Built-in loaders |
+| Multi-format (TOML, YAML, JSON) | `TomlConfigSettingsSource`, `YamlConfigSettingsSource`, `JsonConfigSettingsSource`, `PyprojectTomlConfigSettingsSource` | Yes, plus `[production]`-style environment sections in one file |
+| Cloud secret stores | `AWSSecretsManagerSettingsSource`, `AWSSystemsManagerSettingsSource` (2.16.0), `AzureKeyVaultSettingsSource`, `GoogleSecretManagerSettingsSource` | No AWS, Azure or GCP loader; Vault and Redis loaders built in |
+| HashiCorp Vault | Custom source class | Built-in loader |
 | Nested config | `env_nested_delimiter` | Natural hierarchy |
 | Startup overhead | ~2 ms (cold, with @lru_cache = once) | ~5-10 ms |
 | Type safety | Full Pydantic v2 | Partial |
@@ -512,8 +528,8 @@ def client(mock_settings: Settings) -> TestClient:
 - The team is already using Pydantic v2 for request/response models
 
 **Use dynaconf when:**
-- Config files are in TOML or YAML and you want layered merging across files
-- You need native Vault or AWS Secrets Manager loaders without custom code
+- Config lives in TOML or YAML files with per-environment sections and layered merging across files
+- You need a built-in HashiCorp Vault loader (pydantic-settings covers AWS, Azure, and GCP secret stores but not Vault)
 - Multiple environments have deep config trees that are awkward to express as env var names
 
 **Use raw os.environ when:**
@@ -539,7 +555,7 @@ flowchart TD
 
     START(["New service<br/>needs configuration"]) --> Q1{"Building a<br/>FastAPI service?"}
     Q1 -->|"yes"| R1(["pydantic-settings<br/>+ @lru_cache"])
-    Q1 -->|"no"| Q2{"Need TOML/YAML layered<br/>files or Vault / AWS SM<br/>loaders?"}
+    Q1 -->|"no"| Q2{"Need TOML/YAML environment<br/>sections or a Vault<br/>loader?"}
     Q2 -->|"yes"| R2(["dynaconf"])
     Q2 -->|"no"| Q3{"One-off script,<br/>no third-party deps allowed?"}
     Q3 -->|"yes"| R3(["raw os.environ"])
@@ -555,7 +571,7 @@ flowchart TD
     class R4 lossN
 ```
 
-Reach for `pydantic-settings` by default, drop to `dynaconf` only when the config format itself needs to be TOML/YAML with layered merging, and treat scattered `os.getenv()` calls as the anti-pattern to grow out of once a codebase outgrows a single script.
+Reach for `pydantic-settings` by default, drop to `dynaconf` only when the config needs per-environment sections in TOML/YAML files or a HashiCorp Vault loader, and treat scattered `os.getenv()` calls as the anti-pattern to grow out of once a codebase outgrows a single script.
 
 ---
 
@@ -705,8 +721,8 @@ class Settings(BaseSettings):
 
 | Tool | Type validation | Secret masking | Layered files | Vault / AWS SM | FastAPI DI | Startup fail-fast |
 |---|---|---|---|---|---|---|
-| `pydantic-settings` 2.x | Full Pydantic v2 | `SecretStr` | Multi-file list | Manual | `Depends()` native | Yes |
-| `dynaconf` 3.x | Partial (casting) | Via Vault loader | TOML/YAML/JSON/env | Built-in | Adapter needed | Yes (with validators) |
+| `pydantic-settings` 2.16 | Full Pydantic v2 | `SecretStr` | Multi-file list; TOML/YAML/JSON/pyproject sources | AWS Secrets Manager and SSM sources built in; Vault needs a custom source | `Depends()` native | Yes |
+| `dynaconf` 3.x | Partial (casting) | Via Vault loader | TOML/YAML/JSON/env | Vault built in; AWS needs a custom loader | Adapter needed | Yes (with validators) |
 | `python-dotenv` | None | None | Single file | None | None | No |
 | `environs` | `marshmallow` based | None | Single file | None | Adapter needed | Yes |
 | Raw `os.environ` | None | None | None | None | `monkeypatch` only | No |
@@ -721,8 +737,8 @@ class Settings(BaseSettings):
 Inline `os.getenv()` calls scatter configuration reads across the codebase with no central validation, no type coercion, and no startup-time fail-fast guarantee. `BaseSettings` validates all fields at construction time, so the process refuses to start if any required variable is absent or malformed. This converts a runtime crash mid-request into a deployment failure with a clear error message listing every missing field.
 
 **Q2: What does @lru_cache on get_settings() accomplish?**
-**Short:** lru_cache on get_settings returns the same Settings instance every call, avoiding repeated env var parsing and fragile test overrides.
-`@lru_cache` makes `get_settings()` return the same `Settings` instance on every subsequent call within the same process. Without it, `Settings()` would be constructed on each call, re-reading env vars and `.env` files each time — adding ~2 ms overhead per call and making test overrides fragile. With the cache, pydantic-settings reads and validates configuration exactly once per worker process.
+**Short:** lru_cache on get_settings returns the same Settings instance every call, avoiding repeated env var parsing; pydantic-settings 2.16+ ships the same cache as Settings.settings_cached().
+`@lru_cache` makes `get_settings()` return the same `Settings` instance on every subsequent call within the same process. Without it, `Settings()` would be constructed on each call, re-reading env vars and `.env` files each time, adding ~2 ms overhead per call and making test overrides fragile. With the cache, pydantic-settings reads and validates configuration exactly once per worker process. Since pydantic-settings 2.16.0 the class does this itself: `Depends(Settings.settings_cached)` returns one instance per class per process, builds it under a per-class lock so concurrent threadpool calls cannot construct it twice, and `Settings.settings_clear_cache()` replaces `get_settings.cache_clear()` in tests.
 
 **Q3: How do you override settings in tests without modifying environment variables?**
 **Short:** Override settings via dependency_overrides on get_settings rather than mutating environment variables with monkeypatch.
@@ -773,8 +789,8 @@ Constructing the engine at import time risks building it before the deployment p
 Pydantic-settings finds no matching prefixed variable and silently falls back to the field's default value with no error raised. A service configured with `env_prefix="APP_"` that expects `APP_DATABASE_URL` but receives a plain `DATABASE_URL` from the platform connects to whatever default is coded — commonly `localhost`, which fails or worse, quietly points at a local resource in production. Because there is no missing-field error to catch, this bug surfaces only through wrong behavior, not a startup crash. Remove defaults from any field whose env var name is uncertain so a mismatch produces a loud `ValidationError` instead of a silent fallback.
 
 **Q15: When should you reach for `dynaconf` instead of `pydantic-settings` in a FastAPI project?**
-**Short:** Choose dynaconf over pydantic-settings when config needs layered TOML/YAML files or a built-in Vault or Secrets Manager loader.
-Choose `dynaconf` when configuration must live in layered TOML or YAML files with native environment sections, or when you need a built-in Vault or AWS Secrets Manager loader without writing custom fetch code. `dynaconf` costs roughly 5-10ms of startup overhead versus `pydantic-settings`' ~2ms, and its FastAPI dependency-injection integration needs a manual adapter rather than the native `Depends()` support pydantic-settings ships with. Default to `pydantic-settings` for a Pydantic-v2-native FastAPI service, and switch only when the config format itself demands file-based hierarchical merging.
+**Short:** Choose dynaconf when config needs TOML/YAML files with per-environment sections or a built-in HashiCorp Vault loader; pydantic-settings covers the cloud secret stores.
+Choose `dynaconf` when configuration must live in layered TOML or YAML files with native environment sections (`[production]` blocks), or when you need a built-in HashiCorp Vault loader. File formats and cloud secret stores alone are not a reason: pydantic-settings ships TOML, YAML, JSON and `pyproject.toml` sources plus `AWSSecretsManagerSettingsSource`, `AzureKeyVaultSettingsSource`, `GoogleSecretManagerSettingsSource`, and (since 2.16.0) `AWSSystemsManagerSettingsSource`, wired in through `settings_customise_sources`. `dynaconf` costs roughly 5-10ms of startup overhead versus `pydantic-settings`' ~2ms, and its FastAPI dependency-injection integration needs a manual adapter rather than the native `Depends()` support pydantic-settings ships with. Default to `pydantic-settings` for a Pydantic-v2-native FastAPI service, and switch only when the config format itself demands file-based hierarchical merging.
 
 **Q16: Why should a derived setting like `database_url` be computed with a `@model_validator(mode="after")` instead of a `@property`?**
 **Short:** A model_validator writes a derived setting back onto the instance so it appears in model_dump() and startup logs, unlike a property.
@@ -794,11 +810,13 @@ A `model_validator` writes the computed value back onto the model instance, so i
 
 **Log settings at startup (with SecretStr masking).** Call `logger.info("Settings loaded: %s", settings.model_dump())` in the `lifespan` startup block. This confirms which values were actually loaded in production without leaking secrets, since `SecretStr` renders as `**********` in `model_dump()`.
 
-**Clear the lru_cache in tests.** Call `get_settings.cache_clear()` in test teardown if you mutate environment variables between tests. `dependency_overrides` is cleaner and does not require cache manipulation.
+**Clear the settings cache in tests.** Call `get_settings.cache_clear()` (or `Settings.settings_clear_cache()` with the built-in cache) in test teardown if you mutate environment variables between tests. `dependency_overrides` is cleaner and does not require cache manipulation.
 
 **Use `@model_validator(mode="after")` for derived fields.** Fields that are computed from other fields (e.g., constructing `DATABASE_URL` from `DB_HOST`, `DB_PORT`, `DB_NAME`) should use a `model_validator` rather than a `@property`, so the derived value appears in `model_dump()` and is visible in startup logs.
 
-**Pin pydantic-settings to a minor version in requirements.** Pydantic-settings follows pydantic's release cadence; a minor bump occasionally changes field resolution order. Pin with `pydantic-settings>=2.3,<3.0`.
+**Pin pydantic-settings to a minor version in requirements.** Pydantic-settings follows pydantic's release cadence; a minor bump occasionally changes field resolution order. Pin with `pydantic-settings>=2.16,<3.0`, which requires Python 3.11+ and `python-dotenv>=1.2.2` (the fix for CVE-2026-28684). 2.16.0 also changed alias resolution: `validation_alias` now wins over `alias`, so values from JSON, YAML, TOML files and the CLI that were silently ignored when the two differed now load, and with `validate_by_alias=False` every source ignores aliases. Re-run config tests on the upgrade.
+
+**Set `env_file_depth` in a monorepo.** A relative `env_file=".env"` resolves against the working directory, so a script run from `services/api/scripts/` misses the `.env` two levels up and silently falls back to defaults. `env_file_depth=2` (2.16.0+) searches that many parent directories; the default `0` keeps the old behavior.
 
 **Use feature flags as boolean settings fields.** A `feature_new_onboarding: bool = False` field controlled by an env var is a simple, testable feature flag that requires no external service. Migrate to a dedicated flag service (LaunchDarkly, Unleash) only when you need per-user or per-cohort targeting.
 

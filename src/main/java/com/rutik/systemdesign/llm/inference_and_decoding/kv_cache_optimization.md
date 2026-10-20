@@ -377,9 +377,12 @@ BF16 (baseline):  bytes_per_element = 2   ->  320 KB/token (Llama-3-70B)
 FP8:              bytes_per_element = 1   ->  160 KB/token  (2x reduction)
 INT8:             bytes_per_element = 1   ->  160 KB/token  (2x reduction, needs calibration)
 INT4 / KIVI:      bytes_per_element = 0.5 ->   80 KB/token  (4x reduction)
+NVFP4:            bytes_per_element = 0.5625 -> 90 KB/token (3.6x; 0.5 B + one FP8 scale per 16)
 
 Quality impact (typical, calibrated):
   FP8/INT8 KV:  <0.5% perplexity degradation -- close to "free" on H100/H200 (native FP8)
+  NVFP4 KV:     model-dependent; E2M1 holds 8 magnitudes per sign, so the per-16 block
+                scale carries the range -- run long-context evals before enabling
   INT4/KIVI:    ~1-2% degradation -- KIVI's per-channel K / per-token V asymmetric
                 quantization specifically targets the outlier channels that make
                 naive INT4 KV quantization fail
@@ -396,15 +399,17 @@ Quantization is the only lever here that is *lossless in structure*: nothing is 
 | FP8 | 8-bit float, 1 byte. Native on H100/H200, so no dequantize penalty |
 | INT8 | 8-bit integer, 1 byte. Needs a calibrated scale per tensor/channel |
 | INT4 / KIVI | 4-bit, 0.5 bytes. KIVI quantizes K per-channel and V per-token because K's outliers concentrate in channels |
+| NVFP4 | 4-bit E2M1 values plus one FP8 E4M3 scale per 16-element block: 0.5 + 1/16 = 0.5625 bytes. vLLM `--kv-cache-dtype nvfp4` runs it on SM8x, SM90 and SM12x from v0.32.0 |
 | reduction ratio | `2 / bytes_per_element` — 2x for 8-bit, 4x for 4-bit. Nothing subtler than that |
 
 **Walk one example.** One Llama-3-70B request at 128K context, changing only the precision:
 
 ```
-  format      bytes/elt   per-token bytes            KB/token   @131,072 tokens
-  BF16          2.0       2 x 80 x 8 x 128 x 2.0 = 327,680   320       40 GiB
-  FP8 / INT8    1.0       2 x 80 x 8 x 128 x 1.0 = 163,840   160       20 GiB
-  INT4 / KIVI   0.5       2 x 80 x 8 x 128 x 0.5 =  81,920    80       10 GiB
+  format      bytes/elt per-token bytes                          KB/token   @131,072 tokens
+  BF16        2.0       2 x 80 x 8 x 128 x 2.0 =       327,680        320            40 GiB
+  FP8 / INT8  1.0       2 x 80 x 8 x 128 x 1.0 =       163,840        160            20 GiB
+  INT4 / KIVI 0.5       2 x 80 x 8 x 128 x 0.5 =        81,920         80            10 GiB
+  NVFP4       0.5625    2 x 80 x 8 x 128 x 0.5625 =     92,160         90         11.25 GiB
 
   vs the 2x H100 headroom of 12 GB computed in Section 6.2:
       BF16  40 GiB  ->  does not fit
@@ -737,7 +742,7 @@ Two things to hold onto. First, this is the technique that makes prefix caching 
 
 ## 7. Real-World Examples
 
-- **vLLM** — supports FP8 KV cache quantization (`--kv-cache-dtype fp8`), PagedAttention block management, and prefix caching; H2O/SnapKV-style eviction available via research integrations rather than core defaults.
+- **vLLM** — supports FP8 KV cache quantization (`--kv-cache-dtype fp8`) and NVFP4 (`--kv-cache-dtype nvfp4`, on SM8x, SM90 and SM12x from v0.32.0), PagedAttention block management, and prefix caching; H2O/SnapKV-style eviction available via research integrations rather than core defaults. Low-precision KV is a per-model default on Blackwell: DeepSeek-V4.1-Flash runs FlashMLA with an NVFP4 compressed KV cache by default on SM100 (v0.31.0), and GLM-5.x defaults to FP8 KV on SM100 (v0.32.0), which halved KV memory per rank for 2.3-5.5% more throughput at a 7-11% TTFT cost in the PR's benchmark.
 - **DeepSeek-V2/V3** — Multi-head Latent Attention (MLA) reduces KV cache by 93.3% vs. DeepSeek 67B (arXiv 2405.04434), roughly 15x, alongside 42.5% lower training cost and 5.76x maximum generation throughput; reported as a primary enabler of DeepSeek's aggressive context-length and cost economics.
 - **StreamingLLM (MIT, 2023)** — demonstrated stable perplexity over 4M+ token streams in constant memory using the sink + sliding window approach (Section 6.7).
 - **H2O (Heavy-Hitter Oracle, 2023)** — with a 20% KV budget on OPT-6.7B/OPT-30B, the paper reports throughput gains of up to 29× over DeepSpeed Zero-Inference and HuggingFace Accelerate and up to 3× over FlexGen, and up to 1.9× lower latency at the same batch size, via dynamic heavy-hitter retention.
@@ -797,7 +802,7 @@ Two things to hold onto. First, this is the technique that makes prefix caching 
 
 | Tool | Relevant capability |
 |------|---------------------|
-| vLLM | FP8/INT8 KV cache quantization flag, PagedAttention, prefix caching, request-level preemption |
+| vLLM | FP8, INT8 and NVFP4 KV cache dtypes (see [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) for the full `--kv-cache-dtype` list), PagedAttention, prefix caching, request-level preemption |
 | TensorRT-LLM | INT8/FP8 KV cache, paged KV cache management, optimized for H100/H200 |
 | StreamingLLM (reference impl.) | Attention-sink + sliding-window cache, MIT |
 | H2O / SnapKV / Scissorhands (research repos) | Reference implementations of dynamic and static eviction |

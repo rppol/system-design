@@ -23,7 +23,7 @@ Java has a rich profiling ecosystem: async-profiler for CPU and allocation profi
 ## 3. Core Principles
 
 - **Sample-based vs instrumentation-based**: Sample profilers periodically snapshot the call stack (low overhead). Instrumentation profilers add code to every method entry/exit (accurate but high overhead, not for production).
-- **Safepoint bias**: Traditional JVM profilers wait for safepoints to take stack samples. Code that runs frequently between safepoints (tight loops) appears to not consume CPU. async-profiler avoids safepoint bias via AsyncGetCallTrace.
+- **Safepoint bias**: Traditional JVM profilers wait for safepoints to take stack samples. Code that runs frequently between safepoints (tight loops) appears to not consume CPU. async-profiler avoids safepoint bias via AsyncGetCallTrace. JFR's sampler is also asynchronous: from JDK 25 (JEP 518, cooperative sampling) it records the interrupted thread's program counter and stack pointer, then the thread rebuilds that stack at its next safepoint, so the sample location is not biased toward safepoints.
 - **Heap allocation tracking**: Tracking every allocation is expensive. Use allocation sampling (track a sample of allocations) or allocation profiling (track allocations of specific types).
 - **Production safety**: JFR is the only profiler designed specifically for continuous production use (~1-2% overhead). async-profiler is also production-safe at intervals > 1ms.
 
@@ -37,6 +37,8 @@ Java has a rich profiling ecosystem: async-profiler for CPU and allocation profi
 |------|------|---------|----------------|---------|
 | async-profiler | CPU/alloc/lock (native) | < 5% | Yes | CPU hotspots, allocation profiling, lock contention |
 | Java Flight Recorder | Event-based | 1-2% | Yes (designed for it) | Continuous telemetry, GC, I/O, method profiling |
+| JFR CPU-time sampling (`jdk.CPUTimeSample`, JEP 509) | CPU-time sampler in the JVM | Low at the default 500 samples/s | Yes; JDK 25+, Linux only, experimental | Agent-free CPU flamegraphs that count CPU time spent in native code called from Java |
+| JFR method timing and tracing (`jdk.MethodTiming`, `jdk.MethodTrace`, JEP 520) | JVM-injected bytecode for filtered methods | Scales with call rate of the matched methods | Yes, for a narrow filter | Call count and min/avg/max time, or a stack per call, for named methods |
 | Java Mission Control (JMC) | JFR UI | None (analysis) | Yes | Analyzing JFR recordings |
 | VisualVM | CPU/heap/thread | 5-30% | Dev/test only | Interactive exploration |
 | YourKit | CPU/memory | 2-10% | Limited | Deep allocation analysis |
@@ -49,7 +51,7 @@ Java has a rich profiling ecosystem: async-profiler for CPU and allocation profi
 |----|-------------|-------------|------------|---------|
 | Serial GC | `-XX:+UseSerialGC` | N/A | High | Single-threaded, tiny heap |
 | Parallel GC | `-XX:+UseParallelGC` (was the JDK 8 default) | N/A | Highest | Batch processing |
-| G1 GC | Default collector since JDK 9 | 200ms (configurable) | High | Balanced latency/throughput |
+| G1 GC | Default on server-class machines since JDK 9; through JDK 26 ergonomics pick Serial below 2 CPUs or 1792 MB, which many container limits hit, so set `-XX:+UseG1GC` explicitly. JDK 27 (JEP 523) makes G1 the default everywhere | 200ms (configurable) | High | Balanced latency/throughput |
 | ZGC | `-XX:+UseZGC`; generational-only since JDK 24 (JEP 490) | Sub-millisecond (<1ms) | Good | Low-latency services |
 | Shenandoah | `-XX:+UseShenandoahGC`; generational mode is a product feature since JDK 25 (JEP 521), opt in with `-XX:ShenandoahGCMode=generational` | Sub-millisecond | Good | Low-latency |
 
@@ -219,7 +221,7 @@ import jdk.jfr.consumer.RecordingFile;
 
 // Start a recording
 Recording recording = new Recording();
-recording.enable("jdk.CPUSample").withSamplePeriod(Duration.ofMillis(20));
+recording.enable("jdk.ExecutionSample").withPeriod(Duration.ofMillis(20));
 recording.enable("jdk.GarbageCollection");
 recording.enable("jdk.JavaMonitorWait");
 recording.enable("jdk.SocketRead").withThreshold(Duration.ofMillis(10));
@@ -253,6 +255,27 @@ ResultSet rs = statement.executeQuery(sql);
 event.commit();  // records if duration > event threshold
 ```
 
+**JDK 25 additions: CPU-time sampling and method timing.** `jdk.ExecutionSample` fires on wall-clock intervals, picks a subset of threads that are running Java code, and can drop samples without saying so. JEP 509 adds `jdk.CPUTimeSample`, driven by the Linux kernel's per-thread CPU-time timer, so a sample is taken only after a thread has burned CPU, native code called from Java is attributed to the Java caller, and dropped samples are counted in `jdk.CPUTimeSamplesLost`. JEP 520 adds `jdk.MethodTiming` (invocation count plus approximate min, average, and max duration) and `jdk.MethodTrace` (a stack trace per call) for methods named in a filter; the JVM injects the bytecode itself and removes it when the recording stops.
+
+```bash
+# CPU-time profile, Linux only, experimental in JDK 25.
+# throttle=500/s (default) spreads 500 samples/s over all threads; throttle=10ms samples
+# each thread per 10 ms of its own CPU time (the bundled profile.jfc uses 10ms).
+java -XX:StartFlightRecording=jdk.CPUTimeSample#enabled=true,jdk.CPUTimeSample#throttle=10ms,filename=cpu.jfr -jar app.jar
+jfr view cpu-time-hot-methods cpu.jfr
+
+# Time every JAX-RS GET handler in a running JVM, no agent and no restart
+jcmd <pid> JFR.start method-timing=@jakarta.ws.rs.GET
+jcmd <pid> JFR.view method-timing
+
+# Stack per call for one method; separate several targets with ';'
+java -XX:StartFlightRecording:jdk.MethodTrace#filter=java.util.HashMap::resize,filename=trace.jfr -jar app.jar
+```
+
+JEP 520 states that it does not aim to stay within JFR's usual 1% overhead: every matched call pays for the injected event, so a filter that matches a hot method or a whole package slows the service. Time a handful of methods, and use sampling for anything broad.
+
+**Redaction before a recording leaves the host.** A `.jfr` file carries the JVM command line (`jdk.JVMInformation`), every environment variable (`jdk.InitialEnvironmentVariable`), and every system property (`jdk.InitialSystemProperty`), so a recording attached to a ticket can leak a database password. From JDK 27 (JEP 536) JFR redacts these inside the JVM and writes `[REDACTED]`: by default any key matching patterns such as `*password*`, `*secret*`, `*token*`, `*api*key*`, or `*auth*`. Extend the lists with `-XX:FlightRecorderOptions:redact-key=+*dsn*` (key filters) and `redact-argument` (command-line filters); `none` turns a list off, and `-Xlog:jfr+redact=debug` shows which filter matched. On JDK 26 and earlier nothing is redacted, so scrub or restrict the file yourself.
+
 ### 6.3 Heap Dump Analysis
 
 ```bash
@@ -261,6 +284,10 @@ jmap -dump:format=b,file=/tmp/heap.hprof <pid>
 
 # Or trigger from application on OOM (add to JVM args):
 -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/
+
+# Shallow sizes depend on the object header: JDK 27 turns on compact
+# object headers by default (JEP 534), 12 -> 8 bytes per object.
+# Compare dumps from the same JDK and header mode.
 
 # Analyze with Eclipse MAT (Memory Analyzer Tool)
 # Key views:
@@ -282,6 +309,8 @@ jmap -dump:format=b,file=/tmp/heap.hprof <pid>
 #   4. HttpSession storing large objects (web tier)
 #      Fix: keep sessions lightweight; store IDs, not objects
 ```
+
+Compact object headers cut the header of every object from 96 to 64 bits; JEP 534 reports 22% less heap on SPECjbb2015. A service upgraded from JDK 25 to 27 can show a smaller live set with no code change, so do not read the drop as a leak fix. Turn it off with `-XX:-UseCompactObjectHeaders`. Header layout is in [JVM internals](../../java/jvm_internals/jvm_internals.md).
 
 ### 6.4 Thread Dump Analysis
 
@@ -359,6 +388,8 @@ jstack's automatic deadlock detector flags exactly this pattern — each thread 
 |----------|---------|---------|-----------|
 | async-profiler CPU | High (no safepoint bias) | Low (<5%) | Production |
 | JFR | Very high (event-based) | Very low (1-2%) | Production |
+| JFR `jdk.CPUTimeSample` (JDK 25) | High (CPU-time driven, counts lost samples) | Low | Production, Linux only |
+| JFR method timing (JDK 25) | Exact counts for the filtered methods | Proportional to matched call rate | Production, narrow filters only |
 | VisualVM | Medium (safepoint bias) | High (5-30%) | Dev/test |
 | Allocation sampling | Approximation | Low | Production |
 | Exact allocation | Perfect | Very high | Dev/test only |
@@ -381,7 +412,11 @@ jstack's automatic deadlock detector flags exactly this pattern — each thread 
 
 **Off-heap memory leaks not visible in heap dumps**: Direct ByteBuffers (NIO, Netty), JNI-allocated memory, and memory-mapped files are not in the heap. A service leaking off-heap memory shows normal heap metrics but grows in system RSS. Use JFR's `jdk.DirectBufferStatistics` event or `/proc/<pid>/smaps` to measure off-heap usage.
 
+**A 1-CPU pod silently runs SerialGC**: Through JDK 26, a JVM with no collector flag picks Serial when it sees one CPU or less than 1792 MB of memory, and container limits are what it sees. A Java 25 service in a pod with `cpu: 1` or a 1 Gi memory limit gets single-threaded stop-the-world collections and p99 spikes while the dashboard still says "G1 default". Check with `java -Xlog:gc -version` or `jcmd <pid> VM.flags` and set `-XX:+UseG1GC` explicitly. JDK 27 (JEP 523) picks G1 in every environment.
+
 **GC pause time vs GC throughput confusion**: A GC with 50ms pause every 30 seconds (throughput = 1 - 0.05/30 = 99.83%) is very different from 50ms pause every 2 seconds (throughput = 97.5%). High throughput (low % of time in GC) is important for batch jobs. Low pause times are important for latency-sensitive services. G1's `-XX:MaxGCPauseMillis=50` targets pause time; Parallel GC maximizes throughput.
+
+**Treating `jdk.ExecutionSample` as a CPU profile**: The classic JFR method sampler fires on elapsed-time intervals for a subset of threads running Java code, skips native frames, and can lose samples without reporting it, so a JNI-heavy or many-thread service looks different from its real CPU use. On JDK 25 on Linux, enable `jdk.CPUTimeSample` for CPU questions and check `jdk.CPUTimeSamplesLost` before trusting the flamegraph.
 
 **Profiling the wrong thing**: A service is slow. The profiler shows 80% of CPU in `serialize()`. The developer optimizes serialization. But the actual slowness was 500ms DB query latency invisible to CPU profiling because the thread was WAITING (not RUNNABLE) during the query. CPU profilers only show CPU time — use wall-clock profiling (`-e wall`) to see where threads spend time including I/O waits.
 
@@ -394,6 +429,8 @@ jstack's automatic deadlock detector flags exactly this pattern — each thread 
 | async-profiler | Low-overhead CPU/alloc/lock profiling |
 | Java Flight Recorder | Continuous event recording |
 | Java Mission Control | JFR recording analysis GUI |
+| `jfr view` / `jcmd JFR.view` | Text views of a recording, for example `cpu-time-hot-methods` and `method-timing` (JDK 25) |
+| JFR redaction (JEP 536, JDK 27) | Masks secrets in JVM args, env vars, and system properties inside the recording |
 | Eclipse MAT | Heap dump analysis |
 | `jstack` | Thread dump (diagnose deadlocks/contention) |
 | `jmap` | Heap dump, heap histogram |
@@ -407,14 +444,19 @@ jstack's automatic deadlock detector flags exactly this pattern — each thread 
 ## 12. Interview Questions with Answers
 
 **Q: How do you find the cause of high CPU usage in a Java application?**
-**Short:** Diagnose high CPU by taking an async-profiler CPU flamegraph and finding the widest hot frames near the stack top.
+**Short:** Take a CPU-time flamegraph (async-profiler, or JFR jdk.CPUTimeSample on JDK 25 Linux) and find the widest frames near the top of the stacks.
 
-Take a 30-60 second CPU profile with async-profiler (`-e cpu`). Generate a flamegraph. The widest frames near the top of stacks are the CPU hotspots. Look for business logic (your code) vs framework code vs GC. If GC is wide, investigate allocation rate. If serialization or parsing is wide, optimize the data format. If a specific method is wide, inspect it for inefficiencies (unnecessary object creation, redundant computation, unoptimized algorithms).
+Take a 30-60 second CPU profile with async-profiler (`-e cpu`), or on JDK 25+ on Linux a JFR recording with `jdk.CPUTimeSample` enabled. Generate a flamegraph. The widest frames near the top of stacks are the CPU hotspots. Look for business logic (your code) vs framework code vs GC. If GC is wide, investigate allocation rate. If serialization or parsing is wide, optimize the data format. If a specific method is wide, inspect it for inefficiencies (unnecessary object creation, redundant computation, unoptimized algorithms).
 
 **Q: What is safepoint bias and why does it matter?**
 **Short:** Safepoint bias hides CPU-intensive tight loops from profilers that only sample at JVM safepoints, unlike async-profiler.
 
 Traditional JVM profilers (VisualVM, JProfiler with some modes) take stack samples only at JVM safepoints — points where the JVM can pause all threads (method boundaries, loop back-edges, before allocations). Tight loops without safepoints appear to consume zero CPU in these profiles. async-profiler uses AsyncGetCallTrace which can sample at any point in execution, including inside tight loops. Safepoint bias matters when you have CPU-intensive tight loops — traditional profilers will incorrectly show them as not consuming CPU.
+
+**Q: Why might a Java service in a small Kubernetes pod run SerialGC, and how do you stop it?**
+**Short:** Through JDK 26, ergonomics pick Serial when the container shows one CPU or under 1792 MB; set `-XX:+UseG1GC` or move to JDK 27.
+
+The JVM picks a collector from what it can see, and with container support it sees the pod's limits, not the node. Through JDK 26 the rule is: one CPU or less than 1792 MB of physical memory means a "constrained" machine, and the JVM picks SerialGC. So a pod with `limits.cpu: 1` or a 1 Gi memory limit runs a single-threaded stop-the-world collector even though the team believes it runs G1, and the symptom is long young-GC pauses that scale with heap size. Confirm with `jcmd <pid> VM.flags` (look for `UseSerialGC`) or the first `-Xlog:gc` line, which names the collector. Fix it by setting `-XX:+UseG1GC` explicitly in the image, or by upgrading to JDK 27, where JEP 523 makes G1 the default in all environments. A fractional CPU limit is rounded up for this count, so `cpu: 1.5` already gives 2 CPUs and G1.
 
 **Q: How do you diagnose a memory leak in a Java application?**
 **Short:** Diagnose a memory leak by comparing heap histograms over time and analyzing a full heap dump's dominator tree for growth.
@@ -463,6 +505,16 @@ java \
   -jar app.jar
 ```
 
+**Q: On JDK 25, why would you profile CPU with JFR's jdk.CPUTimeSample instead of the default jdk.ExecutionSample?**
+**Short:** ExecutionSample fires on wall-clock intervals for some Java-running threads and loses samples silently; CPUTimeSample fires on each thread's CPU time and counts native code.
+
+`jdk.ExecutionSample` takes stack samples at fixed elapsed-time intervals, picks a subset of threads at each tick, sees only threads executing Java code, and can miss samples without reporting how many, so it under-weights JNI, compression, and crypto work. JEP 509 (JDK 25, Linux only, experimental) adds `jdk.CPUTimeSample`, driven by the kernel's per-thread CPU-time timer: a thread is sampled only after it has used CPU, CPU time in native code called from Java is attributed to the calling Java method (native frames are not shown), and drops are reported in `jdk.CPUTimeSamplesLost`. Enable it with `jdk.CPUTimeSample#enabled=true`, set `throttle=10ms` (per thread CPU time) or `500/s` (the default, across all threads), and read it with `jfr view cpu-time-hot-methods` or a JMC flamegraph. It builds on JEP 518, which makes the sampler record PC and SP and walk the stack at the next safepoint, so it keeps async-profiler's freedom from safepoint bias without attaching an agent. async-profiler still covers kernel frames, lock and allocation modes, and non-Linux hosts.
+
+**Q: How do you measure how often a specific method runs and how long it takes in production, without an agent or a code change?**
+**Short:** On JDK 25, start JFR with a method-timing filter (JEP 520); the JVM injects timing bytecode for just those methods and removes it when recording stops.
+
+JEP 520 adds two JFR events. `jdk.MethodTiming` reports invocation count and approximate min, average, and max duration per filtered method; `jdk.MethodTrace` records a stack trace for every call, which answers "who calls this". Filters name a class, a `Class::method`, a bare method such as `::<clinit>`, or an annotation, for example `jcmd <pid> JFR.start method-timing=@jakarta.ws.rs.GET` followed by `jcmd <pid> JFR.view method-timing`. The JVM rewrites bytecode for the matched methods only and restores it afterwards, so no `-javaagent`, Arthas, or redeploy is needed. The cost is per matched call and the JEP says it does not try to stay within JFR's 1% target, so filter a few methods; tracing a hot method or a whole package will slow the service, and a sampling profile is the right tool for broad questions.
+
 **Q: What is async-profiler and how does it avoid safepoint bias?**
 **Short:** async-profiler uses AsyncGetCallTrace to sample stacks at any point in execution, eliminating traditional safepoint bias.
 
@@ -503,7 +555,10 @@ Choose G1 as the default for most services, and move to ZGC or Shenandoah when t
 ## 13. Best Practices
 
 - Enable continuous JFR recording on all production JVMs with a 200 MB ring buffer.
-- Use async-profiler for production CPU investigations; never use VisualVM in production.
+- Before a `.jfr` file leaves the host, confirm redaction: JDK 27 masks secrets by default (JEP 536); on older JDKs scrub env vars and system properties yourself.
+- Set the collector explicitly (`-XX:+UseG1GC`) on JDK 26 and earlier; small pods otherwise get SerialGC.
+- For production CPU investigations on JDK 25+ on Linux, start with JFR `jdk.CPUTimeSample` (no agent to attach); use async-profiler for allocation, lock, and kernel-frame profiles, on macOS, or on older JDKs. Never use VisualVM in production.
+- Time a specific method with JFR `method-timing` (JDK 25) instead of adding timers to the code or attaching a bytecode agent; keep the filter narrow.
 - Set -XX:+HeapDumpOnOutOfMemoryError and -XX:+ExitOnOutOfMemoryError on all services.
 - Always enable GC logging with rotation in production.
 - Use wall-clock profiling to diagnose latency issues, not just CPU profiling.

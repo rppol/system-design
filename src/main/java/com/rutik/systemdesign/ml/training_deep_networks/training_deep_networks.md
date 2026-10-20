@@ -953,31 +953,30 @@ Training Configuration
 from __future__ import annotations
 import torch
 import torch.nn as nn
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.fully_sharded_data_parallel import (
-    CPUOffload, MixedPrecision, BackwardPrefetch, ShardingStrategy,
-)
+from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
 import math
 
-def get_mixed_precision_policy() -> MixedPrecision:
-    """bf16 for compute, fp32 for reduction operations."""
-    return MixedPrecision(
+def get_mixed_precision_policy() -> MixedPrecisionPolicy:
+    """bf16 for compute, fp32 for gradient reduce-scatter."""
+    return MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
-        reduce_dtype=torch.float32,     # fp32 all-reduce to avoid gradient underflow
-        buffer_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,     # fp32 reduce-scatter to avoid gradient underflow
     )
 
-def wrap_model_with_fsdp(model: nn.Module, device: torch.device) -> FSDP:
-    return FSDP(
-        model,
-        sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,   # ZeRO Stage 2
-        mixed_precision=get_mixed_precision_policy(),
-        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,    # prefetch next shard
-        cpu_offload=CPUOffload(offload_params=False),        # keep params on GPU
-        device_id=device,
-    )
+def wrap_model_with_fsdp(model: nn.Module) -> FSDPModule:
+    """FSDP2: one sharding unit per decoder layer, then the root.
+
+    Call torch.cuda.set_device(local_rank) first (the device comes from the default mesh)
+    and apply activation checkpointing before sharding.
+    """
+    mp = get_mixed_precision_policy()
+    for layer in model.model.layers:
+        # reshard_after_forward=False keeps params gathered until backward: ZeRO Stage 2
+        fully_shard(layer, mp_policy=mp, reshard_after_forward=False)
+    fully_shard(model, mp_policy=mp, reshard_after_forward=False)
+    return model                     # same object, now also an FSDPModule
 
 class GradientCheckpointedTransformerBlock(nn.Module):
     """Wrap transformer blocks with activation checkpointing to reduce memory 10x."""
@@ -999,13 +998,13 @@ def enable_gradient_checkpointing(model: nn.Module) -> None:
 ```
 
 ```python
-from contextlib import contextmanager
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 
 class TrainingEngine:
     def __init__(
         self,
-        model: FSDP,
+        model: FSDPModule,
         optimizer: AdamW,
         scheduler,
         gradient_accumulation_steps: int = 8,
@@ -1045,10 +1044,12 @@ class TrainingEngine:
         return 0.0
 
     def _optimizer_step(self) -> float:
-        # FSDP handles unsharding before clip_grad_norm_
+        # FSDP2 grads are DTensor shards; clip_grad_norm_ all-reduces the norm across ranks
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.max_grad_norm
         )
+        if isinstance(grad_norm, DTensor):
+            grad_norm = grad_norm.full_tensor()
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             # Skip this step to avoid corrupting weights
             self.optimizer.zero_grad(set_to_none=True)
@@ -1207,4 +1208,4 @@ Cross-check the throughput row against the times: `3e9 / 19,000 tok/s = 157,900 
 
 **How would you debug a training run that shows increasing loss after 1,500 steps?** Follow a systematic diagnosis: (1) check if the LR schedule is decaying correctly - a bug where cosine decay overshoots to negative LR would cause increasing loss; (2) plot gradient norm over time - if norm suddenly increases, the model has entered a loss landscape region with large gradients suggesting a data quality issue (corrupted batch); (3) examine validation loss separately from training loss - if training loss increases but validation is stable, a data pipeline issue is introducing bad training batches; (4) compare checkpoint at step 1,400 versus 1,600 parameter norms per layer - if specific layers' norms explode while others are stable, the issue is layer-specific (often the output projection or embedding layers); (5) rerun with loss logging per sample to identify specific training examples causing loss spikes.
 
-**What is the correct way to save and resume FSDP training without state dict inconsistencies?** FSDP's default local_state_dict stores each GPU's shard separately, requiring the same number of GPUs to resume. The correct approach is to use FSDP's full_state_dict context manager to consolidate all shards to rank-0 before saving: with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT). This saves a single checkpoint loadable on any number of GPUs. For 7B bf16 parameters, the consolidated checkpoint is 14 GB. When resuming, load the full state dict to rank-0 and use FSDP's scatter mechanism to distribute shards. Always save optimizer state alongside model state - resuming without optimizer state (Adam moments) extends warmup by ~500 steps as moments rebuild from scratch.
+**What is the correct way to save and resume FSDP training without state dict inconsistencies?** Under FSDP2, `model.state_dict()` returns DTensor shards, so a per-rank `torch.save` produces files tied to one GPU layout. Use one of two paths. `torch.distributed.checkpoint.save` (DCP) writes every rank's shards in parallel plus metadata and reshards on load, so a run saved on 8 GPUs resumes on 16. For a single portable file, `get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))` all-gathers to CPU (7B fp32 parameters is 28 GB), and `set_model_state_dict(..., options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True))` loads it so only rank 0 reads the file and DCP scatters the shards. Always save optimizer state alongside model state - resuming without optimizer state (Adam moments) extends warmup by ~500 steps as moments rebuild from scratch.

@@ -6,7 +6,7 @@ The JVM was designed for a machine. A container is not a machine — it is a pro
 
 Since JDK 10 (`-XX:+UseContainerSupport`, on by default) it does look, and the memory half of that story — cgroup limits, `MaxRAMPercentage`, the RSS budget that `-Xmx` does not cover, Native Memory Tracking, and diagnosing exit code 137 — is covered in depth by [JVM Tuning & GC for Services](../case_studies/cross_cutting/jvm_tuning_and_gc_for_services.md), which is the canonical home for it. **This file deliberately does not repeat that material.** It covers the other four things a JVM has to get right to be a good container citizen, none of which are about heap size:
 
-1. **CPU.** A Kubernetes CPU limit is a CFS bandwidth quota, not a core count. It throttles a multi-threaded JVM in ways that look like "the GC is slow" or "the JIT is slow" and never look like "we are out of CPU". A JVM sizes at least six independent thread pools off `Runtime.availableProcessors()`, reads it exactly once at startup, and never revisits it.
+1. **CPU.** A Kubernetes CPU limit is a CFS bandwidth quota, not a core count. It throttles a multi-threaded JVM in ways that look like "the GC is slow" or "the JIT is slow" and never look like "we are out of CPU". A JVM sizes at least six independent thread pools off `Runtime.availableProcessors()` at startup and never resizes them, even though later calls return the new value.
 2. **Lifecycle and signals.** A pod termination is a `SIGTERM` followed by a hard `SIGKILL` at the grace deadline. Whether the JVM ever sees that `SIGTERM` depends on your `ENTRYPOINT` form, and whether it finishes in-flight work depends on what your shutdown hooks actually do.
 3. **Probes.** A liveness probe is a watchdog that restarts your process. A JVM has legitimate multi-second stalls (a long GC pause, a slow cold start) that a naively-configured probe reads as death, producing a restart loop that looks exactly like a crash and is not one.
 4. **The image.** Base image, runtime footprint, and glibc-vs-musl decide how much of the memory budget you spend before your code runs a single line.
@@ -17,11 +17,11 @@ The unifying theme is that **the JVM makes irreversible decisions at startup, fr
 
 ## 2. Intuition
 
-> **One-line analogy**: The JVM walks into the room, counts the chairs once, hires a staff sized to the chair count, and never counts again — while the building manager, unseen, is metering how many minutes per hour the staff is allowed to actually work.
+> **One-line analogy**: The JVM walks into the room, counts the chairs, hires a staff sized to the chair count, and never changes the staff size even when a later recount differs, while the building manager, unseen, is metering how many minutes per hour the staff is allowed to actually work.
 
 **Mental model**: separate *what the JVM believes* from *what the kernel enforces*, because they are set by different mechanisms at different times.
 
-- **Belief** is fixed at startup: `Runtime.availableProcessors()` is read from the cgroup CPU quota once, and every derived thread count (GC threads, JIT compiler threads, `ForkJoinPool.commonPool()`, the virtual-thread scheduler, Netty's event loops, your own `newFixedThreadPool(availableProcessors())`) is sized from that single reading and then frozen.
+- **Belief** is fixed at startup: every derived thread count (GC threads, JIT compiler threads, `ForkJoinPool.commonPool()`, the virtual-thread scheduler, Netty's event loops, your own `newFixedThreadPool(availableProcessors())`) is sized from the startup reading of `Runtime.availableProcessors()` and then frozen. HotSpot re-reads the cgroup CPU quota on later calls (behind a 20 ms cache, JDK-8227006), but no pool asks again.
 - **Enforcement** is continuous and invisible: the CFS scheduler gives the cgroup a budget of CPU-microseconds per 100 ms period. When the budget runs out, every runnable thread in the cgroup is descheduled until the next period. No exception is thrown. No log line is written. The only evidence is a counter, `container_cpu_cfs_throttled_seconds_total`, that nothing in the JVM knows exists.
 
 **Why it matters**: the failure mode is not an error, it is *latency with no cause*. A service with a 500m CPU limit and 40 GC threads spends its quota descheduling itself and reports p99 latency spikes that no profiler attributes to any method, because the time is not in any method — it is in the gap between two instructions where the kernel took the CPU away.
@@ -32,7 +32,7 @@ The unifying theme is that **the JVM makes irreversible decisions at startup, fr
 
 ## 3. Core Principles
 
-- **Read once, live forever.** `availableProcessors()` is sampled at JVM startup and never re-read. Vertical scaling a running pod, or a node's allocation changing, does not resize a single JVM thread pool.
+- **Sized once, live forever.** `availableProcessors()` re-reads the cgroup quota on each call, behind a 20 ms cache (JDK-8227006, JDK 14, backported to 11.0.10 and 8u281). The pools sized from it at startup never ask again, so vertical scaling a running pod, or a node's allocation changing, does not resize a single JVM thread pool.
 - **A CPU limit is a time budget, not a core count.** `limits.cpu: 2` means 200 ms of CPU per 100 ms period, however many threads consume it. Parallelism is unbounded; consumption is metered.
 - **A CPU *request* is invisible to the JVM.** Requests drive scheduling and cgroup *shares*, not quota. With no limit set there is no quota, and the JVM falls back to the node's full core count.
 - **The container limit is enforced on the whole process, the JVM's limits are enforced per-region.** Heap, metaspace, code cache, thread stacks, and direct buffers each have their own JVM ceiling; the cgroup has one ceiling over all of them plus the OS overhead.
@@ -110,7 +110,7 @@ flowchart LR
     classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    cg(["cgroup v2<br/>cpu.max"]) --> read(["UseContainerSupport<br/>reads once"])
+    cg(["cgroup v2<br/>cpu.max"]) --> read(["UseContainerSupport<br/>reads at startup"])
     mem(["cgroup v2<br/>memory.max"]) --> read
     read --> apc(["availableProcessors<br/>= quota / period"])
     read --> heap(["Max heap<br/>= MaxRAMPercentage"])
@@ -123,7 +123,7 @@ flowchart LR
     fjp --> froze
     vt --> froze
     heap --> froze
-    froze -.->|"never re-read"| resize(["Pod resized<br/>later"])
+    froze -.->|"never resized"| resize(["Pod resized<br/>later"])
 
     class cg,mem io
     class read mathOp
@@ -133,7 +133,7 @@ flowchart LR
     class resize lossN
 ```
 
-Every box downstream of `availableProcessors` is decided in the first few milliseconds of the process and is immutable afterwards. Vertical-scaling a pod changes the cgroup and changes nothing inside the JVM.
+Every box downstream of `availableProcessors` is decided in the first few milliseconds of the process and is immutable afterwards. Vertical-scaling a pod changes the cgroup, and a later `availableProcessors()` call returns the new count, but no pool in the diagram is resized.
 
 ### CFS throttling — where the latency actually goes
 
@@ -342,6 +342,8 @@ The JVM commits heap from the OS and, by default, is reluctant to give it back �
 -XX:+UseZGC -Xmx4g -XX:SoftMaxHeapSize=3g
 ```
 
+JDK 27 (JDK-8238686) changed G1's `-XX:MinHeapFreeRatio`/`-XX:MaxHeapFreeRatio` defaults from 40/70 to 0/100. Under the old defaults a Full GC, including one from `System.gc()`, expanded the heap until at least 40% was free and shrank it until at most 70% was free, and G1's own sizing then often undid the change. On JDK 27, free-ratio resizing is effectively off unless a flag is set, and G1 sizes the heap from its pause-time and GC-time goals. Two consequences for a pod: a service that called `System.gc()` after a batch to drop RSS back toward `-Xms` no longer shrinks on that path, and a JDK 25 to 27 upgrade can change steady-state RSS with no flag change. To keep the old give-back behaviour, set both ratios explicitly (for example `-XX:MinHeapFreeRatio=40 -XX:MaxHeapFreeRatio=70`); explicitly set values keep working as before.
+
 The practical guidance is to **autoscale a JVM service on CPU or on a request-rate metric, not on memory**, and to size memory as a fixed, generous, verified allocation. `SoftMaxHeapSize` is the useful knob when a service must give memory back: it lets the collector work below a soft target while retaining `-Xmx` as an emergency ceiling for a genuine burst.
 
 ---
@@ -366,6 +368,7 @@ The practical guidance is to **autoscale a JVM service on CPU or on a request-ra
 | Thread sizing | Trust ergonomics | Pin every pool explicitly | Limits are set and correct | Request-only pods, or a limit the JVM rounds badly |
 | Base image | Full JDK | `jlink` / distroless | Diagnostics matter more than size; low deploy frequency | Image pull is on the cold-start path; CVE surface is audited |
 | Autoscale metric | CPU / RPS | Memory | Always, for a JVM | Essentially never — the JVM does not release heap promptly |
+| G1 heap give-back after Full GC (JDK 27+) | JDK 27 defaults (`MinHeapFreeRatio=0`, `MaxHeapFreeRatio=100`) | Set both ratios explicitly (e.g. 40/70) | G1 should size the heap from its pause and GC-time goals; RSS stability matters more than give-back | The service relies on a Full GC or `System.gc()` to shrink RSS, or must match pre-27 memory behaviour in a mixed fleet |
 | Startup cost | Tune flags | AOT cache or native image | Startup is measured in seconds and that is acceptable | Scale-to-zero, Lambda, or a cold start on the request path |
 
 ---
@@ -407,7 +410,7 @@ A batch service was sized from its steady-state profile — it used about a thir
 
 ### War Story 4: Vertical scaling that changed nothing
 
-An ML feature service was throttled, so the team doubled `limits.cpu` from 2 to 4 with an in-place pod resize and saw no improvement. `availableProcessors()` had been read at startup and was still 2, so `ParallelGCThreads`, the common pool, and Netty's event loops were all still sized for a 2-core world. The extra quota was there and nothing in the JVM knew to use it. Fix: restart the pods. **Any change to a pod's CPU allocation requires a JVM restart to take effect.**
+An ML feature service was throttled, so the team doubled `limits.cpu` from 2 to 4 with an in-place pod resize and saw no improvement. A fresh `availableProcessors()` call returned 4, but `ParallelGCThreads`, the common pool, and Netty's event loops had been sized from the startup reading of 2 and were still sized for a 2-core world. The extra quota was there and nothing in the JVM knew to use it. Fix: restart the pods. **Any change to a pod's CPU allocation requires a JVM restart to take effect.**
 
 ### War Story 5: Two hundred threads nobody had allocated memory for
 
@@ -446,9 +449,9 @@ A service used an async Logback appender with a large ring buffer and a shutdown
 CFS throttling. A CPU limit is a bandwidth quota — 100 ms of CPU per 100 ms period — not a restriction on how many threads run simultaneously. With several runnable threads the JVM burns the whole quota in the first ~25 ms of each period, and the kernel then deschedules every thread in the cgroup until the period rolls over. Averaged across the period, utilisation reads 25%; in reality the process was frozen for 75% of the wall clock. The time is not inside any method, so a sampling profiler attributes it nowhere. Confirm with `container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total` — anything above a few percent is real latency. The fix is either more quota, fewer threads competing for it, or removing the limit and pinning `-XX:ActiveProcessorCount` to the request.
 
 **Q: Why does raising a running pod's CPU limit not improve a throttled JVM until you restart it?**
-**Short:** `availableProcessors()` is read once at JVM startup, so every derived thread pool stays sized for the old allocation.
+**Short:** Every thread pool is sized from `availableProcessors()` at startup and never resized, though the method itself returns the new count.
 
-Because `Runtime.availableProcessors()` is sampled once during JVM startup and never re-read. Every pool derived from it — `ParallelGCThreads`, `ConcGCThreads`, `CICompilerCount`, `ForkJoinPool.commonPool()` parallelism, the virtual-thread scheduler's carrier count, Netty's event loops, and any `newFixedThreadPool(availableProcessors())` in your own code — is fixed at that moment. The extra quota is genuinely available; nothing inside the JVM is configured to consume it. This is why an in-place vertical resize is a no-op for a JVM and a rolling restart is required, and it is also why the JVM is a poor fit for Vertical Pod Autoscaling in `Auto` mode without a restart policy.
+`Runtime.availableProcessors()` itself is not the problem: HotSpot re-reads the cgroup quota on each call behind a 20 ms cache (JDK-8227006, JDK 14, backported to 11.0.10 and 8u281), so a call after the resize returns the new count. The pools sized from it at startup do not ask again. `ParallelGCThreads`, `ConcGCThreads`, `CICompilerCount`, `ForkJoinPool.commonPool()` parallelism, the virtual-thread scheduler's carrier count, Netty's event loops, and any `newFixedThreadPool(availableProcessors())` in your own code are fixed at that moment. The extra quota is genuinely available; nothing inside the JVM is configured to consume it. This is why an in-place vertical resize is a no-op for a JVM and a rolling restart is required, and it is also why the JVM is a poor fit for Vertical Pod Autoscaling in `Auto` mode without a restart policy.
 
 **Q: A pod exits with code 137 on every rollout but `OOMKilled` is false. What does that mean?**
 **Short:** The container was SIGKILLed at the grace-period deadline, not by the OOM killer — the process ignored or never received SIGTERM.
@@ -521,9 +524,9 @@ If the pods are request-only, `availableProcessors()` jumps from the old reading
 Smaller images pull faster on cache-miss nodes, which is the part of cold start no JVM flag can improve, and they carry a smaller CVE surface. But a JRE image drops `jcmd`, `jmap`, `jstack`, and `jfr`, and distroless drops the shell as well — so the moment you need a thread dump, a heap dump, or a flight recording from the pod that is misbehaving right now, you cannot get one, and the diagnosis becomes a redeploy. The workable middle ground is a `jlink` image that explicitly includes `jdk.jcmd` and `jdk.jfr`, or a Kubernetes ephemeral debug container attached to the pod's namespaces. Decide this before the incident, not during it.
 
 **Q: How do virtual threads change container CPU sizing?**
-**Short:** They remove the thread-per-request memory cost but not the CPU quota — carrier count is still `availableProcessors()`, still read once.
+**Short:** They remove the thread-per-request memory cost but not the CPU quota; carrier count is still `availableProcessors()`, sized at startup.
 
-They change the memory arithmetic dramatically and the CPU arithmetic not at all. Thousands of virtual threads cost a few hundred bytes to a few kilobytes each on the heap instead of ~1 MiB of native stack, so the thread-stack term in the RSS budget largely disappears. But the scheduler's carrier threads are still `availableProcessors()` in number, still read once at startup, and still bounded by the same CFS quota — so CPU-bound work is throttled exactly as before, and a wrong `availableProcessors()` under-sizes the carrier pool so that virtual threads queue even when quota is available. Tune with `-Djdk.virtualThreadScheduler.parallelism`. See [Structured Concurrency & Loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md).
+They change the memory arithmetic dramatically and the CPU arithmetic not at all. Thousands of virtual threads cost a few hundred bytes to a few kilobytes each on the heap instead of ~1 MiB of native stack, so the thread-stack term in the RSS budget largely disappears. But the scheduler's carrier threads are still `availableProcessors()` in number, still sized once at startup, and still bounded by the same CFS quota, so CPU-bound work is throttled exactly as before, and a wrong `availableProcessors()` under-sizes the carrier pool so that virtual threads queue even when quota is available. Tune with `-Djdk.virtualThreadScheduler.parallelism`. See [Structured Concurrency & Loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md).
 
 **Q: What is the difference between cgroup v2's `memory.max` and `memory.high`, and does the JVM read both?**
 **Short:** `memory.max` is the hard OOMKill ceiling the JVM reads; `memory.high` is a soft throttle it ignores entirely.

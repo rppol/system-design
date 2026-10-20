@@ -30,7 +30,7 @@ The patterns compose. A real production pipeline may chain a router into a paral
 
 **Gates between steps**: Prompt chaining is not useful without gates — programmatic or LLM-based checks that verify the output of step N before passing it to step N+1. A gate that catches a malformed extraction at step 2 prevents cascading errors through steps 3, 4, and 5.
 
-**Cheap models for routing, expensive models for reasoning**: The cost saving in a routing pattern comes entirely from using a small classifier on a cheap-tier model to decide which tasks go to a frontier model. Every worked cost example in this module uses one illustrative price pair — **$0.15 per 1M input tokens** (cheap tier) and **$5 per 1M input tokens** (frontier tier; $5/1M is the July 2026 Claude Opus 4.5 and Opus 5 input rate). Substitute your own providers' rates before quoting any of these figures. If everything routes to the expensive model, you have added a step and gained nothing.
+**Cheap models for routing, expensive models for reasoning**: The cost saving in a routing pattern comes entirely from using a small classifier on a cheap-tier model to decide which tasks go to a frontier model. Every worked cost example in this module uses one illustrative price pair — **$0.15 per 1M input tokens** (cheap tier) and **$5 per 1M input tokens** (frontier tier; Claude Opus 5.5 lists $4/1M input as of 2026-10-19). Substitute your own providers' rates before quoting any of these figures. If everything routes to the expensive model, you have added a step and gained nothing.
 
 **Parallelization is not free**: Spawning N parallel calls reduces wall-clock latency by approximately N× but multiplies token cost by N. Voting on the same task N times also requires a synthesis step. The latency gain must be worth the cost and the added synthesis complexity.
 
@@ -107,16 +107,18 @@ from typing import Optional
 
 client = anthropic.Anthropic()
 
+# 5.5 models put a thinking block first and count it against max_tokens,
+# so every call reads the last content block.
 def extract_entities(text: str) -> str:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=1024,
         messages=[{
             "role": "user",
             "content": f"Extract all named entities (people, organizations, locations) from the following text. Return a JSON array.\n\n{text}"
         }]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def gate_json_array(raw: str) -> Optional[list]:
     """Programmatic gate: parse JSON, return None on failure."""
@@ -131,14 +133,14 @@ def gate_json_array(raw: str) -> Optional[list]:
 
 def summarize_entities(entities: list) -> str:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=512,
         messages=[{
             "role": "user",
             "content": f"Given these entities: {entities}, write a two-sentence summary of the key actors involved."
         }]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def prompt_chain_pipeline(document: str) -> str | None:
     raw_entities = extract_entities(document)
@@ -172,8 +174,9 @@ class RouteType(Enum):
 
 def classify_query(query: str) -> RouteType:
     response = client.messages.create(
-        model="claude-haiku-4-5",  # Cheap model for routing
-        max_tokens=16,
+        model="claude-haiku-5-5",  # Cheap model for routing
+        max_tokens=1024,
+        output_config={"effort": "low"},
         messages=[{
             "role": "user",
             "content": (
@@ -185,7 +188,7 @@ def classify_query(query: str) -> RouteType:
             )
         }]
     )
-    label = response.content[0].text.strip().lower()
+    label = response.content[-1].text.strip().lower()
     try:
         return RouteType(label)
     except ValueError:
@@ -193,29 +196,29 @@ def classify_query(query: str) -> RouteType:
 
 def handle_simple(query: str) -> str:
     response = client.messages.create(
-        model="claude-haiku-4-5",
+        model="claude-haiku-5-5",
         max_tokens=256,
         messages=[{"role": "user", "content": query}]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def handle_complex(query: str) -> str:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=2048,
         system="You are an expert analyst. Think step by step.",
         messages=[{"role": "user", "content": query}]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def handle_code(query: str) -> str:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=4096,
         system="You are an expert software engineer. Provide working, tested code.",
         messages=[{"role": "user", "content": query}]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def routing_pipeline(query: str) -> str:
     route = classify_query(query)
@@ -295,14 +298,14 @@ client = anthropic.Anthropic()
 
 def summarize_chunk(chunk: str, chunk_index: int) -> str:
     response = client.messages.create(
-        model="claude-haiku-4-5",
+        model="claude-haiku-5-5",
         max_tokens=512,
         messages=[{
             "role": "user",
             "content": f"Summarize this section concisely:\n\n{chunk}"
         }]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 async def sectioning_pipeline(document: str, num_chunks: int = 4) -> str:
     chunk_size = len(document) // num_chunks
@@ -318,28 +321,28 @@ async def sectioning_pipeline(document: str, num_chunks: int = 4) -> str:
     # Merge step
     merge_prompt = "\n\n".join(f"Section {i+1}: {s}" for i, s in enumerate(summaries))
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=1024,
         messages=[{
             "role": "user",
             "content": f"Synthesize these section summaries into a single coherent summary:\n\n{merge_prompt}"
         }]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 # --- Voting ---
 
 def classify_once(text: str) -> str:
     response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=8,
-        temperature=0.7,  # Non-zero to get diverse votes
+        model="claude-opus-5-5",
+        max_tokens=1024,
+        output_config={"effort": "low"},
         messages=[{
             "role": "user",
             "content": f"Is this text positive, negative, or neutral? Reply with one word.\n\n{text}"
         }]
     )
-    return response.content[0].text.strip().lower()
+    return response.content[-1].text.strip().lower()
 
 async def voting_pipeline(text: str, num_votes: int = 5) -> str:
     loop = asyncio.get_running_loop()
@@ -380,7 +383,7 @@ class WorkerResult:
 def orchestrate(objective: str) -> list[Subtask]:
     """Orchestrator: decompose objective into subtasks."""
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=1024,
         messages=[{
             "role": "user",
@@ -392,7 +395,7 @@ def orchestrate(objective: str) -> list[Subtask]:
             )
         }]
     )
-    raw = response.content[0].text
+    raw = response.content[-1].text
     subtask_dicts = json.loads(raw)
     return [Subtask(**d) for d in subtask_dicts]
 
@@ -404,25 +407,25 @@ def execute_worker(subtask: Subtask) -> WorkerResult:
         "code": "You are a senior software engineer. Write production-quality Python.",
     }
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=2048,
         system=system_prompts.get(subtask.worker_type, "You are a helpful assistant."),
         messages=[{"role": "user", "content": subtask.description}]
     )
-    return WorkerResult(task_id=subtask.task_id, output=response.content[0].text)
+    return WorkerResult(task_id=subtask.task_id, output=response.content[-1].text)
 
 def synthesize(objective: str, results: list[WorkerResult]) -> str:
     """Orchestrator: synthesize worker outputs into final answer."""
     results_text = "\n\n".join(f"[{r.task_id}]: {r.output}" for r in results)
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=2048,
         messages=[{
             "role": "user",
             "content": f"Synthesize these worker outputs into a final answer for: {objective}\n\n{results_text}"
         }]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def orchestrator_workers_pipeline(objective: str) -> str:
     subtasks = orchestrate(objective)
@@ -505,18 +508,18 @@ class EvaluationResult:
 def generate(task: str, previous_feedback: str = "") -> str:
     feedback_section = f"\n\nPrevious feedback to address:\n{previous_feedback}" if previous_feedback else ""
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=2048,
         messages=[{
             "role": "user",
             "content": f"Complete this task:{feedback_section}\n\nTask: {task}"
         }]
     )
-    return response.content[0].text
+    return response.content[-1].text
 
 def evaluate(task: str, candidate_output: str) -> EvaluationResult:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=512,
         messages=[{
             "role": "user",
@@ -530,7 +533,7 @@ def evaluate(task: str, candidate_output: str) -> EvaluationResult:
         }]
     )
     import json
-    data = json.loads(response.content[0].text)
+    data = json.loads(response.content[-1].text)
     return EvaluationResult(**data)
 
 def evaluator_optimizer_pipeline(
@@ -752,10 +755,10 @@ flowchart TD
 
 Each LLM hop adds:
 - Network round-trip: ~20-50ms (same region)
-- Time-to-first-token: ~100-300ms for claude-haiku-4-5, ~300-600ms for claude-opus-4-5
-- Generation time: ~10-30ms per output token at claude-haiku-4-5 speeds
+- Time-to-first-token: ~100-300ms for claude-haiku-5-5 at `effort: low`; claude-opus-5-5 always runs adaptive thinking (default effort `medium`), so its first text token waits for the thinking pass, on top of ~300-600ms of base TTFT
+- Generation time: ~10-30ms per output token at claude-haiku-5-5 speeds, and thinking tokens count as output tokens for both time and `max_tokens`
 
-A 5-step chain with claude-opus-4-5 at each step: 5 × (400ms avg TTFT + generation) = 2-4 seconds of pure inference latency, before any application logic.
+A 5-step chain with claude-opus-5-5 at each step: 5 × (TTFT + thinking + generation) = 2-4 seconds of pure inference latency at `effort: low`, and more at the default `medium`, before any application logic. Set effort per step: chain steps that only reformat or extract rarely need more than `low`.
 
 Gate implementation — the two patterns:
 
@@ -773,19 +776,20 @@ def parse_json_gate(raw: str, expected_keys: list[str]) -> dict[str, Any] | None
     except (json.JSONDecodeError, TypeError):
         return None
 
-# Pattern B: LLM gate (flexible; ~$0.0005 per check with claude-haiku-4-5 —
-# roughly 500 input tokens at $1 per 1M input plus a few output tokens at $5 per 1M)
+# Pattern B: LLM gate (flexible; ~$0.0001 per check with claude-haiku-5-5:
+# ~500 input tokens at $0.10 per 1M plus ~100 thinking and output tokens at $0.50 per 1M)
 def llm_gate(output: str, criteria: str) -> bool:
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=8,
+        model="claude-haiku-5-5",
+        max_tokens=1024,
+        output_config={"effort": "low"},
         messages=[{
             "role": "user",
             "content": f"Does this output satisfy: {criteria}\nOutput: {output}\nAnswer yes or no."
         }]
     )
-    return response.content[0].text.strip().lower().startswith("yes")
+    return response.content[-1].text.strip().lower().startswith("yes")
 ```
 
 ### Routing — Classifier Accuracy Impact on Cost
@@ -877,7 +881,7 @@ client = anthropic.Anthropic()
 def parallel_section_summarize(chunks: list[str], max_workers: int = 8) -> list[str]:
     """
     max_workers=8 is safe for most Anthropic tier limits.
-    Anthropic RPM for claude-haiku-4-5 (July 2026): 1,000 on Start, 5,000 on Build,
+    Anthropic RPM for claude-haiku-5-5 (2026-10-19): 1,000 on Start, 5,000 on Build,
     10,000 on Scale.
     At 8 parallel workers with ~500ms per call: 8/0.5s = 16 RPS = 960 RPM — right at
     the Start-tier ceiling, comfortable on Build or Scale. Size max_workers against
@@ -886,11 +890,11 @@ def parallel_section_summarize(chunks: list[str], max_workers: int = 8) -> list[
     def summarize(args: tuple[int, str]) -> tuple[int, str]:
         idx, chunk = args
         response = client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-5-5",
             max_tokens=512,
             messages=[{"role": "user", "content": f"Summarize:\n{chunk}"}]
         )
-        return idx, response.content[0].text
+        return idx, response.content[-1].text
 
     results: dict[int, str] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -922,7 +926,7 @@ class StructuredFeedback:
 
 def evaluate_structured(task: str, output: str, threshold: int = 8) -> StructuredFeedback:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=1024,
         messages=[{
             "role": "user",
@@ -933,7 +937,7 @@ def evaluate_structured(task: str, output: str, threshold: int = 8) -> Structure
             )
         }]
     )
-    data = json.loads(response.content[0].text)
+    data = json.loads(response.content[-1].text)
     return StructuredFeedback(
         score=data["score"],
         approved=data["score"] >= threshold,
@@ -946,7 +950,7 @@ def evaluate_structured(task: str, output: str, threshold: int = 8) -> Structure
 
 Section 3 states that parallelization "multiplies token cost by N." That is the *uncached* bill. Every pattern in this module re-sends a large, byte-identical prefix: the same system prompt down each routed branch, the same source document across every section of a fan-out, the entire prior draft on every evaluator round. Cached, those tokens are billed at a fraction of the input rate.
 
-The rates are the whole calculation. Anthropic: cache **reads cost 0.1x** the base input rate, a cache **write costs 1.25x** at the default 5-minute TTL (2x for the 1-hour TTL), with up to 4 explicit `cache_control` breakpoints per request. OpenAI: automatic, no code change, on prompts of **1,024 tokens or more**, and only on an **exact prefix match**.
+The rates are the whole calculation. Anthropic: cache **reads cost 0.1x** the base input rate on most models (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1; the worked numbers below use 0.1x), a cache **write costs 1.25x** at the default 5-minute TTL (2x for the 1-hour TTL), with up to 4 explicit `cache_control` breakpoints per request. OpenAI: automatic, no code change, on prompts of **1,024 tokens or more**, and only on an **exact prefix match**.
 
 ```
   Voting, N branches over a shared 20,000-token document, $5 per 1M input
@@ -979,11 +983,11 @@ The first five entries below are **illustrative deployment shapes**, not publish
 
 **Prompt chaining**: invoice-processing pipelines at payment platforms. Step 1 extracts raw fields from PDF text. Step 2 normalizes currencies and dates. Step 3 validates totals (programmatic gate — no LLM needed). Step 4 maps to internal account codes. Each step's LLM operates on clean, structured input from the prior step rather than raw PDF text, which is where the reduction in numeric-field hallucination comes from.
 
-**Routing**: customer-support ticket triage. A claude-haiku-4-5 classifier routes incoming tickets: billing questions go to a RAG system over billing docs without touching an LLM for generation; technical issues go to claude-opus-4-5 with a technical system prompt; general questions go to claude-haiku-4-5. Because roughly two thirds of tickets never touch the expensive model, blended inference cost falls by roughly half with no drop in CSAT.
+**Routing**: customer-support ticket triage. A claude-haiku-5-5 classifier routes incoming tickets: billing questions go to a RAG system over billing docs without touching an LLM for generation; technical issues go to claude-opus-5-5 with a technical system prompt; general questions go to claude-haiku-5-5. Because roughly two thirds of tickets never touch the expensive model, and Haiku 5.5 input costs 1/40 of Opus 5.5 on short prompts, blended inference cost falls by roughly two thirds with no drop in CSAT.
 
-**Parallelization — sectioning**: legal document review at a large professional-services firm. A 200-page contract is split into 20 sections of ~10 pages each. All 20 sections are reviewed in parallel by claude-opus-4-5. Wall-clock time drops from ~40 minutes sequential to ~3 minutes parallel — the 13.3x speedup derived in Section 4, not 20x, because the merge step is serial. The merge step synthesizes risk flags across sections.
+**Parallelization — sectioning**: legal document review at a large professional-services firm. A 200-page contract is split into 20 sections of ~10 pages each. All 20 sections are reviewed in parallel by claude-opus-5-5. Wall-clock time drops from ~40 minutes sequential to ~3 minutes parallel — the 13.3x speedup derived in Section 4, not 20x, because the merge step is serial. The merge step synthesizes risk flags across sections.
 
-**Parallelization — voting**: medical coding at a health insurer. The same clinical note is sent to claude-opus-4-5 five times with temperature=0.6. The majority ICD-10 code across five votes is accepted. Majority voting reduces sampling variance on borderline codes; the published self-consistency result it rests on is Wang et al. (ICLR 2023), which reports +3.9% to +17.9% absolute across reasoning benchmarks. Cost: 5× per coding decision, justified by audit cost avoidance.
+**Parallelization — voting**: medical coding at a health insurer. The same clinical note is sent to claude-opus-5-5 five times at default sampling (5.5 models reject `temperature`, so vote diversity comes from default sampling and adaptive thinking). The majority ICD-10 code across five votes is accepted. Majority voting reduces sampling variance on borderline codes; the published self-consistency result it rests on is Wang et al. (ICLR 2023), which reports +3.9% to +17.9% absolute across reasoning benchmarks. Cost: 5× per coding decision, justified by audit cost avoidance.
 
 **Orchestrator-workers**: GitHub's Copilot coding agent (GA since September 2025; it succeeded the Copilot Workspace technical preview, which GitHub sunset on 30 May 2025). A user describes a feature or assigns an issue. The agent plans which files to edit, what each edit should accomplish, and what tests to write, executes the edits in a cloud environment, and opens a pull request for review.
 
@@ -1006,9 +1010,9 @@ The first five entries below are **illustrative deployment shapes**, not publish
 **Reliability vs cost frontier**: Routing is the best efficiency play. Evaluator-optimizer is the best quality play. Prompt chaining is the best reliability play for tasks with natural sequential structure. Voting is best when cost is secondary and variance reduction is the goal.
 
 **Latency characteristics**:
-- Routing adds exactly 1 cheap LLM call (~100-200ms with claude-haiku-4-5)
+- Routing adds exactly 1 cheap LLM call (~100-200ms with claude-haiku-5-5 at `effort: low`)
 - Sectioning parallelization: latency = max(chunk latencies) + merge, not sum
-- Evaluator-optimizer: each additional round adds 1 generation + 1 evaluation = ~800ms-2s per round with claude-opus-4-5
+- Evaluator-optimizer: each additional round adds 1 generation + 1 evaluation = ~800ms-2s per round with claude-opus-5-5 at `effort: low`, longer at the default `medium`
 
 ---
 
@@ -1233,7 +1237,7 @@ client = anthropic.Anthropic()
 
 def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5-5",
         max_tokens=1024,
         messages=[{
             "role": "user",
@@ -1245,7 +1249,7 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
         }]
     )
     try:
-        return json.loads(response.content[0].text)
+        return json.loads(response.content[-1].text)
     except json.JSONDecodeError:
         if retry:
             return safe_orchestrate(objective + " (respond with JSON only)", retry=False)
@@ -1259,8 +1263,9 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
 **Anthropic SDK (Python)**
 - `anthropic.Anthropic()` — synchronous client; `anthropic.AsyncAnthropic()` — async client
 - `client.messages.create()` — standard call; use `stream=True` for streaming in long chains
-- Models: `claude-haiku-4-5` for routing/classification ($1/1M input, $5/1M output), `claude-opus-4-5` for orchestration/evaluation ($5/1M input, $25/1M output) — July 2026 list prices
-- Rate limits (July 2026, Claude API usage tiers are Start / Build / Scale / Custom): 1,000 RPM on Start, 5,000 on Build, 10,000 on Scale — the same RPM for claude-haiku-4-5 and for Opus. Note the Opus RPM is a *combined* bucket shared across Opus 4.8/4.7/4.6/4.5, while Opus 5 has its own. Plan parallelization against your own tier, and remember cache reads do not count toward the input-token-per-minute limit
+- Models: `claude-haiku-5-5` for routing/classification ($0.10/1M input, $0.50/1M output on prompts up to 100K tokens; $0.50/$2.50 above), `claude-opus-5-5` for orchestration/evaluation ($4/1M input, $20/1M output), 2026-10-19 list prices
+- Request shape on 5.5 models: no `temperature`, `top_p`, `top_k`, or assistant prefill (each returns HTTP 400); responses start with a thinking block, so read the text from the last content block; steer depth with `output_config={"effort": ...}`
+- Rate limits (2026-10-19, Claude API usage tiers are Start / Build / Scale / Custom): 1,000 RPM on Start, 5,000 on Build, 10,000 on Scale, the same RPM for claude-haiku-5-5 and claude-opus-5-5. Opus 5.5 and Opus 5 each have their own bucket; the combined Opus bucket covers Opus 4.8/4.7/4.6/4.5. Plan parallelization against your own tier, and remember cache reads do not count toward the input-token-per-minute limit
 
 **Concurrency in Python**
 - `concurrent.futures.ThreadPoolExecutor` — best for I/O-bound LLM calls; GIL is not a bottleneck for network I/O
@@ -1301,7 +1306,7 @@ A gate is a validation check between steps in a prompt chain. It can be programm
 
 **Q: How does routing reduce cost and what is the key risk?**
 **Short:** Routing sends simple queries to a cheap model and complex ones to an expensive one, but misclassified queries get silently degraded quality.
-Routing reduces cost by directing low-complexity queries to cheaper models and reserving expensive models for complex queries. On July 2026 list prices, claude-haiku-4-5 is $1/1M input tokens and claude-opus-4-5 is $5/1M — a 5x ratio, so routing 60% of traffic to Haiku gives a blended $1×0.6 + $5×0.4 = $2.60/1M versus $5/1M all-Opus, a 48% saving. Cheaper classifier tiers widen that ratio and the saving with it. The key risk is classifier error: if 10% of complex queries are misclassified as simple and sent to the cheap model, those 10% get degraded quality. The classifier must be validated on a representative sample with precision and recall measured per route.
+Routing reduces cost by directing low-complexity queries to cheaper models and reserving expensive models for complex queries. On 2026-10-19 list prices, claude-haiku-5-5 is $0.10/1M input tokens on prompts up to 100K tokens and claude-opus-5-5 is $4/1M, a 40x ratio, so routing 60% of traffic to Haiku gives a blended $0.10×0.6 + $4×0.4 = $1.66/1M versus $4/1M all-Opus, a 58% saving. Almost all of the remaining bill is the Opus share, so the routing split matters more than the cheap model's price. Haiku 5.5 bills $0.50/1M once a prompt passes 100K tokens, which cuts the ratio to 8x for long-context routes. The key risk is classifier error: if 10% of complex queries are misclassified as simple and sent to the cheap model, those 10% get degraded quality. The classifier must be validated on a representative sample with precision and recall measured per route.
 
 **Q: What is the difference between sectioning and voting in parallelization?**
 **Short:** Sectioning splits one input into parallel chunks merged afterward, capping speedup below N; voting reruns the same prompt N times to cut variance.
@@ -1325,7 +1330,7 @@ Each round costs 1 generation call + 1 evaluation call = 2 calls. Three rounds =
 
 **Q: Does parallelization really multiply token cost by N?**
 **Short:** No, if prompt caching is warmed first -- a shared prefix costs a fraction of a fresh call for each additional parallel branch.
-Only if you leave prompt caching off, which is the default assumption behind the "N× cost" rule and is usually wrong. Sectioning, voting, routing and evaluator-optimizer loops all re-send a large, byte-identical prefix — the same document, the same system prompt, the same prior draft. With Anthropic's rates, a cache read costs 0.1× the base input rate and a cache write 1.25× (2× on the 1-hour TTL), so N branches over a shared 20,000-token document cost `1.25 + 0.1(N-1)` prefix-units instead of `N`: at N=5 that is $0.165 versus $0.500 on a $5/1M tier, and at N=10 it is $0.215 versus $1.00. The ratio improves as N grows, because each marginal branch costs a tenth of a fresh one. Three caveats decide whether you actually get it. A cold concurrent fan-out races its own cache write — every branch becomes a 1.25× write, which is 25% *worse* than not caching — so warm the prefix with one call first. Any volatile content at the top of the prompt (timestamp, request ID, reshuffled few-shots) invalidates the prefix for all branches, and Anthropic invalidates hierarchically from `tools` to `system` to `messages`, so one edited tool description drops everything. And routed branches only share a cache if the shared instructions precede the branch-specific ones. Confirm with `cache_read_input_tokens` on the response rather than assuming.
+Only if you leave prompt caching off, which is the default assumption behind the "N× cost" rule and is usually wrong. Sectioning, voting, routing and evaluator-optimizer loops all re-send a large, byte-identical prefix — the same document, the same system prompt, the same prior draft. With Anthropic's standard rates, a cache read costs 0.1× the base input rate (0.05× on Opus 5.5 and Sonnet 5.5) and a cache write 1.25× (2× on the 1-hour TTL), so N branches over a shared 20,000-token document cost `1.25 + 0.1(N-1)` prefix-units instead of `N`: at N=5 that is $0.165 versus $0.500 on a $5/1M tier, and at N=10 it is $0.215 versus $1.00. The ratio improves as N grows, because each marginal branch costs a tenth of a fresh one. Three caveats decide whether you actually get it. A cold concurrent fan-out races its own cache write — every branch becomes a 1.25× write, which is 25% *worse* than not caching — so warm the prefix with one call first. Any volatile content at the top of the prompt (timestamp, request ID, reshuffled few-shots) invalidates the prefix for all branches, and Anthropic invalidates hierarchically from `tools` to `system` to `messages`, so one edited tool description drops everything. And routed branches only share a cache if the shared instructions precede the branch-specific ones. Confirm with `cache_read_input_tokens` on the response rather than assuming.
 
 **Q: How do you handle orchestrator output that is not valid JSON?**
 **Short:** Retry once with an explicit JSON-only instruction, log the raw failure, and fall back to a hardcoded decomposition rather than proceeding.
@@ -1361,9 +1366,9 @@ The evaluator-optimizer inference loop is a lightweight, inference-time analog o
 
 **Match pattern complexity to task complexity**: A single well-engineered prompt beats a poorly designed pipeline every time. Before adding any pattern, document the specific failure mode you observed and confirm the pattern fixes it.
 
-**Use cheap models for control, expensive models for content**: Route classification, gate checks, and orchestration decomposition are control-plane operations. Use claude-haiku-4-5 or similar cheap models for these. Reserve claude-opus-4-5 for content generation, reasoning, and evaluation where quality matters.
+**Use cheap models for control, expensive models for content**: Route classification, gate checks, and orchestration decomposition are control-plane operations. Use claude-haiku-5-5 or similar cheap models for these. Reserve claude-opus-5-5 for content generation, reasoning, and evaluation where quality matters.
 
-**Define gates as code, not LLM calls, when possible**: A JSON schema validator, a regex, or a numeric range check is deterministic, free, and instant. An LLM gate adds ~100-200ms and roughly $0.0005 per check on claude-haiku-4-5 (~500 input tokens at $1 per 1M). Use programmatic gates whenever the validation criterion can be expressed as code.
+**Define gates as code, not LLM calls, when possible**: A JSON schema validator, a regex, or a numeric range check is deterministic, free, and instant. An LLM gate adds ~100-200ms and roughly $0.0001 per check on claude-haiku-5-5 (~500 input tokens at $0.10 per 1M plus ~100 thinking and output tokens at $0.50 per 1M). Use programmatic gates whenever the validation criterion can be expressed as code.
 
 **Set explicit max_tokens per step**: Never rely on the model's default stopping. Each step in a chain should have a max_tokens budget matched to its expected output size. Overshooting wastes cost and may push the next step over context limits.
 
@@ -1385,9 +1390,9 @@ The evaluator-optimizer inference loop is a lightweight, inference-time analog o
 
 ### Enterprise Document Processing Pipeline
 
-**Scenario** (a worked example, not a published deployment — the architecture is the transferable part; every figure below is derived from the July 2026 list prices and the model in Section 4, and should be re-measured on your own corpus): A large financial services firm processes 50,000 contract documents per month. Each contract is 20-80 pages. The firm needs to: (1) extract key terms (parties, dates, payment amounts, governing law), (2) classify contracts by risk tier (low/medium/high), (3) flag non-standard clauses for legal review, and (4) generate a structured summary for the deal team. Contracts vary enormously in structure — NDAs, MSAs, SOWs, loan agreements, derivatives contracts.
+**Scenario** (a worked example, not a published deployment — the architecture is the transferable part; every figure below is derived from the 2026-10-19 list prices and the model in Section 4, and should be re-measured on your own corpus): A large financial services firm processes 50,000 contract documents per month. Each contract is 20-80 pages. The firm needs to: (1) extract key terms (parties, dates, payment amounts, governing law), (2) classify contracts by risk tier (low/medium/high), (3) flag non-standard clauses for legal review, and (4) generate a structured summary for the deal team. Contracts vary enormously in structure — NDAs, MSAs, SOWs, loan agreements, derivatives contracts.
 
-**Problem with single-prompt approach**: A single frontier-model prompt on an 80-page contract (approximately 60K tokens) costs ~$0.30 per document at $5/1M input tokens, and produces extraction errors on numeric fields (amounts, dates) at roughly a 12% error rate. Note that 60K tokens fits comfortably inside a modern 200K-or-larger context window — the problem is accuracy and cost under a single monolithic prompt, not a hard context-limit failure.
+**Problem with single-prompt approach**: A single frontier-model prompt on an 80-page contract (approximately 60K tokens) costs ~$0.24 per document at $4/1M input tokens (Claude Opus 5.5), and produces extraction errors on numeric fields (amounts, dates) at roughly a 12% error rate. Note that 60K tokens fits comfortably inside a modern 200K-or-larger context window — the problem is accuracy and cost under a single monolithic prompt, not a hard context-limit failure.
 
 ---
 
@@ -1415,7 +1420,7 @@ flowchart TD
     X8 --> MRG
     MRG --> RISK{"Routing — Risk Classification\nClassifier (claude-haiku)\nlow / medium / high"}
     RISK -->|"low: 60%"| LOW["claude-haiku\nSummary only"]
-    RISK -->|"medium/high: 40%"| HIGH["claude-opus-4-5\nFull clause analysis"]
+    RISK -->|"medium/high: 40%"| HIGH["claude-opus-5-5\nFull clause analysis"]
     LOW --> EO["Evaluator-Optimizer — Non-Standard Clause Flags\nGenerator: flag unusual clauses\nEvaluator: verify flags against standard clause library\nMax rounds: 3"]
     HIGH --> EO
     EO --> OUTJ(["Structured JSON Output\n(parties, dates, amounts, risk_tier, clause_flags, summary)"])
@@ -1426,9 +1431,9 @@ flowchart TD
 ```
 
 Three patterns composed in one pipeline: 8-way sectioning parallelization for extraction,
-a 60/40 risk-routing split that reserves claude-opus-4-5 for medium/high-risk contracts, and
+a 60/40 risk-routing split that reserves claude-opus-5-5 for medium/high-risk contracts, and
 a 3-round-capped evaluator-optimizer for clause flags — together cutting cost per document
-from $0.30 to about $0.13 and latency from 38s to 6s.
+from $0.24 to about $0.045 and latency from 38s to 6s.
 
 ---
 
@@ -1452,7 +1457,7 @@ class ContractExtraction:
 
 def extract_chunk(chunk_text: str, chunk_index: int) -> ContractExtraction:
     response = client.messages.create(
-        model="claude-haiku-4-5",
+        model="claude-haiku-5-5",
         max_tokens=512,
         messages=[{
             "role": "user",
@@ -1466,7 +1471,7 @@ def extract_chunk(chunk_text: str, chunk_index: int) -> ContractExtraction:
             )
         }]
     )
-    data = json.loads(response.content[0].text)
+    data = json.loads(response.content[-1].text)
     return ContractExtraction(**data, chunk_index=chunk_index)
 
 def parallel_extract(full_text: str, num_chunks: int = 8) -> list[ContractExtraction]:
@@ -1497,8 +1502,9 @@ def merge_extractions(extractions: list[ContractExtraction]) -> dict:
 
 def classify_risk(merged: dict, full_text: str) -> str:
     response = client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=8,
+        model="claude-haiku-5-5",
+        max_tokens=1024,
+        output_config={"effort": "low"},
         messages=[{
             "role": "user",
             "content": (
@@ -1509,25 +1515,25 @@ def classify_risk(merged: dict, full_text: str) -> str:
             )
         }]
     )
-    label = response.content[0].text.strip().lower()
+    label = response.content[-1].text.strip().lower()
     return label if label in {"low", "medium", "high"} else "high"  # Default to high on error
 
 def flag_clauses(full_text: str, max_rounds: int = 3) -> list[str]:
     def generate_flags(feedback: str = "") -> str:
         fb_section = f"\nAddress this feedback:\n{feedback}" if feedback else ""
         r = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-opus-5-5",
             max_tokens=1024,
             messages=[{"role": "user", "content": (
                 f"Identify non-standard clauses in this contract. "
                 f"Return a JSON array of strings.{fb_section}\n\n{full_text[:8000]}"
             )}]
         )
-        return r.content[0].text
+        return r.content[-1].text
 
     def evaluate_flags(flags_json: str) -> tuple[bool, str]:
         r = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-opus-5-5",
             max_tokens=512,
             messages=[{"role": "user", "content": (
                 f"Evaluate these clause flags for a contract review.\n"
@@ -1535,7 +1541,7 @@ def flag_clauses(full_text: str, max_rounds: int = 3) -> list[str]:
                 f"Flags: {flags_json}"
             )}]
         )
-        data = json.loads(r.content[0].text)
+        data = json.loads(r.content[-1].text)
         return data["approved"], data.get("feedback", "")
 
     current = generate_flags()
@@ -1570,35 +1576,35 @@ def process_contract(pdf_text: str) -> dict:
 
 ---
 
-**Modeled outcomes** for the combined pipeline versus the prior single-prompt approach. The quality rows are illustrative targets for this workload shape; the cost row is computed below from July 2026 list prices:
+**Modeled outcomes** for the combined pipeline versus the prior single-prompt approach. The quality rows are illustrative targets for this workload shape; the cost row is computed below from 2026-10-19 list prices:
 
 | Metric | Single Prompt | Workflow Pipeline | Improvement |
 |---|---|---|---|
 | Extraction error rate (numeric fields) | 12% | 2.1% | 83% reduction |
-| Cost per document | $0.30 | ~$0.13 | ~57% reduction |
+| Cost per document | $0.24 | ~$0.045 | ~81% reduction |
 | Wall-clock latency (80-page doc) | 38s | 6s | 84% reduction |
 | Clause flag false positive rate | 34% | 11% | 68% reduction |
 | Legal review escalation accuracy | 71% | 94% | 32% improvement |
 
-Cost derivation, at claude-haiku-4-5 $1/$5 per 1M input/output and claude-opus-4-5 $5/$25:
+Cost derivation, at claude-haiku-5-5 $0.10/$0.50 per 1M input/output (every call stays under the 100K-token prompt threshold) and claude-opus-5-5 $4/$20:
 
 ```
-  extraction (haiku)     60K in x $1/1M          = $0.060
-                         ~4K out x $5/1M         = $0.020    -> $0.080 every document
-  risk classify (haiku)                                      -> $0.001
-  low-risk summary (haiku, 60% of docs)                      -> $0.004
-  clause flags (opus, 40% of docs, avg 1.8 rounds x 2 calls) -> $0.115
+  extraction (haiku)     60K in x $0.10/1M       = $0.0060
+                         ~4K out x $0.50/1M      = $0.0020   -> $0.0080 every document
+  risk classify (haiku)                                      -> $0.0001
+  low-risk summary (haiku, 60% of docs)                      -> $0.0004
+  clause flags (opus, 40% of docs, avg 1.8 rounds x 2 calls) -> $0.0920
 
-  low-risk doc    = 0.080 + 0.001 + 0.004                    = $0.085
-  med/high doc    = 0.085 + 0.115                            = $0.200
-  blended         = 0.6 x 0.085 + 0.4 x 0.200                = $0.131
+  low-risk doc    = 0.0080 + 0.0001 + 0.0004                 = $0.0085
+  med/high doc    = 0.0085 + 0.0920                          = $0.1005
+  blended         = 0.6 x 0.0085 + 0.4 x 0.1005              = $0.0453
 ```
 
 **Key architectural decisions**:
 
-1. Sectioning parallelization on chunks of 10 pages keeps each chunk well within claude-haiku-4-5's context window (200K tokens) while enabling 8× parallel speedup.
+1. Sectioning parallelization on chunks of 10 pages keeps each chunk (~7.5K tokens) far below claude-haiku-5-5's 100K-token price threshold, past which input cost rises 5x, while enabling 8× parallel speedup.
 
-2. Routing on risk tier concentrates claude-opus-4-5 spend on medium and high risk contracts (40% of volume) — low risk contracts get a haiku-generated summary only, holding cost per low-risk doc to ~$0.085 (the haiku extraction pass dominates; see the derivation above).
+2. Routing on risk tier concentrates claude-opus-5-5 spend on medium and high risk contracts (40% of volume) — low risk contracts get a haiku-generated summary only, holding cost per low-risk doc to ~$0.0085 (the haiku extraction pass dominates; see the derivation above).
 
 3. Evaluator-optimizer on clause flagging limited to 3 rounds with a hard cap. Modeled average rounds to approval: 1.8, consistent with the geometric-convergence model in Section 4. A well-tuned loop should rarely hit the cap — but the cap must stay in place regardless, because its purpose is to bound the pathological inputs, not the typical ones.
 

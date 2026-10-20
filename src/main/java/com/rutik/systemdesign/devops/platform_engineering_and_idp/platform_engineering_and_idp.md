@@ -2,6 +2,8 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
+> **Version anchor (2026-10-19).** Current releases: **Backstage v1.55.3** (2026-09-29) and **Crossplane v2.4.2** (2026-09-22). The Crossplane examples use the v2 model (`apiextensions.crossplane.io/v2`, namespaced composite resources). DORA defines five software delivery metrics ([DORA metrics guide](https://dora.dev/guides/dora-metrics/)).
+
 ---
 
 ## 1. Concept Overview
@@ -12,7 +14,7 @@ The IDP sits between developers and the underlying infrastructure. Instead of ev
 
 The reference open-source backbone is **Backstage** (created at Spotify, donated to the CNCF): a software catalog that inventories every service/API/resource, a **scaffolder** that generates new components from templates, **TechDocs** for docs-as-code, and a plugin ecosystem for CI/CD, Kubernetes, cost, and security views. On the provisioning side, **Crossplane** offers a Kubernetes-native control-plane alternative to Terraform: developers create a namespaced **composite resource (XR)** for a database or bucket, and the platform's `Composition` reconciles the real cloud resources continuously.
 
-Platform success is measured with **DORA metrics** (deployment frequency, change lead time, change fail rate, failed deployment recovery time) and organized via **Team Topologies** (stream-aligned, platform, enabling, and complicated-subsystem teams). This module cross-references [`gitops_argocd_flux`](../gitops_argocd_flux/gitops_argocd_flux.md) (the delivery mechanism behind golden paths) and [`infrastructure_as_code_terraform`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (the alternative provisioning model to Crossplane).
+Platform success is measured with **DORA metrics** (deployment frequency, change lead time, failed deployment recovery time, change fail rate, deployment rework rate) and organized via **Team Topologies** (stream-aligned, platform, enabling, and complicated-subsystem teams). This module cross-references [`gitops_argocd_flux`](../gitops_argocd_flux/gitops_argocd_flux.md) (the delivery mechanism behind golden paths) and [`infrastructure_as_code_terraform`](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (the alternative provisioning model to Crossplane).
 
 The architecture of an ML platform and the build-or-buy choice are covered in [ML Platform Architecture and Build vs Buy](../../mlops/ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md).
 
@@ -42,7 +44,7 @@ The architecture of an ML platform and the build-or-buy choice are covered in [M
 
 5. **Thinnest viable platform (TVP)**. Start with the smallest abstraction that helps — sometimes a wiki page and a Terraform module — and grow only where demand proves it out. Do not build a giant portal nobody asked for.
 
-6. **Measure with DORA**. Deployment frequency, change lead time, change fail rate, and failed deployment recovery time are the outcome metrics that tell you whether the platform is actually accelerating delivery.
+6. **Measure with DORA**. Deployment frequency, change lead time, failed deployment recovery time, change fail rate, and deployment rework rate are the outcome metrics that tell you whether the platform is actually accelerating delivery.
 
 7. **Encode policy, do not gatekeep**. Security and compliance are baked into the golden path (signed images, scanned dependencies, least-privilege IAM) so doing the right thing requires no extra developer effort.
 
@@ -354,7 +356,7 @@ The gate is adoption pain, not preference: skip straight to the thinnest viable 
 
 3. **No ownership in the catalog**. A catalog where half the services have `owner: unknown` is useless during an incident.
 
-4. **Vanity metrics**. Counting "templates created" instead of measuring DORA outcomes (deployment frequency, change lead time, change fail rate, failed deployment recovery time).
+4. **Vanity metrics**. Counting "templates created" instead of measuring DORA outcomes (deployment frequency, change lead time, failed deployment recovery time, change fail rate, deployment rework rate).
 
 Broken scaffolder template — no input validation, so a developer can inject an invalid repo name and an unowned service, polluting the catalog and breaking downstream automation:
 
@@ -434,10 +436,10 @@ The Software Catalog is a graph of components, APIs, systems, and resources desc
 
 Crossplane runs as a control plane inside Kubernetes and continuously reconciles cloud resources from declarative CRDs, self-healing drift automatically, whereas Terraform is a one-shot `apply` per pipeline run that only corrects drift on the next execution. Crossplane exposes a Kubernetes-native API so developers create a small namespaced composite resource in their own namespace — governed by ordinary Kubernetes RBAC — while the platform's Composition hides the complexity. Choose Crossplane when you are K8s-native and want continuous reconciliation; choose Terraform for broad existing adoption and a familiar workflow.
 
-**Q: What are the four DORA metrics and what do they measure?**
-**Short:** The four DORA metrics are deployment frequency, change lead time, change fail rate, and failed deployment recovery time, measuring throughput and stability together.
+**Q: What are the five DORA metrics and what do they measure?**
+**Short:** Deployment frequency, change lead time and failed deployment recovery time measure throughput; change fail rate and deployment rework rate measure instability.
 
-Deployment frequency (how often you ship), change lead time (commit to production), change fail rate (percentage of deploys causing a failure), and failed deployment recovery time (how long it takes to restore service after a bad deploy). The first two measure throughput, the last two measure instability, and the point of tracking all four is that the strongest teams move fast and stay stable at the same time rather than trading one for the other. There is a fifth key now, deployment rework rate, and DORA has stopped ranking teams into Elite/High/Medium/Low tiers in favour of describing team archetypes that combine delivery performance with human factors like burnout and friction. Quote the metrics as outcomes and compare a team against its own trend, not against a published threshold.
+Deployment frequency (how often you ship), change lead time (commit to production) and failed deployment recovery time (how long it takes to recover from a deploy that needs immediate intervention) measure throughput. Change fail rate (share of deploys that need immediate intervention, such as a rollback or hotfix) and deployment rework rate (share of deploys that are unplanned and happen because of a production incident) measure instability. The point of tracking all five is that the strongest teams move fast and stay stable at the same time rather than trading one for the other. DORA has also stopped ranking teams into Elite/High/Medium/Low tiers in favour of describing team archetypes that combine delivery performance with human factors like burnout and friction. Quote the metrics as outcomes and compare a team against its own trend, not against a published threshold.
 
 **Q: Explain Team Topologies and how it relates to platform engineering.**
 **Short:** Team Topologies casts the platform team as offering the IDP as-a-service to stream-aligned teams specifically to reduce their cognitive load, not to gatekeep.
@@ -447,7 +449,7 @@ Team Topologies defines four team types — stream-aligned (own a product slice 
 **Q: How do you measure whether your platform is succeeding?**
 **Short:** Platform success is measured mainly by golden-path adoption and improved DORA outcomes for on-platform teams, not vanity counts like templates created.
 
-Primarily adoption (what fraction of teams/services use the golden path) and DORA outcomes (rising deployment frequency and shrinking change lead time, failed deployment recovery time, and change fail rate) for teams on the platform versus off it, plus developer satisfaction surveys. Vanity metrics like "templates created" are misleading because they do not prove the platform reduced anyone's pain. If adoption is low, treat it as a product failure and go talk to your users.
+Primarily adoption (what fraction of teams/services use the golden path) and DORA outcomes (rising deployment frequency and shrinking change lead time, failed deployment recovery time, change fail rate, and deployment rework rate) for teams on the platform versus off it, plus developer satisfaction surveys. Vanity metrics like "templates created" are misleading because they do not prove the platform reduced anyone's pain. If adoption is low, treat it as a product failure and go talk to your users.
 
 **Q: A team complains the golden path does not fit their use case. How do you respond?**
 **Short:** Treat the complaint as product feedback: extend the golden path if the need is common, or provide a documented escape hatch if it's a genuine edge case.

@@ -769,7 +769,7 @@ Claims backed by published documentation carry their primary-source URL inline. 
 | React Profiler | Commit counts during a stream. The measurement behind the §4.2 table |
 | Chrome DevTools | Performance panel main-thread occupancy, the 84% to 3.4% figure |
 | Playwright | Drives Stop, scroll-up-during-stream and mid-stream disconnect end to end |
-| MSW | v2. Mocks an SSE stream with scripted chunk timing so backpressure is testable |
+| MSW | 3. Mocks an SSE stream with scripted chunk timing so backpressure is testable |
 | Vitest | Unit tests for `splitSettled` against truncated-markdown fixtures |
 
 ---
@@ -816,7 +816,7 @@ A stream that has produced no token for 30 seconds but has not closed is the mos
 Backpressure bugs do not reproduce on a fast local server, where the whole answer arrives in three chunks and the naive implementation looks fine. The test must control chunk timing.
 
 ```ts
-// stream.render.test.ts — MSW v2 with scripted chunk timing
+// stream.render.test.ts: MSW 3 with scripted chunk timing
 server.use(
   http.post("/api/chat", () =>
     new HttpResponse(

@@ -6,7 +6,7 @@
 
 That last point is the real subject of this module. The six-month release cadence means the interesting question about almost any Java feature in 2026 is not *what does it do* but **what is its status**: finalized (use it), preview (available behind `--enable-preview`, API may still change), experimental (available behind an unlock flag, may vanish), incubating (a separate module, explicitly not a preview), or deprecated for removal (works today, will not tomorrow). Those five states look identical in a blog post and could not be more different in a production codebase. Getting one wrong inverts the advice — "still in preview" about a finalized API makes people avoid something safe, and "finalized" about a preview makes them ship something whose method names will change under them.
 
-So this module is organised around status, not chronology. It covers what **finalized** between Java 22 and 26 and is therefore ordinary Java on the section's baseline; what is **still preview** after five, six, or seven rounds and what that longevity tells you; what **changed underneath you** without any new syntax — the integrity-by-default work that turned warnings into errors; and how to reason about adopting any of it. The companion timeline for what is coming is deliberately narrow: **JDK 27 has not shipped** as of this writing (GA is 2026-09-15), so anything attributed to it here is a frozen plan, not a fact about a runtime you can download.
+So this module is organised around status, not chronology. It covers what **finalized** between Java 22 and 26 and is therefore ordinary Java on the section's baseline; what is **still preview** after five, six, or seven rounds and what that longevity tells you; what **changed underneath you** without any new syntax (the integrity-by-default work that turned warnings into errors); and how to reason about adopting any of it. JDK 27 (GA 2026-09-15, non-LTS) is covered only where it changes a Java 25 or 26 answer: it made G1 the default collector in every environment (JEP 523) and compact object headers the default (JEP 534), and it took Structured Concurrency to a seventh preview with a reworked `Joiner` (JEP 533).
 
 ---
 
@@ -87,14 +87,30 @@ This is the group that breaks upgrades, and none of it announces itself in your 
 
 | Feature | Latest JEP | Rounds | Status |
 |---------|-----------|:---:|--------|
-| Structured Concurrency | 533 (27) | 7th preview | 453 (21), 462 (22), 480 (23), 499 (24), **505 (25 — redesigned)**, 525 (26), 533 (27) |
+| Structured Concurrency | 533 (27) | 7th preview | 453 (21), 462 (22), 480 (23), 499 (24), **505 (25, redesigned)**, 525 (26), 533 (27); final in JDK 28 (JEP 543, the JEP 533 API unchanged) |
 | Lazy Constants — **renamed** from Stable Values | 531 (27) | 3rd preview | 502 (25, "Stable Values"), **526 (26, renamed "Lazy Constants")**, 531 (27) |
 | Primitive Types in Patterns, `instanceof`, `switch` | 532 (27) | 5th preview | 455 (23), 488 (24), 507 (25), 530 (26), 532 (27) |
-| PEM Encodings of Cryptographic Objects | 538 (27) | 3rd preview | 470 (25), 524 (26), 538 (27) |
+| PEM Encodings of Cryptographic Objects | 538 (27) | 3rd preview | 470 (25), 524 (26), 538 (27); final in JDK 28 (JEP 542, the JEP 538 API unchanged) |
 | Vector API | 537 (27) | **12th incubator** | not a preview; needs `--add-modules jdk.incubator.vector`; blocked on Project Valhalla |
 | Value Objects (Valhalla) | 401 | preview **targeted at JDK 28** | **has never appeared in any released JDK**; EA builds only |
 
 The Vector API row deserves a sentence of its own. Twelve incubation rounds is not a feature that is nearly ready; it is a feature deliberately held open because it depends on Project Valhalla's value types to deliver its intended performance model without boxing. Treat "still incubating after twelve rounds" as information about the dependency, not about the effort.
+
+### 4.6 Delivered in JDK 27 (non-LTS, GA 2026-09-15)
+
+| JEP | Feature | Status in 27 |
+|-----|---------|--------------|
+| 523 | G1 the default collector in all environments | final (default change) |
+| 527 | Post-quantum hybrid key exchange for TLS 1.3 | final |
+| 531 | Lazy Constants | 3rd preview |
+| 532 | Primitive types in patterns, `instanceof`, `switch` | 5th preview |
+| 533 | Structured Concurrency | 7th preview (final in 28) |
+| 534 | Compact object headers by default | final (default change) |
+| 536 | JFR in-process data redaction | final |
+| 537 | Vector API | 12th incubator |
+| 538 | PEM encodings of cryptographic objects | 3rd preview (final in 28) |
+
+JDK 28 has no published schedule; by the six-month cadence GA falls in March 2027. Its targeted set (openjdk.org/projects/jdk/28, 2026-10-15) is Value Objects preview (401), generational Shenandoah by default (535), strict field initialization preview (539), a Simple JSON API incubator (540), deprecation of the macOS/x64 port (541), final PEM (542) and Structured Concurrency (543), AOT code compilation (544), and two ZGC startup and heap-sizing JEPs (545, 546).
 
 ---
 
@@ -104,16 +120,17 @@ The Vector API row deserves a sentence of its own. Twelve incubation rounds is n
 
 ```mermaid
 timeline
-    title Java 22 to 27 by status
+    title Java 22 to 28 by status
     JDK 22 : Gatherers preview : Class-File API preview : FFM final
     JDK 23 : Markdown javadoc FINAL : Unsafe memory access deprecated
     JDK 24 : Gatherers FINAL : Class-File API FINAL : ML-KEM and ML-DSA FINAL : Security Manager disabled : synchronized stops pinning : AOT cache
     JDK 25 LTS : Module imports FINAL : Compact source files FINAL : Flexible constructors FINAL : ScopedValue FINAL : KDF FINAL : Compact object headers product
     JDK 26 : HTTP/3 FINAL : AOT object caching any GC : Unsafe memory access denied : Applet API removed
-    JDK 27 : not yet shipped : GA 2026-09-15
+    JDK 27 : G1 default everywhere : PQ hybrid TLS 1.3 key exchange : Compact headers default : JFR redaction
+    JDK 28 targeted : Structured Concurrency FINAL : PEM FINAL : Value Objects preview : AOT code compilation
 ```
 
-Read the columns rather than the rows: JDK 24 is where the *API* work landed and where the integrity defaults tightened, JDK 25 is where the *language* work landed, and JDK 26 is a consolidation release with one headline API.
+Read the columns rather than the rows: JDK 24 is where the *API* work landed and where the integrity defaults tightened, JDK 25 is where the *language* work landed, JDK 26 is a consolidation release with one headline API, JDK 27 changed defaults (collector, header layout, TLS key exchange) without finalizing any language feature, and JDK 28 is targeted to finalize two long-running previews.
 
 ### Preview graduation — and where a feature can stall
 
@@ -176,7 +193,7 @@ Object layout on 64-bit HotSpot with compressed class pointers.
 
 **The 4 bytes are an upper bound, not a guarantee.** Objects are 8-byte aligned, so whether the saving survives depends on the class's field layout: a class with a single `int` field is 16 bytes under *both* header sizes, because the padding simply absorbs the difference, while a class whose fields leave no 4-byte hole to fill converts the whole 4 bytes into real footprint. "It depends on the field layout" is the honest answer; measure a specific class with JOL (`ClassLayout.parseClass(Foo.class).toPrintable()`) rather than multiplying by four.
 
-Every per-object footprint figure taught anywhere in this section assumes the 12-byte header. That assumption holds by default today and stops holding in JDK 27, where **JEP 534 makes compact headers the default** — at which point the same arithmetic is wrong by 4 bytes per object everywhere.
+Every per-object footprint figure taught anywhere in this section assumes the 12-byte header. That assumption holds by default on JDK 25 and 26 and stopped holding in JDK 27, where **JEP 534 made compact headers the default**, so on 27 the same arithmetic is wrong by up to 4 bytes per object everywhere.
 
 ---
 
@@ -365,7 +382,7 @@ The reason to prefer it over ASM is versioning: the Class-File API ships *with* 
 java -XX:+UseCompactObjectHeaders -jar app.jar
 ```
 
-Compare with `-XX:+PrintFlagsFinal` or measure directly with JOL. On an object-dense heap the effect is large and free: the header falls from 12 bytes to 8, so a heap holding 50 million live objects recovers roughly 200 MB. JEP 534 makes it the default in JDK 27, which means this is a flag worth enabling *now* — you will get the change eventually, and turning it on deliberately lets you measure it under load rather than discover it during an upgrade.
+Compare with `-XX:+PrintFlagsFinal` or measure directly with JOL. On an object-dense heap the effect is large and free: the header falls from 12 bytes to 8, so a heap holding 50 million live objects recovers roughly 200 MB. JEP 534 made it the default in JDK 27, so on 25 and 26 it is a flag worth enabling deliberately: turning it on lets you measure it under load rather than discover it during the upgrade to 27.
 
 ### `synchronized` no longer pins virtual threads (JEP 491, JDK 24)
 
@@ -386,7 +403,7 @@ try (var scope = StructuredTaskScope.open(Joiner.<Response>anySuccessfulResultOr
 }
 ```
 
-JDK 26 (JEP 525) **renamed that joiner** to `anySuccessfulOrThrow()` and added `Joiner.onTimeout()`. JEP 533 carries a seventh preview into JDK 27. So the same three-line hedged-read idiom is spelled differently on 25 and on 26 — not a deprecation with a migration path, a rename in a preview API, which is precisely the contract `--enable-preview` warns you about.
+JDK 26 (JEP 525) **renamed that joiner** to `anySuccessfulOrThrow()` and added `Joiner.onTimeout()`. JDK 27 (JEP 533, seventh preview) changed it again: `StructuredTaskScope` and `Joiner` gained a third type parameter for the exception `join()` throws, the `...OrThrow()` joiners now make `join()` throw `ExecutionException`, `Joiner.awaitAll()` was removed, and `onTimeout()` became `timeout()`. JEP 543 finalizes that JDK 27 API unchanged in JDK 28. So the same three-line hedged-read idiom is spelled differently on 25, 26 and 27, and a team that adopted it on 25 and waits for the final API in 28 faces two rounds of source changes (the 26 rename, then the 27 exception and joiner changes). That is not a deprecation with a migration path but a rename in a preview API, which is precisely the contract `--enable-preview` warns you about.
 
 **On the Java 25 LTS baseline, write `anySuccessfulResultOrThrow()`.** Pin the release, expect to edit the call site on the next upgrade, and see [Structured Concurrency & Loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md) for the full model.
 
@@ -454,15 +471,15 @@ The second table explains why LTS-to-LTS teams get hurt hardest by §4.4. Moving
 - Stream Gatherers, the Class-File API, module import declarations, compact source files, flexible constructor bodies, `ScopedValue`, the KDF API, HTTP/3 (on 26).
 
 **Use with a deliberate decision:**
-- `-XX:+UseCompactObjectHeaders` — measure under load first, but expect to adopt it, since JDK 27 makes it the default.
+- `-XX:+UseCompactObjectHeaders`: measure under load first, but expect to adopt it, since JDK 27 made it the default.
 - `Gatherers.mapConcurrent` — for I/O-bound mapping only.
 - Module imports in application code — fine in scripts and small tools; in a large codebase the ambiguity rule and the loss of explicit dependency documentation usually outweigh the brevity.
 
 **Do NOT ship:**
 - Any preview feature in a **library**. You would force `--enable-preview` on every consumer, which is not a dependency anyone will accept.
-- Any preview feature anywhere without a named owner for the six-month rework. Structured Concurrency's joiner rename between 25 and 26 is the cost, made concrete.
+- Any preview feature anywhere without a named owner for the six-month rework. Structured Concurrency's joiner rename between 25 and 26, then the exception and joiner changes in 27, is the cost, made concrete.
 - The Vector API in production. Twelve incubation rounds, an incubator module rather than a preview, and a dependency on Valhalla that has not landed.
-- Anything attributed to JDK 27. It has not shipped.
+- Code that depends on a JDK 27 default (G1 everywhere, compact headers) while the fleet still runs 25 or 26. The default is per runtime, not per build.
 
 **Do NOT believe:**
 - That Valhalla value objects are "in preview". JEP 401 has never appeared in a released JDK; the preview is targeted at JDK 28.
@@ -483,7 +500,7 @@ A team on Java 23 saw `sun.misc.Unsafe` warnings from an off-heap cache library,
 
 ### War Story 3: The preview API that renamed a method
 
-A platform team adopted Structured Concurrency on Java 25 for hedged reads across replicas, using `Joiner.anySuccessfulResultOrThrow()`. The JDK 26 upgrade failed to compile: JEP 525 renamed it to `anySuccessfulOrThrow()`. Not a deprecation with an overlap period — a rename in a preview API, which is exactly the contract. The team had budgeted zero time for it because a "minor JDK upgrade" is not usually a source change. **If you adopt a preview feature, put its next-release rework on the roadmap in the same sprint you adopt it.**
+A platform team adopted Structured Concurrency on Java 25 for hedged reads across replicas, using `Joiner.anySuccessfulResultOrThrow()`. The JDK 26 upgrade failed to compile: JEP 525 renamed it to `anySuccessfulOrThrow()`. Not a deprecation with an overlap period: a rename in a preview API, which is exactly the contract. The team had budgeted zero time for it because a "minor JDK upgrade" is not usually a source change. The JDK 27 upgrade broke it again: JEP 533 added a third type parameter for the exception `join()` throws, made the default `open()` scope throw `ExecutionException`, removed `Joiner.awaitAll()`, and replaced `onTimeout()` with `timeout()`. JEP 543 finalizes that JDK 27 shape in JDK 28, so a 25 adopter rewrites the call sites twice before the API is stable. **If you adopt a preview feature, put its next-release rework on the roadmap in the same sprint you adopt it.**
 
 ### War Story 4: `import module` and the ambiguous `List`
 
@@ -493,9 +510,9 @@ A service adopted module imports across its codebase in a cleanup PR. It compile
 
 A batch job replaced `.parallel()` with `.gather(Gatherers.mapConcurrent(64, this::transform))` on the reasoning that virtual threads scale better. `transform` was pure CPU — image resizing. Throughput fell about 30%. Virtual threads multiplex onto carrier threads sized to `availableProcessors()`, so 64 concurrent virtual threads doing CPU work ran on the same cores as before while adding scheduling and continuation-mounting overhead. **`mapConcurrent` is for I/O-bound mapping. `parallel()` is for CPU-bound mapping. The distinction is not stylistic.**
 
-### War Story 6: Object-footprint arithmetic that is about to be wrong
+### War Story 6: Object-footprint arithmetic that JDK 27 made wrong
 
-A capacity model sized a cache from a per-entry footprint computed with a 12-byte object header — the correct default today. On JDK 27, JEP 534 makes compact object headers the default, and every entry becomes 4 bytes smaller per object. The model does not break; it silently over-provisions, which is the failure mode nobody investigates. **Any documented per-object footprint should now name the header size it assumes**, because that assumption stops holding at a release boundary that is weeks away.
+A capacity model sized a cache from a per-entry footprint computed with a 12-byte object header, the correct default on JDK 25 and 26. On JDK 27, JEP 534 made compact object headers the default, and each object in an entry shrinks by up to 4 bytes. The model does not break; it silently over-provisions, which is the failure mode nobody investigates. **Any documented per-object footprint should name the header size it assumes**, because the same model is right on a JDK 26 pod and wrong on a JDK 27 pod in the same fleet.
 
 ---
 
@@ -513,16 +530,16 @@ A capacity model sized a cache from a per-entry footprint computed with a 12-byt
 | `-XX:+UseCompactObjectHeaders` | 8-byte object headers; product feature from JDK 25, default in 27 |
 | `jdk.VirtualThreadPinned` JFR event | Find remaining virtual-thread pinning. On by default at 20 ms. Replaces `jdk.tracePinnedThreads`, which JEP 491 removed in Java 24 |
 | `java Foo.java` | Run a single source file directly, including a compact source file |
-| JDK Early-Access builds (`jdk.java.net`) | The only way to evaluate JDK 27 features before 2026-09-15 |
+| JDK Early-Access builds (`jdk.java.net`) | The only way to evaluate JDK 28 features (Value Objects preview, final Structured Concurrency) before GA |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q: Is `StructuredTaskScope` finalized in Java 25?**
-**Short:** No — it has been in preview since Java 21 and is on its seventh preview round, with the API still changing between releases.
+**Short:** No. It previewed in every release from Java 21 to 27, changing API along the way, and JEP 543 finalizes it only in JDK 28.
 
-No. It reached its fifth preview in Java 25 (JEP 505), a sixth in Java 26 (JEP 525), and a seventh is planned for Java 27 (JEP 533) — it has never finalized in any released JDK, and still requires `--enable-preview`. The confusion is understandable because `ScopedValue`, which is usually discussed alongside it, **did** finalize in Java 25 via JEP 506. The API is genuinely still moving: JEP 505 replaced the public constructors with a `StructuredTaskScope.open()` factory plus a `Joiner` for completion policy, and JEP 525 then renamed `anySuccessfulResultOrThrow()` to `anySuccessfulOrThrow()`. Treat it as a preview: pin the JDK, and budget rework at every upgrade.
+No. It reached its fifth preview in Java 25 (JEP 505), a sixth in Java 26 (JEP 525), and a seventh in Java 27 (JEP 533); on every released JDK through 27 it requires `--enable-preview`, and JEP 543 finalizes it in JDK 28. The confusion is understandable because `ScopedValue`, which is usually discussed alongside it, **did** finalize in Java 25 via JEP 506. The API is genuinely still moving: JEP 505 replaced the public constructors with a `StructuredTaskScope.open()` factory plus a `Joiner` for completion policy, JEP 525 then renamed `anySuccessfulResultOrThrow()` to `anySuccessfulOrThrow()`, and JEP 533 added an exception type parameter, removed `Joiner.awaitAll()`, and made the `...OrThrow()` joiners throw `ExecutionException`. On 25, 26 or 27, treat it as a preview: pin the JDK, and budget rework at every upgrade.
 
 **Q: Does `synchronized` still pin virtual threads?**
 **Short:** No — JEP 491 in Java 24 removed it, so advice to replace `synchronized` with ReentrantLock for that reason is now obsolete.
@@ -565,14 +582,14 @@ Three, all in Java 25: Module Import Declarations (JEP 511), Compact Source File
 JEP 513 (final in Java 25) allows a *prologue* of statements before `super(...)` or `this(...)`. In it you may validate and transform the constructor's arguments, compute local variables, and assign to fields declared by **this** class. You may not call any instance method on `this`, read any instance field, or pass `this` anywhere, explicitly or implicitly — the object does not yet exist as far as the language is concerned. The field-assignment permission is the genuinely valuable part: it closes the long-standing hole where a superclass constructor calling an overridable method could observe an uninitialised subclass field, which is [Effective Java Item 19]'s warning now enforced by the compiler. It also eliminates the old workaround of smuggling validation into a static helper called from inside the `super(...)` argument list.
 
 **Q: What is the status of Valhalla value objects?**
-**Short:** Not in any released JDK — JEP 401 is a preview targeted at Java 28 and exists today only in early-access builds.
+**Short:** Not in any released JDK through 27; JEP 401 is a preview integrated for Java 28 and runs today only in JDK 28 early-access builds.
 
-They have never shipped in any released JDK, including 26. JEP 401 (Value Objects) is a *preview* targeted at Java 28, and today exists only in Project Valhalla early-access builds behind `--enable-preview`. This is worth stating precisely because "value types are in preview" is a very common and very wrong claim — it has been said about every release since roughly Java 20. The knock-on effect is visible elsewhere: the Vector API has now been through twelve incubation rounds (JEP 537 for Java 27) specifically because it depends on Valhalla to deliver its performance model without boxing, which is why it is still an incubator module rather than a preview.
+They have never shipped in any released JDK, including 27. JEP 401 (Value Objects) is a *preview* integrated for Java 28, and today runs only in JDK 28 early-access builds behind `--enable-preview`. This is worth stating precisely because "value types are in preview" is a very common and very wrong claim; it has been said about every release since roughly Java 20. The knock-on effect is visible elsewhere: the Vector API has now been through twelve incubation rounds (JEP 537 for Java 27) specifically because it depends on Valhalla to deliver its performance model without boxing, which is why it is still an incubator module rather than a preview.
 
-**Q: What are compact object headers, and why should you enable them before Java 27?**
-**Short:** They shrink the object header from 12 bytes to 8 by folding the class pointer into the mark word — and Java 27 makes them the default anyway.
+**Q: What are compact object headers, and why enable them explicitly on Java 25 or 26?**
+**Short:** They shrink the object header from 12 bytes to 8 by folding the class pointer into the mark word; Java 27 made them the default, so enabling them on 25 lets you measure first.
 
-JEP 519 made them a product feature in Java 25 (experimental as JEP 450 in 24), enabled with `-XX:+UseCompactObjectHeaders`. The class pointer is folded into the mark word, taking the header from 12 bytes to 8 on 64-bit HotSpot with compressed class pointers. On an object-dense heap the effect is substantial and free: 50 million live objects recover roughly 200 MB, and smaller objects also fit more densely into cache lines. The reason to enable it deliberately now is that **JEP 534 makes it the default in Java 27** — you will get the change regardless, and turning it on yourself lets you measure it under load rather than discover it mid-upgrade. It also means every per-object footprint number in your capacity models should now state which header size it assumes.
+JEP 519 made them a product feature in Java 25 (experimental as JEP 450 in 24), enabled with `-XX:+UseCompactObjectHeaders`. The class pointer is folded into the mark word, taking the header from 12 bytes to 8 on 64-bit HotSpot with compressed class pointers. On an object-dense heap the effect is substantial and free: 50 million live objects recover roughly 200 MB, and smaller objects also fit more densely into cache lines. The reason to enable it deliberately on 25 or 26 is that **JEP 534 made it the default in Java 27**: every fleet gets the change on upgrade, and turning it on yourself lets you measure it under load rather than discover it mid-upgrade. It also means every per-object footprint number in your capacity models should now state which header size it assumes.
 
 **Q: How do module import declarations resolve a name that two modules both export?**
 **Short:** They do not — the reference is ambiguous and fails to compile, and you resolve it with an ordinary single-type import.
@@ -622,7 +639,7 @@ Split the decision by status. A **finalized** feature is ordinary Java — adopt
 7. **Enable `-XX:+UseCompactObjectHeaders` on Java 25 and measure**, rather than inheriting it as a surprise in Java 27.
 8. **Never put a preview feature in a published library.** Never adopt one anywhere without an owner for the six-month rework.
 9. **Reach for `Gatherers.windowFixed` instead of writing another manual batching loop**, and keep `mapConcurrent` for I/O only.
-10. **Restate per-object footprint figures with the header size they assume**, now that the default is about to change.
+10. **Restate per-object footprint figures with the header size they assume**, since the default is 12 bytes on JDK 25 and 26 and 8 bytes from JDK 27.
 11. **Prefer explicit imports in application code**; keep module imports for scripts and single-file programs.
 
 ### Upgrade checklist: Java 21 → 25
@@ -631,7 +648,7 @@ Split the decision by status. A **finalized** feature is ordinary Java — adopt
 [ ] Remove -Djava.security.manager=* from ALL launch paths        (JEP 486, breaks boot)
 [ ] jdeprscan every jar; find sun.misc.Unsafe memory access       (JEP 471, deny in 26)
 [ ] Add --enable-native-access=<modules> for FFM/JNI code         (JEP 472, warns from 24)
-[ ] Remove -XX:+ZGenerational / -XX:-ZGenerational                (JEP 490, obsolete in 24)     
+[ ] Remove -XX:+ZGenerational / -XX:-ZGenerational                (JEP 490, obsolete in 24)
 [ ] Check jdk.VirtualThreadPinned JFR events; delete synchronized->Lock
     workarounds that existed ONLY for pinning                     (JEP 491, fixed in 24)
 [ ] Confirm no bytecode library lags the class-file version       (ClassFormatError risk)
@@ -684,7 +701,7 @@ An internal off-heap cache library, unmaintained for three years, was doing dire
 | 12-byte headers (default) | 61.2 M | 5.84 GB | 890 ms |
 | **8-byte headers (JEP 519)** | 61.2 M | **5.60 GB** | **840 ms** |
 
-A 240 MB reduction and a modest pause improvement from the smaller live set. Note this is close to the theoretical ceiling of 4 bytes x 61.2 M objects rather than exactly it: 8-byte alignment absorbs the saving entirely for some classes, so the realised win always depends on field layout and has to be measured rather than multiplied out. The flag was enabled. JEP 534 makes it the default in Java 27, so this was a change the service was going to receive regardless; taking it deliberately meant measuring it under load instead of meeting it during the next upgrade.
+A 240 MB reduction and a modest pause improvement from the smaller live set. Note this is close to the theoretical ceiling of 4 bytes x 61.2 M objects rather than exactly it: 8-byte alignment absorbs the saving entirely for some classes, so the realised win always depends on field layout and has to be measured rather than multiplied out. The flag was enabled. JEP 534 made it the default in Java 27, so this was a change the service was going to receive regardless; taking it deliberately meant measuring it under load instead of meeting it during the next upgrade.
 
 **Outcome.**
 

@@ -800,7 +800,7 @@ write-only, measure in the previous frame, and coalesce with one handle. Idle wo
 5. **Keep every task under 50 ms**, measured with `long-animation-frame` rather than by feel.
 6. **Pair `content-visibility: auto` with `contain-intrinsic-size`** on every long list, and
    **mark scroll-adjacent listeners `{ passive: true }`** so the compositor never waits.
-8. **Check the Layers panel before and after any compositing change**, and **profile on a
+7. **Check the Layers panel before and after any compositing change**, and **profile on a
    4x-throttled CPU** — implicit promotion is invisible in the source, and a fast laptop
    hides everything a mid-range Android device will not.
 

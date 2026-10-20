@@ -59,7 +59,7 @@ Every `any`, every `as`, every un-parsed `fetch` response is an unproven premise
    meaning of every type in the project.
 4. **The file set is computed, not listed.** `include` seeds it; imports pull in far more;
    `exclude` only filters the seed.
-5. **`strict` is an umbrella over 8 flags**, and each may be re-enabled or disabled after it.
+5. **`strict` is an umbrella over 9 flags**, and each may be re-enabled or disabled after it.
 6. **`target` is emitted syntax; `lib` is assumed APIs.** They default together and are
    independently overridable.
 7. **Type information flows only through `.d.ts` files.** A package with no declarations and no
@@ -224,10 +224,10 @@ flowchart LR
     class rel note
 ```
 
-### `strict` is an umbrella over 8 flags
+### `strict` is an umbrella over 9 flags
 
 Ordered by migration cost: the first three are a one-week job on a large codebase, the other
-five an afternoon each.
+six an afternoon each.
 
 ```mermaid
 flowchart LR
@@ -238,7 +238,7 @@ flowchart LR
     s(["strict, on by<br/>default since 6.0"])
     heavy("strictNullChecks<br/>noImplicitAny<br/>strictPropertyInitialization")
     mid("strictFunctionTypes<br/>noImplicitThis")
-    light("strictBindCallApply<br/>useUnknownInCatchVariables<br/>alwaysStrict")
+    light("strictBindCallApply<br/>useUnknownInCatchVariables<br/>strictBuiltinIteratorReturn<br/>alwaysStrict")
     c1(["thousands of errors<br/>on a legacy codebase"])
     c2(["hundreds"])
     c3(["tens"])
@@ -290,30 +290,43 @@ flowchart LR
     classDef note fill:#2c313a,stroke:#e5c07b,color:#abb2bf
     old(["a tsconfig written<br/>from 5.x habit"])
     red("strict, module esnext,<br/>target, types, rootDir")
-    dead("moduleResolution classic,<br/>outFile, AMD,<br/>UMD, SystemJS")
-    soft("baseUrl root, esModuleInterop false,<br/>alwaysStrict false, moduleResolution node,<br/>target es5, downlevelIteration")
+    soft("classic, outFile, AMD/UMD/SystemJS,<br/>baseUrl root, esModuleInterop false,<br/>alwaysStrict false, moduleResolution node,<br/>target es5, downlevelIteration")
     r1(["redundant, delete<br/>the line"])
-    r2(["removed in 6.0,<br/>hard error"])
-    r3(["deprecated, still<br/>works, warns"])
+    r3(["6.0: error unless<br/>ignoreDeprecations 6.0"])
+    r4(["7.0: removed,<br/>no escape"])
     old --> red --> r1
-    old --> dead --> r2
-    old --> soft --> r3
+    old --> soft --> r3 --> r4
     class old src
     class red,r1 ok
-    class dead,r2 bad
     class soft,r3 note
+    class r4 bad
 ```
 
 `strict: true`, `module: "esnext"`, `types: []`, `rootDir: "."` and
 `noUncheckedSideEffectImports: true` are now the defaults, and `target` **floats** to the latest
 stable ECMAScript edition instead of being pinned to `es3`/`es5` — `es2025` as of the 6.0
 release. `types: []` is the sharpest: `tsc` no longer auto-includes every `@types/*` package, so
-a project relying on ambient `describe`/`it` from `@types/jest` must name it. Only three things
-are true removals and they are hard errors: `moduleResolution: "classic"`, `outFile`, and the
-AMD/UMD/SystemJS module formats. Everything else 6.0 disapproves of — `baseUrl` as a resolution
-root, `esModuleInterop: false`, `alwaysStrict: false`, `moduleResolution: "node"`, `target: "es5"`,
-`downlevelIteration` — is **deprecated**: it warns and compiles exactly as before. That asymmetry
-is the point of a bridge release, and it is the fact most write-ups state backwards.
+a project relying on ambient `describe`/`it` from `@types/jest` must name it.
+
+Everything 6.0 disapproves of is **deprecated**, and nothing is removed: `moduleResolution:
+"classic"`, `outFile`, the AMD/UMD/SystemJS module formats, `baseUrl` as a resolution root,
+`esModuleInterop: false`, `alwaysStrict: false`, `moduleResolution: "node"`, `target: "es5"` and
+`downlevelIteration`. On `tsc` 6.0.3 each one stops the build with error TS5101 or TS5107 until
+the config sets `"ignoreDeprecations": "6.0"`, which silences the errors and restores the old
+behaviour, AMD `outFile` emit included. The 6.0 release notes call `classic` and `outFile`
+removed; the 6.0 compiler still runs both behind that flag. 7.0 (GA 2026-07-08) is the removal:
+the same options fail with TS5102 or TS5108 ("has been removed") and `ignoreDeprecations` no
+longer helps.
+
+Four changes outside that list also break a 5.x config or script. 6.0 made three of them, and
+7.0 keeps all four:
+
+| Change | Since | What breaks |
+|--------|-------|-------------|
+| `libReplacement` defaults to `false` | 6.0 | a `@typescript/lib-*` package no longer replaces the built-in `lib` files unless you set it to `true` |
+| `tsc file.ts` is error TS5112 when the current directory has a `tsconfig.json` | 6.0 | a lint-staged or editor task that passes file paths must add `--ignoreConfig`, or run `tsc -p` on the project |
+| import `assert { type: "json" }` is error TS2880 | 6.0 (`ignoreDeprecations` silences it), 7.0 | write `with { type: "json" }` |
+| `stableTypeOrdering` is always `true` | 7.0 (opt-in flag on 6.0) | the option cannot be turned off; union member order in declaration output and errors is deterministic |
 
 ### 6.3 `strict`, flag by flag
 
@@ -326,7 +339,8 @@ is the point of a bridge release, and it is the fact most write-ups state backwa
 | `noImplicitThis` | `this` of unknown type in a standalone function | Low; fixed with a `this` parameter |
 | `strictBindCallApply` | Wrong arguments through `bind`, `call`, `apply` | Very low |
 | `useUnknownInCatchVariables` | Treating a caught value as an `Error` | Low, but touches every `catch` block |
-| `alwaysStrict` | Emits `"use strict"` and parses in strict mode | None; `false` is deprecated in 6.0 and warns |
+| `strictBuiltinIteratorReturn` `[5.6]` | A built-in iterator's `next().value` typed `any` on the done branch (now `T \| undefined`) | Very low; only code that reads `.next().value` without checking `done` |
+| `alwaysStrict` | Emits `"use strict"` and parses in strict mode | None; `false` is a deprecation error on 6.0 and removed on 7.0 |
 
 ```ts
 // strictNullChecks: null and undefined leave every other type
@@ -345,7 +359,7 @@ try { risky(); } catch (e) { console.log(e.message); }   // 'e' is of type 'unkn
 // FIX: if (e instanceof Error) console.log(e.message);
 ```
 
-The migration order that works is the reverse of the table: land the five cheap flags in a day,
+The migration order that works is the reverse of the table: land the six cheap flags in a day,
 then `noImplicitAny`, then `strictNullChecks` last and **per directory** via a nested
 `tsconfig.json` or project references
 (`../typescript_in_large_codebases/typescript_in_large_codebases.md`). One `strict: true` commit
@@ -474,8 +488,8 @@ stays hidden until it reaches your call site, so a **library author** turns it o
 Every line is doing work. `strict`, `module`, `target` and `rootDir` are absent because 6.0
 already sets them the way this project wants, and `lib` is stated only to drop `dom` from a Node
 service. The same file written in 2024 carried 9 more redundant lines and 2 (`baseUrl`,
-`moduleResolution: "node"`) that still build under 6.0 but warn on every run, and are scheduled
-to stop resolving.
+`moduleResolution: "node"`) that 6.0 rejects with a deprecation error unless
+`"ignoreDeprecations": "6.0"` is set, and that 7.0 removes.
 
 ### A monorepo base plus a leaf
 
@@ -622,7 +636,7 @@ required CI job on the same commit.
 |------|------|--------------------------|
 | TypeScript | The compiler and checker, 7.0 native Go binary | Owns every flag discussed here |
 | tsc6 | The 6.0 binary published as `@typescript/typescript6` | The only stable Compiler API until 7.1 |
-| typescript-eslint | Type-aware linting, 8.69.0 | Still runs on `tsc6`; needs a project config |
+| typescript-eslint | Type-aware linting, 8.71.2 | Still runs on `tsc6`; needs a project config |
 | ts-morph | Programmatic AST and codemods | Also pinned to `tsc6` until 7.1 |
 | DefinitelyTyped | The `@types` registry | Supplies declarations for untyped packages |
 | esbuild | Transpile-only bundler | Erases types, never checks them |
@@ -657,6 +671,16 @@ then walks every import and type reference from that root set and adds what it f
 options it must become a separate compilation with its own `tsconfig.json`, wired in through
 project references.
 
+**Q: Why does `tsc src/x.ts` fail with TS5112 after an upgrade from TypeScript 5.x?**
+**Short:** Since 6.0, tsc rejects file arguments while the current directory holds a `tsconfig.json`, because it would silently ignore that config; pass `--ignoreConfig` or run `tsc -p`.
+
+Through 5.x, file arguments silently dropped the `tsconfig.json` and compiled with default
+options, so `tsc src/x.ts` checked under settings nobody configured. 6.0 made that error TS5112
+(`tsconfig.json is present but will not be loaded if files are specified on commandline`), and
+7.0 keeps it. A lint-staged hook or editor task that passes changed files must either add
+`--ignoreConfig` and state the flags it wants, or run `tsc -p .` (or `tsc -b`) on the whole
+project, which is what CI should run anyway.
+
 **Q: What is the difference between `target` and `lib`?**
 **Short:** `target` chooses which syntax gets down-levelled during emit, while `lib` chooses which built-in API declarations are assumed to exist.
 
@@ -666,7 +690,7 @@ when `lib` is unset, which is why the two look coupled; a Node service should st
 explicitly so `document` does not resolve.
 
 **Q: Which flags does `strict` actually turn on?**
-**Short:** Eight of them: strictNullChecks, noImplicitAny, strictFunctionTypes, strictBindCallApply, strictPropertyInitialization, useUnknownInCatchVariables, alwaysStrict and noImplicitThis.
+**Short:** Nine of them: strictNullChecks, noImplicitAny, strictFunctionTypes, strictBindCallApply, strictPropertyInitialization, useUnknownInCatchVariables, strictBuiltinIteratorReturn, alwaysStrict and noImplicitThis.
 
 `strict` is a shorthand, not a mode, and each member can be overridden individually after it —
 `{"strict": true, "strictNullChecks": false}` is legal and is the standard partial-migration
@@ -706,15 +730,17 @@ depending on ambient `describe` or `it` must name the package. Deleting the redu
 makes the remaining options visibly intentional.
 
 **Q: Which options were removed in 6.0, and which were only deprecated?**
-**Short:** Only `moduleResolution classic`, `outFile` and the AMD/UMD/SystemJS formats were removed; everything else 6.0 disapproves of is deprecated and still compiles with a warning.
+**Short:** None were removed in 6.0: classic, outFile, AMD/UMD/SystemJS, baseUrl, node10, es5 and the rest are deprecation errors that ignoreDeprecations 6.0 silences; 7.0 removes them.
 
-Confusing the two lists is the fastest way to give wrong migration advice. A removed option is a
-hard configuration error that stops the build; a deprecated one emits a warning and compiles
-exactly as before. The deprecated list is the long one: `baseUrl` as a resolution root,
-`esModuleInterop: false` and `allowSyntheticDefaultImports: false`, `alwaysStrict: false`,
-`moduleResolution: "node"` (`node10`), `target: "es5"` and `downlevelIteration`. Fix the
-three removals to unblock the build, then work the warnings down before 7.x turns them into
-errors — replace `baseUrl` with `paths` relative to the config file, and `outFile` with a bundler.
+Confusing deprecation with removal is the fastest way to give wrong migration advice. On `tsc`
+6.0.3 every option 6.0 disapproves of, `moduleResolution: "classic"`, `outFile` and AMD emit
+included, stops the build with TS5101 or TS5107 until the config sets
+`"ignoreDeprecations": "6.0"`; with it set, the old behaviour returns unchanged. The release
+notes call `classic` and `outFile` removed, but the 6.0 compiler still runs them. 7.0 is where
+removal happens: the same options report TS5102 or TS5108 and no setting brings them back. Use
+`ignoreDeprecations` only to land the 6.0 bump: replace `baseUrl` with `paths` relative to the
+config file, `outFile` with a bundler and `node10` with `nodenext` or `bundler`, then delete the
+flag before moving to 7.0.
 
 **Q: What is `noUncheckedIndexedAccess` and why is it not in `strict`?**
 **Short:** It adds `| undefined` to every index and index-signature read, closing a real unsoundness that would have broken too much existing code to include by default.
@@ -811,21 +837,21 @@ waved through. The starting config:
 }
 ```
 
-Nothing here failed the 6.0 build. That is what made it dangerous. `target: es5`,
-`moduleResolution: "node"` and `baseUrl` as a resolution root are all **deprecated, not removed**:
-each emitted a warning on every run, and every one of those warnings went into a job already
-marked `continue-on-error: true`. Nobody had read that log in two years, so a config the compiler
-had been complaining about since March looked, from the dashboard, entirely healthy. Meanwhile
-`target: es5` was down-levelling every `async` function into a state machine nobody needed on
-Node 24, `strict: false` with `strictNullChecks: true` meant `noImplicitAny` had been off for
-four years, and `lib: ["es2020", "dom"]` let a backend package reference `window`.
+Nothing here turned the pipeline red. That is what made it dangerous. `target: es5`,
+`moduleResolution: "node"` and `baseUrl` as a resolution root are all **deprecated** in 6.0: each
+reported a deprecation error, TS5101 or TS5107, on every run, and every one of those errors went
+into a job already marked `continue-on-error: true`. Nobody had read that log in two years, so a
+config the compiler had been complaining about since March looked, from the dashboard, entirely
+healthy. Meanwhile `target: es5` was down-levelling every `async` function into a state machine
+nobody needed on Node 24, `strict: false` with `strictNullChecks: true` meant `noImplicitAny` had
+been off for four years, and `lib: ["es2020", "dom"]` let a backend package reference `window`.
 
-The forcing function was the 7.0 upgrade, not a broken build. The team read the 6.0 warnings for
-the first time while scoping it, found `baseUrl` on the list, and had to decide whether to move
-115 bare `utils/*` specifiers to `paths` now or discover them the day a release turned the
-deprecation into an error. They moved first — a two-day mechanical change with the warnings as
-the worklist, done while the old behaviour still worked as a fallback. Doing it after the
-removal would have meant a red build with 115 unresolved-module errors and no way back.
+The forcing function was the 7.0 upgrade, not a broken build. The team read the 6.0 deprecation
+errors for the first time while scoping it, found `baseUrl` on the list, and had to decide whether
+to move 115 bare `utils/*` specifiers to `paths` now or discover them the day 7.0 removed the
+option. They moved first: a two-day mechanical change with the errors as the worklist, done while
+`"ignoreDeprecations": "6.0"` still kept the old behaviour as a fallback. Doing it after the removal
+would have meant a red build with 115 unresolved-module errors and no way back.
 
 ```ts
 // BROKEN — found by noImplicitAny the moment it was enabled, in a settlement path

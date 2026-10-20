@@ -8,7 +8,7 @@ DSPy (Declarative Self-improving Python) is a framework from Stanford NLP that r
 
 DSPy shifts the prompt engineering workflow from art to science: you write a metric (e.g., "is the answer correct?"), provide training examples, and DSPy searches the prompt space algorithmically to maximize the metric.
 
-**Current version**: dspy 3.3.1 (released 2026-08-21). The canonical distribution is now `dspy`; `dspy-ai` remains on PyPI as an alias that installs the same release, so either name works, but new code should install and import `dspy`.
+**Current version**: dspy 3.4.1 (released 2026-10-12). The canonical distribution is now `dspy`; `dspy-ai` remains on PyPI as an alias that installs the same release, so either name works, but new code should install and import `dspy`.
 **Production adoption signal**: Used by JetBlue (customer support), VMware (security alerts), and adopted in Stanford NLP research. Growing rapidly in enterprise AI teams that want reproducible, measurable prompt improvement. Heavily cited in AI engineering research.
 
 ---
@@ -517,7 +517,7 @@ DSPy modules have `self.predict`, `self.generate`, etc. These accumulate history
 - DSPy 1.x: initial release, basic signature/module/optimizer pattern
 - DSPy 2.0-2.5: `dspy.LM` unified API, `MIPROv2`, `dspy.Assert`/`dspy.Suggest` assertions, improved `dspy.configure`
 - DSPy 2.6: assertions deprecated in favor of `dspy.Refine`/`dspy.BestOfN`
-- DSPy 3.x (current: 3.3.1, 2026-08-21): package renamed from `dspy-ai` to `dspy`; `GEPA` and `SIMBA` optimizers added
+- DSPy 3.x (current: 3.4.1, 2026-10-12): package renamed from `dspy-ai` to `dspy`; `GEPA` and `SIMBA` optimizers added
 - Python 3.10+ required
 
 ---

@@ -146,11 +146,56 @@ Language-level memory models give the programmer three useful ordering strengths
 
 **The Java Memory Model and the C++11 memory model are two spellings of one idea.** Java's `volatile` read/write pair is Java's name for acquire/release on that field; a Java `synchronized` block's unlock/lock pair is Java's name for a release/acquire synchronization edge; `AtomicInteger` exposes both a relaxed-equivalent family (`lazySet`/`getPlain`) and default volatile-strength operations. C++11's `std::memory_order_relaxed` / `_acquire` / `_release` / `_seq_cst` name the identical three strengths directly. Neither model invented a new theory — both implement the same happens-before/DRF-SC contract described in §3, tuned to each language's existing vocabulary. The applied Java spelling — `volatile`, `VarHandle`, `AtomicInteger`, AQS built on top of these primitives — lives in [`java/concurrency`](../../java/concurrency/concurrency.md); this module is where the underlying model lives. Rust names the same four strengths in `std::sync::atomic::Ordering` (`Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`) — a fourth spelling of the identical contract.
 
+**`memory_order_consume` and its deprecation in C++26.** C++11 also defined a fourth strength between relaxed and acquire: a *consume* load orders only the later operations that carry a data dependency on the loaded value (dereferencing the loaded pointer, indexing with it). On ARM and POWER that maps to a plain load, because the hardware already orders dependent loads, which is exactly what RCU readers need. The standard's definition of "carries a dependency" proved impossible to implement through compiler optimizations, so every compiler silently promoted consume to acquire. C++26 adopts Hans Boehm's P3475 ("Defang and deprecate `memory_order::consume`"): consume is deprecated, its dependency-ordering rules are gone, and `kill_dependency` is deprecated with it. Write `memory_order_acquire`; on ARMv8 an acquire load (`LDAR`, or `LDAPR` from ARMv8.3) costs close to a relaxed load in common cases. The Linux kernel keeps its own dependency ordering (`READ_ONCE()`, `rcu_dereference()`) outside the C++ model.
+
 ### Read-mostly patterns whose correctness IS a memory-model argument
 
 **RCU (Read-Copy-Update)**, the pattern at the core of the Linux kernel's scalability, lets any number of readers traverse a data structure with **zero synchronization instructions** — no lock, no atomic, not even a memory barrier on the read side in the common case — while a writer builds a full replacement copy, publishes it with a single release-store of the root pointer, and defers reclaiming the old copy until every reader that might still be traversing it has provably finished (a "grace period"). The entire correctness argument is a happens-before argument: the writer's release-store of the new root, paired with a reader's acquire-load of that same pointer, is what guarantees a reader never observes a partially built replacement — precisely the publication pattern from §3. RCU trades read cost (near zero) for write cost (a full copy plus a deferred-reclaim wait) and reader staleness (a reader that started before the update can keep seeing the old version for its entire traversal, which is *correct*, not a bug, under RCU's semantics).
 
 **Seqlock** targets the same read-mostly shape from a different angle: instead of copying the whole structure, the writer bumps a sequence counter to odd before mutating in place, does the writes, then bumps it to even again. A reader snapshots the counter, reads the data, then re-reads the counter — if it changed, or was caught mid-odd, the reader **retries** rather than blocking. This never blocks the writer and never blocks another reader, at the cost of readers occasionally doing wasted work. §6 builds and runs a seqlock to prove the invariant actually holds under contention.
+
+**Both safe-reclamation schemes are in the C++26 standard library.** P2530 adds `<hazard_pointer>` and P2545 adds `<rcu>`, both derived from the production implementations in Meta's `folly`. The API maps directly onto the mechanisms above:
+
+```cpp
+#include <atomic>
+#include <hazard_pointer>
+#include <mutex>
+#include <optional>
+#include <rcu>
+
+// RCU: readers lock a domain (no atomic RMW), writers publish a copy and retire the old one.
+struct Config : std::rcu_obj_base<Config> {
+    explicit Config(int t) : timeout_ms(t) {}
+    int timeout_ms;
+};
+std::atomic<Config*> current{new Config(100)};
+
+int read_timeout() {
+    std::scoped_lock guard(std::rcu_default_domain());      // rcu_domain has lock()/unlock()
+    return current.load(std::memory_order_acquire)->timeout_ms;
+}
+
+void set_timeout(int ms) {
+    Config* old = current.exchange(new Config(ms), std::memory_order_acq_rel);
+    old->retire();               // deleted only after every reader that could see it unlocks
+}
+
+// Hazard pointers: protect one node at a time, the reclaimer skips anything still protected.
+struct Node : std::hazard_pointer_obj_base<Node> {
+    int value;
+    Node* next;
+};
+std::atomic<Node*> head{nullptr};
+
+std::optional<int> peek() {
+    std::hazard_pointer hp = std::make_hazard_pointer();
+    Node* n = hp.protect(head);  // publishes the hazard, re-reads head until they agree
+    return n ? std::optional<int>(n->value) : std::nullopt;
+}                                // hp's destructor clears the hazard
+// In pop(): after the CAS that unlinks n succeeds, call n->retire().
+```
+
+`std::rcu_synchronize()` blocks until all pre-existing readers have unlocked, and `std::rcu_barrier()` waits until retired objects have been reclaimed. The two schemes differ in what a slow reader costs: one stalled RCU reader delays reclamation of *every* object retired after it began, so unreclaimed memory is unbounded, while a stalled hazard-pointer holder pins only the one node it protects. Hazard-pointer reads cost more, because `protect()` must publish the hazard and order it before re-reading the source pointer.
 
 ### Transactional memory
 
@@ -475,6 +520,8 @@ Herlihy's 1991 result ranks concurrent objects by **consensus number**: the maxi
 
 **Linux kernel RCU** (Paul McKenney) is the reason the kernel's most contended data structures — the routing table, the dcache, large parts of the scheduler — scale to hundreds of cores with read-side cost close to zero; the entire mechanism is the publication happens-before argument from §4 applied to a whole data structure instead of one object.
 
+**C++26** standardizes both reclamation schemes from this section: `std::hazard_pointer` (P2530) and `std::rcu_obj_base` / `std::rcu_domain` (P2545), so portable C++ no longer needs a third-party library to retire nodes safely in a lock-free structure.
+
 **Meta's `folly` C++ library** ships hazard pointers in production as the alternative fix to §10's ABA problem — every large lock-free structure in Facebook's C++ services that cannot tolerate a locking fallback uses this or the tagged-pointer approach worked out in this module's pitfall.
 
 **LMAX's Disruptor**, built for the LMAX financial exchange, is a lock-free ring buffer built entirely on the single-writer-principle release/acquire pattern from §5 and §14 — no locks anywhere on the hot path, and it is the direct ancestor of §14's case study.
@@ -756,6 +803,14 @@ Publishing a reference before construction finishes leaves the constructor's fie
 **Q: If Python's GIL prevents real reordering, why does this module bother demonstrating these bugs in Python at all?**
 **Short:** Forced deterministic interleavings model what real reordering does, proving the CONSEQUENCE even though CPython won't produce the CAUSE spontaneously.
 The GIL genuinely does prevent CPython from spontaneously reordering instructions the way a compiler or a weak-memory CPU would — §6's SB litmus harness demonstrates this directly, finding zero `(0,0)` outcomes across 200,000 trials where real x86-64 hardware would show some. But every publication-failure and ABA demonstration in this module (§6, §10, §14) uses `threading.Event` to force the SAME final interleaving a real reordering would produce, deterministically, rather than waiting for it to happen by luck — which is what lets the demonstration prove the actual CONSEQUENCE (a reader crashing on an unset field, a CAS wrongly succeeding, a stale value read) with a real, reproducible, asserted result, even though the underlying CAUSE (genuine instruction reordering) is specifically the one thing CPython's execution model cannot supply. Reading a "broken" demonstration that never actually misbehaves when run is worse than not having one at all — it teaches false confidence — so forcing the interleaving explicitly is the honest way to demonstrate a hardware/compiler effect from inside an interpreter that structurally can't produce it on its own.
+
+**Q: C++26 adds both `std::hazard_pointer` and `std::rcu`; how do you choose between them for a read-mostly lock-free structure?**
+**Short:** RCU gives near-free reads but one stalled reader blocks reclamation of everything retired after it; hazard pointers cost more per read but pin only the nodes actually protected.
+Both solve the same problem, freeing a node that another thread may still be reading, and both use a `retire()` call on a type derived from their base class (`rcu_obj_base`, `hazard_pointer_obj_base`). An RCU reader only locks an `rcu_domain`, which in good implementations costs no atomic read-modify-write, and a writer's retired objects are reclaimed after every reader that began earlier has unlocked. The weakness is the tail: a reader that stalls inside its critical section holds up reclamation of every object retired after it began, so memory can grow without bound. A hazard pointer's `protect()` must publish the pointer and order that store before re-reading the source, which costs more per access, but a stalled thread pins only the node it protects, so unreclaimed memory stays bounded by threads times hazards. Use RCU for configuration snapshots and routing tables with short, frequent reads; use hazard pointers when readers can block or hold references for a long time.
+
+**Q: What happened to `memory_order_consume` in C++26, and what should code that relied on it use instead?**
+**Short:** C++26 (P3475) deprecates it and drops its dependency-ordering rules because every compiler already treated it as acquire; write memory_order_acquire.
+Consume was meant to order only the operations that carry a data dependency on the loaded value, which on ARM and POWER would compile to a plain load and suit RCU readers. Its definition of "carries a dependency" could not survive compiler optimizations such as replacing a value with a constant it is known to equal, so GCC, Clang and MSVC all implemented consume as acquire, and the `[[carries_dependency]]` and `kill_dependency` machinery around it went unused. Hans Boehm's P3475 deprecates consume, removes dependency-ordered-before from the memory model, and deprecates `kill_dependency`. Use `memory_order_acquire`: on x86 it is a plain load, and on ARMv8 `LDAR`/`LDAPR` cost close to a relaxed load in common cases. The Linux kernel's `rcu_dereference()` keeps dependency ordering outside the C++ model.
 
 ---
 

@@ -318,6 +318,49 @@ The terminal operator picks the interaction model: `send()` = fire-and-forget,
 `retrieveMono()` = request-response, `retrieveFlux()` = request-stream (or channel
 if `data(Flux)` is supplied).
 
+### Declarative clients: `@RSocketExchange` interfaces
+
+Framework 6.0 added `@RSocketExchange`, the RSocket counterpart of `@HttpExchange`: declare
+an interface, and `RSocketServiceProxyFactory` turns it into a client backed by an
+`RSocketRequester`. The return type picks the interaction model (`Mono<Void>` =
+fire-and-forget, `Mono<T>` = request-response, `Flux<T>` = request-stream, `Flux` payload =
+request-channel):
+
+```java
+@RSocketExchange("prices")                      // type-level route prefix
+public interface PriceService {
+
+    @RSocketExchange("quote")                   // route "prices.quote"
+    Mono<Quote> quote(@Payload String symbol);
+
+    @RSocketExchange("stream.{symbol}")         // route variable
+    Flux<Tick> ticks(@DestinationVariable String symbol);
+
+    @RSocketExchange("telemetry")
+    Mono<Void> record(@Payload TelemetryEvent event, Object traceId, MimeType traceMime);
+}                                               // metadata entry = value followed by its MimeType
+
+@Bean
+PriceService priceService(RSocketRequester requester) {
+    return RSocketServiceProxyFactory.builder(requester).build()
+        .createClient(PriceService.class);
+}
+
+// The same interface can be implemented on the server as a responder:
+@Controller
+class PriceController implements PriceService {
+    public Mono<Quote> quote(String symbol) { /* ... */ }
+    public Flux<Tick> ticks(String symbol)  { /* ... */ }
+    public Mono<Void> record(TelemetryEvent e, Object traceId, MimeType m) { /* ... */ }
+}
+```
+
+Unlike `@MessageMapping`, which accepts several routes and route patterns per method,
+`@RSocketExchange` takes one concrete route. A blocking return type (`Quote` instead of
+`Mono<Quote>`) is allowed, and `RSocketServiceProxyFactory.Builder.blockTimeout(...)`
+bounds it, but the reference advises setting timeouts on the RSocket transport and
+keepalive instead.
+
 ### `RSocketStrategies` — codecs, routing, metadata
 
 ```java
@@ -434,6 +477,23 @@ Kafka/RabbitMQ (see [Spring Messaging](../spring_messaging/spring_messaging.md))
 broker-mediated, decoupled pub/sub. Use RSocket for low-latency interactive
 streaming between services; use a broker for durable, fan-out, replayable events.
 
+### Project maintenance risk
+
+The adoption question at principal level is less "is the protocol good" than "who fixes
+it". `io.rsocket:rsocket-core` 1.1.5, released 2025-02-03, is the last version on Maven
+Central as of 2026-10-19, and it is the version Boot 4.1 manages. Spring Framework 7 still
+ships `spring-messaging` RSocket support and `@RSocketExchange`, so the Spring side is
+maintained, but protocol bugs, Netty upgrades, and CVEs in the transport layer depend on a
+library with no release in over 20 months. Compare gRPC Java, which publishes roughly every
+six weeks. Practical consequences:
+
+| Decision | Guidance |
+|----------|----------|
+| Greenfield service-to-service streaming | Prefer gRPC streaming, WebSocket/STOMP, or a broker unless `REQUEST_N` backpressure or resumption is a hard requirement |
+| Existing RSocket estate | Keep it, isolate it behind `@RSocketExchange` interfaces so callers do not depend on `RSocketRequester`, and track Netty CVEs yourself |
+| Browser clients | `rsocket-js` adds a second dependency with the same risk; SSE or WebSocket need no client library |
+| Exit path | An interface-based client can be reimplemented over gRPC or `@HttpExchange` without touching callers |
+
 ### Load balancing
 
 RSocket connections are long-lived and multiplexed, so a per-request L4/L7 load
@@ -465,6 +525,8 @@ balancer cannot spread individual streams across backends. Options:
 - You need broad browser support without a WebSocket transport and RSocket-JS.
 - The data layer is blocking JDBC and you cannot go reactive — you inherit the same
   event-loop hazards as WebFlux with less mature tooling.
+- You need a protocol library with an active release cadence: `rsocket-core` has had
+  no release since 1.1.5 on 2025-02-03.
 
 ---
 
@@ -593,6 +655,7 @@ reactive web server to host the mapping path.
 | `spring-boot-starter-rsocket` | Auto-configures RSocket server/client, `RSocketRequester.Builder` |
 | `RSocketMessageHandler` | Routes inbound frames to `@MessageMapping` methods |
 | `RSocketRequester` | Fluent client for the four interaction models |
+| `@RSocketExchange` + `RSocketServiceProxyFactory` | Declarative interface clients (Framework 6.0+); the interface can also be implemented by a responder `@Controller` |
 | `RSocketStrategies` | Encoders/decoders (CBOR, Protobuf, JSON), route matcher, metadata |
 | `spring-security-rsocket` | `@EnableRSocketSecurity`, payload authorization, JWT |
 | `LoadbalanceRSocketClient` | Client-side load balancing across targets |
@@ -664,6 +727,14 @@ Routing metadata (MIME type `message/x.rsocket.routing.v0`) carries a route stri
 **Short:** RSocketRequester is the fluent client that configures a connector and issues requests in any of the four models.
 
 `RSocketRequester` is the fluent client that opens a connection and issues requests in any of the four models. You inject the auto-configured `RSocketRequester.Builder`, configure the connector (keepalive, resume), set a setup route/data, and terminate with `.tcp(host, port)` or `.websocket(uri)`. Then `requester.route("...").data(...).retrieveMono(T.class)` (or `retrieveFlux`, or `send()`) performs the interaction.
+
+**Q: What does `@RSocketExchange` give you over calling `RSocketRequester` directly, and how does it differ from `@MessageMapping`?**
+**Short:** It declares an RSocket client as a Java interface that RSocketServiceProxyFactory implements over a requester; unlike @MessageMapping it takes one concrete route.
+`@RSocketExchange` (Framework 6.0+) is the RSocket counterpart of `@HttpExchange`. You annotate interface methods with a route, mark parameters with `@Payload`, `@DestinationVariable`, or a metadata value followed by its `MimeType`, and build the client with `RSocketServiceProxyFactory.builder(requester).build().createClient(MyService.class)`. The return type selects the interaction: `Mono<T>` for request-response, `Flux<T>` for request-stream, a `Flux` payload for request-channel. A `@Controller` can implement the same interface to act as the responder, so client and server share one contract. Differences from `@MessageMapping`: one concrete route per method instead of several routes or patterns, and a type-level `@RSocketExchange` sets a route prefix. Callers then depend on a plain interface, which also makes moving off RSocket a matter of reimplementing that interface.
+
+**Q: Would you choose RSocket for a new service-to-service streaming API, given its maintenance status?**
+**Short:** Usually not; rsocket-core has had no release since 1.1.5 on 2025-02-03, so pick gRPC or a broker unless REQUEST_N backpressure or resumption is required.
+The protocol fit can be good, but a principal-level decision weighs who maintains the stack. `io.rsocket:rsocket-core` 1.1.5, released 2025-02-03, is the latest version on Maven Central as of 2026-10-19, and Boot 4.1 still manages it. Spring Framework 7 keeps its RSocket integration, but transport bugs, Netty upgrades, and CVE fixes in the protocol library depend on a project that has not shipped in over 20 months, while gRPC Java releases roughly every six weeks and has broad tooling. Choose RSocket only when per-message `REQUEST_N` backpressure, server-initiated requests, or session resumption are hard requirements. For an existing estate, put calls behind `@RSocketExchange` interfaces so a later move to gRPC or `@HttpExchange` changes one implementation, not every caller.
 
 **Q: What is `RSocketStrategies` responsible for?**
 **Short:** RSocketStrategies configures encoders, route matching, and metadata extraction, mirroring HttpMessageConverter in MVC.

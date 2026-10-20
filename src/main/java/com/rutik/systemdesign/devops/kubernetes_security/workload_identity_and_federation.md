@@ -1,6 +1,6 @@
 # Workload Identity and Federation
 
-> **Version anchor (2026-08-27).** **SPIFFE and SPIRE are CNCF Graduated projects** (graduated August 2022, announced 2022-09-20); **SPIRE v1.15.3** (2026-08-21) is current. Kubernetes projected ServiceAccount tokens enforce a **600-second minimum TTL**, and the kubelet rotates at **80% of the token's lifetime or 24 hours, whichever comes first**. Auto-generation of legacy non-expiring ServiceAccount Secrets stopped being the default (GA in **1.26**, gate removed in **1.27**) — stopped, not removed: you can still create one deliberately. The `LegacyServiceAccountTokenCleanUp` controller **went GA in 1.30**, and node-bound token creation (`ServiceAccountTokenNodeBinding`) is **GA from 1.33**. On the cloud side, **EKS Pod Identity does not support Fargate or Windows EC2 pods**; GKE's feature is now named **Workload Identity Federation for GKE**; and Azure's **AAD Pod Identity was deprecated 2022-10-24, archived September 2023, with the AKS add-on supported only through September 2025** — its replacement is **Microsoft Entra Workload ID**.
+> **Version anchor (2026-10-19).** **SPIFFE and SPIRE are CNCF Graduated projects** (graduated August 2022, announced 2022-09-20); **SPIRE v1.15.4** (2026-10-15) is current. **Pod certificates** (`PodCertificateRequest`, the `podCertificate` projected volume, KEP-4317) and **ClusterTrustBundles** (KEP-3257) are **stable in Kubernetes 1.37** (2026-08-26); no production signer ships in core. Kubernetes projected ServiceAccount tokens enforce a **600-second minimum TTL**, and the kubelet rotates at **80% of the token's lifetime or 24 hours, whichever comes first**. Auto-generation of legacy non-expiring ServiceAccount Secrets stopped being the default (GA in **1.26**, gate removed in **1.27**) — stopped, not removed: you can still create one deliberately. The `LegacyServiceAccountTokenCleanUp` controller **went GA in 1.30**, and node-bound token creation (`ServiceAccountTokenNodeBinding`) is **GA from 1.33**. On the cloud side, **EKS Pod Identity does not support Fargate or Windows EC2 pods**; GKE's feature is now named **Workload Identity Federation for GKE**; and Azure's **AAD Pod Identity was deprecated 2022-10-24, archived September 2023, with the AKS add-on supported only through September 2025** — its replacement is **Microsoft Entra Workload ID**.
 
 ---
 
@@ -80,6 +80,19 @@ Prefer X.509 wherever mTLS is possible. The JWT-SVID exists because L7 infrastru
 | `https_spiffe` | the endpoint's own SPIFFE ID, via `endpoint_spiffe_id` | both sides already run SPIFFE; stronger, no dependency on the web PKI |
 
 For `https_spiffe` the URL scheme MUST be `https` and MUST NOT carry userinfo.
+
+### In-tree X.509 identity: `podCertificate` and ClusterTrustBundle
+
+Kubernetes 1.37 builds X.509 issuance into the kubelet. Four pieces take part:
+
+| Piece | Role |
+|---|---|
+| `podCertificate` projected volume source | the Pod names a `signerName` and a `keyType`; the kubelet generates the private key on the node, so the key never crosses the API |
+| `PodCertificateRequest` | the kubelet creates one per source, addressed to the signer; the node restriction admission plugin stops a node from requesting certificates for Pods not bound to it |
+| signer controller | you deploy it; it decides whether to issue, fills `status.certificateChain` and `status.beginRefreshAt`, and publishes the ClusterTrustBundles that hold its trust anchors |
+| `clusterTrustBundle` projected volume source | the kubelet merges every ClusterTrustBundle that matches the signer name and label selector into one file of trust anchors, in a stable order |
+
+Rotation is the kubelet's job: once `beginRefreshAt` passes it makes a new key, files a new request, and rewrites the files; it also rewrites the trust-anchor file when the bundles change. The application must reload from disk (inotify or polling). Ask the kubelet for a single credential-bundle file holding key and chain, so a reader never pairs a key from one rotation with a chain from the next. Third-party signers may issue certificates for at most 91 days. The certificate format is whatever the signer issues, so a SPIFFE-style signer can put a `spiffe://` URI SAN in it, but federation, non-Kubernetes workloads, and workload selectors stronger than "this Pod on this node" stay with SPIRE.
 
 ### The cloud bindings, precisely
 
@@ -362,11 +375,13 @@ tlsConfig := tlsconfig.MTLSServerConfig(source, source,
 | Vault/ESO-injected secret | scheduled | yes | yes | a secrets system in the critical path |
 | Projected SA token + cloud binding | automatic, 80% of TTL | no — one cloud only | no | very low; the cloud runs it |
 | SPIFFE/SPIRE | automatic, minutes | yes | **yes** | a highly-available control plane you operate |
+| In-tree Pod certificates (1.37) | automatic, kubelet at `beginRefreshAt` | yes, inside one cluster | yes | a signer controller you deploy or write |
 | Service mesh mTLS (mesh CA) | automatic | mesh-only | yes | mesh sidecars or ambient dataplane |
 
 | Choice | You gain | You pay |
 |---|---|---|
 | SPIRE over cloud-native bindings | one identity plane across clouds, on-prem and Pod-to-Pod | a control plane whose outage stops new workloads getting credentials |
+| In-tree Pod certificates over SPIRE | no agent DaemonSet, no SPIRE server; key generation and rotation run in the kubelet | one cluster's trust domain only, no federation, no off-cluster workloads; you still own the signer |
 | X.509-SVID over JWT-SVID | no bearer-token replay | both ends must do mTLS; L7 termination breaks it |
 | Very short SVID TTLs | tiny blast radius | more signing load; a control-plane blip becomes visible sooner |
 | Image-digest selectors | an attacker on the node cannot request another workload's identity | every image update is a registration-entry update |
@@ -485,6 +500,10 @@ The API server exposes `/.well-known/openid-configuration` and `/openid/v1/jwks`
 **Q: When would you deploy SPIRE, and when is it the wrong answer?**
 **Short:** Deploy it when identity must span Pod-to-Pod, multiple clouds, or organisations; skip it when you are on one cloud talking to cloud APIs, where the native binding already does the job.
 Deploy it when the identity problem crosses a boundary the cloud bindings do not: workloads authenticating **to each other**, to databases and brokers, across **more than one cloud**, across cloud and on-prem, or across **organisations** where neither side will issue credentials to the other. Skip it when you are on one cloud, the consumer is that cloud's API, and Pod-to-Pod is handled elsewhere — you would be running a highly available signing service to duplicate something free. Skip it when nobody owns the control plane, because SPIRE sits on the critical path for workload startup and an unowned one is an outage with a quorum. And skip it if the actual problem is secrets committed to Git: fix hygiene first, then upgrade the model.
+
+**Q: When can Kubernetes 1.37 Pod certificates replace SPIRE for mTLS between Pods?**
+**Short:** When every peer runs in one cluster and you trust one signer controller; cross-cluster, off-cluster, and federated identities still need SPIRE, and core ships no production signer.
+Pod certificates give each Pod an X.509 certificate through a `podCertificate` projected volume: the kubelet generates the key, files a `PodCertificateRequest`, writes the chain the signer returns, and rotates at `beginRefreshAt`. Peers verify against a `clusterTrustBundle` projected volume. That covers the common SPIRE use inside one cluster with no agent DaemonSet and no SPIRE server. The limits decide the rest. The trust domain is one cluster's signer, so a VM, a second cluster, or a partner company cannot join without a shared CA you build yourself; SPIRE federation exists for exactly that. The kubelet attests only "this Pod is bound to this node", while SPIRE selectors can pin an image digest. And 1.37 ships no production signer, so "in-tree" still means choosing or writing a controller and running it as a critical service.
 
 **Q: What operational risk does SPIRE introduce that static credentials do not have?**
 **Short:** It puts a control plane on the startup path — if the SPIRE server is unavailable, running workloads survive their current SVID lifetime but new and rotating ones cannot get credentials.

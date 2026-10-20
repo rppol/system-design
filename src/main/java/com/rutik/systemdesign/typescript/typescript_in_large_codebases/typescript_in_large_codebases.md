@@ -87,6 +87,7 @@ in November.
 | Monorepo, one root `tsconfig` | the whole repo | everything | immediately — this is the trap |
 | Monorepo, per-package `tsconfig`, no references | one package, manually | unknown | when a package imports another's source |
 | Monorepo, composite project references | one project node | computable from the graph | cyclic dependencies, which it forbids |
+| Monorepo, live types via `customConditions` | each consumer program, dependency source included | every consumer of the changed package | many consumers of one package, or packages with different strictness |
 
 The third row is the common half-migration: each package has its own config, but they import
 each other's `src/` directly, so the boundary exists on disk and nowhere in the build.
@@ -302,7 +303,7 @@ graph and the tag constraints read:
   "dependencies": { "@acme/ui": "workspace:*", "@acme/core": "workspace:*" } }
 ```
 
-`workspace:*` tells pnpm 11.25.0 to link the local package and refuse to fall back to the
+`workspace:*` tells pnpm 12.14.0 to link the local package and refuse to fall back to the
 registry, so a typo is an install error rather than a silent download of somebody else's
 `@acme/ui`; on publish it is rewritten to the real version. Lockfiles and phantom dependencies
 belong to
@@ -314,7 +315,7 @@ belong to
 exist yet:
 
 ```js
-// eslint.config.js — flat config, typescript-eslint 8.69.0
+// eslint.config.js — flat config, typescript-eslint 8.71.2
 export default [{
   rules: {
     "no-restricted-imports": ["error", { patterns: [
@@ -399,6 +400,21 @@ means they are inferred from but never reported on. The program is whole from da
 converted files are held to the rules. Then opt in a file at a time: `// @ts-check` at the top
 of a `.js` file turns on checking for that file alone with types read from JSDoc, which is how
 you learn a module's real shape *before* renaming it.
+
+TypeScript 7.0 reads less JSDoc than 6.0 did, so a `.js` file that checked clean on 6.0 can report
+new errors after the upgrade:
+
+| JSDoc on 6.0 | On 7.0 |
+|--------------|--------|
+| `/** @type {someValue} */` naming a value as a type | error: write `{typeof someValue}` |
+| `@enum` on an object literal | no longer special, the object is a plain object type |
+| `@class` on a function | does not make it a constructor: use a `class` declaration |
+| `{string!}` postfix `!` | unsupported: write `{string}` |
+| standalone `{?}` | unusable as a type: write `{any}` |
+| Closure-style `{function(string): void}` | unsupported: write `{(s: string) => void}` |
+
+Run `tsc` 7.0 over the checked JS files before the upgrade lands and fix these as a separate
+change, so the migration's own diff stays a rename.
 
 ```mermaid
 stateDiagram-v2
@@ -486,6 +502,82 @@ percentage of expressions typed more specifically than `any`; a healthy large co
 the `any` they replaced. Assert with `--at-least` pinned one tenth of a point below today's
 number, and raise it whenever it drifts up on its own.
 
+### 6.8 Live types: a custom `exports` condition that points at `src`
+
+Project references make a dependent read the *emitted* `.d.ts`, so `core` must build before
+`web` can check. The other common pnpm-workspace layout skips that build. Each internal
+package declares a scoped custom condition that maps to its source, and the shared base turns
+the condition on:
+
+```json
+// packages/core/package.json
+{ "name": "@acme/core", "type": "module",
+  "exports": { ".": {
+      "@acme/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js" } } }
+```
+
+```json
+// tsconfig.base.json
+{ "compilerOptions": {
+    "module": "nodenext", "moduleResolution": "nodenext",
+    "customConditions": ["@acme/source"] } }
+```
+
+`customConditions` adds names to the conditions the resolver already matches, and it is valid
+only under `moduleResolution` `node16`, `nodenext` or `bundler`. Conditions match in key order
+and the first hit wins, so the custom key goes **above** `types` and `default`. The scope prefix
+matters: a bare `development` condition also matches any third-party package that ships one,
+which can resolve a dependency to a `.ts` file it never meant to expose.
+
+```mermaid
+flowchart LR
+    classDef src  fill:#2c313a,stroke:#61afef,color:#abb2bf
+    classDef step fill:#2c313a,stroke:#c678dd,color:#abb2bf
+    classDef ok   fill:#2c313a,stroke:#98c379,color:#abb2bf
+    classDef hot  fill:#2c313a,stroke:#e06c75,color:#abb2bf
+    imp(["import from<br/>@acme/core"]) --> q("@acme/source<br/>condition set?")
+    q -->|"yes"| live("core/src/index.ts<br/>joins the app program")
+    q -->|"no"| built("core/dist/index.d.ts<br/>a built contract")
+    live --> cost("re-checked by every<br/>consumer, under its options")
+    built --> skip("skipped when<br/>.d.ts is unchanged")
+    class imp src
+    class q step
+    class live,built ok
+    class cost hot
+    class skip ok
+```
+
+The runtime side uses the same name. Vite takes it in `resolve.conditions`; Node takes
+`node --conditions=@acme/source src/server.ts`. Node refuses to strip types from a file under a
+`node_modules` path, but pnpm links a workspace package as a symlink and Node loads the real
+path, `packages/core/src/index.ts`, so stripping works. A published consumer never sets
+`@acme/source`, falls through to `types` and `default`, and sees only `dist/`.
+
+What the layout buys: no build before type-checking or running, go-to-definition lands in
+`src`, and a rename across packages is one editor operation. What it costs is the boundary.
+`core/src` becomes part of every importing program, so with four apps importing `core`, its
+source is checked four times and nothing is skipped. It is checked under the **consumer's**
+compiler options, not the options in `core`'s own `tsconfig`. A `core` file with an untyped
+parameter that passed under `core`'s config fails inside `web`:
+
+```
+../../packages/core/src/index.ts(1,78): error TS7006: Parameter 'x' implicitly has an 'any' type.
+```
+
+| | Project references | Live types via `customConditions` |
+|---|---|---|
+| A dependent reads | emitted `.d.ts` | the dependency's `src` |
+| Build before check | yes, `tsc --build` in topological order | none |
+| Unchanged dependency | skipped via `.tsbuildinfo` | re-checked in every consumer |
+| Options applied to the dependency | its own `tsconfig` | each consumer's `tsconfig` |
+| Requires | `composite`, declaration emit, no cycles | one condition per package, one shared base |
+
+Live types suit a workspace with a few apps and shared strictness. Past about 8 packages, or
+once one package is imported by many consumers, the repeated checking is the cost that
+references exist to remove.
+
 ---
 
 ## 7. Real-World Examples
@@ -524,6 +616,7 @@ billing module fenced behind an `exports` map. Dedicated migration time: zero en
 |--------|---------------|-------------|---------------|
 | One root `tsconfig` | slowest — whole repo per change | one program, no drift possible | zero |
 | Composite references | only affected projects | strongest structural boundary | days, plus breaking every cycle |
+| Live types (`customConditions` to `src`) | no build step; each consumer re-checks dependency source | dependency checked under consumer options | one condition per package |
 | Task cache with explicit `inputs` | fastest | **a missed input ships broken code** | hours, and permanent vigilance |
 | Lint boundary rules | instant, in the editor | suppressible with one comment | one config block |
 | `exports` boundary | at resolution | unsuppressible, holds at runtime | needs real package boundaries |
@@ -628,10 +721,10 @@ return sdk.track(name, payload, opts);
 |------|------|----------------|
 | TypeScript | Compiler and checker (7.0, native Go) | `composite`, `references`, `tsc --build` |
 | tsc6 | The 6.0 binary as `@typescript/typescript6` | Only stable Compiler API until 7.1 |
-| pnpm | Workspace package manager (11.25.0) | `workspace:*`, strict `node_modules` layout |
+| pnpm | Workspace package manager (12.14.0) | `workspace:*`, strict `node_modules` layout |
 | Turborepo | Task graph and remote caching (2.10.12) | Skips whole typecheck tasks by input hash |
 | Nx | Monorepo graph with affected detection (23.2.0) | Tag-based dependency constraints |
-| typescript-eslint | Type-aware linting (8.69.0) | `no-unsafe-*`, `no-restricted-imports` |
+| typescript-eslint | Type-aware linting (8.71.2) | `no-unsafe-*`, `no-restricted-imports` |
 | type-coverage | Percentage of non-`any` expressions | The trend metric, via `--at-least` |
 | knip | Unused files, exports and dependencies | Finds what a boundary change orphaned |
 | syncpack | Version alignment across workspace manifests | Stops two packages pinning different React |
@@ -661,6 +754,17 @@ project's `.tsbuildinfo` to decide whether to skip it — a change in `ui` rebui
 become `error TS6202` rather than something that quietly worked. Budget the cycle-breaking as
 the real work; the config itself is twenty lines.
 
+**Q: When is a custom `exports` condition pointing at `src` a better monorepo setup than project references?**
+**Short:** When a few apps share strictness and the team values no build step; it trades the cached .d.ts boundary for re-checking each package's source in every consumer.
+
+Each package maps a scoped condition such as `@acme/source` to `./src/index.ts` above `types`
+and `default`, and the base `tsconfig` sets `customConditions: ["@acme/source"]` under
+`nodenext` or `bundler` resolution. Vite reads the same name from `resolve.conditions` and Node
+from `--conditions`, so nothing builds before checking or running. The cost scales with fan-in:
+a package imported by four apps is checked four times, and no `.tsbuildinfo` lets an unchanged
+one be skipped. Past about 8 packages, or for a package with many consumers, use `composite`
+references.
+
 **Q: How do you enforce a module boundary that a folder convention only suggests?**
 **Short:** Stack three layers, because each catches what the previous one missed: lint patterns, an exports map, and a dependency constraint on the project graph.
 
@@ -688,6 +792,16 @@ contains `require("@core/logger")` and the consumer gets `Cannot find module '@c
 The failure is invisible in the repository that defined the alias, which is why it ships. Use
 `paths` only for an application's internal aliases that a bundler resolves and nothing
 publishes, and use a real `workspace:*` dependency for anything crossing a package.
+
+**Q: After an app switches to a `customConditions` source condition, `tsc` reports TS7006 inside another package's `src/`. Why?**
+**Short:** The condition pulls that package's source into the app's program, so the app's compiler options, not the package's own tsconfig, decide what counts as an error there.
+
+With `"@acme/source": "./src/index.ts"` in `@acme/core`'s `exports` and `customConditions` set
+in the app, the import resolves to `core/src/index.ts` and the file joins the app's program as
+ordinary source. An untyped parameter that `core`'s looser config allowed now fails under the
+app's `strict` with `TS7006: Parameter 'x' implicitly has an 'any' type`. Project references do
+not have this problem, because a dependent reads `core`'s emitted `.d.ts`. Keep the options that
+change what an error is, such as `strict`, in the shared base every package extends.
 
 **Q: Why `@ts-expect-error` rather than `@ts-ignore`?**
 **Short:** Budgeting suppressions works only if each one self-deletes -- TS2578 fires when the error underneath disappears, so the count can ratchet down but never silently drift up.

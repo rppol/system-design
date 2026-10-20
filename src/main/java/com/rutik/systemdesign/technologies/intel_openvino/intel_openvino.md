@@ -1,10 +1,12 @@
 # Intel OpenVINO — CPU/Edge Inference & Model Optimization
 
-> **Version anchor:** OpenVINO **2026.2** (API 2.0 / `ov::` namespace era). Every
+> **Version anchor (2026-10-19):** OpenVINO **2026.4.1** (2026-10-01; API 2.0 / `ov::` namespace era). Every
 > version-specific behavior is tagged inline against the release it landed in — e.g.
 > `[2022.1]` for the `ov::` API, `[2024.0]` for the removal of the legacy
 > `InferenceEngine::` API, `[2025.0]` for the removal of the Model Optimizer (`mo`)
-> CLI. OpenVINO ships **quarterly** (`2026.0`, `2026.1`, `2026.2`, …); treat any
+> CLI. OpenVINO ships a feature release every six to ten weeks, not on a fixed quarter:
+> `2026.0` (Feb 23), `2026.1` (Apr 7), `2026.2` (May 28), `2026.3` (Aug 4), `2026.4`
+> (Sep 16), with point releases between them. Treat any
 > "current default" here as accurate for the 2026.x line and re-verify a flag against
 > the exact release you deploy, because defaults and device support move release to
 > release.
@@ -698,6 +700,8 @@ activation ranges, then folds them into INT8. On VNNI/AMX CPUs INT8 typically ru
 **2–4×** faster than FP32 at a fraction of the memory. Fragile layers (e.g. a final
 softmax) can be excluded with an `ignored_scope`. **POT**, the old Post-training
 Optimization Tool, is **removed** — NNCF is the only quantization path now.
+`[2026.3]` NNCF also quantizes ONNX models to **FP8**, for targets with FP8 kernels where
+INT8 calibration costs too much accuracy.
 
 ### 6.19 Accuracy-Aware Quantization
 
@@ -752,6 +756,19 @@ print(pipe.generate("Explain OpenVINO in one line.", max_new_tokens=64,
 sampling, **continuous batching**, and speculative decoding built in — so you get an
 LLM serving loop without pulling in the full `transformers` stack.
 
+Speculative decoding in `openvino-genai` comes in three forms, each needing a different
+draft source:
+
+| Variant | Draft source | Since |
+|---|---|---|
+| Draft model | A separate small model of the same family | `[2024.5]` |
+| EAGLE-3 | A trained draft head on the target's hidden states; LLMs and VLMs | `[2026.3]`; tree drafting (top-K branches verified in one pass) `[2026.4]` |
+| MTP (multi-token prediction) | The target model's own MTP heads, no extra model | `[2026.4]` for Gemma 4, Qwen3.5 and Qwen3.6 on CPU and GPU |
+
+`[2026.3]` also added **MoE offload to disk**: inactive experts stay on storage and load on
+demand, which is how a 30B MoE such as Qwen3-30B-A3B runs on a 16 GB device, at the cost of
+token latency whenever routing picks an expert that is not resident.
+
 ### 6.22 OpenVINO Model Server — `config.json` + Launch
 
 ```json
@@ -778,8 +795,9 @@ docker run -p 9000:9000 -p 8000:8000 -v /models:/models \
 ```
 
 **OVMS** is the network-serving layer: a C++ server that loads a model repository
-(numeric version directories, exactly like Triton's) and exposes **KServe v2** and
-TensorFlow-Serving APIs over gRPC/REST. It hot-reloads on `config.json` changes and
+(numeric version directories, exactly like Triton's) and exposes the **KServe v2** API
+over gRPC/REST for classic models; OVMS 2026.3 dropped the TensorFlow Serving API and
+the stateful-model (sequence) serving built for Kaldi audio models. It hot-reloads on `config.json` changes and
 routes versions by policy (`latest`, specific, or `all`). It has **no built-in
 authentication** — front it with an authenticating gateway.
 
@@ -787,7 +805,8 @@ authentication** — front it with an authenticating gateway.
 
 Beyond single models, OVMS runs **MediaPipe graphs** — DAGs of model and Python nodes
 for multi-stage pipelines (the successor to the older custom-node DAG scheduler). For
-LLMs, OVMS exposes an **OpenAI-compatible** endpoint (`/v3/chat/completions`) backed by
+LLMs, OVMS exposes an **OpenAI-compatible** endpoint (`/v1/chat/completions` `[2026.3]`;
+the older `/v3/chat/completions` path still works) backed by
 **continuous batching** `[2024.2+]`, so an OpenVINO-served LLM is a drop-in for OpenAI-
 client code.
 
@@ -1025,7 +1044,7 @@ OVMS deployment as CV models.
 
 ### 11.3 Serving and Orchestration
 
-- **OVMS on Kubernetes** — Helm chart / operator, KServe-compatible.
+- **OVMS on Kubernetes** - deployed through the KServe operator; the dedicated OpenVINO operator is deprecated `[2026.3]` and no longer developed.
 - **NVIDIA Triton OpenVINO backend** — serve CPU models inside a Triton fleet.
 - **DL Streamer** — GStreamer-based video-analytics pipelines with OpenVINO inference
   elements.
@@ -1195,8 +1214,8 @@ and INT8 and it shines; feed it a dynamic transformer and it struggles.
 **Q: When do you serve with OVMS versus embedding the runtime versus Triton?**
 **Short:** Embed the runtime for lowest-latency in-process serving, use OVMS for an Intel-only network service, Triton for mixed hardware.
 Embed the runtime for **in-process** inference with no network hop (the default and
-lowest latency). Use **OVMS** when you need a **network service** with KServe/TF-Serving
-APIs, versioning, and hot-reload but your hardware is Intel. Use **Triton** when you
+lowest latency). Use **OVMS** when you need a **network service** with the KServe v2
+API, versioning, and hot-reload but your hardware is Intel. Use **Triton** when you
 need one control plane across **heterogeneous accelerators** (NVIDIA GPUs + Intel CPUs)
 — and note Triton can host OpenVINO via its OpenVINO backend.
 

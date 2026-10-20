@@ -8,7 +8,7 @@ Behavioral patterns define how objects communicate and distribute responsibility
 
 Behavioral patterns address the question: "How do objects collaborate to accomplish complex tasks without becoming tightly coupled?" They externalize control flow, communication protocols, and algorithmic decisions from call sites into objects that can be composed, swapped, chained, or extended independently.
 
-The 11 GoF behavioral patterns covered here are:
+The 11 GoF behavioral patterns covered here, plus the non-GoF Null Object and Specification patterns, are:
 
 | # | Pattern | Module |
 |---|---------|--------|
@@ -23,6 +23,8 @@ The 11 GoF behavioral patterns covered here are:
 | 9 | Strategy | [strategy/](strategy/strategy.md) |
 | 10 | Template Method | [template_method/](template_method/template_method.md) |
 | 11 | Visitor | [visitor/](visitor/visitor.md) |
+| 12 | Null Object (non-GoF) | [null_object/](null_object/null_object.md) |
+| 13 | Specification (non-GoF) | [specification/](specification/specification.md) |
 
 ---
 
@@ -51,6 +53,8 @@ The 11 GoF behavioral patterns covered here are:
 | [Strategy](strategy/strategy.md) | Define a family of algorithms and make them interchangeable | Sorting; payment methods; discount rules | Strategy interface leaking implementation details |
 | [Template Method](template_method/template_method.md) | Define an algorithm skeleton in a base class; let subclasses fill in steps | Spring Batch readers/processors; framework hooks | Tight coupling to base class; hard to test |
 | [Visitor](visitor/visitor.md) | Add new operations to an object structure without modifying the elements | AST traversal; type-specific reporting; compiler passes | Breaking change when a new element type is added |
+| [Null Object](null_object/null_object.md) | Replace a null reference with an object that does nothing safely | Optional loggers, metrics, listeners; empty results | Hiding absence that should have failed loudly |
+| [Specification](specification/specification.md) | Encapsulate a business rule as a composable `isSatisfiedBy` object | Rules shared by validation and queries; optional search filters | Java and query forms drift; filtering in memory after `findAll()` |
 
 ---
 
@@ -216,11 +220,13 @@ Four participants need six direct connections without a mediator, growing quadra
 | Command | `java.lang.Runnable`, `java.util.concurrent.Callable`, `javax.swing.Action` |
 | Template Method | `AbstractList`, `JdbcTemplate`, `Spring Batch ItemReader/ItemProcessor/ItemWriter chain`, `HttpServlet.doGet` |
 | Chain of Responsibility | `jakarta.servlet.Filter`, `jakarta.servlet.FilterChain`, Spring Security `FilterChainProxy`, `HandlerInterceptor` |
-| State | Spring State Machine, `jakarta.faces.lifecycle.Lifecycle` |
+| State | `jakarta.faces.lifecycle.Lifecycle`, JPA entity lifecycle (Transient, Managed, Detached, Removed) |
 | Memento | `javax.swing.undo.UndoableEdit`, Event Sourcing aggregate snapshots |
 | Visitor | `javax.lang.model.element.ElementVisitor`, `ClassVisitor` (ASM), JavaParser visitors |
 | Mediator | Spring MVC `DispatcherServlet`, `ApplicationContext` as mediator between beans |
 | Interpreter | Spring Expression Language (SpEL), OGNL, Thymeleaf expression engine |
+| Null Object | `OutputStream.nullOutputStream()`, `Collections.emptyList()`, SLF4J `NOPLogger`, Spring `NoOpCacheManager` |
+| Specification | Spring Data JPA `Specification<T>` + `JpaSpecificationExecutor<T>`, `java.util.function.Predicate` |
 
 ---
 
@@ -325,9 +331,9 @@ The pattern-level tradeoff worth stating out loud: Strategy, State, and Command 
 | Mediator | `java.util.concurrent.Flow` | `ApplicationEventPublisher`, Spring Integration `MessageChannel` | Guava `EventBus`, Vert.x event bus, Apache Pekko actors |
 | Memento | Records, `Serializable`, `AtomicReference` | — | Jackson deep copy, Kryo `copy`, Vavr persistent collections, Axon or EventStoreDB |
 | Observer | `PropertyChangeSupport`, `java.util.concurrent.Flow` | `@EventListener`, `@TransactionalEventListener(AFTER_COMMIT)` | Guava `EventBus`, Reactor `Flux`, RxJava 3, Kafka |
-| State | `enum` with per-constant bodies, `EnumMap`, sealed interfaces + `switch` patterns (Java 21+) | Spring Statemachine | Temporal, AWS Step Functions, Camunda or Flowable |
+| State | `enum` with per-constant bodies, `EnumMap`, sealed interfaces + `switch` patterns (Java 21+) | (none) | Temporal, AWS Step Functions, Camunda or Flowable |
 | Strategy | `java.util.function`, `Comparator`, `ServiceLoader` | `Map<String, Strategy>` injection, `@Qualifier`, `@ConditionalOnProperty` | Resilience4j `IntervalFunction`, Caffeine eviction policies |
-| Template Method | `AbstractList`, `InputStream`, `HttpServlet.service()`, interface `default` methods | `JdbcTemplate`, `TransactionTemplate`, Spring Batch reader/processor/writer | JUnit 5 lifecycle and `@TestTemplate` |
+| Template Method | `AbstractList`, `InputStream`, `HttpServlet.service()`, interface `default` methods | `JdbcTemplate`, `TransactionTemplate`, Spring Batch reader/processor/writer | JUnit 6 lifecycle and `@TestTemplate` |
 | Visitor | `FileVisitor` + `Files.walkFileTree`, `javax.lang.model` visitors, sealed types + `switch` patterns | — | ASM `ClassVisitor`, JavaParser adapters, ANTLR 4 generated visitors |
 
 The recurring lesson across the table: for most of these patterns the platform already ships an implementation, and hand-rolling one means giving up its ordering guarantees, lifecycle management, and observability. Write the pattern yourself only when no framework owns the extension point you need.
@@ -413,7 +419,7 @@ Observer/Listener is the most abused behavioral pattern in enterprise Java. The 
 **Q: How does the State pattern handle complex FSMs with many states?**
 **Short:** One class per state becomes unmanageable past roughly 50 states, favoring a state-transition table instead.
 
-Each state is a class; transitions are methods on the state class (or the context delegates to the state, which returns the next state object). For 5 to 10 states this is clean and readable. For 50 or more states the class explosion makes the codebase unmanageable — 50 classes, each with transition methods for every possible event. Alternatives: encode the FSM as a state-transition table (a `Map<State, Map<Event, Transition>>` drives the engine); use a library (Spring State Machine for complex hierarchical FSMs, Stateless4j for lightweight ones); or define the FSM in a configuration file and generate the state classes. The State pattern shines when each state has complex behavior with many methods — it is overkill for simple flag-based or two-state logic.
+Each state is a class; transitions are methods on the state class (or the context delegates to the state, which returns the next state object). For 5 to 10 states this is clean and readable. For 50 or more states the class explosion makes the codebase unmanageable — 50 classes, each with transition methods for every possible event. Alternatives: encode the FSM as a state-transition table (a `Map<State, Map<Event, Transition>>` drives the engine); use a library (Stateless4j for lightweight in-process FSMs) or a workflow engine (Temporal, Camunda) when the state must survive a restart; or define the FSM in a configuration file and generate the state classes. The State pattern shines when each state has complex behavior with many methods — it is overkill for simple flag-based or two-state logic.
 
 ---
 

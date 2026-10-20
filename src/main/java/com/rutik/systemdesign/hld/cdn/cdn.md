@@ -462,6 +462,10 @@ flowchart LR
 
 *A cache key is built by transforming the full URL — e.g. `https://example.com/api/products?sort=asc&page=2` — through normalization, `Vary` headers, and tracking-param stripping before it becomes the effective key CDN nodes hash on.*
 
+### Compression and Shared Dictionaries
+
+The edge negotiates a content coding from `Accept-Encoding` (Brotli `br`, then `gzip`) and stores one variant per coding, which is why `Vary: Accept-Encoding` is mandatory on compressed objects. RFC 9842 (Compression Dictionary Transport, September 2025) adds delta compression for versioned assets: a response sent with `Use-As-Dictionary: match="/js/app.*.js"` becomes a dictionary for later requests matching that URL pattern. When the client next fetches `app.v2.js`, it sends `Available-Dictionary` (the SHA-256 hash of `app.v1.js`), and the server replies with `dcb` (dictionary-compressed Brotli) or `dcz` (dictionary-compressed Zstandard), so a small code change ships as a few kilobytes of diff instead of a full bundle. The cache key must split on the dictionary too: cacheable responses carry `Vary: accept-encoding, available-dictionary`, or the edge serves a body encoded against a dictionary the client does not hold. Dictionaries are same-origin unless the response passes CORS, and the scheme requires HTTPS.
+
 ---
 
 ### Geographic Routing
@@ -649,7 +653,7 @@ flowchart LR
 Benefits:
 - TLS handshake with nearby edge (low latency)
 - CDN handles certificate renewal (via Let's Encrypt or custom)
-- OCSP stapling, TLS 1.3, HTTP/2 negotiated at edge
+- TLS 1.3, HTTP/2 negotiated at edge
 - Origin can use simpler HTTP internally (if private network)
 
 ### WAF (Web Application Firewall)
@@ -879,7 +883,7 @@ A: Origin Shield adds an additional caching layer between CDN edge nodes and the
 **Q11: How do CDNs support HTTPS and certificate management?**
 **Short:** CDNs terminate TLS at the edge and automate certificate issuance and renewal via ACME/Let's Encrypt.
 
-A: CDN terminates TLS at the edge. Modern CDNs handle: (1) Automatic certificate provisioning via Let's Encrypt (ACME protocol). (2) Certificate renewal before expiry. (3) SNI (Server Name Indication) for hosting multiple domains on shared IP. (4) HSTS preloading, OCSP stapling. (5) Custom certificate upload for Enterprise customers. The connection from CDN edge to origin can be HTTP (if on private network) or HTTPS (end-to-end encryption).
+A: CDN terminates TLS at the edge. Modern CDNs handle: (1) Automatic certificate provisioning via Let's Encrypt (ACME protocol). (2) Certificate renewal before expiry. (3) SNI (Server Name Indication) for hosting multiple domains on shared IP. (4) HSTS preloading. (5) Custom certificate upload for Enterprise customers. The connection from CDN edge to origin can be HTTP (if on private network) or HTTPS (end-to-end encryption).
 
 **Q12: What is "stale-while-revalidate" and why is it valuable?**
 **Short:** stale-while-revalidate serves the cached copy instantly while refreshing it asynchronously in the background.

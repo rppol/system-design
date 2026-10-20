@@ -879,9 +879,10 @@ rf_efficient = RandomForestClassifier(
 | scikit-learn | 1.4+ | RandomForestClassifier.oob_decision_function_ for OOB probabilities |
 | SHAP | 0.44+ | TreeSHAP: O(TLD^2) exact Shapley values for RF, works on sklearn models |
 | joblib | 1.3+ | Parallelism backend for n_jobs=-1 (used internally by sklearn) |
-| Optuna | 3.3+ | Hyperparameter tuning with OOB as objective (no CV needed, fast) |
+| Optuna | 5.0+ | Hyperparameter tuning with OOB as objective (no CV needed, fast) |
+| XGBoost | 3.4+ | GPU random forest: set `num_parallel_tree` to the forest size, `subsample` and `colsample_bynode` below 1, `learning_rate=1`, and train one boosting round. The `XGBRFClassifier`/`XGBRFRegressor` wrappers are deprecated in 3.4 |
 | imbalanced-learn | 0.11+ | BalancedRandomForestClassifier: undersamples majority in each bootstrap |
-| MLflow | 2.10+ | Auto-logging for sklearn: logs n_estimators, max_features, OOB score |
+| MLflow | 3.0+ | Auto-logging for sklearn: logs n_estimators, max_features, OOB score |
 
 ---
 

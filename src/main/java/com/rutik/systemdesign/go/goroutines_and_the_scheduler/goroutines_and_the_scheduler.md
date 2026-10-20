@@ -1346,8 +1346,7 @@ func (w *webhooker) send(ctx context.Context, url string, body []byte) error {
     if err != nil {
         return err
     }
-    defer resp.Body.Close()
-    io.Copy(io.Discard, resp.Body) // drain so the connection returns to the pool
+    defer resp.Body.Close() // the Transport drains the unread body [1.27]
     return nil
 }
 ```

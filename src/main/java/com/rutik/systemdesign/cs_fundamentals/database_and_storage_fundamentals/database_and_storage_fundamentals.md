@@ -277,11 +277,11 @@ For full normalisation forms (BCNF, 4NF, 5NF) and schema design patterns, see
 | DRAM (RAM) | ~100 ns | ~8–512 GB | OS + application |
 | NVMe SSD | ~100 µs random read | ~256 GB – 8 TB | OS block layer |
 | SATA SSD | ~500 µs random read | ~256 GB – 4 TB | OS block layer |
-| HDD | ~10 ms seek + ~5 ms rotation | ~1–20 TB | OS block layer |
+| HDD | ~10 ms seek + ~5 ms rotation | ~1-32 TB | OS block layer |
 | Network storage | ~1–10 ms | effectively unlimited | Network + OS |
 
 **Sequential vs. random I/O**:
-- SSD sequential read: ~1–3.5 GB/s (NVMe); ~500 MB/s (SATA)
+- SSD sequential read: ~3.5 GB/s (PCIe 3.0 NVMe), ~7 GB/s (PCIe 4.0), ~14.8 GB/s (PCIe 5.0, Samsung 9100 PRO); ~500 MB/s (SATA)
 - SSD random read (4 KB block): ~100–500 µs
 - HDD sequential read: ~100–200 MB/s
 - HDD random read: ~10–15 ms (dominated by seek + rotational latency)
@@ -1128,7 +1128,7 @@ After loading 50 million rows into a new table, the query planner may still beli
 | DynamoDB | Key-value NoSQL | BASE, optional strong reads | Transactions via TransactWriteItems (limited ACID) |
 | Redis | In-memory key-value | Single-threaded, atomic commands | MULTI/EXEC for lightweight transactions |
 | MongoDB | Document NoSQL | ACID multi-doc since 4.0 | WiredTiger storage engine; replica set transactions |
-| NVMe SSD | Storage hardware | ~100 µs random read, ~3.5 GB/s seq | PCIe 4.0; primary database storage tier |
+| NVMe SSD | Storage hardware | ~100 µs random read, ~7 GB/s seq (PCIe 4.0), ~14.8 GB/s (PCIe 5.0) | primary database storage tier |
 | pgBadger | Monitoring | PostgreSQL log analyser | Identifies slow queries, lock waits |
 | pg_stat_statements | Monitoring | Query-level statistics in PostgreSQL | CPU, I/O, call count per query fingerprint |
 

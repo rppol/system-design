@@ -195,6 +195,15 @@ stateDiagram-v2
     Detail --> Credible: real memory keeps producing consistent new detail
     Collapse --> [*]
     Credible --> [*]
+
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    class Opening info
+    class Detail warn
+    class Collapse bad
+    class Credible good
 ```
 
 A rehearsed script and a real memory look identical for the first follow-up and diverge

@@ -409,7 +409,7 @@ public final class TraceContext {
 The `finally` cleanup is non-negotiable: a pooled thread is reused, so a leaked
 `ThreadLocal` would contaminate the *next* unrelated request that lands on it.
 
-Java 21's `ScopedValue` makes this safer — it is immutable and automatically
+`ScopedValue` (final in Java 25, JEP 506) makes this safer: it is immutable and automatically
 unbound at the end of the bound scope, eliminating the leak class entirely (see
 [structured_concurrency_and_loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md)).
 
@@ -547,7 +547,7 @@ a big-bang rewrite of anything business-critical — the failure surface is enor
 
 4. **ThreadLocal leak in a pool.** A trace id set but never cleared in a `finally`
    bled into the next request on the reused thread, so logs attributed one user's
-   actions to another. Always clear in `finally`; prefer `ScopedValue` (Java 21).
+   actions to another. Always clear in `finally`; prefer `ScopedValue` (Java 25).
 
 5. **Unbounded queues defeat the bulkhead.** A `LinkedBlockingQueue` (unbounded) in
    a "bulkhead" pool let a slow dependency buffer millions of tasks until the heap
@@ -574,7 +574,7 @@ a big-bang rewrite of anything business-critical — the failure surface is enor
 | Idempotency / dedup | Postgres UNIQUE constraint, Redis SETNX + TTL |
 | Tracing | OpenTelemetry, Jaeger, AWS X-Ray, Zipkin |
 | Resilience (bulkhead/CB) | Resilience4j, Netflix Hystrix (legacy) |
-| JDK primitives | `CompletableFuture`, `ThreadPoolExecutor`, `ScopedValue` (21), `ThreadLocal`, JDBC |
+| JDK primitives | `CompletableFuture`, `ThreadPoolExecutor`, `ScopedValue` (25), `ThreadLocal`, JDBC |
 
 ---
 
@@ -657,7 +657,7 @@ for availability, which is almost always the right call between services.
 executor the worker thread sees nothing. You must capture the context value on the
 submitting thread, then restore it on the worker thread at the start of the task and
 clear it in a `finally`. Frameworks do this by wrapping the `Runnable`/`Callable`.
-Java 21's `ScopedValue` is the modern fix — it is immutable and auto-unbound at the
+`ScopedValue` (final in Java 25, JEP 506) is the modern fix: it is immutable and auto-unbound at the
 end of its scope, removing the leak risk inherent in mutable `ThreadLocal`.
 
 **Q: Why must you clear a ThreadLocal in a finally block in pooled code?**
@@ -762,7 +762,7 @@ holds locally per step. In short: ACD without the I.
   orchestration for anything that moves money or inventory.
 - **Bound everything** — queues, pools, retries. Unbounded anything defeats
   isolation and invites OOM.
-- **Clear `ThreadLocal` in `finally`**, and migrate to `ScopedValue` on Java 21+.
+- **Clear `ThreadLocal` in `finally`**, and migrate to `ScopedValue` on Java 25+.
 - **Propagate context explicitly** at every async hop; wrap your executors once in a
   central place rather than per-call.
 - **Alert on compensation and dead-letter events** — these are correctness signals,
@@ -854,7 +854,7 @@ tables. Both were acceptable given the correctness and isolation gains.
 
 ---
 
-## See Also
+## Related / See Also
 
 - [structured_concurrency_and_loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md) —
   `ScopedValue` for leak-free context propagation; virtual threads for high-fan-out

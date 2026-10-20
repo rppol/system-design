@@ -52,14 +52,20 @@ For re-embedding and rebuilding a production index when the embedding model chan
 > models below are the current leaders as of this snapshot, not a permanent ranking.
 
 **Current leaders (August 2026):**
-- **`gemini-embedding-001`** (Google, GA since mid-2025) — tops the MTEB **Multilingual**
-  board: 68.32 overall, 67.71 retrieval.
-- **Cohere `embed-v4`** — leads the MTEB **English v2** board at 65.2, ahead of OpenAI
-  `text-embedding-3-large` (64.6) and BGE-M3 (63.0).
+- **`gemini-embedding-2`** (Google, GA 2026-04-22): the Gemini API's embedding model; one
+  model embeds text, image, audio and video, priced at $0.20/1M text tokens.
+- **Cohere `embed-v4`**: 65.2 on the original MTEB **English (v1)** board, ahead of OpenAI
+  `text-embedding-3-large` (64.6) and BGE-M3 (63.0). These v1 numbers do not compare with the
+  English v2 scores below.
 - **Voyage 4** (Voyage AI, January 2026) — shares one embedding space across text and image
   modalities, so a text query and an image can be compared directly.
 - **Qwen3-Embedding** — tops MTEB v2 among **open-weight** models; the 8B variant averages
   roughly 75%.
+- **EmbeddingGemma 2** (Google, 2026-10-06, Apache 2.0) is the on-device open-weight option:
+  740M parameters (270M text backbone plus 170M vision and 300M audio encoders) embed text,
+  images, video and audio into one 768-dim space, truncatable to 512/256/128, with an 8,192-token
+  input. MTEB Multilingual v2 61.36 and English v2 68.46 at 768d, below Qwen3-Embedding-8B,
+  in exchange for a model that runs on a phone or laptop; vLLM serves it from v0.32.0.
 
 **all-MiniLM-L6-v2** (SentenceTransformers)
 - 384 dimensions, 22.7M params, extremely fast; truncates input past 256 word pieces
@@ -84,7 +90,7 @@ For re-embedding and rebuilding a production index when the embedding model chan
 - text-embedding-3-small (1536d) / text-embedding-3-large (3072d)
 - Supports Matryoshka truncation (see below)
 - Kept here as the pricing anchor: it is still the commonly-quoted OpenAI API price point,
-  even though `gemini-embedding-001` and `embed-v4` now rank above it on quality
+  even though `embed-v4` ranks above it on MTEB English (v1)
 
 ### 4.2 Contrastive Learning
 
@@ -755,10 +761,11 @@ Embeddings in production can drift when:
 | all-MiniLM-L6 | 384 | Fastest | Good | Free |
 | BGE-base | 768 | Fast | Very good | Free |
 | Qwen3-Embedding (8B) | varies | Self-hosted | Top open-weight, MTEB v2 | Free (self-hosted) |
+| EmbeddingGemma 2 (740M) | 768 (MRL 512/256/128) | On-device | Multilingual v2 61.36, English v2 68.46; text, image, video, audio in one space | Free (Apache 2.0) |
 | text-embedding-3-small | 1536 | API | Good | $0.02/1M tokens |
-| text-embedding-3-large | 3072 | API | Very good (64.6 MTEB English v2) | $0.13/1M tokens |
-| Cohere embed-v4 | varies | API | Leads MTEB English v2 (65.2) | API-priced (check current rate card) |
-| gemini-embedding-001 | varies | API | Leads MTEB Multilingual (68.32) | API-priced (check current rate card) |
+| text-embedding-3-large | 3072 | API | Very good (64.6 MTEB English v1) | $0.13/1M tokens |
+| Cohere embed-v4 | varies | API | 65.2 MTEB English v1 | API-priced (check current rate card) |
+| gemini-embedding-2 | varies | API | Multimodal: text, image, audio, video | $0.20/1M text tokens |
 
 ---
 

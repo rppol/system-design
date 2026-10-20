@@ -91,7 +91,7 @@ The fourth is where most mature platforms land, and it is the one with the sharp
 | **EKS Pod Identity** | Pod to AWS IAM | **AWS's current recommendation for new EKS workloads** — simpler trust policies, no OIDC provider setup, session tags |
 | **IRSA** | Pod to AWS IAM via OIDC | Not deprecated; still required for Fargate, Windows nodes and EKS Anywhere |
 | **SPIFFE / SPIRE** | Cross-platform workload identity, X.509-SVID and JWT-SVID | Multi-cluster or hybrid, where a single identity plane must span more than Kubernetes. CNCF **graduated** since 2022 |
-| **`PodCertificateRequest`** | X.509 identity for Pods, in-tree | New in 1.35 (1.36 consolidated the request fields into `StubPKCS10Request`). Worth tracking, not yet a foundation |
+| **`PodCertificateRequest`** | X.509 identity for Pods, in-tree | GA in 1.37 together with `ClusterTrustBundle`: the kubelet generates the Pod's key and requests the certificate, and a signer controller you deploy issues it and publishes the trust bundle |
 
 ### Managed runtimes
 
@@ -248,7 +248,7 @@ spec:
       ports: [{protocol: TCP, port: 443}]
 ```
 
-**A caveat that matters:** core `NetworkPolicy` has **no FQDN awareness** — `ipBlock` is CIDR-only, so "allow api.openai.com" is not expressible. For FQDN egress you need a CNI-level policy such as Cilium's `CiliumNetworkPolicy` with `toFQDNs`, which snoops DNS responses and allow-lists the resolved addresses. **`AdminNetworkPolicy` is still `v1alpha1`** and is not the answer yet.
+**A caveat that matters:** core `NetworkPolicy` has **no FQDN awareness** — `ipBlock` is CIDR-only, so "allow api.openai.com" is not expressible. For FQDN egress you need a CNI-level policy such as Cilium's `CiliumNetworkPolicy` with `toFQDNs`, which snoops DNS responses and allow-lists the resolved addresses. The cluster-scoped **`ClusterNetworkPolicy`** (`policy.networking.k8s.io/v1alpha2`, network-policy-api v0.2.0, which merged `AdminNetworkPolicy` and `BaselineAdminNetworkPolicy`) is still alpha and is not the answer yet.
 
 ```yaml
 apiVersion: cilium.io/v2
@@ -426,7 +426,7 @@ spec:
 
 **3. Forgetting DNS in a default-deny egress policy.** Core `NetworkPolicy` has no DNS exception. Deny all egress without an explicit `kube-dns` rule and nothing resolves — the agent fails in a way that looks like a model or gateway problem and takes hours to diagnose. Always pair the deny with the DNS allow.
 
-**4. Believing `ipBlock` can express a hostname.** It cannot; `ipBlock` is CIDR-only and core `NetworkPolicy` has no FQDN awareness. Teams write a policy they believe allows `api.example.com`, and it either fails closed or is far broader than intended. Use Cilium `toFQDNs` — and do not reach for `AdminNetworkPolicy`, which is **still `v1alpha1`**.
+**4. Believing `ipBlock` can express a hostname.** It cannot; `ipBlock` is CIDR-only and core `NetworkPolicy` has no FQDN awareness. Teams write a policy they believe allows `api.example.com`, and it either fails closed or is far broader than intended. Use Cilium `toFQDNs`, and do not reach for `ClusterNetworkPolicy`, which is **still alpha (`v1alpha2`)**.
 
 **5. Leaving `169.254.169.254` reachable.** The link-local metadata endpoint is how a persuaded agent obtains node credentials, and it is called out explicitly in MCP's own security guidance as an SSRF target. Exclude it in the `except` list, and require IMDSv2 as well.
 
@@ -453,10 +453,10 @@ spec:
 | `ValidatingAdmissionPolicy` | Enforcement | CEL invariants without a webhook | GA since 1.30 |
 | `MutatingAdmissionPolicy` | Enforcement | CEL-based defaulting and injection | **GA in 1.36** |
 | Cilium `CiliumNetworkPolicy` | Egress | `toFQDNs` hostname allow-listing | Core NetworkPolicy cannot do this |
-| `AdminNetworkPolicy` | Egress | Cluster-scoped policy | **Still `v1alpha1`** — do not build on it |
+| `ClusterNetworkPolicy` | Egress | Cluster-scoped policy with an Admin or Baseline `tier`; replaced `AdminNetworkPolicy` and `BaselineAdminNetworkPolicy` | **Still alpha (`v1alpha2`)**; do not build on it |
 | EKS Pod Identity | Identity | Pod to AWS IAM | AWS's recommendation for new workloads; IRSA still needed for Fargate and Windows |
 | SPIFFE / SPIRE | Identity | X.509-SVID and JWT-SVID over the Workload API | CNCF graduated; socket at `/tmp/spire-agent/public/api.sock` |
-| `PodCertificateRequest` | Identity | In-tree X.509 for Pods | New in 1.35; 1.36 added `StubPKCS10Request`. Track it |
+| `PodCertificateRequest` | Identity | In-tree X.509 for Pods | **GA in 1.37**, with `ClusterTrustBundle` |
 | kagent / K8sGPT | Agents | Cluster operations and triage | Both CNCF **Sandbox** |
 
 ---
@@ -481,7 +481,7 @@ Once an agent ingests external content — a support ticket, a web page, a log l
 **Q: You apply a default-deny egress NetworkPolicy to an agent namespace and everything breaks. Why?**
 **Short:** Core NetworkPolicy has no implicit DNS exception, so denying all egress blocks name resolution and every call fails before it starts.
 
-`NetworkPolicy` is deny-by-default once a policy selects a Pod for egress, and that includes UDP and TCP port 53 to the cluster DNS service. Without an explicit rule allowing egress to `kube-dns` in `kube-system`, nothing resolves — and the symptom is misleading, because it presents as timeouts and connection failures that look like a model provider outage or a broken gateway rather than a policy problem. Always pair the deny with the DNS allow. The related trap is assuming `ipBlock` can express a hostname: it is CIDR-only, so an allow-list of hostnames is not expressible in core NetworkPolicy at all, and you need a CNI-level mechanism such as Cilium's `toFQDNs`. Do not reach for `AdminNetworkPolicy` — it is still `v1alpha1`.
+`NetworkPolicy` is deny-by-default once a policy selects a Pod for egress, and that includes UDP and TCP port 53 to the cluster DNS service. Without an explicit rule allowing egress to `kube-dns` in `kube-system`, nothing resolves — and the symptom is misleading, because it presents as timeouts and connection failures that look like a model provider outage or a broken gateway rather than a policy problem. Always pair the deny with the DNS allow. The related trap is assuming `ipBlock` can express a hostname: it is CIDR-only, so an allow-list of hostnames is not expressible in core NetworkPolicy at all, and you need a CNI-level mechanism such as Cilium's `toFQDNs`. Do not reach for `ClusterNetworkPolicy`, the cluster-scoped API that replaced `AdminNetworkPolicy`: it is still alpha.
 
 **Q: Why exclude `169.254.169.254` from an agent's egress?**
 **Short:** It is the cloud instance metadata endpoint — the standard path from a persuaded agent to node credentials — and MCP's own security guidance names it as an SSRF target.
@@ -546,7 +546,7 @@ A kill switch has to satisfy three properties that are easy to state and easy to
 - **Audience-bind and shorten tokens** — `audience` plus `expirationSeconds: 600`, the minimum the API server accepts.
 - **Validate token audience on every MCP server** and hold separate upstream credentials. Never forward what you were given.
 - **Default-deny egress, and remember DNS.** Then exclude `169.254.169.254` and require IMDSv2.
-- **Use Cilium `toFQDNs` for hostname allow-lists.** Core NetworkPolicy cannot express them; `AdminNetworkPolicy` is still alpha.
+- **Use Cilium `toFQDNs` for hostname allow-lists.** Core NetworkPolicy cannot express them; `ClusterNetworkPolicy` (which replaced `AdminNetworkPolicy`) is still alpha.
 - **Enforce budget at the gateway, per identity.** A dashboard is not a control.
 - **Emit `agent.step.index`** on tool spans and alert on loop length — it catches a runaway before the cost signal does.
 - **Pin the GenAI semconv version.** All of it is Development stability and has already renamed attributes once.

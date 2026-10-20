@@ -2,7 +2,7 @@
 
 ## Deep Dive Files
 
-This directory contains a README index (this file) plus 18 deep-dive files, each covering one framework or topic with the full 14-section module template and 15+ interview Q&As.
+This directory contains a README index (this file) plus 19 deep-dive files, each covering one framework or topic with the full 14-section module template and 15+ interview Q&As.
 
 | File | Topic | Focus |
 |------|-------|-------|
@@ -11,7 +11,8 @@ This directory contains a README index (this file) plus 18 deep-dive files, each
 | [llamaindex.md](llamaindex.md) | LlamaIndex | Node parsers, index types, sentence window, auto-merging, sub-question engine |
 | [crewai.md](crewai.md) | CrewAI | Agent roles/goals/backstory, Task delegation, sequential vs hierarchical process |
 | [autogen.md](autogen.md) | AutoGen — conversation lineage of Microsoft Agent Framework | ConversableAgent, code execution loop, GroupChat, human_input_mode, code safety |
-| [semantic_kernel.md](semantic_kernel.md) | Semantic Kernel — enterprise lineage of Microsoft Agent Framework | Kernel, plugins, planners, Kernel filters, OpenAPI import, enterprise patterns |
+| [microsoft_agent_framework.md](microsoft_agent_framework.md) | Microsoft Agent Framework | Successor to AutoGen and Semantic Kernel: Agent, AgentSession, graph Workflow engine, Foundry Agent Service |
+| [semantic_kernel.md](semantic_kernel.md) | Semantic Kernel — enterprise lineage of Microsoft Agent Framework | Kernel, plugins, automatic function calling, Kernel filters, OpenAPI import, enterprise patterns |
 | [haystack.md](haystack.md) | Haystack | Pipeline DAG, typed components, document stores, hybrid retrieval, serialization |
 | [dspy.md](dspy.md) | DSPy | Signatures, modules, optimizers (BootstrapFewShot, MIPRO), metrics, compilation |
 | [framework_observability.md](framework_observability.md) | Observability | LangSmith, Langfuse, OpenTelemetry, cost tracking, LLM-as-judge evaluation |
@@ -59,7 +60,7 @@ Understanding frameworks is critical for engineering interviews because producti
 
 ---
 
-## 4. Frameworks
+## 4. Types / Architectures / Strategies
 
 ### 4.1 LangChain
 
@@ -96,7 +97,7 @@ def check_weather(location: str) -> str:
     return f"It's always sunny in {location}"
 
 agent = create_agent(
-    model="anthropic:claude-sonnet-5",
+    model="anthropic:claude-sonnet-5-5",
     tools=[check_weather],
     system_prompt="You are a helpful assistant",
 )
@@ -282,7 +283,7 @@ Deeper multi-agent coordination patterns (debate, orchestrator-worker, handoffs)
 
 ### 4.6 Semantic Kernel (Microsoft) — the JVM/.NET plugin model
 
-The Agent Framework above is the supported path on Python and .NET. Semantic Kernel remains the option where you need a Java SDK, and its kernel/plugin/planner vocabulary is what the Agent Framework's enterprise layer inherited.
+The Agent Framework above is the supported path on Python and .NET. Semantic Kernel remains the option where you need a Java SDK, and its kernel/plugin/filter vocabulary is what the Agent Framework's enterprise layer inherited.
 
 ```python
 import semantic_kernel as sk
@@ -350,8 +351,8 @@ LangChain:     [LLM] + [Prompt] + [Memory] + [Tools] → general purpose
 LangGraph:     [Nodes] → [Edges] → [State] → stateful, cyclical workflows
 LlamaIndex:    [Data] → [Index] → [Retriever] → [LLM] → data-first RAG
 CrewAI:        [Agent1] → [Agent2] → [Agent3] → [Output] → role-based collaboration
-MS Agent Fwk:  [ChatAgent] + [Workflow graph] + [Plugins] → .NET/Python enterprise
-Semantic Kernel: [Kernel] + [Plugins] + [Planner] → Java-capable plugin model
+MS Agent Fwk:  [Agent] + [Workflow graph] + [Tools] → .NET/Python enterprise
+Semantic Kernel: [Kernel] + [Plugins] + [Auto function calling] → Java-capable plugin model
 Haystack:      [Component1] → [Component2] → [Output] → pipeline architecture
 ```
 
@@ -424,7 +425,7 @@ Observability: LangSmith, Langfuse, or OpenTelemetry traces
 
 Error handling:
   - Retry with exponential backoff for transient failures
-  - Fallback model (claude-opus-5 → claude-sonnet-5 if overloaded)
+  - Fallback model (claude-opus-5-5 → claude-sonnet-5-5 if overloaded)
   - Graceful degradation (return partial answer if agent fails)
 
 Cost control:
@@ -571,7 +572,7 @@ A: Framework overhead is rarely the bottleneck because LLM inference dominates (
 
 **Q: How do you implement cost budgeting across a multi-step LangGraph workflow?**
 **Short:** Track cumulative token cost in graph state and route to a guard or degradation node once a per-run budget threshold is exceeded.
-A: Add a token counter to graph state and check it at each node boundary. (1) State: include `total_tokens_used: int` and `cost_budget_usd: float` in the TypedDict; (2) After each LLM call: `state["total_tokens_used"] += response.usage.total_tokens`; (3) Cost calculation: `cost = tokens * MODEL_PRICE_PER_TOKEN`; (4) Guard node: before any LLM call, check `if current_cost >= budget: return "budget_exceeded"`; (5) Conditional edge: route to a graceful degradation path rather than the normal next node. Concrete numbers: Claude Sonnet 5 at $3/1M input tokens, a 10-step agent using 2K input tokens/step burns 20K tokens for ~$0.06; setting a budget of $0.25/run protects against runaway agents. LangSmith project-level usage tracking can also enforce soft limits with alerts.
+A: Add a token counter to graph state and check it at each node boundary. (1) State: include `total_tokens_used: int` and `cost_budget_usd: float` in the TypedDict; (2) After each LLM call: `state["total_tokens_used"] += response.usage.total_tokens`; (3) Cost calculation: `cost = tokens * MODEL_PRICE_PER_TOKEN`; (4) Guard node: before any LLM call, check `if current_cost >= budget: return "budget_exceeded"`; (5) Conditional edge: route to a graceful degradation path rather than the normal next node. Concrete numbers: Claude Sonnet 5.5 at $2/1M input tokens, a 10-step agent using 2K input tokens/step burns 20K tokens for ~$0.04; setting a budget of $0.25/run protects against runaway agents. LangSmith project-level usage tracking can also enforce soft limits with alerts.
 
 **Q: When should you build your own agent loop instead of using a framework?**
 **Short:** Build custom for simple, latency-critical, or framework-fighting cases; adopt a framework once integrations and state needs grow.

@@ -8,7 +8,7 @@ RabbitMQ is a message broker written in Erlang/OTP. Its native protocol is AMQP 
 
 That single design choice is the whole difference between RabbitMQ and a partitioned log. [Kafka](../kafka_deep_dive/kafka_deep_dive.md) is a dumb broker with a smart consumer: the broker appends bytes to a partition and the consumer owns its offset. RabbitMQ is a smart broker with a dumb consumer: the broker owns the routing table, tracks per-message delivery state, pushes messages to consumers, and remembers which of them have been acknowledged. Everything else — per-message TTL, dead-lettering, priorities, competing consumers without a partition count — falls out of the broker holding that state.
 
-**This module targets RabbitMQ 4.3.x** (latest patch at time of writing: **4.3.5**, released 23 July 2026; the 4.2 series reached end of community support on 31 July 2026). The 4.x line is not a cosmetic increment over 3.13, and the changes matter enough that most RabbitMQ material written before September 2024 now teaches things the broker will refuse to do:
+**This module targets RabbitMQ 4.3.x** (latest patch at time of writing: **4.3.6**, released 16 September 2026, with community support for 4.3 until 31 January 2027; the 4.2 series reached end of community support on 31 July 2026). The 4.x line is not a cosmetic increment over 3.13, and the changes matter enough that most RabbitMQ material written before September 2024 now teaches things the broker will refuse to do:
 
 - **Classic queue mirroring was removed in 4.0.** There is no `ha-mode` policy any more. A classic queue is a single-node, non-replicated queue, full stop. Replication is quorum queues (Raft) or streams (Raft-replicated log).
 - **Streams shipped in 3.9 and super streams in 3.11.** RabbitMQ has had non-destructive, replayable, offset-addressed reads for years. "RabbitMQ cannot replay" is a statement about *classic and quorum queues*, not about RabbitMQ.
@@ -65,7 +65,6 @@ Now add the accounting. When the post office hands an envelope to a courier, it 
 | `x-consistent-hash` (plugin) | Hash the routing key or a header, distribute across bound queues by binding weight | Sharding one logical stream of work across N queues while keeping per-key ordering |
 | `x-modulus-hash` (core since 4.3) | `hash(routing key) mod (number of bindings)`, ignoring weights | Deterministic sharding when you want Kafka-style partition arithmetic |
 | `x-local-random` (plugin) | Pick one bound queue at random, preferring a local node | Latency-sensitive RPC where any worker will do |
-| `x-delayed-message` (plugin) | Hold the message for `x-delay` ms, then route as the configured underlying type | Scheduled delivery without the TTL+DLX head-of-line trap |
 
 Exchanges can also bind to *other exchanges* (exchange-to-exchange bindings), which is how you build a two-stage topology: one fanout that every service binds to for audit, feeding a topic exchange that does the real routing.
 
@@ -700,12 +699,9 @@ flowchart LR
 
 A message published into `wait.30s` has no consumer, expires after 30 s, and is dead-lettered into the real work queue. Chain queues with 30 s / 5 min / 30 min TTLs and you have an exponential-backoff retry ladder built entirely from broker configuration.
 
-**The trap: message TTL in a queue is evaluated at the head only.** Messages leave the queue in publish order, so a message with a 30-second TTL sitting behind a message with a 30-minute TTL waits 30 minutes. Per-message `expiration` values in a shared delay queue therefore do not work the way the name suggests. Two correct patterns:
+**The trap: message TTL in a queue is evaluated at the head only.** Messages leave the queue in publish order, so a message with a 30-second TTL sitting behind a message with a 30-minute TTL waits 30 minutes. Per-message `expiration` values in a shared delay queue therefore do not work the way the name suggests. The correct pattern is **one queue per delay tier** with a queue-level `x-message-ttl`: every message in a given queue has the same TTL, so head-of-line ordering is also TTL ordering. This is the pattern in the diagram. Back each tier with a quorum queue so pending delayed messages are replicated.
 
-1. **One queue per delay tier** with a queue-level `x-message-ttl` — every message in a given queue has the same TTL, so head-of-line ordering is also TTL ordering. This is the pattern in the diagram.
-2. **The `rabbitmq_delayed_message_exchange` plugin**, which holds messages in the exchange with an `x-delay` header and releases each at its own time, correctly and independently. Note its limitation: delayed messages live on one node's disk in the exchange, so they do not replicate — a node loss loses the pending schedule.
-
-For quorum queues on 4.3, prefer the new native delayed retry over either of these for the *retry* use case; keep TTL+DLX or the plugin for genuine business scheduling.
+For the *retry* use case on 4.3 quorum queues, use native delayed retry instead; keep per-tier TTL+DLX queues for business scheduling.
 
 ### Streams: the log-based queue type
 
@@ -1020,7 +1016,7 @@ A realistic 3.13 → 4.3 path is therefore three hops, not one: 3.13.7 → lates
 
 **IoT fleets sharing a broker with backend services.** A common shape: tens of thousands of devices connect over MQTT with QoS 1, publishing telemetry to topics like `sensors/floor3/temp`. The `rabbitmq_mqtt` plugin maps those onto the `amq.topic` exchange with `/` translated to `.`, so the backend consumes them as ordinary AMQP 0-9-1 messages through bindings like `sensors.#` — no bridge process, no protocol translation service. What makes this work operationally is the separation of concerns it allows: device-facing topics land in a stream with age-based retention for the analytics team, while a small set of alerting bindings feed a quorum queue with real consumers. What makes it fail is connection count — MQTT fleets bring file-descriptor and Erlang-process pressure that AMQP workloads never do, so size `ulimit -n` and monitor socket usage as first-class metrics rather than as an afterthought.
 
-**Managed RabbitMQ and the version-lag tax.** Teams on Amazon MQ for RabbitMQ regularly discover that the managed version trails upstream and that plugins are restricted — which turns "just enable the delayed-message-exchange plugin" into a design constraint rather than a task. The pattern worth internalising: on a managed broker, check the supported version and the plugin allowlist *before* the design settles on a feature, because the features most likely to be unavailable (community plugins, the newest queue-type behaviour) are exactly the ones that are hard to work around later. This is not an argument against managed brokers; it is an argument for reading the constraint sheet during design instead of during implementation.
+**Managed RabbitMQ and the version-lag tax.** Teams on Amazon MQ for RabbitMQ regularly discover that the managed version trails upstream and that plugins are restricted, which turns "just enable the plugin" into a design constraint rather than a task. The pattern worth internalising: on a managed broker, check the supported version and the plugin allowlist *before* the design settles on a feature, because the features most likely to be unavailable (community plugins, the newest queue-type behaviour) are exactly the ones that are hard to work around later. This is not an argument against managed brokers; it is an argument for reading the constraint sheet during design instead of during implementation.
 
 **Benchmark figures, and how to read them.** Two numbers are worth carrying, both with their conditions attached:
 
@@ -1166,7 +1162,7 @@ Ten consumer pods, one queue, no `basic.qos` call. The first pod to connect rece
 A team upgraded from 3.13 to 4.x, kept their `ha-all` policy in place, saw no errors, and believed their queues were replicated. They were not: the policy key was simply ignored, and every classic queue had exactly one copy. The outage arrived four months later with a node failure, and the post-mortem finding was that the HA policy had done nothing since the upgrade. Fix: after any 4.x upgrade, run `rabbitmqctl list_queues name type` and confirm the `type` column says `quorum` (or `stream`) for everything that matters. A policy that references a removed feature is not an error; it is a no-op, which is worse.
 
 **Pitfall 5 — Per-message TTL in a shared delay queue.**
-A retry mechanism published messages into one `retry` queue with per-message `expiration` values of 10 s, 60 s, and 600 s, expecting each to pop out at its own time. It does not work: **TTL is evaluated at the head of the queue only**, so a 10-second message queued behind a 600-second message waits ten minutes. The symptom was a retry latency distribution with a long, inexplicable tail. Fix: one queue per delay tier with a queue-level `x-message-ttl`, or the delayed-message-exchange plugin, or — on 4.3 quorum queues — native delayed retry.
+A retry mechanism published messages into one `retry` queue with per-message `expiration` values of 10 s, 60 s, and 600 s, expecting each to pop out at its own time. It does not work: **TTL is evaluated at the head of the queue only**, so a 10-second message queued behind a 600-second message waits ten minutes. The symptom was a retry latency distribution with a long, inexplicable tail. Fix: one queue per delay tier with a queue-level `x-message-ttl`, or, on 4.3 quorum queues, native delayed retry.
 
 **Pitfall 6 — The dead-letter loop.**
 A DLQ was itself configured with `x-dead-letter-exchange` pointing back at the same DLX used by the main queue. A rejected message dead-lettered into the DLQ, and because the DLQ's own policy applied, it dead-lettered again, forever. Broker CPU rose steadily, the `x-death` header grew to thousands of entries, and message size grew with it until the connection frame limit was hit. Fix: a DLQ has no DLX. Also cap it — `x-max-length` on the DLQ with `x-overflow: drop-head` — so a runaway producer cannot fill the disk with messages nobody is reading.
@@ -1200,7 +1196,7 @@ A retry service consumed from a DLQ and republished with the original message's 
 ## 11. Technologies and Tools
 
 **Broker and core**
-- **RabbitMQ** — the broker. Current series 4.3.x (4.3.5 at time of writing). Requires Erlang/OTP 27.0 as a minimum for 4.3, with OTP 27.x as the supported maximum; OTP 28 is supported for brand-new clusters only. Keep the same Erlang major version across every node in a cluster.
+- **RabbitMQ**: the broker. Current series 4.3.x (4.3.6 at time of writing). RabbitMQ 4.3.6 supports Erlang/OTP 27.0 through 28.x; 4.3.3 to 4.3.5 cap at OTP 27.x and run OTP 28 only on brand-new clusters. Keep the same Erlang major version across every node in a cluster.
 - **Khepri** — the Raft-based metadata store, default for new clusters in 4.2 and the only store in 4.3. Replaces Mnesia and, with it, the entire partition-handling-strategy configuration family.
 - **Ra** — the Erlang Raft implementation underneath both Khepri and quorum queues. You do not configure it directly, but its WAL settings (`raft.wal_max_size_bytes`, default 512 MB) are the knobs behind quorum queue disk behaviour.
 
@@ -1210,7 +1206,6 @@ A retry service consumed from a DLQ and republished with the original message's 
 - `rabbitmq_stream` / `rabbitmq_stream_management` — the dedicated binary stream protocol listener, server-side offset tracking, and filter expressions.
 - `rabbitmq_shovel` / `rabbitmq_shovel_management` — point-to-point message transfer between brokers.
 - `rabbitmq_federation` / `rabbitmq_federation_management` — binding-aware exchange and queue federation across brokers.
-- `rabbitmq_delayed_message_exchange` — the `x-delayed-message` exchange type. Community plugin, not bundled; note that scheduled messages are held on one node and do not replicate.
 - `rabbitmq_consistent_hash_exchange` — weighted hash-based sharding across bound queues.
 - `rabbitmq_stomp` / `rabbitmq_web_stomp` — STOMP over TCP and over WebSocket; this is what makes RabbitMQ the external relay behind Spring WebSocket messaging.
 - `rabbitmq_mqtt` / `rabbitmq_web_mqtt` — MQTT 3.1.1 and 5.0, for IoT fleets sharing the broker with backend services.
@@ -1290,10 +1285,10 @@ The default is 20, based on the message's `delivery-count` (which replaced the o
 
 This is backwards, and it comes from mirrored classic queues. Quorum queues never keep message bodies in memory; everything goes to disk. What they hold in RAM is an index of roughly 32-plus bytes of metadata per message, independent of message size — the documented rule of thumb is at least 1 MB for every 30,000 messages in the queue. Ten million backed-up 10 KB messages therefore cost about 333 MB of index per member, not 100 GB of payload. RabbitMQ 4.3's eighth-generation quorum queue state machine cut that further with compact message references, roughly halving per-message overhead. The planning consequence is specific: budget quorum queue **memory** against message count and budget **disk throughput** against confirmed publish rate, because disk latency is directly in the confirm path.
 
-**Q: How do you schedule a message for delivery in 30 minutes without a plugin, and what is the trap?**
+**Q: How do you schedule a message for delivery in 30 minutes, and what is the trap?**
 **Short:** Publish into a consumer-less queue with a queue-level TTL that dead-letters into the real queue; the trap is that TTL is only evaluated at the queue head.
 
-Declare a queue with `x-message-ttl: 1800000` and an `x-dead-letter-exchange` pointing at the real work exchange, and give it no consumers. Messages sit there, expire, and are dead-lettered into the work queue 30 minutes later. Chain several such queues and you have an exponential-backoff retry ladder made entirely of broker configuration. The trap is that **message TTL is evaluated at the head of the queue only**: a message with a 10-second per-message `expiration` sitting behind one with a 600-second expiration waits the full 600 seconds, because messages leave in publish order. So per-message TTL in a shared delay queue does not do what its name suggests. Use one queue per delay tier with a queue-level TTL, or the `rabbitmq_delayed_message_exchange` plugin, which schedules each message independently — at the cost of holding pending messages on one node without replication.
+Declare a queue with `x-message-ttl: 1800000` and an `x-dead-letter-exchange` pointing at the real work exchange, and give it no consumers. Messages sit there, expire, and are dead-lettered into the work queue 30 minutes later. Chain several such queues and you have an exponential-backoff retry ladder made entirely of broker configuration. The trap is that **message TTL is evaluated at the head of the queue only**: a message with a 10-second per-message `expiration` sitting behind one with a 600-second expiration waits the full 600 seconds, because messages leave in publish order. So per-message TTL in a shared delay queue does not do what its name suggests. Use one queue per delay tier with a queue-level TTL, and back each tier with a quorum queue so the pending schedule survives a node loss.
 
 **Q: Why did adding more consumer pods not increase throughput?**
 **Short:** Usually unbounded or oversized prefetch — the first consumers claimed the whole backlog, so the new pods had nothing to receive.

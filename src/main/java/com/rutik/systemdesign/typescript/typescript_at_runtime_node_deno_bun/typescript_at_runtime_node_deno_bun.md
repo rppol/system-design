@@ -5,8 +5,9 @@
 ## 1. Concept Overview
 
 `node app.ts` works now. It has worked without a flag since Node **v23.6.0** and **v22.18.0**,
-it became non-experimental at **v24.12.0** and **v25.2.0**, and at **v26.0.0** the
-`--experimental-strip-types` flag was deleted because there was nothing left to opt into. Deno
+it became stable at **v24.12.0** and **v25.2.0**, where the opt-out flag was renamed to
+`--no-strip-types`, and **v26.0.0** removed `--experimental-transform-types`, so Node 26 runs only
+erasable TypeScript. Deno
 has run TypeScript directly since its first release; Bun has since 1.0. The build step that
 every TypeScript service carried for a decade is, for a large class of programs, gone.
 
@@ -20,7 +21,7 @@ into production three weeks later.
 |-----------|-------------|------------------|-----------------|
 | **Type checking** | `tsc --noEmit`, `deno check` | nothing on disk | every type error in the program |
 | **Type stripping** | Node's `amaro`, Bun, esbuild, `tsx` | JavaScript, per file | syntax errors only |
-| **Transpilation** | `tsc`, SWC, Babel, `--experimental-transform-types` | JavaScript, possibly downlevelled | syntax errors only |
+| **Transpilation** | `tsc`, SWC, Babel, Node 24's `--experimental-transform-types` | JavaScript, possibly downlevelled | syntax errors only |
 | **Bundling** | esbuild, Rollup, Rolldown | one or more output chunks | unresolved imports |
 
 Only the first row reads more than one file at a time, and only the first row can fail on a
@@ -125,7 +126,7 @@ break with a module-not-found rather than a syntax error.
 | Runner | Version | Watch | Decorators | CJS/ESM interop | Use it when |
 |--------|---------|-------|------------|-----------------|-------------|
 | `node` | 26 / 24 LTS | `--watch` | no | native | erasable code, no `paths` |
-| `tsx` | 4.23.13 | `--watch` | yes | esbuild shims both | you have decorators or `paths` |
+| `tsx` | 4.23.15 | `--watch` | yes | esbuild shims both | you have decorators or `paths` |
 | `deno` | 2.9 | `--watch` | yes | npm specifiers | greenfield, checking wanted |
 | `bun` | 1.4.0 | `--watch` | TC39 standard | very broad | speed and one toolchain |
 
@@ -208,12 +209,12 @@ timeline
     v22.7.0 : experimental-transform-types added
     v23.6.0 : stripping on by default
     v22.18.0 : default backported to the 22 line
-    v24.12.0 : marked stable, no longer experimental
+    v24.12.0 : stable, opt-out renamed to no-strip-types
     v25.2.0 : stable on the 25 line
-    v26.0.0 : the strip-types flag removed entirely
+    v26.0.0 : experimental-transform-types removed
 ```
 
-Four years from proposal to a deleted flag. The practical read: on any Node you can still
+Node 26 keeps only the erasable subset. The practical read: on any Node you can still
 support, `node app.ts` runs — but only Node 24 LTS and newer is a supported production floor.
 
 ### Where a construct fails, and how loudly
@@ -345,9 +346,10 @@ export class Account {
 }
 ```
 
-`--experimental-transform-types` is the escape hatch: it makes Node *generate* the enum and
-namespace code instead of refusing. It is rarely the right answer, because transforming shifts
-positions, so Node turns on source maps and you have traded the honest stack trace of §6.5 for
+On Node 24, `--experimental-transform-types` makes Node *generate* the enum and namespace code
+instead of refusing. Node v26.0.0 removed that flag, so on Node 26 the only routes for enums,
+namespaces with runtime code and parameter properties are `tsx`, Bun or a build. Each transforms,
+which shifts positions and needs source maps, so you trade the honest stack trace of §6.5 for
 syntax you were better off deleting.
 
 ### 6.3 `--erasableSyntaxOnly` moves the failure to build time `[5.8]`
@@ -382,7 +384,7 @@ plain stripping, full stop.
 ### 6.4 `tsx`, and when you still need a real build
 
 ```bash
-npm i -D tsx typescript                  # tsx 4.23.13
+npm i -D tsx typescript                  # tsx 4.23.15
 npx tsx watch src/server.ts              # restart on change, ~90ms
 npx tsc --noEmit --watch                 # the checker, in a second terminal
 ```
@@ -391,6 +393,11 @@ npx tsc --noEmit --watch                 # the checker, in a second terminal
 `tsconfig.json` `paths`, `target` downlevelling, CJS/ESM interop shims — and it does not type
 check either. The two-terminal setup above is the honest dev loop on any runtime: one process
 runs, one process checks, and neither pretends to do the other's job.
+
+A team that maintains its own `.ts` loader or `--import` hook writes it against
+`module.registerHooks()`: synchronous, in-thread `resolve` and `load` hooks that cover both ESM
+and CommonJS. The off-thread `module.register()` API prints a runtime deprecation warning
+(DEP0205) on Node 26, because its worker-thread orchestration had unresolvable issues.
 
 You still want an ahead-of-time build when any of these is true:
 
@@ -424,7 +431,7 @@ the three cases you will meet:
 | Setup | Trace points at | Source map needed |
 |-------|-----------------|-------------------|
 | `node app.ts` (strip) | your `.ts`, exact line and column | no |
-| `node --experimental-transform-types` | your `.ts`, via a generated map | yes, Node enables it |
+| `node --experimental-transform-types` (Node 24) | your `.ts`, via a generated map | yes, Node enables it |
 | `tsx` / `bun` | your `.ts`, via an in-memory map | yes, installed automatically |
 | `tsc` build then `node dist/app.js` | `dist/app.js` unless `sourceMap` is on | yes, plus `--enable-source-maps` |
 
@@ -494,6 +501,67 @@ The `check` script is the load-bearing line. It is a separate command precisely 
 can believe `dev` covers it, and `ci` runs it before the tests so a type error fails in 4-9
 seconds rather than after a 3-minute suite. `--watch` gives 80-200ms restarts;
 `--env-file` removes the last reason to have a runner wrapping the runtime at all.
+
+### 6.9 Relative `.ts` specifiers: `allowImportingTsExtensions` and `rewriteRelativeImportExtensions` `[5.7]`
+
+Node resolves an ES module specifier exactly as written, with no extension search. The file on
+disk is `math.ts`, so the import must say `./math.ts`. `module: nodenext` teaches the opposite
+habit: write `./math.js`, the name of the file `tsc` will emit. Under native stripping there is
+no emit, so `./math.js` is `ERR_MODULE_NOT_FOUND`.
+
+Writing `./math.ts` then trips the checker. These are the real errors from `tsc` 6.0.3 on a
+two-file project:
+
+```
+src/app.ts(1,21): error TS5097: An import path can only end with a '.ts' extension when
+'allowImportingTsExtensions' is enabled.
+
+tsconfig.json: error TS5096: Option 'allowImportingTsExtensions' can only be used when one of
+'noEmit', 'emitDeclarationOnly', or 'rewriteRelativeImportExtensions' is set.
+```
+
+Two flags answer the two cases:
+
+| Setup | Flags | What `tsc` writes |
+|-------|-------|-------------------|
+| Run sources only (scripts, services that never build) | `noEmit` + `allowImportingTsExtensions` | nothing; `./math.ts` type-checks |
+| Run sources in dev, emit `dist/` for production or npm | `rewriteRelativeImportExtensions` | `./math.ts` becomes `./math.js` in the output |
+
+`rewriteRelativeImportExtensions` `[5.7]` alone silences TS5097; `allowImportingTsExtensions`
+is not needed beside it. It rewrites a specifier only when it starts with `./` or `../`, ends
+in `.ts`, `.tsx`, `.mts` or `.cts`, and sits in a non-declaration file. `.mts` becomes `.mjs`
+and `.cts` becomes `.cjs`. A dynamic `import(p)` with a computed string gets a runtime helper,
+because the compiler cannot see the value:
+
+```js
+// dist/app.js, from: import { add } from "./math.ts"; await import(p);
+var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExtension) || function (path, preserveJsx) { /* regex swap of .ts for .js */ };
+import { add } from "./math.js";
+const m = await import(__rewriteRelativeImportExtension(p));
+```
+
+It does not rewrite anything that resolves through configuration: `paths` aliases, a
+`package.json` `imports` entry such as `#lib/math.ts`, or a bare package specifier. `tsc`
+refuses rather than emit a broken import:
+
+```
+src/b.ts(1,21): error TS2877: This import uses a '.ts' extension to resolve to an input
+TypeScript file, but will not be rewritten during emit because it is not a relative path.
+```
+
+The tsconfig Node's own TypeScript documentation recommends for type stripping (TypeScript 5.8
+or newer) is the emit-capable one:
+
+```json
+{ "compilerOptions": {
+    "noEmit": true,
+    "target": "esnext", "module": "nodenext",
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true, "verbatimModuleSyntax": true } }
+```
+
+Drop `noEmit` when the same sources also build to `dist/`. Both `node src/app.ts` and
+`node dist/app.js` then run the same import graph.
 
 ---
 
@@ -649,7 +717,7 @@ resolution rules.
 | Node.js | Runtime, v26 Current, v24 Active LTS | Native stripping, `--watch`, `--env-file` |
 | amaro | Node's embedded SWC type stripper | Whitespace-preserving erasure, no checking |
 | TypeScript | Checker and compiler, 7.0 | `tsc --noEmit`, `erasableSyntaxOnly` |
-| tsx | esbuild-based TypeScript runner, 4.23.13 | Decorators, `paths`, watch mode |
+| tsx | esbuild-based TypeScript runner, 4.23.15 | Decorators, `paths`, watch mode |
 | Deno | TypeScript-first runtime, 2.9 | `deno check`, permissions, JSR |
 | Bun | Runtime plus toolchain, 1.4.0 | Transpile-only execution, one binary |
 | esbuild | Go bundler and transformer | The engine underneath tsx |
@@ -693,15 +761,16 @@ production, is a coherent split as long as CI checks and you test the built arti
 **Q: How can a stack trace point at a `.ts` line with no source map?**
 **Short:** Whitespace replaces each removed token instead of deleting it, so every line and column offset in the output equals the offset in the original file.
 
-`function f(x: number)` becomes `function f(x        )` — same length, same columns. V8 reports
-`app.ts:42:11` and that is literally where the code is. The trick only survives pure stripping:
-`--experimental-transform-types` generates code, shifts positions, and therefore turns source
+`function f(x: number)` becomes `function f(x )` — same length, same columns. V8 reports
+`app.ts:42:11` and that is literally where the code is. The trick only survives pure stripping: Node
+24's `--experimental-transform-types` generates code, shifts positions, and therefore turns source
 maps on. So does `tsx`, and so does any bundled build.
 
 **Q: What is the Node version story for running TypeScript directly?**
-**Short:** Default-on behaviour landed in v23.6.0 and v22.18.0, went stable at v24.12.0 and v25.2.0, and the opt-in flag was deleted in v26.0.0.
+**Short:** Default-on in v23.6.0 and v22.18.0, stable at v24.12.0 and v25.2.0, and v26.0.0 removed --experimental-transform-types, so Node 26 runs only erasable syntax.
 
 `--experimental-strip-types` arrived in v22.6.0 and `--experimental-transform-types` in v22.7.0.
+At v24.12.0 and v25.2.0 the opt-out `--no-experimental-strip-types` became `--no-strip-types`.
 Node 26 is Current and Node 24 "Krypton" is Active LTS, started 2025-05-06 on a 30-month
 window. Set `"engines": { "node": ">=24.0.0" }` and you can rely on flagless `node app.ts`
 without documenting a single flag.
@@ -709,7 +778,7 @@ without documenting a single flag.
 **Q: Where does `tsx` fit now that Node strips types natively, and what happened to `ts-node`?**
 **Short:** Watch mode plus decorators, path aliases and CJS interop are what a loader still adds once the runtime handles plain erasure by itself.
 
-`tsx` 4.23.13 wraps esbuild, transforms rather than strips, and reads `tsconfig.json`, so it
+`tsx` 4.23.15 wraps esbuild, transforms rather than strips, and reads `tsconfig.json`, so it
 runs the code native stripping refuses. It does not type check either. `ts-node` faded because
 native stripping took its default case and faster loaders took the rest; its last release is
 10.9.2 from 2023-12-08.
@@ -746,21 +815,43 @@ byte-identical to the input, so `@app/lib/logger` reaches Node unchanged and giv
 `ERR_MODULE_NOT_FOUND`. Use Node's `imports` field in `package.json` (`#lib/*`) instead: the
 runtime resolves it natively and the checker understands it too, so one mechanism serves both.
 
+**Q: `node src/app.ts` runs, but `tsc` fails with TS5097 on `import { add } from "./math.ts"`. Why, and what is the fix?**
+**Short:** Node needs the real `.ts` file name and tsc rejects it by default; set `allowImportingTsExtensions` with `noEmit`, or `rewriteRelativeImportExtensions` if you emit.
+
+Node does no extension search for ES modules, so the specifier must name `math.ts`. `tsc`
+assumes the specifier names an emitted file and reports
+`TS5097: An import path can only end with a '.ts' extension when 'allowImportingTsExtensions'
+is enabled`. That flag on its own is a config error (TS5096) unless `noEmit`,
+`emitDeclarationOnly` or `rewriteRelativeImportExtensions` is also set, because an emitted
+`./math.ts` import would not resolve next to `math.js`. A run-only project takes
+`noEmit` plus `allowImportingTsExtensions`. A project that also builds `dist/` takes
+`rewriteRelativeImportExtensions` `[5.7]`, which accepts the `.ts` specifier and emits `.js`.
+
+**Q: What does `rewriteRelativeImportExtensions` rewrite, and what does it leave alone?**
+**Short:** Only relative `./` or `../` specifiers ending in .ts, .tsx, .mts or .cts; `paths` aliases, `#imports` entries and bare package specifiers keep their text.
+
+`./math.ts` becomes `./math.js`, `.mts` becomes `.mjs`, `.cts` becomes `.cjs`. A computed
+`import(p)` is wrapped in an emitted `__rewriteRelativeImportExtension` helper that swaps the
+extension at runtime. A non-relative specifier that resolves to a `.ts` input, such as
+`#lib/math.ts` through `package.json` `imports`, is error TS2877 rather than a silent broken
+import. For workspace packages the TypeScript 5.7 notes point to a scoped custom `exports`
+condition that maps to `src/*.ts`, run with `node --conditions`.
+
 **Q: Can a NestJS or TypeORM codebase run under `node app.ts`?**
 **Short:** Decorators emit runtime calls and metadata, so a decorator-driven framework is structurally incompatible with erasure at any Node version.
 
-`@Injectable()` compiles to a function call plus, with `emitDecoratorMetadata`, reflection data
-the DI container reads at startup. Nothing there is erasable, and `--experimental-transform-types`
-does not cover legacy decorator metadata. Run such a service under `tsx`, Bun, or a real build —
-this is a framework choice, not a migration you can codemod.
+`@Injectable()` compiles to a function call plus, with `emitDecoratorMetadata`, reflection data the
+DI container reads at startup. Nothing there is erasable, Node 26 has no transform flag, and Node
+24's `--experimental-transform-types` does not cover decorators either. Run such a service under
+`tsx`, Bun, or a real build — this is a framework choice, not a migration you can codemod.
 
 **Q: When does the no-build loop actually need a source map?**
 **Short:** A source map becomes necessary the moment a tool generates code rather than blanking it, because generation moves every position after the change.
 
-Pure stripping preserves offsets, so `node app.ts` needs none.
-`--experimental-transform-types`, `tsx`, Bun and any bundled build all rewrite the output, and
-each installs a map — in memory for the runners, on disk for a build. The production rule: if
-you ship `dist/`, ship `.map` and upload it to your error tracker, or `billing.ts:42` becomes
+Pure stripping preserves offsets, so `node app.ts` needs none. Node 24's
+`--experimental-transform-types`, `tsx`, Bun and any bundled build all rewrite the output, and each
+installs a map — in memory for the runners, on disk for a build. The production rule: if you ship
+`dist/`, ship `.map` and upload it to your error tracker, or `billing.ts:42` becomes
 `index.js:1:88214`.
 
 **Q: What does a stack trace look like in each of the three runtimes?**
@@ -803,6 +894,8 @@ the operational simplicity of no `dist/` is worth more than the milliseconds.
    `tsc --noEmit --watch --preserveWatchOutput`.
 6. **Build for publishing, for downlevelling, and for cold-start budgets** — and only then.
 7. **If you ship a build, ship its source map** and upload it to the error tracker.
+8. **Write relative imports as `./file.ts` and set `rewriteRelativeImportExtensions` `[5.7]`**
+   when the same sources also emit, so `node src/app.ts` and `node dist/app.js` both resolve.
 
 ---
 

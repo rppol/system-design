@@ -97,7 +97,7 @@ startup collapses but the build gets expensive and dynamic flexibility disappear
 |--------|--------|--------|
 | **Spring AOT engine** | Beans, `@Configuration`, `@Transactional`/AOP proxies, `@ConfigurationProperties`, most Spring annotations | Automatic |
 | **Reachability Metadata Repository** | Popular third-party libs (shipped with GraalVM) | Automatic if lib is covered |
-| **GraalVM tracing agent** | Records reflection/resource/proxy use during a real JVM run → `reflect-config.json` etc. | Run your test suite under the agent |
+| **GraalVM tracing agent** | Records reflection/resource/proxy use during a real JVM run → `reachability-metadata.json` | Run your test suite under the agent |
 | **`RuntimeHintsRegistrar` / `@RegisterReflectionForBinding`** | Your own reflective code, custom serialization, dynamic classes | Manual, code-level |
 
 ### Initialization strategy choices
@@ -240,7 +240,7 @@ unless a hint re-includes it. This is the #1 cause of native runtime failures.
 ```
 
 The `native` profile triggers two phases: Spring's **AOT** processing (generates
-`*__BeanDefinitions.java`, proxy classes, and `reflect-config.json`/`resource-config.json`
+`*__BeanDefinitions.java`, proxy classes, and `reachability-metadata.json`
 under `target/spring-aot/`), then GraalVM's `native-image` static analysis and
 compilation.
 
@@ -301,10 +301,10 @@ For DTOs bound reflectively (e.g. Jackson), the shortcut is
 ### 6.4 The tracing agent: discover hints automatically
 
 Rather than guess, run your **JVM tests** under GraalVM's tracing agent; it records
-every reflective/resource/proxy access and writes the metadata files:
+every reflective/resource/proxy access and writes the metadata file:
 
 ```bash
-# Run on the JVM with the agent; it emits reflect-config.json etc.
+# Run on the JVM with the agent; it emits reachability-metadata.json
 java -agentlib:native-image-agent=config-output-dir=src/main/resources/META-INF/native-image \
      -jar target/app.jar
 # exercise all code paths (run the full test suite) so nothing is missed
@@ -485,7 +485,7 @@ dynamism for startup speed and small footprint.
 **Short:** It processes the ApplicationContext at build time and generates code plus GraalVM hint files.
 At build time it processes the `ApplicationContext` — resolving bean definitions,
 configuration classes, and proxies — and emits generated Java code plus GraalVM hint
-files (`reflect-config.json`, etc.). At runtime the context replays this generated
+files (`reachability-metadata.json`). At runtime the context replays this generated
 code instead of scanning the classpath and reading annotations reflectively. So AOT
 moves the expensive context-building work from startup to build time, which is what
 collapses startup from seconds to tens of milliseconds, and it auto-generates most of

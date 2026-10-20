@@ -1,17 +1,18 @@
 # Versioning and Safe Deploys
 
-> **Version anchor (2026-08-26).** Temporal Server **1.31.2** (released 2026-07-08) — the
-> same line the parent module studies; no `1.32` server release has shipped as of this
-> writing, so the deprecated legacy Worker Versioning APIs (`UpdateWorkerBuildIdCompatibility`,
+> **Version anchor (2026-10-19).** Temporal Server **1.32.1** (released 2026-10-08), the
+> same line the parent module studies. Server 1.32 is the last release that contains the
+> deprecated legacy Worker Versioning APIs (`UpdateWorkerBuildIdCompatibility`,
 > `GetWorkerBuildIdCompatibility`, `UpdateWorkerVersioningRules`, `GetWorkerVersioningRules`,
-> `GetWorkerTaskReachability`) are present but deprecated, not yet removed. SDKs current today:
-> **Go 1.48.0** (2026-08-18), **Python 1.32.0** (2026-08-24), **Java 1.38.0** (2026-08-10),
-> **TypeScript 1.23.0** (2026-08-26). **Worker Versioning (the Worker Deployment APIs) reached
+> `GetWorkerTaskReachability`); it ships their management APIs disabled by default, and the
+> 1.32.0 release notes plan complete removal for server 1.33. SDKs: **Go 1.50.0**
+> (2026-10-15), **Python 1.34.0** (2026-09-30), **Java 1.40.0** (2026-09-29),
+> **TypeScript 1.24.0** (2026-09-15). **Worker Versioning (the Worker Deployment APIs) reached
 > GA on 2026-03-30**, after public preview since server 1.28.0. That same announcement put two
-> new capabilities into **Public Preview**: **Upgrade-on-Continue-as-New** and **Worker
-> Controller Autoscaling** — both still preview-tagged on the live docs as of this writing. The
-> **Temporal Worker Controller** itself — the Kubernetes operator, independent of its
-> autoscaling add-on — reached **GA on 2026-05-04**; current release **v1.9.0** (2026-08-19).
+> capabilities into **Public Preview**: **Upgrade-on-Continue-as-New** and **Worker
+> Controller Autoscaling**. The **Temporal Worker Controller** itself, the Kubernetes
+> operator independent of its autoscaling add-on, reached **GA on 2026-05-04**; release
+> **v1.13.0** (2026-10-13).
 > Version-gated behaviour is tagged inline as `[GA 2026-03-30]`, `[preview]`, and so on.
 
 This page is the judgment call the parent module sets up and defers.

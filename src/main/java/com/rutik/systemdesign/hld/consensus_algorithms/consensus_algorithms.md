@@ -24,7 +24,7 @@ Consensus is fundamentally about *agreement under uncertainty*. A node cannot te
 
 **Mental model:** The fundamental problem — given N nodes that can fail or be slow, how do we make a decision that at least a quorum (majority) agrees on, such that once committed, the decision is never rolled back even if some nodes crash and rejoin? Consensus algorithms formalize the guarantee that committed values are permanent.
 
-**Why it matters:** etcd (Kubernetes config store), ZooKeeper (Kafka controller election), Consul (service discovery), CockroachDB, and Kafka's ISR mechanism all rely on consensus. Without understanding consensus, you cannot reason about split-brain, leader election timeouts, quorum writes, or why distributed databases sacrifice availability during partitions.
+**Why it matters:** etcd (Kubernetes config store), ZooKeeper (HDFS NameNode HA and HBase coordination), KRaft (Kafka 4.x controller quorum), Consul (service discovery), CockroachDB, and Kafka's ISR mechanism all rely on consensus. Without understanding consensus, you cannot reason about split-brain, leader election timeouts, quorum writes, or why distributed databases sacrifice availability during partitions.
 
 **Key insight:** Safety (never returning an incorrect answer) is non-negotiable. Availability under partition is the tradeoff. Raft and Paxos stop accepting writes without a quorum, guaranteeing consistency at the cost of availability. A consensus system would rather refuse to make progress than make a decision two nodes might disagree about.
 
@@ -505,6 +505,54 @@ sequenceDiagram
 
 etcd implements this via the key's `mod_revision` (a monotonically increasing revision number); ZooKeeper via the znode's `zxid`/version. The storage layer must enforce the check — the lock service alone cannot prevent a delayed client from writing.
 
+**Testing a consensus implementation: Jepsen and deterministic simulation.**
+
+A Raft or Paxos bug lives in a rare interleaving: a vote that arrives after a term bump, a disk write that tears during a crash, a heartbeat that lands during a membership change. Two methods hunt for it, and they work from opposite ends.
+
+- **Jepsen (black box).** Runs the shipped binary on 5 real nodes, injects faults from outside (iptables partitions, `SIGKILL`, `SIGSTOP`, clock skew with `faketime`), records every client operation, and checks the history for linearizability or serializability with its checkers (Knossos, Elle). It tests the real kernel, the real fsync path and the real network stack. A failing run is a symptom: the same schedule rarely occurs twice, so reproducing it can take days.
+- **Deterministic simulation testing, DST (white box).** Every source of nondeterminism (network, disk, clock, random numbers, task scheduling) goes behind an interface. In test, one seeded PRNG drives all of them, and the whole cluster runs as real code inside a single-threaded process. A seed fixes every message delay, drop, crash and disk fault, so any failure replays exactly, under a debugger, from its seed.
+
+```mermaid
+flowchart LR
+    seed([Seed 0x5eed]):::base --> prng([Seeded PRNG]):::req
+    prng --> net([Sim network<br/>delay, drop, clog]):::io
+    prng --> disk([Sim disk<br/>torn write, full]):::io
+    prng --> clock([Sim clock<br/>skew, jump]):::io
+    net --> cluster([Real Raft code<br/>5 nodes, 1 thread]):::train
+    disk --> cluster
+    clock --> cluster
+    cluster --> check([Invariant check<br/>one leader per term]):::mathOp
+    check -->|"pass"| next([Next seed]):::base
+    check -->|"fail"| replay([Replay same seed<br/>in a debugger]):::lossN
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+```
+
+The seed is the whole test case. A failure found on seed `0x5eed` is the same failure on every rerun, which is what turns a heisenbug into an ordinary bug.
+
+Two production systems built their correctness on DST:
+
+| System | Simulator | What it runs | Scale (from the project's own docs) |
+|--------|-----------|--------------|--------------------------------------|
+| FoundationDB | Built into Flow, its C++ actor framework; the simulator came before the database | A full cluster in one single-threaded process, with simulated network, per-machine disks (including a full disk), reboots and "swizzle-clogging" (stop node links one by one, restart them in random order) | Tens of thousands of simulations each night; roughly one trillion CPU-hours of simulation in total |
+| TigerBeetle | VOPR (Viewstamped Operation Replicator) | A full Viewstamped Replication cluster running real code under network, storage and process faults, with simulated time running about 700x faster than real time | 1,024 dedicated cores, about 2,000 simulated years every day |
+
+Antithesis, founded by former FoundationDB engineers, sells the same approach as a service: it runs your software, its dependencies and a test client inside a deterministic hypervisor, so a system not written for DST still gets replayable runs.
+
+| | Jepsen | Deterministic simulation |
+|--|--------|--------------------------|
+| Code changes needed | None, tests the shipped binary | All I/O, time and scheduling behind interfaces (FoundationDB Flow, Rust `madsim`/`turmoil`), or a deterministic hypervisor |
+| Reproducible failure | No, schedule depends on real timing | Yes, one seed replays the whole run |
+| Fault schedules explored | Few, bounded by wall-clock time | Millions, faster than real time, many runs in parallel |
+| Covers real OS, fsync, NIC, kernel | Yes | No, only the faults the simulator models |
+| Best at | Finding bugs in a system you did not build, and checking the docs' consistency claims | Finding rare interleavings in a system you own, before release |
+
+The two are complements. DST cannot find a bug in a fault the simulator does not model (a kernel that acknowledges `fsync` and loses the page, a NIC that reorders), and Jepsen cannot reliably reproduce or exhaustively search the interleavings it stumbles on.
+
 ---
 
 ## 7. Real-World Examples
@@ -636,6 +684,8 @@ Randomizing the timeout is the second half of the fix: identical timeouts make e
 
 8. **`min.insync.replicas` equal to replication factor.** Setting `min.insync.replicas=3` with replication factor 3 means a *single* broker failure makes the partition unavailable for writes (the ISR can no longer satisfy the minimum). Fix: keep `min.insync.replicas` one below the replication factor (e.g. 2 with RF=3) so you can lose one broker and still accept writes durably.
 
+9. **A green Jepsen run treated as proof of correctness.** A team runs a one-hour Jepsen partition test against its Raft fork, sees a linearizable history, and ships. The bug they missed needs a leader crash during a joint-consensus membership change while one follower's disk is slow, a schedule a wall-clock test hits by luck or not at all. Jepsen shows that the faults it tried did not break the system; it does not show the rest are safe. Fix: for a consensus implementation you own, add deterministic simulation (FoundationDB-style simulator, VOPR-style, or a deterministic hypervisor) that runs millions of seeded fault schedules with invariant checks, and keep Jepsen for the real-kernel and real-network faults the simulator does not model.
+
 ---
 
 ## 11. Technologies & Tools
@@ -650,6 +700,7 @@ Randomizing the timeout is the second half of the fix: identical timeouts make e
 | TiKV | Raft | Distributed key-value store (powers TiDB) |
 | Consul | Raft | Service discovery, health checking, KV |
 | Jepsen | Testing framework | Correctness testing of distributed systems under network faults |
+| FoundationDB | Deterministic simulation | Distributed KV store whose Flow framework runs the whole cluster in a seeded single-threaded simulator |
 | hashicorp/raft | Raft | Open-source Go library; battle-tested Raft implementation |
 
 ---
@@ -752,6 +803,16 @@ Choose PBFT when you need Byzantine fault tolerance — nodes that actively lie,
 
 Flexible Paxos (Heidi Howard, 2016) observes that the two phases of consensus can use different quorum sizes, as long as any Phase 1 quorum overlaps any Phase 2 quorum. This lets you trade leader-election cost for commit latency: use a large Phase 1 quorum (leader election, infrequent) and a small Phase 2 quorum (log replication, frequent). Example on 5 nodes — Phase 1 quorum=4, Phase 2 quorum=2 — gives low-latency writes at the cost of slower elections (needs 4/5 nodes). Useful for write-heavy workloads with stable leadership.
 
+**Q: What is deterministic simulation testing and why do FoundationDB and TigerBeetle rely on it?**
+**Short:** DST runs a whole cluster in one process with network, disk and clock driven by a seeded PRNG, so millions of fault schedules run fast and any failure replays exactly from its seed.
+
+Deterministic simulation testing puts every source of nondeterminism (network, disk, clock, randomness, scheduling) behind an interface, then runs the real consensus code for a full cluster in a single-threaded process where one seed drives all of it. The seed fixes every delay, drop, crash and torn write, so a failure is reproducible on every rerun and debuggable with a breakpoint. Because simulated time runs faster than real time and runs parallelize, it explores millions of fault schedules, which is what rare consensus bugs need. FoundationDB built its simulator before the database and reports roughly one trillion CPU-hours of simulation; TigerBeetle runs its VOPR simulator on 1,024 dedicated cores at about 700x real time, roughly 2,000 years of simulated cluster time every day. The cost is architectural: the code must be written for it from day one, or run inside a deterministic hypervisor such as Antithesis.
+
+**Q: What does Jepsen catch that deterministic simulation cannot, and what does simulation catch that Jepsen cannot?**
+**Short:** Jepsen tests the shipped binary on real kernels, disks and networks; simulation searches far more fault schedules and replays each one, but only the faults it models.
+
+Jepsen is black-box: it needs no code changes, runs the real binary on real nodes, and so catches bugs below the application, such as an `fsync` that lies, a filesystem quirk or a misconfigured client, plus gaps between a database's documented consistency level and its behaviour. Its weakness is reach and replay: it runs at wall-clock speed, so it covers far fewer schedules, and a failure depends on real timing, so it may never recur. Simulation is white-box: it explores millions of seeded schedules and replays any failure exactly, but it cannot find a bug in a fault the simulator does not model. Use DST for a consensus core you own and Jepsen to check the deployed system end to end.
+
 
 ## 13. Best Practices
 
@@ -761,7 +822,7 @@ Flexible Paxos (Heidi Howard, 2016) observes that the two phases of consensus ca
 - Monitor `etcd_server_leader_changes_seen_total` in Prometheus — frequent leader changes signal instability (disk, CPU, or network).
 - Enable `acks=all` with `min.insync.replicas >= 2` in Kafka — a single ISR member is a single point of data loss.
 - Never co-locate etcd with high-CPU workloads — CPU starvation delays heartbeats and triggers elections.
-- Run Jepsen tests to verify consensus correctness under network partitions and clock skew before production deployment.
+- Test a consensus implementation you own with deterministic simulation (seeded network, disk and clock faults, invariant checks, exact replay), and run Jepsen against the deployed binary for partitions, clock skew and real-kernel faults the simulator does not model.
 
 ---
 

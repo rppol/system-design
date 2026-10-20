@@ -659,6 +659,21 @@ The coherence story — MESI, line ownership, the cost of a remote invalidation 
 What matters here is that `-benchmem` shows **zero** allocation change while wall time doubles, so
 false sharing is invisible to every tool in this module except the benchmark itself.
 
+### SIMD without assembly `[1.27]`, experimental
+
+Before Go 1.26 the only way to use vector instructions from Go was a hand-written `.s` file,
+which the compiler cannot inline and escape analysis treats as an un-analysable callee. Building
+with `GOEXPERIMENT=simd` enables two packages. `simd/archsimd` gives fixed-width,
+architecture-specific types (`Int8x16`, `Int8x32`, `Int8x64` on amd64) for 128-bit vectors on
+amd64, arm64 Neon and wasm, and 256- and 512-bit vectors on amd64 CPUs that have them. The
+portable `simd` package gives width-agnostic types (`Int8s`, `Float32s`, with comparisons
+returning `Mask8s`). The compiler emits copies of every function that touches them, suffixed
+`@simd0` (emulation), `@simd128`, `@simd256` or `@simd512`, and a wrapper picks one from the
+SIMD level detected at program start. `GODEBUG=simd=0|128|256|512` forces a level, which is
+how you benchmark the emulated path against the vector path on one machine. Neither API is
+stable, so keep it behind a build tag with a scalar fallback and compare with
+`benchstat` like any other change in this module.
+
 ---
 
 ## 7. Real-World Examples
@@ -935,6 +950,7 @@ change, not a code change: `any` in a struct field on a hot path is an allocatio
 | `go build -pgo=off` | Build without the committed profile, to measure PGO's contribution |
 | `golangci-lint` (`makezero`, `prealloc`, `perfsprint`) | Catches `make([]T, n)`-plus-append, missing preallocation, and `fmt` where `strconv` belongs |
 | `go tool compile -S` | The generated assembly, when `-m` and the benchmark disagree |
+| `GOEXPERIMENT=simd` (`simd`, `simd/archsimd`) `[1.27]` | Experimental vector types from Go code instead of hand-written assembly; `GODEBUG=simd=0\|128\|256\|512` picks the vector width at run time |
 | `benchdiff` / `perflock` | Reduces machine noise so `benchstat` p-values mean something |
 
 ---
