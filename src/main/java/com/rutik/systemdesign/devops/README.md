@@ -6,8 +6,8 @@ A comprehensive, one-stop reference for mastering **DevOps, SRE, Cloud, and Plat
 
 > **Audited and migrated (2026-08-04).** The repo-wide factual audit is **complete for all 41
 > modules** (~1,560 claims verified, ~215 corrections — commits `7f98bf4`, `9462731`,
-> `ecd9414`), and every one of the section's **650 module Q&As carries an authored
-> `**Short:**` MCQ summary** (commit `6ce35a6`). The 15 case studies and 8 cross-cutting
+> `ecd9414`), and every module Q&A in the section carries **an authored
+> `**Short:**` MCQ summary** (first pass in commit `6ce35a6`). The 15 case studies and 8 cross-cutting
 > primitives were audited too, and re-audited 2026-08-05. This section is the most
 > version-exposed in the repo: see `CLAUDE.md` -> "What the audit found" before writing here,
 > and audit a claim before writing a `**Short:**` line against it.
@@ -71,19 +71,19 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 | 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | 1 — Foundations | Intermediate | DNS, DHCP, CIDR/subnetting, NAT, firewalls, L4/L7 load balancing, TLS/mTLS/certs, Nginx/Envoy reverse proxy |
 | 4 | [version_control_and_git_workflows](version_control_and_git_workflows/version_control_and_git_workflows.md) | 1 — Foundations | Beginner | Git internals, trunk-based vs GitFlow, monorepo vs polyrepo, hooks, release tagging |
 | 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | 2 — Containers & K8s | Intermediate | Namespaces/cgroups, image layers, multi-stage builds, distroless, BuildKit, registries, Dockerfile best practices |
-| 6 | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md) | 2 — Containers & K8s | Advanced | containerd, runc, CRI-O, OCI image/runtime spec, gVisor/Kata isolation |
+| 6 | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md) | 2 — Containers & K8s | Advanced | containerd, runc, CRI-O, OCI image/runtime spec, gVisor/Kata isolation, plus 1 deep-dive sub-file |
 | 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | 2 — Containers & K8s | Advanced | API server, etcd, scheduler, controller-manager, kubelet, kube-proxy, reconciliation loop |
 | 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | 2 — Containers & K8s | Intermediate | Pods, Deployments, StatefulSets, DaemonSets, Jobs/CronJobs, Services, Ingress, ConfigMap/Secret |
-| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 — Containers & K8s | Advanced | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress controllers, Gateway API, NetworkPolicy, CoreDNS |
+| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 — Containers & K8s | Advanced | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress controllers, Gateway API, NetworkPolicy, CoreDNS, plus 1 deep-dive sub-file |
 | 10 | [kubernetes_storage_and_state](kubernetes_storage_and_state/kubernetes_storage_and_state.md) | 2 — Containers & K8s | Intermediate | PV/PVC, StorageClass, CSI, StatefulSet storage, volume snapshots |
-| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 — Containers & K8s | Advanced | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB |
-| 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | 2 — Containers & K8s | Advanced | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy |
+| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 — Containers & K8s | Advanced | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB, plus 1 deep-dive sub-file |
+| 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | 2 — Containers & K8s | Advanced | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy, plus 1 deep-dive sub-file |
 | 13 | [helm_and_package_management](helm_and_package_management/helm_and_package_management.md) | 2 — Containers & K8s | Intermediate | Helm charts/templating/releases, Kustomize overlays, repositories |
 | 14 | [kubernetes_operators_and_crds](kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) | 2 — Containers & K8s | Advanced | CRDs, custom controllers, operator pattern, Operator SDK, reconcile loop |
 | 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | 3 — CI/CD & GitOps | Intermediate | Pipeline anatomy, stages, artifacts, caching, parallelism, ephemeral runners |
 | 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | 3 — CI/CD & GitOps | Intermediate | GitHub Actions, GitLab CI, Jenkins, Argo Workflows/Tekton, CircleCI (comparison) |
 | 17 | [deployment_strategies](deployment_strategies/deployment_strategies.md) | 3 — CI/CD & GitOps | Advanced | Rolling/blue-green/canary, feature flags, progressive delivery (Argo Rollouts/Flagger) |
-| 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | 3 — CI/CD & GitOps | Advanced | Declarative delivery, ArgoCD, Flux, drift detection, app-of-apps, sync waves |
+| 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | 3 — CI/CD & GitOps | Advanced | Declarative delivery, ArgoCD, Flux, drift detection, app-of-apps, sync waves, plus 1 deep-dive sub-file |
 | 19 | [artifact_and_registry_management](artifact_and_registry_management/artifact_and_registry_management.md) | 3 — CI/CD & GitOps | Intermediate | Container/artifact registries, Artifactory/Nexus, SemVer, promotion across envs |
 | 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) | 4 — IaC & Config | Advanced | Core, state, modules, providers, workspaces, drift, import, remote backends, locking |
 | 21 | [terraform_advanced_and_alternatives](terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md) | 4 — IaC & Config | Advanced | Terragrunt, Pulumi, CloudFormation/CDK, OpenTofu, Terratest, policy (Sentinel/OPA) |
@@ -93,18 +93,18 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 | 25 | [gcp_and_azure_essentials](gcp_and_azure_essentials/gcp_and_azure_essentials.md) | 5 — Cloud | Intermediate | GKE/GCS/Cloud Run/IAM, AKS/Blob/Entra ID; AWS↔GCP↔Azure mapping |
 | 26 | [serverless_and_faas](serverless_and_faas/serverless_and_faas.md) | 5 — Cloud | Intermediate | Lambda/Cloud Functions/Knative, cold starts, event-driven, API Gateway, Step Functions |
 | 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) | 5 — Cloud | Advanced | VPC peering, Transit Gateway, PrivateLink, CloudFront/Cloudflare CDN, global LB, DNS strategies |
-| 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) | 5 — Cloud | Intermediate | Tagging, rightsizing, spot/reserved/savings plans, FinOps practice, cost allocation/showback |
+| 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) | 5 — Cloud | Intermediate | Tagging, rightsizing, spot/reserved/savings plans, FinOps practice, cost allocation/showback, plus 1 deep-dive sub-file |
 | 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | 6 — Observability & SRE | Advanced | Prometheus architecture, PromQL, exporters, recording/alerting rules, Thanos/Mimir/Cortex, cardinality |
 | 30 | [observability_logging](observability_logging/observability_logging.md) | 6 — Observability & SRE | Intermediate | Aggregation, EFK/ELK, Loki, structured logging, retention/sampling, parsing pipelines |
-| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation — plus 1 deep-dive sub-file |
+| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation, plus 1 deep-dive sub-file |
 | 32 | [visualization_and_alerting](visualization_and_alerting/visualization_and_alerting.md) | 6 — Observability & SRE | Intermediate | Grafana dashboards, Alertmanager routing, PagerDuty / Jira Service Management Operations, alert fatigue, SLO burn-rate alerts |
 | 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | 6 — Observability & SRE | Advanced | SLI/SLO/SLA, error budgets, toil, capacity planning, Google SRE practices |
 | 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | 6 — Observability & SRE | Intermediate | Incident command, severity levels, on-call rotations, blameless postmortems, runbooks, MTTR/MTTD |
-| 35 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | 7 — DevSecOps & Reliability | Advanced | SAST/DAST/SCA, image scanning (Trivy/Grype), SBOM, Sigstore/cosign, SLSA levels, secret scanning |
+| 35 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | 7 — DevSecOps & Reliability | Advanced | SAST/DAST/SCA, image scanning (Trivy/Grype), SBOM, Sigstore/cosign, SLSA levels, secret scanning, plus 1 deep-dive sub-file |
 | 36 | [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) | 7 — DevSecOps & Reliability | Advanced | OPA/Rego, Gatekeeper, Kyverno, CIS benchmarks, SOC2/PCI/HIPAA controls, admission control |
 | 37 | [disaster_recovery_and_resilience](disaster_recovery_and_resilience/disaster_recovery_and_resilience.md) | 7 — DevSecOps & Reliability | Advanced | RTO/RPO, multi-region DR (active-active/passive), failover, restore drills |
-| 38 | [platform_engineering_and_idp](platform_engineering_and_idp/platform_engineering_and_idp.md) | 7 — DevSecOps & Reliability | Intermediate | Internal developer platforms, Backstage, golden paths, self-service, Crossplane |
-| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | 8 — Specialized Platforms & Performance | Advanced | NVIDIA GPU Operator, device plugin, MIG/time-slicing, Karpenter GPU NodePools, Kubeflow/Ray on K8s, training vs serving infra |
+| 38 | [platform_engineering_and_idp](platform_engineering_and_idp/platform_engineering_and_idp.md) | 7 — DevSecOps & Reliability | Intermediate | Internal developer platforms, Backstage, golden paths, self-service, Crossplane, plus 1 deep-dive sub-file |
+| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | 8 — Specialized Platforms & Performance | Advanced | NVIDIA GPU Operator, device plugin, MIG/time-slicing, Karpenter GPU NodePools, Kubeflow/Ray on K8s, training vs serving infra, plus 1 deep-dive sub-file |
 | 40 | [event_streaming_operations](event_streaming_operations/event_streaming_operations.md) | 8 — Specialized Platforms & Performance | Advanced | Strimzi/Kafka operator, partition & disk sizing, consumer-lag monitoring, rebalancing, rack awareness, tiered storage |
 | 41 | [performance_and_load_testing](performance_and_load_testing/performance_and_load_testing.md) | 8 — Specialized Platforms & Performance | Intermediate | k6, Locust, distributed load generation, soak/spike/capacity tests, latency percentiles, CI performance gates |
 
@@ -370,7 +370,7 @@ A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview*
 
 ## Principal Path
 
-The judgment cut: which approach at what cost, what fails and how you would know, what you would tell a team NOT to do. Roughly half of this list is material the Senior path never sees — it is a different cut, not a deeper one.
+The judgment cut: which approach at what cost, what fails and how you would know, what you would tell a team NOT to do. All three modules on this list are also on the Senior path; Principal reads them for the judgment questions, not for new material.
 
 <!-- study-path-table principal -->
 ### Principal Path (3 modules)
@@ -503,11 +503,11 @@ Recorded 2026-09-04 from a verified gap review of all 51 files. Every entry belo
 briefable on its own — pick one, read the entry, start. Nothing here is a blocker for the
 section shipping; it is the ordered backlog of what would make it better.
 
-### A. Version-anchor backfill — 11 of 52 module and sub-files lack the dated anchor `CLAUDE.md` mandates
+### A. Version-anchor backfill — 11 of 51 module and sub-files lack the dated anchor `CLAUDE.md` mandates
 
 `CLAUDE.md` requires a `> **Version anchor (YYYY-MM-DD).**` blockquote on every
-version-exposed page. Checked 2026-10-19 over the module pages and sub-files (case studies
-excluded): 41 carry one. The three below are the most version-exposed of the 11 that do
+version-exposed page. Checked 2026-10-22 over the module pages and sub-files (case studies
+excluded): 40 carry one. The three below are the most version-exposed of the 11 that do
 not, and should be done first, in this order.
 
 | # | File | Why it is urgent |
@@ -536,7 +536,7 @@ named so each is briefable without re-reading the file.
 7. **`ci_cd_platforms` (512) and `ci_cd_fundamentals` (504).** Both missing concurrency groups / cancel-superseded-run, build-matrix strategy, test sharding, and monorepo path filtering. `ci_cd_platforms` additionally leans on "ephemeral runners" without ever covering runner sandboxing (gVisor/Kata/Firecracker).
 8. **`artifact_and_registry_management` (442).** Section 6 has one comment-only bash block. Dependency confusion gets two words in the module whose subject *is* registry supply chain. Missing `imagePullSecrets` mechanics and air-gapped mirroring.
 9. **`kubernetes_operators_and_crds` (506).** Missing garbage-collection propagation policies, conversion-webhook code, admission-webhook implementation, and server-side-apply field-manager conflicts.
-10. **`observability_tracing_and_otel` (572).** A 572-line parent under a 2,037-line child. The parent has no version anchor while the child has an excellent one — fix both together.
+10. **`observability_tracing_and_otel` (572).** A 572-line parent under a 2,037-line child.
 
 Second tier, same treatment, lower priority:
 
@@ -593,7 +593,7 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 
 ## 8. Build Status & Implementation Tracker
 
-> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/case_studies.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** No NEXT UP pointer remains.
+> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/case_studies.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** Later additions bring the section to 41 modules + 10 deep-dive sub-files + 15 case studies + 8 cross-cutting primitives. No NEXT UP pointer remains.
 >
 > Chunk 11 added Phase 8 — Specialized Platforms & Performance: 3 modules (`ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`), 1 case study (`design_ml_platform_infrastructure`), 1 cross-cutting primitive (`gpu_node_lifecycle`). Future additions should append modules/case studies following the "Adding a DevOps module" instructions in CLAUDE.md and flip new rows below.
 
@@ -624,18 +624,23 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 | 4 | `version_control_and_git_workflows/version_control_and_git_workflows.md` | 1 | 1 | done | 15 |
 | 5 | `containers_and_docker/containers_and_docker.md` | 2 | 2 | done | 15 |
 | 6 | `container_runtimes_and_oci/container_runtimes_and_oci.md` | 2 | 2 | done | 15 |
+| 6a | `container_runtimes_and_oci/oci_image_formats_and_lazy_pulling.md` | 2 | - | done | 15 |
 | 7 | `kubernetes_architecture/kubernetes_architecture.md` | 2 | 2 | done | 18 |
 | 8 | `kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md` | 2 | 2 | done | 15 |
 | 9 | `kubernetes_networking/kubernetes_networking.md` | 2 | 2 | done | 18 |
+| 9a | `kubernetes_networking/cilium_and_ebpf_dataplane.md` | 2 | - | done | 15 |
 | 10 | `kubernetes_storage_and_state/kubernetes_storage_and_state.md` | 2 | 3 | done | 15 |
 | 11 | `kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md` | 2 | 3 | done | 15 |
+| 11a | `kubernetes_scheduling_and_autoscaling/device_scheduling_and_dra.md` | 2 | - | done | 15 |
 | 12 | `kubernetes_security/kubernetes_security.md` | 2 | 3 | done | 18 |
+| 12a | `kubernetes_security/workload_identity_and_federation.md` | 2 | - | done | 15 |
 | 13 | `helm_and_package_management/helm_and_package_management.md` | 2 | 3 | done | 15 |
 | 14 | `kubernetes_operators_and_crds/kubernetes_operators_and_crds.md` | 2 | 3 | done | 15 |
 | 15 | `ci_cd_fundamentals/ci_cd_fundamentals.md` | 3 | 4 | done | 15 |
 | 16 | `ci_cd_platforms/ci_cd_platforms.md` | 3 | 4 | done | 15 |
 | 17 | `deployment_strategies/deployment_strategies.md` | 3 | 4 | done | 15 |
 | 18 | `gitops_argocd_flux/gitops_argocd_flux.md` | 3 | 4 | done | 15 |
+| 18a | `gitops_argocd_flux/environment_promotion.md` | 3 | - | done | 15 |
 | 19 | `artifact_and_registry_management/artifact_and_registry_management.md` | 3 | 4 | done | 15 |
 | 20 | `infrastructure_as_code_terraform/infrastructure_as_code_terraform.md` | 4 | 5 | done | 18 |
 | 21 | `terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md` | 4 | 5 | done | 15 |
@@ -646,6 +651,7 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 | 26 | `serverless_and_faas/serverless_and_faas.md` | 5 | 6 | done | 15 |
 | 27 | `cloud_networking_and_cdn/cloud_networking_and_cdn.md` | 5 | 6 | done | 15 |
 | 28 | `cloud_cost_optimization_finops/cloud_cost_optimization_finops.md` | 5 | 6 | done | 15 |
+| 28a | `cloud_cost_optimization_finops/gpu_and_ai_finops.md` | 5 | - | done | 15 |
 | 29 | `observability_metrics_prometheus/observability_metrics_prometheus.md` | 6 | 7 | done | 18 |
 | 30 | `observability_logging/observability_logging.md` | 6 | 7 | done | 15 |
 | 31 | `observability_tracing_and_otel/observability_tracing_and_otel.md` | 6 | 7 | done | 15 |
@@ -654,10 +660,13 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 | 33 | `sre_principles_and_slos/sre_principles_and_slos.md` | 6 | 7 | done | 18 |
 | 34 | `incident_management_and_oncall/incident_management_and_oncall.md` | 6 | 7 | done | 15 |
 | 35 | `devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` | 7 | 8 | done | 15 |
+| 35a | `devsecops_and_supply_chain_security/regulated_supply_chain.md` | 7 | - | done | 15 |
 | 36 | `policy_as_code_and_compliance/policy_as_code_and_compliance.md` | 7 | 8 | done | 15 |
 | 37 | `disaster_recovery_and_resilience/disaster_recovery_and_resilience.md` | 7 | 8 | done | 15 |
 | 38 | `platform_engineering_and_idp/platform_engineering_and_idp.md` | 7 | 8 | done | 15 |
+| 38a | `platform_engineering_and_idp/ai_workloads_and_agent_operations.md` | 7 | - | done | 15 |
 | 39 | `ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md` | 8 | 11 | done | 18 |
+| 39a | `ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md` | 8 | - | done | 15 |
 | 40 | `event_streaming_operations/event_streaming_operations.md` | 8 | 11 | done | 15 |
 | 41 | `performance_and_load_testing/performance_and_load_testing.md` | 8 | 11 | done | 15 |
 
@@ -685,6 +694,9 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 | `case_studies/design_zero_downtime_infra_migration.md` | 10 | done |
 | `case_studies/cross_cutting/gpu_node_lifecycle.md` | 11 | done |
 | `case_studies/design_ml_platform_infrastructure.md` | 11 | done |
+| `case_studies/cross_cutting/dra_and_device_plugins.md` | - | done |
+| `case_studies/design_multi_tenant_platform.md` | - | done |
+| `case_studies/design_gpu_training_and_inference_cluster.md` | - | done |
 
 ### Conventions Reminder (for future chunk agents)
 

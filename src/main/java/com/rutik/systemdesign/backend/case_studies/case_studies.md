@@ -62,6 +62,13 @@ Grouped by primary engineering concern, not product category:
 |------------|----------------|----------------|
 | [Design a Webhook Delivery Service](design_webhook_delivery_service/design_webhook_delivery_service.md) | At-least-once delivery to endpoints you do not control | Transactional outbox to per-endpoint queues, HMAC signing with a dual-secret rotation window, an exponential retry ladder with circuit breaking and auto-disable, a customer-visible delivery log, and an SSRF-safe egress path. |
 
+### Shared Platform Services
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design a Rate Limiter Service](design_rate_limiter_service/design_rate_limiter_service.md) | Central enforcement without a shared store on every request | Rate limiting as a shared service: local decisions against a locally held budget that each pod syncs with the shared store on a schedule, hot-key handling, policy propagation, and fail-open or fail-closed chosen per caller class. |
+| [Design a Multi-Tenant SaaS Backend](design_multi_tenant_saas_backend/design_multi_tenant_saas_backend.md) | Tenant isolation and noisy-neighbour control | Cell-based architecture: a router that resolves tenant to isolation tier to cell, pooled, bridge, and silo tiers built from one application image, per-tenant quotas, data residency, and live migration of a tenant between tiers. |
+
 ### Performance Engineering
 
 | Case Study | Primary Concern | What It Teaches |
@@ -145,6 +152,8 @@ Arrows point from the case study that originates a pattern to the one that reuse
 | Design an inference batching system for a single GPU | [design_llm_serving_api](design_llm_serving_api/design_llm_serving_api.md) |
 | Design a webhook / event delivery system | [design_webhook_delivery_service](design_webhook_delivery_service/design_webhook_delivery_service.md) |
 | Design a notification delivery service | [design_webhook_delivery_service](design_webhook_delivery_service/design_webhook_delivery_service.md) |
+| Design a distributed rate limiter / API quota service | [design_rate_limiter_service](design_rate_limiter_service/design_rate_limiter_service.md) |
+| Design a multi-tenant SaaS backend / noisy-neighbour isolation | [design_multi_tenant_saas_backend](design_multi_tenant_saas_backend/design_multi_tenant_saas_backend.md) |
 | Design a performance / profiling platform | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
 | Design a continuous profiling system (Google-Wide Profiling style) | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
 | Design a CI performance-regression detection system | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |

@@ -1,6 +1,6 @@
 # HLD — Case Studies
 
-Twenty-three end-to-end system design case studies at the high-level architectural overview depth. These are interview-format studies — start with requirements, estimate scale, draw the architecture, then discuss tradeoffs.
+End-to-end system design case studies at the high-level architectural overview depth. These are interview-format studies — start with requirements, estimate scale, draw the architecture, then discuss tradeoffs.
 
 Each follows the 11-section principal template: Requirements Clarification, Scale Estimation, High-Level Architecture, Component Deep Dives, Design Decisions & Tradeoffs, Real-World Implementations, Technologies & Tools, Operational Playbook, Common Pitfalls & War Stories, Capacity Planning, and Interview Discussion Points.
 
@@ -38,6 +38,7 @@ Grouped by primary engineering concern:
 | [Design Twitter](design_twitter.md) | Feed fan-out, write amplification vs read amplification | Fan-out-on-write (push model) vs fan-out-on-read (pull model); celebrity problem; hybrid model; Redis sorted sets for timeline; Snowflake-style distributed ID generation; rate limiting fan-out writes for high-follower accounts. |
 | [Design WhatsApp](design_whatsapp.md) | Real-time messaging, end-to-end encryption, online presence | WebSocket connection management at Erlang/OTP scale (2M connections/server); Signal Protocol (X3DH handshake + Double Ratchet) for end-to-end encryption; group fan-out via sender keys; last-seen/online presence via Redis TTL; multi-device sync. |
 | [Design a Notification System](design_notification_system.md) | Multi-channel fan-out under third-party provider rate limits | Per-channel Kafka topics (push/SMS/email/in-app); token-bucket rate limiting per provider (FCM/APNs/Twilio/SES); idempotency keys for exactly-once delivery; circuit breakers for provider outages; cost-driven channel selection (push vs SMS economics). |
+| [Design an Email Service](design_email_service.md) | SMTP interop, mailbox storage, and deliverability at Gmail scale | MSA/MTA/MDA delivery chain; metadata/blob split for mailbox storage; References-first threading; per-user inverted index for search; `historyId`/`modseq` cursor sync; SPF, DKIM, and DMARC; layered spam filtering. |
 
 ### Real-Time & Geo-Distributed
 
@@ -46,6 +47,7 @@ Grouped by primary engineering concern:
 | [Design Uber](design_uber.md) | Real-time geo-matching, location updates, dynamic pricing | Quadtree / geohash / H3 for driver lookup; high-frequency location write load; surge pricing as a feedback loop; trip state machine with LWT/Paxos consistency; multi-region failover for per-city services. |
 | [Design Google Maps](design_google_maps.md) | Geospatial indexing, route precomputation, live traffic | Geohash vs. Quadtree vs. S2 vs. H3 tradeoffs; Contraction-Hierarchy-based routing with bidirectional search; live traffic-overlay layered on a precomputed graph; tile-pyramid CDN serving; versioned-URL cache invalidation. |
 | [Design a Proximity Service](design_proximity_service.md) | Geo + attribute search at sub-second latency (Yelp/nearby) | Two-phase geo-index + attribute-index search with geohash neighbor-cell expansion; Redis GEO vs. PostGIS vs. Elasticsearch `geo_point` backend tradeoffs; split-TTL caching for "open now" freshness vs. static attributes; dense-vs-sparse adaptive geohash precision; personalization re-ranking layered on top of base ranking. |
+| [Design Nearby Friends](design_nearby_friends.md) | Moving points, mutual consent, and one-to-K location fan-out | Adaptive-interval location ingest; pub/sub fan-out to mutual friends instead of a geo-search query on the hot path; TTL live-location store; geospatial cell-key lookup; ghost mode and precision reduction; client battery budget. |
 
 ### Distributed Transactions & Strong Consistency
 
@@ -89,12 +91,13 @@ Grouped by primary engineering concern:
 |------------|----------------|----------------|
 | [Design an Ad Click Event Aggregation System](design_ad_click_aggregation.md) | Real-time + batch aggregation of high-volume event streams | Lambda vs. Kappa streaming architecture; tumbling-window aggregation with watermarks for late events; HyperLogLog mergeable sketches for approximate unique counts; multi-region ingestion with regional rollups merged into global numbers; exact (billing-path) vs. approximate (dashboard-path) counting tradeoffs. |
 | [Design a Metrics Monitoring System](design_metrics_monitoring.md) | Time-series ingestion, storage, and alerting at massive label cardinality | Metric+labels+timestamp+value data model; cardinality = product of label cardinalities (the `user_id`-label trap); pull (Prometheus) vs. push (Datadog/StatsD) ingestion; Gorilla/TSM columnar compression; 3-tier downsampling/retention (15s/15d -> 5m/90d -> 1h/2y); PromQL-style query fan-out; OK -> PENDING -> FIRING -> RESOLVED alert state machine with a "for" duration to suppress flapping. |
+| [Design a Top-K / Heavy-Hitters Service](design_top_k_heavy_hitters.md) | Finding hot items in an unbounded key space with bounded memory | Count-Min Sketch width and depth; Space-Saving / Misra-Gries as the deterministic alternative; sketch-per-minute ring buffer for time windows; merge tier; hot-key skew vs. silent undercounting when partitioning; fast-path / slow-path reconciliation. |
 
 ### AI-Backed Systems
 
 Roughly half of 2026 general-engineering design loops now include an AI or LLM-backed prompt,
 and none of these live in `hld/` — writing another copy here would duplicate a stronger
-sibling. The `llm/` section already ships 29 case studies at the same 11-section principal
+sibling. The `llm/` section already ships its own case studies at the same 11-section principal
 depth. These four are the ones a general system-design interview actually reaches for; read
 them the same way you read the studies above.
 
@@ -116,6 +119,7 @@ The transfer from this section is direct: an LLM gateway is [rate limiting](../r
 | [Design a YouTube Upload Pipeline](design_youtube_upload_pipeline.md) | Resumable ingest and fan-out transcoding | Chunked resumable upload, a transcode DAG fanned across renditions, why the pipeline is queue-bound not CPU-bound, and how publish-visibility lags the last rendition. |
 | [Design a Distributed Job Scheduler](design_distributed_job_scheduler.md) | Exactly-once triggering under clock skew and restarts | Lease-based ownership, the difference between at-least-once firing and exactly-once effect, catch-up storms after an outage, and why a missed-run policy is a product decision. |
 | [Design Flash-Sale Ticketing](design_flash_sale_ticketing.md) | Extreme contention on a tiny hot key | Why a single inventory row serializes the whole sale, admission control and virtual queueing ahead of the write path, reservation-then-confirm, and the oversell/undersell tradeoff. |
+| [Design a Live Streaming Platform](design_live_streaming.md) | Ingest fan-in and CDN fan-out under a live clock | RTMP vs. SRT vs. WHIP ingest; real-time transcode ladder; LL-HLS / LL-DASH packaging and the latency budget; segment-boundary thundering herd at the CDN; DVR window; chat fan-out at 1M+ concurrent viewers. |
 
 ## Cross-Cutting / Shared Primitives
 
@@ -332,6 +336,10 @@ Solid arrows point from the case study that originates a pattern to the one that
 | Design a video upload / transcoding pipeline | [Design a YouTube Upload Pipeline](design_youtube_upload_pipeline.md) |
 | Design a distributed cron / job scheduler | [Design a Distributed Job Scheduler](design_distributed_job_scheduler.md) |
 | Design a flash sale / ticket booking system | [Design Flash-Sale Ticketing](design_flash_sale_ticketing.md) |
+| Design Gmail / Outlook / an email service | [Design an Email Service](design_email_service.md) |
+| Design Twitch / a live streaming platform | [Design a Live Streaming Platform](design_live_streaming.md) |
+| Design Facebook Nearby Friends / live friend locations | [Design Nearby Friends](design_nearby_friends.md) |
+| Design top-K trending items / heavy hitters | [Design a Top-K / Heavy-Hitters Service](design_top_k_heavy_hitters.md) |
 
 ---
 

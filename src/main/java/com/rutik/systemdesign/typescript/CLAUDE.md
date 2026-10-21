@@ -51,7 +51,7 @@ bridge, so almost everything it disapproves of still builds. Only three things a
 fail. Do not write "removed" for anything in the second list.
 
 **The practical TS 7.0 caveat.** There is no stable programmatic Compiler API until 7.1.
-typescript-eslint (8.69.0), ts-jest, ts-morph and framework template checkers still run on
+typescript-eslint (8.71.2), ts-jest, ts-morph and framework template checkers still run on
 `typescript@npm:@typescript/typescript6` (binary `tsc6`). Any module that discusses tooling
 must say this; it is the single most consequential fact for a team on TS 7 today.
 
@@ -77,12 +77,13 @@ point, not on every mention.
 Check `github.com/tc39/proposals` before repeating any of these; several are commonly
 stated wrongly in blog posts.
 
-- **Decorators are at Stage 2.7, not Stage 3.** They reached Stage 3 in 2022; TC39 later
-  inserted 2.7 as an intermediate checkpoint and re-slotted existing proposals into it.
-  Write it as a **process change, not a rejection on the merits** — and never write
-  "Stage 3", which most sources still say.
-- **Temporal is Stage 4 and shipped in ES2026**, but MDN marks it "Limited availability —
-  not Baseline". Do not write that it ships everywhere.
+- **Decorators are at Stage 2.7, not Stage 3.** They reached Stage 3 in March 2022. On
+  2026-05-19 TC39 moved them back to 2.7: no engine had shipped them, spec issues were open,
+  the Test262 semantics PR was unmerged, and V8 halted its implementation. Decorator Metadata
+  moved to 2.7 with them. Never write "Stage 3", which most sources still say.
+- **Temporal reached Stage 4 at the 2026-03 TC39 meeting and is listed for ES2027**, not
+  ES2026. MDN marks it "Limited availability, not Baseline". Do not write that it ships
+  everywhere.
 - **Records & Tuples were withdrawn**; the repo was archived 2025-04-15.
 - **The Type Annotations proposal is Stage 1 and dormant** — its own README says it is "not
   updated regularly".
@@ -141,8 +142,8 @@ The six proposed studies, with what each teaches that no module does, are record
 `README.md` documents the **Full Path** (all 16 modules, the "4-Phase Learning Path") plus
 two curated tiers. They are **different cuts, not nested depths** — senior is the craft
 (can you build it, debug it, say why it broke), principal is the judgment (which approach
-at what cost, what you tell a team *not* to do). Principal is the smaller list, and roughly
-half of it is material senior never sees.
+at what cost, what you tell a team *not* to do). Principal is the smaller list, and all but
+one of its modules are material senior never sees.
 
 Membership is declared ONCE, in the `<!-- study-paths -->` block in this section's
 `README.md`, naming every module, every file it owns, and the tiers each file takes.

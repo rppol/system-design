@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **53 topic directories** plus **29 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (85 sub-files total — 75 module sub-files + 10 cross-cutting case study sub-files — see the Sub-Files Index below):
+This section is organized into **54 topic directories** plus **30 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (80 module sub-files plus 10 cross-cutting case study sub-files, listed in the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -44,7 +44,7 @@ column reflects learning sequence, not addition order.
 | 6 | 2 — Training | [Training Infrastructure](training_infrastructure/training_infrastructure.md) | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | Advanced |
 | 7 | 2 — Training | [Synthetic Data Generation](synthetic_data_generation/synthetic_data_generation.md) | Self-Instruct, Evol-Instruct, quality filtering, LIMA | Intermediate |
 | 8 | 2 — Training | [Fine-Tuning](fine_tuning/fine_tuning.md) | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation — with 5 deep-dive sub-files | Intermediate |
-| 9 | 2 — Training | [Alignment & RLHF](alignment_and_rlhf/alignment_and_rlhf.md) | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models — with 1 deep-dive sub-file (GRPO & RLVR) | Advanced |
+| 9 | 2 — Training | [Alignment & RLHF](alignment_and_rlhf/alignment_and_rlhf.md) | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models — with 2 deep-dive sub-files (GRPO & RLVR, RL environments & agentic RL) | Advanced |
 | 10 | 2 — Training | [Constitutional AI](constitutional_ai/constitutional_ai.md) | SL-CAI critique-revision pipeline, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF, Llama Guard | Advanced |
 | 11 | 3 — Using LLMs | [Prompt Engineering](prompt_engineering/prompt_engineering.md) | CoT, few-shot, ReAct, structured outputs, system prompts | Beginner |
 | 12 | 3 — Using LLMs | [RAG Fundamentals](rag_fundamentals/rag_fundamentals.md) | Chunking, vector DBs, retrieval, reranking, hybrid search — with 4 deep-dive sub-files | Intermediate |
@@ -52,9 +52,9 @@ column reflects learning sequence, not addition order.
 | 14 | 3 — Using LLMs | [Context Engineering](context_engineering/context_engineering.md) | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | Intermediate |
 | 15 | 3 — Using LLMs | [Reasoning Models](reasoning_models/reasoning_models.md) | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | Advanced |
 | 16 | 3 — Using LLMs | [Code Generation](code_generation/code_generation.md) | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | Intermediate |
-| 17 | 4 — Agents | [Agents & Tool Use](agents_and_tool_use/agents_and_tool_use.md) | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost — with 15 deep-dive sub-files | Intermediate |
+| 17 | 4 — Agents | [Agents & Tool Use](agents_and_tool_use/agents_and_tool_use.md) | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost — with 17 deep-dive sub-files | Intermediate |
 | 18 | 4 — Agents | [Agentic Workflow Patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | Prompt chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer (Anthropic taxonomy) | Intermediate |
-| 19 | 4 — Agents | [Agentic Frameworks](agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK — with 18 deep-dive sub-files | Intermediate |
+| 19 | 4 — Agents | [Agentic Frameworks](agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK, Microsoft Agent Framework — with 19 deep-dive sub-files | Intermediate |
 | 20 | 4 — Agents | [Multi-Agent Systems](multi_agent_systems/multi_agent_systems.md) | Orchestrator, debate, ChatDev, MetaGPT, Swarm/Agents SDK, Magentic-One, A2A protocols, agentic commerce, multi-agent security — with 8 deep-dive sub-files | Advanced |
 | 21 | 4 — Agents | [MCP (Model Context Protocol)](mcp_model_context_protocol/mcp_model_context_protocol.md) | MCP servers/clients, resources/tools/prompts, transports, security, registries — with 5 deep-dive sub-files | Intermediate |
 | 22 | 4 — Agents | [Coding Agents](coding_agents/coding_agents.md) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench | Advanced |
@@ -917,6 +917,7 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | [Design Financial Research Agent](case_studies/design_financial_research_agent.md) | XBRL-first extraction, citation verification, per-matter isolation, fiscal alignment | Principal |
 | [Design Synthetic Data Platform](case_studies/design_synthetic_data_platform.md) | Diversity sampling, best-of-N preference pairs, quality filter pipeline, lineage tracking | Principal |
 | [Design Avatar Video Platform](case_studies/design_avatar_video_platform.md) | Sequential pipeline pipelining, lip-sync tier economics, deepfake consent gates, C2PA | Principal |
+| [Design an Internal Multi-Tenant Agent Platform](case_studies/design_agent_platform.md) | Per-tenant tool registry, durable agent runtime, sandboxed execution, atomic budget ledger, agent tracing | Principal |
 
 ### Cross-Cutting Case Study Sub-Files (`case_studies/cross_cutting/`)
 

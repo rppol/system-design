@@ -15,9 +15,9 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `information_theory/` | 1 | Entropy, cross-entropy, KL divergence, mutual information | — |
 | `supervised_learning/` | 2 | Linear/logistic regression, SVM, decision trees, KNN, Naive Bayes | linear_models, support_vector_machines, decision_trees, bayesian_methods |
 | `ensemble_methods/` | 2 | Random Forest, XGBoost, LightGBM, CatBoost, stacking, blending | random_forests, gradient_boosting, xgboost_lightgbm, stacking_and_blending |
-| `unsupervised_learning/` | 2 | k-means, DBSCAN, hierarchical, PCA, t-SNE, UMAP | — |
+| `unsupervised_learning/` | 2 | k-means, DBSCAN, hierarchical, PCA, t-SNE, UMAP | gaussian_mixtures_and_em |
 | `feature_engineering/` | 2 | Encoding, scaling, imputation, target encoding, feature selection | — |
-| `model_evaluation_and_selection/` | 2 | Cross-validation, AUC-ROC/PR, calibration, bias-variance, Optuna | — |
+| `model_evaluation_and_selection/` | 2 | Cross-validation, AUC-ROC/PR, calibration, bias-variance, Optuna | automl_and_nas |
 | `neural_network_fundamentals/` | 3 | MLPs, backprop, activations, weight init, batch norm, dropout | — |
 | `convolutional_neural_networks/` | 3 | Conv2D, pooling, ResNet, EfficientNet, transfer learning | — |
 | `recurrent_neural_networks/` | 3 | LSTM, GRU, vanishing gradients, seq2seq, teacher forcing | state_space_models |
@@ -44,7 +44,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `causal_inference_and_ml/` | 7 | Potential outcomes, propensity scores, uplift, CausalForest | — |
 | `ml_interview_patterns/` | 8 | Design framework, debug checklist, tradeoff templates | — |
 | `model_selection_and_algorithm_choice/` | Cross-cutting | Algorithm decision matrix, problem-type → algorithm mapping, data-size vs complexity regimes | — |
-| `active_learning_and_weak_supervision/` | 5 | Uncertainty/diversity sampling, QBC, BALD, Snorkel labeling functions, label model, data-centric AI | — |
+| `active_learning_and_weak_supervision/` | 5 | Uncertainty/diversity sampling, QBC, BALD, Snorkel labeling functions, label model, data-centric AI | semi_supervised_learning |
 | `adversarial_ml_and_robustness/` | 7 | FGSM/PGD/C&W evasion, poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | — |
 | `uncertainty_quantification_and_conformal_prediction/` | 7 | Aleatoric vs epistemic, MC dropout, deep ensembles, ECE/temperature scaling, conformal sets/intervals, CQR | — |
 | `interpretability_and_explainability/` | 7 | SHAP (KernelSHAP/TreeSHAP), LIME, integrated gradients, Grad-CAM, permutation importance, PDP/ICE, counterfactuals | — |
@@ -94,8 +94,8 @@ edit**: `extract.py` walks the markers and emits the gitignored `questions/paths
 which the game fetches at boot. The tier tables in `README.md` sit between
 `<!-- study-path-table <tier> -->` markers and are **generated** — regenerate with
 `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
-`extract.py --strict` and the Pages deploy. Case studies are tiered the same way from a
-block in `case_studies/case_studies.md` (12 senior / 10 principal of the 24), driving the Level
+`extract.py --strict` and the Pages deploy. Case studies are tiered the same way from the
+`case_studies` entry of that block (13 senior / 13 principal of the 27), driving the Level
 filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
 and a 6-week Study Plan (prose; no path impact).
 

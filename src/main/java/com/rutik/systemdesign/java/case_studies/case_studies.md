@@ -1,6 +1,6 @@
 # Java Case Studies — Learning Path Index
 
-Eight principal-grade case studies covering the core Java engineering patterns that appear most
+Ten principal-grade case studies covering the core Java engineering patterns that appear most
 frequently in senior-engineer interviews and production system design discussions. Each study uses
 the 11-section principal template with executable Java code, concrete numbers, and production
 war stories.
@@ -53,6 +53,8 @@ Read these three first if you only have time for a focused session:
 | [Rate Limiter](design_rate_limiter_java.md) | Token-bucket and sliding-window concurrency | Thread-safe counter management, compare-and-swap, and clock-skew-resistant sliding-window implementation backed by AtomicLong and LongAdder. |
 | [Snowflake ID Generator](design_snowflake_id_generator_java.md) | Lock-free monotonic ID generation | Bit-packing, clock rollback detection, and sequence exhaustion handling under high concurrency using AtomicLong and strict happens-before reasoning. |
 | [LRU Cache](design_lru_cache_java.md) | Concurrent cache eviction | How to implement a thread-safe LRU eviction policy using LinkedHashMap, then upgrade it to a segmented ConcurrentHashMap variant for high-throughput scenarios. |
+| [Structured Concurrency Aggregator](design_structured_concurrency_aggregator.md) | Leak-free fan-out with structured concurrency | How `StructuredTaskScope` ties every forked subtask to a lexical scope so a timeout or failure cancels the rest, how Joiner policies express all-must-succeed and partial-result fan-out, and how `ScopedValue` replaces request-scoped `ThreadLocal`s. |
+| [Low-Latency Market Data Handler](design_low_latency_market_data_handler.md) | GC-free cross-thread handoff | How to move ticks from a network thread to a strategy thread through an off-heap Foreign Function & Memory ring buffer, with `VarHandle` cursors for happens-before and cache-line padding against false sharing. |
 
 ### Group 3 — Design Patterns and Wiring
 
@@ -99,6 +101,12 @@ design_di_container_java
   └── design_event_bus               (listener registration mirrors bean wiring; reflection reuse)
 
 design_lru_cache_java                (self-contained; read after connection_pool for contrast)
+
+design_thread_pool_java
+  └── design_structured_concurrency_aggregator  (scoped fan-out replaces unowned Futures)
+
+design_snowflake_id_generator_java
+  └── design_low_latency_market_data_handler    (lock-free shared state, now off-heap and GC-free)
 ```
 
 The dependency arrows show the minimum prerequisite; you do not need to read every ancestor before
@@ -123,8 +131,10 @@ flowchart LR
     lru --> sf(Snowflake ID)
     sf --> di(DI Container)
     di --> eb(Event Bus)
+    eb --> sc(Structured Concurrency<br/>Aggregator)
+    sc --> md(Market Data<br/>Handler)
 
-    class cp,tp,rl,cb,lru,sf,di,eb base
+    class cp,tp,rl,cb,lru,sf,di,eb,sc,md base
 ```
 
 ---
@@ -146,23 +156,27 @@ For each question below, open the linked file and focus on Sections 3 (High-Leve
 | Design a distributed unique ID generator (Snowflake) | [design_snowflake_id_generator_java.md](design_snowflake_id_generator_java.md) |
 | Design a lightweight IoC / dependency injection container | [design_di_container_java.md](design_di_container_java.md) |
 | Design an in-process event bus / pub-sub system | [design_event_bus.md](design_event_bus.md) |
+| Design a fan-out aggregator that calls N services in parallel with a deadline | [design_structured_concurrency_aggregator.md](design_structured_concurrency_aggregator.md) |
+| Design a low-latency market data feed handler | [design_low_latency_market_data_handler.md](design_low_latency_market_data_handler.md) |
 
 ---
 
 ## Build Manifest
 
-All eight case studies are complete. Each uses the 11-section principal template: Requirements
+All ten case studies are complete. Each uses the 11-section principal template: Requirements
 Clarification, Scale Estimation, High-Level Architecture, Component Deep Dives, Design Decisions
 and Tradeoffs, Real-World Implementations, Technologies and Tools, Operational Playbook, Common
 Pitfalls and War Stories, Capacity Planning, and Interview Discussion Points.
 
 | File | Template | Q&As | Status |
 |------|----------|------|--------|
-| [design_connection_pool.md](design_connection_pool.md) | 11-section principal | ~11 | DONE |
-| [design_rate_limiter_java.md](design_rate_limiter_java.md) | 11-section principal | ~10 | DONE |
-| [design_event_bus.md](design_event_bus.md) | 11-section principal | ~10 | DONE |
-| [design_lru_cache_java.md](design_lru_cache_java.md) | 11-section principal | ~10 | DONE |
-| [design_thread_pool_java.md](design_thread_pool_java.md) | 11-section principal | ~11 | DONE |
-| [design_di_container_java.md](design_di_container_java.md) | 11-section principal | ~10 | DONE |
-| [design_circuit_breaker_java.md](design_circuit_breaker_java.md) | 11-section principal | ~10 | DONE |
-| [design_snowflake_id_generator_java.md](design_snowflake_id_generator_java.md) | 11-section principal | ~10 | DONE |
+| [design_connection_pool.md](design_connection_pool.md) | 11-section principal | 15 | DONE |
+| [design_rate_limiter_java.md](design_rate_limiter_java.md) | 11-section principal | 15 | DONE |
+| [design_event_bus.md](design_event_bus.md) | 11-section principal | 16 | DONE |
+| [design_lru_cache_java.md](design_lru_cache_java.md) | 11-section principal | 13 | DONE |
+| [design_thread_pool_java.md](design_thread_pool_java.md) | 11-section principal | 13 | DONE |
+| [design_di_container_java.md](design_di_container_java.md) | 11-section principal | 12 | DONE |
+| [design_circuit_breaker_java.md](design_circuit_breaker_java.md) | 11-section principal | 13 | DONE |
+| [design_snowflake_id_generator_java.md](design_snowflake_id_generator_java.md) | 11-section principal | 15 | DONE |
+| [design_structured_concurrency_aggregator.md](design_structured_concurrency_aggregator.md) | 11-section principal | 13 | DONE |
+| [design_low_latency_market_data_handler.md](design_low_latency_market_data_handler.md) | 11-section principal | 13 | DONE |

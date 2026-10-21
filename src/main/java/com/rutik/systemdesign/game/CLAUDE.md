@@ -35,12 +35,14 @@ The `game/` directory is an application, not study content — see
   structural: the build reuses the app's exact engine (pinned `mermaid@11.16.0`),
   `mmPolishSvg` polish, and `mdRender`+`cyrb53` extraction — never a second copy.
   Keep `mmPolishSvg`, the `initialize` config, and `mmChooseVariant`/`mmRenderNode`
-  in lockstep, and **bump the asset schema `v` (or clear `game/diagrams/`) whenever
-  the mermaid version or theme changes** so stale assets don't linger.
+  in lockstep, and **re-render with `node scripts/build_diagrams.mjs --full` (or clear
+  `game/diagrams/`) whenever the mermaid version or theme changes** so stale assets
+  don't linger. The asset's `v` field is not checked, so bumping it alone invalidates
+  nothing.
 - **Mermaid icon nodes (product logos).** Diagrams may use icon nodes
   (`n@{ icon: "logos:aws-s3" }`) / `architecture-beta` services so a real product
-  logo renders. `scripts/build_icons.mjs` bundles the iconify `logos` pack into
-  `game/vendor/icons-logos.json` (gitignored, CI-regenerated like the banks and
+  logo renders. `scripts/build_icons.mjs` bundles the iconify `logos` and `simple-icons`
+  packs into `game/vendor/icons-logos.json` and `game/vendor/icons-simple-icons.json` (gitignored, CI-regenerated like the banks and
   `.mmz`, in BOTH `pages.yml` and `build_android_assets.sh` before the diagram
   pre-render). `_mmRegisterIcons()` registers it via a **relative** fetch (resolves
   on Pages AND the APK host, like `diagrams/<key>.mmz`, so **no new `IS_APK` seam** —
@@ -217,13 +219,12 @@ The `game/` directory is an application, not study content — see
   declare no markers at all and are absent from `paths.json` — both are still bank
   sections with `STUDY_ORDER` entries, they just show no tier tabs. `book` has no
   interview subset to cut from chapter summaries (and its 3-segment ids would fail the
-  2-segment tier check outright); `technologies` has SEVEN modules and has
+  2-segment tier check outright); `technologies` has ELEVEN modules and has
   therefore passed the ">= 4 modules" threshold that was supposed to trigger tiering —
   it stays untiered by a live deferral recorded in `technologies/CLAUDE.md`, not because
-  it is too small. That file's caveat still holds: with no deep-dive sub-files in the
-  section, its two tiers could differ only by membership, so the repo-wide "roughly half
-  of each principal list is material senior never sees" property is not yet expressible
-  there. This is an open decision, not a settled rule. `cs_fundamentals`, `cuda` and `devops`
+  it is too small. The section has deep-dive sub-files, so its two tiers
+  could differ per file as well as by module membership. This is an open decision, not a
+  settled rule. `cs_fundamentals` and `cuda`
   have a Senior tier and **zero principal modules** — `check_wiring()` skips a tier
   whose markers declare none, so demanding a Principal heading there is a false alarm,
   not a gap.
@@ -262,8 +263,7 @@ The `game/` directory is an application, not study content — see
   tells a module's own page from its sub-files — that is what labels it "Overview" in the
   sidebar and the sub-file picker. Never hard-code `"README.md"` or strip a literal
   `/README.md`: doing so was a silent no-op after the rename and collapsed the reader's
-  whole file tree to flat rows. Regression test: `test_split.mjs` in `audit-state/` runs
-  both helpers over every real `(module, sourceFile)` pair in `questions/index.json`.
+  whole file tree to flat rows.
 - **Answers may be written as blockquotes.** `parse_md` strips a leading `> ` per line when
   accumulating an answer. The lines are flattened into one space-joined string, so the
   marker could never render as a blockquote anyway — it would only leak a literal `"> "`

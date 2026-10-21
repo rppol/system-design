@@ -6,7 +6,7 @@ A personal daily-learning PWA built over the owner's own study repository: the r
 
 ## What It Is
 
-A static single-page application deployed on GitHub Pages. The repository itself is the CMS: every module README and deep-dive sub-file feeds the app, and `game/extract.py` is the build step that turns their interview Q&As — ~8,400+ across 14 sections — into a multiple-choice question bank. On top of that bank sit a 5-minute MCQ blitz, an SM-2 spaced-repetition review deck, and a full-content reader, so studying the repo and playing the game are the same activity.
+A static single-page application deployed on GitHub Pages. The repository itself is the CMS: every module page and deep-dive sub-file feeds the app, and `game/extract.py` is the build step that turns their interview Q&As, over 19,000 across every content section, into a multiple-choice question bank. On top of that bank sit a 5-minute MCQ blitz, an SM-2 spaced-repetition review deck, and a full-content reader, so studying the repo and playing the game are the same activity.
 
 ---
 
@@ -31,15 +31,19 @@ The problem is consistency, not content. The repo already holds more study mater
 
 | Surface | Route | What it does |
 |---------|-------|--------------|
-| Home | `#/home` | Coach pick of the day, blitz launcher, review-due count, weak spots, drills, section skyline, streak display |
-| Quiz | `#/quiz` | 5-minute blitz; redemption round, Skip-then-teach, card flip, confidence rating |
-| Gauntlet | `#/gauntlet` | Daily sealed 10-question run — same 10 for the day, one attempt |
-| Study | `#/study` | Full / Interview path toggle; ordered learning path per section |
+| Today | `#/home` | Coach pick of the day, blitz launcher, review-due count, weak spots, drills, streak display |
+| Practice | `#/practice`, `#/practice/<due\|weak\|interview>`, `#/topics/<section>` | Sections by mastery, due reviews, weak spots, interviewer entry, sub-topic picker |
+| Quiz | `#/quiz/<section\|review\|weak>` | 5-minute blitz; redemption round, Skip-then-teach, card flip, confidence rating |
+| Interviewer | `#/interview/<section>` | 12-question core-to-advanced escalation; unlocks at Silver in that section |
+| Gauntlet | `#/gauntlet` | Daily sealed 10-question run, same 10 for the day, one attempt |
+| Study | `#/study`, `#/study/<section>`, `#/study/book/<book>` | Full / Senior / Principal / Case Studies paths per section |
 | Reader | `#/reader/<path>` | One-Dark full-content reader with think-first recall prompts and continue-your-path navigation |
-| Progress | `#/progress` | Insights, activity ledger, export/import of all state |
-| Codex | `#/codex` | Collected/browsable question codex |
-| Debrief | `#/debrief` | Post-session summary and misses review |
-| Command palette | Cmd/Ctrl+K | Jump to any surface or section from anywhere |
+| Tech | `#/tech` | Repo-wide technology index |
+| Progress | `#/progress` (`#/insights` for the insights view) | Insights, activity ledger, export/import of all state |
+| Awards | `#/awards` | Ledger and section skyline |
+| Codex | `#/codex` | Collected modules |
+| Debrief | `#/debrief` | Weekly summary and quests for next week |
+| Command palette | Cmd/Ctrl+K or `/` | Jump to any surface or section from anywhere |
 
 ---
 
@@ -48,7 +52,7 @@ The problem is consistency, not content. The repo already holds more study mater
 These are constraints the product treats as non-negotiable:
 
 - **Reader is pitch black** — `#000000` background with `#ffffff` prose in every theme; no theme may tint it.
-- **Vanilla JS/CSS, no build, no frameworks** — the Mermaid CDN import is the sole external dependency.
+- **Vanilla JS/CSS, no bundler, no frameworks**: the app source ships as written; CI generates only content artifacts (question banks, graphs, pre-rendered diagrams, icon packs). The pinned Mermaid engine is the sole runtime dependency, loaded only for a fence with no pre-rendered asset.
 - **Pages-only** — no server, no API, no database, no scheduler. If it cannot run as static files, it does not ship.
 - **`localStorage` (`sd_progress`) is the single source of truth** — all streaks, mastery, and review state live there.
 - **Export/import is the only backup** — there is no cloud sync to fall back on.

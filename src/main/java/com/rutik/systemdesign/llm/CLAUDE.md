@@ -112,7 +112,7 @@ different cuts, not nested depths — senior is the craft (ship the pipeline, de
 eval that lies), principal is the judgment (which architecture at what token cost, what
 failure domains, what you tell a team *not* to do), so the two lists overlap only partly
 and much of principal is material senior never sees. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
-each tier takes — which is also the only way to curate the section's 75 module-level
+each tier takes — which is also the only way to curate the section's module-level
 **deep-dive sub-files**, since a sub-file has no `STUDY_ORDER` entry of its own and would otherwise be
 dragged in wholesale by its parent. Listing a tier joins it, omitting the tier opts out,
 and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from
@@ -122,7 +122,7 @@ the gitignored `questions/paths.json`, which the game fetches at boot. The tier 
 `README.md` sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
 regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
 fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
-from a block in `case_studies/case_studies.md` (15 senior / 11 principal of the 29), driving the
+from the `case_studies` entry of the same `README.md` block, driving the
 Level filter on the game's Case Studies tab. The README also carries a Knowledge-Question
 Map and an 8-week Study Plan (prose; no path impact).
 
@@ -140,7 +140,7 @@ The following are gaps for senior AI engineer coverage, identified by the 2026-0
 
 ---
 
-## Case Studies — 29 Total
+## Case Studies — 30 Total
 
 `case_studies/` directory — all use the 11-section principal template.
 
@@ -154,6 +154,8 @@ Learning-path index: `case_studies/case_studies.md` (mandatory; update with ever
 **Wave 3 (5):** design_image_generation_platform, design_llm_eval_platform, design_voice_cloning_tts_platform, design_medical_ai_scribe, design_sales_ai_agent
 
 **Wave 4 (5):** design_ai_companion_platform, design_ai_meeting_assistant, design_financial_research_agent, design_synthetic_data_platform, design_avatar_video_platform
+
+**Wave 5 (1):** design_agent_platform
 
 ---
 

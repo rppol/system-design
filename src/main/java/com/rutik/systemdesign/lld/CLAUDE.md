@@ -219,7 +219,7 @@ below). The README also carries a Knowledge-Question Map and a 6-week Study Plan
 no path impact). The Study Plan pairs each week with a practice problem from
 `system_design_problems/` rather than a `case_studies/` file — LLD's `case_studies/`
 holds only a learning-path index (`case_studies/case_studies.md`: pattern-dependency map +
-interview shortcuts) over 12 of the 22 problems, not separate case-study write-ups.
+interview shortcuts) over the problems in `system_design_problems/`, not separate case-study write-ups.
 
 ## Adding a New LLD Pattern
 

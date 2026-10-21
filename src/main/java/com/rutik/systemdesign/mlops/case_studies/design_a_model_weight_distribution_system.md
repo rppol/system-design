@@ -90,9 +90,7 @@ must serve the model at full latency within 3 minutes. That is the "0 to 64 node
 | Can inference nodes reach each other over the RDMA fabric? | It decides whether live replicas can serve weights GPU to GPU |
 
 **Not here.** The GPU cluster (DRA, Kueue gang admission, Karpenter, node health) is in
-[Design a GPU Training and Inference Cluster](../../devops/case_studies/design_gpu_training_and_inference_cluster.md);
-loader formats and single-node cold start are in
-[Model Storage, Loading and Cold Start](../model_storage_loading_and_cold_start/model_storage_loading_and_cold_start.md).
+[Design a GPU Training and Inference Cluster](../../devops/case_studies/design_gpu_training_and_inference_cluster.md).
 
 ---
 
@@ -344,9 +342,8 @@ preseeded         total    69.9 s  schedule_and_start=8.0  fetch=0.0  load_to_hb
 ```
 
 The first row is the system before this design: unsharded files pulled straight from the bucket,
-an image pulled per node, and no compile cache. It takes 25.8 minutes. The last two rows are the
-design's cold and common paths. The fixed stages (start, collective init, compile, warmup) are
-55 s in both; they are why the pre-seeded path cannot go much below 70 s.
+an image pulled per node, and no compile cache (25.8 minutes). The last two rows are the design's
+cold and common paths, with the same 55 s of fixed stages that keep pre-seeded above 70 s.
 
 ### 4.2 Packaging: per-rank layers in one ModelPack artifact
 
@@ -657,8 +654,7 @@ spec:
 - **The hedge.** With 64 nodes, the slowest node sets the p100. One node with a degraded NVMe
   stripe (6 GB/s write instead of 20) takes 171 s to fetch 515 GB on the cold path, and its group
   is Ready at about 240 s. The scale controller asks for 34 groups, keeps the first 32 that reach
-  Ready, and deletes the remaining two. Region B keeps 4 spare nodes for this, out of 68; they run
-  batch work like the rest until a failover preempts them.
+  Ready, and deletes the remaining two, using the 4 spare nodes per region from §1.
 
 ### 4.6 Pre-seeding and the RDMA option
 
@@ -677,11 +673,8 @@ after a disk failure misses the pre-seed. So does any node if a hotfix is promot
 
 **Backend RDMA from live replicas.** Inference nodes in region A share an RDMA fabric. A new
 replica could pull its ranks directly from a live replica's GPU memory: 64.4 GB per GPU at 50 GB/s
-per NIC is about 1.3 s, against 51.5 s for P2P over Ethernet. Moonshot AI's checkpoint-engine does
-a version of this: its P2P mode uses Mooncake's transfer engine to send weights from CPU memory in
-existing instances to GPUs in new instances. Perplexity
-reported 1.3 s cross-machine weight updates for Kimi-K2 using one-sided RDMA WRITE (§6). This
-design does not use it for scale-out. It helps only the cold path, since pre-seeded nodes already
+per NIC is about 1.3 s, against 51.5 s for P2P over Ethernet. Moonshot AI's checkpoint-engine and
+Perplexity's RDMA weight transfer do versions of this (§6). This design does not use it for scale-out. It helps only the cold path, since pre-seeded nodes already
 skip the fetch and the 55 s of fixed stages remain. Region B has no live replica during a
 failover, so the case that most needs speed has no source. And the fleet's RDMA partition for
 batch training is separate from serving; sharing it needs its own isolation review.
@@ -753,8 +746,7 @@ GPUs, about 43 GPU-hours. The full pool-cost model is in
 **Uber, Kraken.** Uber built Kraken as a P2P Docker registry backed by blob storage and has run
 it in production since early 2018. Its README reports clusters of at least 15,000 hosts, more
 than 1 million blobs a day in the busiest cluster, and a 3 GB two-layer image pulled by 2,600
-hosts at p50 10 s and p99 18 s with a 300 MB/s per-agent limit. The same README recommends blobs
-of at most 20 GB, which is why a rank file goes into Kraken as several parts.
+hosts at p50 10 s and p99 18 s with a 300 MB/s per-agent limit.
 
 **Dragonfly.** Accepted into the CNCF on 2018-11-13 and graduated on 2025-10-28. Its scope covers
 container images, OCI artifacts and AI models. A scheduler tells each peer which pieces other
@@ -775,8 +767,7 @@ not cold scale-out, which is the distinction §4.6 draws.
 
 **Modal, GPU memory snapshots.** Modal restores a saved process state instead of re-running
 initialization; GPU memory snapshots are an alpha feature. Its docs call them generally
-incompatible with multi-GPU code, which rules them out for a 16-GPU MoE replica. The mechanics are
-in [Model Storage, Loading and Cold Start](../model_storage_loading_and_cold_start/model_storage_loading_and_cold_start.md).
+incompatible with multi-GPU code, which rules them out for a 16-GPU MoE replica.
 
 **NVIDIA Run:ai Model Streamer.** The library behind vLLM's `runai_streamer` and
 `runai_streamer_sharded` formats. vLLM documents it reading from local paths, S3, GCS and Azure
@@ -824,9 +815,6 @@ The scheduling side (Kueue cohorts, preemption policy) is in
 | `weights_digest_mismatch_total` | node, source (peer, origin) | any increase |
 | `weights_peer_ingress_bytes_per_second` | node | under 10 GB/s during a cold fetch |
 | `serving_bundle_digest_info` | replica | more than one manifest digest outside a rollout |
-
-The last metric exists because of the incident in §9. Each replica exports the manifest digest it
-loaded, and the dashboard counts distinct digests per endpoint.
 
 ### Runbook: seed coverage under 100% at promotion time
 
@@ -944,9 +932,6 @@ xychart-beta
     y-axis "Seconds" 0 --> 1600
     bar [1546, 729, 121, 70]
 ```
-
-The first two bars are why the design does not tune the direct path. The gap between the last
-two is the fetch; the 70 s that remain are fixed stages.
 
 ### Where the cold-path 121 s go
 

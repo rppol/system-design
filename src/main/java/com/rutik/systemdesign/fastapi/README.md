@@ -221,7 +221,7 @@ A ruthless cut to what a **senior FastAPI / backend interview** actually probes,
 **Not in this path** (13 of 21, Full Path only): `python_api_framework_landscape`, `fastapi_fundamentals_asgi`, `pydantic_v2_deep_dive`, `routing_and_request_handling`, `dependency_injection_in_fastapi`, `middleware_and_lifecycle`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `testing_fastapi`, `http_clients_and_external_apis`, `message_queues_and_event_driven`, `caching_and_performance`, `api_design_and_versioning`
 <!-- /study-path-table -->
 
-A different cut, not senior-plus-extras. The Principal Path probes service-shape judgment rather than framework mechanics: where async actually pays, how a deployment survives a bad release, and which boundaries you refuse to blur. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
+A different cut, not senior-plus-extras. The Principal Path probes service-shape judgment rather than framework mechanics: where async actually pays, how a deployment survives a bad release, and which boundaries you refuse to blur. Only `security_hardening_and_owasp` is material the Senior Path never covers, and it is the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 

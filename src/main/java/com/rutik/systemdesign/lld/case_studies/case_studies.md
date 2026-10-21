@@ -1,6 +1,6 @@
 # LLD Case Studies — Learning Path
 
-The twelve problems in `../system_design_problems/` serve as the practical interview case studies
+The problems in `../system_design_problems/` serve as the practical interview case studies
 for Low-Level Design. This README provides the learning path, pattern dependency map, and
 interview preparation shortcuts.
 
@@ -18,7 +18,7 @@ Read these three first, in order:
 
 These three cover State (FSM), Command, Strategy, Factory, Observer, and Singleton — the patterns
 that recur across most of the remaining problems. Once you can draw these three designs cold, the
-remaining nine become variations on the same modelling moves.
+rest become variations on the same modelling moves.
 
 ---
 
@@ -34,6 +34,7 @@ Problems grouped by the dominant engineering concern they exercise:
 | ATM | FSM + transaction integrity | [ATM.md](../system_design_problems/ATM.md) | State, Command (execute + rollback), Facade |
 | Elevator System | Complex FSM + scheduling algorithm | [ElevatorSystem.md](../system_design_problems/ElevatorSystem.md) | State, Observer (floor requests), Strategy (SCAN/FCFS) |
 | Ride Sharing | Ride lifecycle FSM with rejected-transition handling | [RideSharing.md](../system_design_problems/RideSharing.md) | State (ride lifecycle), Strategy (fare), Observer (status), Factory (vehicle) |
+| Food Delivery | Three-party order lifecycle; cancellation illegal once picked up | [FoodDelivery.md](../system_design_problems/FoodDelivery.md) | State (order lifecycle), Strategy (fee, partner assignment), Decorator (pricing chain), Observer |
 
 ### Group B — Concurrency + Resource Management
 
@@ -41,6 +42,7 @@ Problems grouped by the dominant engineering concern they exercise:
 |---------|-----------------|------|--------------|
 | Parking Lot | Concurrent spot allocation, pricing strategy | [ParkingLot.md](../system_design_problems/ParkingLot.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Factory (vehicle) |
 | Online Booking System | Double-booking prevention, seat reservation | [OnlineBookingSystem.md](../system_design_problems/OnlineBookingSystem.md) | Strategy (pricing), Observer (notifications), Builder (Movie/Show) |
+| Meeting Scheduler | Half-open interval conflicts across rooms and attendees | [MeetingScheduler.md](../system_design_problems/MeetingScheduler.md) | Strategy (room selection), Observer (notifications) |
 
 ### Group C — Domain Modeling
 
@@ -57,13 +59,27 @@ Problems grouped by the dominant engineering concern they exercise:
 | LRU Cache | O(1) get/put via doubly-linked list + HashMap; thread-safe wrapper | [LRUCache.md](../system_design_problems/LRUCache.md) | Decorator (thread safety), Observer (eviction listener) |
 | Rate Limiter | Per-client request throttling; 4 interchangeable algorithms | [RateLimiter.md](../system_design_problems/RateLimiter.md) | Strategy (algorithm), Factory (algorithm selection) |
 | Tic-Tac-Toe | Incremental win detection; pluggable AI move selection | [TicTacToe.md](../system_design_problems/TicTacToe.md) | Strategy (AI move), State (game state) |
+| Snake and Ladder | Turn loop with a validated jump table; one jump per landing | [SnakeAndLadder.md](../system_design_problems/SnakeAndLadder.md) | Strategy (dice, win rule), Observer (game events), Factory (board) |
+| Order Matching Engine | Price-time priority order book; cancel by id without a scan | [OrderMatchingEngine.md](../system_design_problems/OrderMatchingEngine.md) | State (order lifecycle), Strategy (time-in-force) |
+| File System | Path resolution over a part/whole tree; recursive size | [FileSystem.md](../system_design_problems/FileSystem.md) | Composite (files and directories), Iterator (find), Visitor |
+
+### Group E - Infrastructure Components
+
+| Problem | Dominant Concern | File | Core Patterns |
+|---------|-----------------|------|--------------|
+| Logging Framework | Cheap disabled calls; slow appenders never stall the caller | [LoggingFramework.md](../system_design_problems/LoggingFramework.md) | Chain of Responsibility (logger hierarchy), Strategy (formatter), Decorator (async appender) |
+| Notification Service | Channel fan-out with retry that never sends twice | [NotificationService.md](../system_design_problems/NotificationService.md) | Strategy + Factory (channel), Decorator (retry), Chain of Responsibility (filters), Observer |
+| Task Scheduler | Delay queue with no lost wakeup under concurrent submission | [TaskScheduler.md](../system_design_problems/TaskScheduler.md) | Command (task), Strategy (retry policy), Producer-Consumer (delay queue), Observer |
+| Key-Value Store | Nested transactions as a layer stack; TTL expiry | [KeyValueStore.md](../system_design_problems/KeyValueStore.md) | Unit of Work, Memento-like layer stack, Strategy (clock) |
+| Pub-Sub | Log-based broker; per-partition order; at-least-once delivery | [PubSub.md](../system_design_problems/PubSub.md) | Observer (pull-based), Strategy (partitioner), Mediator (consumer group) |
 
 ---
 
 ## 3. Cross-Cutting Pattern Matrix
 
 Which GoF patterns appear in which problems — use this to decide which problems to study
-when preparing for a specific pattern question:
+when preparing for a specific pattern question. The matrix covers the classic twelve; the Core
+Patterns column in Section 2 lists the patterns for every other problem:
 
 | Pattern | Vending | Parking | Library | Chess | Elevator | ATM | Booking | RideSharing | LRUCache | RateLimiter | TicTacToe | Splitwise |
 |---------|---------|---------|---------|-------|----------|-----|---------|-------------|----------|-------------|-----------|-----------|
@@ -82,10 +98,10 @@ when preparing for a specific pattern question:
 **Legend**: Primary = the pattern is the main architectural decision; Supporting = the pattern
 appears as a secondary component.
 
-Two patterns interviewers often expect here appear in **none** of the twelve: **Template Method**
+**Template Method**, a pattern interviewers often expect, appears in **none** of the problems
 (Tic-Tac-Toe explicitly rejects it — `HumanPlayer` and `AIPlayer` share no multi-step skeleton, so
-it would be plain polymorphism wearing a pattern name) and **Composite** (no problem in this set
-has a genuine part/whole tree). Splitwise likewise considers Observer and deliberately omits it.
+it would be plain polymorphism wearing a pattern name). **Composite** appears only in File System,
+the one problem with a genuine part/whole tree. Splitwise likewise considers Observer and deliberately omits it.
 Naming a pattern you did *not* use, and why, is a stronger interview signal than padding the list.
 
 Three cells read `—` for a reason worth knowing, because each problem argues the omission in its
@@ -121,18 +137,32 @@ flowchart TD
     ES --> CG["Chess Game<br/>Command undo/redo<br/>+ Observer game events"]
     ES --> LM["Library Management<br/>Observer + Builder<br/>+ borrow lifecycle"]
     ES --> SW["Splitwise<br/>Strategy splits + Factory<br/>+ debt-graph simplification"]
+    RS --> FD["Food Delivery<br/>three-party lifecycle<br/>+ Decorator pricing"]
+    OBS --> MS["Meeting Scheduler<br/>interval conflicts<br/>+ room Strategy"]
 
     subgraph SA["Standalone — Algorithms and Data Structures (any order)"]
         LRU["LRU Cache<br/>DLL + HashMap, O(1)"]
         RL["Rate Limiter<br/>4 Strategy algorithms"]
         TTT["Tic-Tac-Toe<br/>Win-check + Strategy AI"]
+        SNL["Snake and Ladder<br/>jump table + Strategy dice"]
+        OME["Order Matching Engine<br/>price-time order book"]
+        FS["File System<br/>Composite tree"]
+    end
+
+    subgraph INF["Standalone: Infrastructure Components (any order)"]
+        LOG["Logging Framework<br/>Chain + async Decorator"]
+        NS["Notification Service<br/>channel fan-out + retry"]
+        TS["Task Scheduler<br/>delay queue, no lost wakeup"]
+        KV["Key-Value Store<br/>transaction layers + TTL"]
+        PS["Pub-Sub<br/>partitioned log + groups"]
     end
 
     class F base
     class VM,ATM,PL,ES train
-    class OBS,RS req
+    class OBS,RS,FD,MS req
     class CG,LM,SW frozen
-    class LRU,RL,TTT mathOp
+    class LRU,RL,TTT,SNL,OME,FS mathOp
+    class LOG,NS,TS,KV,PS io
 ```
 
 **Why this order**: Vending Machine's clean 5-state FSM is the template you'll reuse in every
@@ -142,7 +172,12 @@ Observer + State combination on a trip lifecycle. Chess, Library, and Splitwise 
 domain-modeling problems but assume you can already identify patterns quickly. The Algorithms &
 Data Structures group (LRU Cache, Rate Limiter, Tic-Tac-Toe) is independent of the rest — these
 lean more on data-structure correctness than on OOP class design, so study them whenever a
-"design X" question turns out to really be "implement X efficiently."
+"design X" question turns out to really be "implement X efficiently." Snake and Ladder, Order
+Matching Engine, and File System sit in the same group. Food Delivery extends Ride Sharing to three
+parties, and Meeting Scheduler reuses Online Booking's double-booking check on intervals. The
+Infrastructure Components group (Logging Framework, Notification Service, Task Scheduler, Key-Value
+Store, Pub-Sub) leans on concurrency and delivery guarantees; study it after
+[Concurrency Patterns](../concurrency_patterns/concurrency_patterns.md).
 
 ---
 
@@ -158,15 +193,23 @@ lean more on data-structure correctness than on OOP class design, so study them 
 | Design a chess game | Chess Game | Direct match |
 | Design a movie / flight / hotel booking | Online Booking System | Pattern is identical |
 | Design a traffic light system | Vending Machine | Same state-object FSM structure |
-| Design a food delivery order lifecycle | ATM + Booking | State machine + double-allocation |
+| Design a food delivery app (Swiggy/DoorDash) | Food Delivery | Direct match: three-party State lifecycle, Decorator pricing |
 | Design a ride-sharing app (Uber/Lyft) | Ride Sharing | Direct match — State, Strategy, Observer, Factory |
 | Design a bank transaction system | ATM | Transaction integrity, rollback, idempotency |
 | Design a document editor with undo | Chess Game | Command pattern undo/redo |
-| Design a notification system | Library Management | Observer pattern, overdue/event triggers |
+| Design a notification system | Notification Service | Direct match: channel Strategy, retry Decorator, filter chain |
 | Design an LRU cache (or LFU variant) | LRU Cache | Direct match — doubly-linked list + HashMap, O(1) |
 | Design a rate limiter (class-design angle) | Rate Limiter | Direct match — Strategy across 4 algorithms |
 | Design tic-tac-toe / a turn-based board game | Tic-Tac-Toe | Direct match — incremental win-check, pluggable AI |
 | Design Splitwise / a bill-splitting app | Splitwise | Direct match — Strategy splits + debt simplification |
+| Design a logging framework (Log4j/SLF4J) | Logging Framework | Direct match: logger hierarchy, async appender |
+| Design a task scheduler / cron | Task Scheduler | Direct match: delay queue, lost-wakeup fix |
+| Design snake and ladder | Snake and Ladder | Direct match: validated jump table, Strategy dice |
+| Design a stock exchange order book | Order Matching Engine | Direct match: price-time priority, cancel by id |
+| Design a key-value store with transactions | Key-Value Store | Direct match: layer-stack transactions, TTL |
+| Design a message queue / Kafka-like pub-sub | Pub-Sub | Direct match: partitions, consumer groups, offsets |
+| Design an in-memory file system | File System | Direct match: Composite tree, path resolution |
+| Design a meeting room scheduler / calendar | Meeting Scheduler | Direct match: interval conflict check, room Strategy |
 
 ### 30-Minute Interview Time Box
 

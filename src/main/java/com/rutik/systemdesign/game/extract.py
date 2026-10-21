@@ -22,10 +22,11 @@ answer. This keys on the template's structure, not on the inconsistent
 surface "Q" convention.
 
 MCQ construction:
-    correct option   = first sentence of the answer (CLAUDE.md guarantees the
-                       first sentence is the "direct answer")
-    3 distractors    = first sentences of OTHER questions in the same top-level
-                       section (repo-wide fallback if the section is too small)
+    correct option   = the authored **Short:** line, else the answer's first
+                       sentence trimmed to SHORT_MAX (make_short)
+    3 distractors    = other questions' options, same module first, widening to
+                       the section, ranked by IDF-weighted overlap
+Case studies are excluded from the main bank and written to case_questions/.
 
 Run from anywhere; paths are resolved relative to this file.
 """
@@ -370,7 +371,7 @@ README_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)#]+)\)")
 
 # ---- generated tier tables -------------------------------------------------
 # The section README's tier table used to be hand-maintained, which made it a THIRD
-# source of path membership after the per-module `<!-- study-paths -->` markers and
+# source of path membership after the `<!-- study-paths -->` blocks and
 # app.js. It drifted in 9 of 13 sections the first time the markers were re-curated
 # -- including llm and ml, where the count stayed right and only the MEMBERS moved,
 # which a count-only check waves through. It is generated now: `--write-paths`
@@ -485,20 +486,10 @@ def _readme_tier_path(section, tier):
     return int(m.group(1)), slugs
 
 
-# TIER MARKERS -- the single source of truth for curated-path membership.
-#
-# Every file that belongs to a tier carries `<!-- tiers: senior principal -->` directly
-# under its H1. An HTML comment renders as nothing on GitHub and in the reader, so the
-# marker is invisible to a human and greppable to a tool. Membership therefore lives WITH
-# the content instead of in a hand-maintained array in app.js -- which is what let the two
-# drift in the first place.
-#
-#   module page marker   -> the module is in those tiers
-#   sub-file marker      -> only those tiers see that sub-file
-#   case-study marker    -> that case study is in those tiers
-#   no marker            -> not in any curated tier (Full path only)
-#
-# ORDER still comes from STUDY_ORDER in app.js. A marker says WHETHER, never WHERE.
+# TIER BLOCK -- the single source of truth for curated-path membership and the file
+# inventory: one `<!-- study-paths -->` block in <section>/README.md (format in
+# _section_inventory). ORDER still comes from STUDY_ORDER in app.js. The block says
+# WHETHER, never WHERE.
 TIER_MARK = re.compile(r"^<!--\s*study-paths\s*\n(.*?)^-->\s*$", re.M | re.S)
 TIER_LINE = re.compile(r"^\s*([a-z]+)\s*:\s*(.+?)\s*$", re.M)
 
@@ -688,11 +679,11 @@ def check_wiring(questions, strict):
         for slug in sorted(wired):
             if counts.get(slug, 0) == 0:
                 warns.append(f"STUDY_ORDER dead entry: {slug} extracted 0 questions (Q&A format broken?)")
-        # Tier membership is DERIVED from the `<!-- tiers: ... -->` markers, not read from a
+        # Tier membership is DERIVED from the `<!-- study-paths -->` blocks, not read from a
         # literal in app.js. Ordering is imposed by STUDY_ORDER during derivation, so the
         # ordered-subset property holds by construction -- what remains worth checking is
-        # that every marker names a real tier, that a curated module's page carries one,
-        # and that the section READMEs still describe what the markers say.
+        # that every block line names a real file and tier, that a curated module lists its page,
+        # and that the section READMEs still describe what the blocks say.
         derived, _derive_problems = build_paths_from_markers(order)
         if derived:
             tier_arrays = {t: {s: c[t] for s, c in derived.items()} for t in TIERS}
@@ -709,8 +700,8 @@ def check_wiring(questions, strict):
                 for tier in TIERS:
                     arr = tier_arrays[tier].get(sec)
                     # `[]` (not None) for a section whose markers declare no module at
-                    # this tier -- cs_fundamentals, cuda and devops each have zero
-                    # principal modules. There is no principal path to document, so
+                    # this tier -- cs_fundamentals and cuda have zero principal
+                    # modules. There is no principal path to document, so
                     # demanding a Principal heading there was a false alarm.
                     if not arr:
                         continue
@@ -1143,10 +1134,9 @@ def main():
     with open(os.path.join(OUT_DIR, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, indent=2)
 
-    # Curated tier membership, DERIVED from each file's `<!-- tiers: ... -->` marker and
-    # ordered by STUDY_ORDER. Generated like the banks (gitignored, CI regenerates), so the
-    # module page is the single source of truth and app.js holds no hand-maintained copy
-    # to drift from.
+    # Curated tier membership, DERIVED from each section README's `<!-- study-paths -->`
+    # block and ordered by STUDY_ORDER. Generated like the banks (gitignored, CI
+    # regenerates), so app.js holds no hand-maintained copy to drift from.
     try:
         app_src = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
         _order = _section_arrays(STUDY_ORDER_RE.search(app_src).group(1))

@@ -201,7 +201,7 @@ compiles with a warning, which is the whole point of a bridge release. New defau
 current year (`es2025`), `types: []`, `rootDir: "."`, `noUncheckedSideEffectImports: true`.
 
 **The TS 7.0 caveat that matters most in practice:** there is no stable programmatic
-Compiler API until 7.1. typescript-eslint (8.69.0), ts-jest, ts-morph and framework
+Compiler API until 7.1. typescript-eslint (8.71.2), ts-jest, ts-morph and framework
 template checkers therefore still run on the aliased
 `typescript@npm:@typescript/typescript6` package (binary `tsc6`).
 
@@ -222,7 +222,7 @@ against the TypeScript devblog rather than memory.
 **REPLACE, DO NOT ANNOTATE.** An answer names the current API, never "`foo()` is
 deprecated, use `bar()`". The three exceptions are in root `CLAUDE.md`.
 
-### Ecosystem pins — verified 2026-09-04
+### Ecosystem pins (verified 2026-10-18)
 
 Re-check any of these against the project's own release page before writing a version
 number into prose.
@@ -231,13 +231,13 @@ number into prose.
 |------|---------|------|
 | Node.js | **26 Current / 24 "Krypton" Active LTS** | type stripping non-experimental at v24.12.0 / v25.2.0; flag removed at v26.0.0 |
 | Deno / Bun | **2.9** / **1.4.0** | Bun 1.4.0 (2026-08-20) is the Zig to Rust core rewrite |
-| Zod / Valibot / ArkType | **4.5.4** / **1.4.2** / **2.2.3** | no Zod v5 |
+| Zod / Valibot / ArkType | **4.6.7** / **1.5.0** / **2.2.8** | no Zod v5 |
 | `@standard-schema/spec` | **1.1.0** | a spec, not a runtime library — the `~standard` interface |
-| tRPC | **11.18.0** | accepts any Standard Schema validator natively |
-| typescript-eslint | **8.69.0** | does not yet support TS 7 / tsgo |
-| Vitest | **5.0.0** | shipped 2026-09-03; 4.1.11 is the last 4.x |
-| pnpm / npm / Yarn Berry | **11.25.0** / **12.0.2** / **4.18.0** | pnpm 12 (Rust) went stable 2026-08-26 under `next-12` |
-| ts-node / tsup | **10.9.2** / **8.5.1** | both effectively unmaintained; prefer `tsx` (4.23.13) or native stripping |
+| tRPC | **11.19.0** | accepts any Standard Schema validator natively |
+| typescript-eslint | **8.71.2** | does not yet support TS 7 / tsgo |
+| Vitest | **5.0.5** | 5.0.0 shipped 2026-09-03; 4.1.11 is the last 4.x |
+| pnpm / npm / Yarn Berry | **12.14.0** / **12.0.2** / **4.18.0** | pnpm 12 (Rust) holds the `latest` tag; 11.x ships under `next-11` |
+| ts-node / tsup | **10.9.2** / **9.0.0** | ts-node's last release is 2023-12-08; prefer `tsx` (4.23.15) or native stripping to run code |
 
 ### Spec status
 
@@ -245,8 +245,8 @@ Check `github.com/tc39/proposals` before repeating any of this.
 
 | Proposal | Stage | Note |
 |----------|-------|------|
-| Temporal | **4**, shipped in ES2026 | MDN marks it "Limited availability — not Baseline" |
-| Decorators | **2.7** | Reached Stage 3 in 2022; TC39 later inserted 2.7 as an intermediate checkpoint and re-slotted existing proposals into it. Below Stage 3 today, but as a process change — not a rejection on the merits |
+| Temporal | **4** | Stage 4 at the 2026-03 TC39 meeting, listed for ES2027, not ES2026. MDN marks it "Limited availability, not Baseline" |
+| Decorators | **2.7** | Reached Stage 3 in March 2022. On 2026-05-19 TC39 moved it back to 2.7: no shipping engine, open spec issues, the Test262 semantics PR unmerged, and V8 halted its implementation. Decorator Metadata moved with it |
 | Pipeline operator | **2** | Hack-style won over F#-style, but the topic token is **not** final — the proposal says `%` "could instead be `^`, or many other tokens" |
 | Type Annotations | **1**, dormant | its own README says "not updated regularly" |
 | Records & Tuples | **withdrawn** | repo archived 2025-04-15 |

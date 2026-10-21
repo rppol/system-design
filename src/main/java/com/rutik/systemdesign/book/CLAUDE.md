@@ -8,7 +8,7 @@ Global conventions (formatting, Q&A rules, diagram rules): see root `CLAUDE.md`.
 `devops/`, `cs_fundamentals/` and `cuda/` were unparked on 2026-08-04. **`book/` was
 deliberately left out**, on the owner's reasoning that the other three are *educational
 modules* — they teach a subject and are answerable to reality — whereas this section is
-**a chapter-by-chapter summary of six specific books**, answerable only to its sources.
+**a chapter-by-chapter summary of specific books**, answerable only to its sources.
 That is a difference in kind, not a difference in scheduling, so it does not expire.
 
 **Why the factual audit is not merely deferred here but wrong here.** A book summary is
@@ -89,8 +89,8 @@ word". Those were deliberately skipped and are folded back into "reads fine" her
 renders the question directly above the options, so "It" resolves for a reader. They are
 weak, not wrong.)
 
-**A blanket 1,402-line migration is NOT justified here; the targeted pass over the 310 was
-run on 2026-08-25.** The truncated ones were broken regardless of context — the option
+**The targeted pass over the 310 ran on 2026-08-25, and every book Q&A now carries an
+authored `**Short:**` line.** The truncated ones were broken regardless of context — the option
 literally stopped mid-thought. Rerun the measurement rather than trusting this table if the
 section has changed.
 
@@ -128,6 +128,14 @@ Only `book/README.md` is a README — each book's own index is `book/<book_slug>
 | Machine Learning System Design Interview (Aminian & Xu) | `machine_learning_system_design_interview/` | Ch 1–11 |
 | Designing Machine Learning Systems (Huyen) | `designing_machine_learning_systems/` | Ch 1–11 |
 | Understanding Distributed Systems (Vitillo) | `understanding_distributed_systems/` | Ch 1–33 as **5 part-folders** (sanctioned exception: UDS chapters are 3–8 pages, so one folder per PART — one `## N.x` per book chapter inside; do NOT "fix" it back to 33 folders) |
+| Designing Data-Intensive Applications, 2nd ed. (Kleppmann & Riccomini) | `ddia_2e/` | Ch 1-14 |
+| The Staff Engineer's Path (Reilly) | `the_staff_engineers_path/` | Ch 1-9 |
+| Staff Engineer: Leadership Beyond the Management Track (Larson) | `staff_engineer_larson/` | 5 part-folders |
+| Database Internals (Petrov) | `database_internals/` | Ch 1-14 |
+| Site Reliability Engineering (Beyer, Jones, Petoff & Murphy, eds.) | `site_reliability_engineering/` | 11 selected chapters of 34 |
+| Building Microservices, 2nd ed. (Newman) | `building_microservices/` | Ch 1-16 |
+| AI Engineering (Huyen) | `ai_engineering/` | Ch 1-10 |
+| Generative AI System Design Interview (Aminian & Sheng) | `generative_ai_system_design_interview/` | Ch 1-11 |
 
 **Game navigation (wired in `game/app.js`):** the book section nests one level deeper than
 every other section (module ids are `book/<book_slug>/<chapter>`), so the Study view shows

@@ -31,7 +31,7 @@ This section covers:
   and shipping a front-end with observability that survives contact with production
 
 **Nothing here is React-specific.** Every technique applies to a React app, a Vue app, or
-the 578KB of dependency-free vanilla JavaScript that powers this repository's own learning
+the dependency-free vanilla JavaScript that powers this repository's own learning
 game — which is used throughout as a worked example of the platform without a framework.
 
 ---
@@ -146,7 +146,7 @@ surfaces them as a Full / Senior / Principal toggle.
 The complete curriculum in the order above — see
 [4-Phase Learning Path](#3-4-phase-learning-path). Nothing is dropped.
 
-The two curated tiers below are **different cuts, not nested depths**. Senior is the craft:
+The two curated tiers below nest: Senior covers every module, and Principal is a subset of it. Senior is the craft:
 can you build it, debug it at 3am, and say why it broke. Principal is the judgment: which
 approach at what cost, what the failure modes are, and what you tell a team *not* to do.
 
@@ -382,7 +382,7 @@ Every row was verified at zero or near-zero mentions section-wide.
 **FedCM pairs with the third-party-cookie status.** `cors_cookies_and_the_same_origin_model`
 §6.5 states that status: Safari blocks third-party cookies, Firefox partitions them, and
 Chrome keeps them after Google retired most Privacy Sandbox APIs on 2025-10-17, keeping CHIPS
-and FedCM. `auth_in_the_browser` does not mention FedCM, and neither module links the other.
+and FedCM. `auth_in_the_browser` does not mention FedCM, and `cors_cookies_and_the_same_origin_model` does not link to `auth_in_the_browser`.
 
 The Storage Access API and Local Network Access (which replaced Private Network Access in
 Chrome 142) are Q&As in `cors_cookies_and_the_same_origin_model` §12; both still need prose
@@ -405,7 +405,7 @@ in §6, which is why the row stays.
 |---|---|---|
 | `the_dom_and_web_apis` | `pwa_service_workers_and_offline` | IndexedDB lives entirely in the PWA module |
 | `browser_architecture_and_the_rendering_pipeline` | `web_performance_and_core_web_vitals` | bfcache and font loading |
-| `cors_cookies_and_the_same_origin_model` | `auth_in_the_browser` (both directions) | third-party cookies and FedCM |
+| `cors_cookies_and_the_same_origin_model` | `auth_in_the_browser` | third-party cookies and FedCM; the reverse link exists |
 | `accessibility_and_wcag` | `auth_in_the_browser` | added 2026-09-04 for SC 3.3.8; the reverse link is still missing |
 
 ---

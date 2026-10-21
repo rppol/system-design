@@ -1,6 +1,6 @@
 # ML Case Studies — Learning Path
 
-Twenty-four end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. Ten use the legacy 12-section template (rich, detailed). Fourteen use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
+Twenty-seven end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. Ten use the legacy 12-section template (rich, detailed). Seventeen use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
 
 ---
 
@@ -69,7 +69,7 @@ Studies are grouped by primary engineering concern, not product category.
 | [Semantic Search Engine](design_semantic_search_engine.md) | Dense retrieval + hybrid reranking | Bi-encoder (SBERT), FAISS IVF, RRF hybrid merge, cross-encoder reranking, hard negative mining, Matryoshka embeddings |
 | [NER Pipeline](design_ner_pipeline.md) | BERT token classification | BIO tagging, BERT-CRF, span extraction, nested NER, active learning for annotation, streaming document processing |
 | [Question Answering System](design_question_answering_system.md) | Extractive + open-domain QA | Span prediction (BERT), DPR retriever + reader, multi-hop QA, answer confidence calibration, latency/accuracy tradeoffs |
-
+| [Document AI Extraction](design_document_ai_extraction.md) | Structured extraction from documents | Born-digital text layer vs OCR, fine-tuned layout-aware encoder for known vendors, schema-constrained VLM for unfamiliar layouts, per-vendor memory, field-level accuracy, calibrated auto-post thresholds |
 | [LLM + Classical Hybrid Support Triage](design_llm_hybrid_support_triage.md) | Paradigm choice per traffic slice | Head/tail split, LLM label distillation, temperature-scaled confidence router, conformal abstention, async correction off the SLO path, prompt-drift eval harness, category graduation, cost-per-ticket economics. |
 
 ### Group 7: Product Data Science (DS Analytics)
@@ -84,6 +84,7 @@ Studies are grouped by primary engineering concern, not product category.
 | Study | Primary Concern | What It Teaches |
 |---|---|---|
 | [ML Platform](design_ml_platform.md) | Feature stores, training, serving | End-to-end MLOps: feature store design, Kubeflow, model registry, A/B infra |
+| [Experimentation Platform](design_experimentation_platform.md) | Company-wide A/B testing infrastructure | Assignment, event and analysis layers, layers and domains for concurrent tests, SRM detection, CUPED/CUPAC, sequential testing, SUTVA violations |
 
 ---
 
@@ -140,7 +141,7 @@ Studies that build on patterns from others — read prerequisites first.
                   (feature store, experiment tracking, registry)
 ```
 
-**The first four principal-template studies and their cross-cutting dependencies** (the other ten principal studies reuse the same primitives):
+**The first four principal-template studies and their cross-cutting dependencies** (the other principal studies reuse the same primitives):
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -197,7 +198,9 @@ Map from common "design X" interview question to the best case study.
 | Semantic search engine | [Semantic Search Engine](design_semantic_search_engine.md) | Bi-encoder FAISS IVF, RRF hybrid, cross-encoder reranking, hard negatives |
 | Named entity recognition | [NER Pipeline](design_ner_pipeline.md) | BERT-CRF token classification, BIO tagging, span extraction, active learning |
 | Question answering system | [Question Answering System](design_question_answering_system.md) | BERT extractive QA, DPR open-domain, retriever + reader, multi-hop |
-| Support ticket triage / when to use an LLM vs a classical model | [LLM + Classical Hybrid Support Triage](design_llm_hybrid_support_triage.md) |
+| Support ticket triage / when to use an LLM vs a classical model | [LLM + Classical Hybrid Support Triage](design_llm_hybrid_support_triage.md) | Head/tail split, LLM label distillation, confidence router, conformal abstention, cost per ticket |
+| Experimentation / A/B testing platform | [Experimentation Platform](design_experimentation_platform.md) | Assignment layer, layers and domains, SRM, CUPED, sequential testing, interference |
+| Invoice / document extraction | [Document AI Extraction](design_document_ai_extraction.md) | Layout-aware encoder vs schema-constrained VLM, per-vendor memory, field-level accuracy, calibrated auto-post |
 
 ---
 
@@ -223,8 +226,11 @@ Track completion status across sessions.
 | `design_dynamic_pricing.md` | done | 11-section principal template, 8 Q&As |
 | `design_nlp_classification_pipeline.md` | done | 11-section principal template, 9 Q&As |
 | `design_real_time_personalization.md` | done | 11-section principal template, 9 Q&As |
-| `design_semantic_search_engine.md` | done | 11-section principal template, 9 Q&As |
+| `design_semantic_search_engine.md` | done | 11-section principal template, 8 Q&As |
 | `design_ner_pipeline.md` | done | 11-section principal template, 10 Q&As |
 | `design_question_answering_system.md` | done | 11-section principal template, 10 Q&As |
 | `design_video_recommendation.md` | done | 11-section principal template, 14 Q&As |
 | `design_harmful_content_detection.md` | done | 11-section principal template, 13 Q&As |
+| `design_llm_hybrid_support_triage.md` | done | 11-section principal template, 15 Q&As |
+| `design_experimentation_platform.md` | done | 11-section principal template, 24 Q&As |
+| `design_document_ai_extraction.md` | done | 11-section principal template, 13 Q&As |

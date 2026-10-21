@@ -76,7 +76,7 @@ Every module page (`<module>/<module>.md`) follows the standard 14-section templ
 
 **15-Q&A floor everywhere** — every module page must carry at least 15 Q&As in
 §12, ordered gotchas/traps first, then internals, then edge cases (see root
-`CLAUDE.md` Interview Q&A Rules). It is a floor, not a target: the section runs 16–20, and the
+`CLAUDE.md` Interview Q&A Rules). It is a floor, not a target, and the
 four deep modules listed below require **18+**. Every Q&A needs an authored `**Short:**` line
 as the first non-blank line of its answer (15–220 chars) — and any pass that edits an answer
 MUST update the `**Short:**` above it in the same edit, or a stale summary ships as the
@@ -90,8 +90,8 @@ correct MCQ option.
 two curated tiers: **Senior** (16 modules) and **Principal** (8). They are different
 cuts, not nested depths — senior is the craft (build the endpoint, fix the blocking call
 on the event loop), principal is the judgment (which deployment shape at what cost, what
-you tell a team *not* to do), so principal is the smaller list and much of it is material
-senior never sees. Do not enumerate the members here: membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
+you tell a team *not* to do), so principal is the smaller list, and only one of its modules
+(`security_hardening_and_owasp`) is material senior never sees. Do not enumerate the members here: membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
 each tier takes; listing a tier joins it, omitting the tier opts out, and the module page
 (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.fastapi` in
 `game/app.js`, so a tier is an ordered subset by construction. **There is no path array
@@ -142,10 +142,10 @@ Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 
 ## Q&A Minimums (FastAPI-specific)
 
-- Standard modules: 15+ Q&As (the hard floor in root `CLAUDE.md`). The section currently runs
-  16–20; treat 15 as the floor you must clear, never as the target you aim at.
+- Standard modules: 15+ Q&As (the hard floor in root `CLAUDE.md`). Treat 15 as the floor you
+  must clear, never as the target you aim at.
 - Deep modules — **18+ required**: `pydantic_v2_deep_dive`, `dependency_injection_in_fastapi`,
-  `async_database_sqlalchemy`, `authentication_and_security`. All four are at 18–19 today, so a
+  `async_database_sqlalchemy`, `authentication_and_security`. All four already clear 18, so a
   new Q&A here adds to that, it does not top up to a quota.
 
 ## Boundary with `backend/` — who owns what

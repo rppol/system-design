@@ -64,7 +64,7 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 | `distributed_transactions_and_consistency/` | 2PC problems, Saga, outbox pattern, idempotency keys | 15 |
 | `database_types_deep_dive/` | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL | 15 |
 
-> For deeper coverage: see [`../database/README.md`](../database/README.md) — 33 modules, 7 phases, principal-engineer level.
+> For deeper coverage: see [`../database/README.md`](../database/README.md) - 7 phases, principal-engineer level.
 
 ### Phase 5 — Resilience & Reliability
 

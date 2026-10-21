@@ -26,8 +26,8 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR = path.join(REPO, "src/main/java/com/rutik/systemdesign/game/vendor");
 
 // name = the prefix authors reference (`logos:aws-s3`). Order = registration
-// order; `logos` (full colour) is primary. simple-icons/devicon can be added
-// here for even broader coverage (monochrome — they inherit currentColor).
+// order; `logos` (full colour) is primary, `simple-icons` (monochrome, inherits
+// currentColor) is the fallback.
 const PACKS = [
   { name: "logos", pkg: "@iconify-json/logos" },                 // full colour — preferred
   { name: "simple-icons", pkg: "@iconify-json/simple-icons" },   // monochrome — fallback for products logos lacks

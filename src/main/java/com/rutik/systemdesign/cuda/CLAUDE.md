@@ -56,7 +56,7 @@ is a result. Do not re-audit them looking for something.
   was picked.
 - CC **11.0** (Jetson Thor) is in `gpu_hardware_architecture/blackwell_and_rubin_architecture.md`
   but missing from the capability enumerations in `occupancy_and_launch_configuration`, which
-  lists 10.0/10.3 only. Fill it from the Programming Guide table, never from a guess.
+  lists 10.0/10.3 and Rubin 10.7 but not 11.0. Fill it from the Programming Guide table, never from a guess.
 - Unverified and deliberately left: the 3-8 us device-side child-launch figure (no NVIDIA
   source, and §5/§14 arithmetic depend on it) and a K=4095 cuBLAS sweep whose 8x drop
   likely overstates reality — now labelled illustrative with a re-measure instruction.

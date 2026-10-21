@@ -6,7 +6,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 
 | Section | Coverage | Sub-CLAUDE |
 |---------|---------|-----------|
-| **LLD** | Design patterns (GoF), SOLID, anti-patterns, architecture patterns — 13 modules, 15 design problems | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
+| **LLD** | Design patterns (GoF), SOLID, anti-patterns, architecture patterns — 13 modules, 18 design problems | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
 | **HLD** | Distributed system concepts (CAP, caching, queues, sharding) — 25 modules, 30 case studies | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
 | **Backend** | Networking, API design, performance engineering, resilience, security, microservices — 50 modules, 10 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
 | **Database** | Relational, NoSQL, distributed DB, production ops — 34 modules, 11 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
@@ -17,10 +17,10 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **FastAPI** | FastAPI + ASGI production guide — 21 modules, 8 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 47 modules, 27 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
 | **MLOps** | MLOps & ML Infra: every artifact an AI feature ships (weights, adapters, prompts, MCP servers, vector indexes, eval sets, decision schemas) as a versioned, gated, rolled-out release input, plus the serving, GPU compute and operations platform that runs them. Link-only to `ml/`, `llm/`, `devops/`; owns KServe, llm-d, Kueue, Volcano and KAI Scheduler - 32 modules, 8 case studies, 4 deep-dive sub-files, 1 cross-cutting file | [mlops/CLAUDE.md](src/main/java/com/rutik/systemdesign/mlops/CLAUDE.md) |
-| **LLM** | LLM engineering guide — 54 modules, 30 case studies, 88 deep-dive sub-files (78 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
+| **LLM** | LLM engineering guide — 54 modules, 30 case studies, 90 deep-dive sub-files (80 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 15 case studies, 10 deep-dive sub-files | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 8 case studies, 4 deep-dive sub-files | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
-| **CS Fundamentals** | Language-agnostic CS spine — 28 modules, 6 case studies + DSA pattern playbooks sub-section (26-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
+| **CS Fundamentals** | Language-agnostic CS spine — 27 modules, 6 case studies + DSA pattern playbooks sub-section (26-pattern recognition engine, interview execution playbook, AI-assisted round playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Technologies** | Per-technology deep dives (Apache Airflow, Temporal, NVIDIA Triton Inference Server, Intel OpenVINO, Envoy Proxy, HashiCorp Vault, Debezium, Apache Iceberg, Apache Flink, Trino, Cilium) — 11 modules | [technologies/CLAUDE.md](src/main/java/com/rutik/systemdesign/technologies/CLAUDE.md) |
 | **Soft Skills** | Behavioural interviewing, leadership, influence, communication, and four professional **vocabularies** (precise-technical, business/finance, leadership/org, hedging and disagreement) — 26 modules, 8 case studies. Template-adapted: §4 "Types / Levels / Modes", §5 "Models & Frameworks Diagrammed", §11 **"Frameworks, Books & Further Reading"** (the §11 retitle is load-bearing — see below) | [soft_skills/CLAUDE.md](src/main/java/com/rutik/systemdesign/soft_skills/CLAUDE.md) |
 | **TypeScript** | TypeScript as a language — the type system, the runtime boundary, the TS 7 native compiler, typed backend services — 16 modules, 0 case studies. Targets **TypeScript 7.0** (GA 2026-07-08). JS language semantics and toolchain deliberately live in `frontend_platform/` | [typescript/CLAUDE.md](src/main/java/com/rutik/systemdesign/typescript/CLAUDE.md) |
@@ -94,29 +94,27 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 **`book/` stays out, and its exclusion does not expire.** The owner's reasoning: the other
 three are *educational modules*, answerable to reality; `book/` is a chapter-by-chapter
-summary of six specific books, answerable only to its sources. A currency audit is not
+summary of specific books, answerable only to its sources. A currency audit is not
 deferred there, it is the wrong test — "correcting" a 2017 DDIA claim to 2026 reality makes
 the summary wrong about the book, and REPLACE-DO-NOT-ANNOTATE inverts into fabrication
 attributed to a named author. See `book/CLAUDE.md` for what a fidelity pass would ask
-instead, and for why the `**Short:**` migration is a genuinely separate, still-open
-question there.
+instead, and for the rules that bind a `**Short:**` line written there.
 
 | Section | Was parked | State at unparking | Now |
 |---------|-----------|--------------------|-----|
 | `devops/` | 2026-07-29 | 27 audit units none started; 650 Q&As, 0 Short | **audit DONE, Short 650/650** |
 | `cs_fundamentals/` | 2026-07-29 | 24 audit units none started; 701 Q&As, 0 Short | **audit DONE, Short 704/704** |
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
-| `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
+| `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **audit still out; Short done for every Q&A** |
 
 **Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start; `mlops/` was likewise authored Short-migrated from the start on 2026-10-18) (2026-08-04, commit `6ce35a6`;
-the three unparked sections were audited and migrated the same day). Every non-book Q&A in
-the repo now carries an authored `**Short:**` line — verify with `extract.py`'s own
-"authored **Short:** summaries: N of M parsed Q&As", where `M - N` should equal `book/`'s
-count exactly and nothing else. `cs_fundamentals` reads 704 against the 701 recorded at
+the three unparked sections were audited and migrated the same day). Every Q&A in the
+repo, `book/` included, carries an authored `**Short:**` line. Verify with `extract.py`'s own
+"authored **Short:** summaries: N of M parsed Q&As", where `N` must equal `M`. `cs_fundamentals` reads 704 against the 701 recorded at
 unparking because the Case-B reflow recovered 3 questions that had been written on the same
 line as the END of the previous answer, where `is_question_line()` could not see them.
 
-Only `book/`'s 1,402 remain unmigrated, by design. Do not rebuild a worklist against the
+No Q&A remains unmigrated: `book/` was migrated too, under the rules in `book/CLAUDE.md`. Do not rebuild a worklist against the
 parked-era figures (230 units, 8,489 Q&As) or the unparking-era ones (295 units, 9,503
 Q&As) — both are dead, and the second is dead because the work behind it is finished.
 
@@ -216,8 +214,8 @@ distractor pool would be drawn from an unrelated scenario.
 
 `extract.py` already satisfies this: `case_studies/` paths are skipped outright, and an
 in-file Q&A span opens only on a heading matching `interview q` and closes at the next `##`,
-so anything parked under `## N. Case Study` falls outside it. **182 in-file case-study Q&As
-(llm 99, hld 83) are correctly excluded today — that is the rule working, not a bug.**
+so anything parked under `## N. Case Study` falls outside it. **228 in-file case-study Q&As
+(llm 134, hld 83, ml 9, database 1, soft_skills 1, measured 2026-10-22) are correctly excluded. That is the rule working, not a bug.**
 
 The consequence for authors: **do not "rescue" case-study Q&As by moving them under the
 interview heading**, and do not file a bug when a `## N. Case Study` Q&A is missing from the
@@ -480,8 +478,9 @@ ordering, `data-processed`, square brackets inside labels).
 `src/main/java/com/rutik/systemdesign/<section>/`). Do not add mermaid fences to
 CLAUDE.md files, skill files, or the `game/` tooling directory.
 
-**The game reader renders Mermaid** (`game/app.js` → `renderMermaid()` → CDN lazy
-import). GitHub renders mermaid fences natively. Both surfaces work without a build step.
+**The game reader renders Mermaid** (`game/app.js` → `renderMermaid()`) from build-time SVGs
+in `game/diagrams/<key>.mmz`; the pinned engine (CDN on Pages, vendored UMD on the APK)
+loads only for a fence with no pre-rendered asset. GitHub renders mermaid fences natively.
 
 **Reader post-processing is already wired** — `renderMermaid()`/`mmRenderNode()`
 round ALL diagram boxes (flowchart nodes, sequence actors/notes, frames, timeline
@@ -541,11 +540,11 @@ silently dropped from the game or renders wrong. These rules are derived from
 `game/CLAUDE.md` — do not contradict them.
 
 - **Android APK exception:** the game also ships as an offline-sideloadable APK
-  (see `android/README.md`). Three `IS_APK`-gated hooks in `game/app.js`
-  (vendored Mermaid UMD loader, skipped service-worker registration,
-  `SDAndroid.saveBackup` export bridge) are the ONLY APK-conditional branches,
-  keyed on the `appassets.androidplatform.net` hostname — the Pages build must
-  stay byte-identical outside them.
+  (see `android/README.md`). Three APK seams in `game/app.js` are the ONLY
+  APK-conditional branches: two gated on `IS_APK` (vendored Mermaid UMD loader, skipped
+  service-worker registration; keyed on the `appassets.androidplatform.net` hostname) and
+  the `SDAndroid.saveBackup` export bridge, feature-detected on `window.SDAndroid`. The
+  Pages build must stay byte-identical outside them.
 
 ### What gets scanned
 
@@ -557,8 +556,9 @@ silently dropped from the game or renders wrong. These rules are derived from
   where one is expected.
 - **Excluded from Q&A extraction:** any path containing `case_studies/`, and all
   `CLAUDE.md` files. Case studies are still **reachable in the reader** via
-  relative `.md` links (the `/content/` route serves any file) — so linking to a
-  case study from a module is fine; its Q&As just never enter the quiz bank.
+  relative `.md` links (the reader fetches any repo path), so linking to a
+  case study from a module is fine; its Q&As never enter the main bank and feed only the
+  separate `case_questions/<section>.json` pool behind the case-study page's "Quiz this topic".
 - **`technologies/tech_bank/` is excluded from BOTH walks by exact path** — the Q&A/file-
   tree walk in `extract.py`'s `main()` and the §11/§8 walk in `build_tech_index()`
   (`TECH_BANK_DIR` / `in_tech_bank()` — both live in `game/build_tech.py`, which
@@ -595,9 +595,9 @@ silently dropped from the game or renders wrong. These rules are derived from
   position — a module absent from the array falls through the `indexOf === -1 →
   9999` fallback and sorts to the very end, breaking the learning order.
   `extract.py --strict` (run by Pages CI) fails the deploy when a bank module is
-  missing from `STUDY_ORDER`, when a `STUDY_PATHS` array stops being an ordered
-  subset, or when a section's **Interview-Specific Path drifts between its two
-  sources**. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
+  missing from `STUDY_ORDER`, when a section README's `<!-- study-paths -->` block
+  names a missing file or an unknown tier, or when a generated
+  `<!-- study-path-table -->` is stale. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
   under their parent module's existing position.)
 - **STRUCTURE LIVES IN `<section>/README.md`; CONTENT FILES HOLD ONLY CONTENT.** The
   section README's `<!-- study-paths -->` block is the single source of truth for that
@@ -739,9 +739,10 @@ silently dropped from the game or renders wrong. These rules are derived from
 
 ### Mermaid render rules (so diagrams draw in the reader)
 
-- The reader renders every ```` ```mermaid ```` fence via CDN `mermaid@11`
-  (flowchart, sequenceDiagram, stateDiagram-v2, xychart-beta, pie, quadrantChart,
-  timeline, sankey-beta). Offline → raw source shown, retried next open.
+- The reader renders every ```` ```mermaid ```` fence from its pre-rendered `.mmz`
+  (engine fallback: pinned `mermaid@11.16.0`) (flowchart, sequenceDiagram,
+  stateDiagram-v2, xychart-beta, pie, quadrantChart, timeline, sankey-beta). A fence with
+  no asset and no reachable engine shows its raw source.
 - **Flowcharts: colour EVERY node** with the One-Dark `classDef` block (from
   `/mermaid-diagrams`), semantic-by-role — that is the standard (owner-set 2026-07-07).
   The reader's grey auto-tint fills **only** the nodes you leave unstyled, assigning

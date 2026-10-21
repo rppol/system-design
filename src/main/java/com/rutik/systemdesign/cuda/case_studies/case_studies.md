@@ -2,7 +2,7 @@
 
 8 principal-grade case studies + 5 cross-cutting kernel-engineering deep-dives. Every case study uses the **11-section principal template** (Intuition + §1–11); reference file: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md). These are *kernel-optimization* walkthroughs — the "optimize X" counterpart to the module READMEs' "understand X".
 
-> **Build status:** COMPLETE (2026-07-07) — all 6 case studies and 5 cross-cutting primitives authored. Case-study Q&As are intentionally excluded from the game quiz bank (the `case_studies/` path is skipped by `extract.py`), but every file is reachable in the reader via relative links.
+> **Build status:** COMPLETE - all 8 case studies and 5 cross-cutting primitives authored. Case-study Q&As are intentionally excluded from the game quiz bank (the `case_studies/` path is skipped by `extract.py`), but every file is reachable in the reader via relative links.
 
 ---
 
@@ -78,11 +78,14 @@ optimize_matrix_multiplication_kernel   (the flagship — all perf concepts)
         +--> accelerate_2d_convolution_and_stencil  (shared-mem tiling + halos)
         |
         +--> build_a_flash_attention_kernel         (fusion; needs tiling + softmax)
-                     |
-                     v
-             optimize_llm_inference_kernels          (quantized + fused; needs attention)
+        |            |
+        |            v
+        |    optimize_llm_inference_kernels          (quantized + fused; needs attention)
+        |
+        +--> write_a_blackwell_gemm_with_cute_dsl   (TMA + tcgen05 + warp specialization)
 
 port_a_cpu_pipeline_to_gpu   (methodology — read alongside any of the above)
+optimize_moe_expert_parallel_dispatch  (multi-GPU all-to-all; standalone)
 nsight_profiling_workflow    (referenced by every case study §4)
 numerical_precision_and_determinism  (referenced when precision/repro comes up)
 ```

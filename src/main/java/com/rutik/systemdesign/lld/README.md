@@ -54,7 +54,7 @@ category-level Q&As. Start with the category index before diving into individual
 | Refactoring | [refactoring/refactoring.md](refactoring/refactoring.md) | Code smells, the refactoring catalogue, changing a design safely under test |
 | Concurrency Patterns | [concurrency_patterns/concurrency_patterns.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool, virtual threads and structured concurrency, coordination patterns (Guarded Suspension, Balking, Active Object, Reactor, Actor) |
 | System Design Problems | [system_design_problems/system_design_problems.md](system_design_problems/system_design_problems.md) | 22 problems: Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise, Logging Framework, Notification Service, Task Scheduler, Snake and Ladder, Food Delivery, Order Matching Engine, Key-Value Store, Pub-Sub, File System, Meeting Scheduler |
-| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 12 of the 22 problems |
+| LLD Case Studies | [case_studies/case_studies.md](case_studies/case_studies.md) | Learning path, pattern matrix, dependency map, and interview shortcuts across the problem set |
 
 ---
 
@@ -204,14 +204,17 @@ category-level Q&As. Start with the category index before diving into individual
 ### Phase 1 — Foundations
 Build your design vocabulary before patterns.
 
-1. [SOLID Principles](solid_principles/solid_principles.md) — the why behind every pattern
-2. [DRY](design_principles/DRY.md) — don't repeat yourself
-3. [KISS](design_principles/KISS.md) — simplicity over cleverness
-4. [YAGNI](design_principles/YAGNI.md) — avoid speculative design
-5. [Composition over Inheritance](design_principles/Composition_over_Inheritance.md)
-6. [Program to Interface](design_principles/ProgramToInterface.md)
-7. [Law of Demeter](design_principles/LawOfDemeter.md)
-8. [GRASP and Connascence](design_principles/GRASP.md)
+1. [OOP and UML Foundations](oop_and_uml_foundations/oop_and_uml_foundations.md) - class relationships and the notation every later page uses
+2. [SOLID Principles](solid_principles/solid_principles.md) — the why behind every pattern
+3. [DRY](design_principles/DRY.md) — don't repeat yourself
+4. [KISS](design_principles/KISS.md) — simplicity over cleverness
+5. [YAGNI](design_principles/YAGNI.md) — avoid speculative design
+6. [Composition over Inheritance](design_principles/Composition_over_Inheritance.md)
+7. [Program to Interface](design_principles/ProgramToInterface.md)
+8. [Law of Demeter](design_principles/LawOfDemeter.md)
+9. [GRASP and Connascence](design_principles/GRASP.md)
+10. [Architecture Patterns](architecture_patterns/architecture_patterns.md) - layered, hexagonal, clean and onion; the dependency rule
+11. [Dependency Injection and Testability](dependency_injection_and_testability/dependency_injection_and_testability.md) - constructor injection, seams, test doubles
 
 ### Phase 2 — Creational Patterns
 Learn how to construct objects safely and flexibly.
@@ -441,7 +444,7 @@ a **Full / Senior / Principal** toggle (Full is the default).
 
 ### Full Path (13 modules)
 
-The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 22 System Design Problems. Nothing is dropped.
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (OOP and UML Foundations, SOLID Principles, and Design Principles), application structure (Architecture Patterns, Dependency Injection and Testability), safe change (Refactoring), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 22 System Design Problems. Nothing is dropped.
 
 <!-- study-path-table senior -->
 ### Senior Path (12 modules)
@@ -529,7 +532,7 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 
 ## Study Plan
 
-A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the pattern-dependency map and interview-prep shortcuts across 12 of the 22 problems.
+A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/case_studies.md](case_studies/case_studies.md) for the pattern-dependency map and interview-prep shortcuts across the problem set.
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|

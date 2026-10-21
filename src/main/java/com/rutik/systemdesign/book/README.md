@@ -344,8 +344,7 @@ generative_ai_system_design_interview/11_text_to_video_generation
 >
 > The `**Short:**` MCQ-summary migration is a **separate, fidelity-neutral** question and was
 > answered separately: a targeted pass over the ~310 Q&As whose derived option ships broken
-> was run on 2026-08-25. The remaining ~1,090 derive a perfectly good option and are
-> deliberately left unmigrated — a blanket 1,402-line migration is not justified here.
+> ran on 2026-08-25, and every book Q&A now carries an authored `**Short:**` line.
 
 ---
 
@@ -393,8 +392,8 @@ former.
 
 The two *System Design Interview* volumes are one series split across two folders (each
 volume numbers its chapters independently); with both DDIA editions, MLSDI, DMLS, UDS and the seven added in 2026-08 the section
-covers **fourteen books across fourteen folders**. More may be added over time (e.g. *Database
-Internals*, *Streaming Systems*). New books follow the folder-per-chapter convention —
+covers **fourteen books across fourteen folders**. More may be added over time (e.g. *Streaming
+Systems*). New books follow the folder-per-chapter convention —
 with one sanctioned exception: **UDS uses folder-per-PART** (its ~33 chapters are 3–8
 pages each; a part is the multi-concept narrative the chapter template was designed for) —
 see [CLAUDE.md](CLAUDE.md).

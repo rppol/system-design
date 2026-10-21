@@ -1,6 +1,6 @@
 # LLM Case Studies — Learning Path
 
-29 case studies + 9 cross-cutting infrastructure deep-dives.
+30 case studies + 9 cross-cutting infrastructure deep-dives.
 
 Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII and Mermaid), executable Python code, production war stories, and 10+ design-rationale interview Q&As. Each cross-cutting file is 600–800 lines covering one infrastructure primitive that recurs across many products.
 

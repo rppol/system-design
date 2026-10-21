@@ -48,16 +48,31 @@ This section covers:
   modes and the incremental-snapshot watermark algorithm, offsets and schema history,
   the four-quadrant position-loss recovery table, ordering guarantees, the
   `ExtractNewRecordState` tombstone modes and the outbox `EventRouter` defaults.
+- **eBPF Networking** - Cilium: the pod-to-pod, pod-to-Service and egress packet paths,
+  `CiliumNetworkPolicy` and the default-deny that kills DNS, Hubble flow observability,
+  Cluster Mesh, the BGP Control Plane, Gateway API, XDP/Maglev/DSR, netkit, and
+  WireGuard vs IPsec encryption.
+- **Lakehouse Table Format** - Apache Iceberg: spec v2 vs v3, the metadata tree and the
+  atomic pointer swap, hidden partitioning, schema evolution by column ID, copy-on-write
+  vs merge-on-read, snapshot expiry, compaction, and the catalog tier.
+- **Stream Processing** - Apache Flink: event time and watermarks, barrier
+  checkpointing, checkpoint vs savepoint, the HashMap/RocksDB/ForSt state backends,
+  two-phase-commit sinks, backpressure, Flink SQL, `maxParallelism` and key groups, and
+  elastic scaling.
+- **Distributed SQL Query Engine** - Trino: the query lifecycle, memory pools and the
+  low-memory killer, fault-tolerant execution, the cost-based optimizer, dynamic
+  filtering, the Iceberg connector, federation, and access control.
 
-**Primary stack:** Apache Airflow 3.3.0; Temporal Server 1.31.2 (with Go 1.47.0,
-Java 1.37.0, Python 1.31.0 and TypeScript 1.21.1 SDKs, and `temporal` CLI 1.8.2);
-NVIDIA Triton Inference Server (version tagged per NGC container release inside the
-module); Intel OpenVINO 2026.2 (API 2.0 `ov::` era); Envoy 1.39.0 (with Envoy Gateway
-1.8.3, Istio 1.30.3 and Gateway API 1.6.1); HashiCorp Vault 2.0.3 and OpenBao 2.6.1
-(with Vault Secrets Operator 1.5.0, vault-k8s 1.7.5, vault-csi-provider 1.7.3 and
-External Secrets Operator 2.8.0); Debezium 3.6.0.Final (built against Apache Kafka
-4.3.0, with PostgreSQL as the worked connector). See each module's §1 for the exact
-version studied and inline tags for version-specific features.
+**Primary stack:** Apache Airflow 3.3.2; Temporal Server 1.32.1 (with Go 1.50.0,
+Java 1.40.0, Python 1.34.0, TypeScript 1.24.0 and .NET 1.20.0 SDKs, and `temporal` CLI
+1.9.1); NVIDIA Triton Inference Server (version tagged per NGC container release inside
+the module); Intel OpenVINO 2026.4.1 (API 2.0 `ov::` era); Envoy 1.40.0 (with Envoy
+Gateway 1.9.2, Istio 1.31.2 and Gateway API 1.6.3); Cilium 1.20.3; HashiCorp Vault 2.2.0
+and OpenBao 2.7.1 (with Vault Secrets Operator 1.5.0, vault-k8s 1.7.5, vault-csi-provider
+1.7.3 and External Secrets Operator 2.8.0); Debezium 3.7.0.Final (built against Apache
+Kafka 4.3.1, with PostgreSQL as the worked connector); Apache Iceberg (Java) 1.12.0;
+Apache Flink 2.3.0; Trino 484. See each module's §1 for the exact version studied and
+inline tags for version-specific features.
 
 See [`CLAUDE.md`](CLAUDE.md) for the scope & non-overlap boundary (why Kafka and vLLM
 are *not* here), the module template, and how to add a new technology.
@@ -73,18 +88,22 @@ are *not* here), the module template, and how to add a new technology.
 | 3 | [nvidia_triton_inference_server](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU Model Serving | Advanced | Model repository + `config.pbtxt`, backends, dynamic batching, ensembles/BLS, `perf_analyzer` |
 | 4 | [intel_openvino](intel_openvino/intel_openvino.md) | CPU/Edge Inference & Optimization | Advanced | IR + `ovc`/`convert_model`, device plugins (CPU/GPU/NPU), AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, OVMS, `openvino-genai` |
 | 5 | [envoy_proxy](envoy_proxy/envoy_proxy.md) | L7 Proxy & Service-Mesh Data Plane | Advanced | Listener/filter-chain/route/cluster/endpoint model, xDS + ADS ordering, LB policies and locality/priority/panic mode, the `enforcing_*` outlier trap, circuit breaking as five ceilings, retry budgets, the seven-layer timeout stack, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc |
-| 6 | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | Secrets Management | Advanced | Barrier + four-layer key hierarchy, seal/unseal and why recovery keys cannot unseal, Integrated Storage, every secrets engine, the KV v2 `data/` policy trap, leases and the lease-count arithmetic, secret-zero and auth methods, `bound_claims` vs `claim_mappings`, policies + identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, the OpenBao delta |
-| 7 | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) | Change Data Capture | Advanced | Logical decoding and output plugins, what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`), `flush.lsn.source` and the idle-captured-table heartbeat trap, `REPLICA IDENTITY` and `before: null`, TOAST and `__debezium_unavailable_value`, snapshot modes and their removals, the incremental-snapshot watermark algorithm, the four-quadrant position-loss recovery table, the never-compact schema-history topic, ordering per key / per table / never across tables, the five tombstone modes, the `EventRouter` defaults, why `tasks.max` is ignored |
-| 8 | [apache_iceberg](apache_iceberg/apache_iceberg.md) | Lakehouse Table Format | Advanced | Spec v2 vs v3, the metadata tree (metadata.json / manifest list / manifests) and the atomic pointer swap, hidden partitioning and partition evolution, column-ID schema evolution, copy-on-write vs merge-on-read, deletion vectors, snapshot expiry and orphan-file cleanup, compaction economics, the catalog tier (REST, Polaris, Glue, Nessie), and engine support. The vendor-neutral concept layer lives in [`database/lakehouse_and_table_formats`](../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md). |
+| 6 | [cilium](cilium/cilium.md) | eBPF Networking (CNI) | Advanced | Pod-to-pod, pod-to-Service and egress packet paths, kube-proxy replacement, `CiliumNetworkPolicy` and the default-deny DNS trap, Hubble, Cluster Mesh, BGP Control Plane, Gateway API and Cilium Ingress, Cilium Service Mesh vs Istio Ambient, XDP/Maglev/DSR, netkit, WireGuard vs IPsec, Bandwidth Manager, the conntrack table ceiling |
+| 7 | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | Secrets Management | Advanced | Barrier + four-layer key hierarchy, seal/unseal and why recovery keys cannot unseal, Integrated Storage, every secrets engine, the KV v2 `data/` policy trap, leases and the lease-count arithmetic, secret-zero and auth methods, `bound_claims` vs `claim_mappings`, policies + identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, the OpenBao delta |
+| 8 | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) | Change Data Capture | Advanced | Logical decoding and output plugins, what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`), `flush.lsn.source` and the idle-captured-table heartbeat trap, `REPLICA IDENTITY` and `before: null`, TOAST and `__debezium_unavailable_value`, snapshot modes and their removals, the incremental-snapshot watermark algorithm, the four-quadrant position-loss recovery table, the never-compact schema-history topic, ordering per key / per table / never across tables, the five tombstone modes, the `EventRouter` defaults, why `tasks.max` is ignored |
+| 9 | [apache_iceberg](apache_iceberg/apache_iceberg.md) | Lakehouse Table Format | Advanced | Spec v2 vs v3, the metadata tree (metadata.json / manifest list / manifests) and the atomic pointer swap, hidden partitioning and partition evolution, column-ID schema evolution, copy-on-write vs merge-on-read, deletion vectors, snapshot expiry and orphan-file cleanup, compaction economics, the catalog tier (REST, Polaris, Glue, Nessie), and engine support. The vendor-neutral concept layer lives in [`database/lakehouse_and_table_formats`](../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md). |
+| 10 | [apache_flink](apache_flink/apache_flink.md) | Stream Processing | Advanced | Event time, watermarks and allowed lateness, asynchronous barrier checkpointing, checkpoint vs savepoint, HashMap/RocksDB/ForSt state backends, two-phase-commit sinks, backpressure diagnosis, Flink SQL and dynamic tables, restart strategies and failover regions, FlinkCEP, state schema evolution, Reactive Mode and the Operator autoscaler, `maxParallelism` and key groups, Materialized Tables |
+| 11 | [trino](trino/trino.md) | Distributed SQL Query Engine | Advanced | Query lifecycle, memory pools and the low-memory killer, task concurrency and scheduling, fault-tolerant execution, cost-based optimizer and table statistics, dynamic filtering, the Iceberg connector, federation and cross-catalog joins, `EXPLAIN ANALYZE`, session vs configuration properties, access control, the file system cache |
 
 ---
 
 ## 3. Learning Path
 
-The seven modules are **independent** — none depends on the others, so study order is a
-matter of which domain you need first, not a hard prerequisite chain. Four of them read
-best as **two contrast pairs**, and `STUDY_ORDER.technologies` is arranged that way, with
-the last three appended because none of them has a partner in the section yet:
+The modules are **independent**: none depends on the others, so study order is a
+matter of which domain you need first, not a hard prerequisite chain.
+`STUDY_ORDER.technologies` groups them by domain: three contrast pairs (orchestration,
+serving, and traffic and data plane), Vault on its own, and a four-module data run from
+Debezium to Trino:
 
 - **Orchestration pair — apache_airflow ↔ temporal_durable_execution.** Both are called
   "orchestrators" and are constantly confused in interviews. Airflow schedules
@@ -95,24 +114,22 @@ the last three appended because none of them has a partner in the section yet:
 - **Serving pair — nvidia_triton_inference_server ↔ intel_openvino.** GPU model serving
   against CPU/edge inference and model optimization, sharing a vocabulary (batching,
   instances, throughput/latency knees) with opposite hardware assumptions.
-- **The third pair slot, still half-empty — envoy_proxy.** Both pairs above share a
-  property Envoy does not: they *run your workload*. Envoy *moves traffic to* it, which
-  is a third domain, so it is appended rather than inserted. If the next technology page
-  is another traffic or edge technology, it belongs immediately after Envoy, completing
-  an "edge and data plane" pair.
-- **A fourth domain, appended — hashicorp_vault.** Vault neither runs your workload nor
+- **Traffic and data-plane pair - envoy_proxy ↔ cilium.** Both pairs above *run your
+  workload*; these two *move traffic to* it. Envoy is the L7 proxy, Cilium the eBPF
+  L3/L4 data plane and CNI underneath it, and Cilium hands L7 policy to an embedded
+  Envoy (`cilium` §6.4), so reading them back to back shows where one layer stops and
+  the other starts.
+- **The credential layer - hashicorp_vault.** Vault neither runs your workload nor
   moves traffic to it: it is the control-plane dependency that lets both start at all.
-  It did not take the edge slot, which stays open. The most useful pairing for Vault is
-  outside this section — read it against
+  Its most useful pairing is outside this section: read it against
   [devops/secrets_management](../devops/secrets_management/secrets_management.md), which
   owns the discipline while this module owns the product.
-- **A fifth domain, appended — debezium_change_data_capture.** Debezium moves *data
-  between stores*, which is neither running a workload nor moving traffic to one, so it
-  did not take the edge slot either — that stays open next to Envoy. Appending it opens a
-  **fourth pair slot at position 8** for a future data-integration page, which belongs
-  adjacent to Debezium. It was deliberately not inserted at 3 next to Temporal: both are
+- **Data run - debezium_change_data_capture → apache_iceberg → apache_flink → trino.**
+  Debezium captures row changes from the database log, Iceberg is the table format they
+  land in, Flink is the stream processor that moves and transforms them, and Trino
+  queries the result. Debezium was deliberately not placed next to Temporal: both are
   fed by a durable log, but that would split the orchestration pair for a surface
-  similarity. Its real contrast partners are outside this section —
+  similarity. Debezium's contrast partners outside this section are
   [backend/kafka_deep_dive](../backend/kafka_deep_dive/kafka_deep_dive.md) for the log it
   writes to and
   [database/polyglot_persistence_patterns](../database/polyglot_persistence_patterns/polyglot_persistence_patterns.md)
@@ -133,11 +150,23 @@ intel_openvino  (CPU/edge inference & model optimization)
        v  (independent — the traffic layer, not a workload runner)
 envoy_proxy  (L7 proxy / service-mesh data plane)
        |
-       v  (independent — the credential layer everything else depends on)
+       v  (contrast pair - the eBPF L3/L4 data plane under the L7 proxy)
+cilium  (eBPF networking / CNI)
+       |
+       v  (independent - the credential layer everything else depends on)
 hashicorp_vault  (secrets management / identity broker)
        |
-       v  (independent — data movement between stores, not traffic to workloads)
+       v  (independent - data movement between stores, not traffic to workloads)
 debezium_change_data_capture  (change data capture from the database log)
+       |
+       v  (data run - where the change stream lands)
+apache_iceberg  (lakehouse table format)
+       |
+       v  (data run - the stream processor that writes those tables)
+apache_flink  (stream processing)
+       |
+       v  (data run - the engine that queries them)
+trino  (distributed SQL query engine)
 ```
 
 ---
@@ -182,7 +211,7 @@ trino
 -->
 ## Learning Paths
 
-This section is small by design — 7 modules, each already scoped to what a senior
+This section is small by design, with each module already scoped to what a senior
 engineer needs to operate the technology in production. There is **no Senior/Principal
 tier toggle yet**: the browser learning game's Study view only shows tier tabs for
 sections present in the derived `paths.json`, and while this section has now crossed
@@ -191,20 +220,24 @@ the remaining planned technology pages land. See
 [`CLAUDE.md`](CLAUDE.md) "Learning Paths (Full-only — tiers deliberately deferred past
 the threshold)" for the reasoning and the mechanics.
 
-### Full Path (7 modules)
+### Full Path
 
-The complete curriculum in the order above — see [Learning Path](#3-learning-path).
-All seven modules in full: every layer of Airflow's scheduler and executor internals,
+The complete curriculum in the order above - see [Learning Path](#3-learning-path).
+Every module and deep-dive sub-file in full: every layer of Airflow's scheduler and executor internals,
 every layer of Temporal's event history, determinism constraint, timeout and failure
 taxonomy, versioning strategies and shard sizing, every layer of Triton's model
 repository, backend, and batching internals, every layer of OpenVINO's Runtime,
 device plugins, hints/streams model, and NNCF quantization, every layer of Envoy's
 object model, xDS delivery, load-balancing and health machinery, timeout stack,
-observability subsystems and extension surfaces, and every layer of Vault's barrier and
-key hierarchy, seal mechanics, secrets engines, lease economics, auth and policy model,
-delivery mechanisms and operational playbook, and every layer of Debezium's snapshot and
-streaming phases, replication-slot mechanics, offset and schema-history stores,
-transformation surface and failure modes.
+observability subsystems and extension surfaces, every layer of Cilium's eBPF packet
+paths, policy engine, Hubble, Cluster Mesh and encryption, every layer of Vault's barrier
+and key hierarchy, seal mechanics, secrets engines, lease economics, auth and policy
+model, delivery mechanisms and operational playbook, every layer of Debezium's snapshot
+and streaming phases, replication-slot mechanics, offset and schema-history stores,
+transformation surface and failure modes, every layer of Iceberg's metadata tree,
+partitioning, delete files, maintenance and catalogs, every layer of Flink's event-time,
+checkpoint, state-backend and exactly-once machinery, and every layer of Trino's query
+lifecycle, memory management, optimizer and connectors.
 
 ---
 
@@ -238,6 +271,9 @@ that answers them.
 | Your upstream takes 30 seconds and Envoy kills it at 15 — which timeout did that? | [envoy_proxy](envoy_proxy/envoy_proxy.md) |
 | You set a local rate limit of 100 rps and it is admitting roughly 800 — why? | [envoy_proxy](envoy_proxy/envoy_proxy.md) |
 | Is Envoy a service mesh, and which of Istio, Envoy Gateway, Contour and Consul are control planes over the same data plane? | [envoy_proxy](envoy_proxy/envoy_proxy.md) |
+| A `CiliumNetworkPolicy` meant to allow one external API takes down DNS for the whole namespace - what happened? | [cilium](cilium/cilium.md) |
+| `cilium-agent` on a node crashes and restarts - do the pods on that node lose connectivity while it is down? | [cilium](cilium/cilium.md) |
+| Connections start failing silently after months of steady growth with `bpf-ct-global-tcp-max` at its default - what is the mechanism? | [cilium](cilium/cilium.md) |
 | Your Vault policy grants read on `secret/app/db` and every pod still gets permission denied — why? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
 | You cut the dynamic credential TTL from 1h to 5m. What happens to Vault's lease count and its load? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
 | Vault is unsealed and healthy but returning 500 to everything — what do you check first? | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) |
@@ -249,12 +285,21 @@ that answers them.
 | You already bulk-copied the table — how do you tell Debezium to start streaming from that exact point? | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) |
 | Why can't you just publish to Kafka from the application after the commit and skip CDC entirely? | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) |
 | What ordering does CDC actually guarantee — per key, per table, or across tables? | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) |
+| Why is renaming a column safe in Iceberg when it would break a Hive table's downstream readers? | [apache_iceberg](apache_iceberg/apache_iceberg.md) |
+| Storage cost tripled over eight months even though compaction ran the whole time - what did the team forget? | [apache_iceberg](apache_iceberg/apache_iceberg.md) |
+| Two Spark jobs commit to the same Iceberg table at nearly the same time - what actually happens? | [apache_iceberg](apache_iceberg/apache_iceberg.md) |
+| A rescale from 8 to 16 parallelism restores cleanly, but a downstream operator's counts reset to zero - what happened? | [apache_flink](apache_flink/apache_flink.md) |
+| A `KafkaSink` with `EXACTLY_ONCE` starts failing after someone widened the checkpoint interval - why? | [apache_flink](apache_flink/apache_flink.md) |
+| All windowed output stops across every key while the job still checkpoints - what is the likely cause? | [apache_flink](apache_flink/apache_flink.md) |
+| A Trino cluster sits under 30% CPU but latency climbs as more analysts connect - what do you check first? | [trino](trino/trino.md) |
+| The low-memory killer removed a well-behaved query instead of the one causing the pressure - how? | [trino](trino/trino.md) |
+| A wide join keeps hitting "exceeded distributed user memory limit" - why does adding workers not fix it? | [trino](trino/trino.md) |
 
 ---
 
 ## Study Plan
 
-A 7-week plan. Each week pairs the module with related concept-section material to
+A one-week-per-module plan, in study order. Each week pairs the module with related concept-section material to
 rehearse how the technology fits into a broader system design answer.
 
 | Week | Focus | Module | Rehearse with |
@@ -264,8 +309,12 @@ rehearse how the technology fits into a broader system design answer.
 | 3 | GPU Serving | [nvidia_triton_inference_server](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | [llm/inference_engines](../llm/inference_engines/inference_engines.md) (Triton vs vLLM/TGI-style serving stacks), [devops/ml_platform_and_gpu_infrastructure](../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) (the GPU platform Triton runs on) |
 | 4 | CPU/Edge Serving & Optimization | [intel_openvino](intel_openvino/intel_openvino.md) | [llm/optimization_and_quantization](../llm/optimization_and_quantization/optimization_and_quantization.md) (the quantization concepts NNCF implements), [ml/gpu_and_hardware_optimization](../ml/gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) (VNNI/AMX/XMX vs Tensor Cores), [llm/vllm_deep_dive](../llm/vllm_deep_dive/vllm_deep_dive.md) (the GPU LLM-serving contrast to OpenVINO's CPU/edge LLM path) |
 | 5 | Traffic Layer & Data Plane | [envoy_proxy](envoy_proxy/envoy_proxy.md) | [backend/service_mesh_and_service_discovery](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) (the mesh pattern and Istio's CRD surface over this data plane), [backend/api_gateway_patterns](../backend/api_gateway_patterns/api_gateway_patterns.md) (the gateway pattern Envoy implements), [devops/kubernetes_networking](../devops/kubernetes_networking/kubernetes_networking.md) (Gateway API, whose implementations are mostly Envoy), [hld/load_balancing](../hld/load_balancing/load_balancing.md) (the algorithms behind Envoy's LB policies) |
-| 6 | Secrets & Credential Brokering | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | [devops/secrets_management](../devops/secrets_management/secrets_management.md) (the discipline this module's product implements — read it first, and note the deliberate non-overlap table in §1), [devops/kubernetes_security](../devops/kubernetes_security/kubernetes_security.md) (RBAC and etcd encryption, which is what VSO's native Secrets depend on), [backend/auth_and_authorization_systems](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md) (the OIDC and JWT mechanics behind Vault's `jwt` auth), [devops/infrastructure_as_code_terraform](../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (how mounts, roles and policies should actually be managed) |
-| 7 | Change Data Capture | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) | [backend/kafka_deep_dive](../backend/kafka_deep_dive/kafka_deep_dive.md) (the log Debezium writes to — broker internals, partitions and the Netflix DBLog story all live there, not here), [database/polyglot_persistence_patterns](../database/polyglot_persistence_patterns/polyglot_persistence_patterns.md) (the outbox and derived-store *pattern* this module's `EventRouter` implements), [database/replication_and_high_availability](../database/replication_and_high_availability/replication_and_high_availability.md) and [database/postgresql_internals](../database/postgresql_internals/postgresql_internals.md) (logical replication, slots as a general primitive and the xmin horizon), [devops/case_studies/design_zero_downtime_infra_migration](../devops/case_studies/design_zero_downtime_infra_migration.md) (bulk copy plus CDC catch-up at 200 TB) |
+| 6 | eBPF Networking | [cilium](cilium/cilium.md) | [devops/kubernetes_networking](../devops/kubernetes_networking/kubernetes_networking.md) (CNI and kube-proxy, which Cilium replaces), [backend/service_mesh_and_service_discovery](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) (the sidecar mesh Cilium Service Mesh competes with), [devops/kubernetes_security](../devops/kubernetes_security/kubernetes_security.md) (the NetworkPolicy model `CiliumNetworkPolicy` extends), [backend/off_cpu_and_ebpf_analysis](../backend/off_cpu_and_ebpf_analysis/off_cpu_and_ebpf_analysis.md) (eBPF as a general kernel mechanism) |
+| 7 | Secrets & Credential Brokering | [hashicorp_vault](hashicorp_vault/hashicorp_vault.md) | [devops/secrets_management](../devops/secrets_management/secrets_management.md) (the discipline this module's product implements — read it first, and note the deliberate non-overlap table in §1), [devops/kubernetes_security](../devops/kubernetes_security/kubernetes_security.md) (RBAC and etcd encryption, which is what VSO's native Secrets depend on), [backend/auth_and_authorization_systems](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md) (the OIDC and JWT mechanics behind Vault's `jwt` auth), [devops/infrastructure_as_code_terraform](../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (how mounts, roles and policies should actually be managed) |
+| 8 | Change Data Capture | [debezium_change_data_capture](debezium_change_data_capture/debezium_change_data_capture.md) | [backend/kafka_deep_dive](../backend/kafka_deep_dive/kafka_deep_dive.md) (the log Debezium writes to — broker internals, partitions and the Netflix DBLog story all live there, not here), [database/polyglot_persistence_patterns](../database/polyglot_persistence_patterns/polyglot_persistence_patterns.md) (the outbox and derived-store *pattern* this module's `EventRouter` implements), [database/replication_and_high_availability](../database/replication_and_high_availability/replication_and_high_availability.md) and [database/postgresql_internals](../database/postgresql_internals/postgresql_internals.md) (logical replication, slots as a general primitive and the xmin horizon), [devops/case_studies/design_zero_downtime_infra_migration](../devops/case_studies/design_zero_downtime_infra_migration.md) (bulk copy plus CDC catch-up at 200 TB) |
+| 9 | Lakehouse Table Format | [apache_iceberg](apache_iceberg/apache_iceberg.md) | [database/lakehouse_and_table_formats](../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md) (the vendor-neutral concept layer this module is the product half of), [ml/data_pipelines_and_processing](../ml/data_pipelines_and_processing/data_pipelines_and_processing.md) (the pipelines that write these tables) |
+| 10 | Stream Processing | [apache_flink](apache_flink/apache_flink.md) | [hld/stream_processing](../hld/stream_processing/stream_processing.md) (the windowing and exactly-once concepts Flink implements), [backend/kafka_deep_dive](../backend/kafka_deep_dive/kafka_deep_dive.md) (the source and sink most Flink jobs read and write) |
+| 11 | Distributed SQL Query Engine | [trino](trino/trino.md) | [database/analytical_databases_and_olap](../database/analytical_databases_and_olap/analytical_databases_and_olap.md) (where a federated query engine sits against a warehouse), [database/sql_query_optimization](../database/sql_query_optimization/sql_query_optimization.md) (the plan-reading skills `EXPLAIN ANALYZE` needs), [database/lakehouse_and_table_formats](../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md) (the tables Trino reads through the Iceberg connector) |
 
 ---
 
@@ -273,15 +322,19 @@ rehearse how the technology fits into a broader system design answer.
 
 | Technology | Version Studied | Key Notes |
 |-----------|-----------------|-----------|
-| Apache Airflow | 3.3.0 | React-based UI, DAG versioning, and the task-execution API server are new in 3.0; deferrable operators (Airflow 2.7+) and the Celery/Kubernetes executors are tagged inline where behavior differs from 2.x |
-| Temporal | Server 1.31.2 (SDKs: Go 1.47.0, Java 1.37.0, Python 1.31.0, TypeScript 1.21.1, .NET 1.17.0; CLI 1.8.2) | MIT throughout. `[1.31]` brought Worker Deployment APIs to GA, Task Queue Priority and Fairness to GA, Nexus on by default with token-based routing, and `Principal` attribution on history events; the legacy Worker Versioning v1/v2 APIs are deprecated in 1.31 and removed in 1.32. Update-with-Start went GA in `[1.28]`. Core schema floor is MySQL/PostgreSQL v1.19 with Cassandra 5.0.4+; visibility schema is Elasticsearch v14 |
-| NVIDIA Triton Inference Server | Tagged per NGC container release inline (e.g. `24.05-py3`) | Triton does not gate features by simple semver — the module tags each version-specific flag/default against the NGC release it shipped in |
-| Intel OpenVINO | 2026.2 | API 2.0 (`ov::` / top-level `openvino` package) — the legacy `InferenceEngine::` API was removed in 2024.0 and the Model Optimizer (`mo`) CLI in 2025.0; NPU plugin is 2023.2+, `openvino-genai` 2024.2+. Features are tagged inline against the release they landed in |
-| Envoy | 1.39.0 (2026-07-14) | Apache 2.0, CNCF graduated. Quarterly releases on the 15th with roughly 12 months of support per line, so 1.39, 1.38, 1.37 and 1.36 are current; 1.40.0 is due 2026-10-13. Dynamic Modules landed `[1.34]` and expanded substantially in `[1.39]`. Ecosystem versions studied: Gateway API 1.6.1, Istio 1.30.3 (ambient GA in `[Istio 1.24]`), Envoy Gateway 1.8.3, Contour 1.33.5, Envoy AI Gateway 1.0 |
-| HashiCorp Vault | 2.0.3 (2026-06-17), on the 2.0 line GA'd 2026-04-14 | **BUSL 1.1**, source-available, with the Licensor now **International Business Machines Corporation (IBM)** after the $6.4B acquisition closed 2026-02-27 — the brand is "IBM Vault (formerly HashiCorp Vault)" while the repo, Go module, docs domain, Helm chart and Terraform provider all still say hashicorp. Change Date +4 years, Change License MPL 2.0. Supported lines: 2.0.x, 1.21.x, 1.20.x, 1.19.x. `[2.0]` made `sys/rekey`, `sys/generate-root` and the DR operation-token endpoint **authenticated**, made `LIST` with a trailing slash respect a more-specific deny, prohibited globs in rendered identity-template output, and rejected non-canonical paths |
-| OpenBao | 2.6.1 (2026-07-22) | **MPL 2.0**, Linux Foundation. API-compatible at the fork point and diverging on operational surface: `[OpenBao 2.6]` removed `stored_shares` from `sys/init` and `sys/rekey/init`, runs containers as the unprivileged `openbao` user rather than root, deprecated the built-in `awskms`/`azurekeyvault`/`gcpckms`/`pkcs11` seals for removal in 2.7.0, and deprecated `file` storage. No Enterprise features at all — no namespaces, replication, HSM seals, Seal HA, performance standbys or lease-count quotas |
+| Apache Airflow | 3.3.2 (2026-09-17) | React-based UI, DAG versioning, and the task-execution API server arrived in `[3.0]`; 3.3.2 also tightened backfill-endpoint authorization and made an explicit API credential take precedence over a session cookie. Where 2.x behaves differently the delta is tagged inline as `[2.x]` |
+| Temporal | Server 1.32.1 (2026-10-08); supported lines 1.30, 1.31, 1.32 (SDKs: Go 1.50.0, Java 1.40.0, Python 1.34.0, TypeScript 1.24.0, .NET 1.20.0; CLI 1.9.1) | MIT throughout. `[1.31]` brought Worker Deployment APIs to GA, Task Queue Priority and Fairness to GA, and Nexus on by default; the legacy Worker Versioning v1/v2 APIs are deprecated in 1.31 with removal in 1.33. Update-with-Start went GA in `[1.28]` |
+| NVIDIA Triton Inference Server | Tagged per NGC container release inline (e.g. `26.09-py3`, server 2.73.0) | Triton does not gate features by simple semver - the module tags each version-specific flag/default against the NGC release it shipped in |
+| Intel OpenVINO | 2026.4.1 (2026-10-01) | API 2.0 (`ov::` / top-level `openvino` package) - the legacy `InferenceEngine::` API was removed in 2024.0 and the Model Optimizer (`mo`) CLI in 2025.0; from `[2026.0]` the CPU plugin requires AVX2. Features are tagged inline against the release they landed in |
+| Envoy | 1.40.0 (2026-10-13) | Apache 2.0, CNCF graduated. Quarterly releases around the 15th with roughly 12 months of support per line, so 1.40, 1.39, 1.38 and 1.37 are supported. Dynamic Modules landed `[1.34]` and expanded in `[1.39]`. Ecosystem versions studied: Gateway API 1.6.3, Gateway API Inference Extension 1.6.2, Istio 1.31.2 (ambient GA in `[Istio 1.24]`), Envoy Gateway 1.9.2, Contour 1.33.7, and Agent Router 1.2.0 (the release that renamed Envoy AI Gateway, which reached 1.0 in June 2026) |
+| Cilium | 1.20.3 (2026-10-15) | Three most recent minor lines supported (1.20, 1.19, 1.18) on roughly a six-month cadence; 1.17 left support when 1.20 shipped. Version-gated behaviour is tagged inline as `[1.20]`, `[BGP v2]` and `[Gateway API]` |
+| HashiCorp Vault | 2.2.0 (2026-10-15), on the 2.x line GA'd as 2.0.0 on 2026-04-14 | **BUSL 1.1**, with the Licensor now **International Business Machines Corporation (IBM)**; the repo, Go module, docs domain, Helm chart and Terraform provider all still say hashicorp. Change Date +4 years, Change License MPL 2.0. From 2.x, Enterprise follows IBM's Support Cycle-2 model (fixes only in the latest fix release of a major line); 1.19.x is the remaining LTS line, in extended maintenance until April 2027. `[2.0]` made `sys/rekey`, `sys/generate-root` and the DR operation-token endpoint **authenticated** |
+| OpenBao | 2.7.1 (2026-10-01) | **MPL 2.0**, Linux Foundation. API-compatible at the fork point and diverging on operational surface: `[OpenBao 2.6]` removed `stored_shares` from `sys/init` and `sys/rekey/init` and runs containers as the unprivileged `openbao` user; `[OpenBao 2.7]` moved the KMS seals and the LDAP, Kerberos and RADIUS auth methods out to plugins, removed `file` storage, and added Control Groups |
 | Vault Kubernetes ecosystem | VSO 1.5.0, vault-k8s 1.7.5, vault-csi-provider 1.7.3, ESO 2.8.0 | The four delivery mechanisms are compared in `hashicorp_vault` §4.9, §6.19–§6.20 and §8.5. ESO 2.8.0 serves `external-secrets.io/v1`; `[ESO 0.17]` stopped serving `v1beta1` |
-| Debezium | 3.6.0.Final (2026-07-01) | **Apache 2.0**, community-governed with Red Hat as corporate sponsor — **not a CNCF project**. Built against Apache Kafka 4.3.0; preceding releases 3.5.2.Final and 3.4.3.Final, preview 3.7.0.Alpha1. Build requires Java 21; connector runtime baseline is Java 17, while Debezium Server, the Operator and the Quarkus Outbox extension require 21. Removals that break copied configs: `schema_only`/`schema_only_recovery` `[3.3.0.Alpha1]`, MySQL `never` `[3.6.0.Alpha2]`, `drop.tombstones`/`delete.handling.mode` `[3.2.0.Beta1]`, singular `additional-condition` `[3.0]`, `wal2json` `[2.0.0.Alpha1]`, MongoDB oplog capture `[2.0.0.Alpha2]`. `source.ts_ms` became the COMMIT timestamp `[2.6.0.CR1]`. Support floors: PostgreSQL 14+ `[3.4]`, MySQL 8.0+ `[2.5]`. **Images are published only to `quay.io/debezium/*`** since `[3.0.1.Final]`; the stale Docker Hub tags still resolve |
+| Debezium | 3.7.0.Final (2026-09-29) | **Apache 2.0**, community-governed with Red Hat as corporate sponsor - **not a CNCF project**. Built against Apache Kafka 4.3.1; preceding lines end at 3.6.3.Final and 3.5.2.Final. Build requires Java 21; connector runtime baseline is Java 17, while Debezium Server, the Operator and the Quarkus Outbox extension require 21. `[3.7]` removed the Cassandra 3 connector and continuous mining for Oracle 12, and renamed `ByLogicalTableRouter` to `ToLogicalTopicRouter`. Earlier removals that break copied configs: `schema_only`/`schema_only_recovery` `[3.3.0.Alpha1]`, MySQL `never` `[3.6.0.Alpha2]`, `drop.tombstones`/`delete.handling.mode` `[3.2.0.Beta1]`, `wal2json` `[2.0.0.Alpha1]`. Support floors: PostgreSQL 14+ `[3.4]`, MySQL 8.0+ `[2.5]` |
+| Apache Iceberg | Java 1.12.0 (2026-09-29); PyIceberg 0.12.0 | Apache 2.0, ASF top-level project. Table spec v3 is ratified, but `format-version` still defaults to 2 for new tables; v3 is opt-in and one-way (v3 readers read v2 tables, not the reverse). `[1.12]` removed Spark 3.4 support; `[1.11]` made Spark 4.1 and Flink 2.1 the default build targets |
+| Apache Flink | 2.3.0 (2026-06-25); 1.20 is the 1.x LTS line | `[2.0]` (2025-03-24) is the boundary the module keeps returning to: the first major version in nine years. Ecosystem versions studied: Flink CDC 3.7.0 and the Flink Kubernetes Operator 1.16.1 (supports Flink 1.19.x to 2.3.x) |
+| Trino | 484 (2026-10-15) | Single-number releases. Amazon Athena engine version 3 is built on Trino. Version-gated behaviour is tagged inline as `[484]`, `[483]`, `[Athena v3]` and `[SEP]` |
 
 ---
 

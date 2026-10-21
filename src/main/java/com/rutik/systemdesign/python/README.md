@@ -244,7 +244,7 @@ A ruthless cut to what a **senior Python interview** actually probes, anchored o
 **Not in this path** (17 of 25, Full Path only): `data_model_and_objects`, `core_language_idioms`, `the_import_system`, `iterators_and_generators`, `decorators_and_closures`, `context_managers_and_exceptions`, `collections_and_data_structures`, `dataclasses_enums_and_data_modeling`, `strings_bytes_encoding_and_regex`, `file_io_and_serialization`, `cpython_memory_model`, `metaclasses_and_metaprogramming`, `c_extensions_and_native_interop`, `functional_programming`, `threading_and_multiprocessing`, `asyncio_and_event_loop`, `stdlib_datetime_and_logging`
 <!-- /study-path-table -->
 
-A different cut, not senior-plus-extras. The Principal Path probes the judgment behind a Python codebase at scale: where the runtime's guarantees actually bind, which concurrency model the workload demands, and what you standardise across teams. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
+A different cut, not senior-plus-extras. The Principal Path probes the judgment behind a Python codebase at scale: where the runtime's guarantees actually bind, which concurrency model the workload demands, and what you standardise across teams. In this section it is close to a subset of the Senior Path (only `design_patterns_in_python` is principal-only), and it is the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 

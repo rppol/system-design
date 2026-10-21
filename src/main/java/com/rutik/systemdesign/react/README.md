@@ -245,8 +245,8 @@ full table is in [Server Components and Server Functions](server_components_and_
 | Area | Pin | Note |
 |------|-----|------|
 | Next.js | **16** (2025-10-21), current **16.4.x** (security floor 16.4.1) | Turbopack is default; Cache Components and `"use cache"` replace `experimental.ppr`/`dynamicIO`; `middleware.ts` is now **`proxy.ts`** on the Node runtime |
-| React Router | **v8** (2026-06-17), current 8.5 | v7 was the Remix merge — "framework mode" is the former Remix |
-| Remix v3 | **not React** | a separate framework on a Preact fork; **beta preview 2026-04-30** (the July press coverage is not the release date). Never present it as a React upgrade path |
+| React Router | **v8** (2026-06-17), current 8.4 | v7 was the Remix merge — "framework mode" is the former Remix |
+| Remix v3 | **not React** | a separate framework with its own UI runtime; release candidate 2026-08-31, `remix@3.0.0` on npm 2026-10-01. Never present it as a React upgrade path |
 | TanStack Start | **1.0**, stable since 2026-10-13 | Vite plus Nitro; RSC opt-in |
 | Astro | **7** (2026-06-22), current 7.4 | Rust compiler, on Vite 8 |
 | RSC outside Next | `@vitejs/plugin-rsc`, Waku, Parcel | a framework-agnostic Vite RSC story now exists |
@@ -448,33 +448,33 @@ lines**, 11-section principal template, 10-16 Q&As.
 |---|------|-------|--------|-----:|------:|
 | 1 | `react_fundamentals_and_the_render_model/react_fundamentals_and_the_render_model.md` | 1 | **done** | 18 | 744 |
 | 2 | `hooks_rules_and_the_hook_model/hooks_rules_and_the_hook_model.md` | 1 | **done** | 18 | 807 |
-| 3 | `typing_react_components/typing_react_components.md` | 1 | **done** | 18 | 749 |
-| 4 | `effects_and_synchronization/effects_and_synchronization.md` | 1 | **done** | 18 | 753 |
-| 5 | `refs_and_focus_management/refs_and_focus_management.md` | 1 | **done** | 16 | 823 |
-| 6 | `context_and_component_communication/context_and_component_communication.md` | 1 | **done** | 16 | 785 |
-| 7 | `fiber_and_reconciliation/fiber_and_reconciliation.md` | 2 | **done** | 18 | 850 |
-| 8 | `concurrent_rendering_and_transitions/concurrent_rendering_and_transitions.md` | 2 | **done** | 18 | 751 |
-| 9 | `suspense_and_error_boundaries/suspense_and_error_boundaries.md` | 2 | **done** | 18 | 774 |
+| 3 | `typing_react_components/typing_react_components.md` | 1 | **done** | 18 | 750 |
+| 4 | `effects_and_synchronization/effects_and_synchronization.md` | 1 | **done** | 18 | 755 |
+| 5 | `refs_and_focus_management/refs_and_focus_management.md` | 1 | **done** | 17 | 865 |
+| 6 | `context_and_component_communication/context_and_component_communication.md` | 1 | **done** | 16 | 810 |
+| 7 | `fiber_and_reconciliation/fiber_and_reconciliation.md` | 2 | **done** | 18 | 854 |
+| 8 | `concurrent_rendering_and_transitions/concurrent_rendering_and_transitions.md` | 2 | **done** | 20 | 802 |
+| 9 | `suspense_and_error_boundaries/suspense_and_error_boundaries.md` | 2 | **done** | 19 | 812 |
 | 10 | `react_performance_and_profiling/react_performance_and_profiling.md` | 2 | **done** | 18 | 796 |
-| 11 | `the_react_compiler/the_react_compiler.md` | 2 | **done** | 18 | 756 |
+| 11 | `the_react_compiler/the_react_compiler.md` | 2 | **done** | 18 | 778 |
 | 12 | `server_state_and_data_fetching/server_state_and_data_fetching.md` | 3 | **done** | 18 | 788 |
 | 13 | `client_state_management/client_state_management.md` | 3 | **done** | 16 | 755 |
-| 14 | `forms_and_validation/forms_and_validation.md` | 3 | **done** | 18 | 880 |
+| 14 | `forms_and_validation/forms_and_validation.md` | 3 | **done** | 18 | 890 |
 | 15 | `accessible_component_patterns/accessible_component_patterns.md` | 3 | **done** | 16 | 880 |
-| 16 | `server_components_and_server_functions/server_components_and_server_functions.md` | 4 | **done** | 18 | 804 |
-| 17 | `rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md` | 4 | **done** | 18 | 782 |
-| 18 | `meta_frameworks_and_routing/meta_frameworks_and_routing.md` | 4 | **done** | 18 | 816 |
+| 16 | `server_components_and_server_functions/server_components_and_server_functions.md` | 4 | **done** | 18 | 830 |
+| 17 | `rendering_strategies_hydration_and_seo/rendering_strategies_hydration_and_seo.md` | 4 | **done** | 20 | 858 |
+| 18 | `meta_frameworks_and_routing/meta_frameworks_and_routing.md` | 4 | **done** | 18 | 857 |
 | 19 | `styling_and_design_systems/styling_and_design_systems.md` | 5 | **done** | 16 | 788 |
-| 20 | `testing_and_frontend_ci/testing_and_frontend_ci.md` | 5 | **done** | 16 | 814 |
-| 21 | `react_architecture_and_antipatterns/react_architecture_and_antipatterns.md` | 5 | **done** | 16 | 750 |
+| 20 | `testing_and_frontend_ci/testing_and_frontend_ci.md` | 5 | **done** | 16 | 827 |
+| 21 | `react_architecture_and_antipatterns/react_architecture_and_antipatterns.md` | 5 | **done** | 16 | 766 |
 | C0 | `case_studies/case_studies.md` (index) | CS | **done** | n/a | 123 |
 | C1 | `case_studies/design_a_news_feed_with_infinite_scroll.md` | CS | **done** | 14 | 929 |
 | C2 | `case_studies/design_a_checkout_and_payment_flow.md` | CS | **done** | 14 | 937 |
-| C3 | `case_studies/design_a_search_and_typeahead_experience.md` | CS | **done** | 14 | 919 |
-| C4 | `case_studies/design_a_realtime_collaborative_editor.md` | CS | **done** | 14 | 923 |
+| C3 | `case_studies/design_a_search_and_typeahead_experience.md` | CS | **done** | 15 | 921 |
+| C4 | `case_studies/design_a_realtime_collaborative_editor.md` | CS | **done** | 16 | 925 |
 | C5 | `case_studies/design_a_dashboard_with_server_components.md` | CS | **done** | 16 | 1010 |
-| C6 | `case_studies/design_a_micro_frontend_platform.md` | CS | **done** | 15 | 901 |
-| C7 | `case_studies/design_an_ai_chat_streaming_ui.md` | CS | **done** | 14 | 974 |
+| C6 | `case_studies/design_a_micro_frontend_platform.md` | CS | **done** | 16 | 903 |
+| C7 | `case_studies/design_an_ai_chat_streaming_ui.md` | CS | **done** | 15 | 976 |
 
 ### Conventions reminder (for future batch agents)
 

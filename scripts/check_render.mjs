@@ -1,6 +1,6 @@
 // Render-validation gate for Mermaid fences. Extracts every ```mermaid fence from a
-// file and renders each through the pinned engine WITH the logos icon pack registered
-// (the exact runtime path). Exit 0 = all render; exit 1 = prints the failing fences.
+// file and renders each through the pinned engine with the logos icon pack registered
+// (the runtime also registers simple-icons; this check does not). Exit 0 = all render; exit 1 = prints the failing fences.
 //
 // Run this on any file whose diagrams you touched, BEFORE committing. A fence that
 // does not parse fails the build (scripts/build_diagrams.mjs exits 1), and GitHub

@@ -9,7 +9,7 @@
 // LR) plus their measured dims, so the client can re-choose orientation for the
 // current width — engine-free, offline, on phone/tablet/rotation.
 //
-// Assets: game/diagrams/<key>.json keyed by cyrb53(fenceSource) (the SAME hash +
+// Assets: game/diagrams/<key>.mmz (gzipped JSON) keyed by cyrb53(fenceSource) (the SAME hash +
 // normalization the runtime computes from a .mermaid node's textContent.trim()).
 // Content-hashed => edits invalidate, unchanged diagrams are stable/cacheable, and
 // the build is incremental (renders only missing keys, prunes orphans).

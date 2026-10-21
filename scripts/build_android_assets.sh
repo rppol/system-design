@@ -5,8 +5,8 @@ set -euo pipefail
 #
 # Generates the question banks, mirrors the entire study repo (every Markdown
 # section + the game SPA) into the APK's assets/www, then vendors Mermaid
-# locally so diagrams render fully offline (the reader falls back to this file
-# when the CDN is unreachable). Run before any Gradle assemble; the assets/ tree
+# locally; the APK always uses this file (never the CDN), and only for a fence
+# with no pre-rendered .mmz. Run before any Gradle assemble; the assets/ tree
 # is gitignored and always regenerated.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,7 +72,7 @@ curl -fSL --retry 3 --retry-delay 2 --retry-all-errors "$MERMAID_URL" -o "$MERMA
 SIZE=$(wc -c < "$MERMAID_OUT")
 MIN_BYTES=2621440  # 2.5 MiB
 if [ "$SIZE" -lt "$MIN_BYTES" ]; then
-  echo "ERROR: mermaid.min.js is $SIZE bytes (< 3 MB) — download looks wrong or truncated." >&2
+  echo "ERROR: mermaid.min.js is $SIZE bytes (< 2.5 MiB) — download looks wrong or truncated." >&2
   exit 1
 fi
 

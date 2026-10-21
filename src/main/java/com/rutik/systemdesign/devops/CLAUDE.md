@@ -104,7 +104,7 @@ Backfill status (2026-07-16): the floor backlog is fully cleared — every modul
 ## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 41 modules = "8-Phase Learning Path") plus
-two curated tiers: **Senior** (22 modules) and **Principal** (3 modules —
+two curated tiers: **Senior** (27 modules) and **Principal** (3 modules —
 `cloud_cost_optimization_finops`, `platform_engineering_and_idp`,
 `ml_platform_and_gpu_infrastructure`, each with its deep-dive sub-file, plus the
 `design_gpu_training_and_inference_cluster` case study). The Principal cut is small on

@@ -1,9 +1,8 @@
 /* System Design Daily - service worker (Pages-only PWA).
    The cache name embeds a per-deploy build stamp: pages.yml rewrites the BUILD
    placeholder below on every deploy so a new deploy always busts the app-shell
-   cache. Bump the "v1" when you change the caching STRATEGY (not needed for content
-   edits — banks are stale-while-revalidate, so fresh data arrives on the next load).
-   Bump the "vN" prefix (v2 -> v3, ...) when you change the caching STRATEGY. */
+   cache. Bump the "vN" prefix (v2 -> v3, ...) when you change the caching STRATEGY;
+   content edits need no bump (banks are stale-while-revalidate). */
 const BUILD = "__BUILD__";
 const CACHE = "sd-daily-v2-" + BUILD;
 // [W5] Content .md pages live in their own capped bucket so lazily-fetched repo

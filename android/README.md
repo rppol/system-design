@@ -29,8 +29,10 @@ gh release download --pattern systemdesign-daily.apk   # grab the latest APK
 
 ## Build locally
 
-You need **JDK 17** (AGP 8.7.2 rejects newer JDKs), **Gradle 8.10+**, and an
-Android SDK with `platforms;android-35` + `build-tools;35.0.0`. No Gradle
+You need **JDK 17** (AGP 8.7.2 rejects newer JDKs), **Gradle 8.10+**, an
+Android SDK with `platforms;android-35` + `build-tools;35.0.0`, **Python 3**,
+**Node.js + npm**, and network access (npm packages, Puppeteer's Chrome, and the
+Mermaid UMD build). No Gradle
 wrapper is committed (CI uses `gradle/actions/setup-gradle`, which needs
 nothing extra); install Gradle yourself, or run `gradle wrapper` once inside
 `android/` to generate one.
@@ -38,7 +40,7 @@ nothing extra); install Gradle yourself, or run `gradle wrapper` once inside
 Then build in two steps — the asset step is not optional:
 
 ```bash
-bash scripts/build_android_assets.sh     # banks + graphs + content + mermaid
+bash scripts/build_android_assets.sh     # banks + graphs + pre-rendered diagrams + icon packs + content + mermaid
 gradle -p android :app:assembleDebug
 ```
 

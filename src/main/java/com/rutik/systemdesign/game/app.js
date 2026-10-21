@@ -469,16 +469,8 @@ const STUDY_ORDER = {
   ],
 };
 
-// Curated "Interview-Specific" learning paths — an ordered SUBSET of STUDY_ORDER
-// per section, focused on what a senior interview actually probes. Only sections
-// with an entry here show the Full/Interview toggle in the Study view; all others
-// behave exactly as before (Full only). Slugs are the same "<section>/<module>"
-// form as STUDY_ORDER and MUST stay in sync with that section's README
-// "Learning Paths" list (LLM was the pilot; ML, Java, Spring now live too).
-// [TIERS] Curated Senior/Principal paths are DERIVED, not declared here: extract.py reads
-// each file's `<!-- tiers: ... -->` marker and emits questions/paths.json, which boot()
-// assigns below. Membership therefore lives with the content it describes -- the drift
-// this used to have with the section READMEs is structurally impossible now.
+// [TIERS] Senior/Principal paths, derived by extract.py from each section README's
+// `<!-- study-paths -->` block into questions/paths.json; boot() assigns it below.
 // Shape: { <section>: { senior:[], principal:[], seniorFiles:{}, principalFiles:{},
 //                       cases:{senior:[],principal:[]} } }
 let STUDY_PATHS = {};
@@ -489,7 +481,7 @@ let STUDY_PATHS = {};
 // line resolves on Pages and on the APK's asset host -- adding no new APK seam
 // (the grep-counted token stays at exactly 4; see game/CLAUDE.md).
 //
-// It is an order of magnitude larger than paths.json (~740 KB, ~250 KB gzipped), so
+// It is far larger than paths.json (megabytes raw, over 1 MB gzipped), so
 // boot() STARTS the fetch without awaiting it and renderTech() awaits the same
 // promise. Boot latency is untouched; by the time anyone reaches the screen it is
 // warm. Absent (offline before the first fetch) -> the screen shows an empty state.
@@ -4302,8 +4294,8 @@ function fuzzyScore(query, text) {
   return score + Math.max(0, 12 - first);                        // earlier first hit -> better
 }
 
-// Static command set (sections + every module's Read/Quiz). Built once — ~340
-// modules -> ~680 entries — and cached; verbs are rebuilt per open (state-aware).
+// Static command set (sections + every module's Read/Quiz, two entries per module).
+// Built once and cached; verbs are rebuilt per open (state-aware).
 let _palStatic = null;
 function palStaticCommands() {
   if (_palStatic) return _palStatic;
@@ -6995,7 +6987,7 @@ async function ensureMermaid(failNode) {
 }
 
 // [SF] Pre-rendered diagram assets (built by scripts/build_diagrams.mjs into
-// game/diagrams/<key>.json, keyed by the SAME cyrb53(source) a fence hashes to).
+// game/diagrams/<key>.mmz (gzipped JSON), keyed by the SAME cyrb53(source) a fence hashes to).
 // Cached per session; a miss (null) is cached too so an un-baked fence isn't
 // re-fetched on every scroll. Fetched relative to the game dir -> resolves on
 // Pages AND in the offline APK WebView.
@@ -8508,7 +8500,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     <button class="reader-top" id="readerTop" title="Back to top" aria-label="Back to top">&uarr;</button>`;
   document.body.classList.add("reader-open");
   panel.tabIndex = -1;
-  panel.focus({ preventScroll: true });          // soft-focus the panel (page behind stays interactive ≥900px)
+  panel.focus({ preventScroll: true });          // soft-focus the panel (page behind stays interactive ≥47rem)
   applyReaderModes();
   wireGrips();
   el("#readerClose").addEventListener("click", closeReader);
@@ -9256,7 +9248,7 @@ function maybeShowNudge() {
 // listener resolves the route -> screen render. _navLock swallows the one
 // programmatic hash write we make when restoring the quiz hash on a blocked Back.
 // Live (Phase C): #/gauntlet #/codex #/interview/<sec>. #/debrief is implemented
-// — see [D] Coach above (renderDebrief). Reserved for later phases: #/insights.
+// — see [D] Coach above (renderDebrief). #/insights is a live alias of #/progress.
 let _navLock = false;
 
 const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (frag ? "@" + frag : "");
@@ -9282,7 +9274,7 @@ function redirect(route) {
 }
 
 /* ---------- [NAV] five destinations, one model, two surfaces ----------------
-   Same five on every viewport: a left rail at >=900px, a bottom bar below it.
+   Same five on every viewport: a left rail at >=47rem, a bottom bar below it.
    Every one of the app's routes is OWNED by exactly one destination (destOf),
    so #/gauntlet, #/codex, #/debrief and #/interview/<section> all have a
    permanent door instead of depending on a conditional card. The icon glyphs
@@ -10205,12 +10197,11 @@ async function boot() {
   // navigator.connection.saveData guards below.
   if (navigator.connection && navigator.connection.saveData) document.documentElement.classList.add("low-power");
   state.index = await fetchJSON("questions/index.json", null);
-  // [TIERS] Curated Senior/Principal membership, DERIVED by extract.py from each file's
-  // `<!-- tiers: ... -->` marker. Generated like the banks, so the module page is the
-  // single source of truth and there is no hand-maintained copy here to drift from.
+  // [TIERS] Curated Senior/Principal membership, DERIVED by extract.py from the
+  // `<!-- study-paths -->` block in each <section>/README.md. Generated like the banks.
   // Absent (offline, or a bank that predates it) -> the tier tabs simply do not render.
   STUDY_PATHS = await fetchJSON("questions/paths.json", {}) || {};
-  // [TECH] Same relative-path fetch, deliberately NOT awaited: tech.json is ~250 KB
+  // [TECH] Same relative-path fetch, deliberately NOT awaited: tech.json is over 1 MB
   // gzipped and nothing on the first screen needs it. renderTech() awaits this exact
   // promise, so the screen is warm on arrival and boot never waits for it.
   loadTechIndex();

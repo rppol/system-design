@@ -78,7 +78,7 @@ Forty-seven modules organized across eight learning phases take you from linear 
 
 ## Sub-Files Index
 
-Thirty-seven deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
+Forty-two deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
 
 ### supervised_learning/ (4 sub-files)
 
@@ -256,24 +256,28 @@ Phase 2 — Classical ML
 Phase 3 — Deep Learning Foundations
   neural_network_fundamentals
   convolutional_neural_networks
-  recurrent_neural_networks
+  recurrent_neural_networks  -->  [sub-file: state_space_models]
   training_deep_networks
   pytorch_deep_dive
   generative_models
         |
         v
 Phase 4 — Domain Specializations
-  computer_vision      -->  [sub-files: object_detection, image_segmentation, vision_transformers, self_supervised_vision]
+  computer_vision      -->  [sub-files: object_detection, image_segmentation, vision_transformers,
+                             self_supervised_vision, open_vocabulary_and_vision_foundation]
   natural_language_processing  -->  [sub-files: bert_and_pretrained_models, attention_and_seq2seq,
                                text_representation_and_retrieval, nlp_evaluation_and_metrics,
                                tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf,
                                text_classification, topic_modeling, language_modeling, syntactic_parsing]
   recommender_systems  -->  [sub-files: collaborative_filtering, deep_learning_recommenders,
-                             retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits]
+                             retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits,
+                             generative_recommenders]
+  information_retrieval_and_search
+  speech_and_audio_ml
   multi_task_and_multi_objective_learning
+  time_series_forecasting  -->  [sub-file: time_series_foundation_models]
   anomaly_detection
-  time_series_forecasting
-  reinforcement_learning
+  reinforcement_learning  -->  [sub-file: offline_rl]
         |
         v
 Phase 5 — ML Systems & Infrastructure
@@ -297,10 +301,12 @@ Phase 6 — Production ML
 Phase 7 — Advanced Topics
   graph_neural_networks
   self_supervised_and_contrastive_learning
+  meta_learning_and_few_shot
   causal_inference_and_ml
   adversarial_ml_and_robustness
   privacy_preserving_ml
   interpretability_and_explainability
+  fairness_and_responsible_ai
   uncertainty_quantification_and_conformal_prediction
         |
         v

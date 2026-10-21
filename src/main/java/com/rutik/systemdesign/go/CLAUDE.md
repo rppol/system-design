@@ -138,7 +138,7 @@ cross-cutting files nor `case_studies.md` itself appear in that block.
 two curated tiers: **Senior** (the craft — can you write it, debug it at 3am, say why it
 broke) and **Principal** (the judgment — which runtime model at what cost, what failure
 modes, what you tell a team *not* to do). They are **different cuts, not nested depths**:
-6 of the 12 principal modules are material senior never sees.
+6 of the 13 principal modules are material senior never sees.
 
 Membership is declared ONCE per section, in the `<!-- study-paths -->` block in this
 section's `README.md`, naming every module, every file it owns, and the tiers each file

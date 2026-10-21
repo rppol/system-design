@@ -23,13 +23,13 @@ A living aurora-mesh: three blurred 110px drift blobs on 64-88s alternating loop
 
 ## Token Architecture
 
-Source of truth: `game/style.css` (approx. lines 15-137). The families:
+Source of truth: `game/style.css` (approx. lines 15-250). The families:
 
 | Family | Tokens |
 |--------|--------|
-| Surfaces | `--bg`, `--bg-2` |
+| Surfaces | `--floor`, `--bg`, `--bg-2`, `--track` |
 | Text ladder | `--text`, `--muted`, `--faint` |
-| Accent | accent pair + `--accent-ink` |
+| Accent | accent pair + `--accent-text` + `--accent-ink` |
 | Semantics | `--good`, `--bad`, `--warn` |
 | Mesh | `--mesh-1`, `--mesh-2`, `--mesh-3`, `--mesh-o` (opacity) |
 | Materials | glass stack, shadows |
@@ -37,20 +37,26 @@ Source of truth: `game/style.css` (approx. lines 15-137). The families:
 | Type | system font stack + `--mono` |
 | Motion | `--ease-out: cubic-bezier(0.22, 1, 0.36, 1)` |
 
-**Rule:** every new color is a token or a `color-mix()` of tokens, and must read on both midnight and daylight.
+**Rule:** every new color is a token or a `color-mix()` of tokens, and must read in both dark and light mode.
 
 ---
 
 ## Themes
 
-Set via `data-theme` on `<html>`; `?theme=` query previews a theme without persisting.
+Two independent attributes on `<html>`: `data-theme` (colour) and `data-mode` (`dark` | `light`). `?theme=` previews a colour without persisting. Grounds are derived from the theme: `--bg: color-mix(in srgb, var(--mesh-1) 17%, var(--floor))` with `--floor: #0a0c12`; light mode uses `color-mix(in srgb, var(--mesh-1) 15%, #eceef4)` and `--mesh-o: 0.42`.
 
-| Theme | Background | Accent pair | Notes |
-|-------|-----------|-------------|-------|
-| midnight | `#06070d` | `#7cabff` + `#9d8cff` | default |
-| orchid | `#0c0611` | `#c084fc` + `#f472b6` | |
-| ember | `#0e0709` | `#fb923c` + `#f87171` | |
-| daylight | `#eef1f7` | (light scheme) | mesh opacity 0.46 |
+| Theme | Accent pair |
+|-------|-------------|
+| midnight (default) | `#7cabff` + `#9d8cff` |
+| ocean | `#38bdf8` + `#22d3ee` |
+| forest | `#34d399` + `#a3e635` |
+| ember | `#fb923c` + `#f87171` |
+| fire | `#f5484e` + `#ff8c42` |
+| rose | `#fda4af` + `#f0abfc` |
+| orchid | `#c084fc` + `#f472b6` |
+| obsidian | `#cbd1dc` + `#8b93a3` |
+
+A saved `daylight` theme migrates to midnight + light mode.
 
 ---
 
@@ -69,7 +75,7 @@ Set via `data-theme` on `<html>`; `?theme=` query previews a theme without persi
 ## Type, Spacing, Motion
 
 - Base 16px / 1.6 line-height on the system font stack; tabular numerals for stats.
-- Touch targets are 44px minimum below 640px width; the tab bar reserves `--tabbar-h`.
+- Touch targets are 44px minimum on `(pointer: coarse)`; the bottom tab bar (below 47rem) reserves `--tabbar-h`, and a left rail replaces it at 47rem and up.
 - ALL animation is gated behind `prefers-reduced-motion`.
 - The moments engine is the single celebration channel — no surface fires its own confetti/sound.
 

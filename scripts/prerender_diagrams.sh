@@ -27,7 +27,7 @@ cd "$REPO_ROOT"
 
 npm ci --no-audit --no-fund
 
-# Bundle the iconify logo pack into game/vendor/ BEFORE the render, so Mermaid icon
+# Bundle the iconify icon packs (logos, simple-icons) into game/vendor/ BEFORE the render, so Mermaid icon
 # nodes (product logos) bake into the .mmz and ship offline. Registered from a
 # relative fetch on both surfaces, which is why this adds no IS_APK seam.
 node scripts/build_icons.mjs

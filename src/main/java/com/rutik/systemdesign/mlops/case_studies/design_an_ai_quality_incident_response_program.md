@@ -103,7 +103,6 @@ The 2026-08-11 incident, measured afterwards:
   [AI Gateway Operations](../ai_gateway_operations/ai_gateway_operations.md).
 - The incident class catalog, replay harness and degradation resolver code: owned by
   [AI Incident Response and Reliability](../ai_incident_response_and_reliability/ai_incident_response_and_reliability.md).
-  This study uses them and does not repeat them.
 
 ---
 
@@ -545,8 +544,7 @@ is a versioned artifact gated like a bundle. The policy has four rules:
 - A retirement calendar lists every pinned id with its announced deprecation and retirement
   dates. Re-qualification starts at announcement, not at the deadline.
 
-The alternate rule doubles gate runs per bundle (about 18% more eval spend). On 2026-08-11 the only fallback,
-`pa-large-0611`, had not been evaluated in 9 weeks.
+On 2026-08-11 the only fallback, `pa-large-0611`, had not been evaluated in 9 weeks.
 
 **Blast radius.** The first incident action is a query, not a guess. Every live bundle is a row in
 the lineage store with its model ids:
@@ -842,9 +840,8 @@ page, because most fingerprint changes do not move quality.
 | Detector job | in-house, about 600 lines of Python | Cohort CUSUM per (feature, response model id), hourly and per 5 min for high-volume features |
 | Attribution job | in-house | Rules in §4.3, writes the verdict and evidence link to the page |
 
-Langfuse's online evaluators already run sampled judges and write scores the detector queries by
-trace metadata. The detector is in-house because no tool Acme evaluated split a CUSUM by an
-arbitrary trace attribute with a mix-adjusted reference.
+The detector is in-house because no tool Acme evaluated split a CUSUM by an arbitrary trace
+attribute with a mix-adjusted reference.
 
 ---
 
@@ -871,8 +868,7 @@ arbitrary trace attribute with a mix-adjusted reference.
 | SEV2 | Down 8% relative on a feature above 1,000 tasks an hour, or on 3 or more features at once | Status page at 30 min, account teams at 60 min |
 | SEV3 | Down 8% relative on a smaller feature, or 4-8% on any | Internal only, ticket to the feature team |
 
-The 2026-08-11 incident is a SEV2 under this table. The general severity framework is in
-[Incident Management and On-Call](../../devops/incident_management_and_oncall/incident_management_and_oncall.md).
+The 2026-08-11 incident is a SEV2 under this table.
 
 ### Drills
 
@@ -917,10 +913,9 @@ It scored 3.2 points below the champion on the feature's eval set, so failover s
 regression and started a smaller one. Fix: the 30-day alternate expiry, checked in the weekly
 review.
 
-**The judge change read as a provider change.** In the 2026-08-14 re-qualification, the stored
-baseline comparison (§4.5) failed the refunds slice because the judge had moved from `@v4` to
-`@v5`. 4 engineer-days went into re-tuning a prompt that had not regressed. Fix: paired same-day
-runs with one judge version for the whole campaign.
+**The judge change read as a provider change.** In the 2026-08-14 re-qualification (§4.5), a judge
+move from `@v4` to `@v5` failed the refunds slice and cost 4 engineer-days of re-tuning a prompt
+that had not regressed. Fix: paired same-day runs with one judge version for the whole campaign.
 
 **"Resolved" posted too early.** During the 2026-09-16 incident, the status page moved to resolved
 15 minutes after failover. The detector on the alternate path then paged on one feature (the
@@ -956,8 +951,7 @@ be complete.
 
 ### Judge budget by feature
 
-The sample rate per feature is set so each feature reaches 300 judged tasks in its target window
-(§2):
+Each feature's sample rate reaches 300 judged tasks in its target window (§2):
 
 | Feature tier | Tasks an hour | Target window | Sample rate | Judged a day |
 |---|---|---|---|---|

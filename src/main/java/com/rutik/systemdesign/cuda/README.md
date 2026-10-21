@@ -392,7 +392,7 @@ Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced
 
 ## 8. Build Status & Implementation Tracker
 
-> **BUILD COMPLETE.** All 24 modules + 6 principal case studies + 5 cross-cutting primitives authored (2026-07-07). `game/extract.py` yields 427 CUDA MCQs across all 24 modules; `game/app.js` wiring (`SECTION_LABELS`/`STUDY_ORDER`/`STUDY_PATHS`) and root `README.md`/`CLAUDE.md` registration are in place. No NEXT UP pointer remains. Future additions should follow the "Adding a New CUDA Module" steps in `CLAUDE.md` and flip new rows below.
+> **BUILD COMPLETE.** All 24 modules + 8 principal case studies + 5 cross-cutting primitives authored. `game/extract.py` extracts the CUDA MCQs from all 24 modules; `game/app.js` wiring (`SECTION_LABELS`/`STUDY_ORDER`/`STUDY_PATHS`) and root `README.md`/`CLAUDE.md` registration are in place. No NEXT UP pointer remains. Future additions should follow the "Adding a New CUDA Module" steps in `CLAUDE.md` and flip new rows below.
 >
 > Authoring convention reminder for future chunks: follow the Conventions Reminder below; flip each new file `pending` → `done` on completion.
 
@@ -454,6 +454,8 @@ Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced
 | `case_studies/accelerate_2d_convolution_and_stencil.md` | 7 | done |
 | `case_studies/port_a_cpu_pipeline_to_gpu.md` | 7 | done |
 | `case_studies/optimize_llm_inference_kernels.md` | 7 | done |
+| `case_studies/write_a_blackwell_gemm_with_cute_dsl.md` | - | done |
+| `case_studies/optimize_moe_expert_parallel_dispatch.md` | - | done |
 
 ### Conventions Reminder (for future chunk agents)
 

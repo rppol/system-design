@@ -42,7 +42,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `java_platform_module_system/` | JPMS: module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink |
 | `reference_types_and_cleaners/` | Strong/Soft/Weak/Phantom references, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks |
 | `aot_startup_and_class_data_sharing/` | CDS/AppCDS/dynamic archives, the AOT cache, training runs, silent fallback |
-| `graalvm_native_image/` | GraalVM native-image AOT, closed-world reachability, reflection/resource/proxy metadata, build-time vs runtime init |
+| `graalvm_native_image/` | GraalVM native-image AOT, closed-world reachability, reflection/resource/proxy metadata, build-time vs runtime init, GC choices, Oracle vs Community editions and the monthly 25.x feature trains, Substrate VM isolates |
 | `build_tools_maven_gradle/` | Maven (lifecycle, dependency mediation, BOM, shade) + Gradle (task graph, build cache, version catalogs), dependency hell |
 
 **Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry):
@@ -58,7 +58,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 ## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 35 modules = "8-Phase Learning Path") plus
-two curated tiers: **Senior** (19 modules) and **Principal** (15). They are different
+two curated tiers: **Senior** and **Principal**. They are different
 cuts, not nested depths — senior is the craft (write it, profile it, debug the 3am
 deadlock), principal is the judgment (which runtime at what cost, migration, what you
 tell a team *not* to do), so principal is usually the smaller list and much of it is
@@ -72,9 +72,9 @@ and the module page (`<module>.md`) must always be listed. Order is never declar
 the gitignored `questions/paths.json`, which the game fetches at boot. The tier tables in
 `README.md` sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
 regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
-fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
-from a block in `case_studies/case_studies.md` (5 senior / 3 principal), driving the Level
-filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
+fails `extract.py --strict` and the Pages deploy. Case studies are tiered in the same
+block, under its `case_studies` entry, driving the Level filter on the game's Case Studies
+tab. The README also carries a Knowledge-Question Map
 and a 5-week Study Plan (prose; no path impact).
 
 ---
@@ -94,7 +94,7 @@ gap below — the table has no pending items left; retained as a historical reco
 
 ---
 
-## Case Studies — 8 Total
+## Case Studies - 10 Total
 
 `case_studies/` directory — all use the 11-section principal template.
 
@@ -108,6 +108,8 @@ gap below — the table has no pending items left; retained as a historical reco
 | `design_di_container_java.md` | Reflection-based injection, scope management, circular deps |
 | `design_circuit_breaker_java.md` | State machine, half-open probing, metrics integration |
 | `design_snowflake_id_generator_java.md` | Twitter Snowflake, clock skew handling, worker ID assignment |
+| `design_structured_concurrency_aggregator.md` | `StructuredTaskScope` fan-out, Joiner policies, deadlines and cancellation, `ScopedValue` context |
+| `design_low_latency_market_data_handler.md` | Off-heap FFM ring buffer, cache-line padding against false sharing, GC-free hot path |
 
 Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 

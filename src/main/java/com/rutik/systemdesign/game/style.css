@@ -82,7 +82,7 @@
   --reader-w: min(58%, 760px);   /* reader pane width; updated live by the drag grip */
   --modules-w: 160px;            /* left sidebar width; drag-resizable */
   --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
-  --tabbar-h: 58px;              /* [NAV] bottom tab bar height (< 900px) */
+  --tabbar-h: 58px;              /* [NAV] bottom tab bar height (< 47rem) */
   /* CONTENT QUANTITIES, not device widths. Every threshold below is derived from
      these, and because they are rem the thresholds move with the user's font
      size — raise Android's system font to 1.3x and the layout learns it has less
@@ -3013,9 +3013,9 @@ body.interview-mode #app::before {
 .pal-item.sel .pal-hint { color: var(--muted); }
 .pal-empty { padding: 14px 12px; color: var(--muted); font-size: 0.875rem; }
 
-/* ---------- Mobile bottom tab bar (< 640px only) ------------------------ */
+/* ---------- Mobile bottom tab bar (< 47rem only) ------------------------ */
 .tabbar {
-  display: none;   /* the < 640px media query flips this to flex */
+  display: none;   /* the < 47rem media query flips this to flex */
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   height: var(--tabbar-h); align-items: stretch;
   background: var(--topbar-bg);
@@ -3228,7 +3228,7 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
    combinations. --track (not --glass-2) is the bar/meter track — see §1.
    ========================================================================== */
 
-/* --- left rail (>= 900px) ------------------------------------------------ */
+/* --- left rail (>= 47rem) ------------------------------------------------ */
 .rail { display: none; }
 @media (min-width: 47rem) {
   :root { --nav-inset: var(--rail-cur); }
@@ -3330,7 +3330,7 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 .railicon { width: 17px; height: 17px; flex: 0 0 auto; }
 .rail-kbd { margin-left: auto; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--faint); }
 
-/* --- bottom bar (< 900px) ------------------------------------------------ */
+/* --- bottom bar (< 47rem) ------------------------------------------------ */
 body.nav-hidden #tabbar { display: none !important; }
 .tab { min-height: 46px; }
 

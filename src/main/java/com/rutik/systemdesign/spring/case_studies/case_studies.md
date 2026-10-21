@@ -1,6 +1,6 @@
 # Spring Case Studies — Learning Path
 
-Nine end-to-end case studies covering senior Spring engineer and backend system design interview scenarios. All nine use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Four cross-cutting shared-primitive files in `cross_cutting/` cover operational patterns referenced by multiple case studies.
+End-to-end case studies covering senior Spring engineer and backend system design interview scenarios. All of them use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Four cross-cutting shared-primitive files in `cross_cutting/` cover operational patterns referenced by multiple case studies.
 
 ---
 
@@ -140,6 +140,7 @@ design_batch_pipeline                    (standalone; no direct upstream depende
 | [design_oauth2_authorization_server.md](design_oauth2_authorization_server.md) | 11-section principal | 10 | DONE |
 | [design_idempotent_payment_api.md](design_idempotent_payment_api.md) | 11-section principal | 10 | DONE |
 | [design_realtime_notification_service.md](design_realtime_notification_service.md) | 11-section principal | 10 | DONE |
+| [design_mcp_tool_platform.md](design_mcp_tool_platform.md) | 11-section principal | 10 | DONE |
 | [cross_cutting/otel_observability_for_spring.md](cross_cutting/otel_observability_for_spring.md) | 14-section module | 10 | DONE |
 | [cross_cutting/resilience4j_patterns.md](cross_cutting/resilience4j_patterns.md) | 14-section module | 10 | DONE |
 | [cross_cutting/testcontainers_and_test_strategy.md](cross_cutting/testcontainers_and_test_strategy.md) | 14-section module | 10 | DONE |

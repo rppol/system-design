@@ -56,8 +56,8 @@ never as the way to write new code.
    the default story; `useMemo`, `useCallback` and `React.memo` are **escape hatches**.
    Any module that teaches manual memoization as the *primary* optimization technique is
    teaching 2023. Meta reports up to 12% faster loads and ~2.5x on some interactions.
-2. **Remix v3 is not React.** It is a separate framework on a **Preact fork**, previewed
-   **2026-04-30** (the July press coverage is not the release date). What would have been
+2. **Remix v3 is not React.** It is a separate framework with its own UI runtime, release
+   candidate 2026-08-31, `remix@3.0.0` on npm 2026-10-01. What would have been
    Remix v3 shipped as **React Router v7**; React Router is
    now at **v8** (2026-06-17). Never present Remix v3 as a React upgrade path — this is the
    easiest factual error in the section.
@@ -83,7 +83,7 @@ full table lives in `server_components_and_server_functions` §12 and §10.
 
 | Area | Pin | Note |
 |------|-----|------|
-| React Router | **v8** (2026-06-17), current 8.5 | v7 was the Remix merge; "framework mode" is the former Remix |
+| React Router | **v8** (2026-06-17), current 8.4 | v7 was the Remix merge; "framework mode" is the former Remix |
 | TanStack Start | **1.0**, stable since 2026-10-13 | Vite plus Nitro; RSC opt-in |
 | Astro | **7** (2026-06-22), current 7.4 | Rust compiler, on Vite 8 |
 | RSC outside Next | `@vitejs/plugin-rsc`, Waku, Parcel | a framework-agnostic Vite RSC story now exists |

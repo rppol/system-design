@@ -119,40 +119,37 @@ say so on first mention.
 
 ---
 
-## Module List — 8 Modules
+## Module List
 
-Listed in `STUDY_ORDER.technologies` order, which pairs the two orchestration modules
-and then the two serving modules as contrast pairs, with `envoy_proxy` **appended** at
-position 5. Both existing pairs share a property Envoy does not — they *run your
-workload*, while Envoy *moves traffic to* it — so inserting it anywhere in positions 1–4
-would split a pair for no gain.
+Listed in `STUDY_ORDER.technologies` order, which groups modules by domain:
 
-`hashicorp_vault` is **appended at position 6**, and it did *not* take the "edge and data
-plane" pair slot that was being held open for another traffic technology — Vault is a
-control-plane dependency of everything, not a traffic component, so it starts a third
-domain rather than completing the second pair. That slot is therefore **still open**: a
-future traffic/edge page belongs adjacent to `envoy_proxy`, which now means inserting at
-position 6 and pushing Vault to 7, not appending at 7. Do not append blindly.
+1. **Orchestration pair** - `apache_airflow`, `temporal_durable_execution`.
+2. **Serving pair** - `nvidia_triton_inference_server`, `intel_openvino`.
+3. **Traffic and data-plane pair** - `envoy_proxy`, `cilium`. Both earlier pairs *run your
+   workload*; these two *move traffic to* it. Cilium sits next to Envoy because its L7
+   policy runs through an embedded Envoy (`cilium` §6.4).
+4. **Credential layer** - `hashicorp_vault`, a control-plane dependency of everything, not
+   a traffic component.
+5. **Data run** - `debezium_change_data_capture`, `apache_iceberg`, `apache_flink`,
+   `trino`: capture changes, land them in a table format, process the stream, query the
+   result. Debezium was deliberately not inserted beside Temporal, which would split the
+   orchestration pair for a surface similarity (both are fed by a durable log).
 
-`debezium_change_data_capture` is **appended at position 7** for the same kind of reason
-and it too leaves the edge pair slot open: Debezium moves *data between stores*, not
-*traffic to workloads*, so it does not complete Envoy's edge/data-plane pair and it was
-deliberately not inserted at 3 beside Temporal, which would split the orchestration pair
-this list protects. Appending it opens a **fourth pair slot at 8** for a future
-data-integration page (a stream processor, a table format, a warehouse-ingest technology),
-which belongs adjacent to Debezium. So there are now two open slots to respect: traffic/edge
-next to `envoy_proxy`, and data-integration next to `debezium_change_data_capture`.
+A new module goes into the group it belongs to, not at the end. Do not append blindly.
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
-| [`apache_airflow/`](apache_airflow/apache_airflow.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.0 |
-| [`temporal_durable_execution/`](temporal_durable_execution/temporal_durable_execution.md) | Durable execution | Two-plane split (Service never runs your code), event history + replay determinism, activities and the four timeouts, signals/queries/updates, Continue-As-New and the 51,200-event limit, versioning via patching vs Pinned Worker Deployments, shard immutability | Temporal Server 1.31.2 |
+| [`apache_airflow/`](apache_airflow/apache_airflow.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.2 |
+| [`temporal_durable_execution/`](temporal_durable_execution/temporal_durable_execution.md) | Durable execution | Two-plane split (Service never runs your code), event history + replay determinism, activities and the four timeouts, signals/queries/updates, Continue-As-New and the 51,200-event limit, versioning via patching vs Pinned Worker Deployments, shard immutability | Temporal Server 1.32.1 |
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
-| [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
-| [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.39.0 |
-| [`hashicorp_vault/`](hashicorp_vault/hashicorp_vault.md) | Secrets management / identity broker | Barrier and the four-layer key hierarchy, seal/unseal and why recovery keys are not unseal keys, Integrated Storage, every secrets-engine family, the KV v2 policy trap, **leases and the lease-count arithmetic** (halving the TTL changes nothing and doubles issuance), auth methods and secret-zero, `bound_claims` vs `claim_mappings`, policies and identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, and the OpenBao delta | Vault 2.0.3, OpenBao 2.6.1 |
-| [`debezium_change_data_capture/`](debezium_change_data_capture/debezium_change_data_capture.md) | Change data capture | The two questions — where do I start, can I keep reading; logical decoding and output plugins; what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`); `flush.lsn.source`, heartbeats and the idle-captured-table trap; `REPLICA IDENTITY` and the `before: null` consequence; TOAST and `__debezium_unavailable_value`; snapshot modes and their removals; the incremental-snapshot watermark algorithm; the four-quadrant position-loss recovery table and why a lost slot is data loss; the never-compact schema-history topic; ordering per key / per table / never across tables; `ExtractNewRecordState` and the five tombstone modes; the `EventRouter` defaults; why `tasks.max` is ignored | Debezium 3.6.0.Final |
-| [`apache_iceberg/`](apache_iceberg/apache_iceberg.md) | Lakehouse table format | Spec v2 vs v3; the metadata tree (metadata.json / manifest list / manifests) and the atomic pointer swap; hidden partitioning and partition evolution; column-ID schema evolution; copy-on-write vs merge-on-read; deletion vectors; snapshot expiry and orphan-file cleanup; compaction economics; the catalog tier (REST, Polaris, Glue, Nessie); engine support. The vendor-neutral concept layer lives in `../database/lakehouse_and_table_formats/` | Iceberg Java 1.11.0 |
+| [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.4.1 |
+| [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.40.0 |
+| [`cilium/`](cilium/cilium.md) | eBPF networking / CNI | Pod-to-pod, pod-to-Service and egress packet paths; kube-proxy replacement; `CiliumNetworkPolicy` and the default-deny DNS trap; the embedded Envoy for L7 rules; Hubble; Cluster Mesh; BGP Control Plane; Gateway API and Cilium Ingress; Cilium Service Mesh vs Istio Ambient; XDP, Maglev and DSR; netkit; WireGuard vs IPsec; Bandwidth Manager | Cilium 1.20.3 |
+| [`hashicorp_vault/`](hashicorp_vault/hashicorp_vault.md) | Secrets management / identity broker | Barrier and the four-layer key hierarchy, seal/unseal and why recovery keys are not unseal keys, Integrated Storage, every secrets-engine family, the KV v2 policy trap, **leases and the lease-count arithmetic** (halving the TTL changes nothing and doubles issuance), auth methods and secret-zero, `bound_claims` vs `claim_mappings`, policies and identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, and the OpenBao delta | Vault 2.2.0, OpenBao 2.7.1 |
+| [`debezium_change_data_capture/`](debezium_change_data_capture/debezium_change_data_capture.md) | Change data capture | The two questions — where do I start, can I keep reading; logical decoding and output plugins; what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`); `flush.lsn.source`, heartbeats and the idle-captured-table trap; `REPLICA IDENTITY` and the `before: null` consequence; TOAST and `__debezium_unavailable_value`; snapshot modes and their removals; the incremental-snapshot watermark algorithm; the four-quadrant position-loss recovery table and why a lost slot is data loss; the never-compact schema-history topic; ordering per key / per table / never across tables; `ExtractNewRecordState` and the five tombstone modes; the `EventRouter` defaults; why `tasks.max` is ignored | Debezium 3.7.0.Final |
+| [`apache_iceberg/`](apache_iceberg/apache_iceberg.md) | Lakehouse table format | Spec v2 vs v3; the metadata tree (metadata.json / manifest list / manifests) and the atomic pointer swap; hidden partitioning and partition evolution; column-ID schema evolution; copy-on-write vs merge-on-read; deletion vectors; snapshot expiry and orphan-file cleanup; compaction economics; the catalog tier (REST, Polaris, Glue, Nessie); engine support. The vendor-neutral concept layer lives in `../database/lakehouse_and_table_formats/` | Iceberg Java 1.12.0 |
+| [`apache_flink/`](apache_flink/apache_flink.md) | Stream processing | Event time and watermarks; asynchronous barrier checkpointing; checkpoint vs savepoint; HashMap, RocksDB and ForSt state backends; two-phase-commit sinks; backpressure diagnosis; Flink SQL and dynamic tables; restart strategies and failover regions; FlinkCEP; state schema evolution; Reactive Mode and the Operator autoscaler; `maxParallelism` and key groups; Materialized Tables | Flink 2.3.0 |
+| [`trino/`](trino/trino.md) | Distributed SQL query engine | Query lifecycle; memory pools and the low-memory killer; task concurrency and scheduling; fault-tolerant execution; cost-based optimizer and table statistics; dynamic filtering; the Iceberg connector; federation and cross-catalog joins; `EXPLAIN ANALYZE`; session vs configuration properties; access control; file system cache | Trino 484 |
 
 ---
 
@@ -223,37 +220,29 @@ release.
 
 ## Learning Paths (Full-only — tiers deliberately deferred past the threshold)
 
-No module here carries a `<!-- study-paths -->` block, so `questions/paths.json` has no
-`technologies` key and the section is Full-path only. The Study view's tier tabs
-**auto-hide** for any section absent from the derived paths (`book` is the other such
-section), so this is a deliberate omission, not a gap.
+The `README.md` `<!-- study-paths -->` block lists every file with `-` (Full path only), so
+`questions/paths.json` has no `technologies` key and the section is Full-path only. The
+Study view's tier tabs **auto-hide** for any section absent from the derived paths (`book`
+is the other such section), so this is a deliberate omission, not a gap.
 
-**Status 2026-08-04 (owner-set):** the section reached **4 modules** with
-`temporal_durable_execution`, crossing the threshold below, and **5 modules** with
-`envoy_proxy`, **6 modules** with `hashicorp_vault` and **7 modules** with
-`debezium_change_data_capture`, all the same day — and the tier
-decision was
-**deliberately deferred** to a separate change once all four planned technology pages
-have landed. The deferral **still stands** at 7 modules; `envoy_proxy`,
-`hashicorp_vault` and `debezium_change_data_capture` all deliberately
-carry no `<!-- study-paths -->` block. Do not read the un-tiered state as an oversight, and do not add a
-`<!-- study-paths -->` block to one module on its own: tiering is a section-wide
-decision plus a one-time `README.md` marker-pair setup, and doing it piecemeal produces
-a Senior path that silently advertises a partial section.
+**Status (owner-set 2026-08-04):** the section crossed the 4-module threshold with
+`temporal_durable_execution`, and the tier decision was **deliberately deferred** to a
+separate change once the planned technology pages land. The deferral **still stands** for
+every module in `STUDY_ORDER.technologies`. Do not read the un-tiered state as an
+oversight, and do not tag one module's files with a tier on its own: tiering is a
+section-wide decision plus a one-time `README.md` marker-pair setup, and doing it
+piecemeal produces a Senior path that silently advertises a partial section.
 
-**A caveat to record now, for whoever does the tiering.** At module-page granularity
-with no deep-dive sub-files, the two tiers can only differ by *membership*, so the
-repo-wide "roughly half of each principal list is material senior never sees" property
-cannot yet be expressed here. It becomes expressible the moment the first sub-file
-lands — a `temporal_durable_execution/versioning_and_safe_deploys.md` is the obvious
-first candidate, principal-only, since safe-deploy strategy across a fleet of
-long-lived executions is exactly a judgment call. Treat the eventual first shape as a
-floor, not the design.
+**A note for whoever does the tiering.** The section has deep-dive sub-files (see
+[Deep-Dive Sub-Files](#deep-dive-sub-files)), so the tiers can differ per file and not only
+by module membership. `temporal_durable_execution/versioning_and_safe_deploys.md` is the
+obvious first principal-only file, since safe-deploy strategy across a fleet of
+long-lived executions is a judgment call.
 
 **The mechanics, when the deferral ends:** decide the tiers — Senior (the craft: operate it, debug it) and Principal (the
 judgment: adopt it or not, at what cost) are different cuts, not nested depths — then
-add each participating module and its files to this section's `README.md` `<!-- study-paths -->` block, naming the
-files it contributes, paste an empty `<!-- study-path-table senior -->` /
+replace the `-` on each participating file in this section's `README.md` `<!-- study-paths -->`
+block with its tiers (the module page must carry every tier the module is in), paste an empty `<!-- study-path-table senior -->` /
 `<!-- /study-path-table -->` marker pair into `README.md` where the table should sit
 (placement is editorial; `--write-paths` only fills blocks that already exist), and run
 `python3 extract.py --write-paths` to generate it. Also update the toggle-exception
@@ -554,12 +543,23 @@ Never hand-edit `game/tech_index.json` — it is overwritten on every build.
 
 ---
 
-## Deep-Dive Sub-Files (future)
+## Deep-Dive Sub-Files
+
+| Sub-file | Parent module |
+|----------|---------------|
+| [`assets_partitions_and_the_state_store.md`](apache_airflow/assets_partitions_and_the_state_store.md) | `apache_airflow` |
+| [`versioning_and_safe_deploys.md`](temporal_durable_execution/versioning_and_safe_deploys.md) | `temporal_durable_execution` |
+| [`dynamo_and_the_nvidia_serving_stack.md`](nvidia_triton_inference_server/dynamo_and_the_nvidia_serving_stack.md) | `nvidia_triton_inference_server` |
+| [`gateway_api_and_inference_extension.md`](envoy_proxy/gateway_api_and_inference_extension.md) | `envoy_proxy` |
+| [`workload_identity_and_the_end_of_stored_secrets.md`](hashicorp_vault/workload_identity_and_the_end_of_stored_secrets.md) | `hashicorp_vault` |
+| [`cdc_across_failover_and_into_the_lakehouse.md`](debezium_change_data_capture/cdc_across_failover_and_into_the_lakehouse.md) | `debezium_change_data_capture` |
 
 Sub-files follow the repo-wide convention: `<module>/<topic>.md`, full 14-section
 template, 15+ Q&As. `extract.py` auto-groups a sub-file under its parent module's
-existing `STUDY_ORDER` position by directory — **no `STUDY_ORDER` change is needed**
-when adding a sub-file, only when adding a new top-level module directory.
+existing `STUDY_ORDER` position by directory - **no `STUDY_ORDER` change is needed**
+when adding a sub-file, only when adding a new top-level module directory. Add each new
+sub-file to this table and to the `README.md` `<!-- study-paths -->` block in the same
+commit.
 
 ---
 

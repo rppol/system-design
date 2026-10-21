@@ -1,8 +1,8 @@
 # Game — LORA (Learn Often, Recall Always), by Rutik
 
 A browser-based daily learning game built **from this repo's own content**. It turns
-the ~8,800 interview Q&As scattered across all 15 sections (every module README **and
-its deep-dive sub-files**; case studies excluded) into a one-click, 5-minute
+the ~19,000 interview Q&As across every section (every module page **and its deep-dive
+sub-files**; case-study Q&As feed only a separate reader quiz pool) into a one-click, 5-minute
 multiple-choice blitz with streaks, XP, spaced repetition, per-section mastery, and an
 in-app coach that curates the day's topic and reports weekly.
 
@@ -24,15 +24,21 @@ is a static single-page app deployed to GitHub Pages.
 ```
 Browser (index.html + app.js + style.css + sw.js)
    GET  /                          static SPA shell (also precached by the service worker)
-   GET  questions/index.json       tiny manifest: { total, sections{sec:count}, files{mod:[md]} }
-   GET  questions/<section>.json   ~0.4–2 MB bank, fetched lazily only for the sections you touch
+   GET  questions/index.json       manifest: { generatedAt, total, sections, files, moduleCounts, caseStudies }
+   GET  questions/<section>.json   ~0.6-5.6 MB bank, fetched lazily only for the sections you touch
+   GET  questions/paths.json       Senior/Principal study tiers per section
+   GET  questions/tech.json        Technologies screen index (+ tech_index.json knowledge bank)
+   GET  case_questions/<section>.json  case-study reader quiz pool
    GET  graph/<section>.json       prerequisite edges for the Learning Path (optional)
+   GET  diagrams/<key>.mmz         pre-rendered Mermaid SVG (gzipped JSON)
+   GET  vendor/icons-<pack>.json   iconify packs, only when the Mermaid engine loads
    GET  ../<section>/<module>/…md  raw repo Markdown, rendered in the in-app reader
    localStorage  sd_progress       ← streak · XP · mastery · SM-2 review schedule · history
 ```
 
 - **`localStorage` `sd_progress` is the one place all progress lives.** Every write goes
-  through `saveSessionLocal()` / `loadProgress()`; nothing else persists progress.
+  through the quota-safe `safeSet()` wrapper (`saveSessionLocal()` for session
+  aggregates); only backup import writes raw.
 - **No mirror seam, no round-trip.** Because there is no server, there is nothing to sync
   and no `POST` — a finished session is written straight to `localStorage`.
 - **Backup = export/import.** The Progress screen has **Export backup** (downloads
@@ -44,7 +50,8 @@ Browser (index.html + app.js + style.css + sw.js)
   every deploy busts the shell cache; content edits arrive on the next load without a
   version bump.
 - **All app colours flow from tokens** in `:root` / `[data-theme=…]` in `style.css`;
-  four glass themes (Midnight, Orchid, Ember, Daylight) set `data-theme` on `<html>`.
+  eight colour themes (Midnight, Ocean, Forest, Ember, Fire, Rose, Orchid, Obsidian) set
+  `data-theme` on `<html>`, and an independent light/dark mode sets `data-mode`.
   `?theme=<id>` previews one without persisting.
 
 ### Run it locally
@@ -57,9 +64,9 @@ python3 -m http.server 8901
 # open http://localhost:8901/src/main/java/com/rutik/systemdesign/game/index.html
 ```
 
-No `pip install`, no `npm`, no build step. In production
-`.github/workflows/pages.yml` runs `extract.py` + `build_graph.py` and publishes the
-whole repo root to Pages.
+Run `bash scripts/build_banks.sh` once first: the banks and graphs are gitignored. No
+`pip install`. In production `.github/workflows/pages.yml` runs `scripts/build_banks.sh`
+and `scripts/prerender_diagrams.sh`, then publishes the whole repo root to Pages.
 
 ---
 
@@ -84,6 +91,17 @@ whole repo root to Pages.
   lowest-accuracy sections, lapsed questions first.
 - **Drills** — a **confusion drill** (the two modules you most mix up, alternated) and a
   **fading refresh** (questions whose estimated retention is slipping this week).
+- **Interviewer** (`#/interview/<section>`): unlocks at Silver (20 questions seen at 70%
+  accuracy); 4 core, 4 intermediate, then 4 advanced questions. Gold opens a
+  12-advanced panel. Passes land in the Ledger.
+
+### Study and Technologies
+
+- **Study paths**: Full, Senior, Principal, and Case Studies tabs per section from
+  `questions/paths.json`, with a Level filter on case studies.
+- **Technologies** (`#/tech`): By technology and Tradeoffs tabs, a section filter, and
+  tier/role facets, from `questions/tech.json` and `tech_index.json`.
+- **Light/dark mode**, independent of the colour theme.
 
 ### The learning engine
 
@@ -114,8 +132,8 @@ whole repo root to Pages.
   the consecutive-day reading streak, tracked separately from the quiz streak.
 - **Mastery tiers** — sections earn Bronze/Silver/Gold from combined volume + accuracy.
 - **The Codex** — a collection view of every module, unlocked as you practise.
-- **The Skyline** — a home-screen city that grows with your sections.
-- **The Ledger** — earned award chips (and Interview/Panel passes) on the Progress screen.
+- **The Skyline**: a city on Progress > Awards that grows with your sections.
+- **The Ledger**: earned award chips (and Interview/Panel passes) on Progress > Awards.
 - **Time capsules** — a flawless full blitz buries a capsule; the question returns ~60
   days later and celebrates if it "kept".
 - **Boss round, combos, double-down, comeback engine, daily-XP goal ring, streak freezes**
@@ -139,8 +157,10 @@ whole repo root to Pages.
 
 - **Dive deeper** — every revealed answer opens its exact source module beside the quiz.
 - **One Dark surface** — code gets IntelliJ-style highlighting; ASCII §5 diagrams get
-  alignment-safe colouring; **Mermaid** fences render via a lazy CDN import (flowchart,
-  sequence, state, xychart, pie, quadrant, timeline, sankey), column-aware and themed.
+  alignment-safe colouring; **Mermaid** fences render from build-time SVGs
+  (`diagrams/<key>.mmz`), and the pinned `mermaid@11.16.0` engine loads only for a fence
+  with no pre-rendered asset (flowchart, sequence, state, xychart, pie, quadrant,
+  timeline, sankey), column-aware and themed.
   Authored diagrams follow four style rules — **colour every node**, **horizontal-first**
   (`LR`), **no spillover text**, **rounded corners** (see the authoring contract below).
 - **Evaluate me** — every module page ends with a "Quiz this topic" launcher.
@@ -172,23 +192,25 @@ how-am-I-doing:
   each row a one-tap **Drill** into that module.
 - **Your hardest questions (leeches)** — questions missed 3+ times; the list lazily fetches
   banks only when expanded, links each to its source, and has a "Drill these" button.
+- **30-day trend** — XP bars + a 7-day rolling-accuracy line (inline SVG).
 - **Calibration** — per-section "When sure: X% · When unsure: Y%", with an *overconfident*
   warn chip when Sure underperforms Not-sure.
-- **30-day trend** — XP bars + a 7-day rolling-accuracy line (inline SVG).
 - **Session log** — the last 10 runs (date · section · score · XP · duration).
 
 ### Command palette (Cmd/Ctrl+K, or `/`)
 
 A centred glass modal with fuzzy (subsequence) search over: every section blitz, every
-module's Read/Quiz command (~426 modules), and verbs (resume, start review + due count,
+module's Read/Quiz command (book chapters included), and verbs (resume, start review + due count,
 weak spots, gauntlet, codex, insights, debrief, quiz/flashcards toggle, theme switch,
 export). Arrow keys + Enter, Esc closes. When a section's bank is already cached, a final
 row runs full-text question search (top 8, each opens its reader source).
 
 ### Mobile
 
-Under 640px: a fixed glass **bottom tab bar** (Home / Study / Progress, 44px targets; the
-topbar keeps brand + stats), **sticky quiz actions**, a horizontally-scrollable heatmap
+Below 47rem: a fixed glass **bottom tab bar** (Today / Practice / Study / Tech /
+Progress; the topbar keeps brand + stats); at 47rem and up the same five sit in a left
+rail that collapses to icons (`[`). Coarse pointers get 44px targets. Also **sticky quiz
+actions**, a horizontally-scrollable heatmap
 (scrolled to today), and 44px reader controls. On coarse pointers the Learning Path's
 hover-only prerequisite chords are hidden and the side gutters reclaimed.
 
@@ -208,14 +230,15 @@ focus management, no emojis, tabular numerals throughout.
 
 | Key | Schema / purpose |
 |-----|------------------|
-| `sd_progress` | The one truth. `{ streak, longestStreak, lastPlayed, totalXP, sections:{sec:{seen,correct,lastPlayed,sureSeen,sureCorrect,unsureSeen,unsureCorrect}}, history:[{date,answered,correct,xp,section,durationSec,comeback?}] (cap 365), reviews:{qid:{ease,interval,reps,lapses,section,module,due,ms,flagged?,capsule?}}, freezes, freezeUsedOn:[], awards:{id:date}, deepReads, confusions:{"a\|b":n} }` |
+| `sd_progress` | The one truth. `{ streak, longestStreak, lastPlayed, totalXP, sections:{sec:{seen,correct,lastPlayed,sureSeen,sureCorrect,unsureSeen,unsureCorrect}}, history:[{date,answered,correct,xp,section,durationSec,comeback?}] (cap 365), reviews:{qid:{ease,interval,reps,lapses,section,module,due,ms,flagged?,capsule?}}, freezes, freezeUsedOn:[], awards:{id:date}, deepReads, confusions:{"a\|b":n}, readModules:{path:date}, reading:{day,count,streak,longest,todayKeys}, questClears:{week,count} }` |
 | `sd_active_deck` | Same-day resume snapshot of an interrupted blitz (dropped on a new day). |
 | `sd_gauntlet` | Today's sealed run: `{ date, qids:[], sealed, score, attempt:[] }` (ignored if `date` ≠ today). |
 | `sd_coach` | Coach memory: recent picks/observations so it doesn't repeat itself. |
 | `sd_recent_<section>` | Ring buffer of recently-served qids for no-repeat sampling. |
 | `sd_last_mastery` | `{sec: acc%}` snapshot from the last Home render — drives the mastery-delta shine. |
 | `sd_last_read` | `{ path, title }` for Study's "Continue reading" card. |
-| `sd_theme` | `midnight` \| `orchid` \| `ember` \| `daylight`. |
+| `sd_theme` | `midnight` \| `ocean` \| `forest` \| `ember` \| `fire` \| `rose` \| `orchid` \| `obsidian` (a saved `daylight` migrates to midnight + light). |
+| `sd_theme_mode` | `dark` \| `light`. |
 | `sd_mode` | `quiz` \| `flash` (flashcard self-grade). |
 | `sd_deck_len` | Session length `5` \| `10` \| `20`. |
 | `sd_mute` | Sound on/off. |
@@ -224,6 +247,13 @@ focus management, no emojis, tabular numerals throughout.
 | `sd_reader_fs` / `sd_reader_full` / `sd_reader_toc` / `sd_reader_modules` / `sd_reader_w` / `sd_modules_w` / `sd_toc_w` | Reader font size, fullscreen, TOC/module-tree open state, pane/sidebar widths. |
 | `sd_reader_font` / `sd_reader_measure` / `sd_reader_dropcap` / `sd_reader_recall` / `sd_reader_scroll` | Reader typography (serif, measure, drop-cap), think-first answers pref (`"1"` hidden = default), per-path scroll-resume map. |
 | `sd_last_export` | Date of the last backup export (for the backup nudge). |
+| `sd_study_path` | `{section: "full"\|"senior"\|"principal"\|"cases"}` Study path per section (legacy `interview` reads as `senior`). |
+| `sd_case_tier` | `{section: "all"\|"senior"\|"principal"}` Case Studies level filter. |
+| `sd_rail_collapsed` | `"1"` collapses the left rail (applied pre-paint). |
+| `sd_reader_short` | `"1"` shows authored `**Short:**` summaries in the reader. |
+| `sd_diagram_dir` | `lr` \| `td`; absent = auto orientation. |
+| `sd_tech_tab` / `sd_tech_sec` / `sd_tech_facets` | Technologies screen tab, section filter, facet state. |
+| `sd_progress_corrupt` | Raw copy of an unparseable `sd_progress`; never exported. |
 
 ---
 
@@ -234,7 +264,8 @@ deep-dive sub-files** (e.g. `llm/advanced_rag/graph_rag.md`), grouped under the 
 module — and builds `questions/<section>.json` + `index.json`. `case_studies/` and
 `CLAUDE.md` are excluded. It scopes to each file's `## 12. Interview Questions` section,
 treats every fully-bold line as a question and the paragraph beneath as the answer, uses
-the answer's **first sentence** as the correct option, and picks **topically related**
+the authored `**Short:**` line under the question as the correct option (or the answer's
+**first sentence**, trimmed to 220 chars, when there is none), and picks **topically related**
 distractors (IDF-weighted token overlap, same module first, widening to the section).
 Each question record carries `id`, `section`, `module`, `moduleName`, `sourceFile`,
 `difficulty`, `question`/`questionMd`, `answerFull`/`answerFullMd`, `correct`/`correctMd`,
@@ -253,10 +284,14 @@ python3 extract.py     # re-run after editing ANY module's Q&A, then reload the 
 ```
 
 - Q&As live under `## 12. Interview Questions with Answers`; each question line starts
-  with `**`; the answer's **first sentence must be a self-contained 15–220 char answer**
-  (shorter/longer → silently dropped). The **15-Q&A floor** guarantees enough distractors.
+  with `**`; an authored `**Short:**` line under the question (15-220 chars; `--strict`
+  fails outside that range) becomes the option; without one, the answer's first sentence
+  is used and an over-long one is trimmed, never dropped. The **15-Q&A floor** guarantees
+  enough distractors.
 - Every new module directory must be added to `STUDY_ORDER["<section>"]` in `app.js` at
-  its learning-path position (sub-files need no entry — they group under their parent).
+  its learning-path position, and every new file (module page, sub-file, case study) must
+  be listed in the section README's `<!-- study-paths -->` block; `--strict` fails on a
+  gap either way.
 - Mermaid fences are valid only in study section files, never in `game/` or `CLAUDE.md`.
 - **Mermaid diagram style rules (owner-set 2026-07-07) — all four, every diagram:**
   (1) **Colour every node** with the One-Dark `classDef` palette, semantic-by-role — the
@@ -279,7 +314,13 @@ python3 extract.py     # re-run after editing ANY module's Q&A, then reload the 
 | `manifest.webmanifest` | PWA manifest. |
 | `extract.py` | Builds `questions/<section>.json` + `index.json` from all module READMEs + sub-files. |
 | `build_graph.py` | Builds `graph/<section>.json` (prerequisite edges) for the Learning Path. |
-| `questions/`, `graph/` | Generated data — gitignored; Pages CI rebuilds both on every deploy (locally: `python3 extract.py`, then `python3 build_graph.py <section>` per section). |
+| `build_tech.py` | Builds `tech_index.json` and `questions/tech.json`. |
+| `build_common.py` | Constants shared by the builders. |
+| `questions/`, `graph/` | Generated data, gitignored; Pages CI rebuilds both on every deploy (locally: `bash scripts/build_banks.sh`). |
+| `case_questions/` | Case-study reader quiz pools (generated). |
+| `tech_index.json` | Technology knowledge bank (generated). |
+| `diagrams/` | Pre-rendered Mermaid `.mmz` (generated by `scripts/build_diagrams.mjs`). |
+| `vendor/` | Iconify icon packs (generated by `scripts/build_icons.mjs`); the APK build also adds `mermaid.min.js` to its asset copy. |
 
 ---
 
@@ -289,15 +330,17 @@ LORA also ships as a fully-offline, sideloadable Android APK — a raw-WebView
 wrapper (no Capacitor/frameworks) built by `scripts/build_android_assets.sh`,
 which mirrors the whole repo (every section's Markdown + freshly regenerated
 question banks/graphs) plus a vendored `mermaid@11.16.0` UMD build into the
-app's assets — a ~59MB payload that compresses to a **~27MB APK**.
+app's assets, plus the pre-rendered diagram assets (`game/diagrams/*.mmz`) and icon
+packs. The CI smoke test accepts an APK of 15-200 MiB.
 `.github/workflows/android-apk.yml` builds and publishes a signed GitHub
 Release on **every push to `main`, newest push wins** (builds are
 cancel-in-progress, so a burst of commits yields one release for the last of
 them and the release numbering skips; green-skip if any signing secret is
 absent). It also `node --check`s the SPA before building and smoke-tests the
-assembled APK — required entries, a parseable shipped `app.js`, bank/graph
-counts matching the section count, an unstamped `sw.js`, and a sane size —
-so a white-screen build cannot reach the stable download at
+assembled APK: required entries (including `paths.json` and `tech.json`), a
+parseable shipped `app.js`, graph count equal to the section count, bank count
+equal to sections + 3, at least 3,000 pre-rendered `.mmz` diagrams, an unstamped
+`sw.js`, and a size in the 15-200 MiB window, so a white-screen build cannot reach the stable download at
 `releases/latest/download/systemdesign-daily.apk`.
 
 Three seams in `app.js` are the only places behavior forks from the Pages
@@ -335,7 +378,7 @@ the GitHub repo for tap-to-update. Full detail: `android/README.md`.
 ## QA harness pattern
 
 Features are smoke-tested with headless Chrome over the Chrome DevTools Protocol (raw Node
-`WebSocket`, no Puppeteer). The pattern (see `/tmp/qa_phase*.mjs`):
+`WebSocket`, no Puppeteer). The pattern:
 
 - Serve the repo root (`python3 -m http.server <port>`), launch
   `--headless=new --remote-debugging-port=<cdp>` against

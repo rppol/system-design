@@ -31,31 +31,33 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 | 6 | [Java Streams — Deep Dive](java_streams/java_streams.md) | All ops, lazy eval, flatMap, reduce, collect, Spliterator, parallel rules | Intermediate |
 | 7 | [Functional Programming](functional_programming/functional_programming.md) | Function composition, custom Collectors, parallel streams, immutability | Intermediate |
 | 8 | [Java 9-21 Features](java9_to_21_features/java9_to_21_features.md) | Records, Sealed classes, Virtual threads, Pattern matching, JPMS | Intermediate |
-| 9 | [JVM Internals](jvm_internals/jvm_internals.md) | GC algorithms, JIT, Memory model, Class loading, Object layout | Advanced |
-| 10 | [Concurrency](concurrency/concurrency.md) | synchronized, volatile, locks, ThreadPool, CompletableFuture, CAS | Advanced |
-| 11 | [Collections Internals](collections_internals/collections_internals.md) | HashMap/TreeMap/ArrayList internals, fail-fast, treeification | Advanced |
-| 12 | [Design Patterns in Java](design_patterns_in_java/design_patterns_in_java.md) | GoF patterns in JDK, JDK Proxy vs CGLIB, Decorator chain, Strategy vs Template Method, concurrency patterns | Intermediate |
-| 13 | [Performance & Tuning](performance_and_tuning/performance_and_tuning.md) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler | Advanced |
-| 14 | [Java Memory Model](java_memory_model/java_memory_model.md) | Happens-before rules, memory barriers, safe publication, final fields, data race vs race condition | Advanced |
-| 15 | [Java Interview Patterns](java_interview_patterns/java_interview_patterns.md) | Immutable class, builder, equals contract, Integer cache, enum singleton | Intermediate |
-| 16 | [Testing — JUnit 5 & Mockito](testing_junit_mockito/testing_junit_mockito.md) | JUnit 5 lifecycle, assertions, @ParameterizedTest, Mockito mocks/spies/captors, test doubles | Intermediate |
-| 17 | [Annotation Processing](annotation_processing/annotation_processing.md) | JSR 269 rounds, AbstractProcessor, Filer/Messager, element model, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime | Advanced |
-| 18 | [Structured Concurrency & Loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue, Continuation internals, Java 21 GA | Advanced |
-| 19 | [Foreign Function & Memory API (Panama)](foreign_function_and_memory_api/foreign_function_and_memory_api.md) | Arena, MemorySegment, MemoryLayout, VarHandle, Linker downcall/upcall, jextract, replacing Unsafe/JNI, Java 22 GA | Advanced |
-| 20 | [Reactive Programming](reactive_programming/reactive_programming.md) | Reactor Flux/Mono, cold vs hot, flatMap/concatMap/switchMap, backpressure, Schedulers, Reactor Context, RxJava 3, StepVerifier | Advanced |
-| 21 | [Networking & HTTP Client](networking_and_http_client/networking_and_http_client.md) | HttpClient (Java 11), NIO Selector/Reactor, HTTP/2 multiplexing, NIO2 async channels | Intermediate |
-| 22 | [JDBC & Database Access](jdbc_and_database/jdbc_and_database.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
-| 23 | [gRPC & Protocol Buffers](grpc_protobuf/grpc_protobuf.md) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport | Advanced |
-| 24 | [Microservices Patterns](microservices_patterns/microservices_patterns.md) | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead | Advanced |
-| 25 | [Java Date/Time (java.time)](java_time_datetime/java_time_datetime.md) | Instant vs LocalDateTime, ZoneId/offsets, Duration vs Period, TemporalAdjuster, Clock (testable time), DST gaps/overlaps | Intermediate |
-| 26 | [Bytecode & Class-File Format](bytecode_and_classfile/bytecode_and_classfile.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation | Advanced |
-| 27 | [Security & Cryptography](security_and_cryptography/security_and_cryptography.md) | JCA/JCE, MessageDigest/Cipher/KeyStore/SecureRandom, AES-GCM, TLS/SSLEngine handshake, password hashing, JAAS | Advanced |
-| 28 | [JSON Processing with Jackson](json_processing_jackson/json_processing_jackson.md) | ObjectMapper thread-safety + reuse, streaming vs tree vs databind, records/@JsonCreator, TypeReference generics, polymorphic deserialization CVEs, java.time module | Intermediate |
-| 29 | [Logging](logging/logging.md) | SLF4J facade, Logback/Log4j2, parameterized logging, MDC propagation across threads/virtual-threads, async appenders, structured JSON, Log4Shell | Intermediate |
-| 30 | [JPMS — Java Platform Module System](java_platform_module_system/java_platform_module_system.md) | module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink | Advanced |
-| 31 | [Reference Types & Cleaners](reference_types_and_cleaners/reference_types_and_cleaners.md) | Strong/Soft/Weak/Phantom, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks | Advanced |
-| 32 | [GraalVM Native Image](graalvm_native_image/graalvm_native_image.md) | AOT native-image, closed-world reachability, reflection/resource metadata, build-time vs runtime init, startup vs throughput | Advanced |
-| 33 | [Build Tools — Maven & Gradle](build_tools_maven_gradle/build_tools_maven_gradle.md) | Maven lifecycle/dependency mediation/BOM/shade, Gradle task graph/build cache/version catalogs, dependency hell | Intermediate |
+| 9 | [Java 22-26 Features](java22_to_26_features/java22_to_26_features.md) | Module imports, compact source files, flexible constructor bodies, Stream Gatherers, Class-File API, compact object headers | Intermediate |
+| 10 | [JVM Internals](jvm_internals/jvm_internals.md) | GC algorithms, JIT, Memory model, Class loading, Object layout | Advanced |
+| 11 | [Concurrency](concurrency/concurrency.md) | synchronized, volatile, locks, ThreadPool, CompletableFuture, CAS | Advanced |
+| 12 | [Collections Internals](collections_internals/collections_internals.md) | HashMap/TreeMap/ArrayList internals, fail-fast, treeification | Advanced |
+| 13 | [Design Patterns in Java](design_patterns_in_java/design_patterns_in_java.md) | GoF patterns in JDK, JDK Proxy vs CGLIB, Decorator chain, Strategy vs Template Method, concurrency patterns | Intermediate |
+| 14 | [Performance & Tuning](performance_and_tuning/performance_and_tuning.md) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler | Advanced |
+| 15 | [Java Memory Model](java_memory_model/java_memory_model.md) | Happens-before rules, memory barriers, safe publication, final fields, data race vs race condition | Advanced |
+| 16 | [Java Interview Patterns](java_interview_patterns/java_interview_patterns.md) | Immutable class, builder, equals contract, Integer cache, enum singleton | Intermediate |
+| 17 | [Testing — JUnit 5 & Mockito](testing_junit_mockito/testing_junit_mockito.md) | JUnit 5 lifecycle, assertions, @ParameterizedTest, Mockito mocks/spies/captors, test doubles | Intermediate |
+| 18 | [Annotation Processing](annotation_processing/annotation_processing.md) | JSR 269 rounds, AbstractProcessor, Filer/Messager, element model, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime | Advanced |
+| 19 | [Structured Concurrency & Loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue, Continuation internals, Java 21 GA | Advanced |
+| 20 | [Foreign Function & Memory API (Panama)](foreign_function_and_memory_api/foreign_function_and_memory_api.md) | Arena, MemorySegment, MemoryLayout, VarHandle, Linker downcall/upcall, jextract, replacing Unsafe/JNI, Java 22 GA | Advanced |
+| 21 | [Reactive Programming](reactive_programming/reactive_programming.md) | Reactor Flux/Mono, cold vs hot, flatMap/concatMap/switchMap, backpressure, Schedulers, Reactor Context, RxJava 3, StepVerifier | Advanced |
+| 22 | [Networking & HTTP Client](networking_and_http_client/networking_and_http_client.md) | HttpClient (Java 11), NIO Selector/Reactor, HTTP/2 multiplexing, NIO2 async channels | Intermediate |
+| 23 | [JDBC & Database Access](jdbc_and_database/jdbc_and_database.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
+| 24 | [gRPC & Protocol Buffers](grpc_protobuf/grpc_protobuf.md) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport | Advanced |
+| 25 | [Microservices Patterns](microservices_patterns/microservices_patterns.md) | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead | Advanced |
+| 26 | [Java Date/Time (java.time)](java_time_datetime/java_time_datetime.md) | Instant vs LocalDateTime, ZoneId/offsets, Duration vs Period, TemporalAdjuster, Clock (testable time), DST gaps/overlaps | Intermediate |
+| 27 | [Bytecode & Class-File Format](bytecode_and_classfile/bytecode_and_classfile.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation | Advanced |
+| 28 | [Security & Cryptography](security_and_cryptography/security_and_cryptography.md) | JCA/JCE, MessageDigest/Cipher/KeyStore/SecureRandom, AES-GCM, TLS/SSLEngine handshake, password hashing, JAAS | Advanced |
+| 29 | [JSON Processing with Jackson](json_processing_jackson/json_processing_jackson.md) | Jackson 3 immutable `JsonMapper` built once and reused, streaming vs tree vs databind, records/@JsonCreator, TypeReference generics, polymorphic deserialization CVEs, built-in `java.time` support | Intermediate |
+| 30 | [Logging](logging/logging.md) | SLF4J facade, Logback/Log4j2, parameterized logging, MDC propagation across threads/virtual-threads, async appenders, structured JSON, Log4Shell | Intermediate |
+| 31 | [JPMS — Java Platform Module System](java_platform_module_system/java_platform_module_system.md) | module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink | Advanced |
+| 32 | [Reference Types & Cleaners](reference_types_and_cleaners/reference_types_and_cleaners.md) | Strong/Soft/Weak/Phantom, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks | Advanced |
+| 33 | [AOT Startup & Class Data Sharing](aot_startup_and_class_data_sharing/aot_startup_and_class_data_sharing.md) | CDS, AppCDS, dynamic archives, the AOT cache, training runs, silent fallback | Advanced |
+| 34 | [GraalVM Native Image](graalvm_native_image/graalvm_native_image.md) | AOT native-image, closed-world reachability, reflection/resource metadata, build-time vs runtime init, startup vs throughput, editions and 25.x feature trains, isolates | Advanced |
+| 35 | [Build Tools — Maven & Gradle](build_tools_maven_gradle/build_tools_maven_gradle.md) | Maven lifecycle/dependency mediation/BOM/shade, Gradle task graph/build cache/version catalogs, dependency hell | Intermediate |
 
 > **Note**: `java8_features` covers Streams as part of the full Java 8 overview. `java_streams` is the dedicated deep dive — all 20+ operations, `Spliterator` internals, parallel rules, `reduce` vs `collect`, and the full `Collectors` catalogue.
 
@@ -71,15 +73,15 @@ Understand what Java code actually means at the semantic level — object contra
 
 ### Phase 2 — Modern Java
 ```
-java8_features  -->  java_time_datetime  -->  java_streams  -->  functional_programming  -->  java9_to_21_features  -->  java_platform_module_system
+java8_features  -->  java_time_datetime  -->  java_streams  -->  functional_programming  -->  java9_to_21_features  -->  java22_to_26_features  -->  java_platform_module_system
 ```
-Master the functional style, stream pipelines (full deep dive), the modern `java.time` date/time model, and the new language features from Java 8 through 21. `java_platform_module_system` closes the phase with the full JPMS deep-dive — `module-info`, `requires`/`exports`/`opens`, `requires transitive`, automatic modules, split packages, `ServiceLoader`, and `jlink` — beyond the single bullet inside `java9_to_21_features`.
+Master the functional style, stream pipelines (full deep dive), the modern `java.time` date/time model, and the language features from Java 8 through 21. `java22_to_26_features` carries the same story through the Java 25 LTS and Java 26: module imports, compact source files, flexible constructor bodies, Stream Gatherers, the Class-File API, and compact object headers. `java_platform_module_system` closes the phase with the full JPMS deep-dive — `module-info`, `requires`/`exports`/`opens`, `requires transitive`, automatic modules, split packages, `ServiceLoader`, and `jlink` — beyond the single bullet inside `java9_to_21_features`.
 
 ### Phase 3 — JVM Internals (Show Depth)
 ```
-jvm_internals  -->  reference_types_and_cleaners  -->  bytecode_and_classfile  -->  graalvm_native_image
+jvm_internals  -->  bytecode_and_classfile  -->  reference_types_and_cleaners  -->  aot_startup_and_class_data_sharing  -->  graalvm_native_image
 ```
-Understand what the JVM does under the hood — GC algorithms, JIT compilation, memory model, and class loading. `reference_types_and_cleaners` follows immediately: Strong/Soft/Weak/Phantom references, `ReferenceQueue`, `WeakHashMap`, and `Cleaner` vs `finalize` — the GC-adjacent mechanics behind caches and leak hunting (`ThreadLocal`/`ClassLoader` leaks). `bytecode_and_classfile` goes one level deeper: the `.class` format, opcodes, `invokedynamic`, and runtime bytecode manipulation (ASM/Byte Buddy, java agents) that powers proxies, mocks, and profilers. `graalvm_native_image` closes the phase: AOT `native-image` compilation, closed-world reachability, and reflection/resource metadata — the build-time counterpart to everything else in this phase. This phase separates senior from junior engineers at interviews.
+Understand what the JVM does under the hood — GC algorithms, JIT compilation, memory model, and class loading. `bytecode_and_classfile` goes one level deeper: the `.class` format, opcodes, `invokedynamic`, and runtime bytecode manipulation (ASM/Byte Buddy, java agents) that powers proxies, mocks, and profilers. `reference_types_and_cleaners` follows: Strong/Soft/Weak/Phantom references, `ReferenceQueue`, `WeakHashMap`, and `Cleaner` vs `finalize`, the GC-adjacent mechanics behind caches and leak hunting (`ThreadLocal`/`ClassLoader` leaks). `aot_startup_and_class_data_sharing` covers HotSpot startup: CDS, AppCDS and dynamic archives, the AOT cache built from a training run, and the silent fallback when an archive does not match the run. `graalvm_native_image` closes the phase: AOT `native-image` compilation, closed-world reachability, and reflection/resource metadata — the build-time counterpart to everything else in this phase. This phase separates senior from junior engineers at interviews.
 
 ### Phase 4 — Concurrency + Collections + Patterns (Most Tested)
 ```
@@ -213,9 +215,9 @@ aot_startup_and_class_data_sharing
 -->
 ## Learning Paths
 
-33 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+The full curriculum is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (33 modules)
+### Full Path (all modules)
 
 The complete curriculum in the order above — see [8-Phase Learning Path](#8-phase-learning-path). Use it for genuine depth: bytecode and the class-file format, Panama FFM, reactive programming, gRPC, networking internals, security/crypto, and the production/tooling modules. Nothing is dropped.
 
@@ -328,9 +330,9 @@ A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_st
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|
 | 1 | Language Core | Core Language, Strings & Text, Generics & Type System, Exceptions & I/O, JSON Processing (Jackson) | skim [LRU Cache](case_studies/design_lru_cache_java.md) |
-| 2 | Modern Java | Java 8 Features, Java Streams, Java 9-21 Features | — |
-| 3 | JVM + Concurrency (most tested) | JVM Internals, Concurrency, Collections Internals, Java Memory Model | [Thread Pool](case_studies/design_thread_pool_java.md), [Connection Pool](case_studies/design_connection_pool.md) |
-| 4 | Patterns, Testing, Modern Concurrency | Design Patterns in Java, Java Interview Patterns, Testing (JUnit 5 & Mockito), Structured Concurrency & Loom | [Circuit Breaker](case_studies/design_circuit_breaker_java.md) |
+| 2 | Modern Java | Java 8 Features, Java Streams, Java 9-21 Features, Java 22-26 Features | — |
+| 3 | JVM + Concurrency (most tested) | JVM Internals, Reference Types & Cleaners, AOT Startup & Class Data Sharing, Concurrency, Collections Internals, Java Memory Model | [Thread Pool](case_studies/design_thread_pool_java.md), [Connection Pool](case_studies/design_connection_pool.md) |
+| 4 | Patterns, Testing, Modern Concurrency | Design Patterns in Java, Java Interview Patterns, Testing (JUnit 5 & Mockito), Structured Concurrency & Loom | [Circuit Breaker](case_studies/design_circuit_breaker_java.md), [Structured Concurrency Aggregator](case_studies/design_structured_concurrency_aggregator.md) |
 | 5 | Data Access + drills | JDBC & Database Access | [Rate Limiter](case_studies/design_rate_limiter_java.md) + mock "implement X" from the case studies |
 
 ---
@@ -381,6 +383,9 @@ A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_st
 | security_and_cryptography | networking_and_http_client (TLS transport), `../../cs_fundamentals/cryptography_fundamentals/`, `../../backend/backend_security_owasp/`, `../../backend/auth_and_authorization_systems/` |
 | strings_and_text → regex_engine_and_redos.md (sub-file) | catastrophic backtracking / ReDoS, possessive/atomic groups, `../../backend/backend_security_owasp/` |
 | performance_and_tuning → jmx_and_management.md (sub-file) | platform MXBeans, custom MBeans, remote JMX security, `../../spring/spring_boot_actuator/` |
+| performance_and_tuning → jvm_in_containers.md (sub-file) | cgroup CPU quota and `availableProcessors()`, SIGTERM and shutdown hooks, probes, base images, `../../devops/kubernetes_scheduling_and_autoscaling/` |
+| performance_and_tuning → jfr_and_production_diagnostics.md (sub-file) | always-on JFR recording, `jcmd`, JFR event streaming, jmx_and_management.md (live metrics), jvm_in_containers.md (getting a recording out of a pod) |
+| security_and_cryptography → post_quantum_and_modern_jca.md (sub-file) | ML-KEM and ML-DSA, harvest-now-decrypt-later data lifetime, the modern JCA, `../../cs_fundamentals/cryptography_fundamentals/` |
 
 ---
 
@@ -412,7 +417,7 @@ A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_st
 
 ## Case Studies
 
-For a guided learning path through all 8 case studies, see [case_studies/case_studies.md](case_studies/case_studies.md).
+For a guided learning path through every case study, see [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Case Study | Core Java Concepts | Difficulty |
 |------------|-------------------|------------|
@@ -424,6 +429,8 @@ For a guided learning path through all 8 case studies, see [case_studies/case_st
 | [Design DI Container (Java)](case_studies/design_di_container_java.md) | Reflection, @Inject/@Named/@PostConstruct, Binding record, cycle detection | Advanced |
 | [Design Circuit Breaker (Java)](case_studies/design_circuit_breaker_java.md) | Sliding window ring buffer, CAS state transitions, HALF_OPEN probe counting | Advanced |
 | [Design Snowflake ID Generator (Java)](case_studies/design_snowflake_id_generator_java.md) | 41+10+12 bit layout, CAS, clock skew, virtual thread pinning pitfall | Advanced |
+| [Design Structured Concurrency Aggregator (Java)](case_studies/design_structured_concurrency_aggregator.md) | StructuredTaskScope fan-out, Joiner policies, deadlines and cancellation, ScopedValue | Advanced |
+| [Design Low-Latency Market Data Handler (Java)](case_studies/design_low_latency_market_data_handler.md) | FFM off-heap ring buffer, VarHandle cursors, cache-line padding, GC-free hot path | Advanced |
 
 **Cross-cutting shared primitives** (consumed by the case studies above):
 

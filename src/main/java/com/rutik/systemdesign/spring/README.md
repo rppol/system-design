@@ -521,7 +521,7 @@ The current generation is **Spring Framework 7.0 / Spring Boot 4.1** (Boot 4.1.0
 
 ## 7. Case Studies
 
-For a guided learning path through all 9 case studies, see [case_studies/case_studies.md](case_studies/case_studies.md).
+For a guided learning path through the case studies, see [case_studies/case_studies.md](case_studies/case_studies.md).
 
 | Case Study | Core Concepts | Difficulty |
 |------------|---------------|------------|
@@ -534,6 +534,7 @@ For a guided learning path through all 9 case studies, see [case_studies/case_st
 | [Design an OAuth2 Authorization Server](case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server 7.1 (inside Spring Security), PKCE, refresh token rotation, dual-key JWKS rollover | Advanced |
 | [Design an Idempotent Payment API](case_studies/design_idempotent_payment_api.md) | Idempotency keys, pg_advisory_xact_lock, outbox pattern, exactly-once semantics | Advanced |
 | [Design a Real-Time Notification Service](case_studies/design_realtime_notification_service.md) | WebSocket fan-out, Redis Pub/Sub, ZSET history, virtual threads, backpressure | Advanced |
+| [Design an Internal MCP Tool Platform](case_studies/design_mcp_tool_platform.md) | Spring AI 2.0 `@McpTool`/`@McpResource`/`@McpPrompt`, scope-filtered `tools/list`, RFC 8693 token exchange, progressive disclosure for large catalogues | Advanced |
 
 **Cross-cutting shared primitives** (consumed by the case studies above):
 
@@ -554,6 +555,6 @@ Recommended learning order for interview preparation:
 2. **Week 2**: Phases 3–4 (Spring Boot internals, MVC, WebFlux)
 3. **Week 3**: Phases 5–6 (Data, transactions, security)
 4. **Week 4**: Phases 7–8 (Cloud patterns, messaging, testing, performance)
-5. **Review**: Work through all 9 case studies end-to-end — see [case_studies/case_studies.md](case_studies/case_studies.md) for the recommended order
+5. **Review**: Work through every case study end-to-end — see [case_studies/case_studies.md](case_studies/case_studies.md) for the recommended order
 
 Each module follows the standard 14-section template. See [llm/foundations_and_architecture/foundations_and_architecture.md](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.

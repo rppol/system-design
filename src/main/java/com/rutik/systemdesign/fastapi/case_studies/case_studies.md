@@ -50,13 +50,19 @@ If you only have time for three case studies, read these in order:
 |---|---|---|
 | [Design an LLM Gateway](design_llm_gateway_fastapi.md) | A FastAPI front door for model traffic | Streaming completions over SSE, cancellation propagated to the backend, per-tenant token budgets, provider failover, and semantic caching with its invalidation trap. |
 
+### File Uploads and Media
+
+| Case Study | Primary Concern | What It Teaches |
+|---|---|---|
+| [Design a File Upload and Media API](design_file_upload_and_media_api.md) | Large request bodies, object storage | `UploadFile` spill threshold, multipart DoS limits, presigned S3 PUT, S3 multipart and resumable uploads, content sniffing, virus scanning before promotion, and off-request post-processing. |
+
 ## Cross-Cutting / Shared Primitives
 
 No `cross_cutting/` directory here — the shared primitives live as deep-dive modules in the section itself. The same primitives recur across these case studies; read the deep dive once, then recognize it everywhere:
 
 | Primitive | Used By | Deep Dive | Phase |
 |---|---|---|---|
-| `Depends`-injected service layer | all six (established by Rate-Limited API) | `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md` | 1 — Core Framework |
+| `Depends`-injected service layer | all case studies (established by Rate-Limited API) | `../dependency_injection_in_fastapi/dependency_injection_in_fastapi.md` | 1 — Core Framework |
 | Redis Lua atomicity (TOCTOU-free counters) | Rate-Limited API | `../caching_and_performance/caching_and_performance.md` | 3 — Production |
 | `lifespan` startup loading | ML Inference, Rate-Limited API | `../fastapi_fundamentals_asgi/fastapi_fundamentals_asgi.md` | 1 |
 | Async SQLAlchemy session-per-request | Multi-Tenant SaaS | `../async_database_sqlalchemy/async_database_sqlalchemy.md` | 2 — Data & Integration |
@@ -115,3 +121,4 @@ flowchart LR
 | How would you do zero-downtime deploys? | [design_ml_inference_api_fastapi.md](design_ml_inference_api_fastapi.md) (covers `lifespan` pattern) |
 | How would you implement tenant isolation at the DB layer? | [design_multi_tenant_saas_api.md](design_multi_tenant_saas_api.md) |
 | Design an LLM gateway / proxy in front of model providers | [design_llm_gateway_fastapi](design_llm_gateway_fastapi.md) |
+| Design a file / media upload service | [design_file_upload_and_media_api](design_file_upload_and_media_api.md) |

@@ -57,7 +57,8 @@ Build manifest / status tracker: `README.md` §7 — check Batch Plan before sta
 two curated tiers: **Senior** (20 modules) and **Principal** (8). They are different
 cuts, not nested depths — senior is the craft, principal is the judgment (which runtime
 model at what cost, what you tell a team *not* to do), so principal is the far smaller
-list here and much of it is material senior never sees. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
+list here. In this section principal is close to a subset of senior: only
+`design_patterns_in_python` is principal-only. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
 each tier takes; listing a tier joins it, omitting the tier opts out, and the module page
 (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.python` in
 `game/app.js`, so a tier is an ordered subset by construction. **There is no path array

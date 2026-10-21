@@ -119,8 +119,8 @@ normal §14:
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 21 modules) plus two curated tiers. They are
-**different cuts, not nested depths** — senior is the craft, principal is the judgment.
+`README.md` documents the **Full Path** (all 21 modules) plus two curated tiers. They nest:
+Senior lists every module and Principal is a subset of it. Senior is the craft, principal is the judgment.
 Membership is declared ONCE, in the `<!-- study-paths -->` block in this section's
 `README.md`. Order is never declared there — it comes from `STUDY_ORDER.frontend_platform`
 in `game/app.js`. **There is no path array in `app.js` to edit**; `extract.py` emits the
@@ -155,7 +155,7 @@ block holds the membership; do not restate it here.
 - At least one **`// BROKEN` → `// FIX`** pair in §10 and one in §14 of every module.
 - Concrete numbers everywhere — real thresholds, real byte counts, real millisecond
   budgets. Never "a few", "some", "significant".
-- This repository's own learning game (`game/app.js`, 578KB of dependency-free vanilla
+- This repository's own learning game (`game/app.js`, dependency-free vanilla
   JavaScript with no build step, plus `game/sw.js`) is a legitimate worked example for the
   DOM, service-worker and bundling modules. It is an **app, not study content** — cite it,
   never treat it as a module.
