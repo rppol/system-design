@@ -4884,11 +4884,11 @@ async function renderTech() {
     <div class="hero">
       <h1>Technologies</h1>
       <p><b>${idx.tech.length.toLocaleString()}</b> tools indexed from <b>${mods.length}</b> module pages.
-      Search one to find every page that teaches it.<span class="tx-provenance"> Built from every
-      <span class="tx-cite">&sect;11 Technologies &amp; Tools</span> and
-      <span class="tx-cite">&sect;8 Tradeoffs</span> table in the repo.</span></p>
+      Search one to find every page that teaches it.</p>
+      <details class="tx-provenance"><summary>Where this comes from</summary>
+        Built from every <span class="tx-cite">&sect;11 Technologies &amp; Tools</span> and
+        <span class="tx-cite">&sect;8 Tradeoffs</span> table in the repo.</details>
     </div>
-    ${deepHTML}
     <div class="topicbar tx-bar">
       <div class="pathswitch" role="radiogroup" aria-label="Index">
         <button class="pathopt${tab === "tech" ? " on" : ""}" role="radio" aria-checked="${tab === "tech"}" data-txtab="tech">By technology</button>
@@ -4905,6 +4905,7 @@ async function renderTech() {
     </div>
     ${bankOn ? `<div id="techFacets" class="tx-facets"></div>` : ""}
     <div id="techShelf" class="tx-shelf"></div>
+    <div id="techDeep">${deepHTML}</div>
     <div id="techList" class="tx-list"></div>`;
 
   const listEl = el("#techList"), countEl = el("#techCount"), findEl = el("#techFilter");
@@ -5262,6 +5263,7 @@ async function renderTech() {
     const k = focusKey();
     const q = findEl.value.trim().toLowerCase();
     renderFacets(q); renderShelf(q); paint();
+    el("#techDeep").hidden = !!q || secPick !== "all" || F.t.length > 0 || F.r.length > 0 || !!F.l || F.k !== defaultKind;
     refocus(k);
   }
   function toggle(list, v) {

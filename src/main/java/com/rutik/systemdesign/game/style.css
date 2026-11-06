@@ -936,6 +936,8 @@ button:active { transform: scale(0.98); }
    and the section hue carried ONLY by a 7px dot so 3,600 rows never turn into a
    colour riot. Every colour is a token or the section's own --tile-accent. */
 
+.tx-provenance { margin-top: 2px; color: var(--muted); font-size: 0.8125rem; }
+.tx-provenance > summary { cursor: pointer; padding: 6px 0; }
 .tx-cite { font-family: var(--mono); font-size: 0.88em; color: var(--muted); white-space: nowrap; }
 .tx-deep { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 .tx-deepcard { cursor: pointer; border-color: color-mix(in srgb, var(--tile-accent) 34%, var(--glass-brd)); }
@@ -1030,10 +1032,7 @@ button:active { transform: scale(0.98); }
   .tx-gomod { flex-shrink: 1; min-width: 0; overflow-wrap: anywhere; }
   .tx-gosec { margin-left: 0; padding-left: 16px; }
   .tx-item > summary { padding: 11px 6px; }
-  /* On a phone the hero + three deep-dive cards cost a whole screen before the
-     index appears. Drop the provenance sentence (the §-citations are desktop
-     context, not instructions) and let the cards ride a single swipeable row. */
-  .tx-provenance { display: none; }
+  /* On a phone the deep-dive cards ride a single swipeable row. */
   .tx-deep {
     display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
     margin: 0 -16px; padding: 2px 16px 8px; overscroll-behavior-x: contain;
