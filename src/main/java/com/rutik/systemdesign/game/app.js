@@ -144,13 +144,6 @@ const ACRONYMS = new Map(Object.entries({
   psps: "PSPs", kyc: "KYC", aml: "AML", pci: "PCI", dss: "DSS", "3ds": "3DS", ach: "ACH", sepa: "SEPA", fx: "FX", fix: "FIX", ccp: "CCP", onchain: "On-Chain",
   opentelemetry: "OpenTelemetry",
 }));
-// Touch layouts drop the hover-only prerequisite chords, and narrow ones drop
-// the multi-column serpentine, so copy describing rows, hovering, or drawn
-// links is false there and reads as a half-finished screen. The column
-// threshold must match layoutPath()'s `W < 520` test — a landscape phone or a
-// tablet really does get rows, and should be told so.
-const coarsePointer = () => window.matchMedia("(pointer: coarse)").matches;
-const singleColumnPath = () => window.innerWidth < 520;
 
 // Small words stay lowercase inside a title, but never as the first word.
 const TITLE_STOPWORDS = new Set(["a", "an", "and", "as", "at", "by", "for", "from",
@@ -1450,6 +1443,11 @@ function maybeMarkRead(path, body) {
 }
 function isModuleRead(path) {
   return !!(state.progress && state.progress.readModules && state.progress.readModules[path]);
+}
+// A module counts as read once any of its files is: readModules is keyed by reader path.
+function anyFileRead(mod) {
+  const files = ((state.index && state.index.files) || {})[mod] || [modulePage(mod)];
+  return files.some((f) => isModuleRead(`${mod}/${f}`));
 }
 
 // [SD] One-time key migration for the 2026-07-30 module-page rename. `readModules` is
@@ -4654,10 +4652,11 @@ function renderStudy() {
     const id = SECTION_IDENTITY[s];
     const av = id ? id.accent : "var(--accent)";
     const gl = id ? id.glyph : "";
+    const mods = modulesFromIndex(s);
     return `<button class="tile sec-tile" data-section="${s}" style="--tile-accent:${av}">
        ${gl ? `<span class="tile-glyph" aria-hidden="true">${gl}</span>` : ""}
        <span class="tname">${esc(label(s))}</span>
-       <span class="tmeta">${secs[s]} Qs &middot; read the notes</span>
+       <span class="tmeta">${mods.filter((m) => anyFileRead(m.module)).length} of ${mods.length} read</span>
      </button>`;
   };
   const grouped = new Set(SECTION_GROUPS.flatMap(([, ss]) => ss));
@@ -5407,9 +5406,9 @@ function renderBookPicker(section, mods) {
   const byBook = new Map();
   mods.forEach((m) => {
     const slug = bookOf(m.module) || m.module.split("/")[1] || m.module;
-    if (!byBook.has(slug)) { byBook.set(slug, { slug, chapters: 0, qs: 0 }); groups.push(byBook.get(slug)); }
+    if (!byBook.has(slug)) { byBook.set(slug, { slug, chapters: 0, read: 0 }); groups.push(byBook.get(slug)); }
     const g = byBook.get(slug);
-    g.chapters++; g.qs += m.count;
+    if (bookOf(m.module)) { g.chapters++; if (anyFileRead(m.module)) g.read++; }   // the book's own index page is not a chapter
   });
   const tiles = groups.map((g, i) => {
     const meta = BOOK_LABELS[g.slug] || {};
@@ -5417,7 +5416,7 @@ function renderBookPicker(section, mods) {
       <span class="bk-num">${String(i + 1).padStart(2, "0")}</span>
       <span class="bk-body">
         <span class="tname">${esc(bookLabel(g.slug))}</span>
-        <span class="tmeta">${meta.author ? esc(meta.author) + " &middot; " : ""}${g.chapters} chapters &middot; ${g.qs} Qs</span>
+        <span class="tmeta">${meta.author ? esc(meta.author) + " &middot; " : ""}${g.read} of ${g.chapters} read</span>
       </span>
       <span class="bk-go" aria-hidden="true">&rarr;</span>
     </button>`;
@@ -5425,7 +5424,7 @@ function renderBookPicker(section, mods) {
   app.innerHTML = `
     ${crumbHTML([{ label: "Study", route: "#/study" }, { label: label(section) }])}
     <div class="hero"><h1>${esc(label(section))}</h1>
-      <p>${groups.length} books &middot; ${mods.length} chapters &middot; pick a book to open its chapter path.</p></div>
+      <p>${groups.length} books &middot; ${groups.reduce((n, g) => n + g.chapters, 0)} chapters &middot; pick a book to open its chapter path.</p></div>
     <div class="grid bookshelf">${tiles}</div>`;
   wireCrumb();
   document.querySelectorAll(".bookcard").forEach((b) =>
@@ -5528,10 +5527,9 @@ async function openStudySection(sectionPath) {
     ? mods.map((m) => ({ path: m.module, title: m.name }))            // [CS] module IS the reader path
     : mods.map((m) => ({ path: `${m.module}/${modulePage(m.module)}`, title: m.name }));
   const files = (state.index && state.index.files) || {};
-  // Practiced = any spaced-repetition entry from this module (real history only).
-  const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
-  // [CS] Case studies are read-only: a node's "done" state is whether it's been READ.
-  const read = casesMode ? new Set(mods.filter((m) => isModuleRead(m.module)).map((m) => m.module)) : null;
+  // [CS] A case-study node's module IS its reader path.
+  const isRead = (m) => (casesMode ? isModuleRead(m.module) : anyFileRead(m.module));
+  const readMods = mods.filter(isRead);
   // [NAV] Chapter/module meta gets a read-state line: "read 4 days ago" reads
   // as progress in a way a bare check mark never did.
   const readDays = (mod) => {
@@ -5573,8 +5571,7 @@ async function openStudySection(sectionPath) {
     const isHere = m.module === hereMod;
     const isOpen = openFans.has(m.module);
     // [A2] Memory Map: tint each node by estimated retention (+ amber pulse when overdue).
-    // [CS] Case-study nodes: "done" = read (no retention data / no Q count).
-    const done = casesMode ? read.has(m.module) : practiced.has(m.module);
+    const done = isRead(m);
     const ms = casesMode ? null : mstats[m.module];
     let mmCls = casesMode ? "" : " mm-cold", retTxt = casesMode ? (done ? "read" : "case study") : "no review data yet";
     if (ms) {
@@ -5589,14 +5586,14 @@ async function openStudySection(sectionPath) {
       return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn, m.module))}</button>`;
     }).join("") : "";
     return `<div class="pathstep${isOpen ? " open" : ""}">
-      <div class="pathnode${done ? " practiced" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
+      <div class="pathnode${done ? " read" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
         <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${ariaCount}, ${retTxt}${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
           <span class="pn-num">${String(i + 1).padStart(2, "0")}</span>
           <span class="pn-body">
             <span class="pn-name">${esc(m.name)}</span>
             <span class="pn-meta">${metaTxt}${isHere ? ` &middot; <b class="pn-here">you are here</b>` : ""}</span>
           </span>
-          ${done ? `<span class="pn-check" title="${casesMode ? "Read" : "Practiced"}">✓</span>` : ""}
+          ${done ? `<span class="pn-check" title="Read">✓</span>` : ""}
         </button>
         ${multi ? `<button class="pn-fan" aria-expanded="${isOpen}" aria-controls="fan-${i}" aria-label="${mFiles.length} files in ${esc(m.name)}${hiddenCount ? `, ${hiddenCount} more on the Full path` : ""}"><span class="pn-arrow">&#9656;</span>&nbsp;${mFiles.length} files${hiddenCount ? ` <span class="pn-fan-more">+${hiddenCount}</span>` : ""}</button>` : ""}
       </div>
@@ -5604,7 +5601,6 @@ async function openStudySection(sectionPath) {
     </div>`;
   }).join("");
 
-  const onInterview = !!activeTier;
   // [TIERS] Path toggle: Full always; Senior and Principal each iff that tier has a
   // curated subset; Case Studies iff the section has >=2. Rendered only when >=2 exist.
   const pathOpts = [
@@ -5637,37 +5633,31 @@ async function openStudySection(sectionPath) {
      other: you could finish a book and have no door to the questions drawn
      from it. Prefers the chapters you have actually read; falls back to the
      whole ${bookScope ? "book" : "section"} when none are read yet. */
-  const readMods = mods.filter((m) => isModuleRead(`${m.module}/${modulePage(m.module)}`));
   const quizMods = readMods.length ? readMods : mods;
   const quizQs = quizMods.reduce((n, m) => n + (m.count || 0), 0);
-  const bridgeCard = (!casesMode && quizQs > 0) ? `
-    <button class="review-card bridge" id="studyQuiz">
-      <div><div class="eyebrow">Read, then recall</div>
-      <h2>Quiz this ${bookScope ? "book" : "section"}</h2>
-      <p class="msg">${quizQs} question${quizQs === 1 ? "" : "s"} drawn from ${readMods.length
-        ? `the ${readMods.length} chapter${readMods.length === 1 ? "" : "s"} you have read`
-        : `all ${mods.length} ${bookScope ? "chapters" : "topics"} &mdash; none read yet`}.</p></div>
-      <span class="review-go">Start &rarr;</span>
+  const quizBtn = (!casesMode && quizQs > 0)
+    ? `<button class="ghost iv-cta" id="studyQuiz">${readMods.length ? "Quiz what you've read" : `Quiz this ${bookScope ? "book" : "section"}`} (${quizQs})</button>` : "";
+  const due = casesMode ? 0 : mods.reduce((n, m) => n + ((mstats[m.module] || {}).overdue || 0), 0);
+  const hereCard = hereMod ? `
+    <button class="review-card" id="hereBtn">
+      <div><div class="eyebrow">Continue reading</div><h2>${esc(lastRead.title || herePath)}</h2></div>
+      <span class="review-go">Open &rarr;</span>
     </button>` : "";
+  const legend = casesMode ? "" : `
+    <p class="mm-key"><span class="mm-key-read">&check; read</span><span class="mm-fresh">fresh</span><span class="mm-warm">warm</span><span class="mm-fading">fading</span><span class="mm-overdue">due</span><span class="mm-cold">not reviewed</span>${crossLinks ? `<span class="mm-key-hover">hover a topic to see its links</span>` : ""}</p>`;
   app.innerHTML = `
     <div class="path-screen" style="--tile-accent:${_secAccent}">
     ${crumbHTML(bookScope
       ? [{ label: "Study", route: "#/study" }, { label: "Books", route: "#/study/book" }, { label: bookLabel(bookScope) }]
       : [{ label: "Study", route: "#/study" }, { label: label(section) }])}
     <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
-      <p>${casesMode
-        ? `${mods.length} case studies &middot; read-only &mdash; ${singleColumnPath() ? "work through them top to bottom" : "the path snakes across each row"} in the section's suggested order.`
-        : `${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; ${singleColumnPath()
-          ? `follow them top to bottom in the ${bookScope ? "book's chapter order" : "section's learning order"}.`
-          : `the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.`}`}</p>
-      ${graph && !coarsePointer() ? `<p class="path-legend">${crossLinks
-        ? `strongest prerequisite links drawn &middot; hover a topic to see all its connections &middot; ${crossLinks} cross-links mapped`
-        : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
+      <p>${mods.length} ${casesMode ? "case studies" : bookScope ? "chapters" : "topics"} &middot; ${readMods.length} read${casesMode ? "" : ` &middot; ${due} due`}</p></div>
+    ${hereCard}
     <div class="topicbar">
       ${pathSwitchHtml}${caseTierHtml}
       <input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" />
       <span class="selcount" id="pathCount" role="status"></span>
-    </div>
+    </div>${legend}
     <div class="path-wrap" id="pathWrap">
       <svg class="path-svg" id="pathSvg" aria-hidden="true">
         <!-- userSpaceOnUse, not the default objectBoundingBox: on a phone the
@@ -5686,13 +5676,16 @@ async function openStudySection(sectionPath) {
       </svg>
       ${steps}
     </div>
-    ${bridgeCard}
     </div>`;
   wireCrumb();
+  insertInterviewControl(section);                 // [C] Face the Interviewer / Panel / lock chip on the path header
+  el(".path-screen .iv-cta-wrap")?.insertAdjacentHTML("afterbegin", quizBtn);
   el("#studyQuiz")?.addEventListener("click", () =>
     startBlitz(section, quizMods.map((m) => m.module)));
-
-  insertInterviewControl(section);                 // [C] Face the Interviewer / Panel / lock chip on the path header
+  el("#hereBtn")?.addEventListener("click", () => {
+    reader.back = [];
+    openReaderPath(herePath, lastRead.title, { list, idx: mods.findIndex((m) => m.module === hereMod) });
+  });
 
   const wrap = el("#pathWrap"), svg = el("#pathSvg");
   const stepEls = [...wrap.querySelectorAll(".pathstep")];

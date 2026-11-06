@@ -922,7 +922,7 @@ button:active { transform: scale(0.98); }
 .lenopt.on { color: var(--accent-ink); background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; }
 
 /* Study Full/Interview learning-path switch — same segmented look as .lenopt */
-.pathswitch { display: inline-flex; align-items: center; gap: 6px; }
+.pathswitch { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .pathswitch-label { color: var(--muted); font-size: 0.8125rem; margin-right: 2px; }
 .pathopt {
   padding: 6px 14px; font-weight: 700; font-family: var(--mono); font-size: 0.8125rem;
@@ -2275,7 +2275,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 }
 .pathnode:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); transform: translateY(-1px); }
 /* map nodes: section accent on the BORDER only (--tile-accent from .path-screen).
-   Cursor spotlight + hover shadow stay neutral; practiced/here keep their own
+   Cursor spotlight + hover shadow stay neutral; read/here keep their own
    border tint (higher specificity). */
 .pathnode { border-color: color-mix(in srgb, var(--tile-accent) 26%, var(--glass-brd)); }
 .pathnode:hover {
@@ -2307,13 +2307,13 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 .pn-arrow { font-size: 0.625rem; line-height: 1; transition: transform 0.2s var(--ease-out); }
 .pathstep.open .pn-arrow { transform: rotate(90deg); }
 
-/* states: practiced (✓, good tint + satisfied inner-glow) and "you are here"
+/* states: read (✓, good tint + satisfied inner-glow) and "you are here"
    (section-accent breathing ring). Both keyed to --tile-accent (.path-screen). */
-.pathnode.practiced {
+.pathnode.read {
   border-color: color-mix(in srgb, var(--good) 45%, transparent);
   box-shadow: inset 0 0 15px -8px color-mix(in srgb, var(--good) 75%, transparent), var(--glass-hilite);
 }
-.pathnode.practiced .pn-check { text-shadow: 0 0 9px color-mix(in srgb, var(--good) 60%, transparent); }
+.pathnode.read .pn-check { text-shadow: 0 0 9px color-mix(in srgb, var(--good) 60%, transparent); }
 .pathnode.here {
   border-color: color-mix(in srgb, var(--tile-accent, var(--accent)) 78%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--tile-accent, var(--accent)) 45%, transparent), var(--glass-hilite);
@@ -2370,11 +2370,15 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
     0 7px 24px -10px color-mix(in srgb, var(--tile-accent, var(--accent)) 58%, transparent), var(--glass-hilite);
 }
 
-/* edge legend under the section hero (eyebrow family: mono, small, quiet) */
-.hero .path-legend {
-  margin: 8px 0 0; font-family: var(--mono); font-size: 0.6875rem;
-  color: var(--muted); letter-spacing: 0.02em;
+/* retention legend under the path topicbar (eyebrow family: mono, small, quiet) */
+.mm-key {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; margin: -4px 0 14px;
+  font-family: var(--mono); font-size: 0.6875rem; color: var(--muted); letter-spacing: 0.02em;
 }
+.mm-key span { display: inline-flex; align-items: center; gap: 6px; }
+.mm-key-read { color: var(--good); }
+.mm-key .mm-key-hover { display: none; }
+@media (hover: hover) and (pointer: fine) { .mm-key .mm-key-hover { display: inline-flex; } }
 
 /* ---------- 18. Session guard, moments, durability (Phase 0) --------------- */
 
@@ -2538,11 +2542,13 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; z-index: 1;
   border-radius: var(--radius-sm) 0 0 var(--radius-sm);
 }
-.pathnode.mm-fresh::before  { background: var(--good); }
-.pathnode.mm-warm::before   { background: var(--accent); }
-.pathnode.mm-fading::before { background: var(--warn); }
-.pathnode.mm-cold::before   { background: var(--faint); opacity: 0.45; }
-.pathnode.mm-overdue::before {
+.mm-key .mm-fresh::before, .mm-key .mm-warm::before, .mm-key .mm-fading::before,
+.mm-key .mm-cold::before, .mm-key .mm-overdue::before { content: ""; width: 3px; height: 12px; border-radius: 2px; }
+.pathnode.mm-fresh::before,  .mm-key .mm-fresh::before  { background: var(--good); }
+.pathnode.mm-warm::before,   .mm-key .mm-warm::before   { background: var(--accent); }
+.pathnode.mm-fading::before, .mm-key .mm-fading::before { background: var(--warn); }
+.pathnode.mm-cold::before,   .mm-key .mm-cold::before   { background: var(--faint); opacity: 0.45; }
+.pathnode.mm-overdue::before, .mm-key .mm-overdue::before {
   width: 4px; background: var(--warn); animation: mm-pulse 2s ease-in-out infinite;
 }
 @keyframes mm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -2879,7 +2885,7 @@ body.interview-mode #app::before {
 .iv-intro { text-align: center; padding: 40px 20px; position: relative; z-index: 1; }
 .iv-type { min-height: 3.2em; font-size: 1.125rem; line-height: 1.5; max-width: 520px; margin: 0 auto 20px; letter-spacing: -0.005em; }
 .iv-followup { margin-top: 10px; color: var(--warn); font-size: 0.8125rem; font-style: italic; }
-.iv-cta-wrap { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+.iv-cta-wrap { margin-top: 12px; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 10px; }
 .iv-cta { font-weight: 700; }
 .c-iv-banner { margin: 0 0 14px; padding: 10px 14px; border-radius: var(--radius-sm); font-size: 0.875rem; text-align: center; }
 .c-iv-banner.won { background: color-mix(in srgb, #fbbf24 12%, var(--glass)); border: 1px solid color-mix(in srgb, #fbbf24 45%, transparent); }
@@ -3501,7 +3507,6 @@ body.nav-hidden #tabbar { display: none !important; }
 .tx-crumb { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .tx-crumb .crumb { margin: 0; }
 .tx-clearlink { color: var(--accent-text); font-size: var(--fs-sm); font-weight: 700; padding: 2px 6px; }
-.review-card.bridge { margin-top: 18px; }
 
 /* ============================================================================
    22. [NAV] Sizing rule — NOTHING IS SIZED TO A DEVICE
