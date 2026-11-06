@@ -933,3 +933,4 @@ The 33x multiplier is real and the 0.04 percent is also real; they are the same 
 - [JVM Internals](../jvm_internals/jvm_internals.md) — memory barriers, safepoints, how the JIT respects JMM ordering
 - [Structured Concurrency & Loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md) — ScopedValue vs ThreadLocal, virtual thread memory visibility
 - [Computer Architecture & Memory Hierarchy](../../cs_fundamentals/computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — CPU cache coherence and store buffers that the JMM's happens-before rules sit on top of
+- [Channels, Atomics and Shared State](../../rust/channels_atomics_and_shared_state/channels_atomics_and_shared_state.md): Rust's C++20-style orderings

@@ -6,6 +6,8 @@ Performance profiling is the process of measuring where a Java application spend
 
 Java has a rich profiling ecosystem: async-profiler for CPU and allocation profiling with low overhead, Java Flight Recorder (JFR) for continuous, production-safe telemetry, heap dump analysis for memory leaks, and thread dump analysis for concurrency issues. Reading a flamegraph and a GC log is a core skill for any senior backend engineer.
 
+For profiling Rust binaries, see [Profiling and Benchmarking](../../rust/profiling_and_benchmarking/profiling_and_benchmarking.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

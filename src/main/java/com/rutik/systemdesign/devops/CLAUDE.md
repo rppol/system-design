@@ -165,6 +165,7 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 | `event_streaming_operations/` | `../../backend/kafka_deep_dive/` — Kafka internals; `../../backend/event_driven_fundamentals/` |
 | `ml_platform_and_gpu_infrastructure/` | `../../ml/gpu_and_hardware_optimization/` — CUDA profiling; `../../ml/mlops_and_ci_cd/` |
 | `ml_platform_and_gpu_infrastructure/`, `kubernetes_scheduling_and_autoscaling/`, `deployment_strategies/` | `../../mlops/`: GPU schedulers and quota policy (Kueue, Volcano, KAI Scheduler), model-server progressive delivery, inference autoscaling, GPU fleet health. This section keeps the device plugin, DRA, MIG, MPS and time-slicing mechanism and the generic deployment strategies |
+| `observability_tracing_and_otel/opentelemetry_deep_dive.md`, `devsecops_and_supply_chain_security/` | `../../rust/`: `observability_tracing_and_opentelemetry/` (the `tracing` crate and its OTel bridge), `build_deployment_and_supply_chain/` (cargo-deny, cargo-audit, cargo-vet, cargo-auditable). This section keeps the OTel concepts, OTLP, the collector, the per-language status, SLSA, Sigstore and SBOM formats |
 
 ---
 

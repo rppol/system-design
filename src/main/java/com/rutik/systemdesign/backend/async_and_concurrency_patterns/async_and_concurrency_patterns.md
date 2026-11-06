@@ -6,6 +6,8 @@ Backend services spend most of their time waiting: waiting for database response
 
 This module covers the practical engineering of async systems in Java: thread pool sizing formulas, CompletableFuture's traps and best practices, virtual threads on Java 25 and their pinning pitfalls, reactive backpressure strategies, and the bulkhead pattern for isolating slow dependencies.
 
+For async cancellation safety in Rust, see [Async Cancellation and Pitfalls](../../rust/async_cancellation_and_pitfalls/async_cancellation_and_pitfalls.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

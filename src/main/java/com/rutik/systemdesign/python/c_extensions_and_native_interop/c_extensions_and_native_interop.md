@@ -44,6 +44,8 @@ whether you have a problem native code can solve, and
 [CPython Memory Model](../cpython_memory_model/cpython_memory_model.md) for the reference-counting
 semantics you are taking manual responsibility for.
 
+For the Rust side of a PyO3 extension, see [FFI and Language Interop](../../rust/ffi_and_language_interop/ffi_and_language_interop.md) in `rust/`.
+
 ---
 
 ## 2. Intuition
@@ -989,7 +991,7 @@ ls dist/ | grep -c 'cp314t' || { echo "no free-threaded wheels built"; exit 1; }
 
 A team moves a service to `python3.14t`. They audit their own extensions, declare `Py_mod_gil`
 correctly everywhere, benchmark, and see no improvement at all — throughput is *slightly worse* than
-on 3.14, consistent with paying the free-threading single-thread penalty of roughly 5-10% and getting
+on 3.14, consistent with paying the free-threading single-thread penalty of about 1% to 8% (the pyperformance average, macOS aarch64 to x86-64 Linux) and getting
 nothing back.
 
 The cause is a transitive dependency four levels down that has not declared support. On import, it
@@ -1178,7 +1180,7 @@ its own extensions perfectly, declare `Py_mod_gil` everywhere, and still see zer
 transitive dependency four levels down re-enabled the lock at import. nanobind states the rule
 directly: "Loading an Python extension that does not support free-threading disables free-threading
 globally. In larger binding projects with multiple extensions, all of them must be adapted." Worse
-than zero gain, you are now paying the free-threaded build's single-thread penalty of roughly 5-10%
+than zero gain, you are now paying the free-threaded build's single-thread penalty of about 1% to 8% (the pyperformance average, macOS aarch64 to x86-64 Linux)
 for nothing. This is why a free-threading rollout is a dependency-audit project first and a
 performance project second — enumerate every native wheel in the environment and confirm each
 declares support before measuring anything.

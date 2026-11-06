@@ -37,6 +37,8 @@ that in `-gcflags=-m`, a profile and a binary, and what the measurement usually 
 The short version, earned over the rest of the page: **generics buy type safety and API
 ergonomics, not speed.**
 
+For the cost of full monomorphization in Rust, see [Monomorphization, Vtables and Dispatch Cost](../../rust/traits_generics_and_trait_objects/monomorphization_vtables_and_dispatch_cost.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

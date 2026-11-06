@@ -38,6 +38,8 @@ freed-but-unreturned spans.
 
 Target version is **Go 1.27** (released 2026-08-19).
 
+For memory budgets in a language without a GC, see [Memory Budgets Without a GC](../../rust/case_studies/cross_cutting/memory_budgets_without_a_gc.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

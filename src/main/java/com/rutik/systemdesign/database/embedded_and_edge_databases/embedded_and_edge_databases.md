@@ -28,6 +28,8 @@ different jobs: **SQLite** is embedded OLTP (relational, transactional, general-
 embedded key-value engines that other databases build their storage layer on top of, rather than
 being queried directly by application code.
 
+For how a Rust-native KV store is built, see [Design a Zero-Copy Embedded Storage Engine in Rust](../../rust/case_studies/design_a_zero_copy_storage_engine.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

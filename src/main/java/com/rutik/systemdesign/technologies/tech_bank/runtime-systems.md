@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: runtime-systems -->
 
-The 455 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 510 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Runtime & OS** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -51,6 +51,12 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @2
 
+### ahash
+**Short:** Fast keyed hasher for Rust hash maps that uses AES instructions where available; not a cryptographic hash.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1
+
 ### aiofiles
 **Short:** Async file I/O for Python; wraps blocking file operations in a thread pool so they do not stall the event loop.
 **Kind:** tech
@@ -92,6 +98,12 @@ Reach for it when a long-running asyncio service stops making progress and resta
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/collections-and-algorithms @3
+
+### anyhow
+**Short:** Rust error type for applications: one boxed error that any error converts into, with context messages and a backtrace.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
 
 ### anyio
 **Short:** Backend-agnostic async library running on asyncio or trio; task groups, timeouts and to_thread offloading.
@@ -138,6 +150,12 @@ Reach for it when the domain really is many independent stateful entities exchan
 The behaviour is a function from current state and incoming message to the next state plus side effects, and since the mailbox already serializes delivery, each transition runs to completion before the next message is examined. No lock and no interleaving are possible by construction, which removes the class of bug where two threads observe a half-applied transition.
 
 Reach for it when a protocol genuinely has named states with legal and illegal transitions, such as an order lifecycle or a saga, because encoding it this way makes an illegal transition an explicit testable case rather than a missing branch. The cost is durability: state is lost on crash unless paired with event sourcing. Where durability matters more than throughput, a state column plus a transition table is simpler.
+
+### arc-swap
+**Short:** Rust crate for an Arc that can be replaced atomically, which gives lock-free reads of shared config that changes rarely.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
 
 ### Arena
 **Short:** Java FFM API scoped allocator: allocates native MemorySegments and deterministically frees them when closed.
@@ -190,6 +208,18 @@ Reach for it when the universe is dense and known, or when implementing somethin
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1
+
+### async-compat
+**Short:** Adapter crate that runs futures and I/O types written for Tokio inside other Rust async runtimes such as smol.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
+### async-trait
+**Short:** Proc macro that gives a Rust trait async methods by boxing each returned future, which keeps the trait usable as dyn Trait.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/runtime-internals-and-types @2
 
 ### asyncio
 **Short:** Python's standard-library async runtime: event loop, tasks, futures and primitives for high-concurrency I/O.
@@ -373,6 +403,18 @@ It reads `/proc` and draws four panels: per-core CPU with a rolling history grap
 
 Reach for it as the first screen on a host you have a terminal into and a vague complaint about, since it answers CPU, memory, disk and network in one view. The costs: it has only its own short history, drawing it costs measurably more CPU than `top` on an already saturated machine, and it is frequently absent from a minimal image where `htop` or `top` will be present.
 
+### bumpalo
+**Short:** Bump-allocation arena for Rust: each allocation is a pointer increment, and everything is freed at once when the arena drops.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/collections-and-algorithms @3
+
+### bytemuck
+**Short:** Rust crate for safe casts between plain-old-data types and byte slices, checked through the Pod and Zeroable traits.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
 ### bytes.decode
 **Short:** Python bytes method that turns raw bytes into str using an explicit codec at the I/O boundary.
 **Kind:** api
@@ -527,6 +569,12 @@ Reach for it when a thread has a genuine latency bound, in audio or a packet-pro
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+### color-eyre
+**Short:** Report handler for eyre that prints colored backtraces, span traces and custom sections for command-line applications.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
 ### com.google.re2j
 **Short:** Java port of RE2: automaton-based regex with guaranteed linear-time matching and no catastrophic backtracking.
 **Kind:** tech
@@ -611,6 +659,18 @@ It is a dependently typed language in which a proposition is a type and a proof 
 
 Reach for it when correctness is worth an order of magnitude more effort than testing and the artifact is small and formal, such as a compiler pass or a cryptographic protocol. The costs are honest: verification is measured in person-years, refactoring drags the proofs along, and a proof is only as meaningful as a specification that can itself be wrong. For distributed protocols, TLA+ finds most real bugs far more cheaply.
 
+### cortex-m
+**Short:** Low-level access to Arm Cortex-M processors from Rust: core peripherals, interrupt control and critical sections.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/memory-processes-and-os @1
+
+### cortex-m-rt
+**Short:** Startup code and minimal runtime for Arm Cortex-M in Rust: the vector table, RAM initialization and the entry attribute.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/memory-processes-and-os @1
+
 ### Counter
 **Short:** Python stdlib dict subclass for frequency counting, with arithmetic and most_common(k).
 **Kind:** api
@@ -657,6 +717,18 @@ constraint-programming engine is often the better model.
 It uses the kernel checkpoint machinery to dump a running process, heap, initialized classes and JIT-compiled code included, to disk, then restores that image in a fresh process, so the JVM comes back warm with no class loading and no re-profiling. The coordinated half is an API: components implement before-checkpoint and after-restore hooks to close descriptors and rebuild pools, because a live connection cannot survive being dumped.
 
 Reach for it when JVM cold start is the actual problem, in serverless functions and fleets that scale out under load, taking time to first request from seconds to tens of milliseconds. The costs: the image holds everything in memory including secrets, every library must be checkpoint-aware, and it needs Linux and a supporting JDK. GraalVM native image solves the same problem at build time instead.
+
+### critical-section
+**Short:** Rust crate that defines one critical-section API, implemented per target, so embedded libraries can share data safely.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
+### crossbeam
+**Short:** Rust concurrency toolkit: MPMC channels with select, scoped threads, epoch-based memory reclamation, lock-free queues and CachePadded.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
 
 ### CryptoMiniSat
 **Short:** CDCL SAT solver with native XOR-clause handling and Gaussian elimination, aimed at cryptographic and algebraic instances.
@@ -712,6 +784,12 @@ Reach for it when a numeric hotspot is a tight loop NumPy cannot vectorize, such
 It exposes the same API as `toolz` — `curry`, `pipe`, `compose`, `groupby`, `partition_all`, `merge_with`, `unique`, and iterator forms that stay lazy so a pipeline over a huge file never materializes it — with the implementation rewritten in Cython. `import cytoolz as toolz` is a drop-in swap that moves the hot loops out of the interpreter.
 
 Reach for it when data-munging code is genuinely a chain of many small transformations and the per-step function-call overhead is showing up in a profile. It is not a general speedup: for numeric work, NumPy or Pandas vectorization beats any per-element functional pipeline, and for two or three steps a plain generator expression is faster to read than a composed one.
+
+### dashmap
+**Short:** Concurrent hash map for Rust that shards the table over many RwLock-protected segments to cut lock contention.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/collections-and-algorithms @2
 
 ### dataclasses
 **Short:** Python stdlib decorator that generates init/repr/eq from annotations, giving structured mutable record types.
@@ -823,10 +901,40 @@ Reach for it for large collections of numbers, such as identifier sets, counters
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
 
+### embassy-boot
+**Short:** Bootloader for embedded Rust with A/B firmware partitions, a power-fail-safe swap and rollback for over-the-air updates.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/memory-processes-and-os @1
+
+### embassy-executor
+**Short:** Async executor for embedded Rust that runs statically allocated tasks without a heap and sleeps until an interrupt wakes it.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
+### embedded-hal
+**Short:** Rust traits for embedded peripherals such as GPIO, SPI, I2C and delays, so one driver crate runs on any microcontroller HAL.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/io-networking-and-syscalls @1
+
+### embedded-hal-async
+**Short:** Async versions of the embedded-hal traits, for drivers that await peripheral transfers instead of blocking.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/io-networking-and-syscalls @1
+
 ### enum.Enum
 **Short:** Python enumeration base class whose EnumMeta metaclass and _EnumDict enforce unique, singleton named members.
 **Kind:** api
 **Lang:** python
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
+### enum_dispatch
+**Short:** Proc macro that replaces trait-object dispatch over a closed set of types with a match on an enum, removing the vtable call.
+**Kind:** tech
+**Lang:** rust
 **Roles:** runtime-systems/runtime-internals-and-types @1
 
 ### EnumMap
@@ -840,6 +948,12 @@ Reach for it for large collections of numbers, such as identifier sets, counters
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
+
+### error-stack
+**Short:** Rust error library that builds a typed stack of context and attachments as an error moves up the call chain.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
 
 ### ethtool
 **Short:** Linux CLI for reading NIC driver statistics and toggling hardware offloads, ring sizes and link settings.
@@ -856,6 +970,12 @@ Reach for it when packets are disappearing and you need to know whether the NIC 
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1
+
+### eyre
+**Short:** Fork of anyhow with a pluggable report handler, so an application can choose how errors and their context print.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
 
 ### Fenwick/BIT
 **Short:** Binary indexed tree giving O(log n) prefix sums and point updates; simpler to code than a segment tree.
@@ -891,6 +1011,18 @@ Reach for it when the aggregate is invertible, meaning sums, counts or XOR, and 
 **Lang:** java
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/design-patterns-and-principles @2
 
+### flip-link
+**Short:** Linker wrapper for embedded Rust that puts the stack below static data, so a stack overflow faults instead of corrupting memory.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/memory-processes-and-os @1, devtools/compiler-toolchain-and-codegen @2
+
+### flume
+**Short:** MPMC channel crate for Rust that allows sync and async send and receive on the same channel.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
 ### fn.py
 **Short:** Small functional-programming toolkit for Python: composition, currying, partial application and lazy structures.
 **Kind:** tech
@@ -906,6 +1038,12 @@ The honest guidance is that this is not the default choice in new code. The pack
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/io-networking-and-syscalls @3
+
+### foldhash
+**Short:** Fast, non-cryptographic hasher for Rust hash maps; the default hasher of hashbrown.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1
 
 ### free -h
 **Short:** Linux CLI showing total, used and available RAM plus swap; 'available' is the number that actually matters.
@@ -928,6 +1066,12 @@ Reach for it as a five-second check on whether a host is under genuine memory pr
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1
+
+### futures
+**Short:** The Rust futures crate: Stream and Sink traits, future and stream combinators, join and select macros, and a simple executor.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
 
 ### fuzzysearch PyPI
 **Short:** Python library for approximate substring matching within a Levenshtein distance, for typo-tolerant search.
@@ -960,6 +1104,12 @@ Reach for it when the native image is a server rather than a short-lived process
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/memory-processes-and-os @3
+
+### glommio
+**Short:** Thread-per-core Rust async runtime for Linux from Datadog, built on io_uring with one executor pinned to each CPU.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/io-networking-and-syscalls @2
 
 ### Glucose
 **Short:** MiniSat-derived CDCL SAT solver whose learned-clause quality metric, the literal block distance, became standard everywhere.
@@ -1051,6 +1201,12 @@ The file is plain text named for the fully qualified service interface, with one
 
 The costs all come from it being an untyped text file. A typo or a class renamed in a refactor becomes a runtime configuration error rather than a compile error, and building a fat jar silently overwrites one provider file with another unless the shade plugin concatenates them, which is the classic cause of a driver that works in the IDE and vanishes when deployed. An annotation processor removes the drift.
 
+### hashbrown
+**Short:** Rust port of Google's SwissTable hash map; the standard library's HashMap and HashSet are built on it.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1
+
 ### hashids
 **Short:** Library encoding integer ids into short reversible strings; obfuscation for public URLs, never a security boundary.
 **Kind:** tech
@@ -1065,6 +1221,12 @@ Use it to keep sequential database keys out of public URLs so a customer cannot 
 **Short:** Java's hash table: default capacity 16 and load factor 0.75, converting a long bucket chain to a red-black tree.
 **Kind:** api
 **Lang:** java
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+### heapless
+**Short:** Fixed-capacity Vec, String, queues and maps for Rust that live on the stack or in statics, for no_std code with no heap.
+**Kind:** tech
+**Lang:** rust
 **Roles:** runtime-systems/collections-and-algorithms @1
 
 ### heapq
@@ -1164,6 +1326,12 @@ Reach for it whenever text must be correct for humans rather than merely process
 It reads and writes interface state through the old ioctl interface: address, netmask, MTU, flags such as UP and PROMISC, and per-interface counters. Its limits are structural rather than cosmetic, because that interface predates most of modern Linux networking: it shows only one IPv4 address per interface even when several are configured, its IPv6 support is incomplete, and it knows nothing about policy routing, network namespaces or VRFs.
 
 It survives because a decade of runbooks use it and because it remains the native tool on macOS and the BSDs. On Linux it belongs to the deprecated net-tools package and is frequently not installed in a container image, so `ip addr`, `ip link` and `ip route` are the commands worth learning. If you do use it on Linux, treat its output as a hint and confirm anything surprising with `ip`.
+
+### indexmap
+**Short:** Rust hash map and set that keep insertion order and allow lookup by index as well as by key.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1
 
 ### inspect
 **Short:** Python stdlib introspection module (signatures, closures, members); also the name of AISI's Inspect eval framework.
@@ -1585,6 +1753,12 @@ This is how you answer questions the source cannot: what a lambda compiled to, w
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/concurrency-and-async @2
 
+### kameo
+**Short:** Actor framework for Rust on Tokio with typed messages, supervision and optional distributed actors.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
 ### Kissat
 **Short:** Heavily engineered sequential CDCL SAT solver, a C rewrite of CaDiCaL's ideas that has topped recent SAT competitions.
 **Kind:** tech
@@ -1815,6 +1989,18 @@ Reach for it when you need exact control and a static, publication-quality artif
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/io-networking-and-syscalls @3
 
+### miette
+**Short:** Diagnostic error library for Rust that renders errors with source snippets, labels and help text.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
+### mimalloc
+**Short:** Microsoft's compact general-purpose memory allocator; the Rust mimalloc crate sets it as a program's global allocator.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/memory-processes-and-os @1
+
 ### MinHash
 **Short:** Locality-sensitive hashing sketch estimating Jaccard similarity; the standard near-duplicate corpus dedup method.
 **Kind:** concept
@@ -1843,6 +2029,12 @@ people read to understand CDCL, and its interface is one many tools still expose
 instance reach for a modern descendant such as CaDiCaL or Kissat; MiniSat's value is that you
 can read the whole thing in an afternoon.
 
+### mio
+**Short:** Low-level non-blocking I/O crate for Rust over epoll, kqueue and IOCP; the event source under Tokio's I/O driver.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/io-networking-and-syscalls @1, runtime-systems/concurrency-and-async @2
+
 ### mlock
 **Short:** Syscall pinning pages in physical RAM so they are never swapped; needs root or CAP_IPC_LOCK.
 **Kind:** api
@@ -1860,6 +2052,12 @@ can read the whole thing in an afternoon.
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/build-and-dependency-management @2
+
+### monoio
+**Short:** Thread-per-core Rust async runtime from ByteDance that uses io_uring on Linux and can fall back to epoll or kqueue.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/io-networking-and-syscalls @2
 
 ### more-itertools
 **Short:** Python library of 170+ iterator recipes (chunked, windowed, partition, peekable) beyond what itertools ships.
@@ -2192,11 +2390,29 @@ C# APIs. Two caveats decide whether it works: modelling is the real effort, sinc
 constraint is expressed determines whether an instance solves in seconds or never, and
 variables are integer only, so continuous quantities must be scaled.
 
+### ouroboros
+**Short:** Proc-macro crate for safe self-referential structs in Rust that generates constructors and borrow-scoped accessors.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
 ### OutputStreamWriter
 **Short:** JDK bridge presenting a byte OutputStream as a character Writer using a charset; the canonical adapter example.
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/io-networking-and-syscalls @2, apis-frameworks/design-patterns-and-principles @2
+
+### panic-probe
+**Short:** Panic handler for embedded Rust that can print the panic through defmt and signals the debug probe to stop.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1, observability/logging @3
+
+### parking_lot
+**Short:** Smaller and faster Mutex, RwLock and Condvar for Rust, with no lock poisoning and optional deadlock detection.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
 
 ### Path.of()
 **Short:** NIO factory creating a Path from string segments; the modern replacement for Paths.get().
@@ -2242,6 +2458,12 @@ It matches processes by an extended regular expression against the process name,
 
 It exists to replace the fragile pipeline of listing processes, grepping, filtering out the grep itself and cutting a column. Its sibling `pkill` takes the same selectors and sends a signal. Two cautions save real incidents. The default matches only the first fifteen characters of the process name, taken from the kernel's truncated field, which is why matching the full command line is often necessary for anything launched through an interpreter. And a loose pattern can select far more than intended.
 
+### pin-project-lite
+**Short:** Declarative-macro crate that generates safe pin projections, so a struct that holds a future can poll it without unsafe code.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/runtime-internals-and-types @2
+
 ### ping
 **Short:** ICMP echo utility for testing host reachability and round-trip latency.
 **Kind:** tech
@@ -2267,6 +2489,12 @@ Reach for it when doing conventional inferential statistics and you want the com
 **Kind:** api
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+### portable-atomic
+**Short:** Rust crate with atomic types, including 128-bit and float atomics, for targets whose hardware lacks the native instructions.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
 
 ### POSIX pthread_mutex_t
 **Short:** The POSIX C mutex type, with attributes such as PTHREAD_PRIO_INHERIT to avoid priority inversion.
@@ -2408,11 +2636,23 @@ A plain linked list pays two pointers and an allocation per element, which is ru
 
 Because a queue only ever touches the two ends, the middle nodes can be compressed and never decompressed on the hot path, which can shrink a large backlog dramatically. That setting is exactly wrong for indexed access into the middle, where every read would decompress a node.
 
+### ractor
+**Short:** Erlang-inspired actor framework for Rust with supervision trees, process groups and optional clustering.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
 ### random
 **Short:** Python stdlib pseudo-random generator used for sampling, shuffling and Monte Carlo simulation.
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+### rayon
+**Short:** Data-parallelism crate for Rust: par_iter and join over a work-stealing thread pool, often a one-line change from iter.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/collections-and-algorithms @2
 
 ### re
 **Short:** Python's standard-library regular expression module for matching, searching, splitting and substitution.
@@ -2534,11 +2774,29 @@ Reach for it to stop a batch job or a runaway build from stealing time from an i
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @2
 
+### rtic
+**Short:** Real-Time Interrupt-driven Concurrency: a Rust framework that runs tasks on hardware interrupt priorities with compile-time checked resource sharing.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
+### rtic-monotonics
+**Short:** Timer implementations for RTIC that give async tasks a monotonic clock for delays and timeouts.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
 ### RuntimeReflection
 **Short:** GraalVM build-time API registering classes and members for reflection so native image keeps them reachable.
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/compiler-toolchain-and-codegen @2
+
+### rustc-hash
+**Short:** FxHash for Rust: the fast hasher with no HashDoS resistance that the Rust compiler uses for its own maps.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1
 
 ### RxJava
 **Short:** Reactive Extensions for the JVM: composable async streams with operators, schedulers and backpressure.
@@ -2678,6 +2936,12 @@ It is a binary tree over an array in which each node stores the aggregate of a c
 
 It is the general structure where a Fenwick tree is the specialised one: any associative combine works, including minimum, maximum and gcd, none of which a Fenwick tree can express because they have no inverse to subtract. Choose the Fenwick tree when the operation is a sum and you want half the memory and a tenth of the code; choose this when the operation is not invertible or a node must hold something richer than a number.
 
+### self_cell
+**Short:** Rust crate for safe self-referential structs that hold an owner and a value that borrows from it, built with a declarative macro.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
 ### send
 **Short:** Generator method from PEP 342 that pushes a value into a paused generator, making coroutines bidirectional.
 **Kind:** api
@@ -2701,6 +2965,30 @@ It is the general structure where a Fenwick tree is the specialised one: any ass
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/design-patterns-and-principles @2, apis-frameworks/rpc-graphql-and-streaming @3
+
+### slotmap
+**Short:** Rust arena of values addressed by generational keys, a safe replacement for graphs built from Rc and RefCell.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/memory-processes-and-os @2
+
+### smallvec
+**Short:** Rust vector that stores a few elements inline and moves to the heap only when it outgrows that capacity.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/collections-and-algorithms @1
+
+### smol
+**Short:** Small, modular Rust async runtime assembled from the async-executor, async-io and blocking crates.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
+
+### snafu
+**Short:** Rust error library that generates context selectors, so each failure site attaches its own context to an error enum.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
 
 ### socket
 **Short:** Python's stdlib BSD socket API for raw TCP and UDP: echo servers, custom protocols and low-level networking.
@@ -3042,6 +3330,12 @@ tcpdump installs a BPF filter in the kernel and copies only matching packets to 
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @2
 
+### thiserror
+**Short:** Derive macro that implements std::error::Error for your own error enums and structs, with Display messages and From conversions.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1
+
 ### Thread.ofVirtual
 **Short:** Java 21 builder that creates virtual threads - lightweight JVM-scheduled threads with a few-KB stack instead of ~1MB.
 **Kind:** api
@@ -3144,6 +3438,12 @@ Reach for it for the two types people otherwise reimplement badly: an interval w
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/concurrency-and-async @2
 
+### tikv-jemallocator
+**Short:** Rust crate that builds jemalloc and sets it as the global allocator, often to cut fragmentation in long-running services.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/memory-processes-and-os @1
+
 ### TLA+
 **Short:** Formal specification language whose model checker explores every reachable state to test a protocol invariant.
 **Kind:** tech
@@ -3153,6 +3453,18 @@ Reach for it for the two types people otherwise reimplement badly: an interval w
 You write a specification as a state machine: variables, an initial-state predicate, and a next-state relation, expressed in set theory and temporal logic rather than in code. The model checker then enumerates every reachable state of a finite instance you configure, perhaps three nodes and two clients, checks your invariants against all of them, and produces a minimal counterexample trace when one fails. PlusCal is a pseudocode-flavoured front end that compiles to the same specification.
 
 It earns its cost on concurrent and distributed designs, where the bug is an interleaving nobody imagined and no test would generate; AWS has published on using it to find serious flaws in designs that had already survived review. Reach for it before implementing a protocol, not afterwards. The costs: state-space explosion means you verify a small instance and argue that it generalizes, and it verifies a design rather than the code you ship.
+
+### tokio
+**Short:** Rust's most used async runtime: a work-stealing multi-thread scheduler, an I/O driver over epoll, kqueue or IOCP, timers, channels and async locks.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/io-networking-and-syscalls @2
+
+### tokio-util
+**Short:** Companion crate to Tokio with codecs and framed I/O, CancellationToken, TaskTracker and other helpers that are not in the tokio core.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1
 
 ### toolz
 **Short:** Functional utility library for Python: lazy pipe, compose, curry and iterator combinators; cytoolz is the C build.
@@ -3191,6 +3503,12 @@ That MTU discovery is the reason to reach for it. A path MTU black hole, typical
 traceroute sends probes with a time-to-live of one, then two, then three, and so on. Each router that decrements the TTL to zero replies with an ICMP time-exceeded message, so the sequence of replies reveals the routers along the path and the round-trip time to each. That is how you localize where latency or loss enters — your network, your provider, a transit peer, or the far end.
 
 Read the output carefully, because it lies in a specific way: routers deprioritize or rate-limit the ICMP replies they generate, so a single hop showing asterisks or a high time is normal and means nothing on its own. Only latency or loss that appears at one hop and persists through every hop after it is evidence. For intermittent loss, `mtr` runs the same probes continuously and gives you a distribution instead of a single sample.
+
+### trait-variant
+**Short:** Proc macro from the Rust project that derives a Send-bounded variant of a trait with async fn methods.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/runtime-internals-and-types @2
 
 ### TreeMap
 **Short:** Java red-black-tree sorted map: O(log n) operations plus ordered iteration and floorKey/ceilingKey/subMap range queries.
@@ -3350,6 +3668,12 @@ In cloud design it is the pragmatic bridge during a migration, giving a VPC reac
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1
 
+### Wasmtime
+**Short:** Bytecode Alliance's WebAssembly runtime in Rust, with the Cranelift compiler, WASI and the component model, embeddable in a host program.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1, security/supply-chain-and-runtime-security @2
+
 ### weakref
 **Short:** CPython module for references that do not keep an object alive; WeakSet and WeakValueDictionary stop listener leaks.
 **Kind:** api
@@ -3395,6 +3719,12 @@ These turn a vague complaint that a transfer is slow into a named cause. A seque
 **Roles:** runtime-systems/collections-and-algorithms @1
 
 You assert constraints over typed variables (integers, reals, bitvectors, arrays, uninterpreted functions) and ask whether they can all hold; Z3 answers `sat` with a concrete model, `unsat`, or `unknown`, which turns "does an input exist that makes this go wrong?" into something a machine decides rather than something a team argues about. That is why it sits underneath symbolic execution, program verification, exploit generation and some type checkers, and it is directly usable through its Python bindings for scheduling, packing and configuration problems. It is MIT-licensed and very capable, but satisfiability over these theories is undecidable in general, so expect `unknown` or a timeout on nonlinear arithmetic and heavy quantifiers and encode problems with that in mind.
+
+### zerocopy
+**Short:** Rust crate whose derive macros prove a type safe to read from or write as raw bytes, so parsing needs no unsafe transmute.
+**Kind:** tech
+**Lang:** rust
+**Roles:** runtime-systems/runtime-internals-and-types @1, runtime-systems/memory-processes-and-os @2
 
 ### zoneinfo
 **Short:** Python stdlib access to the IANA time zone database for timezone-aware datetimes.

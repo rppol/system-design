@@ -943,3 +943,4 @@ would bind the mapped segment to one thread.
 - [Java Memory Model](../java_memory_model/java_memory_model.md) — VarHandle memory ordering semantics, acquire/release on MemorySegment
 - [Java 9–21 Features](../java9_to_21_features/java9_to_21_features.md) — Panama project timeline, JEP 454 (Java 22 GA) in the Java 9–21 evolution arc
 - [Performance & Tuning](../performance_and_tuning/performance_and_tuning.md) — JMH benchmarking methodology, off-heap tuning
+- [FFI and Language Interop](../../rust/ffi_and_language_interop/ffi_and_language_interop.md): the other side of a Java to Rust boundary

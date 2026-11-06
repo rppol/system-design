@@ -16,6 +16,8 @@ This module assumes you already understand pod-level controls (see [`kubernetes_
 
 Signing, provenance, and scanning for model weights, datasets, and ML dependencies are covered in [ML Supply Chain Security](../../mlops/ml_supply_chain_security/ml_supply_chain_security.md).
 
+For cargo-deny, cargo-vet and cargo-auditable in a Rust build, see [Rust Build, Deployment and Supply Chain](../../rust/build_deployment_and_supply_chain/build_deployment_and_supply_chain.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

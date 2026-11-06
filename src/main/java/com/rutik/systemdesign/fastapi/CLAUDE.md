@@ -165,6 +165,10 @@ duplicating it — duplicated first sentences also feed the same section-wide MC
 pool, so the duplication degrades the quiz as well as the prose. The same rule one level more
 abstract governs the `hld/` twins.
 
+`pydantic_v2_deep_dive/pydantic_core_and_performance.md` uses pydantic-core as the PyO3
+example. Keep it on the Python side. How PyO3 bindings are written belongs to
+[`../rust/ffi_and_language_interop/ffi_and_language_interop.md`](../rust/ffi_and_language_interop/ffi_and_language_interop.md).
+
 ## Adding a New FastAPI Module
 
 1. Create `<module_name>/<module_name>.md` — 14-section clean template

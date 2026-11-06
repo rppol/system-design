@@ -40,6 +40,8 @@ which builds directly on everything here.
 
 For benchmarking inference engines and qualifying an engine upgrade before release, see [Inference Engine Operations and Benchmarking](../../mlops/inference_engine_operations_and_benchmarking/inference_engine_operations_and_benchmarking.md) in `mlops/`.
 
+For Rust-specific benchmark traps, see [Profiling and Benchmarking](../../rust/profiling_and_benchmarking/profiling_and_benchmarking.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

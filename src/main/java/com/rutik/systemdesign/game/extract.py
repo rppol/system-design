@@ -540,7 +540,7 @@ def _section_inventory(section):
 
 def _module_page(module):
     """The module's own content page. Since 2026-07-30 a module page is named for its
-    folder (llm/advanced_rag/advanced_rag.md), not README.md -- only the 16 SECTION
+    folder (llm/advanced_rag/advanced_rag.md), not README.md -- only the SECTION
     landing pages are still called README.md. The study-paths marker lives in this file
     and every tier must list it, so this is the one filename the tier machinery resolves
     by convention rather than by being told."""

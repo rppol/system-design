@@ -18,6 +18,8 @@ Key components:
 - `SchemaValidator` / `SchemaSerializer` — compiled Rust objects; one per class, reused forever
 - `TypeAdapter` — thin Python wrapper that gives you validator/serializer access for non-`BaseModel` types
 
+For how PyO3 bindings are written on the Rust side, see [FFI and Language Interop](../../rust/ffi_and_language_interop/ffi_and_language_interop.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

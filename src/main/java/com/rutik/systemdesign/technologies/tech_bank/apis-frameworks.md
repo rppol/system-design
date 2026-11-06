@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: apis-frameworks -->
 
-The 492 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 518 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **APIs & app frameworks** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -419,6 +419,12 @@ family is easy, adding a new product type means editing every concrete factory a
 interface itself. With only one family, a Factory Method or a plain map of suppliers carries
 the same intent with far less scaffolding.
 
+### actix-web
+**Short:** Mature Rust web framework that runs one single-threaded Tokio runtime per worker thread.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
+
 ### Adapter
 **Short:** GoF structural pattern converting one interface into another so incompatible types can collaborate.
 **Kind:** concept
@@ -789,6 +795,18 @@ expensive to construct, so creating one per request is a serious performance bug
 default credentials provider chain walks several sources and its failure messages are opaque;
 and that the module granularity is a feature you must use — depend on the individual service
 artifacts rather than the aggregate, or the jar and the cold start both balloon.
+
+### axum
+**Short:** Rust web framework from the Tokio project, built on hyper and tower, where handlers are plain async functions with typed extractors.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
+
+### axum-extra
+**Short:** Companion crate to axum with extra extractors and responses, such as typed headers, cookie jars and protobuf.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
 
 ### BasicErrorController
 **Short:** Spring Boot's default /error handler, which produces the fallback JSON or whitelabel page and can be replaced.
@@ -1232,6 +1250,12 @@ work, or when you want scopes and interception. The cost is that wiring errors m
 compiler to startup, or with lazy beans to first use, and reflective containers add both
 startup time and a proxying layer that distorts stack traces. For a small program, wiring by
 hand in `main` is fully compiler-checked and faster.
+
+### Dioxus
+**Short:** Rust UI framework with a React-like component model that targets the web through WebAssembly, desktop and mobile.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
 
 ### DispatcherServlet
 **Short:** Spring MVC's front controller: receives every request and delegates to handler mapping, adapter and view.
@@ -2360,6 +2384,18 @@ process — across many workers, each refreshes independently.
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, devtools/testing-and-mocking @2
 
+### hyper
+**Short:** Low-level HTTP/1 and HTTP/2 client and server library for Rust; axum, tonic and reqwest are built on it.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
+
+### hyper-util
+**Short:** Utilities for hyper 1.x: the pooled legacy client, server connection helpers, and Tokio executor and I/O adapters.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
+
 ### hypercorn
 **Short:** ASGI server for Python apps with HTTP/2 and HTTP/3 support; an alternative to uvicorn in production deployments.
 **Kind:** tech
@@ -3026,6 +3062,12 @@ boundary, use protobuf or Avro.
 **Lang:** *
 **Roles:** apis-frameworks/dependency-injection-and-config @1, security/secrets-and-cryptography @2, platform-delivery/kubernetes-and-orchestration @2
 
+### Leptos
+**Short:** Full-stack Rust web framework with fine-grained reactive signals, server-side rendering and WebAssembly hydration.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
+
 ### Litestar
 **Short:** ASGI web framework with type-hint routing, layered DI and attrs or Pydantic models; a FastAPI alternative.
 **Kind:** tech
@@ -3467,6 +3509,12 @@ caller can register a document.
 **Lang:** java
 **Roles:** apis-frameworks/web-framework-and-http-client @1, data-access/drivers-and-connection-pooling @2
 
+### postcard
+**Short:** Compact binary serde format for Rust that works in no_std, often used between microcontrollers and hosts.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
 ### Pothos
 **Short:** TypeScript-first GraphQL schema builder that derives the schema from code with full end-to-end type inference.
 **Kind:** tech
@@ -3502,6 +3550,12 @@ messages that take practice to read.
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/design-patterns-and-principles @1
+
+### prost
+**Short:** Protocol Buffers for Rust: generates plain Rust structs from .proto files at build time; tonic uses it for message types.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1, apis-frameworks/rpc-graphql-and-streaming @2
 
 ### protobuf
 **Short:** Google's schema-first binary serialization format, compact and fast, and the payload format for gRPC.
@@ -3901,6 +3955,12 @@ wrong tool: every call blocks the event loop, so an `await` elsewhere in the sam
 buys nothing and one slow upstream stalls the process. Use `httpx`, which offers a nearly
 identical API with an async client, or `aiohttp`.
 
+### reqwest
+**Short:** High-level HTTP client for Rust on hyper, with connection pooling, rustls or native TLS, JSON bodies and a blocking mode.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/web-framework-and-http-client @1
+
 ### ResourceBundleMessageSource
 **Short:** Spring MessageSource resolving i18n messages from classpath resource bundles, cached for the JVM's lifetime.
 **Kind:** api
@@ -3956,6 +4016,18 @@ is cheaper.
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/web-framework-and-http-client @1
+
+### rkyv
+**Short:** Zero-copy deserialization framework for Rust: archived data is read in place from a byte buffer without a parse step.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
+### rmp-serde
+**Short:** MessagePack serialization and deserialization for Rust through serde.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
 
 ### routers
 **Short:** Enterprise-integration routers: named channels plus routing rules making a mediator's topology explicit.
@@ -4083,6 +4155,30 @@ well-formed value can still be hostile.
 **Lang:** java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, data-access/orm-and-data-mapping @2
 
+### serde
+**Short:** Rust serialization framework: derive Serialize and Deserialize once, and any format crate such as serde_json can read and write the type.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
+### serde_json
+**Short:** JSON for serde: typed serialization and deserialization, an untyped Value tree, and RawValue to pass JSON through unparsed.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
+### serde_path_to_error
+**Short:** Wrapper for serde deserializers that reports the path to the field that failed, such as items[3].price.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
+### serde_with
+**Short:** Helper crate for serde with custom field adapters such as DisplayFromStr, duration and base64 formats, and skip_serializing_none.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
 ### server reflection
 **Short:** gRPC service that publishes a server's proto descriptors so clients like grpcurl can call methods without the .proto.
 **Kind:** spec
@@ -4164,6 +4260,12 @@ repeating: it does not guarantee exactly-once execution, because a lock lost to 
 pause or an expired `lockAtMostFor` can let a second node start while the first is still
 working. The task must still tolerate overlap.
 
+### simd-json
+**Short:** Rust port of simdjson that parses JSON with SIMD instructions and works with serde; it needs a mutable input buffer.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
+
 ### SimpleClientHttpRequestFactory
 **Short:** Spring's HttpURLConnection-backed RestTemplate transport; the dependency-free fallback when no HTTP client is present.
 **Kind:** api
@@ -4230,6 +4332,12 @@ largely historical now, and the cost is significant: the session URL pattern req
 sessions at the load balancer, the fallback transports multiply requests and latency, and the
 extra layer complicates every debugging session. For new work, use WebSocket directly and
 handle failure with reconnection and a polling path only if measurement shows you need one.
+
+### sonic-rs
+**Short:** SIMD-accelerated JSON library for Rust from ByteDance's CloudWeGo project, with serde support.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/data-formats-and-api-contracts @1
 
 ### Spring @Bean methods
 **Short:** A factory method the Spring container calls once per scope, with dependencies supplied as method parameters.
@@ -5224,6 +5332,42 @@ reflexively, since more threads against a saturated database only moves the queu
 JDKs, enabling virtual threads changes the calculus, replacing the bounded pool with a
 per-request virtual thread and removing the classic exhaustion mode.
 
+### tonic
+**Short:** Native gRPC client and server for Rust on hyper, tower and Tokio, with code generation from .proto files.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+### tonic-health
+**Short:** The standard gRPC health-checking service, implemented for tonic servers.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+### tonic-prost
+**Short:** Codec crate that connects tonic to prost-generated message types.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+### tonic-reflection
+**Short:** gRPC server reflection for tonic, so tools such as grpcurl can find services without the .proto files.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+### tonic-types
+**Short:** Rust types for the rich gRPC error model (google.rpc.Status details) used with tonic.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+### tonic-web
+**Short:** Layer that lets a tonic server accept gRPC-Web requests from browsers.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
 ### tools.jackson.core:jackson-core
 **Short:** Jackson 3's streaming core: JsonParser, JsonGenerator and the token factory the databind layers build on.
 **Kind:** tech
@@ -5276,6 +5420,18 @@ Register it on any mapper that touches Kotlin types — Spring Boot does so auto
 it is on the classpath. The costs are that its Kotlin reflection has a measurable startup and
 first-call cost, and that it does not make everything work: value classes, sealed hierarchies
 and generic inline types still need explicit configuration or custom serializers.
+
+### tower
+**Short:** Rust library of the Service and Layer traits, plus middleware for timeouts, retries, rate limits and load balancing.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/aop-middleware-and-scheduling @1, traffic-edge/rate-limiting-and-resilience @2
+
+### tower-http
+**Short:** HTTP middleware for tower: tracing, compression, CORS, timeouts, body limits and request IDs.
+**Kind:** tech
+**Lang:** rust
+**Roles:** apis-frameworks/aop-middleware-and-scheduling @1
 
 ### Traverson
 **Short:** Spring HATEOAS Java client that walks a hypermedia API by following link relations rather than hardcoded URLs.

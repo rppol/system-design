@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 232 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 239 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -332,6 +332,42 @@ Add it when the JDK genuinely lacks the algorithm or format you need, not reflex
 Everything routes through the intercepting proxy: point a browser at Burp, the traffic lands in HTTP history, and from there a request goes to Repeater for hand-editing, to Intruder for automated payload iteration over marked positions, or to the scanner, which both passively flags issues in observed traffic and actively probes with crafted payloads. The session-handling rules and macros are what keep it authenticated while doing so.
 
 It is the standard tool for manual web application testing, with an extension ecosystem covering the specialised cases. The split matters commercially, since the Community edition has no active scanner and throttles Intruder, so serious use means the Professional licence. Test only what you are authorised to test: active scanning sends real attack traffic and writes real data.
+
+### cargo-audit
+**Short:** Checks Cargo.lock against the RustSec advisory database for crates with known vulnerabilities.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/supply-chain-and-runtime-security @1
+
+### cargo-auditable
+**Short:** Embeds the dependency list in a Rust binary, so scanners can audit a shipped executable for vulnerable crates.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/supply-chain-and-runtime-security @1
+
+### cargo-cyclonedx
+**Short:** Generates CycloneDX SBOMs for Rust crates and workspaces from Cargo metadata.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/supply-chain-and-runtime-security @1
+
+### cargo-deny
+**Short:** Cargo plugin that lints the dependency graph for advisories, licenses, banned or duplicate crates, and untrusted sources.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/supply-chain-and-runtime-security @1
+
+### cargo-geiger
+**Short:** Cargo subcommand that counts unsafe code in a crate and in its whole dependency tree.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/supply-chain-and-runtime-security @1, devtools/static-analysis-and-linting @2
+
+### cargo-vet
+**Short:** Mozilla's tool that records which dependency versions a team or a trusted peer has audited and fails CI on unaudited ones.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/supply-chain-and-runtime-security @1
 
 ### Casbin
 **Short:** Embeddable access-control library whose model file expresses RBAC, ABAC or ACL rules evaluated per request.
@@ -1647,6 +1683,12 @@ No layer is sufficient alone — a paraphrase defeats the heuristics and the jud
 Rego is a declarative query language descended from Datalog: rules define documents rather than execute steps, `input` is the request under evaluation and `data` is everything else loaded, and a rule body is a conjunction of expressions where iteration happens implicitly by unifying a variable across a collection. Two idioms carry most policies, a complete rule with a default of false that any matching case can satisfy, and a partial rule collecting deny messages, which is how policy tools report every violation instead of the first.
 
 It repays learning when authorization or configuration policy is a real part of the system, because rules become testable and version-controlled. The learning curve is the genuine cost: undefined is not false, negation and unification behave unlike an imperative language, and a rule that quietly evaluates to undefined looks exactly like a policy that passed. Write tests alongside the policy, and note the current syntax requires keywords that older examples omit.
+
+### rustls
+**Short:** TLS 1.2 and 1.3 library in Rust with pluggable crypto providers; aws-lc-rs is the default provider in the 0.23 line.
+**Kind:** tech
+**Lang:** rust
+**Roles:** security/secrets-and-cryptography @1, runtime-systems/io-networking-and-syscalls @3
 
 ### safety
 **Short:** Python dependency CVE scanner backed by a commercial vulnerability database, complementing pip-audit.

@@ -27,6 +27,8 @@ enough to make that call with numbers, the ladder of alternatives you are oblige
 exhaust first, and the narrow set of cases — a mature C library with no Go equivalent —
 where the answer is genuinely yes.
 
+For Rust FFI, which has no runtime boundary to cross, see [FFI and Language Interop](../../rust/ffi_and_language_interop/ffi_and_language_interop.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

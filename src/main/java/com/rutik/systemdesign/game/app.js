@@ -21,7 +21,7 @@ const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
   cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
   go: "Go", hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
-  llm: "LLM Engineering", ml: "Machine Learning", mlops: "MLOps & ML Infra", python: "Python", fastapi: "FastAPI", spring: "Spring",
+  llm: "LLM Engineering", ml: "Machine Learning", mlops: "MLOps & ML Infra", python: "Python", rust: "Rust", fastapi: "FastAPI", spring: "Spring",
   technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
   typescript: "TypeScript", frontend_platform: "Frontend Platform", react: "React",
 };
@@ -38,6 +38,7 @@ const SECTION_LABELS = {
 const SECTION_IDENTITY = {
   java:            { accent: "#e06c75", glyph: "J" },     // 355  red
   cs_fundamentals: { accent: "#ef8666", glyph: "∴" },     //  15  coral
+  rust:            { accent: "#de5b2a", glyph: "⚙" },     //  OKLab >= 0.079 from every accent
   ml:              { accent: "#e79a4f", glyph: "Σ" },     //  35  orange
   python:          { accent: "#e8bd54", glyph: "λ" },     //  52  gold
   book:            { accent: "#c9be63", glyph: "¶" },     //  70  parchment
@@ -127,6 +128,7 @@ const ACRONYMS = new Map(Object.entries({
   pytorch: "PyTorch", tensorflow: "TensorFlow", numpy: "NumPy", k8s: "K8s",
   rabbitmq: "RabbitMQ", amqp: "AMQP",
   ai: "AI", lora: "LoRA", kserve: "KServe",
+  raii: "RAII", ffi: "FFI", sqlx: "SQLx", webassembly: "WebAssembly", wasi: "WASI", semver: "SemVer", cpp: "C++", msrv: "MSRV", pyo3: "PyO3",
   opentelemetry: "OpenTelemetry",
 }));
 // Touch layouts drop the hover-only prerequisite chords, and narrow ones drop
@@ -152,7 +154,7 @@ function titleize(s) {
 
 // [SD] A module's own content page, derived from its id. Since 2026-07-30 every module
 // page is named for the folder that holds it (llm/advanced_rag/advanced_rag.md); the
-// only README.md files left are the 16 SECTION landing pages, which are never module
+// only README.md files left are the SECTION landing pages, which are never module
 // pages. Module ids did not change in that rename, so the page name is always
 // derivable — nothing here needs the bank. Book ids are three segments and the last
 // one is still the folder, so this holds for them too.
@@ -365,6 +367,14 @@ const STUDY_ORDER = {
     "go/the_runtime_and_garbage_collector","go/escape_analysis_and_performance","go/profiling_and_tracing","go/testing_benchmarking_and_fuzzing",
     "go/net_http_server","go/http_clients_and_resilience","go/json_and_serialization","go/database_sql_and_data_access","go/grpc_and_protobuf_in_go","go/observability_and_opentelemetry",
     "go/time_io_and_stdlib_essentials","go/reflection_and_unsafe","go/cgo_and_ffi","go/idiomatic_api_and_package_design","go/build_deployment_and_supply_chain","go/go_vs_java_and_python",
+  ],
+  rust: [
+    "rust/ownership_borrowing_and_raii","rust/lifetimes_and_the_borrow_checker","rust/traits_generics_and_trait_objects","rust/enums_pattern_matching_and_type_driven_design","rust/error_handling_and_panics","rust/collections_and_strings","rust/closures_and_iterators","rust/smart_pointers_and_interior_mutability","rust/modules_crates_and_cargo",
+    "rust/macros_declarative_and_procedural","rust/unsafe_rust_and_undefined_behavior","rust/ffi_and_language_interop",
+    "rust/threads_send_sync_and_locks","rust/channels_atomics_and_shared_state","rust/async_futures_and_pinning","rust/async_runtimes_and_executors","rust/async_cancellation_and_pitfalls",
+    "rust/performance_and_zero_cost_abstractions","rust/profiling_and_benchmarking","rust/testing_fuzzing_and_miri",
+    "rust/web_services_axum_tower_and_hyper","rust/serde_and_serialization","rust/databases_sqlx_and_diesel","rust/grpc_with_tonic","rust/observability_tracing_and_opentelemetry",
+    "rust/embedded_rust_and_bare_metal","rust/webassembly_and_wasi","rust/library_api_design_and_semver","rust/build_deployment_and_supply_chain","rust/rust_vs_cpp_go_java_and_python",
   ],
   hld: [
     "hld/scalability","hld/capacity_estimation","hld/load_balancing","hld/caching","hld/database_design",
@@ -7516,7 +7526,7 @@ function resolvePath(baseFile, rel) {
 // Human title from a content path: ".../module/module.md" -> "Module";
 // ".../module/sub_file.md" -> "Sub File". Since the 2026-07-30 rename a module page is
 // named for its folder, so the plain basename already yields the right title; the
-// readme branch survives only for the 16 SECTION landing pages, still README.md.
+// readme branch survives only for the SECTION landing pages, still README.md.
 function titleFromPath(path) {
   const parts = path.split("/");
   let name = parts.pop();

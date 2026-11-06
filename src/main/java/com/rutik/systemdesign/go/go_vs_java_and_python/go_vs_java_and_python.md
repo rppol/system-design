@@ -1220,3 +1220,4 @@ of 14 engineer-months, which is the outcome a language comparison should be desi
 - [The GIL and Free-Threading](../../python/the_gil_and_free_threading/the_gil_and_free_threading.md) — PEP 703, PEP 779, and the six concurrency strategies
 - [asyncio and Event Loop](../../python/asyncio_and_event_loop/asyncio_and_event_loop.md) — the event loop, `TaskGroup`, and what blocks it
 - [CPython Memory Model](../../python/cpython_memory_model/cpython_memory_model.md) — reference counting, the cycle collector, per-object overhead
+- [Rust vs C++, Go, Java and Python](../../rust/rust_vs_cpp_go_java_and_python/rust_vs_cpp_go_java_and_python.md): the Rust axis of this comparison

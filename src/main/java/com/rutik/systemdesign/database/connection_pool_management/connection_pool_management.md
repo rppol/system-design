@@ -6,6 +6,8 @@ A database connection is expensive: TCP handshake (~0.3ms), TLS negotiation (~1m
 
 At production scale, connection pool sizing and configuration become critical: too few connections cause request queuing; too many connections overwhelm the database server (PostgreSQL: 5–10MB RAM per backend process, plus scheduling overhead). The right pool size is a function of your database server's CPU count, I/O characteristics, and application concurrency.
 
+For sqlx pool configuration in Rust, see [Databases with sqlx and diesel](../../rust/databases_sqlx_and_diesel/databases_sqlx_and_diesel.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

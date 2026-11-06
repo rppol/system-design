@@ -80,6 +80,18 @@ is now its own section — see [`../fastapi/CLAUDE.md`](../fastapi/CLAUDE.md) an
 `fastapi/case_studies/`; `python/case_studies/` holds 6 pure-Python case studies plus 2
 cross-cutting guides in `case_studies/cross_cutting/`.
 
+## Relationship to rust/
+
+`c_extensions_and_native_interop` keeps the Python-side mechanics, the PyO3 extension
+end to end (§6.1) and the decision of when to go native (§14).
+[`../rust/ffi_and_language_interop/ffi_and_language_interop.md`](../rust/ffi_and_language_interop/ffi_and_language_interop.md)
+owns the Rust side: `#[pyclass]` `Send`/`Sync` rules, error mapping, napi-rs, jni, UniFFI
+and cxx. `rust/case_studies/design_a_pyo3_python_extension.md` builds on §6.1 and §14 (wheel
+matrix, abi3, release engineering) and does not restate them. Do not teach the Rust side here.
+
+Version skew: `c_extensions_and_native_interop` pins maturin 1.15.0. `rust/` pins maturin
+1.16.0 (crates.io, 2026-10-29). Update the pin here in a `python/` audit pass.
+
 ---
 
 ## Python Version Tags

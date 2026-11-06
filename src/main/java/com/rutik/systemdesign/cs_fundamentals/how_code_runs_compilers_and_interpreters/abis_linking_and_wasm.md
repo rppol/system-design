@@ -813,3 +813,4 @@ $ readelf -V wheelhouse/.../tokenizer_ext.abi3.so | grep GLIBC | sort -u
 - [`java/bytecode_and_classfile`](../../java/bytecode_and_classfile/bytecode_and_classfile.md) — a runtime that resolves symbolically by name and type at every call site, which is the opposite end of the design space from a fixed calling convention
 - [`python/c_extensions_and_native_interop`](../../python/c_extensions_and_native_interop/c_extensions_and_native_interop.md) — the limited API, `ctypes`/`cffi`, and the wheel-building machinery the case study leans on
 - [`devops/container_runtimes_and_oci`](../../devops/container_runtimes_and_oci/container_runtimes_and_oci.md) — why static linking and `FROM scratch` became the container default, and what breaks when `cgo` is enabled
+- [`rust/ffi_and_language_interop`](../../rust/ffi_and_language_interop/ffi_and_language_interop.md): `extern "C"`, bindgen and cxx in practice

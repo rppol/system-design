@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-access -->
 
-The 136 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 144 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Data access & DB ops** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -230,6 +230,30 @@ For new applications HikariCP is the better default — smaller, faster, and wha
 **Kind:** api
 **Lang:** *
 **Roles:** data-access/transactions-and-consistency @1, data-stores/relational @2
+
+### deadpool-postgres
+**Short:** Async connection pool for tokio-postgres, built on the deadpool crate.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/drivers-and-connection-pooling @1
+
+### diesel
+**Short:** Synchronous Rust ORM and query builder that type-checks queries against a schema module generated from the database.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/orm-and-data-mapping @1
+
+### diesel-async
+**Short:** Async connection implementations for diesel, with Postgres and MySQL backends and connection-pool integrations.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @2
+
+### diesel_cli
+**Short:** Command-line tool for diesel that runs migrations and regenerates schema.rs from the database.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/schema-and-migration @1
 
 ### Django ORM
 **Short:** Django's active-record ORM: model classes built by the ModelBase metaclass, querysets and migrations.
@@ -1008,6 +1032,12 @@ It connects over JDBC, reads the catalog — tables, columns, types, primary and
 
 Reach for it when inheriting a database nobody documented, or run it from CI so a published schema reference cannot drift from the database it describes. It is read-only and deploys nothing, and it needs Graphviz installed for the diagrams. For changing schema, that is Flyway, Liquibase or Atlas; SchemaSpy only explains what is already there.
 
+### sea-orm
+**Short:** Async ORM for Rust built on sqlx, with entity code generation and an ActiveModel API for inserts and updates.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/orm-and-data-mapping @1
+
 ### Seata
 **Short:** Distributed transaction framework offering AT, TCC, saga and XA modes with a central coordinator.
 **Kind:** tech
@@ -1185,6 +1215,24 @@ Install it when the application is ASGI and the driver is async — asyncpg, asy
 **Roles:** data-access/orm-and-data-mapping @1, apis-frameworks/data-formats-and-api-contracts @2
 
 A class declared with `table=True` is registered as a SQLAlchemy mapped table while still being a Pydantic model, so one declaration serves the database, request validation and the generated OpenAPI schema. It targets the triplication a FastAPI codebase accumulates, where an ORM entity, a create schema and a read schema all describe the same thing, though in practice you still subclass for those variants so fields can be optional, computed or hidden. Written by FastAPI's author, it fits small and medium services well. When you need the full SQLAlchemy mapper surface, drop to SQLAlchemy directly rather than fighting through the wrapper.
+
+### sqlx
+**Short:** Async Rust SQL toolkit for Postgres, MySQL and SQLite whose query macros check SQL against the schema at compile time.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/drivers-and-connection-pooling @1, data-access/orm-and-data-mapping @2
+
+### sqlx-cli
+**Short:** Command-line tool for sqlx that creates databases, runs migrations and prepares the offline query cache for CI.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/schema-and-migration @1
+
+### tokio-postgres
+**Short:** Async PostgreSQL client for Rust on Tokio with query pipelining; the sync postgres crate wraps it.
+**Kind:** tech
+**Lang:** rust
+**Roles:** data-access/drivers-and-connection-pooling @1
 
 ### TransactionAwareCacheManagerProxy
 **Short:** Spring cache decorator deferring cache writes until after commit so a rolled-back transaction leaves no stale entry.

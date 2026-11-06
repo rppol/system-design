@@ -928,3 +928,4 @@ The last two rows are the reason a distributed lock is a *liveness* tool, not a 
 - [`lld/concurrency_patterns`](../../lld/concurrency_patterns/concurrency_patterns.md) — ReadWriteLock, ThreadPool, Circuit Breaker patterns
 - [processes_threads_and_context_switching](../processes_threads_and_context_switching/processes_threads_and_context_switching.md) — thread model, context switch cost
 - [cpu_scheduling_algorithms](../cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) — priority inversion and scheduling interaction
+- [`rust/threads_send_sync_and_locks`](../../rust/threads_send_sync_and_locks/threads_send_sync_and_locks.md): what Rust's type system does and does not prevent

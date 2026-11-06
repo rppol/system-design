@@ -842,3 +842,4 @@ java \
 - [processes_threads_and_context_switching](../processes_threads_and_context_switching/processes_threads_and_context_switching.md) — virtual address space per process, fork + COW
 - [computer_architecture_and_memory_hierarchy](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — cache hierarchy, cache lines, NUMA
 - [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) — OOM killer, cgroups memory limits, vmstat, /proc/meminfo
+- [`rust/ownership_borrowing_and_raii`](../../rust/ownership_borrowing_and_raii/ownership_borrowing_and_raii.md): ownership instead of a collector

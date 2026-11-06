@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: traffic-edge -->
 
-The 100 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 101 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Traffic & resilience** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -658,6 +658,12 @@ Reach for it when upstreams change frequently and reloading configuration for ev
 It runs a caching resolver as a DaemonSet on every node and points pods at that local listener instead of at the cluster DNS service address. Two things follow. Cache hits are answered on the node with no network hop at all, and the misses that do leave the node travel to the cluster resolver over a long-lived TCP connection rather than as fresh UDP exchanges through the service's NAT rules, which is the actual fix, because it removes the conntrack churn and UDP entry races behind sporadic five-second lookups.
 
 Reach for it in any busy cluster, and especially where those intermittent multi-second DNS timeouts appear under load. The tradeoffs are ordinary DaemonSet ones: a small resident footprint on every node and one more component to upgrade, plus a cache that can serve a briefly stale answer after an endpoint change. It complements rather than replaces tuning the resolver's `ndots` setting and scaling the cluster DNS deployment itself.
+
+### Pingora
+**Short:** Cloudflare's Rust framework for building programmable HTTP proxies and load balancers.
+**Kind:** tech
+**Lang:** rust
+**Roles:** traffic-edge/proxy-and-load-balancer @1
 
 ### Polly
 **Short:** .NET resilience library for retries, circuit breakers, timeouts, bulkheads and fallbacks around remote calls.

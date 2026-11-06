@@ -47,7 +47,7 @@ from build_common import (
 #   * at the section ROOT instead, one stray `## 12. Interview Questions` heading collapses
 #     `module` to the 1-segment "technologies" and check_wiring() kills the deploy.
 # An exact path, NOT a name in SKIP_PATH_PARTS: a name rule would silently swallow a
-# directory called tech_bank in any of the 16 sections.
+# directory called tech_bank in any section.
 TECH_BANK_DIR = os.path.join("technologies", "tech_bank")
 
 
@@ -1129,6 +1129,7 @@ PRODUCT_DEEP_DIVES = {
     "ml/mlflow_deep_dive/mlflow_deep_dive.md",
     "ml/pytorch_deep_dive/pytorch_deep_dive.md",
     "mlops/model_serving_platforms/kserve_deep_dive.md",
+    "rust/async_runtimes_and_executors/tokio_deep_dive.md",
 }
 # Matches the same filename pattern but teaches a CONCEPT, not a product. Listed so the
 # guard stays silent about them and loud about anything new.

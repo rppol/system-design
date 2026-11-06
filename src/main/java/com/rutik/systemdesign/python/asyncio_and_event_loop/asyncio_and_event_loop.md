@@ -24,6 +24,8 @@ Python version scope: the APIs used here are 3.11+ (`TaskGroup`, `asyncio.timeou
 and all examples use `X | None` union syntax. Runtime behaviour, defaults and deprecations are
 stated for **3.14**.
 
+For poll-based futures in Rust as the contrast to asyncio, see [Async, Futures and Pinning](../../rust/async_futures_and_pinning/async_futures_and_pinning.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

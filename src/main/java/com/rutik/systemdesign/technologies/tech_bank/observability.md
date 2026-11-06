@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 291 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 317 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -251,6 +251,30 @@ It runs the program on Valgrind's synthetic CPU, counting every instruction exec
 
 That determinism is exactly why you use it, since comparing two implementations without benchmark noise is otherwise hard. The price is roughly a fiftyfold slowdown and a simulated rather than real memory hierarchy, so it will not tell you what your actual processor does with prefetching and out-of-order execution. Read the output in KCachegrind, and confirm the wall-clock win on real hardware with `perf`.
 
+### cargo-bloat
+**Short:** Cargo subcommand that lists which functions and crates take the most space in a compiled binary.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
+
+### cargo-flamegraph
+**Short:** Cargo subcommand that profiles a Rust binary with perf or dtrace and writes a flame graph SVG.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
+
+### cargo-llvm-lines
+**Short:** Cargo subcommand that counts LLVM IR lines per generic function, which shows where monomorphization adds compile time.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1, devtools/compiler-toolchain-and-codegen @2
+
+### cargo-show-asm
+**Short:** Cargo subcommand that prints the assembly, LLVM IR or MIR that the compiler generates for one function.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1, devtools/compiler-toolchain-and-codegen @2
+
 ### Cassandra Exporter
 **Short:** Sidecar that scrapes Cassandra JMX metrics and exposes them in Prometheus format.
 **Kind:** tech
@@ -317,6 +341,12 @@ It is the operator's single screen for a Confluent Platform cluster: brokers and
 
 Reach for it when you are already licensed for Confluent Platform and want one supported console instead of assembling dashboards. It is not a reason to adopt the platform on its own: an exporter feeding Prometheus and Grafana covers lag and broker metrics, Burrow covers lag evaluation without static thresholds, and Kafdrop covers message browsing, all on open-source Kafka.
 
+### console-subscriber
+**Short:** The instrumentation layer a Tokio application installs so tokio-console can connect and read its task data.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
+
 ### Cortex
 **Short:** Horizontally scalable, multi-tenant long-term storage behind Prometheus remote-write.
 **Kind:** tech
@@ -346,6 +376,12 @@ Reach for it before scale rather than after, since the point is to see marginal 
 cProfile instruments every function call and return, so its numbers are exact counts rather than samples: total time is the time spent in a function's own body, cumulative time includes everything it called, and sorting by each answers a different question — who is slow versus who is responsible for the slowness. Write the output to a file and read it with `pstats` or a flame-graph viewer instead of the default text dump, which is unreadable past a few dozen functions.
 
 The instrumentation multiplies runtime and it only profiles the thread that started it, so for production, threaded or async code a sampling profiler is the right instrument. cProfile is for a reproducible local script.
+
+### criterion
+**Short:** Statistics-driven benchmarking library for Rust that compares each run against a saved baseline and reports regressions.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1, devtools/testing-and-mocking @2
 
 ### Custom OTel
 **Short:** Hand-rolled OpenTelemetry instrumentation instead of a vendor SDK: full control, any backend, more work.
@@ -423,6 +459,18 @@ NVIDIA's Data Center GPU Manager reads driver telemetry, and the exporter turns 
 
 Reach for it for anything GPU-adjacent, because request-level metrics cannot say whether a slow inference server is compute-bound, memory-bound or thermally throttled. Two caveats matter: some fields are profiling counters with a real sampling cost, so enable them deliberately, and under Multi-Instance GPU the values are reported per instance, which quietly makes whole-GPU dashboards wrong in both directions.
 
+### defmt
+**Short:** Deferred-formatting logging for embedded Rust: format strings stay on the host, so the device sends only indices and values.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/logging @1
+
+### defmt-rtt
+**Short:** Transport that sends defmt log frames from a microcontroller to the host over SEGGER RTT through the debug probe.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/logging @1
+
 ### depesz EXPLAIN
 **Short:** Web tool that reformats a PostgreSQL EXPLAIN plan into a ranked tree so the expensive node is obvious.
 **Kind:** tech
@@ -432,6 +480,18 @@ Reach for it for anything GPU-adjacent, because request-level metrics cannot say
 You paste an `EXPLAIN` or `EXPLAIN ANALYZE` plan into the form and it renders the node tree with columns Postgres does not print: exclusive time per node as well as inclusive, each node's percentage of total runtime, and the ratio between estimated and actual rows. Nodes are colour-ranked, so the slowest step and the worst estimate are visible immediately instead of being inferred from indentation.
 
 Reach for it when a plan runs to more than a handful of nodes and you want the expensive one named. The estimate-against-actual ratio is the column that matters most, since a bad row estimate is what makes the planner pick a nested loop over a hash join. It is a hosted page, so treat a pasted plan as disclosure of your schema and query shapes; pev2 does the same job locally.
+
+### dhat
+**Short:** Heap profiler for Rust programs that records every allocation with its call stack and can assert allocation counts in tests.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1, devtools/testing-and-mocking @3
+
+### divan
+**Short:** Rust benchmarking library with attribute-registered benchmarks, generic and parameterized cases, and allocation counting.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1, devtools/testing-and-mocking @2
 
 ### Eclipse MAT
 **Short:** Heap dump analyzer for the JVM: dominator tree, leak suspects, OQL queries over retained memory.
@@ -627,6 +687,12 @@ It deliberately builds no full-text index. Traces are written as blocks to objec
 
 The intended workflow is not to browse traces at all, but to arrive with an ID already: a slow request found in a dashboard via metric exemplars, or a log line whose trace ID links straight through. Pair it with Prometheus and Loki so all three share the same labels, and think twice if attribute-heavy trace search - rather than ID lookup - is your primary access pattern.
 
+### gungraun
+**Short:** Rust benchmarking framework, formerly iai-callgrind, that counts instructions and cache events under Valgrind for stable CI results.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1, devtools/testing-and-mocking @2
+
 ### guppy3
 **Short:** Python heap analysis toolkit taking a one-shot census of live objects grouped by type and retainer.
 **Kind:** tech
@@ -728,6 +794,12 @@ Reach for it when a connection fails in a cluster running network policy, becaus
 It is driven from chat: a slash command declares an incident, which creates the channel, sets severity and roles, posts a summary and begins capturing a timeline from messages, pins and integrations. Workflows are configurable automations that announce at a severity threshold, open a ticket, page a team or remind the lead to send an update, and the retrospective is generated pre-populated with the timeline it recorded.
 
 Reach for it when the organisation already lives in Slack and you want process without asking responders to leave the channel they are working in. It also sells on-call scheduling and paging, so it can be the single tool rather than a layer over PagerDuty. The limit is common to the category: it records and coordinates but detects nothing, and adoption dies if declaring an incident feels heavyweight.
+
+### inferno
+**Short:** Rust port of Brendan Gregg's FlameGraph scripts that collapses stack samples and renders flame graphs.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
 
 ### INFO memory
 **Short:** Redis INFO section reporting used and peak memory, eviction counts and the fragmentation ratio for diagnosis.
@@ -1255,6 +1327,18 @@ Modules are per-target collectors — system, Docker, Kubernetes, nginx, Postgre
 
 It is the pull-based counterpart to Filebeat's tail, and both are being folded into Elastic Agent, which runs the same collection under central management. Reach for Metricbeat directly when you want one small binary with one job and no Fleet dependency; choose Elastic Agent when a fleet of hosts needs its collection managed centrally.
 
+### metrics
+**Short:** Lightweight Rust metrics facade with counter, gauge and histogram macros; the binary picks the exporter.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/metrics-and-monitoring @1
+
+### metrics-exporter-prometheus
+**Short:** Prometheus exporter for the Rust metrics facade that serves or pushes the text exposition format.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/metrics-and-monitoring @1
+
 ### Micrometer
 **Short:** Vendor-neutral JVM metrics facade; one instrumentation API exporting to Prometheus, Datadog, CloudWatch and others.
 **Kind:** tech
@@ -1664,6 +1748,12 @@ Weaver consumes the semantic-convention registry — attribute names, types, sta
 
 Reach for it when your own attributes have quietly become a private convention that nothing enforces, or when several languages should be generated from one definition. It governs names, not behaviour: it will not tell you a span is missing, only that the one you emit is undeclared or spelled differently from the registry.
 
+### opentelemetry-appender-tracing
+**Short:** Bridge that sends tracing events to the OpenTelemetry Logs SDK as log records.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/logging @1
+
 ### opentelemetry-exporter-otlp
 **Short:** OpenTelemetry exporter shipping spans and metrics over OTLP to Jaeger, Tempo, Honeycomb or Datadog.
 **Kind:** tech
@@ -1684,6 +1774,12 @@ Instrumenting the app object, or running it under the auto-instrumentation launc
 
 Reach for it as the first piece of tracing on a FastAPI service, and pair it with the client and database instrumentations, since a server span alone says a request was slow without saying which downstream call caused it. Excluding health and metrics endpoints is worth doing or probes dominate trace volume, and background tasks fall outside the request span unless you propagate context into them yourself.
 
+### opentelemetry-otlp
+**Short:** OTLP exporter for the Rust OpenTelemetry SDK, over gRPC through tonic or over HTTP.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/tracing-apm-and-llm-observability @1
+
 ### opentelemetry-sdk
 **Short:** Python OpenTelemetry SDK implementing the tracing/metrics API - samplers, processors and OTLP exporters.
 **Kind:** tech
@@ -1691,6 +1787,12 @@ Reach for it as the first piece of tracing on a FastAPI service, and pair it wit
 **Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @3
 
 `opentelemetry-api` is what libraries import; this package is the implementation an application installs and configures, giving you a `TracerProvider` with samplers, span processors (batched in production) and OTLP exporters aimed at a collector or a backend. Because the wire format is OTLP and context propagates as a W3C `traceparent` header, a trace crosses service and language boundaries and the backend stays swappable without touching instrumentation. In practice you rarely construct spans by hand, since the auto-instrumentation packages cover FastAPI, requests, SQLAlchemy and the rest, and manual spans are for your own business logic. Choose the sampler deliberately: recording every request is fine at low volume and ruinous at high.
+
+### opentelemetry_sdk
+**Short:** The OpenTelemetry SDK for Rust: tracer, meter and logger providers, sampling, batch processors and resources.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @2
 
 ### OTLP
 **Short:** OpenTelemetry's vendor-neutral wire protocol over gRPC or HTTP carrying traces, metrics and logs.
@@ -2180,6 +2282,18 @@ Statements evaluate per item and name the pipelines that item should go to, with
 
 Being a connector it is an exporter in one pipeline and a receiver in several others, so the routing decision is expressed in the pipeline graph rather than inside one component's config. Everything downstream of the split is duplicated configuration, so if the branches share a prefix of processors, keep that prefix upstream of the connector instead of repeating it in each branch.
 
+### rustfilt
+**Short:** Command-line demangler for Rust symbol names, legacy and v0, for profiler and perf output.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
+
+### samply
+**Short:** Sampling CPU profiler for macOS, Linux and Windows that opens its results in the Firefox Profiler.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
+
 ### SDK
 **Short:** The OpenTelemetry API/SDK split: libraries depend only on the stable API while the SDK and exporters stay swappable.
 **Kind:** concept
@@ -2454,6 +2568,18 @@ The net effect is unlimited retention on cheap object storage and one global que
 **Lang:** python
 **Roles:** observability/profiling-and-performance @1
 
+### tokio-console
+**Short:** Live debugger for Tokio applications, like top for async tasks: poll times, wake counts and the resources each task waits on.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
+
+### tokio-metrics
+**Short:** Runtime and per-task metrics for Tokio, such as poll counts, scheduling delay and busy time.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/metrics-and-monitoring @1, observability/profiling-and-performance @2
+
 ### Traceloop
 **Short:** LLM observability platform built on OpenLLMetry, tracing prompts, tool calls and cost as OpenTelemetry spans.
 **Kind:** tech
@@ -2470,6 +2596,30 @@ That portability is the honest reason to start here, since you can adopt the ins
 **Lang:** python
 **Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
 
+### tracing
+**Short:** Rust instrumentation framework for structured spans and events that stay attached to async tasks across .await points.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/tracing-apm-and-llm-observability @1, observability/logging @2
+
+### tracing-appender
+**Short:** Non-blocking and rolling-file writers for tracing-subscriber that move log writes to a worker thread.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/logging @1
+
+### tracing-opentelemetry
+**Short:** Layer that turns tracing spans into OpenTelemetry spans, so a Rust service exports traces through the OTel SDK.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/tracing-apm-and-llm-observability @1
+
+### tracing-subscriber
+**Short:** Subscriber and Layer implementations for tracing: formatters, EnvFilter, and several outputs composed in one registry.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/logging @1, observability/tracing-apm-and-llm-observability @2
+
 ### transform
 **Short:** OpenTelemetry Collector processor that rewrites telemetry with OTTL statements — redact an attribute, rename a field, edit conditionally.
 **Kind:** api
@@ -2485,6 +2635,12 @@ This is where PII redaction belongs, because it is one place, auditable, and out
 **Kind:** api
 **Lang:** java
 **Roles:** observability/logging @1, apis-frameworks/design-patterns-and-principles @3
+
+### twiggy
+**Short:** Code-size profiler for WebAssembly binaries that shows which functions take space and what keeps them in the binary.
+**Kind:** tech
+**Lang:** rust
+**Roles:** observability/profiling-and-performance @1
 
 ### USE INDEX
 **Short:** SQL optimizer hint forcing a chosen index; MySQL supports it natively, PostgreSQL only via an extension.

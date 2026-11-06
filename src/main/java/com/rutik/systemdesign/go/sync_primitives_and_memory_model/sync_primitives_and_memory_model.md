@@ -1164,3 +1164,4 @@ which ones Go pointedly does not offer — that is
   Go's is deliberately smaller than
 - [Memory Models and Concurrency Theory](../../cs_fundamentals/memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md)
   — sequential consistency and TSO from first principles
+- [Channels, Atomics and Shared State](../../rust/channels_atomics_and_shared_state/channels_atomics_and_shared_state.md): typed atomics and shared state in Rust

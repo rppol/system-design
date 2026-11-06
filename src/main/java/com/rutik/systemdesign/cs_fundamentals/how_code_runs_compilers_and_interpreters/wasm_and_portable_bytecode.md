@@ -646,3 +646,4 @@ That single file replaced a C header plus three pages of prose about who frees t
 - [memory_management_and_virtual_memory](../memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) — what a flat linear memory gives up: paging, guard pages, ASLR
 - [`devops/container_runtimes_and_oci`](../../devops/container_runtimes_and_oci/container_runtimes_and_oci.md) — the OCI packaging and containerd shim machinery a Wasm workload reuses unchanged
 - [`llm/agents_and_tool_use/sandboxed_code_execution`](../../llm/agents_and_tool_use/sandboxed_code_execution.md) — the newest large use of the capability model: running model-generated code with no ambient authority
+- [`rust/webassembly_and_wasi`](../../rust/webassembly_and_wasi/webassembly_and_wasi.md): compiling Rust to Wasm and WASI components

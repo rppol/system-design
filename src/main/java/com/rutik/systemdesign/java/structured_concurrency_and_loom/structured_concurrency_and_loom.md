@@ -906,3 +906,4 @@ baseline — dwarfed by the 97.3% cut in code, which is the trade the team actua
 - [Spring WebFlux](../../spring/spring_webflux/spring_webflux.md) — the reactive alternative for I/O-bound concurrency when you are not yet on Java 21+
 - [Async & Concurrency Patterns](../../backend/async_and_concurrency_patterns/async_and_concurrency_patterns.md) — production fan-out/fan-in, timeout, and cancellation patterns applied to virtual threads
 - [Processes, Threads & Context Switching](../../cs_fundamentals/processes_threads_and_context_switching/processes_threads_and_context_switching.md) — the OS-level thread and context-switch costs that virtual threads amortize
+- [Async Cancellation and Pitfalls](../../rust/async_cancellation_and_pitfalls/async_cancellation_and_pitfalls.md): cancellation in Rust's poll-based async model

@@ -20,6 +20,8 @@ Everything here builds on:
 [HTTP Clients and Resilience](../http_clients_and_resilience/http_clients_and_resilience.md),
 and [Profiling and Tracing](../profiling_and_tracing/profiling_and_tracing.md).
 
+For the Rust data-plane counterpart, see [Design a High-Performance L7 Proxy in Rust](../../rust/case_studies/design_a_high_performance_l7_proxy.md) in `rust/`.
+
 ---
 
 ## 1. Requirements Clarification

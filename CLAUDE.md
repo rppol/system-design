@@ -13,6 +13,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **Java** | Pure Java senior-engineer guide — 35 modules, 10 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
 | **Spring** | Spring Framework guide — 40 modules, 10 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
 | **Go** | Pure Go senior-engineer guide (the language every system in `devops/` is written in) — 27 modules, 6 case studies, 3 deep-dive sub-files | [go/CLAUDE.md](src/main/java/com/rutik/systemdesign/go/CLAUDE.md) |
+| **Rust** | Pure Rust senior-engineer guide: ownership and lifetimes, traits, unsafe and FFI, Send/Sync and atomics, async with Tokio, performance, testing with Miri, axum/tonic/sqlx services, no_std, WebAssembly, supply chain. Targets Rust 1.99 on edition 2024. Link-only to `cs_fundamentals/`, `python/`, `go/`, `backend/` - 30 modules, 7 case studies, 4 deep-dive sub-files, 2 cross-cutting files | [rust/CLAUDE.md](src/main/java/com/rutik/systemdesign/rust/CLAUDE.md) |
 | **Python** | Pure Python senior-engineer guide — 24 modules, 6 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
 | **FastAPI** | FastAPI + ASGI production guide — 21 modules, 8 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 47 modules, 27 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
@@ -44,6 +45,7 @@ src/main/java/com/rutik/systemdesign/
 ├── python/       ← Pure Python guide + CLAUDE.md
 ├── fastapi/      ← FastAPI + ASGI guide + CLAUDE.md
 ├── go/          ← Pure Go guide + CLAUDE.md
+├── rust/             ← Pure Rust guide + CLAUDE.md
 ├── ml/               ← Machine Learning guide + CLAUDE.md
 ├── mlops/            ← MLOps & ML Infra guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
@@ -66,7 +68,7 @@ anywhere below a section root.
 
 | File | How many | What it is |
 |------|----------|-----------|
-| `<section>/README.md` | exactly 22, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/README.md` | exactly 23, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
 | `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
@@ -86,7 +88,7 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Scope — 21 sections in scope; only `book/` is still out (owner-set 2026-08-04)
+## Scope — 22 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
 `devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
 2026-08-04**. Every improvement pass now applies to them: the factual audit, the
@@ -107,7 +109,7 @@ instead, and for the rules that bind a `**Short:**` line written there.
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **audit still out; Short done for every Q&A** |
 
-**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start; `mlops/` was likewise authored Short-migrated from the start on 2026-10-18) (2026-08-04, commit `6ce35a6`;
+**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start; `mlops/` was likewise authored Short-migrated from the start on 2026-10-18; `rust/` was likewise authored Short-migrated from the start on 2026-11-06) (2026-08-04, commit `6ce35a6`;
 the three unparked sections were audited and migrated the same day). Every Q&A in the
 repo, `book/` included, carries an authored `**Short:**` line. Verify with `extract.py`'s own
 "authored **Short:** summaries: N of M parsed Q&As", where `N` must equal `M`. `cs_fundamentals` reads 704 against the 701 recorded at

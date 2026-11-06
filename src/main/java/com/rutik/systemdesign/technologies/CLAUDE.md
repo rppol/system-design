@@ -41,7 +41,10 @@ so do not add `technologies/opentelemetry`. KServe, llm-d, Kueue, Volcano and KA
 [`mlops/model_serving_platforms/kserve_deep_dive.md`](../mlops/model_serving_platforms/kserve_deep_dive.md)),
 so do not add `technologies/kserve` or a module for any of the others. Triton and OpenVINO
 predate `mlops/` and stay here as a recorded exception; `mlops/model_serving_platforms`
-links to them. This section is for technologies that don't
+links to them. Tokio is owned by
+[`rust/async_runtimes_and_executors/tokio_deep_dive.md`](../rust/async_runtimes_and_executors/tokio_deep_dive.md),
+a deep-dive sub-file, so do not add `technologies/tokio`. axum, tonic, sqlx and serde are
+taught in `rust/` modules. This section is for technologies that don't
 already have a canonical home — an orchestrator like Airflow or an inference server like Triton has
 no single owning section, so it lives here instead.
 

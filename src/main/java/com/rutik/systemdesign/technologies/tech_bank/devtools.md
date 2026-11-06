@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: devtools -->
 
-The 303 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 363 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Build & test tooling** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -62,6 +62,12 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** api
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1
+
+### afl.rs
+**Short:** Rust bindings and the cargo afl command for fuzzing Rust code with AFL++.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1, security/supply-chain-and-runtime-security @2
 
 ### aioresponses
 **Short:** Pytest-friendly mock that intercepts aiohttp requests so async HTTP calls can be stubbed in tests.
@@ -157,6 +163,12 @@ than hand-written.
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, devtools/testing-and-mocking @2
 
+### arbitrary
+**Short:** Trait and derive macro that turn raw fuzzer bytes into structured Rust values for fuzz targets.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
 ### ArchUnit
 **Short:** Java library that asserts architecture rules (layering, package cycles, forbidden access) as ordinary JUnit tests.
 **Kind:** tech
@@ -208,6 +220,12 @@ It is the substrate under CGLIB, Byte Buddy, Mockito, Jacoco and most APM agents
 AssertJ gives you one entry point, `assertThat(actual)`, that returns an assertion object typed to whatever you passed, so completion offers only the assertions that make sense — collection assertions for a list, temporal ones for an `Instant` — and they chain into a single readable line. The practical payoff is the failure message: instead of "expected true but was false" you get the actual value, the expected value and the diff, which is often enough to diagnose without rerunning under a debugger.
 
 Beyond simple values it covers exceptions with `assertThatThrownBy`, soft assertions that collect several failures in one run instead of stopping at the first, and recursive field-by-field comparison for whole object graphs. It is the default assertion library in Spring Boot's test starter.
+
+### autocxx
+**Short:** Generates cxx bindings from existing C++ headers, on top of bindgen, so Rust can call C++ with less hand-written glue.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### Awaitility
 **Short:** Java test DSL for asserting asynchronous outcomes: await().atMost(5, SECONDS).until(...) instead of Thread.sleep.
@@ -264,6 +282,12 @@ The traps are word splitting and globbing on unquoted expansion, and a pipeline 
 A build is a graph of fine-grained targets whose inputs and outputs are declared explicitly, so every action is hermetic and content-addressed. That buys two things a monorepo needs: results cache locally and in a shared remote cache so an unchanged target is never rebuilt, and querying the reverse dependency graph tells CI precisely which targets a commit can affect - so CI time scales with the size of the change rather than the size of the repository.
 
 The price is that everything must be declared. Undeclared dependencies a Makefile tolerated become hard errors, and non-JVM ecosystems need rulesets and pinned lockfiles that somebody has to maintain. Reach for it for a large polyglot repository where build times or flaky incremental builds are actually hurting; a single-language project is nearly always better served by its native tool.
+
+### bindgen
+**Short:** Generates Rust FFI declarations from C and some C++ headers through libclang, usually from build.rs.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### bison
 **Short:** GNU parser generator that turns a grammar file into an LALR bottom-up parser, usually paired with flex for lexing.
@@ -323,6 +347,96 @@ It bundles several independent Java decompilers behind one window and shows thei
 
 Use it to inspect a third-party jar with no sources attached, or to confirm what desugaring the compiler applied to your own code. For everyday questions about your own build, `javap -c -p -v` is faster and already installed; the GUI earns its keep on obfuscated or source-less code.
 
+### Cargo
+**Short:** Rust's build tool and package manager: dependency resolution, Cargo.lock, features, workspaces, profiles and publishing to crates.io.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
+### cargo-binstall
+**Short:** Installs Rust binaries from prebuilt release archives instead of compiling them, and falls back to cargo install.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
+### cargo-chef
+**Short:** Cargo subcommand that builds dependencies in their own Docker layer, so a code change does not rebuild every crate.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1, platform-delivery/container-and-image @2
+
+### cargo-component
+**Short:** Cargo subcommand that builds Rust crates as WebAssembly components from WIT interface definitions.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
+### cargo-dist
+**Short:** Release tool for Rust binaries that builds cross-platform archives and installers and generates the CI release workflow.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1, platform-delivery/ci-cd-and-release @2
+
+### cargo-expand
+**Short:** Cargo subcommand that prints a crate's code after macro expansion and derives.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
+### cargo-fuzz
+**Short:** Cargo subcommand for coverage-guided fuzzing of Rust code with libFuzzer.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1, security/supply-chain-and-runtime-security @2
+
+### cargo-hack
+**Short:** Cargo subcommand that builds or tests every feature combination or a range of Rust versions, to catch feature and MSRV breaks.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1, devtools/testing-and-mocking @2
+
+### cargo-llvm-cov
+**Short:** Cargo subcommand for source-based code coverage of Rust tests through LLVM instrumentation.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
+### cargo-msrv
+**Short:** Finds and checks a crate's minimum supported Rust version by building it with older toolchains.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
+### cargo-mutants
+**Short:** Mutation testing for Rust: it changes the code and reports each mutation the test suite did not catch.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
+### cargo-nextest
+**Short:** Rust test runner that runs each test in its own process, with retries, CI partitioning and JUnit output.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
+### cargo-pgo
+**Short:** Cargo subcommand that drives profile-guided optimization and BOLT builds of a Rust binary.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1, observability/profiling-and-performance @2
+
+### cargo-semver-checks
+**Short:** Linter that compares a crate's public API with its last release and flags changes that need a major version bump.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/static-analysis-and-linting @1
+
+### cargo-zigbuild
+**Short:** Cargo subcommand that uses Zig as the linker to cross-compile Rust, including against a chosen glibc version.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
 ### cassandra-stress
 **Short:** Cassandra's bundled load-generation and benchmarking tool for stressing a cluster with a chosen schema and workload mix.
 **Kind:** tech
@@ -332,6 +446,18 @@ Use it to inspect a third-party jar with no sources attached, or to confirm what
 It ships with Cassandra and drives a cluster with a generated workload: either the built-in key-value schema or, more usefully, a YAML profile in which you declare your real table, the distribution of each column's values, and a mix of named queries with relative weights. It ramps client threads, warms up, then reports throughput, latency percentiles and per-operation timing, so you can find the concurrency level at which the cluster stops scaling.
 
 Use it to size a cluster and to validate a data model before it is in production, because most Cassandra performance problems are partition-design problems that only appear under real cardinality. Results are only as honest as the value distributions in the profile — uniform keys hide the hot partition that will actually hurt you.
+
+### cbindgen
+**Short:** Generates C and C++ headers from a Rust crate's extern C API, so C code can call into Rust.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
+### cc
+**Short:** Rust build-dependency crate that compiles C, C++ and assembly sources from build.rs and links them into the crate.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### CGLIB
 **Short:** Bytecode library generating runtime subclasses; the proxy mechanism Spring AOP uses for classes without interfaces.
@@ -421,6 +547,12 @@ Commands are ordinary functions wearing decorators: `@click.command()`, then `@c
 
 Reach for it for any CLI that has grown past a couple of flags; the stdlib `argparse` needs far more code for the same nesting. Typer wraps Click and derives the same interface from type hints, which is less boilerplate again for a modern codebase.
 
+### Clippy
+**Short:** Rust's official linter, with hundreds of lints for correctness, performance, style and suspicious code, run as cargo clippy.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/static-analysis-and-linting @1
+
 ### CMake CUDA_ARCHITECTURES
 **Short:** CMake target property selecting GPU architectures to compile for; -real/-virtual map to sm_XX/compute_XX.
 **Kind:** api
@@ -460,6 +592,18 @@ The format is a structured first line — a type, an optional scope, an optional
 
 Adopt it by enforcing the format in a commit-msg hook, since it degrades the moment half the commits are freeform. It says nothing about whether the message is informative — a `fix: bug` still passes the linter.
 
+### crater
+**Short:** Rust project tool that builds and tests every crate on crates.io with two compilers to find regressions before a release.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
+### cross
+**Short:** Cross-compilation for Rust that runs cargo inside a Docker or Podman image that holds the target toolchain.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
 ### CUP
 **Short:** Java LALR parser generator with grammar actions written inline in Java; used for legacy grammars.
 **Kind:** tech
@@ -469,6 +613,12 @@ Adopt it by enforcing the format in a commit-msg hook, since it degrades the mom
 The Constructor of Useful Parsers is a Java port of the yacc model: you declare terminals and non-terminals, write productions with Java semantic actions inline, and it generates an LALR(1) table-driven parser class, conventionally paired with JFlex for the scanner. Its conflict reports are the classic shift/reduce and reduce/reduce messages, resolved with precedence and associativity declarations or by restructuring the grammar.
 
 It survives mainly in academic compiler courses and long-lived codebases that adopted it years ago. For new Java work ANTLR 4 is the better default: the grammar stays free of embedded Java, the generated visitor separates traversal from semantics, and adaptive LL(*) accepts left-recursive expression rules without the precedence gymnastics LALR requires.
+
+### cxx
+**Short:** Safe interop between Rust and C++: both sides of the bridge are declared once and checked at compile time.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### DataGrip
 **Short:** JetBrains database IDE for browsing schemas, writing SQL and reviewing generated migration diffs before merge.
@@ -509,6 +659,12 @@ Correctness rests entirely on honest input and output declarations, so a task th
 It parses a unified diff — the output of `git diff`, or a patch file — into a structured model and renders it as HTML with per-file summaries, line-level intra-word highlighting, and a choice of side-by-side or inline layout. It ships as a browser and Node library plus a `diff2html-cli` that turns a commit range into a standalone page, so nothing about it requires a hosting platform.
 
 Reach for it when a diff has to be readable outside a code-review tool: an emailed release note, a CI artifact showing what a codegen step changed, a report page. It only renders — computing the diff, resolving renames and applying syntax highlighting are your job or another library's.
+
+### docs.rs
+**Short:** Service that builds and hosts rustdoc documentation for every crate version published to crates.io.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
 
 ### Documenter
 **Short:** Spring Modulith class that renders module structure and dependencies as C4/PlantUML diagrams and canvases.
@@ -579,6 +735,12 @@ That is the mechanism behind `-gencode` and CMake's `CUDA_ARCHITECTURES`: each `
 **Kind:** api
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2
+
+### Ferrocene
+**Short:** Ferrous Systems' qualified Rust compiler toolchain for safety-critical industries.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### FieldVisitor
 **Short:** ASM visitor for class fields, chainable so each visitor inspects or rewrites bytecode and delegates onward.
@@ -1030,6 +1192,12 @@ A control is a Ruby DSL block that describes desired state — a package install
 
 The distinction that matters is that it asserts observed state rather than configuration intent, so it catches drift that a converged Ansible or Terraform run would report as fine. Profiles can inherit and override each other, which is how a team specialises a CIS benchmark. It only checks; remediation stays with your configuration tool.
 
+### insta
+**Short:** Snapshot testing library for Rust with inline and file snapshots and a cargo insta review workflow.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
 ### IntelliJ IDEA
 **Short:** JetBrains IDE with code generation, refactoring, inspections and debuggers including a stream-stage trace debugger.
 **Kind:** tech
@@ -1288,6 +1456,12 @@ A `.jmod` file is a packaging format for a module that a jar cannot carry: along
 
 Its scope is deliberately narrow. A `.jmod` is a link-time artifact only — you cannot put one on the module path and run it, and you cannot publish it as an ordinary dependency. Package normally as a modular jar and reach for `jmod create` only when a module carries native libraries that must end up inside a `jlink` image.
 
+### jni
+**Short:** Rust bindings to the Java Native Interface, used to call into the JVM or to implement Java native methods in Rust.
+**Kind:** tech
+**Lang:** rust, java
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
 ### JPA metamodel
 **Short:** Generated Entity_ classes from an annotation processor, giving type-safe attribute references in Criteria queries.
 **Kind:** api
@@ -1322,6 +1496,12 @@ nightly job rather than on every commit.
 It registers as a JUnit Platform engine, so `@Property` methods live beside ordinary `@Test` methods in the same suite and run under the same tooling. Parameters are supplied by `Arbitrary` generators — built in for the common types, composed with `map`, `filter`, `flatMap` and `combine` for domain objects, or supplied by an `@Provide` method — and a failing property is shrunk to a minimal counterexample, then recorded so the same input is retried first on subsequent runs.
 
 Use it where invariants are stronger than examples: a round-trip through a serializer, a comparator's transitivity, a state machine's reachable transitions. `Statistics.collect` is worth using early, because generators frequently produce a distribution far narrower than you assumed and the property then proves very little.
+
+### js-sys
+**Short:** Raw wasm-bindgen bindings for Rust to JavaScript's built-in objects, such as Array, Promise and Date.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### jshell
 **Short:** The JDK's REPL for evaluating Java snippets interactively without a build.
@@ -1406,6 +1586,12 @@ Tests are JavaScript modules -- a default exported function each virtual user ru
 A `TestRun` custom resource names a ConfigMap holding the script and a parallelism count; the operator splits the test into that many runner pods, passes each an execution segment so together they generate exactly the declared load once, and runs an initializer pod first to validate the script. Results are aggregated from the runners, typically streamed to Prometheus or another output rather than collected on one node.
 
 This is how you exceed a single machine's virtual-user ceiling using the cluster you already have instead of a managed service. Two things to watch: the generators compete with the system under test for cluster resources unless you isolate them by node or namespace, and per-runner percentiles cannot simply be averaged, so aggregate through a real metrics backend.
+
+### Kani
+**Short:** Bounded model checker for Rust from AWS that proves properties of unsafe and arithmetic code for all inputs within a bound.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1, devtools/static-analysis-and-linting @2
 
 ### KAPT
 **Short:** Kotlin Annotation Processing Tool, the Kotlin bridge to Java annotation processors (now largely superseded by KSP).
@@ -1539,6 +1725,18 @@ Weigh that dependence on unsupported compiler internals against the boilerplate 
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @2
 
+### loom
+**Short:** Model checker for Rust concurrent code that runs a test under many thread interleavings and memory-ordering outcomes to find races.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1, runtime-systems/concurrency-and-async @2
+
+### madsim
+**Short:** Deterministic simulator for distributed Rust systems that replaces Tokio time, networking and randomness with seeded versions.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
 ### Mandrel
 **Short:** Red Hat's GraalVM downstream distribution, trimmed to the native-image toolchain Quarkus builds against.
 **Kind:** tech
@@ -1556,6 +1754,12 @@ Functionally the binaries it produces are GraalVM native images; choosing betwee
 **Roles:** devtools/compiler-toolchain-and-codegen @1, data-access/orm-and-data-mapping @2, apis-frameworks/design-patterns-and-principles @3
 
 You declare a `@Mapper` interface with method signatures such as `TargetDto toDto(SourceEntity e)`, and the annotation processor writes the implementation at compile time -- plain field assignments, no reflection -- so the mapping costs what hand-written code costs and appears in stack traces and debuggers as ordinary Java. Matching names and types map automatically; `@Mapping` covers renames, nested paths, expressions and formatting, and unmapped target properties can be escalated from a warning to a build error. That escalation is the real value: adding a field to a DTO and forgetting to populate it fails the build instead of shipping a null. Reach for it wherever entity-to-DTO conversion is repetitive and wide; for two small objects a hand-written mapper is less machinery, and any mapping with genuine branching logic should stay hand-written anyway.
+
+### maturin
+**Short:** Build and publish tool for Rust Python extensions (PyO3, cffi, UniFFI) that produces manylinux, macOS and Windows wheels.
+**Kind:** tech
+**Lang:** rust, python
+**Roles:** devtools/build-and-dependency-management @1, devtools/compiler-toolchain-and-codegen @2
 
 ### Maven annotationProcessorPaths
 **Short:** maven-compiler-plugin setting that declares annotation processors separately from the compile classpath.
@@ -1639,6 +1843,12 @@ You import an existing artifact — an OpenAPI or AsyncAPI document, a Postman c
 
 That symmetry is the point — one artifact drives both the mock and the conformance check, so the mock cannot drift into fiction. It covers asynchronous protocols too, publishing mock messages to Kafka or MQTT. Where it is weaker than WireMock is dynamic behaviour: it is example-driven, not a programmable stub server.
 
+### Miri
+**Short:** Interpreter for Rust's mid-level IR that detects undefined behavior in unsafe code at test time, such as aliasing violations and use-after-free.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1, runtime-systems/runtime-internals-and-types @2
+
 ### Miro
 **Short:** Online collaborative whiteboard; in this repo it is the canvas a distributed team runs an event storming session on.
 **Kind:** tech
@@ -1648,6 +1858,12 @@ That symmetry is the point — one artifact drives both the mock and the conform
 An effectively unbounded shared canvas with sticky notes, frames, connectors and live multi-user cursors. Event storming needs very little more than that: enough wall to hold a domain's worth of notes, a colour convention everyone can see being applied in real time, and an artifact that still exists after the session, which a physical wall does not give you without someone photographing it.
 
 Reach for it when the people modelling a domain are not in the same room. The costs are the ones any remote board has -- it loses the everyone-standing-at-the-wall quality co-located teams prefer, and a board becomes unreadable once the note count grows unless someone is disciplined about frames and naming.
+
+### mockall
+**Short:** Mock-object library for Rust that generates mocks of traits and structs with expectations on calls.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
 
 ### MockIntegration
 **Short:** Spring Integration test helper providing mock message channels, handlers and sources for flow assertions.
@@ -1767,6 +1983,12 @@ Oracle's official desktop client, and its distinguishing features are the modell
 
 For query work the visual explain is what you open it for: it renders the plan as a diagram with cost and row estimates per node, and a full table scan or a missing index is visible without parsing `EXPLAIN FORMAT=JSON` by eye. It is MySQL-only and can be slow on very large schemas; DBeaver or DataGrip are the multi-engine alternatives.
 
+### napi-rs
+**Short:** Framework for building Node.js native addons in Rust on Node-API, with generated TypeScript definitions.
+**Kind:** tech
+**Lang:** rust, js
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
 ### Native Build Tools
 **Short:** GraalVM's Maven and Gradle plugins binding native-image to a build profile and running tests in the native binary.
 **Kind:** tech
@@ -1848,6 +2070,12 @@ Reach for it when a monorepo's pipeline has grown to rebuilding everything on ev
 `objdump -d` disassembles the executable sections of an object file or binary, `-S` interleaves the original source when debug info is present, and `-h`, `-r` and `-t` dump section headers, relocations and symbols. It reads the file itself rather than a running process, so it shows exactly what the compiler and linker produced.
 
 That is why it settles arguments no amount of reading source can: whether a call was inlined, whether a loop was unrolled or vectorized into SIMD instructions, whether a supposedly atomic operation compiled to a locked instruction or to a library call. Reach for it after a profiler has already told you which function is hot; disassembly is a poor way to find a problem and an excellent way to explain one. Compile with `-g` so the source interleaving works.
+
+### oha
+**Short:** HTTP load generator written in Rust with a live terminal UI.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
 
 ### OkHttp MockWebServer
 **Short:** Embedded scriptable HTTP server that lets client tests assert on real wire requests and canned responses.
@@ -2015,6 +2243,18 @@ A config file names hook repositories and pinned revisions, and the framework cl
 
 Run it in CI as well as locally. A developer can bypass the hook with a no-verify flag, so the local run is a convenience and the CI run is the actual gate.
 
+### probe-rs
+**Short:** Toolkit that flashes and debugs embedded targets through debug probes, with cargo flash, cargo embed and a DAP debug server.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/version-control-and-workbench @1
+
+### proc-macro2
+**Short:** Wrapper around the compiler's proc_macro types that also works outside a macro, so syn and quote code can be unit-tested.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
 ### Profile-Guided Optimization
 **Short:** Compiling with a recorded execution profile so the compiler optimizes the branches and paths that actually run hot.
 **Kind:** concept
@@ -2024,6 +2264,12 @@ Run it in CI as well as locally. A developer can bypass the hook with a no-verif
 The build runs twice. An instrumented binary is executed against a representative workload and records which branches were taken, which calls were hot and which functions were never reached; the second compilation reads that profile and uses it to make decisions it could otherwise only guess — inline the hot callee, lay out the taken branch to fall through, group hot functions so the instruction cache and TLB behave, and leave cold paths unoptimized or out of line. Typical gains are in the single-digit to low-double-digit percent range on branch-heavy code.
 
 The cost is a two-stage pipeline and a profile that must be representative and refreshed as the code changes; a stale profile can be worse than none. Sampling-based collection from production avoids the instrumented run, and GraalVM applies the same idea to native images.
+
+### proptest
+**Short:** Property-based testing for Rust that generates inputs from strategies and shrinks a failure to a minimal case.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
 
 ### protobuf-maven-plugin
 **Short:** Maven plugin that runs protoc to generate Java message and gRPC stub classes from .proto files.
@@ -2088,6 +2334,12 @@ Enable it in the mypy config for any codebase where Pydantic models are the data
 Pylance is the Python language server Microsoft ships with the VS Code Python extension, built on the Pyright type-checking engine and adding the editor features Pyright alone does not provide: completion informed by inferred types, inlay hints, semantic highlighting, auto-import, docstring rendering and call-signature help, with bundled type stubs for popular libraries that publish none.
 
 Because it is Pyright underneath, it flags the same errors, and `python.analysis.typeCheckingMode` selects off, basic or strict. The gap to close deliberately: the editor's setting is local, so a strict Pylance and a lenient CI check disagree with each other. Run Pyright or mypy in CI with a checked-in configuration and match the editor to it. Pylance itself is proprietary and VS Code only; Pyright is the open-source part.
+
+### PyO3
+**Short:** Rust bindings for the Python interpreter, used to write native Python extension modules in Rust and to embed Python.
+**Kind:** tech
+**Lang:** rust, python
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### pyright
 **Short:** Microsoft's fast static type checker for Python; stricter than mypy on generics and narrowing.
@@ -2168,6 +2420,12 @@ The suite has to be genuinely independent for this to work, and parallelising is
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, runtime-systems/io-networking-and-syscalls @2
+
+### quote
+**Short:** Quasi-quoting macro that turns Rust syntax written inside a procedural macro into a TokenStream.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### react-diff-viewer
 **Short:** React component rendering side-by-side or inline text diffs, used to show an agent's proposed edits.
@@ -2282,6 +2540,42 @@ Reach for it to collapse a stack of lint and format tools into one configured in
 **Kind:** api
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2
+
+### rust-analyzer
+**Short:** Rust language server for editors: completion, inline type hints, go-to-definition and refactors.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/version-control-and-workbench @1, devtools/static-analysis-and-linting @2
+
+### rustc
+**Short:** The Rust compiler: type and borrow checking, monomorphization and LLVM code generation, usually invoked by Cargo.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
+### rustdoc
+**Short:** Rust's documentation generator that builds API docs from doc comments and runs their code examples as doctests.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1, devtools/testing-and-mocking @3
+
+### rustfmt
+**Short:** Rust's official code formatter, run as cargo fmt, with a style edition tied to the Rust edition.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/static-analysis-and-linting @1
+
+### rustup
+**Short:** Rust toolchain installer and version manager that installs channels, targets and components and reads rust-toolchain.toml.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1, devtools/version-control-and-workbench @2
+
+### sccache
+**Short:** Compiler cache from Mozilla that wraps rustc and C or C++ compilers and stores outputs locally or in cloud storage.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/build-and-dependency-management @1
 
 ### Scenario
 **Short:** Spring Modulith test API that publishes an event and waits for the expected downstream outcome across modules.
@@ -2564,6 +2858,12 @@ Bound to the `test` phase, Surefire scans the test classpath for classes matchin
 
 The pairing to know is Failsafe, its sibling bound to `integration-test` and `verify`: Failsafe runs `*IT` classes and, crucially, does not fail the build immediately, so `post-integration-test` can still tear down the environment. Putting slow integration tests in Surefire is the usual reason a build leaks containers.
 
+### syn
+**Short:** Parser that turns Rust source tokens into a syntax tree; the base of almost every procedural macro.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
 ### tc netem
 **Short:** Linux traffic-control queue discipline that injects latency, jitter, loss, corruption and reordering for chaos tests.
 **Kind:** api
@@ -2616,6 +2916,12 @@ Against a real broker you actually exercise consumer group rebalancing, offset c
 
 Run it in pre-commit and CI, with the relevant provider plugin enabled in `.tflint.hcl` — without a plugin you get only the generic rules. It is a linter, not a security scanner and not a policy engine: `tfsec` or Trivy covers misconfiguration, and OPA or Sentinel covers organisational policy on the plan.
 
+### tonic-prost-build
+**Short:** Build-time code generator that turns .proto files into tonic services and prost messages from build.rs.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/rpc-graphql-and-streaming @2
+
 ### tools.jackson:jackson-bom
 **Short:** Jackson's bill of materials: import it as a platform so every Jackson module resolves to one aligned version.
 **Kind:** tech
@@ -2636,6 +2942,12 @@ Tree-sitter is a GLR parser generator plus a runtime library whose defining prop
 
 That combination made it the standard for editor syntax highlighting, structural selection and code navigation, and for splitting source into semantically whole chunks — a function or class rather than a fixed token window — when indexing code for retrieval.
 
+### trunk
+**Short:** Build and dev-server tool for Rust WebAssembly web apps that bundles the Wasm, JavaScript glue and assets from an index.html.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
 ### trunk-based development
 **Short:** Branching model where everyone merges small changes to one trunk daily, keeping releases continuous and cheap.
 **Kind:** concept
@@ -2646,6 +2958,12 @@ Everyone commits to a single shared branch at least daily, and the branches that
 
 The prerequisites are what make or break it: a fast reliable test suite, small reviewable changes, and branch protection so trunk cannot go red. Without them, continuous integration into one branch just distributes the breakage. Release branches are cut from trunk for versioned products and only cherry-picked into, never developed on — that is the difference from GitFlow, whose long-lived branches this model exists to avoid.
 
+### trybuild
+**Short:** Test harness that checks a Rust snippet fails to compile with the expected error, used to test macros and API misuse.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
+
 ### Turborepo
 **Short:** JavaScript monorepo build orchestrator: task graph, content-hash remote caching and affected-target builds.
 **Kind:** tech
@@ -2655,6 +2973,12 @@ The prerequisites are what make or break it: a fast reliable test suite, small r
 Turborepo runs tasks across a JavaScript or TypeScript monorepo in dependency order. Each task's inputs — source files, dependencies' outputs, environment variables — are hashed, and if that hash already has a stored result the task is skipped and its output replayed from cache, locally or from a cache shared with CI. Combined with filtering by what changed since a git ref, a pull request rebuilds and retests only the packages it can affect.
 
 Reach for it when the full monorepo build has become the CI bottleneck and most pull requests touch one package. It orchestrates and caches; the actual compiling and bundling is still your existing toolchain, and cache correctness depends on declaring each task's inputs and outputs honestly.
+
+### turmoil
+**Short:** Deterministic simulation testing for Tokio services: hosts and network links run in one thread, so faults and partitions replay exactly.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/testing-and-mocking @1
 
 ### twine
 **Short:** CLI that uploads built Python distributions to PyPI or a private index.
@@ -2671,6 +2995,12 @@ The modern practice is not to hold a token at all: PyPI's trusted publishing let
 **Kind:** api
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @2
+
+### UniFFI
+**Short:** Mozilla's binding generator that exposes one Rust library to Kotlin, Swift and Python from proc-macro attributes or a UDL file.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### uv
 **Short:** Rust-based Python installer, resolver and project manager; 10-100x faster than pip, with locked syncs.
@@ -2749,6 +3079,30 @@ An Electron editor whose architecture is the reason for its reach: language inte
 
 It is also where much of the current agentic tooling lands first: Copilot Chat hosts coding agents in the editor, and it acts as an MCP client so an agent can reach external tools. For deep Java or Kotlin refactoring, a full IDE's resolved project model still does more than a language server can.
 
+### wasm-bindgen
+**Short:** Generates the glue between Rust WebAssembly and JavaScript, so each side can call the other with rich types.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
+### wasm-pack
+**Short:** Build tool that compiles a Rust crate to WebAssembly, runs wasm-bindgen and packages the result as an npm module.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/build-and-dependency-management @1
+
+### wasm-tools
+**Short:** Bytecode Alliance CLI and Rust libraries that validate, print, parse, compose and strip WebAssembly modules and components.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
+### web-sys
+**Short:** Raw wasm-bindgen bindings for Rust to Web APIs such as the DOM, fetch and WebSocket, each gated behind a Cargo feature.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
+
 ### WebMvcTest
 **Short:** Spring test slice booting only the MVC layer with MockMvc, leaving services and repositories to be mocked.
 **Kind:** api
@@ -2784,6 +3138,12 @@ Assertions chain from `exchange()`: `expectStatus()`, `expectHeader()`, `expectB
 WireMock starts a real HTTP server on a local port and answers requests according to stubs you define by method, URL, headers or body matchers. Because it is real HTTP, the code under test uses its real client, real serialization, real connection pool and real timeout configuration — all the machinery that is skipped when you mock the client object instead, which is where integration bugs hide.
 
 It also does the awkward cases: stateful scenarios where the second call returns something different, injected latency and dropped connections for resilience tests, request verification after the fact, and record-and-playback against a live API to seed stubs. Reach for it to test outbound HTTP clients and to develop against an API that does not exist yet.
+
+### wit-bindgen
+**Short:** Generates guest bindings from WIT interfaces for WebAssembly components, in Rust and several other languages.
+**Kind:** tech
+**Lang:** rust
+**Roles:** devtools/compiler-toolchain-and-codegen @1
 
 ### xargs
 **Short:** Shell tool building command lines from stdin, with -P to run the resulting commands in parallel.

@@ -780,3 +780,4 @@ correlated p999 spikes disappeared from the metric described above.
 - [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md)
   — the boundary: this file owns readiness-vs-completion as a model, devops owns tuning and the
   kernel-version matrix
+- [`rust/tokio_deep_dive`](../../rust/async_runtimes_and_executors/tokio_deep_dive.md): Tokio's scheduler and I/O driver

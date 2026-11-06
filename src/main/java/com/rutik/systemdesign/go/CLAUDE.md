@@ -210,7 +210,8 @@ edit**: `extract.py` walks the block and emits the gitignored `questions/paths.j
 | `observability_and_opentelemetry` | `../devops/observability_tracing_and_otel/observability_tracing_and_otel.md`, `../backend/observability_and_monitoring/observability_and_monitoring.md` |
 | `build_deployment_and_supply_chain` | `../devops/containers_and_docker/containers_and_docker.md`, `../devops/devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md` |
 | `idiomatic_api_and_package_design` | `../lld/design_principles/design_principles.md`, `../lld/solid_principles/solid_principles.md` |
-| `go_vs_java_and_python` | `../java/concurrency/concurrency.md`, `../python/the_gil_and_free_threading/the_gil_and_free_threading.md` |
+| `go_vs_java_and_python` | `../java/concurrency/concurrency.md`, `../python/the_gil_and_free_threading/the_gil_and_free_threading.md`, `../rust/rust_vs_cpp_go_java_and_python/rust_vs_cpp_go_java_and_python.md` |
+| `cgo_and_ffi` | `../rust/ffi_and_language_interop/ffi_and_language_interop.md` |
 | `case_studies/design_a_kubernetes_controller.md` | `../devops/kubernetes_operators_and_crds/kubernetes_operators_and_crds.md` |
 
 ---

@@ -136,6 +136,7 @@ and a 6-week Study Plan (prose; no path impact).
 | Vector search | `vector_databases/` | `../llm/embeddings_and_similarity_search/`, `../llm/faiss_deep_dive/` — the in-process library and the library-vs-service argument |
 | N+1 query | `sql_query_optimization/` | `../spring/spring_data_jpa/`, `../backend/query_optimization/` |
 | Schema migration | `database_migrations_zero_downtime/` | `../backend/database_migrations/` |
+| Rust data access and storage | `connection_pool_management/`, `embedded_and_edge_databases/` | `../rust/databases_sqlx_and_diesel/` (the sqlx pool), `../rust/case_studies/design_a_zero_copy_storage_engine.md` (the Rust-specific parts of a redb-shaped store). Pool theory and storage-engine theory stay here |
 
 ---
 

@@ -73,6 +73,8 @@ Apache 2.0, no relicensing event, no BSL, no open-core split. CNCF **graduated**
 
 The release cadence is unusually strict and worth internalizing for planning: a minor release **every quarter on the 15th**, an extended maintenance window of roughly **12 months** per line, and a documented deprecation policy where a field is announced deprecated in release N, runtime-guarded off in N+1, and removed in N+2. `[1.39]` is a live example: `enforce_rsa_key_usage` is deprecated and ignored, with RSA key-usage validation now mandatory.
 
+For writing Proxy-Wasm filters and dynamic modules in Rust, see [WebAssembly and WASI from Rust](../../rust/webassembly_and_wasi/webassembly_and_wasi.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

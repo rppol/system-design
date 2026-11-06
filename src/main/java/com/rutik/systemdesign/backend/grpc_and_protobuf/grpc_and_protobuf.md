@@ -6,6 +6,8 @@ gRPC is a high-performance, open-source remote procedure call (RPC) framework de
 
 Protocol Buffers serialize structured data into a compact binary format that is normally smaller and cheaper to parse than the equivalent JSON, though the actual ratio depends entirely on message shape (the widely-quoted "3–10x smaller, 20–100x faster" figure is Google's protobuf-vs-**XML** claim, not a protobuf-vs-JSON benchmark — see the field-by-field comparison in Section 5). gRPC provides four communication modes (unary, server-streaming, client-streaming, bidirectional), built-in deadline propagation, interceptors (middleware), and a health-checking protocol. It is widely used for internal service-to-service communication, including at Google and Netflix.
 
+For gRPC in Rust with tonic, see [gRPC with tonic](../../rust/grpc_with_tonic/grpc_with_tonic.md) in `rust/`.
+
 ---
 
 ## 2. Intuition

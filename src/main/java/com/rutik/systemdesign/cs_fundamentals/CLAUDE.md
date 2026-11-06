@@ -168,7 +168,8 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `cpu_scheduling_algorithms/` | `../../devops/linux_and_os_fundamentals/` — CFS in practice |
 | `memory_management_and_virtual_memory/` | `../../java/jvm_internals/` — JVM heap regions, GC; `../../python/cpython_memory_model/` — refcounting, pymalloc |
 | `deadlocks_and_synchronization/` | `../../java/concurrency/` — AQS, ReentrantLock, semaphores deep dive; `../../database/concurrency_control_and_locking/` — deadlock in DB transactions; `../../lld/concurrency_patterns/` — ReadWriteLock, ThreadPool |
-| `memory_models_and_concurrency_theory/` | `../java/java_memory_model/`, `../java/concurrency/`, `../cuda/synchronization_and_atomics/` |
+| `memory_models_and_concurrency_theory/` | `../java/java_memory_model/`, `../java/concurrency/`, `../cuda/synchronization_and_atomics/`, `../../rust/channels_atomics_and_shared_state/` (the Rust atomics API) |
+| `how_code_runs_compilers_and_interpreters/` (`wasm_and_portable_bytecode.md`, `abis_linking_and_wasm.md`) | `../../rust/webassembly_and_wasi/` (the Rust Wasm toolchain); `../../rust/ffi_and_language_interop/` (the Rust FFI API surface) |
 | `computer_architecture_and_memory_hierarchy/` | `../../java/concurrency/` — `@Contended`, false sharing, memory barriers |
 | `networking_fundamentals/` | `../../backend/osi_model_and_networking/` — OSI 7-layer deep dive; `../../backend/tcp_ip_deep_dive/` — TCP internals; `../../backend/udp_and_quic/`; `../../backend/http_protocols/` |
 | `database_and_storage_fundamentals/` | `../../database/database_fundamentals/` — ACID/BASE/MVCC deep dive; `../../database/indexing_deep_dive/`; `../../database/schema_design_and_normalization/` |

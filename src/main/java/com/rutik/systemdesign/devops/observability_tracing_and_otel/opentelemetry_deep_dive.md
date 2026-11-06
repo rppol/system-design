@@ -43,7 +43,7 @@ Checked 2026-08-05 against `opentelemetry.io/status`, `opentelemetry.io/docs/spe
 | **Baggage** | Stable | Stable | n/a — it is a propagation concern, not a signal | Stable, and a footgun (§6.16). |
 | **Profiles** | **Development** | **Development** | **Development** — path is `/v1development/profiles` | Public **alpha** since March 2026, Collector support from **v0.148.0**. Do not build a product on it. |
 
-Per-language, as of the status page: **Java** has traces, metrics and logs stable and profiles in development; **Go**, **JavaScript** and **Python** have traces and metrics stable with logs beta or in development; **C++**, **.NET** and **PHP** are stable across the three; **Ruby** and **Erlang/Elixir** have traces stable only; **Rust** is beta across all three; **Kotlin** is in development. "OpenTelemetry is stable" is true of tracing and false as a sentence about the project.
+Per-language, as of the status page: **Java** has traces, metrics and logs stable and profiles in development; **Go**, **JavaScript** and **Python** have traces and metrics stable with logs beta or in development; **C++**, **.NET** and **PHP** are stable across the three; **Ruby** and **Erlang/Elixir** have traces stable only; **Rust** has logs and metrics stable and traces beta (per the opentelemetry-rust README); **Kotlin** is in development. "OpenTelemetry is stable" is true of tracing and false as a sentence about the project.
 
 ### A short history, because it explains the shape
 
@@ -60,6 +60,8 @@ OpenTracing (2016, an API with no SDK) and OpenCensus (2017, a Google-originated
 ### Licence and governance
 
 Apache 2.0. CNCF graduated (2026-05-11). Governed by a Governance Committee and a Technical Committee, with per-language and per-domain SIGs; over 2,800 companies have contributed. The consequence that matters operationally: **no single vendor can change the wire format**, which is why every commercial backend accepts OTLP, and why the decoupling argument in §2 is real rather than aspirational.
+
+For instrumenting Rust with `tracing`, see [Observability with tracing and OpenTelemetry](../../rust/observability_tracing_and_opentelemetry/observability_tracing_and_opentelemetry.md) in `rust/`.
 
 ---
 
@@ -1681,7 +1683,7 @@ OTLP allows a server to accept a batch and reject part of it, returning HTTP 200
 **Q: Which OpenTelemetry signals are stable today, and which are not?**
 **Short:** Traces, metrics, logs and baggage are stable in spec and OTLP; profiles is in public alpha, and per-language SDK completeness varies especially for logs.
 
-Tracing is complete and under long-term support — API, SDK and protocol all stable. The metrics API and data model are stable, though SDK completeness is mixed across languages. Logs are stable at the protocol and SDK level, with the important caveat that the API is deliberately a **Bridge API** intended for appenders such as Logback, Log4j2 and Python's `logging`, not for direct application use. Baggage is stable. Profiles is the outlier: it entered public alpha in March 2026, Collector support landed in v0.148.0, its OTLP path is literally `/v1development/profiles`, and the SIG says not to use it for critical workloads. Per language, Java has all three signals stable; Go, JavaScript and Python have traces and metrics stable with logs behind; Rust is beta across the board. Saying "OpenTelemetry is stable" is true of tracing and false as a statement about the project.
+Tracing is complete and under long-term support — API, SDK and protocol all stable. The metrics API and data model are stable, though SDK completeness is mixed across languages. Logs are stable at the protocol and SDK level, with the important caveat that the API is deliberately a **Bridge API** intended for appenders such as Logback, Log4j2 and Python's `logging`, not for direct application use. Baggage is stable. Profiles is the outlier: it entered public alpha in March 2026, Collector support landed in v0.148.0, its OTLP path is literally `/v1development/profiles`, and the SIG says not to use it for critical workloads. Per language, Java has all three signals stable; Go, JavaScript and Python have traces and metrics stable with logs behind; Rust has logs and metrics stable and traces beta. Saying "OpenTelemetry is stable" is true of tracing and false as a statement about the project.
 
 **Q: What is the default `num_traces` in the tail sampling processor and why does it silently drop traces?**
 **Short:** The default is 50,000 traces in a circular buffer; once full it evicts the oldest before its decision timer fires, with no error.

@@ -31,6 +31,8 @@ bundled is invisible until deploy. This module owns that seam. What it does **no
 | LCP, INP and what bundle size costs in Web Vitals terms | [Web Performance and Core Web Vitals](../web_performance_and_core_web_vitals/web_performance_and_core_web_vitals.md) |
 | `React.lazy`, Suspense boundaries, render-time splitting | [React Performance and Profiling](../../react/react_performance_and_profiling/react_performance_and_profiling.md) |
 
+For why Rust toolchains are fast, see [Design a Fast Developer Tool in Rust](../../rust/case_studies/design_a_fast_developer_tool.md) in `rust/`.
+
 ---
 
 ## 2. Intuition
