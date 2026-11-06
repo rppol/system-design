@@ -225,7 +225,9 @@ hover-only prerequisite chords are hidden and the side gutters reclaimed.
 `prefers-reduced-motion` gates every animation (view transitions gate in JS); the beauty
 pass (reveal glow sweep, results stagger, mastery-delta shine, screen slide-fade between
 routes) is all reduced-motion-safe. A screen plays one entrance per navigation, and the next
-question swaps in instantly so a fast tap is never lost to a transition. `:focus-visible`, an aria-live region,
+question swaps in instantly so a fast tap is never lost to a transition. `prefers-reduced-transparency`
+swaps the glass for solid surfaces with no blur, and `prefers-contrast: more` strengthens borders and
+secondary text; the reader is left as it is in both. `:focus-visible`, an aria-live region,
 focus management, no emojis, tabular numerals throughout.
 
 ---

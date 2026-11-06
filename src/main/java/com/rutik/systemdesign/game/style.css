@@ -1910,7 +1910,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
    positioned under its anchor (JS-computed top/left) instead of a fixed corner. */
 .streak-pop {
   position: fixed; z-index: 60; min-width: 220px; padding: 12px 14px;
-  background: var(--glass-2);
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent);
   -webkit-backdrop-filter: blur(26px) saturate(1.6); backdrop-filter: blur(26px) saturate(1.6);
   border: 1px solid var(--glass-brd-hi); border-radius: var(--radius);
   box-shadow: var(--shadow), var(--glass-hilite);
@@ -2063,6 +2063,29 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
      declared — a bare `.mesh` here is 0-1-0 and silently loses. */
   .mesh.m1, .mesh.m2, .mesh.m3 { animation: none; }
   html { scroll-behavior: auto; }
+  /* The blanket rule zeroes durations, not delays, so a staggered `backwards` fill
+     still hid content. Scoped like the blocks below: the reader keeps its timing. */
+  body > :not(#reader, .mermaid-overlay) * { animation-delay: 0s !important; }
+}
+
+/* Token overrides sit on every top-level node except the reader (and its diagram
+   lightbox), so the reader computes the same values in every mode. */
+@media (prefers-reduced-transparency: reduce) {
+  :where(body > :not(#reader, .mermaid-overlay)) { --glass: var(--bg-2); --glass-2: var(--bg-2); --topbar-bg: var(--bg-2); }
+  body > :not(#reader, .mermaid-overlay), body > :not(#reader, .mermaid-overlay) * {
+    -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+  }
+  body > :is(.help-overlay, .pause-sheet, .moment, .palette-overlay) { background: color-mix(in srgb, var(--bg) 90%, transparent); }
+}
+@media (prefers-contrast: more) {
+  :where(body > :not(#reader, .mermaid-overlay)) {
+    --glass: var(--bg-2);
+    --glass-brd: color-mix(in srgb, var(--text) 40%, transparent);
+    --glass-brd-hi: color-mix(in srgb, var(--text) 65%, transparent);
+    --track: var(--glass-brd-hi);
+    --muted: color-mix(in srgb, var(--text) 82%, var(--bg));
+    --faint: color-mix(in srgb, var(--text) 68%, var(--bg));
+  }
 }
 
 /* [W5] perf: drop the aurora drift where it costs the most — narrow viewports
@@ -2226,7 +2249,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   animation: fade 0.18s ease; padding: 20px;
 }
 .help-card {
-  background: var(--glass-2); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
   box-shadow: var(--shadow), var(--glass-hilite); padding: 24px 26px; max-width: 560px; width: 100%;
   animation: pop-in 0.22s var(--ease-out);
 }
@@ -2434,7 +2457,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   padding: 20px;
 }
 .pause-card {
-  background: var(--glass-2); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
   box-shadow: var(--shadow), var(--glass-hilite); padding: 24px 26px; max-width: 420px; width: 100%;
   text-align: center;
 }
@@ -3048,7 +3071,7 @@ body.interview-mode #app::before {
 }
 .palette {
   width: min(560px, 100%);
-  background: var(--glass-2); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
   box-shadow: var(--shadow); overflow: hidden;
   -webkit-backdrop-filter: blur(28px) saturate(1.6); backdrop-filter: blur(28px) saturate(1.6);
 }
