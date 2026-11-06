@@ -1983,8 +1983,8 @@ function renderHome() {
   const whyChip = state.today && WHY_CHIP[state.today.why];
   const flash = deckMode() === "flash";
 
-  /* --- slot 1: exactly one primary action. Same precedence renderHome always
-     used: reboarding card > review-due > the coach's suggested section. --- */
+  /* --- slot 1: exactly one primary action. Precedence: paused blitz >
+     reboarding card > review-due > the coach's suggested section. --- */
   let primary;
   if (reboard) {
     primary = {
@@ -2019,12 +2019,20 @@ function renderHome() {
 
   /* --- slot 2 + 3: the waiting rows, ranked. Top two are shown; everything
      below folds into ONE disclosure so the count is visible without the
-     stack. Rank order is fixed: unfinished blitz > gauntlet > debrief >
-     fading > confusion > weak > rusty. --- */
+     stack. Rank order is fixed: today's pick (when a paused blitz takes the
+     primary slot) > gauntlet > debrief > fading > confusion > weak > rusty. --- */
   const rows = [];
-  if (resume) rows.push({ id: "resume", mark: "&#9654;", short: "unfinished blitz",
-    title: "Resume your blitz", sub: `${resume.done}/${resume.total} done${resume.combo >= 2 ? ` &middot; ${resume.combo}x combo alive` : ""}. Pick up where you left off.`,
-    run: resumeDeck });
+  if (resume) {
+    rows.push({ id: "pick", mark: "&#9733;", short: "today's pick",
+      title: `${primary.eyebrow}: ${primary.title}`, sub: primary.ctaSub, run: primary.run });
+    primary = {
+      eyebrow: "Paused", cls: "good",
+      title: `Resume your blitz &middot; ${resume.done}/${resume.total}`,
+      body: `${resume.combo >= 2 ? `${resume.combo}x combo alive. ` : ""}Pick up where you left off.`,
+      cta: "Resume", ctaSub: `${resume.total - resume.done} left`,
+      run: resumeDeck,
+    };
+  }
   const g = loadGauntlet();
   rows.push(g && g.sealed
     ? { id: "gauntlet", mark: "&#9670;", short: "gauntlet practice",
@@ -2103,10 +2111,10 @@ function renderHome() {
         <div class="topic-card primary-card">
           <div class="pc-head">
             <div class="eyebrow ${primary.cls}">${primary.eyebrow}</div>
-            <div class="deckseg" role="radiogroup" aria-label="Deck mode">
+            ${resume ? "" : `<div class="deckseg" role="radiogroup" aria-label="Deck mode">
               <button role="radio" data-deck="quiz" aria-checked="${!flash}">Quiz</button>
               <button role="radio" data-deck="flash" aria-checked="${flash}">Cards</button>
-            </div>
+            </div>`}
           </div>
           <h1 class="pc-title">${primary.title}</h1>
           <p class="msg">${primary.body}</p>
@@ -2516,6 +2524,32 @@ function resetPhaseBState() {
 }
 
 function startDeck(questions, replayFn, opts = {}) {
+  const paused = !opts.prime && state.section !== "interview" && resumeSummary();
+  if (paused) showResumeSheet(paused, () => dealDeck(questions, replayFn, opts));
+  else dealDeck(questions, replayFn, opts);
+}
+
+function showResumeSheet(r, startNew) {
+  if (el("#resumeSheet")) return;
+  const o = document.createElement("div");
+  o.className = "pause-sheet"; o.id = "resumeSheet";
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Unfinished blitz");
+  o.innerHTML = `<div class="pause-card">
+      <h2>You have an unfinished blitz (${r.done}/${r.total})</h2>
+      <p>A new one replaces it as soon as you answer or skip.</p>
+      <div class="pause-btns">
+        <button class="primary" id="resumeOld">Resume it</button>
+        <button class="ghost" id="resumeNew">Start new</button>
+      </div>
+    </div>`;
+  document.body.appendChild(o);
+  const release = trapFocus(o, { initial: "#resumeOld" });
+  const close = () => { release(false); o.remove(); };
+  el("#resumeOld").addEventListener("click", () => { close(); resumeDeck(); });
+  el("#resumeNew").addEventListener("click", () => { close(); startNew(); });
+}
+
+function dealDeck(questions, replayFn, opts) {
   state.prime = !!opts.prime;                    // [A2] pretest deck: no XP/combo/snapshot/confidence
   state.mode = opts.prime ? "quiz" : deckMode(); // [A2] prime always uses the MCQ path
   if (opts.keepOrder) state.mode = "quiz";       // [C] gauntlet/interview always run the MCQ engine
@@ -2653,7 +2687,7 @@ async function startReview() {
   }
   if (!items.length) {
     showToast(loadFailed ? "Couldn't load questions — check your connection." : "Nothing due right now.");
-    renderHome(); return;
+    redispatch(); return;
   }
   state.section = "review"; state.modules = null;
   const deck = items.slice(0, deckLen());
@@ -2686,7 +2720,7 @@ async function startWeakSpots() {
   const pool = (weak.length ? weak : weakSections().slice(0, 3));
   if (!pool.length) {
     showToast("Not enough data for weak spots yet — play a few rounds first.");
-    renderHome(); return;
+    redispatch(); return;
   }
   const reviews = state.progress.reviews || {};
   const banks = {}, byId = {};
@@ -2709,7 +2743,7 @@ async function startWeakSpots() {
   shuffle(filler).forEach((q) => { if (items.length < deckLen()) add(q); });
   if (!items.length) {
     showToast(loadFailed ? "Couldn't load questions — check your connection." : "Not enough data for weak spots yet — play a few rounds first.");
-    renderHome(); return;
+    redispatch(); return;
   }
   state.section = "weakspots"; state.modules = null;
   startDeck(items.slice(0, deckLen()), startWeakSpots, { hard: true });
@@ -2730,7 +2764,7 @@ async function startConfusionDrill(key) {
   }
   if (!items.length) {
     showToast(loadFailed ? "Couldn't load questions — check your connection." : "No confusion pairs tracked yet.");
-    renderHome(); return;
+    redispatch(); return;
   }
   const picked = shuffle(items).slice(0, deckLen());
   state.section = "drill"; state.modules = null;
@@ -2759,7 +2793,7 @@ async function startRefresh(ids) {
   }
   if (!items.length) {
     showToast(loadFailed ? "Couldn't load questions — check your connection." : "Nothing is fading right now.");
-    renderHome(); return;
+    redispatch(); return;
   }
   state.section = "refresh"; state.modules = null;
   startDeck(items.slice(0, deckLen()), () => startRefresh(ids), { interleave: [] });
@@ -2949,6 +2983,8 @@ function readDeckSnapshot() {
 }
 
 function clearDeckSnapshot() { localStorage.removeItem("sd_active_deck"); }
+// Only the live deck's own snapshot: a paused blitz must survive a newer deck that never saved.
+function clearOwnSnapshot() { if (readDeckSnapshot()?.startedAt === state.startedAt) clearDeckSnapshot(); }
 
 // Previous-day snapshots are discarded silently on boot — a resume must be same-day.
 function discardStaleDeck() {
@@ -2968,7 +3004,7 @@ function resumeSummary() {
 // restore the option order and per-item status, then render the current card.
 async function resumeDeck() {
   const snap = readDeckSnapshot();
-  if (!snap) { renderHome(); return; }
+  if (!snap) { redispatch(); return; }
   app.innerHTML = skeletonHTML("quiz");
   // Gather every bank the snapshot's questions live in (a review deck spans sections).
   const sections = new Set();
@@ -2993,9 +3029,9 @@ async function resumeDeck() {
     idxMap.set(oldIdx, deck.length);
     deck.push(item);
   });
-  if (!deck.length) { clearDeckSnapshot(); renderHome(); return; }
+  if (!deck.length) { clearDeckSnapshot(); redispatch(); return; }
   const queue = (snap.queue || []).map((i) => idxMap.get(i)).filter((i) => i !== undefined);
-  if (!queue.length) { clearDeckSnapshot(); renderHome(); return; }
+  if (!queue.length) { clearDeckSnapshot(); redispatch(); return; }
   let cursor = 0;                                  // count surviving pre-cursor queue slots
   for (let k = 0; k < (snap.cursor || 0) && k < (snap.queue || []).length; k++)
     if (idxMap.has(snap.queue[k])) cursor++;
@@ -3641,7 +3677,7 @@ async function finish(opts = {}) {
   const { xp, freezeUsed, saved } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
   // Only drop the resume snapshot once the save is confirmed — a quota failure
   // keeps the run resumable instead of losing it silently.
-  if (saved !== false) clearDeckSnapshot();
+  if (saved !== false) clearOwnSnapshot();
   else showToast("Couldn't save this session — storage is full. Your run is kept for resume; export a backup.", 8000);
   const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
   const post = progressSnapshot();                 // (after the save)
@@ -3975,7 +4011,7 @@ function importProgress(file) {
 
 /* ---------- session guard: pause sheet + guarded navigation ---------- */
 // Any attempt to leave a live blitz with at least one answered card raises this
-// glass confirm sheet. Zero answered -> leave silently, discard the snapshot.
+// glass confirm sheet. Zero answered -> leave silently, drop the deck's own snapshot.
 function answeredCount() {
   const DONE = ["correct", "wrong", "learned"];
   return state.deck.filter((d) => DONE.includes(d.status)).length;
@@ -3986,7 +4022,7 @@ function answeredCount() {
 function guardedNav(fn) {
   if (!state.inQuiz) { fn(); return; }
   if (state.prime) { state.inQuiz = false; state.prime = false; fn(); return; }   // [A2] prime never blocks
-  if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; fn(); return; }
+  if (answeredCount() === 0) { clearOwnSnapshot(); state.inQuiz = false; fn(); return; }
   openPauseSheet(fn);
 }
 
@@ -3995,16 +4031,25 @@ function openPauseSheet(pending) {
   if (el("#pauseSheet")) return;
   const leave = pending || (() => go("#/home"));
   const done = answeredCount(), total = state.deck.length;
+  const correct = state.deck.filter((d) => d.status === "correct").length;
+  const iv = state.section === "interview", sealing = state.section === "gauntlet";
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "pauseSheet";
-  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Pause this blitz");
-  o.innerHTML = `<div class="pause-card">
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", iv ? "Leave the interview" : "Pause this blitz");
+  o.innerHTML = iv ? `<div class="pause-card">
+      <h2>Leave the interview?</h2>
+      <p>Interviews can't be paused. ${done}/${total} answered.</p>
+      <div class="pause-btns">
+        <button class="primary" id="pauseKeep">Keep going</button>
+        <button class="ghost" id="pauseFinish">End and score</button>
+      </div>
+    </div>` : `<div class="pause-card">
       <h2>Pause this blitz?</h2>
-      <p>Your progress is saved &mdash; resume from Home. ${done}/${total} answered.</p>
+      <p>Your progress is saved. Resume it from Today. ${done}/${total} answered.${sealing ? " This is today's only scored attempt." : ""}</p>
       <div class="pause-btns">
         <button class="primary" id="pauseKeep">Keep playing</button>
         <button class="ghost" id="pauseLeave">Pause &amp; leave</button>
-        <button class="ghost" id="pauseFinish">Finish now</button>
+        <button class="ghost" id="pauseFinish">${sealing ? `Seal now at ${correct}/${total}` : "Finish now"}</button>
       </div>
     </div>`;
   document.body.appendChild(o);
@@ -4012,7 +4057,7 @@ function openPauseSheet(pending) {
   const closeSheet = (restore = true) => { release(restore); o.remove(); };
   o._close = closeSheet;
   el("#pauseKeep").addEventListener("click", () => closeSheet());
-  el("#pauseLeave").addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(false); leave(); });
+  el("#pauseLeave")?.addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(false); leave(); });
   el("#pauseFinish").addEventListener("click", () => { closeSheet(false); finish({ early: true }); });
   o.addEventListener("click", (e) => { if (e.target === o) closeSheet(); });
 }
@@ -9304,6 +9349,11 @@ function go(route) {
   if (location.hash === r) { onHashChange(); return; }   // same hash fires no event -> dispatch by hand
   location.hash = r;
 }
+// Under the reader, repaint the screen beneath it: dispatch() ignores the open reader's own route.
+function redispatch() {
+  const h = location.hash || "#/home";
+  dispatch(h.startsWith("#/reader/") ? state.underHash || "#/home" : h);
+}
 // Redirect without adding a history entry (fallbacks), then dispatch.
 function redirect(route) {
   const r = route.startsWith("#") ? route : "#" + route;
@@ -9430,7 +9480,7 @@ function onHashChange() {
   // Leaving a live blitz: 0 answered -> leave silently; else restore the quiz
   // hash and raise the pause sheet with this route as the pending destination.
   if (state.inQuiz && !route.startsWith("#/quiz") && !isReaderRoute) {
-    if (state.prime || answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; state.prime = false; }   // [A2] prime never blocks
+    if (state.prime || answeredCount() === 0) { clearOwnSnapshot(); state.inQuiz = false; state.prime = false; }   // [A2] prime never blocks
     else {
       _navLock = true;
       location.hash = state.quizHash || quizRoute(state.section);
@@ -9500,7 +9550,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet")._close(); return; }
   // Any other key while a modal sheet is up must not fall through to the quiz
   // handler below — it would lock/grade the question hidden behind the overlay.
-  if (el("#helpOverlay") || el("#pauseSheet") || el("#moreSheet") || el("#primeSheet")) return;
+  if (el("#helpOverlay") || el("#pauseSheet") || el("#moreSheet") || el("#primeSheet") || el("#resumeSheet")) return;
   // [E2] command palette: Cmd/Ctrl+K toggles anywhere; "/" opens when not typing.
   if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
@@ -10076,7 +10126,10 @@ async function startInterview(section, panel) {
     for (const q of seededShuffle(bank, seed + "fill")) { if (deckQ.length >= 12) break; if (!seen.has(q.id)) { seen.add(q.id); deckQ.push(q); } }
   }
   deckQ = deckQ.slice(0, 12);
-  if (deckQ.length < 3) { redirect("#/home"); return; }
+  if (deckQ.length < 3) {
+    showToast(`Not enough questions in ${label(section)} for an interview yet.`);
+    redirect("#/practice/interview"); return;
+  }
   const usedIds = new Set(deckQ.map((q) => q.id)), pool = new Map();
   for (const q of seededShuffle(bank, seed + "pool")) {   // per-module follow-up pools
     if (usedIds.has(q.id)) continue;

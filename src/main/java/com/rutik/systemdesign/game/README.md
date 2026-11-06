@@ -74,7 +74,8 @@ and `scripts/prerender_diagrams.sh`, then publishes the whole repo root to Pages
 
 ### The daily loop
 
-- **Blitz** — one big button starts the coach's pick for today; or pick a section, then
+- **Blitz** — one big button starts the coach's pick for today, or resumes a paused blitz
+  (starting any other deck while one is paused asks first); or pick a section, then
   multi-select exactly which sub-topics to drill (select-all/clear, live count, a
   5/10/20 session-length control). Questions interleave so no two consecutive share a
   module; a graph decides which topics sit adjacent for contrast.
