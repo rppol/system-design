@@ -5754,8 +5754,7 @@ async function openStudySection(sectionPath) {
     for (let r = 1; r < rows; r++) rowTop[r] = rowTop[r - 1] + rowH[r - 1] + rowGap;
     meta.forEach((m) => {
       const left = sideM + m.c * (colW + colGap);
-      m.s.style.left = left + "px";
-      m.s.style.top = rowTop[m.r] + "px";
+      m.s.style.translate = `${left}px ${rowTop[m.r]}px`;
       pts[m.gi] = { left, top: rowTop[m.r], w: colW, h: m.h, chipH: m.chipH, r: m.r, s: m.s };
     });
     const H = rows ? rowTop[rows - 1] + rowH[rows - 1] + (hasEdges ? rowGap : 12) : 24;
@@ -5917,7 +5916,7 @@ async function openStudySection(sectionPath) {
     fan.hidden = !willOpen;                        // display toggle restarts the leaf-in animation
     step.classList.toggle("open", willOpen);
     b.setAttribute("aria-expanded", willOpen ? "true" : "false");
-    layoutPath();                                  // steps below shift smoothly (top transition)
+    layoutPath();                                  // steps below shift smoothly (translate transition)
   }));
   // Hover / keyboard focus on a chip spotlights its prerequisite edges: its
   // chords go full opacity (lexical-only ones appear faint dashed on demand),
@@ -6016,7 +6015,7 @@ async function openStudySection(sectionPath) {
 
   layoutPath();
   stepEls.forEach((s, i) => s.style.setProperty("--d", Math.min(i, 12) * 40 + "ms"));
-  wrap.classList.add("pathlaid");                  // arms the entrance stagger + top transitions
+  wrap.classList.add("pathlaid");                  // arms the entrance stagger + translate transitions
 }
 
 /* ---------- code syntax highlighting (hand-rolled, One Dark) ---------- */
@@ -10084,7 +10083,7 @@ function interviewAfterAnswer(item, right) {
 }
 function updateInterviewHP(crit) {
   const iv = state.interview, f = el("#ivHpFill"); if (!iv || !f) return;
-  f.style.width = (100 * iv.hp / iv.maxHp).toFixed(1) + "%";
+  f.style.transform = `scaleX(${(iv.hp / iv.maxHp).toFixed(3)})`;
   if (crit && !REDUCED()) { const s = el("#ivStage"); if (s) { s.classList.remove("hit"); void s.offsetWidth; s.classList.add("hit"); } }
 }
 function renderInterviewStage() {

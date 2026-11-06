@@ -28,7 +28,7 @@ Source of truth: `game/style.css` (approx. lines 15-250). The families:
 | Family | Tokens |
 |--------|--------|
 | Surfaces | `--floor`, `--bg`, `--bg-2`, `--track` |
-| Text ladder | `--text`, `--muted`, `--faint` |
+| Text ladder | `--text`, `--muted`, `--faint`; outside the reader `--muted` and `--faint` take `--ui-muted` and `--ui-faint`, which clear 4.5:1 on glass |
 | Accent | accent pair + `--accent-text` + `--accent-ink` |
 | Semantics | `--good`, `--bad`, `--warn` |
 | Mesh | `--mesh-1`, `--mesh-2`, `--mesh-3`, `--mesh-o` (opacity) |
@@ -43,7 +43,7 @@ Source of truth: `game/style.css` (approx. lines 15-250). The families:
 
 ## Themes
 
-Two independent attributes on `<html>`: `data-theme` (colour) and `data-mode` (`dark` | `light`). `?theme=` previews a colour without persisting. Grounds are derived from the theme: `--bg: color-mix(in srgb, var(--mesh-1) 17%, var(--floor))` with `--floor: #0a0c12`; light mode uses `color-mix(in srgb, var(--mesh-1) 15%, #eceef4)` and `--mesh-o: 0.42`.
+Two independent attributes on `<html>`: `data-theme` (colour) and `data-mode` (`dark` | `light`). `?theme=` previews a colour without persisting. Grounds are derived from the theme: `--bg: color-mix(in srgb, var(--mesh-1) 17%, var(--floor))` with `--floor: #0a0c12`; light mode uses `color-mix(in srgb, var(--mesh-1) 15%, #eceef4)` and `--mesh-o: 0.2`.
 
 | Theme | Accent pair |
 |-------|-------------|
