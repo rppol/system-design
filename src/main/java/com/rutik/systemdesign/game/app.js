@@ -915,12 +915,13 @@ function fadeOut(node) {
 }
 
 // Cross-fade between screens via the View Transitions API where available.
+let vtDone = Promise.resolve();
 function vt(fn) {
   if (document.startViewTransition && !REDUCED()) {
     const t = document.startViewTransition(fn);
     /* [C] rapid successive navigations skip a transition; the ready/finished
        promises then reject with a benign AbortError — swallow it. */
-    t.ready?.catch(() => {}); t.finished?.catch(() => {});
+    t.ready?.catch(() => {}); vtDone = t.finished.catch(() => {});
   } else fn();
 }
 
@@ -2524,13 +2525,23 @@ function resetPhaseBState() {
   state._capsuleReturns = [];
 }
 
+function dropStaleDeckState() {
+  if (state.section !== "interview") {
+    state.interview = null;
+    document.body.classList.remove("interview-mode");
+    el("#ivStage")?.remove();
+  }
+  if (state.section !== "gauntlet" && state.section !== "gauntlet-practice") state.gauntlet = null;
+}
+
 function startDeck(questions, replayFn, opts = {}) {
   const paused = !opts.prime && state.section !== "interview" && resumeSummary();
   if (paused) showResumeSheet(paused, () => dealDeck(questions, replayFn, opts));
   else dealDeck(questions, replayFn, opts);
 }
 
-function showResumeSheet(r, startNew) {
+async function showResumeSheet(r, startNew) {
+  await vtDone;                                    // taps during the route cross-fade hit the transition, not the sheet
   el("#resumeSheet.closing")?.remove();
   if (el("#resumeSheet")) return;
   const o = document.createElement("div");
@@ -2559,6 +2570,7 @@ function dealDeck(questions, replayFn, opts) {
   state.awaitingConf = false;
   state._medMs = medianReviewMs();
   resetPhaseBState();
+  dropStaleDeckState();
   const flipSet = state.mode === "flash" ? null : opts.flip;   // [A2] Set of qids to flip
   const ilv = opts.keepOrder ? null : opts.interleave;         // [A2] graph pairs — [C] never reorder a gauntlet/interview recipe
   const items = questions.map((q) => makeItem(q, null, flipSet && flipSet.has(q.id)));
@@ -3051,6 +3063,7 @@ async function resumeDeck() {
   state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
   state.sessionXp = snap.sessionXp || 0;
   state.section = snap.section; state.modules = snap.modules || null;
+  dropStaleDeckState();
   state.sourceFiles = snap.sourceFiles || null;      // [SF] additive: old snapshots read undefined -> null -> whole-module
   state.limit = snap.limit || null;                  // [SF] additive: old snapshots -> null -> deckLen()
   state.startedAt = snap.startedAt || Date.now();
@@ -3984,16 +3997,22 @@ function exportProgress() {
   for (const k of BACKUP_KEYS) { const v = localStorage.getItem(k); if (v != null) blob.data[k] = v; }
   const filename = `sysdesign-daily-backup-${todayISO()}.json`;
   const json = JSON.stringify(blob, null, 2);
+  const done = () => {
+    safeSet("sd_last_export", todayISO());
+    if (el("#exportBtn")) {
+      const refocus = document.activeElement?.id === "exportBtn";
+      renderProgress("overview");
+      if (refocus) el("#exportBtn").focus({ preventScroll: true });
+    }
+    announce("Backup exported.");
+  };
   // APK: no browser download chrome — hand the same filename + pretty JSON to the
   // native bridge, which writes it to shared storage, then run the shared tail.
   if (window.SDAndroid && typeof window.SDAndroid.saveBackup === "function") {
     // The bridge returns success synchronously; only record/announce a real
     // export — a failed write must not suppress the 30-day backup nudge (the
     // native side already toasts the failure reason).
-    if (window.SDAndroid.saveBackup(filename, json)) {
-      safeSet("sd_last_export", todayISO());
-      announce("Backup exported.");
-    }
+    if (window.SDAndroid.saveBackup(filename, json)) done();
     return;
   }
   const a = document.createElement("a");
@@ -4001,8 +4020,7 @@ function exportProgress() {
   a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  safeSet("sd_last_export", todayISO());
-  announce("Backup exported.");
+  done();
 }
 
 function importProgress(file) {
@@ -4414,7 +4432,7 @@ function palVerbs() {
   out.push({ label: "Weak spots", hint: "Action", run: () => startWeakSpots() });
   const flash = deckMode() === "flash";
   out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "Action",
-    run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (el(".deckseg")) renderHome(); } });
+    run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (el(".today-grid")) renderHome(); } });
   out.push({ label: "Export progress", hint: "Action", run: () => exportProgress() });
   for (const t of ["midnight", "ocean", "forest", "ember", "fire", "rose", "orchid", "obsidian"]) out.push({ label: `Theme: ${t}`, hint: "Appearance", typed: true, run: () => applyTheme(t) });
   for (const m of ["dark", "light"]) out.push({ label: `Mode: ${m}`, hint: "Appearance", typed: true, run: () => applyMode(m) });
@@ -9340,8 +9358,7 @@ function maybeShowNudge() {
   el("#nudgeDismiss").addEventListener("click", dismiss);
   el("#nudgeStart").addEventListener("click", () => {
     dismiss();
-    if (dueReviews().length) startReview();
-    else startBlitz(pickSection());
+    guardedNav(() => (dueReviews().length ? startReview() : startBlitz(pickSection())));
   });
 }
 /* ---------- end [D] Coach ---------- */
@@ -9361,6 +9378,7 @@ const quizRoute = (section) =>
 function setQuizHash(section) {
   if (!location.hash.startsWith("#/quiz")) state.originHash = quizOrigin(location.hash);
   state.quizHash = quizRoute(section);
+  el("#nudgeToast")?.remove();
   history.replaceState(null, "", state.quizHash);   // silent: no dispatch during play
   updateNav();                                     // [NAV] but the chrome must still know we are in a mode
 }
