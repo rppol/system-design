@@ -541,7 +541,7 @@ will say so:
 Where an instant rail is available, the top-up flow in §4.4 collapses: settlement is final in
 seconds, so the optimistic credit and its multi-day reversal window disappear, and with them
 a whole class of clawback fraud. What replaces that risk is a harder one — **irrevocability**.
-An instant push payment cannot be recalled, so authorised-push-payment (APP) scam losses land
+An instant push payment is final for the sender: the sending bank can only request a return, which the receiver need not honor, so authorised-push-payment (APP) scam losses land
 on the wallet's fraud controls rather than on a chargeback process, which is exactly why the
 SCA and risk-scoring work above moves from a compliance cost to the primary loss control.
 
@@ -931,3 +931,7 @@ A: Each currency is a **separate `wallets` row** for the same `user_id` (enforce
 - **KYC, encryption at rest for PII (SSN, bank account numbers), and secrets management (§4.7, §7)** -> [`../security_and_auth/security_and_auth.md`](../security_and_auth/security_and_auth.md)
 - **Reconciliation, drift alerting, and SLI/SLO framing for the operational playbook (§8)** -> [`../observability/observability.md`](../observability/observability.md)
 - **Event-driven propagation of wallet-credited/debited events via outbox/Kafka (§3, §4.4)** -> [`../event_sourcing_cqrs/event_sourcing_cqrs.md`](../event_sourcing_cqrs/event_sourcing_cqrs.md)
+- **Stored value, e-money safeguarding, FBO accounts and payouts (fintech/)** -> [`../../fintech/wallets_stored_value_and_payouts/wallets_stored_value_and_payouts.md`](../../fintech/wallets_stored_value_and_payouts/wallets_stored_value_and_payouts.md)
+- **Instant rails, sender finality and return requests (fintech/)** -> [`../../fintech/real_time_payments_and_open_banking/real_time_payments_and_open_banking.md`](../../fintech/real_time_payments_and_open_banking/real_time_payments_and_open_banking.md)
+- **SCA exemptions, who may apply them, and the dated rule facts (fintech/)** -> [`../../fintech/strong_customer_authentication_and_3ds/strong_customer_authentication_and_3ds.md`](../../fintech/strong_customer_authentication_and_3ds/strong_customer_authentication_and_3ds.md)
+- **KYC, sanctions screening and SAR filing (fintech/)** -> [`../../fintech/kyc_aml_and_sanctions_screening/kyc_aml_and_sanctions_screening.md`](../../fintech/kyc_aml_and_sanctions_screening/kyc_aml_and_sanctions_screening.md)

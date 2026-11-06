@@ -158,6 +158,7 @@ on explicit request (each needs the full "Adding a New ML Module" procedure + ST
 | `active_learning_and_weak_supervision/` | `../../llm/data_flywheels_and_continuous_learning/`; `../../llm/synthetic_data_generation/` |
 | `interpretability_and_explainability/` | `case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md`; `../../llm/mechanistic_interpretability/` — attention/circuit interpretability for LLMs |
 | `privacy_preserving_ml/` | `../../llm/llm_security/` — DP-SGD at LLM scale, PII/data governance; `adversarial_ml_and_robustness/` — membership inference as an attack |
+| `case_studies/design_fraud_detection.md` | `../fintech/fraud_and_risk_scoring/`: the payment risk decision system (rules, thresholds, the authorization latency budget). The model stays here |
 
 ---
 

@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 159 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 162 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -18,6 +18,18 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 Artemis is the successor codebase to ActiveMQ Classic, built on a non-blocking append-only journal and an address model rather than a queue model: producers send to an address, which routes to anycast queues for point-to-point delivery or multicast queues for publish-subscribe. Protocol heads for AMQP 1.0, MQTT, STOMP, OpenWire and its own core protocol all map onto that same addressing, so a message published over one protocol can be consumed over another. High availability is either shared-store or replication between a live and a backup broker.
 
 Reach for it when you need real JMS semantics -- transactions, message selectors, durable subscriptions, scheduled delivery -- or when several protocol families must meet on one broker, which is why it also serves as an external STOMP relay behind WebSocket messaging. The operational work is journal tuning and a paging strategy for when a consumer falls behind. For a replayable log read by many independent consumer groups, Kafka is the different shape you actually want.
+
+### Aeron
+**Short:** Real Logic's open-source messaging library for reliable, low-latency UDP unicast, UDP multicast and shared-memory IPC.
+**Kind:** tech
+**Lang:** java, cpp
+**Roles:** data-movement/message-broker @1, finance/trading-and-market-data @2
+
+### Aeron Archive
+**Short:** Aeron module that records message streams to storage and replays them from any recorded position.
+**Kind:** tech
+**Lang:** java, cpp
+**Roles:** data-movement/message-broker @1, finance/trading-and-market-data @2
 
 ### aio-pika
 **Short:** Asyncio AMQP client for RabbitMQ with connection/channel pooling and per-message consumer tasks.
@@ -352,6 +364,12 @@ Delivery is at-least-once, and with `acks_late` a worker crash re-runs the task,
 **Kind:** api
 **Lang:** python
 **Roles:** data-movement/workflow-and-durable-execution @1, llm-apps/agent-framework @2, llm-apps/prompting-context-and-structured-output @3
+
+### Chronicle Queue
+**Short:** Java persisted message queue on memory-mapped files, used as a low-latency journal that consumers can replay.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/message-broker @1, finance/trading-and-market-data @2
 
 ### ClickHouse Sink
 **Short:** Kafka Connect sink connector that streams topic records into ClickHouse tables for real-time analytics.

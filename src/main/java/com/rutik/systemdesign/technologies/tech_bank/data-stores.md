@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-stores -->
 
-The 131 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 135 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Databases** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -76,6 +76,12 @@ Reach for it when the questions are about relationships several hops deep — fr
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/cloud-platform-and-cost @3
+
+### Amazon S3 Object Lock
+**Short:** S3 feature that stores objects write-once-read-many, with retention periods and legal holds in governance or compliance mode.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1, security/privacy-and-compliance @2
 
 ### Apache AGE
 **Short:** PostgreSQL extension adding property-graph storage and openCypher queries alongside normal relational tables.
@@ -158,6 +164,12 @@ Reach for it when the workload genuinely mixes both shapes — entity records pl
 Aurora keeps the MySQL or PostgreSQL query engine and replaces everything below it. The engine writes only redo log records, which go to a storage fleet spread over six replicas in three availability zones; storage applies them to build pages, and a write is durable once a quorum acknowledges. There are no full-page writes, no replica separately replaying a log, and no checkpoint stalls, which is where the throughput advantage over the stock engines comes from.
 
 Because every instance reads the same storage, replicas lag by tens of milliseconds and failover is a promotion rather than a rebuild. Reach for it when you want a familiar SQL dialect with durability and failover handled. The costs are I/O-based billing that surprises write-heavy workloads, engine versions that trail upstream, and total dependence on a storage layer you no longer control.
+
+### Azure Blob immutable storage
+**Short:** Azure Blob Storage policies that keep data write-once-read-many through time-based retention and legal holds.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1, security/privacy-and-compliance @2
 
 ### Azure Cognitive Search
 **Short:** Azure managed search service combining keyword, semantic and vector indexes; common RAG/memory backend.
@@ -335,6 +347,12 @@ It transforms inside the warehouse and does nothing else: extraction and loading
 
 A table is Parquet files plus a `_delta_log` of ordered commits; a reader replays the log to get a consistent snapshot and a writer commits atomically by appending a new log entry, which is how you get ACID semantics on object storage that offers no multi-file atomicity of its own. That same log is what enables time travel to an earlier version, `MERGE` upserts, schema enforcement and evolution, and the targeted deletes compliance work needs, none of which a bare directory of Parquet can do. Reach for it when concurrent writers, late-arriving corrections or reproducible training snapshots matter. Iceberg and Hudi solve the same problem, so the decision is usually which format your query engines and catalog support best.
 
+### Docstore
+**Short:** Uber's in-house distributed database built on MySQL, the store that LedgerStore's ledger indexes moved to from DynamoDB.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/document @1
+
 ### Dragonfly
 **Short:** Redis-compatible multi-threaded in-memory data store with higher throughput and better memory efficiency per node.
 **Kind:** tech
@@ -442,6 +460,12 @@ Reach for it as the Google Cloud landing zone for data lakes, backups, model art
 It is a desktop workbench rather than a database: you import an edge list, GraphML or a database extract, run a force-directed layout such as ForceAtlas2 to make the structure visible, compute metrics like degree, betweenness and modularity-based communities, and map those metrics onto node size and colour. Filters hide parts of the graph interactively, so you can isolate a subgraph without recomputing anything.
 
 Reach for it when a human needs to understand a graph — checking whether a knowledge graph built from documents really has the communities you assumed, spotting a hairball caused by one hub node, or producing a figure. It is memory-bound and single-machine, so hundreds of thousands of nodes is a realistic ceiling; beyond that, compute the metrics in the database or a graph library and visualise a sample.
+
+### Google Cloud Storage Bucket Lock
+**Short:** Cloud Storage feature that locks a bucket's retention policy, so no object can be deleted or replaced before its retention ends.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1, security/privacy-and-compliance @2
 
 ### Google Spanner
 **Short:** Google's globally distributed SQL database giving external consistency via TrueTime and 2PC over Paxos.

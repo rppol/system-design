@@ -11,6 +11,8 @@ These are handled by different components, at different points in the request pa
 
 This module is the architectural decision layer: how to choose between session-based and token-based auth, how OAuth2/OIDC fit into a system's identity architecture, how tokens propagate through a microservices call chain, and where encryption boundaries belong. The cryptographic internals (TLS handshake details, JWT signature algorithms, bcrypt internals) and framework-specific implementations (Spring Security filter chains) are covered in the deep-dive companions in §13 — this module focuses on *which mechanism to choose, and why, when designing a system from scratch*.
 
+For strong customer authentication, 3-D Secure and PCI DSS scope in payments, see [Strong Customer Authentication and 3DS](../../fintech/strong_customer_authentication_and_3ds/strong_customer_authentication_and_3ds.md) and [PCI DSS Scope and Tokenization](../../fintech/pci_dss_scope_and_tokenization/pci_dss_scope_and_tokenization.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

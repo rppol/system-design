@@ -6,6 +6,8 @@ Java's core language is built on **object-oriented programming** with a statical
 
 This module covers the foundational contracts that underpin all Java programs: the object hierarchy, equality semantics, polymorphism dispatch, inner class memory implications, and the full set of `Object` methods. Getting any of these wrong in production code causes subtle, hard-to-debug failures — a broken `equals()` implementation that silently loses data in a `HashSet`, or an anonymous inner class that prevents garbage collection by holding an unexpected outer reference.
 
+For `BigDecimal` scale, `RoundingMode` and minor units applied to money, see [Money Representation and Currency](../../fintech/money_representation_and_currency/money_representation_and_currency.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

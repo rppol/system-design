@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: observability -->
 
-The 317 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 318 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Observability** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -702,6 +702,12 @@ The intended workflow is not to browse traces at all, but to arrive with an ID a
 It is the maintained Python 3 port of the Guppy toolkit, and in practice you use one entry point: a heap facade whose census walks every object the garbage collector knows about and returns a set partitioned by type, showing count, total size and each class's share of the heap. Sets support subtraction, so two snapshots taken around an operation give exactly what that operation retained.
 
 Reach for it when a long-running process grows and you need to know what is accumulating rather than where it was allocated. The walk is a stop-the-world census costing seconds and memory of its own, and it sees only Python objects, so a leak inside a C extension stays invisible. `tracemalloc` attributes growth to allocation sites instead, and memray covers native allocations that neither of them can see.
+
+### HdrHistogram
+**Short:** High dynamic range histogram that records latency values in fixed memory with bounded relative error, for accurate percentiles.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/profiling-and-performance @1, finance/trading-and-market-data @3
 
 ### health_check
 **Short:** OpenTelemetry Collector extension exposing an HTTP endpoint that reports whether the Collector is up, for Kubernetes probes.

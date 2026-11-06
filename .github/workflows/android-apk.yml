@@ -152,8 +152,10 @@ jobs:
           # exploded", so it has to be raised whenever a section is added rather than
           # treated as a budget. History: 17 sections / 4,735 mmz = 129.8 MiB, which
           # sat at 99.8% of the old 130 MiB ceiling; the front-end track (3 sections,
-          # 65 files, 388 diagrams) added 14.1 MiB and crossed it. 200 MiB leaves room
-          # for roughly four more sections at the current per-section cost.
+          # 65 files, 388 diagrams) added 14.1 MiB and crossed it. apk-v842 (mlops and
+          # rust added, 23 sections counting game/) was 153.3 MiB. fintech/ adds 101
+          # diagrams, about 3.2 MiB at rust's measured cost, so 24 sections is about
+          # 157 MiB. Raise the ceiling when an estimate passes 185 MiB.
           SIZE=$(stat -c%s "$APK")
           [ "$SIZE" -ge $((15*1024*1024)) ] && [ "$SIZE" -le $((200*1024*1024)) ] \
             || { echo "APK size $SIZE outside the 15-200 MiB window"; exit 1; }

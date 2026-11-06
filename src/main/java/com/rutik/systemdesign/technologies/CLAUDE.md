@@ -44,7 +44,9 @@ predate `mlops/` and stay here as a recorded exception; `mlops/model_serving_pla
 links to them. Tokio is owned by
 [`rust/async_runtimes_and_executors/tokio_deep_dive.md`](../rust/async_runtimes_and_executors/tokio_deep_dive.md),
 a deep-dive sub-file, so do not add `technologies/tokio`. axum, tonic, sqlx and serde are
-taught in `rust/` modules. This section is for technologies that don't
+taught in `rust/` modules. TigerBeetle, FIX engines, Aeron and the payment vendors are taught
+in [`fintech/`](../fintech/README.md), so do not add a `technologies/` module for any of them.
+The bank's `finance` tier lives in `tech_bank/finance.md`. This section is for technologies that don't
 already have a canonical home — an orchestrator like Airflow or an inference server like Triton has
 no single owning section, so it lives here instead.
 
@@ -409,10 +411,10 @@ replaced Subscription/CatalogSource/CSV resolution with `ClusterExtension`.
 
 ```
 tech_bank/
-├── tech_bank.md      ← the TAXONOMY: 6 kinds, 8 language tokens, 18 tiers, 95 roles
+├── tech_bank.md      ← the TAXONOMY: 6 kinds, 8 language tokens, 19 tiers, 100 roles
 ├── caching.md        ← one shard per tier, named for the tier id
 ├── data-stores.md
-└── …                 ← 18 shards
+└── …                 ← 19 shards
 ```
 
 Shard by **primary tier** — the tier of the tool's FIRST role. Roles are weight-ascending

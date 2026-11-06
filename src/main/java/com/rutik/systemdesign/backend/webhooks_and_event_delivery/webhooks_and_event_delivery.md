@@ -12,6 +12,8 @@ This is fundamentally different from internal event fan-out. Inside your own inf
 
 The corollary is that a webhook platform is really two systems wearing one name: a **producer-side delivery pipeline** (this module) and a **consumer-side receiver** that must verify, dedupe, and process what arrives. Both sides matter to the interview and to production; §6 covers both.
 
+For how a payment platform checks a PSP webhook against the PSP's own record before it moves money, see [Idempotency and Exactly-Once Money Movement](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

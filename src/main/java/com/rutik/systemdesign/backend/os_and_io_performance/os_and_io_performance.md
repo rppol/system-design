@@ -14,6 +14,8 @@ This file asks a narrower, more operational question: **your service is 40ms slo
 
 **Everything here is measurable.** Nothing in this module should be believed on authority, including the numbers in it — every section names the command that produces the figure on your own hardware, because cloud instance types, kernel versions, CPU mitigation settings and storage classes move these numbers by an order of magnitude.
 
+For kernel bypass, core isolation and the tick-to-trade budget in trading systems, see [Low-Latency Trading Systems](../../fintech/low_latency_trading_systems/low_latency_trading_systems.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

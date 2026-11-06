@@ -137,6 +137,7 @@ and a 6-week Study Plan (prose; no path impact).
 | N+1 query | `sql_query_optimization/` | `../spring/spring_data_jpa/`, `../backend/query_optimization/` |
 | Schema migration | `database_migrations_zero_downtime/` | `../backend/database_migrations/` |
 | Rust data access and storage | `connection_pool_management/`, `embedded_and_edge_databases/` | `../rust/databases_sqlx_and_diesel/` (the sqlx pool), `../rust/case_studies/design_a_zero_copy_storage_engine.md` (the Rust-specific parts of a redb-shaped store). Pool theory and storage-engine theory stay here |
+| Ledger accounting model, hot accounts | `case_studies/design_banking_ledger/` | `../fintech/double_entry_ledger_design/` and its `hot_accounts_and_ledger_scaling.md` own the accounting model and its invariants. Isolation, locking and the Postgres schema stay here |
 
 ---
 

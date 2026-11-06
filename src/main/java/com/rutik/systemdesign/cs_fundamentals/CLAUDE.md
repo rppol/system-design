@@ -152,7 +152,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | CS Fundamentals Module | See Also (other sections) |
 |------------------------|--------------------------|
 | `complexity_analysis_and_big_o/` | `../../java/collections_internals/` — per-collection Big-O tables; `../../database/indexing_deep_dive/` — B+Tree O(log n) guarantees |
-| `number_systems_and_bit_manipulation/` | `../../python/strings_bytes_encoding_and_regex/` — UTF-8, bytes/memoryview; `../../java/strings_and_text/` — compact strings, surrogate pairs |
+| `number_systems_and_bit_manipulation/` | `../../python/strings_bytes_encoding_and_regex/` — UTF-8, bytes/memoryview; `../../java/strings_and_text/` — compact strings, surrogate pairs; `../fintech/money_representation_and_currency/` (money types and rounding) |
 | `recursion_and_problem_solving_patterns/` | `../../java/concurrency/` — recursive algorithms with thread pools; `graph_and_string_algorithms/` (module 12) |
 | `arrays_strings_and_hashing/` | `../../java/collections_internals/` — HashMap/ConcurrentHashMap internals; `../../python/collections_and_data_structures/` — dict/set internals |
 | `linked_lists_stacks_and_queues/` | `../../java/collections_internals/` — LinkedHashMap-for-LRU, ArrayDeque |

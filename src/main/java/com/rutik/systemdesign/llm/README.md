@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **54 topic directories** plus **30 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (80 module sub-files plus 10 cross-cutting case study sub-files, listed in the Sub-Files Index below):
+This section is organized into **55 topic directories** plus **30 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (80 module sub-files plus 10 cross-cutting case study sub-files, listed in the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -88,8 +88,9 @@ column reflects learning sequence, not addition order.
 | 50 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/mixture_of_experts.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
 | 51 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/diffusion_language_models.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
 | 52 | 6 — Advanced | [AI Applications](ai_applications/ai_applications.md) | Healthcare, legal, finance, education, customer support | Beginner |
-| 53 | 6 — Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | Model families, licensing, cost analysis, timeline | Beginner |
-| 54 | 6 — Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
+| 53 | 6 - Advanced | [Applied AI Product Decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) | Use-case portfolio ranking, AI feasibility spikes, vendor product vs model API, IP indemnity terms, adoption funnel, autonomy promotion per action class | Advanced |
+| 54 | 6 - Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | Model families, licensing, cost analysis, timeline | Beginner |
+| 55 | 6 - Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 
 ---
 
@@ -324,7 +325,7 @@ then hardens production safety.
 Safety & Alignment  -->  Mechanistic Interpretability  -->  LLM Security  -->  AI Regulations & Compliance
         -->  Multimodal Models  -->  Vision-Language Models  -->  VLA & Robotics Foundation Models
         -->  Small Language Models & Edge AI  -->  Mixture of Experts  -->  Diffusion Language Models
-        -->  AI Applications  -->  LLM Ecosystem & Landscape
+        -->  AI Applications  -->  Applied AI Product Decisions  -->  LLM Ecosystem & Landscape
         -->  Data Flywheels & Continuous Learning
 ```
 Broaden understanding of safety, security threats and defenses, the regulatory landscape (EU AI
@@ -536,6 +537,8 @@ diffusion_language_models
   diffusion_language_models.md  -
 ai_applications
   ai_applications.md  -
+applied_ai_product_decisions
+  applied_ai_product_decisions.md  principal
 llm_ecosystem_and_landscape
   llm_ecosystem_and_landscape.md  principal
 data_flywheels_and_continuous_learning
@@ -574,12 +577,12 @@ case_studies
 -->
 ## Learning Paths
 
-This section is deliberately exhaustive — 54 modules covering the full LLM lifecycle. That is the right
+This section is deliberately exhaustive: 55 modules covering the full LLM lifecycle. That is the right
 depth for a reference, but the wrong shape for someone with an interview in two weeks. So there are **two
 ways through it**. Pick based on your goal; the browser learning game's **Study** view surfaces both as a
 **Full / Interview** toggle (Full is the default).
 
-### Full Path (54 modules)
+### Full Path (55 modules)
 
 The complete curriculum, in the order above — see [Recommended Learning Order](#recommended-learning-order).
 Use this when you want genuine mastery of the whole field: research frontier (diffusion LMs, VLA/robotics,
@@ -624,7 +627,7 @@ specialized agent type. Nothing is dropped.
 | 44 | [llm_security](llm_security/llm_security.md) | 3 files |
 | 50 | [mixture_of_experts](mixture_of_experts/mixture_of_experts.md) | module page only |
 
-**Not in this path** (22 of 54, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `code_generation`, `agentic_frameworks`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
+**Not in this path** (23 of 55, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `code_generation`, `agentic_frameworks`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `applied_ai_product_decisions`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
@@ -650,7 +653,7 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 (e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 30 above are solid.
 
 <!-- study-path-table principal -->
-### Principal Path (30 modules)
+### Principal Path (31 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -682,10 +685,11 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 | 42 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
 | 44 | [llm_security](llm_security/llm_security.md) | 3 files |
 | 45 | [ai_regulations_and_compliance](ai_regulations_and_compliance/ai_regulations_and_compliance.md) | module page only |
-| 53 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | module page only |
-| 54 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | module page only |
+| 53 | [applied_ai_product_decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) | module page only |
+| 54 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | module page only |
+| 55 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | module page only |
 
-**Not in this path** (24 of 54, Full Path only): `tokenization_and_embeddings`, `embeddings_and_similarity_search`, `faiss_deep_dive`, `pre_training`, `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `prompt_engineering`, `code_generation`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `context_windows_and_long_context`, `vllm_deep_dive`, `llm_ops_platforms`, `llm_testing_strategies`, `mechanistic_interpretability`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `mixture_of_experts`, `diffusion_language_models`, `ai_applications`
+**Not in this path** (24 of 55, Full Path only): `tokenization_and_embeddings`, `embeddings_and_similarity_search`, `faiss_deep_dive`, `pre_training`, `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `prompt_engineering`, `code_generation`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `context_windows_and_long_context`, `vllm_deep_dive`, `llm_ops_platforms`, `llm_testing_strategies`, `mechanistic_interpretability`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `mixture_of_experts`, `diffusion_language_models`, `ai_applications`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes system-level ownership of an LLM product: evaluation you can trust, the cost and latency envelope, and the failure and safety modes you design for before launch. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -766,6 +770,7 @@ The highest-frequency LLM *knowledge* questions mapped to the exact file that an
 | How do GCG and AutoDAN construct adversarial jailbreak prompts, and how do you defend against them? | [automated_jailbreak_algorithms.md](safety_and_alignment/automated_jailbreak_algorithms.md) |
 | How do AI agents pay for things autonomously — what protocols enforce spend limits? | [agentic_commerce_and_payments.md](multi_agent_systems/agentic_commerce_and_payments.md) |
 | How do you secure a multi-agent system against a compromised or colluding peer agent? | [multi_agent_security.md](multi_agent_systems/multi_agent_security.md) |
+| Should this be an AI feature, which use case goes first, and do we buy or build it? | [Applied AI Product Decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) |
 
 ---
 

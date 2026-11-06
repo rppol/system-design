@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 239 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 247 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -179,6 +179,12 @@ A policy is a `permit` or `forbid` over a principal, action and resource with an
 
 Reach for it for application authorization where policies should be data you can reason about, embedded as a library or hosted by Amazon Verified Permissions. Against Rego the trade is expressiveness for analysability, and the harder half of the work is unchanged: Cedar decides over the entity graph and context you hand it, so modelling groups, ownership and tenancy into that input is the real design task.
 
+### AWS CloudHSM
+**Short:** Single-tenant hardware security modules in AWS that hold keys under your control for signing and encryption.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1, finance/digital-asset-custody @3
+
 ### AWS Cognito
 **Short:** AWS managed identity service: OIDC/OAuth2 user pools, hosted sign-in, MFA and federated identity providers.
 **Kind:** tech
@@ -228,6 +234,12 @@ Access is the intersection of IAM policy and the key policy on the key itself, e
 Macie samples and inspects objects in S3, matching them against managed data identifiers for things like payment card numbers, credentials and health identifiers, plus custom regexes with keyword proximity rules. Automated sensitive data discovery continuously profiles buckets at low daily cost and builds a map of where sensitive data probably lives, while scheduled classification jobs do the deeper per-object scan. It also flags buckets that are public, unencrypted or shared outside the account.
 
 Reach for it to answer where the sensitive data actually is across accounts, a question nobody can answer from memory once a data lake grows. Plan the cost: job pricing scales with bytes inspected, so scope by prefix, object tag and file type rather than scanning everything. It only looks at S3, so databases and other stores need their own tooling.
+
+### AWS Payment Cryptography
+**Short:** Managed AWS service for payment HSM functions such as PIN translation, card verification values and payment key exchange.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1, finance/payments-and-acquiring @2
 
 ### AWS Secrets Manager
 **Short:** AWS managed secret store with versioning and built-in automatic rotation for database credentials and API keys.
@@ -296,6 +308,12 @@ Applications authenticate with a managed identity, so nothing but the vault URL 
 The PII feature of Azure AI Language returns typed entities with offsets and confidence, and can return a redacted copy of the text in the same call, with the masking policy selectable between a fixed character, the entity type name, or removal. Categories can be restricted to the ones you care about, and a separate conversational mode is tuned for transcripts, where speaker turns and disfluencies break models trained on documents.
 
 Reach for it when you are on Azure and want redaction without hosting a model, particularly for scrubbing prompts and logs before they leave a boundary. The model is fixed, so a business-specific identifier goes undetected and recall on free text is never complete, which makes it a defence layer rather than proof of compliance. Presidio is the self-hosted route when you need custom recognizers or the text must not leave your network.
+
+### Basis Theory
+**Short:** Tokenization platform with a vault and a proxy that keeps card and other sensitive data out of your systems behind access policies.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, finance/payments-and-acquiring @2
 
 ### bcrypt
 **Short:** Adaptive password hashing with a tunable cost factor (10-12 typical, ~100-300ms); implemented in every language.
@@ -710,6 +728,12 @@ Reach for it as the cheapest possible guard on a repository that touches cloud c
 gitleaks scans the git history as well as the working tree, which matters because a secret deleted in a later commit is still in the repository and still arrives with every clone. Detection combines a built-in rule set for common providers, extendable with your own patterns, and entropy scoring for unrecognised formats; findings can be allowlisted by fingerprint so the scan stays green without switching the rule off entirely.
 
 Run it over full history in CI and as a fast pre-commit hook locally. A hit in history means the credential is compromised and must be rotated — rewriting history does not un-clone it.
+
+### Global Relay
+**Short:** Archiving and surveillance service for the email, chat and voice records of regulated firms.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, finance/fraud-and-financial-compliance @3
 
 ### GnuPG
 **Short:** OpenPGP CLI implementation for file encryption, detached signatures and keyring management.
@@ -1770,6 +1794,12 @@ The driver presents secrets as a volume. A `SecretProviderClass` names the provi
 
 Reach for it when secrets should stay out of etcd, which is the substantive difference from an operator that materialises them as Secret objects. The tradeoffs are that applications must read files rather than environment variables to get the benefit, since the sync option puts the value back into etcd, and that rotation only rewrites the mounted file, so the process must reread it or be restarted. External Secrets Operator fits better when Secret objects are what your tooling expects.
 
+### Secure Payment Confirmation
+**Short:** W3C web API that binds a WebAuthn authentication to the payment details, so the result can serve as cardholder authentication.
+**Kind:** spec
+**Lang:** js
+**Roles:** security/authentication-and-identity @1, finance/payments-and-acquiring @2
+
 ### SecureRandom
 **Short:** JDK cryptographically secure PRNG; getInstanceStrong() for key and token material.
 **Kind:** api
@@ -1826,6 +1856,12 @@ is usually the hard part.
 **Kind:** spec
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1
+
+### Smarsh
+**Short:** Communications archiving and supervision service for regulated firms.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/privacy-and-compliance @1, finance/fraud-and-financial-compliance @3
 
 ### SmoothLLM
 **Short:** Randomized-smoothing jailbreak defence: perturb a prompt many times and aggregate to break adversarial suffixes.
@@ -2092,6 +2128,18 @@ Reach for it when a formal privacy claim about a model trained on personal data 
 Tetragon attaches eBPF programs to kernel hooks covering syscalls, process execution and exit, and file and network operations, and crucially filters in the kernel rather than streaming everything to userspace, which is what keeps overhead low at high event rates. Events carry full process ancestry and Kubernetes identity, so you see which container, pod and workload spawned a process. A `TracingPolicy` custom resource declares what to watch and can also enforce, terminating a matching process in-kernel rather than merely reporting it.
 
 Reach for it in Kubernetes when you want low-overhead runtime detection, or synchronous enforcement that does not depend on a userspace agent reacting in time. The requirements and costs are real: a recent kernel with the right eBPF support, policies expressed at the syscall and argument level rather than in behavioural language, and a genuine risk of killing legitimate processes if an enforcing policy ships without an observation period. Falco is the neighbouring tool with a broader out-of-the-box rule set.
+
+### Thales Luna HSM
+**Short:** Thales hardware security modules, network-attached or PCIe, for key generation, key storage and signing.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1, finance/digital-asset-custody @3
+
+### Thales payShield
+**Short:** Thales payment HSM for PIN translation, card verification and key management in payment networks.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/secrets-and-cryptography @1, finance/payments-and-acquiring @2
 
 ### Tink
 **Short:** Google's misuse-resistant crypto library over JCA: safe AEAD, signing and key rotation defaults.

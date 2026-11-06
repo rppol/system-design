@@ -20,6 +20,8 @@ The central abstraction is PlatformTransactionManager. Spring Boot auto-configur
 - JPA on classpath: JpaTransactionManager (wraps EntityManager/Session lifecycle)
 - JTA: JtaTransactionManager (delegates to a Jakarta EE container's transaction manager, or to a standalone coordinator such as Narayana or Atomikos wired through that vendor's own Spring Boot starter)
 
+For the ledger invariants that a payment transaction must keep, see [Double-Entry Ledger Design](../../fintech/double_entry_ledger_design/double_entry_ledger_design.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

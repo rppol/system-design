@@ -6,6 +6,8 @@ A distributed transaction is an atomic operation spanning multiple independent s
 
 Distributed transactions are not a feature to add — they are a design constraint that forces architectural choices. The primary patterns are 2PC (strong consistency, high coupling), Saga (eventual consistency, loose coupling), and the outbox pattern (reliable messaging with at-least-once delivery).
 
+For idempotent money movement across payment rails and the double-entry model behind it, see [Idempotency and Exactly-Once Money Movement](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md) and [Double-Entry Ledger Design](../../fintech/double_entry_ledger_design/double_entry_ledger_design.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

@@ -8,6 +8,8 @@ Each domain has distinct requirements: healthcare demands accuracy and regulator
 
 Domain-specific LLM applications differ from general-purpose deployments in three critical ways: they operate in regulated environments where errors carry legal or medical liability, they require domain-adapted knowledge bases rather than relying on parametric knowledge alone, and they mandate human oversight for high-stakes decisions that cannot be fully delegated to a model.
 
+For deciding which AI use cases to fund, whether to buy or build them, and how much autonomy to grant, see [Applied AI Product Decisions](../applied_ai_product_decisions/applied_ai_product_decisions.md).
+
 ---
 
 ## 2. Intuition

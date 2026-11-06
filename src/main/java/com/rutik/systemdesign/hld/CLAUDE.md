@@ -91,6 +91,8 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 | `security_and_auth/` | `../backend/auth_and_authorization_systems/`, `../backend/backend_security_owasp/`, `../spring/spring_security_architecture/`, `../spring/spring_security_jwt_oauth/` | — |
 | `resilience_patterns/` | `../backend/fault_tolerance_patterns/`, `../spring/case_studies/cross_cutting/resilience4j_patterns.md` | — |
 
+The payment, wallet and exchange case studies (`case_studies/design_payment_system.md`, `case_studies/design_digital_wallet.md`, `case_studies/design_stock_exchange.md`) stay here. The domain concepts and the dated rule facts live in `../fintech/` (see `../fintech/CLAUDE.md`). Do not add rail or regulation facts to these studies. Link the `fintech/` module that owns the fact.
+
 ---
 
 ## Adding a New HLD Module

@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-access -->
 
-The 144 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 145 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Data access & DB ops** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -14,6 +14,12 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** api
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1, observability/metrics-and-monitoring @2, search-retrieval/lexical-and-hybrid-search @3
+
+### Aeron Cluster
+**Short:** Aeron module that replicates a deterministic service across nodes through a Raft-based log, so a follower can take over with the same state.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-access/replication-ha-and-backup @1, finance/trading-and-market-data @2
 
 ### aiomysql
 **Short:** Asyncio MySQL/MariaDB driver for async SQLAlchemy stacks; asyncmy is the more actively maintained alternative.

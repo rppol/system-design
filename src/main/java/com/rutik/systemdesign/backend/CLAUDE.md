@@ -180,6 +180,7 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | `service_mesh_and_service_discovery/` | `../hld/microservices/` |
 | `event_sourcing_and_cqrs/` | `../hld/` — architectural overview |
 | `benchmarking_methodology/`, `performance_profiling/`, `grpc_and_protobuf/`, `async_and_concurrency_patterns/` | `../rust/`: `profiling_and_benchmarking/`, `grpc_with_tonic/`, `async_cancellation_and_pitfalls/`. This section keeps the protocol, the pattern and the method; `rust/` owns the crates and the Rust-specific traps and links here |
+| `distributed_transactions_and_consistency/`, `messaging_patterns/`, `webhooks_and_event_delivery/`, `case_studies/design_payment_processor/` | `../fintech/idempotency_and_exactly_once_money_movement/`, `../fintech/reconciliation_and_settlement_files/`. This section keeps the patterns. `fintech/` owns the rail semantics, the per-rail retry rules and the dated rule facts |
 
 ---
 

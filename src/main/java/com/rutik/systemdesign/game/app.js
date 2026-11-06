@@ -19,7 +19,7 @@ function deckLen() {
 const estMinutes = (n) => Math.max(1, Math.round(n * 0.5));   // ~30s/question, matches the original 10q/~5min ratio
 const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
-  cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
+  cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud", fintech: "Payments & Trading",
   go: "Go", hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", mlops: "MLOps & ML Infra", python: "Python", rust: "Rust", fastapi: "FastAPI", spring: "Spring",
   technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
@@ -42,6 +42,7 @@ const SECTION_IDENTITY = {
   ml:              { accent: "#e79a4f", glyph: "Σ" },     //  35  orange
   python:          { accent: "#e8bd54", glyph: "λ" },     //  52  gold
   book:            { accent: "#c9be63", glyph: "¶" },     //  70  parchment
+  fintech:         { accent: "#a08c2a", glyph: "¤" },     // brass; OKLab >= 0.131 from every accent (nearest ml)
   cuda:            { accent: "#9bcf5a", glyph: "▦" },     // 110  lime
   go:              { accent: "#69cf59", glyph: "Go" },    // 112  green
   database:        { accent: "#5fc47e", glyph: "▤" },     // 135  green
@@ -129,6 +130,8 @@ const ACRONYMS = new Map(Object.entries({
   rabbitmq: "RabbitMQ", amqp: "AMQP",
   ai: "AI", lora: "LoRA", kserve: "KServe",
   raii: "RAII", ffi: "FFI", sqlx: "SQLx", webassembly: "WebAssembly", wasi: "WASI", semver: "SemVer", cpp: "C++", msrv: "MSRV", pyo3: "PyO3",
+  // fix and fx are global: a future slug word "fix" (bug_fix) would also render as "FIX".
+  psps: "PSPs", kyc: "KYC", aml: "AML", pci: "PCI", dss: "DSS", "3ds": "3DS", ach: "ACH", sepa: "SEPA", fx: "FX", fix: "FIX", ccp: "CCP", onchain: "On-Chain",
   opentelemetry: "OpenTelemetry",
 }));
 // Touch layouts drop the hover-only prerequisite chords, and narrow ones drop
@@ -361,6 +364,14 @@ const STUDY_ORDER = {
     "devops/devsecops_and_supply_chain_security","devops/policy_as_code_and_compliance","devops/disaster_recovery_and_resilience","devops/platform_engineering_and_idp",
     "devops/ml_platform_and_gpu_infrastructure","devops/event_streaming_operations","devops/performance_and_load_testing",
   ],
+  fintech: [
+    "fintech/money_representation_and_currency","fintech/double_entry_ledger_design","fintech/idempotency_and_exactly_once_money_movement",
+    "fintech/psps_acquirers_issuers_and_networks","fintech/card_payments_lifecycle","fintech/bank_rails_ach_sepa_and_wires","fintech/real_time_payments_and_open_banking",
+    "fintech/strong_customer_authentication_and_3ds","fintech/pci_dss_scope_and_tokenization","fintech/fraud_and_risk_scoring","fintech/kyc_aml_and_sanctions_screening","fintech/disputes_chargebacks_and_refunds",
+    "fintech/reconciliation_and_settlement_files","fintech/wallets_stored_value_and_payouts","fintech/subscriptions_billing_and_invoicing","fintech/tax_for_payment_engineers","fintech/treasury_liquidity_and_fx_operations",
+    "fintech/market_microstructure_and_order_types","fintech/order_books_and_matching_engines","fintech/exchange_architecture_and_determinism","fintech/market_data_feeds_and_multicast","fintech/fix_protocol_and_order_entry","fintech/low_latency_trading_systems",
+    "fintech/ccp_clearing_and_settlement","fintech/margin_liquidation_and_derivatives_risk","fintech/crypto_custody_and_onchain_operations","fintech/regulatory_reporting_and_audit_trails","fintech/build_vs_buy_and_licensing_strategy",
+  ],
   go: [
     "go/go_fundamentals_and_idioms","go/data_structures_and_memory_layout","go/interfaces_methods_and_embedding","go/errors_and_panics","go/generics_and_type_parameters","go/packages_modules_and_tooling",
     "go/goroutines_and_the_scheduler","go/channels_and_select","go/sync_primitives_and_memory_model","go/context_and_cancellation","go/concurrency_patterns_and_pitfalls",
@@ -404,7 +415,7 @@ const STUDY_ORDER = {
     "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization","llm/knowledge_distillation_and_model_merging",
     "llm/deployment_and_mlops","llm/llm_caching","llm/llm_observability_and_monitoring","llm/llm_ops_platforms","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection","llm/prompt_management_and_promptops",
     "llm/evaluation_and_benchmarks","llm/error_analysis_and_eval_design","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
-    "llm/safety_and_alignment","llm/mechanistic_interpretability","llm/llm_security","llm/ai_regulations_and_compliance","llm/multimodal_models","llm/vision_language_models","llm/vla_and_robotics_foundation_models","llm/small_language_models_and_edge_ai","llm/mixture_of_experts","llm/diffusion_language_models","llm/ai_applications","llm/llm_ecosystem_and_landscape","llm/data_flywheels_and_continuous_learning",
+    "llm/safety_and_alignment","llm/mechanistic_interpretability","llm/llm_security","llm/ai_regulations_and_compliance","llm/multimodal_models","llm/vision_language_models","llm/vla_and_robotics_foundation_models","llm/small_language_models_and_edge_ai","llm/mixture_of_experts","llm/diffusion_language_models","llm/ai_applications","llm/applied_ai_product_decisions","llm/llm_ecosystem_and_landscape","llm/data_flywheels_and_continuous_learning",
   ],
   ml: [
     "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
@@ -4917,7 +4928,7 @@ async function renderTech() {
       return `<button class="tx-chip${on ? " on" : ""}" data-tier="${esc(t.id)}"${n || on ? "" : " disabled"}
         aria-pressed="${on}">${esc(t.label)} <span class="tx-chipn">${n}</span></button>`;
     }).join("");
-    // The role row appears only once a tier is chosen: 95 role chips at once is not a
+    // The role row appears only once a tier is chosen: 100 role chips at once is not a
     // second level, it is the same wall with more words.
     const roles = F.t.length
       ? TIERS.filter((t) => F.t.includes(t.id)).flatMap((t) => t.roles.map((r) => ({ t, r, id: `${t.id}/${r.id}` })))

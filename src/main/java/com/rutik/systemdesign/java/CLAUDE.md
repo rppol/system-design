@@ -146,6 +146,7 @@ Learning-path index: `case_studies/case_studies.md` (mandatory; update with ever
 | `java_time_datetime/` | `java8_features/` — where java.time landed; `strings_and_text/` — parsing/formatting; `jdbc_and_database/` — TIMESTAMP vs TIMESTAMPTZ; `../../spring/request_handling/i18n_and_localization.md` — locale-aware formatting |
 | `bytecode_and_classfile/` | `jvm_internals/` — class loading, JIT; `annotation_processing/` — compile-time vs bytecode-time codegen; `../../spring/spring_native_graalvm/` — reachability/reflection hints |
 | `security_and_cryptography/` | `../../cs_fundamentals/cryptography_fundamentals/` — primitives; `../../backend/backend_security_owasp/` — applied security; `../../backend/auth_and_authorization_systems/` — OAuth/OIDC; `networking_and_http_client/` — TLS transport |
+| `case_studies/design_low_latency_market_data_handler.md` | `../fintech/market_data_feeds_and_multicast/` (feed protocols, gap recovery), `../fintech/low_latency_trading_systems/` (the tick-to-trade budget) |
 
 ---
 

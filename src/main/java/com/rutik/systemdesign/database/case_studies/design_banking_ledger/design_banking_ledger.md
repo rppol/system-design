@@ -26,6 +26,11 @@ latency, an idempotency round trip on every write — that a throughput-first sy
 accept, and why "we'll fix it in the next release" is not an option: a wrong ledger entry is fixed
 by posting another entry, never by editing the first one.
 
+The accounting model that this schema stores (normal balances, zero-sum postings, holds and
+reversals) is in [Double-Entry Ledger Design](../../../fintech/double_entry_ledger_design/double_entry_ledger_design.md), and
+hot-account contention is in [Hot Accounts and Ledger Scaling](../../../fintech/double_entry_ledger_design/hot_accounts_and_ledger_scaling.md).
+Both are in `fintech/`.
+
 ---
 
 ## 1. Requirements Clarification

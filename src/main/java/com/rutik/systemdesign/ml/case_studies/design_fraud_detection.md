@@ -11,6 +11,8 @@ Constraints:
 - Model must be explainable (regulatory requirement: reason codes for declined transactions)
 - Online learning: model updated at minimum daily, preferably hourly
 
+The payment decision system around this model (rules, velocity counters, thresholds, step-up and the authorization latency budget) is in [Fraud and Risk Scoring](../../fintech/fraud_and_risk_scoring/fraud_and_risk_scoring.md) in `fintech/`.
+
 ---
 
 ## Architecture Overview

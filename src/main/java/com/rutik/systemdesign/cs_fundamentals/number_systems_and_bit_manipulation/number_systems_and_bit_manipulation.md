@@ -10,6 +10,8 @@ Number systems are the languages of hardware. Binary (base-2) is what gates comp
 
 Bit manipulation is a toolkit of constant-time operations (AND, OR, XOR, NOT, shifts) that can replace loops in many algorithms, detect properties (sign, parity, power-of-two), and pack/unpack data efficiently. It also underlies hash functions, compression codecs, cryptographic primitives, and network protocol parsing.
 
+For money types, ISO 4217 minor units and rounding modes, see [Money Representation and Currency](../../fintech/money_representation_and_currency/money_representation_and_currency.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

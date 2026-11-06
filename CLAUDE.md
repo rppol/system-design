@@ -10,6 +10,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **HLD** | Distributed system concepts (CAP, caching, queues, sharding) — 25 modules, 30 case studies | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
 | **Backend** | Networking, API design, performance engineering, resilience, security, microservices — 50 modules, 10 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
 | **Database** | Relational, NoSQL, distributed DB, production ops — 34 modules, 11 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
+| **Fintech** | Payments, ledgers and trading systems: money representation, double-entry ledgers, card and bank rails, idempotent money movement, SCA, PCI scope, fraud, KYC/AML, disputes, reconciliation, payouts, billing, treasury, market microstructure, matching engines, exchange architecture, FIX, market data, low latency, clearing, margin and liquidation, crypto custody, regulatory reporting. Owns the dated rule facts (fact pins fetched 2026-11-06). Link-only to `hld/`, `database/`, `backend/`, `lld/` - 28 modules, 6 case studies, 2 deep-dive sub-files, 2 cross-cutting files | [fintech/CLAUDE.md](src/main/java/com/rutik/systemdesign/fintech/CLAUDE.md) |
 | **Java** | Pure Java senior-engineer guide — 35 modules, 10 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
 | **Spring** | Spring Framework guide — 40 modules, 10 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
 | **Go** | Pure Go senior-engineer guide (the language every system in `devops/` is written in) — 27 modules, 6 case studies, 3 deep-dive sub-files | [go/CLAUDE.md](src/main/java/com/rutik/systemdesign/go/CLAUDE.md) |
@@ -18,7 +19,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **FastAPI** | FastAPI + ASGI production guide — 21 modules, 8 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 47 modules, 27 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
 | **MLOps** | MLOps & ML Infra: every artifact an AI feature ships (weights, adapters, prompts, MCP servers, vector indexes, eval sets, decision schemas) as a versioned, gated, rolled-out release input, plus the serving, GPU compute and operations platform that runs them. Link-only to `ml/`, `llm/`, `devops/`; owns KServe, llm-d, Kueue, Volcano and KAI Scheduler - 32 modules, 8 case studies, 4 deep-dive sub-files, 1 cross-cutting file | [mlops/CLAUDE.md](src/main/java/com/rutik/systemdesign/mlops/CLAUDE.md) |
-| **LLM** | LLM engineering guide — 54 modules, 30 case studies, 90 deep-dive sub-files (80 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
+| **LLM** | LLM engineering guide: 55 modules, 30 case studies, 90 deep-dive sub-files (80 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 15 case studies, 10 deep-dive sub-files | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 8 case studies, 4 deep-dive sub-files | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 27 modules, 6 case studies + DSA pattern playbooks sub-section (26-pattern recognition engine, interview execution playbook, AI-assisted round playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
@@ -40,6 +41,7 @@ src/main/java/com/rutik/systemdesign/
 ├── hld/          ← System design concepts + CLAUDE.md
 ├── backend/      ← Backend engineering + CLAUDE.md
 ├── database/     ← Database engineering + CLAUDE.md
+├── fintech/          ← Payments, ledgers & trading guide + CLAUDE.md
 ├── java/         ← Pure Java guide + CLAUDE.md
 ├── spring/       ← Spring Framework guide + CLAUDE.md
 ├── python/       ← Pure Python guide + CLAUDE.md
@@ -68,7 +70,7 @@ anywhere below a section root.
 
 | File | How many | What it is |
 |------|----------|-----------|
-| `<section>/README.md` | exactly 23, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/README.md` | exactly 24, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
 | `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
 | `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Content only — structure lives in the section README. |
 | `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
@@ -76,7 +78,7 @@ anywhere below a section root.
 | `<section>/case_studies/case_studies.md` | one per section with case studies | The case-study INDEX (5-section learning path + tier markers). |
 | `<section>/case_studies/<name>/<name>.md` | directory-shaped case study | Flat case studies stay `<name>.md`. |
 | `book/<book>/<NN_chapter>/<NN_chapter>.md` | book chapter | Same rule; the per-book index is `book/<book>/<book>.md` and only `book/README.md` is a README. |
-| `technologies/tech_bank/*.md` | one taxonomy + 18 tier shards | The technology KNOWLEDGE BANK — authored **data**, not a module. Source of the generated `game/tech_index.json`. Excluded from both `extract.py` walks by exact path; carries records, never the 14-section template. See `technologies/CLAUDE.md`. |
+| `technologies/tech_bank/*.md` | one taxonomy + 19 tier shards | The technology KNOWLEDGE BANK — authored **data**, not a module. Source of the generated `game/tech_index.json`. Excluded from both `extract.py` walks by exact path; carries records, never the 14-section template. See `technologies/CLAUDE.md`. |
 
 So: **one `README.md` per section (the index), one `CLAUDE.md` per section (agent rules),
 and every content page named for its folder.** `extract.py` resolves a module page with
@@ -88,7 +90,7 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Scope — 22 sections in scope; only `book/` is still out (owner-set 2026-08-04)
+## Scope — 23 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
 `devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
 2026-08-04**. Every improvement pass now applies to them: the factual audit, the
@@ -109,7 +111,7 @@ instead, and for the rules that bind a `**Short:**` line written there.
 | `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **audit still out; Short done for every Q&A** |
 
-**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start; `mlops/` was likewise authored Short-migrated from the start on 2026-10-18; `rust/` was likewise authored Short-migrated from the start on 2026-11-06) (2026-08-04, commit `6ce35a6`;
+**Both passes are COMPLETE for all 18 in-scope sections as of that date** (`soft_skills/` was created 2026-08-25 and `go/` on 2026-09-02, both after the migration, and both authored fully `**Short:**`-migrated from the start; `mlops/` was likewise authored Short-migrated from the start on 2026-10-18; `rust/` was likewise authored Short-migrated from the start on 2026-11-06; `fintech/` was likewise authored Short-migrated from the start on 2026-11-06) (2026-08-04, commit `6ce35a6`;
 the three unparked sections were audited and migrated the same day). Every Q&A in the
 repo, `book/` included, carries an authored `**Short:**` line. Verify with `extract.py`'s own
 "authored **Short:** summaries: N of M parsed Q&As", where `N` must equal `M`. `cs_fundamentals` reads 704 against the 701 recorded at

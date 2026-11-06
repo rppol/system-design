@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: search-retrieval -->
 
-The 116 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 117 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Search & retrieval** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -858,6 +858,12 @@ Reach for it for small per-document computations that cannot be precomputed: a d
 It is built on `pdfminer.six` and exposes the page as geometry: every character with its font, size and bounding box, plus the lines and rectangles drawn on it. Table extraction follows from that primitive, since the default strategy infers a grid from ruling lines and a borderless table needs the text strategy or explicit column positions instead. Cropping a page to a region before extracting is how you reliably pull one repeated block out of a standard-format document.
 
 Reach for it when the answer depends on layout, such as financial statements, invoices and forms where a number only means something in relation to its column heading. It reads the text layer only, so scanned documents need OCR first, and it is slow, being pure Python over character-level objects and easily an order of magnitude behind `PyMuPDF`, which is the better choice when you simply want the text of a large corpus quickly.
+
+### pg_trgm
+**Short:** PostgreSQL extension for trigram similarity search, with GIN and GiST index support for fuzzy text matching.
+**Kind:** tech
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, finance/fraud-and-financial-compliance @3
 
 ### PPL
 **Short:** OpenSearch's Piped Processing Language: a source command then a chain of pipes, the fork's answer to ES|QL and not compatible with it.

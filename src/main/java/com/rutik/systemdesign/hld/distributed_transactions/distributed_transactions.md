@@ -8,6 +8,8 @@ This module is the architectural decision layer for that problem: **when do you 
 
 The central tension every design in this module navigates is the same one CAP describes at the data layer: **you can have strong cross-service atomicity, or you can have availability and low coupling during partial failures, but distributed systems make it very expensive to have both.** Two-Phase Commit chooses the first; Saga chooses the second; TCC and the Outbox pattern are pragmatic middle grounds that narrow the window of inconsistency without paying 2PC's blocking cost.
 
+For the idempotency key chain across payment rails and the ledger these transactions protect, see [Idempotency and Exactly-Once Money Movement](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md) and [Double-Entry Ledger Design](../../fintech/double_entry_ledger_design/double_entry_ledger_design.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

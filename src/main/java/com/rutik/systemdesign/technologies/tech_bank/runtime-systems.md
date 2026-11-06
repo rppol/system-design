@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: runtime-systems -->
 
-The 510 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 517 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Runtime & OS** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -50,6 +50,12 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @2
+
+### Agrona
+**Short:** Java library of off-heap buffers, primitive collections, ring buffers and agent runners, used under Aeron for allocation-free code.
+**Kind:** tech
+**Lang:** java
+**Roles:** runtime-systems/collections-and-algorithms @1, finance/trading-and-market-data @3
 
 ### ahash
 **Short:** Fast keyed hasher for Rust hash maps that uses AES instructions where available; not a cryptographic hash.
@@ -487,6 +493,12 @@ A symmetric positive-definite matrix factors as a lower-triangular matrix times 
 
 That makes it the workhorse wherever a covariance or Gram matrix appears, in Gaussian log-likelihoods, Gaussian process regression and Kalman filters. Its failure mode is its diagnostic: it fails when the matrix is not positive definite, usually because rounding made a near-singular covariance indefinite. Adding a small multiple of the identity is the standard remedy, and if that jitter must keep growing, the model is rank-deficient.
 
+### chrony
+**Short:** NTP client and server that disciplines a host clock, and can also follow a PTP hardware clock as its reference.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/memory-processes-and-os @1
+
 ### chrt
 **Short:** Linux CLI that sets a process's real-time scheduling policy and priority (SCHED_FIFO, SCHED_RR, SCHED_DEADLINE).
 **Kind:** tech
@@ -875,6 +887,12 @@ Reach for it first when a process died with no application log entry, the signat
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, observability/profiling-and-performance @3
 
+### DPDK
+**Short:** Data Plane Development Kit: user-space poll-mode NIC drivers and libraries that bypass the kernel for packet processing.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** runtime-systems/io-networking-and-syscalls @1, finance/trading-and-market-data @2
+
 ### Eclipse Collections persistent collections
 **Short:** Eclipse Collections' immutable containers: copy-on-write ImmutableList, Set and Map with size-specialized forms for small sizes.
 **Kind:** tech
@@ -900,6 +918,12 @@ Reach for it for large collections of numbers, such as identifier sets, counters
 **Kind:** api
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+### ef_vi
+**Short:** Low-level user-space API to AMD Solarflare NIC rings that sends and receives raw frames with no socket layer.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** runtime-systems/io-networking-and-syscalls @1, finance/trading-and-market-data @2
 
 ### embassy-boot
 **Short:** Bootloader for embedded Rust with A/B firmware partitions, a power-fail-safe swap and rollback for over-the-air updates.
@@ -1310,6 +1334,12 @@ Reach for it at an ingest boundary where both encodings are known, converting a 
 It is the reference implementation of Unicode and CLDR behaviour and covers the operations that are wrong when done naively: normalization in all four forms, collation that sorts by a locale's real rules rather than code-point order, boundary analysis for grapheme clusters, words and sentences, case mapping that respects locale such as the Turkish dotless i, transliteration between scripts, and message formatting with plural selection.
 
 Reach for it whenever text must be correct for humans rather than merely processed as bytes: sorting names for a locale, counting characters the way a user perceives them, or case-folding for comparison. The costs are size and versioning. The data tables run to tens of megabytes. And two systems on different versions can order the same strings differently, the mechanism behind database index corruption after a collation upgrade, so pin the version.
+
+### ICU4J
+**Short:** The Java port of the ICU Unicode and globalization library, with locale-aware number, currency and date formatting.
+**Kind:** tech
+**Lang:** java
+**Roles:** runtime-systems/text-encoding-and-regex @1, finance/ledger-billing-and-treasury @3
 
 ### id() built-in
 **Short:** Python built-in returning an object's identity, in CPython its memory address; used to reason about aliasing.
@@ -1835,6 +1865,12 @@ The everyday idiom is to build a result behind a local dummy and return the node
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, runtime-systems/io-networking-and-syscalls @3
 
+### linuxptp
+**Short:** Linux implementation of the Precision Time Protocol that syncs NIC and host clocks to a PTP grandmaster.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/memory-processes-and-os @1, finance/trading-and-market-data @2
+
 ### list
 **Short:** Python's built-in dynamic array; amortized O(1) append and pop, the default stack.
 **Kind:** api
@@ -2354,6 +2390,12 @@ Essentially every other array library in Python builds on it or copies its inter
 It allocates an instance of a class without running any constructor, choosing a strategy at run time for the JVM it finds itself on, typically the serialization machinery's constructor factory or a low-level allocation intrinsic. The resulting object has all fields at their default values, so no initialization logic, no validation and no constructor side effects have run.
 
 That is exactly what proxying and mocking libraries need: Mockito and the CGLIB proxies behind Spring must produce a subclass instance without knowing which constructor arguments to pass, and serialization frameworks such as Kryo need it for the same reason. The cost is that such an object has skipped every invariant its constructor established, so final fields are null, making it safe only when something else populates the object immediately afterwards.
+
+### OpenOnload
+**Short:** AMD Solarflare's user-space network stack that speeds up ordinary socket applications by bypassing the kernel.
+**Kind:** tech
+**Lang:** *
+**Roles:** runtime-systems/io-networking-and-syscalls @1, finance/trading-and-market-data @2
 
 ### openssl s_client
 **Short:** OpenSSL CLI that opens a TLS connection and dumps the handshake, cipher, certificate chain and expiry.

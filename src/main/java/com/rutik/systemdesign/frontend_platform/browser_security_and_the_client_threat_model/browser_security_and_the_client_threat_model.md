@@ -25,6 +25,8 @@ The through-line is one question a reviewer should be able to answer for any lin
 front-end code: **if the attacker controlled this string, what would it become?** A text node,
 harmless. An HTML fragment, an XSS. An object key, a prototype pollution.
 
+For PCI DSS scope and SAQ eligibility on a page that embeds a payment iframe, see [PCI DSS Scope and Tokenization](../../fintech/pci_dss_scope_and_tokenization/pci_dss_scope_and_tokenization.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

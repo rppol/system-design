@@ -24,6 +24,8 @@ Three consequences reshape how a platform team builds pipelines:
 
 **Article 14 has applied since 2026-09-11**, more than a year ahead of the rest of the regulation. The EU front-loaded reporting because it wanted visibility into actively exploited vulnerabilities before the full conformity regime arrives in December 2027.
 
+For PCI DSS scope and the cardholder data environment that these controls protect, see [PCI DSS Scope and Tokenization](../../fintech/pci_dss_scope_and_tokenization/pci_dss_scope_and_tokenization.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

@@ -22,6 +22,8 @@ Key concerns:
 - **Eventual vs. immediate consistency**: tolerating temporary inconsistency in exchange for availability.
 - **Idempotency**: compensating transactions and message consumers must be safe to re-execute.
 
+For idempotency across payment rails, where a timeout leaves the outcome of a payment unknown, see [Idempotency and Exactly-Once Money Movement](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

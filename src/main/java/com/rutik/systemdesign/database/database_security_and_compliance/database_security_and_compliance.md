@@ -6,6 +6,8 @@ Database security protects data from unauthorized access, modification, and leak
 
 The threat model spans internal threats (privilege escalation by engineers, accidental data exposure), external threats (SQL injection, credential theft, network attacks), and systemic threats (vendor compromise, cloud misconfiguration). Defense in depth — multiple independent layers — is the guiding principle.
 
+For PCI DSS scope, SAQ eligibility and tokenization, see [PCI DSS Scope and Tokenization](../../fintech/pci_dss_scope_and_tokenization/pci_dss_scope_and_tokenization.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

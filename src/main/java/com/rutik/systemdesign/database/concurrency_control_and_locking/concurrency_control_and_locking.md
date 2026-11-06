@@ -4,6 +4,8 @@
 
 Concurrency control ensures that concurrent database transactions produce results equivalent to some serial execution. Two main approaches: pessimistic (locking — block conflicting operations) and optimistic (MVCC — allow concurrent reads/writes, detect conflicts at commit). Understanding when each wins, and the specific lock types and anomalies involved, is critical for building correct concurrent applications.
 
+For lock contention on a hot ledger account and the batching and sub-account fixes, see [Hot Accounts and Ledger Scaling](../../fintech/double_entry_ledger_design/hot_accounts_and_ledger_scaling.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

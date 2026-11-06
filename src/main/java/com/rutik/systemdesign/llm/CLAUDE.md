@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 54 Modules
+## Module List: 55 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
@@ -42,6 +42,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `multimodal_models/` | VLMs, vision encoders, diffusion, speech, video | — |
 | `context_windows_and_long_context/` | RoPE, ALiBi, YaRN, long context vs RAG | — |
 | `ai_applications/` | Healthcare, legal, finance, education, customer support | — |
+| `applied_ai_product_decisions/` | Use-case portfolio ranking, AI feasibility spikes, vendor product vs model API, IP indemnity terms, adoption funnel, autonomy promotion per action class | - |
 | `llm_ecosystem_and_landscape/` | Model families, licensing, cost analysis, timeline | — |
 | `vllm_deep_dive/` | PagedAttention, continuous batching, prefix caching, TP/PP | — |
 | `mcp_model_context_protocol/` | MCP protocol, servers/clients, resources/tools/prompts, JSON-RPC, transports, security, registries | mcp_server_building, mcp_client_patterns, mcp_transports_and_jsonrpc, mcp_security, mcp_registries_and_ecosystem |
@@ -106,8 +107,8 @@ cosmetic in the reader only.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 54 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (32 modules) and **Principal** (30). They are
+`README.md` documents the **Full Path** (all 55 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (32 modules) and **Principal** (31). They are
 different cuts, not nested depths — senior is the craft (ship the pipeline, debug the
 eval that lies), principal is the judgment (which architecture at what token cost, what
 failure domains, what you tell a team *not* to do), so the two lists overlap only partly

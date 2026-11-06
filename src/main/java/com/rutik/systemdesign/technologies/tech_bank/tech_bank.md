@@ -1,7 +1,7 @@
 # Technology knowledge bank — taxonomy
 
 The vocabulary every record in this directory is written against: 6 kinds, 8
-language tokens, 18 tiers and the 95 roles beneath them. This file and its sibling
+language tokens, 19 tiers and the 100 roles beneath them. This file and its sibling
 shards ARE the source of truth — `game/tech_index.json` is generated from them by
 `game/extract.py` and is gitignored, exactly like the question banks.
 
@@ -643,3 +643,32 @@ derived index), a contiguous block of `**Field:**` lines, then optional prose.
 **Label:** Runtime internals & type system
 **Def:** How the VM/interpreter actually works, plus the static type layer: reflection, class loading, modules, JIT, CPython internals, typing constructs.
 **Seeds:** CPython internals, JITWatch, JPMS, ServiceLoader, typing.Protocol, typing_extensions, dataclasses, jdeprscan
+
+### finance
+**Label:** Payments & finance
+**Blurb:** Moving, recording, policing and trading money.
+
+#### payments-and-acquiring
+**Label:** Payments, acquiring & payouts
+**Def:** PSPs, acquirers, gateways, card networks and their programs, bank and instant rails, issuing processors, payouts and open banking.
+**Seeds:** Stripe, Adyen, Fedwire Funds Service, FedNow Service, Visa Token Service, Marqeta, Plaid Auth
+
+#### ledger-billing-and-treasury
+**Label:** Ledgers, billing, tax & treasury
+**Def:** Double-entry ledgers and money types, subscription billing and metering, tax engines, reconciliation, and treasury and FX platforms.
+**Seeds:** TigerBeetle, Modern Treasury Ledgers, Stripe Billing, Lago, Avalara AvaTax, BlackLine, Kyriba
+
+#### fraud-and-financial-compliance
+**Label:** Fraud, KYC & AML
+**Def:** Fraud scoring and chargeback services, identity verification, sanctions and PEP screening data, transaction monitoring, and dispute platforms.
+**Seeds:** Stripe Radar, Forter, Jumio, LSEG World-Check, NICE Actimize, Moov Watchman, Visa Resolve Online
+
+#### trading-and-market-data
+**Label:** Trading & market data
+**Def:** Venues and clearing houses, FIX engines, market data protocols and feeds, margin systems, and post-trade infrastructure.
+**Seeds:** QuickFIX/J, Artio, Nasdaq TotalView-ITCH, MoldUDP64, Simple Binary Encoding, CME Globex, NSCC
+
+#### digital-asset-custody
+**Label:** Digital-asset custody & nodes
+**Def:** Crypto custody and MPC signing platforms, blockchain nodes, chain analytics and travel-rule networks.
+**Seeds:** Fireblocks, BitGo, Bitcoin Core, Geth, Chainalysis, Notabene

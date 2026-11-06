@@ -118,13 +118,13 @@ The `game/` directory is an application, not study content — see
   `correct`/`correctMd`, `distractors`/`distractorsMd`, `distractorIds`, `concepts`.
   **Re-run `python3 extract.py` after editing any module's Q&A**, then reload.
 - **`tech_index.json` is GENERATED and gitignored, like every other bank artifact.**
-  Its source is `technologies/tech_bank/*.md` (a taxonomy file plus 18 tier shards);
+  Its source is `technologies/tech_bank/*.md` (a taxonomy file plus 19 tier shards);
   `build_tech.py`'s `build_tech_bank()` parses it, validates it, and writes the JSON at the
   game root. It was committed only because deriving a tool's roles needed a judgement
   pass — that judgement lives in markdown now, so **the `[BANK]` comment's old "NOT
   CI-regenerable" claim is dead.** The bank directory is excluded from BOTH `extract.py`
   walks by exact path (`TECH_BANK_DIR`), and a `## NN.` template heading anywhere under
-  it fails `--strict`. `scripts/build_banks.sh` guards existence, 18 tiers, non-empty
+  it fails `--strict`. `scripts/build_banks.sh` guards existence, at least 18 tiers, non-empty
   tools, and the **round-trip**: every record must still carry `k`/`r`/`l`/`s` and no key
   beyond those plus the optional authored description `d`. The file lives at the game
   ROOT, not in `questions/`, so the APK smoke test's `BANKS == SEC + 3` is unaffected.

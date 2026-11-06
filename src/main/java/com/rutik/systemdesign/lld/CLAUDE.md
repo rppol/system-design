@@ -119,6 +119,7 @@ LLD describes how individual components are implemented — class relationships,
 | `system_design_problems/` | `../../hld/microservices/` — Parking Lot / Elevator at distributed system scale |
 | `system_design_problems/RateLimiter.md` | `../../hld/rate_limiting/` — single-JVM token bucket/sliding window here vs. Redis-backed distributed rate limiting at HLD scale |
 | `system_design_problems/LRUCache.md` | `../../hld/caching/`, `../../database/database_caching_patterns/` — exact in-process LRU here vs. approximated/sampled LRU eviction in Redis/Memcached at scale |
+| `system_design_problems/OrderMatchingEngine.md` | `../fintech/order_books_and_matching_engines/`: pro-rata, auctions, self-trade prevention and array price ladders. This page stays the price-time baseline |
 
 ---
 

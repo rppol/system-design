@@ -24,6 +24,8 @@ The framework is deliberately paradigm-agnostic. "Classical ML" here means any t
 
 Skipping straight to step 4 is the single most common gap this module exists to close.
 
+For deciding which AI use cases to fund, whether to buy or build them, and how much autonomy to grant, see [Applied AI Product Decisions](../../llm/applied_ai_product_decisions/applied_ai_product_decisions.md).
+
 ## 2. Intuition
 
 **One-line analogy:** classical ML is a machine you build to stamp one part a million times a second; an LLM is a versatile contractor you hire by the hour who can do almost any job once, expensively, without a blueprint.

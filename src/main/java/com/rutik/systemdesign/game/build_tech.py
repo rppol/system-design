@@ -9,7 +9,7 @@ Two artifacts come out of here, both GENERATED and gitignored, both rebuilt by C
 push exactly like questions/*.json:
 
   tech_index.json        the BANK — what each tool IS. Source: technologies/tech_bank/*.md
-                         (a taxonomy file plus 18 tier shards), authored and committed.
+                         (a taxonomy file plus 19 tier shards), authored and committed.
   questions/tech.json    the INDEX — which module teaches which tool, with that module's
                          one-line purpose for it, plus a per-module tradeoff digest and the
                          precomputed search haystack the Technologies screen renders from.
@@ -780,6 +780,8 @@ TECH_ALIASES = {                       # written this way -> indexed as this
     "rootless buildkit": "buildkit",
     "helm 4": "helm",                     # sibling of the existing "helm 3" entry
     "grafana cloud k6": "k6 cloud",       # backend/ still writes the old "Grafana k6 Cloud"
+    "cloud spanner": "spanner",
+    "avalara": "avalara avatax",
 }
 # The reverse problem: ONE name, two unrelated products. tech_key merges by name, so a
 # homonym silently fuses them and the entry describes neither. Disambiguated by the section
@@ -997,6 +999,7 @@ TECH_LABELS = {
     # 2026-08-04: the audit left "rootless BuildKit" as the ONLY written form, so the
     # vote would elect a mode of the product rather than the product.
     "buildkit": "BuildKit",
+    "avalara avatax": "Avalara AvaTax",
 }
 TECH_LABELS.update({v.lower(): v for m in TECH_HOMONYMS.values() for v in m.values()})
 

@@ -32,6 +32,8 @@ decided to do" from "how money actually moves"** — three concerns that, in a w
 agents acting at machine speed, can no longer be collapsed into "the agent has my credit card
 number."
 
+For the card roles, disputes and crypto custody that agentic payments build on, see [PSPs, Acquirers, Issuers and Networks](../../fintech/psps_acquirers_issuers_and_networks/psps_acquirers_issuers_and_networks.md), [Disputes, Chargebacks and Refunds](../../fintech/disputes_chargebacks_and_refunds/disputes_chargebacks_and_refunds.md) and [Crypto Custody and On-Chain Operations](../../fintech/crypto_custody_and_onchain_operations/crypto_custody_and_onchain_operations.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

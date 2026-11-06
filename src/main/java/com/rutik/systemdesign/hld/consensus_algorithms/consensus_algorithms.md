@@ -16,6 +16,8 @@ When you run `kubectl apply`, elect a Kafka partition leader, acquire a distribu
 
 Consensus is fundamentally about *agreement under uncertainty*. A node cannot tell the difference between a peer that has crashed and a peer whose network is slow. Consensus algorithms turn that uncertainty into a precise contract: a value, once committed by a quorum, is permanent — even across leader changes, crashes, and partitions.
 
+For deterministic replicated state machines in an exchange (the sequencer, journal replay and failover models), see [Exchange Architecture and Determinism](../../fintech/exchange_architecture_and_determinism/exchange_architecture_and_determinism.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition

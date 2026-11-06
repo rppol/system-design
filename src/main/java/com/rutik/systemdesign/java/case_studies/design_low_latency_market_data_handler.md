@@ -902,3 +902,5 @@ component can honestly commit to.
 - [JVM Tuning and GC for Services](cross_cutting/jvm_tuning_and_gc_for_services.md) — GC pause budgets and tuning for the surrounding JVM process once the hot path itself is allocation-free
 - [Design an Event Bus](design_event_bus.md) — the LMAX Disruptor reference point this case study's §6 builds on, cited there for the same cache-line-padding technique in a different context
 - [Performance & Tuning](../performance_and_tuning/performance_and_tuning.md) — JIT inlining, tiered compilation, and CPU cache behavior underlying §4.5's escape-analysis discussion
+- [Market Data Feeds and Multicast](../../fintech/market_data_feeds_and_multicast/market_data_feeds_and_multicast.md): the feed protocols this handler decodes (ITCH over MoldUDP64, SBE), A/B line arbitration and gap recovery, in `fintech/`
+- [Low-Latency Trading Systems](../../fintech/low_latency_trading_systems/low_latency_trading_systems.md): the tick-to-trade budget this handler sits inside, kernel bypass and core isolation, in `fintech/`

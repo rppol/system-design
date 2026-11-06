@@ -14,6 +14,8 @@ Together, these two topics â€” CPU micro-architecture and the memory hierarchy â
 
 Understanding these fundamentals is not just academic: it explains why columnar databases beat row stores for analytics, why false sharing kills multi-threaded throughput, why sorting data before a branch-heavy loop speeds it up, and why NUMA-aware thread pinning matters on two-socket servers.
 
+For a tick-to-trade latency budget built on these effects, see [Low-Latency Trading Systems](../../fintech/low_latency_trading_systems/low_latency_trading_systems.md) in `fintech/`.
+
 ---
 
 ## 2. Intuition
