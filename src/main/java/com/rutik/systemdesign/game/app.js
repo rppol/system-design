@@ -4378,22 +4378,22 @@ function palStaticCommands() {
   _palStatic = out;
   return out;
 }
+// Rows carry their group as `hint`; `typed` rows appear only once a query is typed.
 function palVerbs() {
-  const out = [];
-  if (readDeckSnapshot()) out.push({ label: "Resume blitz", hint: "verb", run: () => resumeDeck() });
-  const due = dueReviews().length;
-  out.push({ label: `Start review${due ? ` (${due} due)` : ""}`, hint: "verb", run: () => startReview() });
-  out.push({ label: "Weak spots", hint: "verb", run: () => startWeakSpots() });
-  out.push({ label: "Today's gauntlet", hint: "verb", run: () => go("#/gauntlet") });
-  out.push({ label: "Codex", hint: "verb", run: () => go("#/codex") });
-  out.push({ label: "Insights", hint: "verb", run: () => go("#/progress") });
-  out.push({ label: "Debrief", hint: "verb", run: () => go("#/debrief") });
+  const out = [], due = dueReviews().length;
+  if (readDeckSnapshot()) out.push({ label: "Resume blitz", hint: "Continue", run: () => resumeDeck() });
+  out.push({ label: `Start review${due ? ` (${due} due)` : ""}`, hint: "Continue", typed: !due, run: () => startReview() });
+  for (const [l, r] of [["Today", "#/home"], ["Practice", "#/practice"], ["Study", "#/study"], ["Tech", "#/tech"],
+    ["Progress", "#/progress"], ["Codex", "#/codex"], ["Debrief", "#/debrief"], ["Gauntlet", "#/gauntlet"]])
+    out.push({ label: l, hint: "Go to", run: () => go(r) });
+  out.push({ label: "Insights", hint: "Go to", typed: true, run: () => go("#/insights") });
+  out.push({ label: "Weak spots", hint: "Action", run: () => startWeakSpots() });
   const flash = deckMode() === "flash";
-  out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "verb",
-    run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
-  for (const t of ["midnight", "ocean", "forest", "ember", "fire", "rose", "orchid", "obsidian"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
-  for (const m of ["dark", "light"]) out.push({ label: `Mode: ${m}`, hint: "theme", run: () => applyMode(m) });
-  out.push({ label: "Export progress", hint: "verb", run: () => exportProgress() });
+  out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "Action",
+    run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (el(".deckseg")) renderHome(); } });
+  out.push({ label: "Export progress", hint: "Action", run: () => exportProgress() });
+  for (const t of ["midnight", "ocean", "forest", "ember", "fire", "rose", "orchid", "obsidian"]) out.push({ label: `Theme: ${t}`, hint: "Appearance", typed: true, run: () => applyTheme(t) });
+  for (const m of ["dark", "light"]) out.push({ label: `Mode: ${m}`, hint: "Appearance", typed: true, run: () => applyMode(m) });
   return out;
 }
 // A cached section bank lets us offer full-text question search without a fetch.
@@ -4426,7 +4426,7 @@ function openPalette() {
   let results = [], sel = 0, search = null;                      // search = {section} sub-mode
 
   function topResults(query) {
-    const cmds = query ? [] : palVerbs().slice();                // empty query -> verbs first (calm default)
+    const cmds = query ? [] : palVerbs().filter((c) => !c.typed);
     if (query) {
       const all = [...palVerbs(), ...palStaticCommands()], scored = [];
       for (const c of all) { const sc = fuzzyScore(query, c.label); if (sc >= 0) scored.push({ c, sc }); }
@@ -4454,9 +4454,12 @@ function openPalette() {
   function render() {
     results = search ? questionResults(input.value.trim()) : topResults(input.value.trim());
     if (sel >= results.length) sel = Math.max(0, results.length - 1);
+    const grouped = !search && !input.value.trim();
     list.innerHTML = results.length
-      ? results.map((r, i) => `<li class="pal-item${i === sel ? " sel" : ""}" id="pal-opt-${i}" role="option" aria-selected="${i === sel}" data-i="${i}">
-          <span class="pal-label">${esc(r.label)}</span>${r.hint ? `<span class="pal-hint">${esc(r.hint)}</span>` : ""}</li>`).join("")
+      ? results.map((r, i) => `${grouped && r.hint !== results[i - 1]?.hint
+          ? `<li class="pal-group" role="presentation">${r.hint === "Action" ? "Actions" : esc(r.hint)}</li>` : ""}
+        <li class="pal-item${i === sel ? " sel" : ""}" id="pal-opt-${i}" role="option" aria-selected="${i === sel}" data-i="${i}">
+          <span class="pal-label">${esc(r.label)}</span>${r.hint && !grouped ? `<span class="pal-hint">${esc(r.hint)}</span>` : ""}</li>`).join("")
       : `<li class="pal-empty">${search ? "No questions match." : "No matches."}</li>`;
     list.querySelectorAll(".pal-item").forEach((li) => {
       li.addEventListener("mousemove", () => { sel = +li.dataset.i; markSel(); });

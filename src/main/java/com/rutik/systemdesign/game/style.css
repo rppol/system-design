@@ -3006,6 +3006,11 @@ body.interview-mode #app::before {
 .pal-label { color: var(--text); font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pal-hint { color: var(--faint); font-family: var(--mono); font-size: 0.6875rem; flex: none; }
 .pal-item.sel .pal-hint { color: var(--muted); }
+.pal-group {
+  padding: 10px 12px 4px; color: var(--faint); font-family: var(--mono); font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.pal-group:first-child { padding-top: 4px; }
 .pal-empty { padding: 14px 12px; color: var(--muted); font-size: 0.875rem; }
 
 /* ---------- Mobile bottom tab bar (< 47rem only) ------------------------ */

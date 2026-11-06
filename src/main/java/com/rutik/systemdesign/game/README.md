@@ -203,9 +203,10 @@ how-am-I-doing:
 ### Command palette (Cmd/Ctrl+K, or `/`)
 
 A centred glass modal with fuzzy (subsequence) search over: every section blitz, every
-module's Read/Quiz command (book chapters included), and verbs (resume, start review + due count,
-weak spots, gauntlet, codex, insights, debrief, quiz/flashcards toggle, theme switch,
-export). Arrow keys + Enter, Esc closes. When a section's bank is already cached, a final
+module's Read/Quiz command (book chapters included), and commands (resume, start review +
+due count, every main screen, weak spots, quiz/flashcards toggle, export, theme and mode).
+With no query it lists three groups: Continue (resume, and start review when something is
+due), Go to, and Actions; themes and modes appear once you type. Arrow keys + Enter, Esc closes. When a section's bank is already cached, a final
 row runs full-text question search (top 8, each opens its reader source).
 
 ### Mobile
