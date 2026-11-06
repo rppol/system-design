@@ -1730,7 +1730,7 @@ function goalRing() {
   const xp = todaysXp(), pct = Math.min(1, xp / DAILY_XP_GOAL);
   const r = 26, circ = 2 * Math.PI * r, off = circ * (1 - pct);
   const done = xp >= DAILY_XP_GOAL;
-  return `<div class="goal" title="Daily goal">
+  return `<div class="goal" role="img" aria-label="Daily goal: ${xp} of ${DAILY_XP_GOAL} XP today">
       <svg width="72" height="72" viewBox="0 0 64 64">
         <defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" style="stop-color:var(--accent)"/>
@@ -1999,10 +1999,11 @@ function renderHome() {
   /* --- slot 2 + 3: the waiting rows, ranked. Top two are shown; everything
      below folds into ONE disclosure so the count is visible without the
      stack. Rank order is fixed: today's pick (when a paused blitz takes the
-     primary slot) > gauntlet > debrief > fading > confusion > weak > rusty. --- */
+     primary slot) > gauntlet > debrief > fading > confusion > weak > rusty >
+     a sealed gauntlet. --- */
   const rows = [];
   if (resume) {
-    rows.push({ id: "pick", mark: "&#9733;", short: "today's pick",
+    rows.push({ id: "pick", mark: "&#9733;", short: "today's pick", verb: "Start",
       title: `${primary.eyebrow}: ${primary.title}`, sub: primary.ctaSub, run: primary.run });
     primary = {
       eyebrow: "Paused", cls: "good",
@@ -2013,12 +2014,14 @@ function renderHome() {
     };
   }
   const g = loadGauntlet();
-  rows.push(g && g.sealed
-    ? { id: "gauntlet", mark: "&#9670;", short: "gauntlet practice",
+  const sealed = !!(g && g.sealed);
+  const gauntletRow = sealed
+    ? { id: "gauntlet", mark: "&#9670;", short: "gauntlet practice", verb: "Replay",
       title: `Gauntlet sealed &middot; ${g.score}/${(g.qids || []).length}`, sub: "Today's run is scored and closed. Replay it as unscored practice.", run: () => go("#/gauntlet") }
-    : { id: "gauntlet", mark: "&#9670;", short: "the daily gauntlet",
-      title: "Today's Gauntlet", sub: "Sealed &middot; 10 questions, one attempt, one score.", run: () => go("#/gauntlet") });
-  if (debriefReady()) rows.push({ id: "debrief", mark: "&#9635;", short: "Weekly debrief",
+    : { id: "gauntlet", mark: "&#9670;", short: "the daily gauntlet", verb: "Start",
+      title: "Today's Gauntlet", sub: "Sealed &middot; 10 questions, one attempt, one score.", run: () => go("#/gauntlet") };
+  if (!sealed) rows.push(gauntletRow);
+  if (debriefReady()) rows.push({ id: "debrief", mark: "&#9635;", short: "Weekly debrief", verb: "Open",
     title: "Debrief ready", sub: "Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.", run: () => go("#/debrief") });
 
   const mstats = moduleStats(p);
@@ -2029,7 +2032,7 @@ function renderHome() {
     const ms = mstats[rv.module];
     if (ms && ms.retention < 0.5) { fadingIds.push(id); fadingMods.add(rv.module); }
   }
-  if (fadingIds.length >= 5) rows.push({ id: "fading", mark: "&#9671;", short: "fading questions",
+  if (fadingIds.length >= 5) rows.push({ id: "fading", mark: "&#9671;", short: "fading questions", verb: "Refresh",
     title: `Fading this week: ${fadingIds.length} questions across ${fadingMods.size} modules`,
     sub: "Retention is slipping on these. Refresh them before they are gone.", run: () => startRefresh(fadingIds) });
 
@@ -2038,27 +2041,28 @@ function renderHome() {
   for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!topPair || n > topPair.n)) topPair = { k, n };
   if (topPair) {
     const [ma, mb] = topPair.k.split("|");
-    rows.push({ id: "confuse", mark: "&#8644;", short: "a confusion pair",
+    rows.push({ id: "confuse", mark: "&#8644;", short: "a confusion pair", verb: "Drill",
       title: `You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}`,
       sub: `Missed ${topPair.n}&times; by picking one when the other was right.`, run: () => startConfusionDrill(topPair.k) });
   }
   const worst = weakSections().filter((x) => x.acc < 0.7)[0];
-  if (worst) rows.push({ id: "weak", mark: "&#9662;", short: "weak spots",
+  if (worst) rows.push({ id: "weak", mark: "&#9662;", short: "weak spots", verb: "Drill",
     title: "Drill your weak spots", sub: `Lowest mastery: <b>${esc(label(worst.s))}</b> at ${Math.round(worst.acc * 100)}%.`, run: startWeakSpots });
   const rusty = rustiestSection();
-  if (rusty) rows.push({ id: "rusty", mark: "&#8635;", short: `${esc(label(rusty.s))} going rusty`,
+  if (rusty) rows.push({ id: "rusty", mark: "&#8635;", short: `${esc(label(rusty.s))} going rusty`, verb: "Practice",
     title: `${esc(label(rusty.s))} is getting rusty`, sub: `${rusty.days} days since you practiced it.`, run: () => startBlitz(rusty.s) });
+  if (sealed) rows.push(gauntletRow);
 
   const rowHTML = (r) => `<button class="wait-row" data-row="${r.id}">
       <span class="wr-mark" aria-hidden="true">${r.mark}</span>
       <span class="wr-body"><span class="wr-title">${r.title}</span><span class="wr-sub">${r.sub}</span></span>
-      <span class="wr-go">Enter &rarr;</span>
+      <span class="wr-go">${r.verb} &rarr;</span>
     </button>`;
   const shown = rows.slice(0, 2), rest = rows.slice(2);
   const disclosure = rest.length ? `
     <details class="more-nudges">
       <summary>${rest.length} more nudge${rest.length === 1 ? "" : "s"} &mdash; ${rest.map((r) => r.short).join(", ")}</summary>
-      <div class="nudge-body">${rest.map(rowHTML).join("")}${questChipsHTML(ensureQuests())}</div>
+      <div class="nudge-body">${rest.map(rowHTML).join("")}</div>
     </details>` : "";
 
   /* --- right column --- */
@@ -2068,8 +2072,9 @@ function renderHome() {
     const pct = Math.round(w.acc * 100);
     return `<div class="weak-row"><span class="wr-name">${esc(label(w.s))}</span>
         <span class="tbar"><i style="width:${pct}%"></i></span><span class="wr-pct">${pct}%</span></div>`;
-  }).join("")}
-      <button class="btn2" id="drill3">Drill the bottom three</button></div>` : "";
+  }).join("")}</div>` : "";
+  const quests = ensureQuests();
+  const questCard = quests.length ? `<div class="side-card"><h3 class="side-h">Weekly quests</h3>${questChipsHTML(quests)}</div>` : "";
 
   const freezeBit = freezes > 0 ? ` <span class="freeze-chip" title="Streak freezes auto-cover a single missed day">${ICON("snow", "i-snow")} ${freezes}</span>` : "";
   const rd = p.reading || {};
@@ -2081,9 +2086,8 @@ function renderHome() {
     <div class="today-grid"><div class="today-cols">
       <div class="today-main">
         <div class="hero today-hero">
-          <div class="hero-row">${goalRing()}<div>
+          <div class="hero-row"><div class="goal-wrap">${goalRing()}<span class="goal-cap" aria-hidden="true">XP today</span></div><div>
             <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
-            <h1>Today's 5-minute blitz</h1>
             <p>${streak > 0 ? `You're on a <b>${streak}-day</b> streak. Keep it alive.` : `Start your streak today &mdash; just 5 minutes.`}${freezeBit}${readChip}</p>
           </div></div>
         </div>
@@ -2105,13 +2109,13 @@ function renderHome() {
       </div>
       <aside class="today-side">
         ${weekChartHTML()}
+        ${questCard}
         ${weakCard}
       </aside>
     </div></div>`;
 
   el("#startBtn").addEventListener("click", primary.run);
   el("#pickOther").addEventListener("click", () => go("#/practice"));
-  el("#drill3")?.addEventListener("click", startWeakSpots);
   document.querySelectorAll(".deckseg [role=radio]").forEach((b) => b.addEventListener("click", () => {
     if (b.getAttribute("aria-checked") === "true") return;
     safeSet("sd_mode", b.dataset.deck === "flash" ? "flash" : "quiz");
@@ -9314,12 +9318,19 @@ function maybeShowNudge() {
   o.className = "nudge-toast"; o.id = "nudgeToast";
   o.setAttribute("role", "status");
   o.innerHTML = `<span>Your ${streak}-day streak ends at midnight. Ten questions cover it.</span>
+    <button class="nudge-start" id="nudgeStart">Start</button>
     <button class="nudge-dismiss" id="nudgeDismiss" aria-label="Dismiss">&times;</button>`;
   document.body.appendChild(o);
-  el("#nudgeDismiss").addEventListener("click", () => {
+  const dismiss = () => {
     const c = loadCoach(); c.nudgedOn = todayISO(); saveCoach(c);
     o.classList.add("out");
     setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
+  };
+  el("#nudgeDismiss").addEventListener("click", dismiss);
+  el("#nudgeStart").addEventListener("click", () => {
+    dismiss();
+    if (dueReviews().length) startReview();
+    else startBlitz(pickSection());
   });
 }
 /* ---------- end [D] Coach ---------- */

@@ -152,9 +152,11 @@ and `scripts/prerender_diagrams.sh`, then publishes the whole repo root to Pages
 - **Reboarding** — a >2-day gap replaces the suggested card with a calm "the reviews kept
   your place" card.
 - **Weekly debrief**: `#/debrief`, XP per day, the week's deltas, a held-memory highlight,
-  and three generated quests. Each quest chip (also on Home) starts the deck that moves it.
+  and three generated quests. Each quest chip (also in Home's Weekly quests card) starts
+  the deck that moves it.
 - **Streak nudge** — a same-day "you haven't played" toast, re-checked whenever the tab
-  regains visibility (there is no OS scheduler on Pages).
+  regains visibility (there is no OS scheduler on Pages). Its Start button runs the same
+  pick as Home: review when anything is due, else today's section.
 
 ### The reader (One Dark)
 

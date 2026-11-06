@@ -429,6 +429,8 @@ button:active { transform: scale(0.98); }
   font-family: var(--mono); font-size: 0.9375rem; font-weight: 800;
 }
 .goal-txt span { font-size: 0.625rem; color: var(--muted); font-weight: 600; }
+.goal-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 0 0 auto; }
+.goal-cap { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
 
 /* spaced-repetition / weak-spot cards */
 .review-card {
@@ -1939,7 +1941,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
    with no primary navigation at all. */
 @media (max-width: 46.99rem) {
   main { padding-bottom: calc(40px + var(--tabbar-h)); }
-  .toast, .nudge-toast { bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom)); }
   #tabbar { display: flex; }
   /* sticky quiz actions ride just above the tab bar */
   .qactions {
@@ -2667,11 +2669,12 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 .quest-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .quest-chip {
   display: flex; flex-direction: column; gap: 5px; min-width: 168px; flex: 1 1 168px;
-  padding: 10px 14px; border-radius: var(--radius-sm); text-align: left;
+  padding: 10px 14px; border-radius: var(--radius-sm); text-align: left; align-items: stretch;
   background: var(--glass); border: 1px solid var(--glass-brd);
 }
 .quest-chip:not(:disabled):hover { border-color: var(--glass-brd-hi); background: var(--glass-2); }
 .quest-chip:disabled { cursor: default; }
+.side-card .quest-row { margin: 0; }
 .quest-chip.done { border-color: color-mix(in srgb, var(--good) 55%, transparent); }
 .qc-text { font-size: var(--fs-sm); color: var(--text); }
 .quest-chip.done .qc-text::before { content: "\2713  "; color: var(--good); }
@@ -2715,22 +2718,30 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 
 /* same-day streak nudge: dismissible glass bar, bottom of viewport */
 .nudge-toast {
-  position: fixed; left: calc(50% + var(--nav-inset) / 2); bottom: 22px; transform: translateX(-50%);
+  position: fixed; left: var(--nav-inset); right: 0; margin-inline: auto; width: fit-content; bottom: 22px;
   display: flex; align-items: center; gap: 14px; z-index: 80; max-width: min(92dvw, 420px);
   padding: 12px 12px 12px 18px; border-radius: 999px;
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
   box-shadow: var(--shadow), var(--glass-hilite);
-  font-size: var(--fs-md); color: var(--text); animation: nudge-in 0.3s var(--ease-out);
+  font-size: var(--fs-md); color: var(--text); animation: nudge-up 0.3s var(--ease-out);
 }
-.nudge-toast.out { animation: nudge-in 0.2s ease reverse forwards; }
+.nudge-toast.out { animation: nudge-up 0.2s ease reverse forwards; }
 .nudge-dismiss {
   flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--glass-brd-hi);
   /* px ON PURPOSE: 16px glyph in a fixed 26px circle is already ~62% fill. */
   background: transparent; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer;
 }
 .nudge-dismiss:hover { color: var(--text); background: var(--glass); }
+.nudge-start {
+  flex: 0 0 auto; padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: var(--fs-sm);
+  color: var(--accent-ink); background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
 @keyframes nudge-in { from { opacity: 0; transform: translateX(-50%) translateY(14px); } }
+@keyframes nudge-up { from { opacity: 0; transform: translateY(14px); } }
+@media (max-width: 46.99rem) {
+  .nudge-toast { bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom)); max-width: calc(100% - 32px); border-radius: var(--radius); }
+}
 @media (prefers-reduced-motion: reduce) {
   .nudge-toast, .nudge-toast.out { animation: none; }
   .qc-bar i { transition: none; }
@@ -3407,7 +3418,7 @@ body.nav-hidden #tabbar { display: none !important; }
 @container (min-width: 44rem) { .today-cols { grid-template-columns: 1.35fr 1fr; } }
 
 .today-hero { text-align: left; margin: 0 0 16px; }
-.today-hero .hero-row { justify-content: flex-start; }
+.today-hero .hero-row { justify-content: flex-start; flex-wrap: nowrap; }
 .primary-card { margin: 0 0 16px; }
 .pc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .pc-title { font-size: 1.6875rem; line-height: 1.15; letter-spacing: -0.02em; margin: 8px 0 4px; font-weight: 750; }
@@ -3430,9 +3441,6 @@ body.nav-hidden #tabbar { display: none !important; }
 .wr-title { display: block; font-size: var(--fs-md); font-weight: 600; color: var(--text); }
 .wr-sub { display: block; font-size: var(--fs-sm); color: var(--muted); margin-top: 2px; }
 .wr-go { flex: 0 0 auto; color: var(--accent-text); font-size: var(--fs-sm); font-weight: 700; }
-/* Rule 6 again: the "Enter ->" cue used to be deleted below 520px, leaving a row
-   with no signal that it is actionable. Let it shrink to the glyph instead. */
-@media (max-width: 32rem) { .wr-go { font-size: 0; } .wr-go::after { content: "\2192"; font-size: var(--fs-md); } }
 
 .more-nudges { margin: 4px 0 0; }
 .more-nudges > summary {
@@ -3518,8 +3526,7 @@ body.nav-hidden #tabbar { display: none !important; }
         --bp-rail   47rem  = --rail-w (13rem) + --measure (34rem)
                              "a rail and a legible column both fit"
         --bp-split  46rem  = the container query on .today-cols
-      Plus one density threshold at 40rem for phone typography, and 32rem for
-      the .wr-go glyph swap. Was SEVEN px thresholds — 420, 520, 639, 640, 899,
+      Plus one density threshold at 40rem for phone typography. Was SEVEN px thresholds — 420, 520, 639, 640, 899,
       899.98, 900 — whose near-duplicate pairs were the signature of numbers
       chosen to dodge device widths rather than derived from content.
    2. The operands are rem ON PURPOSE. The type scale is already rem; when every
