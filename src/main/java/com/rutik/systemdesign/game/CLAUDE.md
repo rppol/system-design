@@ -132,8 +132,9 @@ The `game/` directory is an application, not study content — see
   `questions/tech.json`.** Same philosophy as `build_diagrams.mjs` pre-rendering Mermaid
   to static SVG: `h` is the lowercase, pre-joined search haystack per tool (name + every
   citing module's title and blurb + the bank's authored short line and description — the
-  short line was never searchable before), `s` is the row's section list, and top-level
-  `secs`/`deep` replace a section sort and a whole-index pass over ~5,800 use-pairs. The
+  short line was never searchable before), `s` is the row's section list, top-level
+  `secs` lists the sections present (the select orders them with `sectionsInOrder()`), and
+  `deep` replaces a whole-index pass over ~5,800 use-pairs. The
   `trade` array arrives sorted by section then `STUDY_ORDER` position, so the runtime sort
   is a stable no-op. **Deliberately left at runtime:** the tradeoff tab's own haystack
   (+53.5 KB gzip to save ~1.7 ms) and every facet count — `tierCounts`/`roleCounts` depend

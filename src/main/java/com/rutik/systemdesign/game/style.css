@@ -337,7 +337,7 @@ main { flex: 1; width: 100%; max-width: 48.75rem; margin: 0 auto; padding: 30px 
 .brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 .brand span { color: var(--accent); }
 .brand .byline { color: var(--muted); font-family: var(--mono); font-weight: 500; font-size: 0.6875rem; letter-spacing: 0; margin-left: 8px; }
-.stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.stats { display: flex; align-items: center; gap: 12px; justify-content: flex-end; min-width: 0; }
 .stats > * { min-width: 0; }
 .stat { display: flex; align-items: center; gap: 6px; font-size: 0.875rem; color: var(--muted); }
 .stat b { font-family: var(--mono); font-size: 0.875rem; color: var(--text); font-variant-numeric: tabular-nums; }
@@ -3379,6 +3379,7 @@ body.nav-hidden #tabbar { display: none !important; }
 /* Rule 6: never hide content by width alone. The level used to disappear from
    the day chip below 420px; now it truncates and keeps its tooltip instead. */
 .dc-lvl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#lvlTitle.pop { display: inline; }   /* an inline-block title would vanish whole instead of truncating */
 
 /* --- sub-navigation (a real route, not local state) ---------------------- */
 .subnav {
@@ -3393,6 +3394,7 @@ body.nav-hidden #tabbar { display: none !important; }
 .subtab:hover { color: var(--text); }
 .subtab.on { background: var(--glass-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--glass-brd); }
 .sub-n { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--accent-text); }
+@media (max-width: 22.5rem) { .subtab { padding-inline: 9px; } }
 
 /* --- breadcrumb ---------------------------------------------------------- */
 .crumb { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; font-size: var(--fs-sm); }

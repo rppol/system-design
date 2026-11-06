@@ -71,6 +71,13 @@ const SECTION_GROUPS = [
   ["Infrastructure", ["devops", "technologies"]],
   ["Domains and Career", ["fintech", "soft_skills", "book"]],
 ];
+function sectionGroups() {
+  const secs = state.index.sections, grouped = SECTION_GROUPS.flatMap(([, ss]) => ss);
+  return [...SECTION_GROUPS, ["Other", Object.keys(secs).filter((s) => !grouped.includes(s)).sort()]]
+    .map(([name, ss]) => [name, ss.filter((s) => s in secs)])
+    .filter(([, ss]) => ss.length);
+}
+const sectionsInOrder = () => sectionGroups().flatMap(([, ss]) => ss);
 
 // The book section nests one level deeper than every other section: module ids are
 // book/<book_slug>/<chapter>. These labels drive the per-book Study picker
@@ -78,8 +85,8 @@ const SECTION_GROUPS = [
 // book group headers in the reader's module sidebar.
 const BOOK_LABELS = {
   designing_data_intensive_applications: { name: "Designing Data-Intensive Applications", author: "Kleppmann", short: "DDIA" },
-  system_design_interview_vol_1: { name: "System Design Interview — Vol 1", author: "Xu", short: "SDI Vol 1" },
-  system_design_interview_vol_2: { name: "System Design Interview — Vol 2", author: "Xu & Lam", short: "SDI Vol 2" },
+  system_design_interview_vol_1: { name: "System Design Interview, Vol 1", author: "Xu", short: "SDI Vol 1" },
+  system_design_interview_vol_2: { name: "System Design Interview, Vol 2", author: "Xu & Lam", short: "SDI Vol 2" },
   machine_learning_system_design_interview: { name: "ML System Design Interview", author: "Aminian & Xu", short: "ML SDI" },
   designing_machine_learning_systems: { name: "Designing Machine Learning Systems", author: "Huyen", short: "DMLS" },
   understanding_distributed_systems: { name: "Understanding Distributed Systems", author: "Vitillo", short: "UDS" },
@@ -1023,17 +1030,17 @@ function toggleHelp() {
   o.innerHTML = `<div class="help-card">
     <h2 class="help-h2">Keyboard shortcuts</h2>
     <div class="help-cols">
-      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}${row("D", "Double down")}</div>
-      <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
+      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("1", "Sure")}${row("2", "Not sure")}${row("Space", "Show options (recall)")}${row("↵", "Next")}${row("E", "Explain back")}${row("S", "Skip for now")}${row("D", "Double down")}${row("Esc", "Pause or leave")}</div>
+      <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed")}${row("2", "Hard")}${row("3", "Easy")}${row("E", "Explain back")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
       <div><h3>Everywhere</h3>${row("Cmd/Ctrl+K /", "Search everything")}${row("[", "Collapse the rail")}${row("?", "This help")}</div>
     </div>
     <h2 class="help-h2">How LORA works</h2>
     <div class="help-cols help-mech">
-      <div><h3>Review</h3><p>Every question you answer is scheduled to come back. Get it right and the gap grows (1 day, then 3, then multiplying); get it wrong and it resets to tomorrow. Answering while unsure grows the gap more slowly on purpose &mdash; that is the point, not a penalty.</p></div>
+      <div><h3>Review</h3><p>Every question you answer is scheduled to come back. Get it right and the gap grows (1 day, then 3, then multiplying); get it wrong and it resets to tomorrow. Answering while unsure grows the gap more slowly on purpose. That is the point, not a penalty.</p></div>
       <div><h3>Gauntlet</h3><p>Ten questions, rebuilt once a day and sealed after your scored attempt. The mix is fixed: your oldest-due reviews first, then your suggested and weakest sections, then one harder finisher. Replay any time as unscored practice.</p></div>
-      <div><h3>XP and level</h3><p>10 XP per correct answer, plus 5 for each step of an answer streak, plus boss and double-down bonuses. Your level is total XP &divide; 250.</p></div>
+      <div><h3>XP and level</h3><p>10 XP per correct answer. Three in a row doubles it and five in a row triples it. Recall mode pays 1.5&times; and boss questions pay 2&times;. Comebacks and double downs add bonuses. Your level is total XP &divide; 250, plus 1.</p></div>
       <div><h3>Streak and freezes</h3><p>A streak counts days you studied, not days in a row you were perfect. Miss a day and a freeze covers it automatically, if you have one.</p></div>
     </div>
     <p class="help-hint">Press <kbd>?</kbd> anytime &middot; mouse back/forward buttons navigate too<span class="touch-hint"> &middot; more options live behind the &#8943; button on phones</span></p>
@@ -1355,7 +1362,7 @@ function safeSet(key, val) {
   catch {
     if (!_quotaWarned) {
       _quotaWarned = true;
-      showToast("Storage is full — progress may not save. Export a backup from Progress.", 6000);
+      showToast("Storage is full, so progress may not save. Export a backup from Progress.", 6000);
     }
     return false;
   }
@@ -1689,7 +1696,7 @@ function updateLevelRing() {
   if (chip) {
     const lvl = levelFromXP(state.progress.totalXP);
     chip.setAttribute("role", "img");
-    chip.setAttribute("aria-label", `Level ${lvl} — ${titleForLevel(lvl)}. ${Math.round(pct * 100)}% to next level`);
+    chip.setAttribute("aria-label", `Level ${lvl}, ${titleForLevel(lvl)}. ${Math.round(pct * 100)}% to next level`);
   }
 }
 
@@ -1799,37 +1806,32 @@ function renderPractice(view) {
   };
 
   if (view === "sections") {
-    // Sorted by mastery ASCENDING, not alphabetically: the number is already
-    // computed and the weakest section is the one worth opening. A never-started
-    // section has no mastery to be low, so it sorts AFTER the scored ones rather
-    // than masquerading as the weakest thing you know.
     let lastMastery = {};
     try { lastMastery = JSON.parse(localStorage.getItem("sd_last_mastery")) || {}; } catch { /* first visit */ }
     const curMastery = {};
-    const rows = Object.keys(secs).map((s) => {
-      const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
-      return { s, acc: st.seen ? st.correct / st.seen : null };
-    }).sort((a, b) => (a.acc === null) - (b.acc === null) || ((a.acc ?? 0) - (b.acc ?? 0)));
     const suggested = state.today && state.today.section;
-    body = `<div class="grid practice-grid">${rows.map(({ s, acc }) => {
-      const pct = acc === null ? null : Math.round(acc * 100);
+    const tile = (s) => {
+      const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
+      const pct = st.seen ? Math.round((st.correct / st.seen) * 100) : null;
       if (pct !== null) curMastery[s] = pct;
       const deltaClass = (pct !== null && lastMastery[s] != null && lastMastery[s] !== pct) ? " mastery-delta" : "";
       const passChip = (p.awards && (p.awards["interview_" + s] || p.awards["panel_" + s]))
         ? `<span class="c-chip pass sm">Passed</span>` : "";
       return `<button class="tile${s === suggested ? " suggested" : ""}${deltaClass}" data-section="${s}">
           <span class="tname">${esc(label(s))}${passChip}</span>
-          <span class="tmeta">${secs[s]} Qs &middot; ${pct === null ? "new" : pct + "% mastery"}</span>
+          <span class="tmeta">${secs[s]} Qs &middot; ${pct === null ? "new" : pct + "% accuracy"}</span>
           ${pct === null ? "" : `<span class="tbar"><i style="width:${pct}%"></i></span>`}
         </button>`;
-    }).join("")}</div>`;
+    };
+    body = sectionGroups().map(([name, ss]) =>
+      `<h3 class="sec-group">${esc(name)}</h3><div class="grid sec-grid practice-grid">${ss.map(tile).join("")}</div>`).join("");
     safeSet("sd_last_mastery", JSON.stringify(curMastery));
   }
 
   if (view === "due") {
     const due = dueReviews();
     if (!due.length) {
-      body = `<p class="hm-empty">Nothing due. Reviews appear here the day they come round &mdash; answer a blitz to start scheduling them.</p>${blitzCta()}`;
+      body = `<p class="hm-empty">Nothing due. Reviews appear here the day they come round. Answer a blitz to start scheduling them.</p>${blitzCta()}`;
     } else {
       const rounds = Math.ceil(due.length / deckLen());
       const bySec = {};
@@ -1838,7 +1840,7 @@ function renderPractice(view) {
       const dueTomorrow = Object.values(p.reviews || {}).filter((r) => r.due === tomorrow).length;
       body = `<div class="topic-card">
           <div class="eyebrow good">Spaced repetition</div>
-          <h2>${due.length} due &mdash; ${rounds} round${rounds === 1 ? "" : "s"} clears it</h2>
+          <h2>${due.length} due, cleared in ${rounds} round${rounds === 1 ? "" : "s"}</h2>
           <p class="msg">Resurface what you have missed before it fades.</p>
           <div class="due-chips">${Object.entries(bySec).sort((a, b) => b[1] - a[1])
           .map(([s, n]) => `<span class="due-chip">${esc(label(s))} <b>${n}</b></span>`).join("")}</div>
@@ -1860,14 +1862,14 @@ function renderPractice(view) {
             <span class="tbar"><i style="width:${pct}%"></i></span>
             <span class="wr-pct">${pct}%</span></div>`;
       }).join("")}</div>
-        <button class="cta" id="pracWeak">Drill the bottom three<small>${deckLen()} questions from your lowest-mastery sections</small></button>`
-      : `<p class="hm-empty">Answer at least five questions in a section and its mastery shows up here.</p>${blitzCta()}`;
+        <button class="cta" id="pracWeak">Drill the bottom three<small>${deckLen()} questions from your lowest-accuracy sections</small></button>`
+      : `<p class="hm-empty">Answer at least five questions in a section and its accuracy shows up here.</p>${blitzCta()}`;
     if (topPair) {
       const [ma, mb] = topPair.k.split("|");
       body += `<button class="review-card confuse" id="pracConfuse">
           <div><div class="eyebrow warn">Confusion spotted</div>
           <h2>You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}</h2>
-          <p class="msg">Missed ${topPair.n}&times; by picking one when the other was right &mdash; drill the pair.</p></div>
+          <p class="msg">Missed ${topPair.n}&times; by picking one when the other was right. Drill the pair.</p></div>
           <span class="review-go warn">Drill &rarr;</span>
         </button>`;
     }
@@ -1884,8 +1886,8 @@ function renderPractice(view) {
       return { s, tier, st, acc, open, near: open ? 2 : Math.min(st.seen / need.seen, 1) * Math.min(acc / need.acc, 1) };
     }).sort((a, b) => b.near - a.near).map(({ s, tier, st, acc, open }) => {
       const passed = awards["interview_" + s] || awards["panel_" + s];
-      const stateTxt = tier === "gold" ? "Panel unlocked &mdash; 12 advanced questions, one HP bar."
-        : tier === "silver" ? "Interviewer unlocked &mdash; core to advanced escalation."
+      const stateTxt = tier === "gold" ? "Panel unlocked: 12 advanced questions, one HP bar."
+        : tier === "silver" ? "Interviewer unlocked: core to advanced escalation."
           : `${Math.min(st.seen, need.seen)}/${need.seen} seen${st.seen ? ` &middot; ${Math.round(acc * 100)}%` : ""} (need ${Math.round(need.acc * 100)}%)`;
       return `<button class="iv-card${open ? "" : " locked"}" data-route="${open ? "#/interview/" : "#/topics/"}${s}">
           <span class="iv-name">${esc(label(s))}${passed ? ` <span class="c-chip pass sm">Passed</span>` : ""}</span>
@@ -1902,7 +1904,7 @@ function renderPractice(view) {
     ${subnavHTML(practiceTabs(), view)}
     ${body}`;
   wireSubnav();
-  announce("Practice — " + view);
+  announce("Practice: " + view);
   document.querySelectorAll(".practice-grid .tile").forEach((b) => {
     b.addEventListener("click", () => go("#/topics/" + b.dataset.section));
     b.addEventListener("pointerenter", () => prefetchBank(b.dataset.section), { once: true });
@@ -1970,9 +1972,9 @@ function renderHome() {
       eyebrow: "Coach", cls: "",
       title: `It&rsquo;s been ${reboard.days} days.`,
       body: reboard.dueCount
-        ? `Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting; the oldest ${Math.min(reboard.dueCount, deckLen())} take about ${estMinutes(deckLen())} minutes.`
-        : `Doesn&rsquo;t matter &mdash; the reviews kept your place. Nothing waiting, so ${esc(label(section))} picks up the rotation.`,
-      cta: reboard.dueCount ? "Start review" : `Start &mdash; ${deckLen()} questions`,
+        ? `Doesn&rsquo;t matter. The reviews kept your place. ${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting; the oldest ${Math.min(reboard.dueCount, deckLen())} take about ${estMinutes(deckLen())} minutes.`
+        : `Doesn&rsquo;t matter. The reviews kept your place. Nothing waiting, so ${esc(label(section))} picks up the rotation.`,
+      cta: reboard.dueCount ? "Start review" : `Start ${deckLen()} questions`,
       ctaSub: `${reboard.dueCount ? Math.min(reboard.dueCount, deckLen()) : deckLen()} questions &middot; ~${estMinutes(deckLen())} min`,
       run: () => (reboard.dueCount ? startReview() : startBlitz(section)),
     };
@@ -1981,8 +1983,8 @@ function renderHome() {
     const rounds = Math.ceil(due.length / deckLen());
     primary = {
       eyebrow: "Spaced repetition", cls: "good",
-      title: `${due.length} due &mdash; ${rounds} round${rounds === 1 ? "" : "s"} clears it`,
-      body: `${take} of them come up in this round &mdash; every one is a question you have already answered, resurfaced on the day it was about to fade. About ${estMinutes(take)} minutes.`,
+      title: `${due.length} due, cleared in ${rounds} round${rounds === 1 ? "" : "s"}`,
+      body: `${take} of them come up in this round. Every one is a question you have already answered, resurfaced on the day it was about to fade. About ${estMinutes(take)} minutes.`,
       cta: "Start review", ctaSub: `${take} questions &middot; ${flash ? "flashcards" : "multiple choice"}`,
       run: () => startReview(),
     };
@@ -1990,8 +1992,8 @@ function renderHome() {
     primary = {
       eyebrow: whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today", cls: "",
       title: esc(label(section)),
-      body: `${esc((state.today && state.today.message) || `${deckLen()} questions pulled from your ${label(section)} notes.`)} All ${deckLen()} are new to this round &mdash; about ${estMinutes(deckLen())} minutes.`,
-      cta: `Start &mdash; ${deckLen()} questions`, ctaSub: `~${estMinutes(deckLen())} min &middot; ${flash ? "flashcards" : "multiple choice"}`,
+      body: `${esc((state.today && state.today.message) || `${deckLen()} questions pulled from your ${label(section)} notes.`)} All ${deckLen()} are new to this round, about ${estMinutes(deckLen())} minutes.`,
+      cta: `Start ${deckLen()} questions`, ctaSub: `~${estMinutes(deckLen())} min &middot; ${flash ? "flashcards" : "multiple choice"}`,
       run: () => startBlitz(section),
     };
   }
@@ -2022,7 +2024,7 @@ function renderHome() {
       title: "Today's Gauntlet", sub: "Sealed &middot; 10 questions, one attempt, one score.", run: () => go("#/gauntlet") };
   if (!sealed) rows.push(gauntletRow);
   if (debriefReady()) rows.push({ id: "debrief", mark: "&#9635;", short: "Weekly debrief", verb: "Open",
-    title: "Debrief ready", sub: "Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.", run: () => go("#/debrief") });
+    title: "Weekly debrief ready", sub: "Your week, summarized: deltas, a held-memory highlight, three quests for next week.", run: () => go("#/debrief") });
 
   const mstats = moduleStats(p);
   const t7 = toISO(isoAdd(new Date(todayISO() + "T00:00:00"), 7));
@@ -2047,7 +2049,7 @@ function renderHome() {
   }
   const worst = weakSections().filter((x) => x.acc < 0.7)[0];
   if (worst) rows.push({ id: "weak", mark: "&#9662;", short: "weak spots", verb: "Drill",
-    title: "Drill your weak spots", sub: `Lowest mastery: <b>${esc(label(worst.s))}</b> at ${Math.round(worst.acc * 100)}%.`, run: startWeakSpots });
+    title: "Drill your weak spots", sub: `Lowest accuracy: <b>${esc(label(worst.s))}</b> at ${Math.round(worst.acc * 100)}%.`, run: startWeakSpots });
   const rusty = rustiestSection();
   if (rusty) rows.push({ id: "rusty", mark: "&#8635;", short: `${esc(label(rusty.s))} going rusty`, verb: "Practice",
     title: `${esc(label(rusty.s))} is getting rusty`, sub: `${rusty.days} days since you practiced it.`, run: () => startBlitz(rusty.s) });
@@ -2061,7 +2063,7 @@ function renderHome() {
   const shown = rows.slice(0, 2), rest = rows.slice(2);
   const disclosure = rest.length ? `
     <details class="more-nudges">
-      <summary>${rest.length} more nudge${rest.length === 1 ? "" : "s"} &mdash; ${rest.map((r) => r.short).join(", ")}</summary>
+      <summary>${rest.length} more nudge${rest.length === 1 ? "" : "s"}: ${rest.map((r) => r.short).join(", ")}</summary>
       <div class="nudge-body">${rest.map(rowHTML).join("")}</div>
     </details>` : "";
 
@@ -2088,7 +2090,7 @@ function renderHome() {
         <div class="hero today-hero">
           <div class="hero-row"><div class="goal-wrap">${goalRing()}<span class="goal-cap" aria-hidden="true">XP today</span></div><div>
             <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
-            <p>${streak > 0 ? `You're on a <b>${streak}-day</b> streak. Keep it alive.` : `Start your streak today &mdash; just 5 minutes.`}${freezeBit}${readChip}</p>
+            <p>${streak > 0 ? `You're on a <b>${streak}-day</b> streak. Keep it alive.` : `Start your streak today. It takes about ${estMinutes(deckLen())} minutes.`}${freezeBit}${readChip}</p>
           </div></div>
         </div>
         <div class="topic-card primary-card">
@@ -2335,7 +2337,7 @@ async function openTopics(section) {
     `<button class="lenopt${deckLen() === n ? " on" : ""}" role="radio" aria-checked="${deckLen() === n}" data-len="${n}">${n}</button>`).join("");
   app.innerHTML = `
     ${crumbHTML([{ label: "Practice", route: "#/practice" }, { label: label(section) }])}
-    <div class="hero"><h1>${esc(label(section))}</h1><p>Pick the sub-topics to drill &mdash; or keep them all.</p></div>
+    <div class="hero"><h1>${esc(label(section))}</h1><p>Pick the sub-topics to drill, or keep them all.</p></div>
     <div class="topicbar">
       <button class="ghost" id="allBtn">Select all</button>
       <button class="ghost" id="noneBtn">Clear</button>
@@ -2670,7 +2672,7 @@ async function startReview() {
     }
   }
   if (!items.length) {
-    showToast(loadFailed ? "Couldn't load questions — check your connection." : "Nothing due right now.");
+    showToast(loadFailed ? "Couldn't load questions. Check your connection." : "Nothing due right now.");
     redispatch(); return;
   }
   state.section = "review"; state.modules = null;
@@ -2703,7 +2705,7 @@ async function startWeakSpots() {
   const weak = weakSections().filter((x) => x.acc < 0.7).slice(0, 4);
   const pool = (weak.length ? weak : weakSections().slice(0, 3));
   if (!pool.length) {
-    showToast("Not enough data for weak spots yet — play a few rounds first.");
+    showToast("Not enough data for weak spots yet. Play a few rounds first.");
     redispatch(); return;
   }
   const reviews = state.progress.reviews || {};
@@ -2726,7 +2728,7 @@ async function startWeakSpots() {
   for (const p of pool) if (banks[p.s]) filler.push(...banks[p.s]);
   shuffle(filler).forEach((q) => { if (items.length < deckLen()) add(q); });
   if (!items.length) {
-    showToast(loadFailed ? "Couldn't load questions — check your connection." : "Not enough data for weak spots yet — play a few rounds first.");
+    showToast(loadFailed ? "Couldn't load questions. Check your connection." : "Not enough data for weak spots yet. Play a few rounds first.");
     redispatch(); return;
   }
   state.section = "weakspots"; state.modules = null;
@@ -2747,7 +2749,7 @@ async function startConfusionDrill(key) {
     else loadFailed = true;
   }
   if (!items.length) {
-    showToast(loadFailed ? "Couldn't load questions — check your connection." : "No confusion pairs tracked yet.");
+    showToast(loadFailed ? "Couldn't load questions. Check your connection." : "No confusion pairs tracked yet.");
     redispatch(); return;
   }
   const picked = shuffle(items).slice(0, deckLen());
@@ -2776,7 +2778,7 @@ async function startRefresh(ids) {
     for (const id of bySec[sec]) { const q = byId.get(id); if (q) items.push(q); }
   }
   if (!items.length) {
-    showToast(loadFailed ? "Couldn't load questions — check your connection." : "Nothing is fading right now.");
+    showToast(loadFailed ? "Couldn't load questions. Check your connection." : "Nothing is fading right now.");
     redispatch(); return;
   }
   state.section = "refresh"; state.modules = null;
@@ -2900,7 +2902,7 @@ function runExplainBack(det, item) {
     floatXP(5, det);
   }
   resEl.innerHTML = `<div class="eb-score">Key terms covered: ${hit.length}/${concepts.length}${bonus}</div>
-      <div class="eb-echo">${echoed || "&mdash;"}</div>
+      <div class="eb-echo">${echoed || "(nothing written)"}</div>
       <div class="eb-ans"><b>Model answer:</b> ${ans}</div>`;
 }
 
@@ -2929,14 +2931,14 @@ function flagForReview(item, btn) {
   reviews[item.q.id] = rv;
   safeSet("sd_progress", JSON.stringify(p));
   btn.classList.add("on"); btn.disabled = true; btn.title = "Flagged for review";
-  announce("Flagged — it'll appear in your next review.");
+  announce("Flagged. It'll appear in your next review.");
 }
 function copyQuestion(item, btn) {
   const text = `Q: ${item.q.question}\nA: ${item.q.answerFull}`;
   navigator.clipboard?.writeText(text).then(() => {
     btn.classList.add("ok");
     setTimeout(() => btn.classList.remove("ok"), 1400);
-  }).catch(() => announce("Couldn't copy — clipboard is blocked."));
+  }).catch(() => announce("Couldn't copy. The clipboard is blocked."));
 }
 
 /* ---------- session guard: pause / resume ---------- */
@@ -3206,7 +3208,7 @@ function renderQuestion() {
     if (n >= 3 && acc >= 0.7) { state._doubleDown = "offered"; state._doubleDownIdx = idx; state._doubleDownWager = bonusXpSoFar(); }
   }
   const ddBar = (state._doubleDown === "offered" && state._doubleDownIdx === idx && state._doubleDownWager > 0)
-    ? `<div class="dd-bar" id="ddBar">Double down &mdash; your bonus XP (<b>${state._doubleDownWager}</b>) rides on this one.
+    ? `<div class="dd-bar" id="ddBar">Double down? Your bonus XP (<b>${state._doubleDownWager}</b>) rides on this one.
          <button class="dd-yes" id="ddYes">Double down <kbd>D</kbd></button>
          <button class="dd-no" id="ddNo">No thanks</button>
        </div>` : "";
@@ -3254,7 +3256,7 @@ function renderQuestion() {
   if (state.interview) renderInterviewStage();
   else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
-  coachMark(".options", "Tap or press 1-4. Not sure? Skip — it returns as a lesson.", "first_question");   // [E1]
+  coachMark(".options", "Tap or press 1-4. Not sure? Skip it and it returns as a lesson.", "first_question");   // [E1]
 }
 
 // A3: reveal the hidden options for a recall-first (hard-deck) question. Leave
@@ -3307,7 +3309,7 @@ function renderTeach(item) {
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
       <span class="qright">${dotsHTML(idx)}</span>
     </div>
-    <div class="teach-chip">Concept preview &middot; you skipped this &mdash; learn it, we quiz you shortly</div>
+    <div class="teach-chip">Concept preview &middot; you skipped this. Learn it and we quiz you shortly</div>
     <div class="qtext teach-head">${qInline(q.questionMd || q.question)}</div>
     <div class="reveal concept show teach-concept">${clozeHTML(q.answerFullMd || q.answerFull, q.concepts)}${hasCloze ? `<div class="cloze-hint">Tap the blurred terms to reveal them</div>` : ""}</div>
     <div class="qactions">
@@ -3483,7 +3485,7 @@ function buildReveal(item, pickIdx, right, ctx) {
   // [A2] provenance is skipped for flip items — their options ARE questions.
   if (!right && !item.flip) {
     const src = distractorSource(q, opts[pickIdx]);
-    if (src) prov = `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.
+    if (src) prov = `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span>, from ${esc(src.moduleName)}.
       <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || modulePage(src.module))}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
   }
   rev.className = "reveal show" + (hyper ? " hyper" : "");
@@ -3491,7 +3493,7 @@ function buildReveal(item, pickIdx, right, ctx) {
   const recoveredChip = item._recovered ? `<span class="recovered-chip">Recovered.</span>` : "";
   const ddNote = item._ddOutcome
     ? `<div class="dd-outcome ${item._ddOutcome.win ? "win" : "lose"}">Double-down ${item._ddOutcome.win ? "paid" : "lost"}: ${item._ddOutcome.win ? "+" : "−"}${item._ddOutcome.amount}</div>` : "";
-  rev.innerHTML = `${recoveredChip}${ddNote}${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
+  rev.innerHTML = `${recoveredChip}${ddNote}${hyper ? `<div class="hyper-lead">High-confidence miss. Worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   // [E1] flag-for-review + copy-question icons, pinned to the top of the panel.
   rev.insertAdjacentHTML("afterbegin", revealActionsHTML(item));
@@ -3656,7 +3658,7 @@ async function finish(opts = {}) {
   // Only drop the resume snapshot once the save is confirmed — a quota failure
   // keeps the run resumable instead of losing it silently.
   if (saved !== false) clearOwnSnapshot();
-  else showToast("Couldn't save this session — storage is full. Your run is kept for resume; export a backup.", 8000);
+  else showToast("Couldn't save this session. Storage is full. Your run is kept for resume; export a backup.", 8000);
   const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
   const post = progressSnapshot();                 // (after the save)
   // [B] time capsules: returns that came due this session, and a new capsule on a
@@ -3678,7 +3680,7 @@ async function finish(opts = {}) {
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
   announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
-    ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
+    ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved. 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
   const backupNote = backupNudgeHTML();
   // [B] boss/comeback badges alongside the existing learned/combo ones.
   const bossItems = recorded.filter((d) => d.boss);
@@ -3691,13 +3693,13 @@ async function finish(opts = {}) {
   // [B] results reward moments: daily goal ring, elapsed stopwatch, streak-advance line.
   const goalRemain = Math.max(0, DAILY_XP_GOAL - post.todaysXp);
   const goalLineTxt = post.todaysXp >= DAILY_XP_GOAL
-    ? `Daily goal: complete &mdash; ${post.todaysXp} XP today`
-    : `Daily goal: ${post.todaysXp}/${DAILY_XP_GOAL} &mdash; ${goalRemain} to go`;
+    ? `Daily goal complete: ${post.todaysXp} XP today`
+    : `Daily goal: ${post.todaysXp}/${DAILY_XP_GOAL}, ${goalRemain} to go`;
   const mm = Math.floor(durationSec / 60), ss = durationSec % 60;
   const elapsedStr = `${mm}:${String(ss).padStart(2, "0")}`;
   const fastChip = durationSec > 0 && durationSec < 300 ? `<span class="fast-chip">under 5 minutes</span>` : "";
   const streakAdvanceLine = post.streak > pre.streak
-    ? `<p class="streak-advance">+${post.streak - pre.streak} day &mdash; ${post.streak}-day streak</p>` : "";
+    ? `<p class="streak-advance">+${post.streak - pre.streak} day, ${post.streak}-day streak</p>` : "";
   // [E1] Ghost: "vs you, <date>: 6/10 in 5:40 -> 9/10 in 4:12."
   const ghostLine = (ghostBest && durationSec > 0)
     ? `<p class="ghost-line">vs you, ${fmtDate(ghostBest.date)}: ${ghostBest.correct}/${ghostBest.answered} in ${Math.floor(ghostBest.durationSec / 60)}:${String(ghostBest.durationSec % 60).padStart(2, "0")} &rarr; ${correct}/${total} in ${elapsedStr}</p>`
@@ -3719,7 +3721,7 @@ async function finish(opts = {}) {
     let body = qInline(m.q.answerFullMd || m.q.answerFull);
     if (m.status === "wrong" && m.pickedOpt) {
       const src = distractorSource(m.q, m.pickedOpt);
-      if (src) body += `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.</div>`;
+      if (src) body += `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span>, from ${esc(src.moduleName)}.</div>`;
     }
     return `<details class="miss-item ${m.status}${m.redeemed ? " redeemed" : ""}">
         <summary class="miss-q">${qInline(m.q.correctMd || m.q.correct)}</summary>
@@ -3849,7 +3851,7 @@ async function queueMoments(pre, post, extra = []) {
     // [B] career ladder: crossing a title band gets a bigger celebration than a plain level-up.
     const preTitle = titleForLevel(pre.level), postTitle = titleForLevel(post.level);
     if (postTitle !== preTitle) {
-      list.push({ tier: "title", icon: ICON("bolt"), title: `Level ${post.level} — ${postTitle}`, sub: `You made ${postTitle}.`, play: () => { sfx.levelup(); confetti(); } });
+      list.push({ tier: "title", icon: ICON("bolt"), title: `Level ${post.level}: ${postTitle}`, sub: `You made ${postTitle}.`, play: () => { sfx.levelup(); confetti(); } });
     } else {
       list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
     }
@@ -3997,7 +3999,7 @@ function importProgress(file) {
     if (!confirm("Import this backup? It replaces all current progress in this browser.")) return;
     try {
       for (const k of BACKUP_KEYS) { if (blob.data[k] != null) localStorage.setItem(k, blob.data[k]); }
-    } catch { alert("Import failed — your browser storage may be full. Free up space and try again."); return; }
+    } catch { alert("Import failed. Your browser storage may be full. Free up space and try again."); return; }
     location.reload();
   };
   reader.readAsText(file);
@@ -4075,7 +4077,7 @@ function openMoreSheet() {
       <div class="more-actions">
         <button class="ghost" id="moreAppear">Appearance&hellip;</button>
         <button class="ghost" id="moreSearch">Search&hellip;</button>
-        <button class="ghost" id="moreHelp">Keyboard shortcuts</button>
+        <button class="ghost" id="moreHelp">Help</button>
         <button class="primary" id="moreClose">Done</button>
       </div>
       <p class="more-about">Built from your own repo &middot; ${esc(state.bankInfo || "")}</p>
@@ -4115,7 +4117,7 @@ function heatmapHTML(history) {
     cells += `<span class="hmcell hm-l${lvl}${gaunt}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP${gaunt ? " · gauntlet" : ""}" aria-hidden="true"></span>`;
   }
   const empty = !(history || []).length
-    ? `<p class="hm-empty">No activity yet &mdash; your first blitz lights up this grid.</p>` : "";
+    ? `<p class="hm-empty">No activity yet. Your first blitz lights up this grid.</p>` : "";
   const summary = `Activity, last ${WEEKS} weeks: ${activeDays} active day${activeDays === 1 ? "" : "s"}, ${totalXp} XP`;
   return `<h2 class="section-h">Activity</h2>
     <div class="heatmap-scroll"><div class="heatmap" role="img" aria-label="${esc(summary)}">${cells}</div></div>
@@ -4228,7 +4230,7 @@ function leechesHTML() {
   return `<div class="ins-card">
       <h3 class="ins-h">Your hardest questions</h3>
       <details class="leeches" id="leechDetails">
-        <summary>${ids.length} question${ids.length === 1 ? "" : "s"} missed 3+ times &mdash; expand to see them</summary>
+        <summary>${ids.length} question${ids.length === 1 ? "" : "s"} missed 3+ times</summary>
         <div class="leech-list" id="leechList"><div class="leech-note">Loading&hellip;</div></div>
         <button class="ghost" id="leechDrill">Drill these &rarr;</button>
       </details></div>`;
@@ -4263,7 +4265,7 @@ function calibrationHTML() {
     const over = sureAcc != null && unsureAcc != null && sureAcc < unsureAcc;
     rows.push(`<div class="cal-row">
         <span class="cal-sec">${esc(label(s))}${over ? ` <span class="warn-chip">overconfident</span>` : ""}</span>
-        <span class="cal-val">When sure: <b>${sureAcc == null ? "&mdash;" : sureAcc + "%"}</b> &middot; When unsure: <b>${unsureAcc == null ? "&mdash;" : unsureAcc + "%"}</b></span>
+        <span class="cal-val">When sure: <b>${sureAcc == null ? "n/a" : sureAcc + "%"}</b> &middot; When unsure: <b>${unsureAcc == null ? "n/a" : unsureAcc + "%"}</b></span>
       </div>`);
   }
   if (!rows.length) return "";
@@ -4310,7 +4312,7 @@ function sessionLogHTML() {
   if (!h.length) return "";
   const rows = h.map((e) => {
     const secs = e.durationSec || 0, mm = Math.floor(secs / 60), ss = secs % 60;
-    const dur = secs > 0 ? `${mm}:${String(ss).padStart(2, "0")}` : "&mdash;";
+    const dur = secs > 0 ? `${mm}:${String(ss).padStart(2, "0")}` : "n/a";
     return `<div class="log-row">
         <span class="log-date">${fmtDate(e.date)}</span>
         <span class="log-sec">${esc(label(e.section))}</span>
@@ -4387,7 +4389,7 @@ function palVerbs() {
   if (readDeckSnapshot()) out.push({ label: "Resume blitz", hint: "Continue", run: () => resumeDeck() });
   out.push({ label: `Start review${due ? ` (${due} due)` : ""}`, hint: "Continue", typed: !due, run: () => startReview() });
   for (const [l, r] of [["Today", "#/home"], ["Practice", "#/practice"], ["Study", "#/study"], ["Tech", "#/tech"],
-    ["Progress", "#/progress"], ["Codex", "#/codex"], ["Debrief", "#/debrief"], ["Gauntlet", "#/gauntlet"]])
+    ["Progress", "#/progress"], ["Codex", "#/codex"], ["Weekly debrief", "#/debrief"], ["Gauntlet", "#/gauntlet"]])
     out.push({ label: l, hint: "Go to", run: () => go(r) });
   out.push({ label: "Insights", hint: "Go to", typed: true, run: () => go("#/insights") });
   out.push({ label: "Weak spots", hint: "Action", run: () => startWeakSpots() });
@@ -4573,7 +4575,7 @@ function renderProgress(view) {
       solid.length ? `Solid on ${listOf(solid)}.` : "",
       thin.length ? `Thin on ${listOf(thin)}.` : "",
       never.length ? `${never.length} section${never.length === 1 ? "" : "s"} you have never opened.` : "",
-    ].filter(Boolean).join(" ") || "Nothing measured yet — answer a blitz and this sentence fills in.";
+    ].filter(Boolean).join(" ") || "Nothing measured yet. Answer a blitz and this sentence fills in.";
 
     const slip = slippingModules();
     const slipHTML = slip.length ? `<div class="slip-list">${slip.map((m) => `
@@ -4585,9 +4587,7 @@ function renderProgress(view) {
       <button class="cta" id="slipCta">Build a session from these<small>${slip.reduce((n, m) => n + m.ids.length, 0)} questions across ${slip.length} modules</small></button>`
       : `<p class="hm-empty">Nothing slipping. Reviews you answer keep their intervals long.</p>`;
 
-    const grouped = SECTION_GROUPS.flatMap(([, ss]) => ss);
-    const order = [...grouped.filter((s) => s in secs), ...Object.keys(secs).filter((s) => !grouped.includes(s)).sort()];
-    const sectionRows = order.map((s) => {
+    const sectionRows = sectionsInOrder().map((s) => {
       const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
       const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : 0;
       const tier = sectionTier(st);
@@ -4628,7 +4628,7 @@ function renderProgress(view) {
     ${subnavHTML(progressTabs(), view)}
     ${body}`;
   wireSubnav();
-  announce("Progress — " + view);
+  announce("Progress: " + view);
   refreshStats();                                   // repoint the level ring at the card we just drew
   if (view === "overview") {
     el("#exportBtn").addEventListener("click", exportProgress);
@@ -4644,7 +4644,6 @@ function renderProgress(view) {
 function renderStudy() {
   state.inQuiz = false;
   refreshStats();
-  const secs = state.index.sections;
   let lastRead = null;
   try { lastRead = JSON.parse(localStorage.getItem("sd_last_read")); } catch { }
   const contCard = lastRead && lastRead.path
@@ -4663,15 +4662,11 @@ function renderStudy() {
        <span class="tmeta">${mods.filter((m) => anyFileRead(m.module)).length} of ${mods.length} read</span>
      </button>`;
   };
-  const grouped = new Set(SECTION_GROUPS.flatMap(([, ss]) => ss));
-  const other = Object.keys(secs).filter((s) => !grouped.has(s)).sort();
-  const tiles = [...SECTION_GROUPS, ["Other", other]]
-    .map(([name, ss]) => [name, ss.filter((s) => s in secs)])
-    .filter(([, ss]) => ss.length)
+  const tiles = sectionGroups()
     .map(([name, ss]) => `<h3 class="sec-group">${esc(name)}</h3><div class="grid sec-grid">${ss.map(tile).join("")}</div>`)
     .join("");
   app.innerHTML = `
-    <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
+    <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader. No quiz, no clock.</p></div>
     <div class="study-head"><button class="ghost" id="studyTech" title="Every tool this repo teaches, and where"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/></svg><span>Technologies</span></button><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
     ${contCard}
     <h2 class="section-h">Pick a section to browse its topics</h2>
@@ -4773,10 +4768,8 @@ async function renderTech() {
     return { t, m, sec: m.m.split("/")[0], so: soIndex(m.m),
       h: (techName(m) + " " + t.h.join(" ") + " " + t.r.map((r) => r.join(" ")).join(" ")).toLowerCase() };
   }).sort((a, b) => (secOrderIdx(a.sec) - secOrderIdx(b.sec)) || (a.so - b.so));
-  // Sections present in the index, in the app's canonical section order.
-  const secOrder = Object.keys(STUDY_ORDER);
-  const secsPresent = idx.secs || [...new Set(mods.map((m) => m.m.split("/")[0]))]
-    .sort((a, b) => (secOrder.indexOf(a) + 1 || 99) - (secOrder.indexOf(b) + 1 || 99));
+  const inIndex = new Set(idx.secs || mods.map((m) => m.m.split("/")[0]));
+  const secsPresent = sectionsInOrder().filter((s) => inIndex.has(s));
 
   // The hand-written PRODUCT deep dives, pinned above the derived index.
   // [[moduleIdx, toolCount], ...] emitted by extract.py -- this used to be a filter over
@@ -5048,7 +5041,7 @@ async function renderTech() {
         <div class="tx-tierroles">${t.roles.slice(0, 6).map((r) => {
           const rid = `${t.id}/${r.id}`;
           return `<button class="tx-minirole" data-role="${esc(rid)}"${rc.get(rid) ? "" : " disabled"}
-            title="${esc(r.label)} &mdash; ${rc.get(rid) || 0}">${esc(r.label)}</button>`;
+            title="${esc(r.label)}: ${rc.get(rid) || 0}">${esc(r.label)}</button>`;
         }).join("")}
           ${t.roles.length > 6 ? `<span class="tx-morerole">+${t.roles.length - 6}</span>` : ""}</div>
       </div>`; }).join("")}</div>`;
@@ -5079,7 +5072,7 @@ async function renderTech() {
     if (byFacet) bits.push(`${byFacet} by the problem area`);
     if (byLang) bits.push(`${byLang} by language`);
     if (byKind) bits.push(`${byKind} by kind`);
-    return `<p class="tx-empty">No match with these filters &mdash; ${bits.join(", ")} hidden.
+    return `<p class="tx-empty">No match with these filters. ${bits.join(", ")} hidden.
       <button class="ghost tx-widen" id="techWiden">Clear filters</button></p>`;
   }
 
@@ -5093,7 +5086,7 @@ async function renderTech() {
         const m = mods[uses[0][0]];
         return `<button class="tx-chip tx-tailchip" data-p="${esc(techPath(m))}"
           data-a="${esc(m.a[0] >= 0 ? idx.anchors[m.a[0]] : "")}"
-          title="${esc(techName(m))}${b && b.s ? " \u2014 " + b.s : ""}">${esc(r.n)}</button>`;
+          title="${esc(techName(m))}${b && b.s ? ": " + b.s : ""}">${esc(r.n)}</button>`;
       }).join("")}</div></details>`;
   }
 
@@ -5220,7 +5213,7 @@ async function renderTech() {
         const cols = Math.max(t.h.length, ...t.r.map((r) => r.length));
         const head = Array.from({ length: cols }, (_, c) => `<th>${esc(t.h[c] || "")}</th>`).join("");
         const body = t.r.map((r) => `<tr>${Array.from({ length: cols }, (_, c) =>
-          c === 0 ? `<th scope="row">${esc(r[0] || "")}</th>` : `<td>${esc(r[c] || "&mdash;")}</td>`).join("")}</tr>`).join("");
+          c === 0 ? `<th scope="row">${esc(r[0] || "")}</th>` : `<td>${esc(r[c] || "-")}</td>`).join("")}</tr>`).join("");
         return `<div class="tr-card" style="--tile-accent:${accentOf(sec)}">
           <button class="tr-head" data-p="${esc(techPath(m))}" data-a="${esc(anchor)}">
             <span class="tx-dot"></span>
@@ -5988,7 +5981,7 @@ async function openStudySection(sectionPath) {
     }
     setStudyPath(section, b.dataset.path);
     announce(b.dataset.path === "senior" ? "Senior path" : b.dataset.path === "principal" ? "Principal path"
-      : b.dataset.path === "cases" ? "Case Studies — read-only" : "Full path");
+      : b.dataset.path === "cases" ? "Case Studies (read-only)" : "Full path");
     openStudySection(section);                         // re-render with the new subset
   }));
   wireRadioGroup(el(".pathswitch"));
@@ -8944,7 +8937,7 @@ function reboardingInfo() {
 const WHY_CHIP = { new: "new territory", weak: "weak spot", least: "least practiced", rotation: "rotation" };
 const COACH_PRIORITY = ["firstEver", "comeback", "dueHigh", "streakMilestone", "goalStreak", "accDelta", "weekend", "byWhy"];
 const COACH_LINES = [
-  { id: "first1", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `First one. Ten questions, five minutes — start with ${label(c.section)}.` },
+  { id: "first1", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `First one. ${deckLen()} questions, about ${estMinutes(deckLen())} minutes. Start with ${label(c.section)}.` },
   { id: "first2", group: "firstEver", when: (c) => c.isFirstEver, text: () => `Nothing recorded yet. No baseline to protect, so just answer.` },
   { id: "first3", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `Day one. ${label(c.section)} is as good a place to start as any.` },
 
@@ -8956,7 +8949,7 @@ const COACH_LINES = [
   { id: "due2", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} due for review. That backlog doesn't shrink on its own.` },
   { id: "due3", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} questions waiting on review. Ten minutes there clears most of it.` },
 
-  { id: "sm1", group: "streakMilestone", when: (c) => c.freezeAway, text: (c) => `Day ${c.streak} — one more for a freeze token.` },
+  { id: "sm1", group: "streakMilestone", when: (c) => c.freezeAway, text: (c) => `Day ${c.streak}. One more for a freeze token.` },
   { id: "sm2", group: "streakMilestone", when: (c) => c.milesAway === 1, text: (c) => `One more day puts you at a ${c.nextMile}-day streak.` },
   { id: "sm3", group: "streakMilestone", when: (c) => c.milesAway != null && c.milesAway > 1 && c.milesAway <= 2, text: (c) => `${c.milesAway} days from a ${c.nextMile}-day streak.` },
 
@@ -8966,25 +8959,25 @@ const COACH_LINES = [
   { id: "ad1", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `Your ${label(c.accDelta.section)} accuracy climbed ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}.` },
   { id: "ad2", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `${label(c.accDelta.section)} is up ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}. That's real progress.` },
 
-  { id: "we1", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend or not, ten questions still count — ${label(c.section)}.` },
+  { id: "we1", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend or not, ${deckLen()} questions of ${label(c.section)} still count.` },
   { id: "we2", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend pace is fine. ${label(c.section)}, whenever you get to it.` },
   { id: "we3", group: "weekend", when: (c) => c.isWeekend, text: (c) => `No rush today. ${label(c.section)} will still be there in five minutes.` },
 
   { id: "new1", group: "byWhy", why: "new", when: () => true, text: (c) => `Untouched section. ${label(c.section)} has nothing recorded yet.` },
   { id: "new2", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} hasn't been touched. Today's as good a day as any.` },
   { id: "new3", group: "byWhy", why: "new", when: () => true, text: (c) => `Fresh ground: ${label(c.section)}. No baseline yet, so anything right is a start.` },
-  { id: "new4", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} is new territory. Ten questions sets the first baseline.` },
+  { id: "new4", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} is new territory. ${deckLen()} questions set the first baseline.` },
 
-  { id: "wk1", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} sits at ${c.acc}% over ${c.seen} questions — the softest spot right now.` },
+  { id: "wk1", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} sits at ${c.acc}% over ${c.seen} questions, the softest spot right now.` },
   { id: "wk2", group: "byWhy", why: "weak", when: () => true, text: (c) => `Lowest accuracy: ${label(c.section)} at ${c.acc}%. Ten more questions moves that number.` },
   { id: "wk3", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} is dragging at ${c.acc}%. Time to close the gap.` },
   { id: "wk4", group: "byWhy", why: "weak", when: () => true, text: (c) => `${c.acc}% in ${label(c.section)} after ${c.seen} questions. Worth the ten minutes.` },
 
-  { id: "ls1", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} has the fewest reps of anything you've touched — ${c.seen} so far.` },
+  { id: "ls1", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} has the fewest reps of anything you've touched: ${c.seen} so far.` },
   { id: "ls2", group: "byWhy", why: "least", when: () => true, text: (c) => `Least practiced: ${label(c.section)}, ${c.seen} questions in. Building the baseline.` },
   { id: "ls3", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} trails everything else on reps. Ten more closes some of that.` },
 
-  { id: "rot1", group: "byWhy", why: "rotation", when: () => true, text: (c) => `Back to ${label(c.section)} — every other section was touched more recently.` },
+  { id: "rot1", group: "byWhy", why: "rotation", when: () => true, text: (c) => `Back to ${label(c.section)}. Every other section was touched more recently.` },
   { id: "rot2", group: "byWhy", why: "rotation", when: () => true, text: (c) => `${label(c.section)} again. The rotation loops here until something else opens up.` },
 ];
 
@@ -9269,7 +9262,7 @@ function renderDebrief() {
         const best = bestSessionThisWeek(thisStartISO, thisEndISO);
         return best
           ? `Best session this week: <b>${Math.round((best.correct / best.answered) * 100)}%</b> in ${esc(label(best.section))} (${best.correct}/${best.answered}).`
-          : `Quiet week &mdash; no sessions recorded yet.`;
+          : `Quiet week. No sessions recorded yet.`;
       })();
 
   const headline = debriefHeadline(deltas, held);
@@ -9293,7 +9286,7 @@ function renderDebrief() {
     <h2 class="section-h">Weekly debrief &middot; ${day(thisStart)} to ${day(isoAdd(thisStart, 6))}</h2>
     <p class="prac-lede">${esc(headline)}</p>
     ${stripHTML}
-    <h2 class="section-h">Section deltas &mdash; this week vs last</h2>
+    <h2 class="section-h">Section deltas: this week vs last</h2>
     <div class="delta-list">${deltaHTML}</div>
     <h2 class="section-h">Moment of the week</h2>
     <p class="moment-week">${momentHTML}</p>
@@ -9301,7 +9294,7 @@ function renderDebrief() {
     ${questChipsHTML(quests)}`;
   wireSubnav();
   wireQuestChips();
-  announce("Progress — debrief");
+  announce("Progress: debrief");
 }
 
 /* ---------- [D] same-day streak nudge (tab-open only) ---------- */
@@ -9314,10 +9307,11 @@ function maybeShowNudge() {
   if (streak < 3) return;
   if ((state.progress.history || []).some((h) => h.date === today)) return;   // already played today
   if (nowHM() < "16:00") return;
+  const due = dueReviews().length;
   const o = document.createElement("div");
   o.className = "nudge-toast"; o.id = "nudgeToast";
   o.setAttribute("role", "status");
-  o.innerHTML = `<span>Your ${streak}-day streak ends at midnight. Ten questions cover it.</span>
+  o.innerHTML = `<span>Your ${streak}-day streak ends at midnight. ${due ? Math.min(due, deckLen()) : deckLen()} questions cover it.</span>
     <button class="nudge-start" id="nudgeStart">Start</button>
     <button class="nudge-dismiss" id="nudgeDismiss" aria-label="Dismiss">&times;</button>`;
   document.body.appendChild(o);
@@ -9427,7 +9421,7 @@ function renderNav() {
   const rail = el("#rail"), bar = el("#tabbar");
   const collapsed = railCollapsed();
   if (rail) rail.innerHTML =
-    `<div class="rail-brand" id="railBrand" role="button" tabindex="0" aria-label="LORA — go to today">LORA<span>by Rutik</span></div>
+    `<div class="rail-brand" id="railBrand" role="button" tabindex="0" aria-label="LORA, go to Today">LORA<span>by Rutik</span></div>
      <button class="rail-toggle" id="railToggle" aria-expanded="${!collapsed}" aria-controls="rail"
        title="Collapse the rail ([)" aria-label="Collapse the rail">
        ${navSvg(`<polyline points="15 18 9 12 15 6"/>`, "")}</button>
@@ -9537,6 +9531,7 @@ function dispatch(route) {
   /* [C] tentpole routes (previously reserved) — and leaving the quiz drops any
      lingering interviewer/gauntlet skin before the next screen paints. */
   if (!state.inQuiz) { document.body.classList.remove("interview-mode"); state.interview = null; state.gauntlet = null; }
+  refreshStats();
   if (route === "#/gauntlet") { startGauntlet(); return; }
   /* [NAV] Practice + Progress sub-navs are REAL routes, so back/forward and
      reload land on the view you were looking at. #/topics/<section> stays the
@@ -9802,7 +9797,7 @@ async function startGauntlet() {
       // Some frozen qids failed to load (bank churn / partial fetch): run short
       // rather than bailing — the seal's identity is the day, not the count.
       if (questions.length && questions.length < g.qids.length)
-        showToast("Some questions couldn't load — running a short gauntlet.");
+        showToast("Some questions couldn't load, so this gauntlet is shorter.");
     } else {
       questions = await buildGauntletDeck();
       g = { date: todayISO(), qids: questions.map((q) => q.id), sealed: false, score: null, attempt: [] };
@@ -9858,12 +9853,6 @@ function renderPracticeBanner() {
 }
 
 /* ---------- [C] 2. THE CODEX — collection, 100% derived ---------- */
-function codexOrderedSections() {
-  const files = (state.index && state.index.files) || {};
-  const secOrder = Object.keys(STUDY_ORDER);
-  const all = [...new Set(Object.keys(files).map((k) => k.split("/")[0]))];
-  return [...secOrder.filter((s) => all.includes(s)), ...all.filter((s) => !secOrder.includes(s))];
-}
 function codexModulesOf(sec) {
   const order = STUDY_ORDER[sec] || [];
   return capturableModules().filter((k) => k.split("/")[0] === sec)
@@ -9875,7 +9864,7 @@ function renderCodex() {
   const cs = codexState(state.progress, capturableModules());
   let captured = 0, foil = 0;
   cs.forEach((v) => { if (v.captured) captured++; if (v.foil) foil++; });
-  const shelves = codexOrderedSections().map((sec) => {
+  const shelves = sectionsInOrder().map((sec) => {
     const mods = codexModulesOf(sec);
     if (!mods.length) return "";
     const got = mods.filter((m) => cs.get(m)?.captured).length;
@@ -9884,7 +9873,7 @@ function renderCodex() {
       const cls = [v.captured ? "captured" : "", v.foil ? "foil" : "", v.tarnished ? "tarnished" : "",
         (!v.captured && !v.tarnished) ? "dim" : ""].filter(Boolean).join(" ");
       const dots = Array.from({ length: v.needed }, (_, i) => `<span class="cx-dot ${i < v.held ? "on" : ""}"></span>`).join("");
-      const cardLbl = `${esc(prettyMod(mod))} — ${v.held}/${v.needed} held${v.foil ? " · foil" : ""}${v.tarnished ? " · fading" : ""}`;
+      const cardLbl = `${esc(prettyMod(mod))}: ${v.held}/${v.needed} held${v.foil ? " · foil" : ""}${v.tarnished ? " · fading" : ""}`;
       return `<button class="cx-card ${cls}" data-mod="${esc(mod)}" title="${cardLbl}" aria-label="${cardLbl}">
           <span class="cx-name">${esc(prettyMod(mod))}</span>
           <span class="cx-dots">${dots}</span>
@@ -9904,7 +9893,7 @@ function renderCodex() {
     </div>
     ${shelves}`;
   wireSubnav();
-  announce("Progress — codex");
+  announce("Progress: codex");
   document.querySelectorAll(".cx-card").forEach((b) =>
     b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/" + modulePage(b.dataset.mod), prettyMod(b.dataset.mod)); }));
 }
@@ -9943,13 +9932,13 @@ function skylineSVG(p) {
       const flick = (!REDUCED() && on && rnd() < 0.18) ? ' class="sky-flicker"' : "";
       wins += `<rect x="${wx}" y="${wy}" width="3" height="3" fill="${on ? "var(--warn)" : "var(--faint)"}" fill-opacity="${on ? 0.9 : 0.15}"${flick}/>`;
     }
-    buildings += `<g><title>${esc(prettyMod(mod))} — ${lit}/${winTotal} lit</title>` +
+    buildings += `<g><title>${esc(prettyMod(mod))}: ${lit}/${winTotal} lit</title>` +
       `<rect x="${x}" y="${by}" width="${BW}" height="${bh}" rx="2" fill="var(--accent)" fill-opacity="0.14" stroke="var(--accent)" stroke-opacity="0.22"/>${wins}</g>`;
     x += BW;
   }
   return `<div class="skyline" aria-label="Retention skyline: ${captured.length} captured modules">` +
     `<svg viewBox="0 0 ${x + PAD} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMax meet" role="img" aria-hidden="true">${buildings}</svg>` +
-    `<p class="ins-cap">Skyline — one building per captured module; lit windows show current retention.</p></div>`;
+    `<p class="ins-cap">Skyline: one building per captured module. Lit windows show current retention.</p></div>`;
 }
 
 /* ---------- [C] 4. THE LEDGER — achievements certifying learning events ---------- */
@@ -10104,7 +10093,7 @@ function renderInterviewIntro(section, panel, deckQ) {
   state.inQuiz = false;
   const line = panel
     ? `A panel today. ${deckQ.length} hard questions on ${label(section)}. No warm-up.`
-    : `Let's talk about ${label(section)}. ${deckQ.length} questions. Take your time — I won't.`;
+    : `Let's talk about ${label(section)}. ${deckQ.length} questions. Take your time. I won't.`;
   app.innerHTML = `<div class="iv-intro">
       <div class="iv-avatar big" aria-hidden="true">${IV_AVATAR_SVG}</div>
       <div class="iv-type" id="ivType" role="status"></div>
@@ -10121,7 +10110,7 @@ function renderInterviewIntro(section, panel, deckQ) {
 async function startInterview(section, panel) {
   const tier = tierOf(section);
   if (tier !== "silver" && tier !== "gold") {   // locked: path header shows the chip
-    showToast(`Interview mode unlocks at Silver in ${label(section)} — 20 questions seen at 70% accuracy.`);
+    showToast(`Interview mode unlocks at Silver in ${label(section)}: 20 questions seen at 70% accuracy.`);
     redirect("#/study/" + section); return;
   }
   if (panel === undefined) panel = tier === "gold";
@@ -10198,7 +10187,7 @@ function cAfterSave(ctx, stats) {
       g.sealed = true; g.score = stats.correct; g.attempt = state.deck.map((d) => d.status);
       saveGauntlet(g);
       const n = (p.history || []).filter((h) => h.section === "gauntlet").length;   // includes today's entry
-      extra.push({ tier: "gauntlet", icon: `<span class="c-seal-stamp"></span>`, title: `Gauntlet #${n} — sealed`, sub: `${stats.correct}/${state.deck.length}`, play: () => sfx.seal() });
+      extra.push({ tier: "gauntlet", icon: `<span class="c-seal-stamp"></span>`, title: `Gauntlet #${n} sealed`, sub: `${stats.correct}/${state.deck.length}`, play: () => sfx.seal() });
     }
   }
   if (state.interview) {
@@ -10359,7 +10348,7 @@ async function boot() {
   onHashChange();                                  // dispatch the initial route
   // [W1] corrupt sd_progress detected at loadProgress: the raw copy was kept
   // under sd_progress_corrupt — tell the user once, after the first render.
-  if (state._progressCorrupt) showToast("Saved progress couldn't be read — a copy was kept. Import a backup from Progress.", 9000);
+  if (state._progressCorrupt) showToast("Saved progress couldn't be read. A copy was kept. Import a backup from Progress.", 9000);
   /* [D] coach: same-day streak nudge — check now (tab already visible at load)
      and again whenever the tab regains visibility (no OS scheduler on Pages). */
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") maybeShowNudge(); });
