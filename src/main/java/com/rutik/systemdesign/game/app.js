@@ -62,6 +62,16 @@ const SECTION_IDENTITY = {
 };
 const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
 
+// Study picker groups, in display order. A section missing here lands in "Other".
+const SECTION_GROUPS = [
+  ["System Design", ["hld", "lld", "backend", "database", "cs_fundamentals"]],
+  ["Backend Languages", ["java", "spring", "python", "fastapi", "go", "rust"]],
+  ["Frontend", ["typescript", "frontend_platform", "react"]],
+  ["AI and ML", ["ml", "llm", "mlops", "cuda"]],
+  ["Infrastructure", ["devops", "technologies"]],
+  ["Domains and Career", ["fintech", "soft_skills", "book"]],
+];
+
 // The book section nests one level deeper than every other section: module ids are
 // book/<book_slug>/<chapter>. These labels drive the per-book Study picker
 // (#/study/book -> one node per book -> that book's own chapter graph) and the
@@ -4608,7 +4618,7 @@ function renderStudy() {
          <div><div class="eyebrow">Continue reading</div><h2>${esc(lastRead.title || lastRead.path)}</h2></div>
          <span class="review-go">Open &rarr;</span>
        </button>` : "";
-  const tiles = Object.keys(secs).sort().map((s) => {
+  const tile = (s) => {
     const id = SECTION_IDENTITY[s];
     const av = id ? id.accent : "var(--accent)";
     const gl = id ? id.glyph : "";
@@ -4617,13 +4627,20 @@ function renderStudy() {
        <span class="tname">${esc(label(s))}</span>
        <span class="tmeta">${secs[s]} Qs &middot; read the notes</span>
      </button>`;
-  }).join("");
+  };
+  const grouped = new Set(SECTION_GROUPS.flatMap(([, ss]) => ss));
+  const other = Object.keys(secs).filter((s) => !grouped.has(s)).sort();
+  const tiles = [...SECTION_GROUPS, ["Other", other]]
+    .map(([name, ss]) => [name, ss.filter((s) => s in secs)])
+    .filter(([, ss]) => ss.length)
+    .map(([name, ss]) => `<h3 class="sec-group">${esc(name)}</h3><div class="grid sec-grid">${ss.map(tile).join("")}</div>`)
+    .join("");
   app.innerHTML = `
     <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
     <div class="study-head"><button class="ghost" id="studyTech" title="Every tool this repo teaches, and where"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/></svg><span>Technologies</span></button><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
     ${contCard}
     <h2 class="section-h">Pick a section to browse its topics</h2>
-    <div class="grid">${tiles}</div>`;
+    ${tiles}`;
   document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => go("#/study/" + b.dataset.section)));
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
   el("#studySearch").addEventListener("click", () => openPalette());

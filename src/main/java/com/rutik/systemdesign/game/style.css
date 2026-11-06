@@ -482,6 +482,12 @@ button:active { transform: scale(0.98); }
 .rusty-note b { color: var(--text); }
 
 .section-h { margin: 22px 0 10px; font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.01em; }
+.sec-group {
+  margin: 18px 0 8px; color: var(--accent-text); font-family: var(--mono); font-size: 0.6875rem;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em;
+}
+/* auto-fill, not auto-fit: a 2-tile group keeps the same tile width as a 6-tile one */
+.grid.sec-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 11.25rem), 1fr)); }
 
 /* section tiles */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11.25rem), 1fr)); gap: 12px; }
