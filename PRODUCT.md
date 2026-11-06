@@ -42,7 +42,7 @@ The problem is consistency, not content. The repo already holds more study mater
 | Progress | `#/progress` (`#/insights` for the insights view) | Insights, activity ledger, export/import of all state |
 | Awards | `#/awards` | Ledger and section skyline |
 | Codex | `#/codex` | Collected modules |
-| Debrief | `#/debrief` | Weekly summary and quests for next week |
+| Weekly debrief | `#/debrief` | Weekly summary, XP per day, and quests that start a deck |
 | Command palette | Cmd/Ctrl+K or `/` | Jump to any surface or section from anywhere |
 
 ---

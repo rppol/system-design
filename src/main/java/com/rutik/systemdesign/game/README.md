@@ -151,8 +151,8 @@ and `scripts/prerender_diagrams.sh`, then publishes the whole repo root to Pages
   computed once per boot and shown on the home card.
 - **Reboarding** — a >2-day gap replaces the suggested card with a calm "the reviews kept
   your place" card.
-- **Friday Debrief** — `#/debrief`: the week's deltas, a held-memory highlight, and three
-  generated quests for next week (live quest chips on Home).
+- **Weekly debrief**: `#/debrief`, XP per day, the week's deltas, a held-memory highlight,
+  and three generated quests. Each quest chip (also on Home) starts the deck that moves it.
 - **Streak nudge** — a same-day "you haven't played" toast, re-checked whenever the tab
   regains visibility (there is no OS scheduler on Pages).
 

@@ -2020,7 +2020,7 @@ function renderHome() {
       title: `Gauntlet sealed &middot; ${g.score}/${(g.qids || []).length}`, sub: "Today's run is scored and closed. Replay it as unscored practice.", run: () => go("#/gauntlet") }
     : { id: "gauntlet", mark: "&#9670;", short: "the daily gauntlet",
       title: "Today's Gauntlet", sub: "Sealed &middot; 10 questions, one attempt, one score.", run: () => go("#/gauntlet") });
-  if (debriefReady()) rows.push({ id: "debrief", mark: "&#9635;", short: "Friday debrief",
+  if (debriefReady()) rows.push({ id: "debrief", mark: "&#9635;", short: "Weekly debrief",
     title: "Debrief ready", sub: "Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.", run: () => go("#/debrief") });
 
   const mstats = moduleStats(p);
@@ -2124,6 +2124,7 @@ function renderHome() {
   const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
   document.querySelectorAll(".wait-row").forEach((b) =>
     b.addEventListener("click", () => byId[b.dataset.row]?.run()));
+  wireQuestChips();
 }
 
 /* ---------- [E1] friendly error screens + loading skeletons ---------- */
@@ -4321,14 +4322,14 @@ function sessionLogHTML() {
 // The whole Insights region, ordered what's-due -> what's-weak -> how-am-I-doing.
 function insightsHTML() {
   if (!(state.progress.history || []).length && !Object.keys(state.progress.reviews || {}).length) return "";
+  const more = calibrationHTML() + sessionLogHTML();
   return `<div class="ins-region">
       <h2 class="section-h">Insights</h2>
       ${forecastHTML()}
       <div class="ins-two">${strongestShakiestHTML()}</div>
       ${leechesHTML()}
       ${trendHTML()}
-      ${calibrationHTML()}
-      ${sessionLogHTML()}
+      ${more ? `<details class="more-ins"><summary>More insights</summary>${more}</details>` : ""}
     </div>`;
 }
 function wireInsights() {
@@ -4572,18 +4573,6 @@ function renderProgress(view) {
       never.length ? `${never.length} section${never.length === 1 ? "" : "s"} you have never opened.` : "",
     ].filter(Boolean).join(" ") || "Nothing measured yet — answer a blitz and this sentence fills in.";
 
-    // Coverage grid. A never-opened cell is --track, not a faint accent: absence
-    // being VISIBLE is the entire point of this grid.
-    const grid = `<div class="cov-grid">${scored.map((x) => {
-      const pct = x.acc === null ? 0 : Math.round(x.acc * 100);
-      const style = x.seen
-        ? `background: color-mix(in srgb, var(--accent) ${Math.max(14, pct)}%, transparent)`
-        : `background: var(--track)`;
-      return `<span class="cov-cell${x.seen ? "" : " untouched"}" style="${style}"
-          title="${esc(label(x.s))} — ${x.seen ? pct + "% over " + x.seen + " seen" : "never opened"}"></span>`;
-    }).join("")}</div>
-      <p class="ins-cap">One cell per section, mastery by opacity. Flat cells are sections you have never opened.</p>`;
-
     const slip = slippingModules();
     const slipHTML = slip.length ? `<div class="slip-list">${slip.map((m) => `
         <div class="slip-row">
@@ -4594,35 +4583,40 @@ function renderProgress(view) {
       <button class="cta" id="slipCta">Build a session from these<small>${slip.reduce((n, m) => n + m.ids.length, 0)} questions across ${slip.length} modules</small></button>`
       : `<p class="hm-empty">Nothing slipping. Reviews you answer keep their intervals long.</p>`;
 
-    const mastery = Object.keys(secs).sort().map((s) => {
+    const grouped = SECTION_GROUPS.flatMap(([, ss]) => ss);
+    const order = [...grouped.filter((s) => s in secs), ...Object.keys(secs).filter((s) => !grouped.includes(s)).sort()];
+    const sectionRows = order.map((s) => {
       const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
       const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : 0;
       const tier = sectionTier(st);
       return `<div class="sectiontile">
           <div class="top"><span class="name">${esc(label(s))}${tier ? `<span class="tier ${tier.toLowerCase()}">${tier}</span>` : ""}</span>
           <span class="pct">${st.seen ? acc + "% &middot; " + st.seen + " seen" : "not started"}</span></div>
-          <div class="bar"><span style="width:${acc}%"></span></div>
+          <div class="bar${st.seen ? "" : " untouched"}"><span style="width:${acc}%"></span></div>
         </div>`;
     }).join("");
 
-    body = `${levelCard}
-      <p class="readiness">${sentence}</p>
-      <h2 class="section-h">Coverage</h2>
-      ${grid}
-      <h2 class="section-h">Slipping</h2>
-      ${slipHTML}
-      ${heatmapHTML(p.history)}
-      <h2 class="section-h">Mastery by section</h2>
-      ${mastery}
-      ${insightsHTML()}
-      <div class="backup-row">
-        <div class="backup-copy">Your progress lives only in this browser. Keep a backup.</div>
+    const lastExport = localStorage.getItem("sd_last_export");
+    const backupStale = !lastExport || daysBetweenISO(lastExport, todayISO()) > 30;
+    const backupRow = `<div class="backup-row">
+        <div class="backup-copy">Your progress lives only in this browser. Last backup: ${lastExport ? fmtDate(lastExport) : "never"}.</div>
         <div class="backup-actions">
           <button class="ghost" id="exportBtn">Export backup</button>
           <button class="ghost" id="importBtn">Import backup</button>
           <input type="file" id="importFile" accept="application/json,.json" hidden />
         </div>
       </div>`;
+
+    body = `${levelCard}
+      ${backupStale ? backupRow : ""}
+      <p class="readiness">${sentence}</p>
+      <h2 class="section-h">Slipping</h2>
+      ${slipHTML}
+      ${heatmapHTML(p.history)}
+      <h2 class="section-h">Sections</h2>
+      ${sectionRows}
+      ${insightsHTML()}
+      ${backupStale ? "" : backupRow}`;
   } else {
     body = `${ledgerStripHTML()}${skylineSVG(p)}`;
   }
@@ -8783,7 +8777,7 @@ function closeReader() {
    ---------- [D] Coach ----------
    Everything below, up to the matching end marker, is the in-app coach
    (Phase D): daily pick, the message bank + true-specifics voice, the
-   reboarding protocol, quest generation, the Friday Debrief, and the same-day
+   reboarding protocol, quest generation, the weekly debrief, and the same-day
    streak nudge. Persists to `sd_coach` (additive to `sd_progress`). Touches
    the rest of app.js only via small blocks marked with a [D] comment tag
    inside boot(), dispatch(), and renderHome() — everything else here is new,
@@ -9115,7 +9109,7 @@ function generateQuests(friKey) {
       target: tierPick.need.seen, weekKey: friKey, text: `Push ${label(tierPick.section)} to ${tierPick.nextTier}`,
     });
   }
-  const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  const touched = touchedModules();
   const untouched = capturableModules().filter((m) => !touched.has(m));
   if (untouched.length) {
     const n = Math.min(3, untouched.length);
@@ -9158,29 +9152,48 @@ function questProgress(q) {
   }
   if (q.type === "tier") {
     const st = (state.progress.sections && state.progress.sections[q.section]) || { seen: 0, correct: 0 };
-    return { done: Math.min(q.target, st.seen), target: q.target };
+    // Volume alone is not the tier: hold the chip one short until accuracy gets there too.
+    const reached = TIER_ORDER.indexOf(sectionTier(st)) >= TIER_ORDER.indexOf(q.nextTier);
+    return { done: reached ? q.target : Math.min(q.target - 1, st.seen), target: q.target };
   }
   if (q.type === "modules") {
-    const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+    const touched = touchedModules();
     return { done: (q.modules || []).filter((m) => touched.has(m)).length, target: q.target };
   }
   return { done: 0, target: q.target || 1 };
+}
+function touchedModules() {
+  return new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+}
+function startQuest(q) {
+  if (q.type === "reviews") return startReview();
+  if (q.type === "tier") return startBlitz(q.section);
+  if (q.type === "modules") {
+    const touched = touchedModules(), m = (q.modules || []).find((x) => !touched.has(x));
+    if (m) return startBlitz(m.split("/")[0], [m]);
+  }
+  return startBlitz(pickSection());
+}
+function wireQuestChips() {
+  const byId = Object.fromEntries((loadCoach().quests || []).map((q) => [q.id, q]));
+  document.querySelectorAll(".quest-chip:not(:disabled)").forEach((b) =>
+    b.addEventListener("click", () => { if (byId[b.dataset.qid]) startQuest(byId[b.dataset.qid]); }));
 }
 function questChipsHTML(quests) {
   if (!quests || !quests.length) return "";
   const rows = quests.map((q) => {
     const { done, target } = questProgress(q);
     const pct = target ? Math.min(100, Math.round((done / target) * 100)) : 0;
-    return `<div class="quest-chip${done >= target ? " done" : ""}" data-qid="${esc(q.id)}">
+    return `<button class="quest-chip${done >= target ? " done" : ""}" data-qid="${esc(q.id)}"${done >= target ? " disabled" : ""}>
         <span class="qc-text">${esc(q.text)}</span>
         <span class="qc-bar"><i style="width:${pct}%"></i></span>
         <span class="qc-count">${done}/${target}</span>
-      </div>`;
+      </button>`;
   }).join("");
   return `<div class="quest-row">${rows}</div>`;
 }
 
-/* ---------- [D] Friday Debrief ---------- */
+/* ---------- [D] Weekly debrief ---------- */
 function moduleLabel(moduleKey) {
   const parts = (moduleKey || "").split("/");
   return titleize(parts[1] || parts[0] || moduleKey || "");
@@ -9264,10 +9277,11 @@ function renderDebrief() {
 
   const headline = debriefHeadline(deltas, held);
   const quests = ensureQuests();
+  const day = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
   const stripHTML = `<div class="week-strip">${dayCells.map((c) => `
-      <div class="week-cell ${c.lvl < 0 ? "wc-future" : "wc-l" + c.lvl}" title="${c.iso}: ${c.xp} XP">
-        <span class="wc-day">${c.label}</span>
+      <div class="week-cell ${c.lvl < 0 ? "wc-future" : "wc-l" + c.lvl}">
+        ${c.lvl < 0 ? "" : `<span class="wc-xp">${c.xp} XP</span>`}<span class="wc-day">${c.label}</span>
       </div>`).join("")}</div>`;
   const deltaHTML = deltas.length ? deltas.map((d) => `
       <div class="delta-row ${d.delta >= 0 ? "up" : "down"}">
@@ -9279,16 +9293,17 @@ function renderDebrief() {
   app.innerHTML = `
     <div class="hero"><h1>Progress</h1></div>
     ${subnavHTML(progressTabs(), "debrief")}
-    <div class="hero"><h1>Friday Debrief</h1><p>${esc(headline)}</p></div>
-    <h2 class="section-h">This week</h2>
+    <h2 class="section-h">Weekly debrief &middot; ${day(thisStart)} to ${day(isoAdd(thisStart, 6))}</h2>
+    <p class="prac-lede">${esc(headline)}</p>
     ${stripHTML}
     <h2 class="section-h">Section deltas &mdash; this week vs last</h2>
     <div class="delta-list">${deltaHTML}</div>
     <h2 class="section-h">Moment of the week</h2>
     <p class="moment-week">${momentHTML}</p>
-    <h2 class="section-h">Next week</h2>
+    <h2 class="section-h">Quests</h2>
     ${questChipsHTML(quests)}`;
   wireSubnav();
+  wireQuestChips();
   announce("Progress — debrief");
 }
 
@@ -9533,7 +9548,7 @@ function dispatch(route) {
   if (route === "#/study") { renderStudy(); return; }
   if (route === "#/tech" || route.startsWith("#/tech?")) { renderTech(); return; }   /* [TECH] repo-wide technology index; ?-suffix carries the facet state */
   if (route === "#/progress") { renderProgress("overview"); return; }
-  if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
+  if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Weekly debrief */
   renderHome();                                     // #/home and any unknown route
 }
 
@@ -9859,6 +9874,7 @@ function renderCodex() {
   const shelves = codexOrderedSections().map((sec) => {
     const mods = codexModulesOf(sec);
     if (!mods.length) return "";
+    const got = mods.filter((m) => cs.get(m)?.captured).length;
     const cards = mods.map((mod) => {
       const v = cs.get(mod) || { held: 0, needed: 5, captured: false, foil: false, tarnished: false };
       const cls = [v.captured ? "captured" : "", v.foil ? "foil" : "", v.tarnished ? "tarnished" : "",
@@ -9870,19 +9886,18 @@ function renderCodex() {
           <span class="cx-dots">${dots}</span>
         </button>`;
     }).join("");
-    return `<div class="cx-shelf"><h2 class="section-h">${esc(label(sec))}</h2><div class="cx-grid">${cards}</div></div>`;
+    return `<details class="cx-shelf"${got ? " open" : ""}><summary><h2 class="section-h">${esc(label(sec))}</h2><span class="cx-count">${got}/${mods.length} captured</span></summary><div class="cx-grid">${cards}</div></details>`;
   }).join("");
   app.innerHTML = `
     <div class="hero"><h1>Progress</h1></div>
     ${subnavHTML(progressTabs(), "codex")}
-    <div class="hero"><h1>The Codex</h1>
-      <p><b>${captured}</b>/${cs.size} captured &middot; <b>${foil}</b> foil</p>
-      <div class="cx-legend">
-        <span class="cx-legkey captured"><span class="cx-legdot"></span>captured</span>
-        <span class="cx-legkey foil"><span class="cx-legdot"></span>foil</span>
-        <span class="cx-legkey tarnished"><span class="cx-legdot"></span>fading</span>
-        <span class="cx-legkey dim"><span class="cx-legdot"></span>unexplored</span>
-      </div></div>
+    <p class="prac-lede"><b>${captured}</b>/${cs.size} modules captured &middot; <b>${foil}</b> foil. Captured means 5 questions held (answered and not yet due), or all of them in a smaller module.</p>
+    <div class="cx-legend">
+      <span class="cx-legkey captured"><span class="cx-legdot"></span>captured</span>
+      <span class="cx-legkey foil"><span class="cx-legdot"></span>foil</span>
+      <span class="cx-legkey tarnished"><span class="cx-legdot"></span>fading</span>
+      <span class="cx-legkey dim"><span class="cx-legdot"></span>unexplored</span>
+    </div>
     ${shelves}`;
   wireSubnav();
   announce("Progress — codex");
