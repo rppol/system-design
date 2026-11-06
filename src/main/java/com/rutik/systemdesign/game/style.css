@@ -881,6 +881,12 @@ button:active { transform: scale(0.98); }
 .topicbar { display: flex; align-items: center; gap: 10px; margin: 6px 0 12px; }
 .topicbar .selcount { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 0.75rem; }
 .modlist { display: flex; flex-direction: column; gap: 7px; max-height: 56vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+@media (min-width: 47rem) {
+  .modlist ~ .qactions {
+    position: sticky; bottom: 0; z-index: 3; padding: 10px 0; background: var(--topbar-bg); border-top: 1px solid var(--glass-brd);
+    -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
+  }
+}
 .modrow {
   display: flex; align-items: center; gap: 11px; padding: 10px 13px;
   background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius-sm);
@@ -3438,8 +3444,9 @@ body.nav-hidden #tabbar { display: none !important; }
   padding: 16px; background: var(--glass); border: 1px solid var(--glass-brd);
   border-radius: var(--radius); box-shadow: var(--glass-hilite);
 }
-.iv-card:hover:not(.locked) { border-color: var(--glass-brd-hi); background: var(--glass-2); }
-.iv-card.locked { opacity: 0.55; cursor: default; }
+.iv-card:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); }
+.iv-card .review-go { font-weight: 700; color: var(--good); }
+.iv-card.locked .review-go { color: var(--muted); font-size: var(--fs-sm); font-weight: 600; }
 .iv-name { font-size: var(--fs-md); font-weight: 700; color: var(--text); }
 .iv-state { font-size: var(--fs-sm); color: var(--muted); }
 

@@ -1795,6 +1795,10 @@ function renderPractice(view) {
   if (!PRACTICE_VIEWS.includes(view)) view = "sections";
   const p = state.progress, secs = state.index.sections;
   let body = "";
+  const blitzCta = () => {
+    const s = pickSection();
+    return `<button class="cta" id="pracBlitz" data-section="${s}">Start today's suggested blitz<small>${esc(label(s))} &middot; ${deckLen()} questions &middot; ~${estMinutes(deckLen())} min</small></button>`;
+  };
 
   if (view === "sections") {
     // Sorted by mastery ASCENDING, not alphabetically: the number is already
@@ -1827,7 +1831,7 @@ function renderPractice(view) {
   if (view === "due") {
     const due = dueReviews();
     if (!due.length) {
-      body = `<p class="hm-empty">Nothing due. Reviews appear here the day they come round &mdash; answer a blitz to start scheduling them.</p>`;
+      body = `<p class="hm-empty">Nothing due. Reviews appear here the day they come round &mdash; answer a blitz to start scheduling them.</p>${blitzCta()}`;
     } else {
       const rounds = Math.ceil(due.length / deckLen());
       const bySec = {};
@@ -1859,7 +1863,7 @@ function renderPractice(view) {
             <span class="wr-pct">${pct}%</span></div>`;
       }).join("")}</div>
         <button class="cta" id="pracWeak">Drill the bottom three<small>${deckLen()} questions from your lowest-mastery sections</small></button>`
-      : `<p class="hm-empty">Answer at least five questions in a section and its mastery shows up here.</p>`;
+      : `<p class="hm-empty">Answer at least five questions in a section and its mastery shows up here.</p>${blitzCta()}`;
     if (topPair) {
       const [ma, mb] = topPair.k.split("|");
       body += `<button class="review-card confuse" id="pracConfuse">
@@ -1873,17 +1877,22 @@ function renderPractice(view) {
 
   if (view === "interview") {
     const awards = p.awards || {};
+    const need = TIER_NEED.Silver;
     const cards = Object.keys(secs).sort().map((s) => {
       const tier = tierOf(s);
-      const passed = awards["interview_" + s] || awards["panel_" + s];
+      const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
+      const acc = st.seen ? st.correct / st.seen : 0;
       const open = tier === "silver" || tier === "gold";
+      return { s, tier, st, acc, open, near: open ? 2 : Math.min(st.seen / need.seen, 1) * Math.min(acc / need.acc, 1) };
+    }).sort((a, b) => b.near - a.near).map(({ s, tier, st, acc, open }) => {
+      const passed = awards["interview_" + s] || awards["panel_" + s];
       const stateTxt = tier === "gold" ? "Panel unlocked &mdash; 12 advanced questions, one HP bar."
         : tier === "silver" ? "Interviewer unlocked &mdash; core to advanced escalation."
-          : "Locked. Reach Silver (20 seen at 70%) to face the interviewer.";
-      return `<button class="iv-card${open ? "" : " locked"}" data-section="${s}"${open ? "" : " disabled"}>
+          : `${Math.min(st.seen, need.seen)}/${need.seen} seen${st.seen ? ` &middot; ${Math.round(acc * 100)}%` : ""} (need ${Math.round(need.acc * 100)}%)`;
+      return `<button class="iv-card${open ? "" : " locked"}" data-route="${open ? "#/interview/" : "#/topics/"}${s}">
           <span class="iv-name">${esc(label(s))}${passed ? ` <span class="c-chip pass sm">Passed</span>` : ""}</span>
           <span class="iv-state">${stateTxt}</span>
-          ${open ? `<span class="review-go">${tier === "gold" ? "Panel" : "Enter"} &rarr;</span>` : `<span class="c-chip lock">Silver</span>`}
+          <span class="review-go">${open ? (tier === "gold" ? "Panel" : "Enter") : "Practice to unlock"} &rarr;</span>
         </button>`;
     }).join("");
     body = `<p class="prac-lede">A sealed twelve-question interview per section, with follow-ups drawn from the module graph. Pass it and the section carries a plaque.</p>
@@ -1910,8 +1919,9 @@ function renderPractice(view) {
     for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!top || n > top.n)) top = { k, n };
     if (top) cf.addEventListener("click", () => startConfusionDrill(top.k));
   }
-  document.querySelectorAll(".iv-card[data-section]").forEach((b) =>
-    b.addEventListener("click", () => go("#/interview/" + b.dataset.section)));
+  el("#pracBlitz")?.addEventListener("click", (e) => startBlitz(e.currentTarget.dataset.section));
+  document.querySelectorAll(".iv-card[data-route]").forEach((b) =>
+    b.addEventListener("click", () => go(b.dataset.route)));
 }
 
 /* ---------- [NAV] Today — a fixed three-slot contract ---------------------
@@ -2321,6 +2331,7 @@ async function openTopics(section) {
   const lenOpts = [5, 10, 20].map((n) =>
     `<button class="lenopt${deckLen() === n ? " on" : ""}" role="radio" aria-checked="${deckLen() === n}" data-len="${n}">${n}</button>`).join("");
   app.innerHTML = `
+    ${crumbHTML([{ label: "Practice", route: "#/practice" }, { label: label(section) }])}
     <div class="hero"><h1>${esc(label(section))}</h1><p>Pick the sub-topics to drill &mdash; or keep them all.</p></div>
     <div class="topicbar">
       <button class="ghost" id="allBtn">Select all</button>
@@ -2434,7 +2445,8 @@ async function openTopics(section) {
     announce(`Session length set to ${b.dataset.len} questions.`);
   }));
   wireRadioGroup(el(".lenbar"));
-  el("#backBtn").addEventListener("click", () => go("#/home"));
+  wireCrumb();
+  el("#backBtn").addEventListener("click", () => go("#/practice"));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected(), selectedSourceFiles()));
   updateCount();
 }
