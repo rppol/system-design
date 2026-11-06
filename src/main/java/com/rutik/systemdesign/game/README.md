@@ -140,7 +140,8 @@ and `scripts/prerender_diagrams.sh`, then publishes the whole repo root to Pages
   days later and celebrates if it "kept".
 - **Boss round, combos, double-down, comeback engine, daily-XP goal ring, streak freezes**
   (auto-cover one missed day, re-earned every 7-day milestone, cap 3), sound effects,
-  confetti — all celebration flows through the single **moments engine** (`queueMoments`);
+  confetti — all celebration flows through the single **moments engine** (`queueMoments`),
+  which plays at most two moments after a deck and folds the rest into one "Also" moment;
   `bonusXp` is the only XP side-channel.
 
 ### The coach (in-app, no scheduler)

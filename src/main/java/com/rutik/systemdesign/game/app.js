@@ -3123,8 +3123,9 @@ function bonusXpSoFar() {
 /* ---------- [NAV] quiz chrome ---------------------------------------------
    Quiz stays a full-screen MODE with the primary nav suppressed — but it now
    names itself and names its exit, instead of leaving you nowhere with every
-   nav item inactive. Exiting returns to Practice > <section>, not Home. */
+   nav item inactive. Exiting returns to the screen the deck started from. */
 function quizExitRoute() {
+  if (state.originHash) return state.originHash;
   const s = state.section;
   if (state.interview) return "#/topics/" + state.interview.section;
   return (s && state.index && state.index.sections[s]) ? "#/topics/" + s : "#/practice";
@@ -3643,21 +3644,20 @@ async function finish(opts = {}) {
   else showToast("Couldn't save this session — storage is full. Your run is kept for resume; export a backup.", 8000);
   const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
   const post = progressSnapshot();                 // (after the save)
-  // [B] time-capsule returns: correct answers on questions whose 60-day capsule
-  // came due this session, celebrated before the general milestone moments.
-  for (const cr of state._capsuleReturns || [])
-    await moment({ tier: "capsule", icon: ICON("clock"), title: "Capsule recovered", sub: `You planted this on ${fmtDate(cr.plantedOn)}. It kept.`, play: () => sfx.chime() });
-  await queueMoments(pre, post, cExtra);           // celebrate milestones before the results ([C] extras lead)
+  // [B] time capsules: returns that came due this session, and a new capsule on a
+  // flawless, full-length, non-flash/non-hard blitz. Both queue with the deck's extras.
+  const capsules = (state._capsuleReturns || []).map((cr) =>
+    ({ tier: "capsule", icon: ICON("clock"), title: "Capsule recovered", sub: `You planted this on ${fmtDate(cr.plantedOn)}. It kept.`, play: () => sfx.chime() }));
   const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
-  // [B] bury a new time capsule on a flawless, full-length, non-flash/non-hard blitz.
   if (flawless && total === deckLen() && !opts.early && state.mode !== "flash" && !state.hard
       && state.section !== "review" && state.section !== "weakspots" && !state.deck.some((d) => d.retry)) {
+    state._capsuleBuried = null;
     maybeBuryCapsule();
-    if (state._capsuleBuried) {
-      await moment({ tier: "capsule", icon: ICON("clock"), title: "Time capsule buried", sub: `${state._capsuleBuried.moduleName}. Returns ${fmtDate(state._capsuleBuried.due)}.`, play: () => sfx.chime() });
-    }
+    if (state._capsuleBuried)
+      capsules.push({ tier: "capsule", icon: ICON("clock"), title: "Time capsule buried", sub: `${state._capsuleBuried.moduleName}. Returns ${fmtDate(state._capsuleBuried.due)}.`, play: () => sfx.chime() });
   }
+  await queueMoments(pre, post, [...cExtra, ...capsules]);   // celebrate before the results ([C] extras lead)
   refreshStats();
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
@@ -3689,10 +3689,9 @@ async function finish(opts = {}) {
     : "";
   const resultsMeta = `
     <div class="results-meta">
-      <div class="goal-line">${goalRing()}<span>${goalLineTxt}</span></div>
       <div class="elapsed-line">Finished in <b>${elapsedStr}</b> ${fastChip}</div>
-    </div>
-    ${streakAdvanceLine}${ghostLine}`;
+      ${ghostLine}
+    </div>`;
   // Post-round review: misses split into Redeemed (retry-correct) and Still
   // shaky, plus questions learned from a skip. Each is a <details> — summary is
   // the correct sentence, expanding reveals the full answer (+ honest provenance
@@ -3725,6 +3724,7 @@ async function finish(opts = {}) {
   // [E1] no-repeat sampling only reshuffles a real content-section blitz —
   // review/weak/drill/refresh/gauntlet/interview replays aren't "a fresh mix".
   const isContentSection = !!(state.index.sections && Object.prototype.hasOwnProperty.call(state.index.sections, state.section));
+  const origin = state.originHash;
   app.innerHTML = `
     <div class="result staged">
       <div class="score-wrap">
@@ -3740,19 +3740,18 @@ async function finish(opts = {}) {
       </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
       ${resultsMeta}
-      ${freezeNote}${backupNote}
+      ${missList}
+      <div class="row">
+        <button class="primary" id="againBtn">${isContentSection ? "Another round &middot; same mix" : "Play another"}</button>
+        <button class="ghost" id="homeBtn">${origin ? `Back to ${(NAV.find((n) => n.id === destOf(origin)) || NAV[0]).label}` : "Home"}</button>
+        <button class="ghost" id="progBtn">View progress</button>
+      </div>
       <div class="badges">
         <div class="badge"><div class="n" id="xpCount">+0</div><div class="l">XP</div></div>
         ${extraBadges}
-        <div class="badge"><div class="n">${state.progress.streak || 0}</div><div class="l">Day streak</div></div>
-        <div class="badge"><div class="n">${state.progress.totalXP || 0}</div><div class="l">Total XP</div></div>
       </div>
-      <div class="row">
-        <button class="primary" id="againBtn">${isContentSection ? "Another round &middot; same mix" : "Play another"}</button>
-        <button class="ghost" id="homeBtn">Home</button>
-        <button class="ghost" id="progBtn">View progress</button>
-      </div>
-      ${missList}
+      <div class="results-meta"><div class="goal-line">${goalLineTxt}</div>${streakAdvanceLine}</div>
+      ${freezeNote}${backupNote}
     </div>`;
   countUp(el("#xpCount"), xp);
   requestAnimationFrame(() => {                    // animate the score arc in
@@ -3760,7 +3759,7 @@ async function finish(opts = {}) {
     if (f) f.style.strokeDashoffset = (CIRC * (1 - correct / Math.max(1, total))).toFixed(1);
   });
   el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : go("#/home")));
-  el("#homeBtn").addEventListener("click", () => go("#/home"));
+  el("#homeBtn").addEventListener("click", () => go(origin || "#/home"));
   el("#progBtn").addEventListener("click", () => go("#/progress"));
   document.querySelectorAll(".miss-deeper").forEach((b) =>
     b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openReaderPath(`${b.dataset.mod}/${b.dataset.src}`, b.dataset.name); }));
@@ -3770,6 +3769,7 @@ async function finish(opts = {}) {
   cApplyResults(cCtx, { correct });
   document.body.classList.remove("interview-mode");
   state.interview = null; state.gauntlet = null;
+  if (origin) { history.replaceState(null, "", origin); updateNav(); }
 }
 
 /* ---------- moments engine ---------- */
@@ -3823,10 +3823,12 @@ function moment({ tier = "", title, sub = "", icon = "" }) {
 }
 
 // Diff pre/post progress snapshots into an ordered moment list, then play them
-// sequentially. Later phases add more moment types; the diff shape stays.
-// [C] extra: pre-built deck-headline moments (gauntlet seal, interview verdict,
-// ledger awards) that lead the queue.
-async function queueMoments(pre, post, extra) {
+// sequentially. [C] extra: pre-built deck-headline moments (gauntlet seal,
+// interview verdict, ledger awards, time capsules) that lead the queue.
+// At most two play in full: the first extra, then the biggest milestone, else
+// the next in queue order. One "Also" moment names the rest.
+const BIG_MOMENTS = ["title", "gold", "level", "silver", "bronze", "streak"];
+async function queueMoments(pre, post, extra = []) {
   const list = [];
   if (post.level > pre.level) {
     // [B] career ladder: crossing a title band gets a bigger celebration than a plain level-up.
@@ -3864,11 +3866,27 @@ async function queueMoments(pre, post, extra) {
     if (b.foil && !a.foil)
       list.push({ tier: "foil", icon: `<span class="c-flipcard foil"></span>`, title: `Foil: ${b.name}`, sub: "Proven over 21 days.", play: () => sfx.gold() });
   }
-  if (extra && extra.length) list.unshift(...extra);   /* [C] deck-headline moments lead */
-  for (const m of list) {
+  const big = list.filter((m) => BIG_MOMENTS.includes(m.tier))
+    .sort((a, b) => BIG_MOMENTS.indexOf(a.tier) - BIG_MOMENTS.indexOf(b.tier))[0];
+  const queue = [...extra, ...list];
+  const full = [...new Set([extra[0], big, ...queue].filter(Boolean))].slice(0, 2);
+  const rest = queue.filter((m) => !full.includes(m));
+  if (rest.length) full.push({ title: "Also", sub: alsoLine(rest) });
+  for (const m of full) {
     m.play?.();
     await moment(m);
   }
+}
+// "Daily goal met · Captured: Kafka, Raft": titles sharing a "Prefix: " fold into one entry.
+function alsoLine(moments) {
+  const parts = new Map();
+  for (const { title } of moments) {
+    const i = title.indexOf(": ");
+    const key = i > 0 ? title.slice(0, i) : title;
+    if (!parts.has(key)) parts.set(key, []);
+    if (i > 0) parts.get(key).push(title.slice(i + 2));
+  }
+  return [...parts].map(([k, v]) => (v.length ? `${k}: ${v.join(", ")}` : k)).join(" · ");
 }
 
 /* ---------- [B] time capsules ---------- */
@@ -9294,11 +9312,18 @@ const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (fra
 const quizRoute = (section) =>
   section === "review" ? "#/quiz/review" : section === "weakspots" ? "#/quiz/weak" : "#/quiz/" + section;
 function setQuizHash(section) {
+  if (!location.hash.startsWith("#/quiz")) state.originHash = quizOrigin(location.hash);
   state.quizHash = quizRoute(section);
   history.replaceState(null, "", state.quizHash);   // silent: no dispatch during play
   updateNav();                                     // [NAV] but the chrome must still know we are in a mode
 }
 
+// Where a quiz returns to. A reader origin is null, so a quiz started in the reader keeps its old exits.
+function quizOrigin(h) {
+  if (!h || h === "#/gauntlet") return "#/home";
+  if (h.startsWith("#/interview/")) return "#/practice/interview";
+  return h.startsWith("#/reader/") ? null : h;
+}
 // Navigate to a route (adds a history entry). The hashchange listener dispatches.
 function go(route) {
   const r = route.startsWith("#") ? route : "#" + route;

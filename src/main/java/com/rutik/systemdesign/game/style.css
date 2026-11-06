@@ -2145,6 +2145,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 
 /* post-round miss review */
 .miss-wrap { text-align: left; margin-top: 26px; }
+.result > .row { margin-top: 18px; }
 .miss-group { font-family: var(--mono); font-size: 0.6875rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin: 16px 0 8px; color: var(--muted); }
 .miss-group.good { color: var(--good); }
 .miss-group.warn { color: var(--warn); }
