@@ -742,7 +742,7 @@ function openAppearance(anchorBtn) {
   // Esc and click-away close it. NOT a modal: the page behind stays visible and
   // live, so a theme pick can be judged against real content.
   const dismiss = (e) => {
-    if (e.type === "keydown") { if (e.key !== "Escape") return; }
+    if (e.type === "keydown") { if (e.key !== "Escape") return; e.preventDefault(); }
     else if (pop.contains(e.target) || e.target.closest?.("#railAppear, #moreBtn")) return;
     closeAppearance();
     document.removeEventListener("pointerdown", dismiss, true);
@@ -785,7 +785,7 @@ function toggleStreakPop() {
   pop.tabIndex = -1;
   pop._release = trapFocus(pop, { restoreTo: anchor });
   const dismiss = (e) => {
-    if (e.type === "keydown") { if (e.key !== "Escape") return; }
+    if (e.type === "keydown") { if (e.key !== "Escape") return; e.preventDefault(); }
     else if (pop.contains(e.target) || e.target.closest?.("#streakChip")) return;
     closeStreakPop();
     document.removeEventListener("pointerdown", dismiss, true);
@@ -902,20 +902,16 @@ function wireRadioGroup(container) {
 const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // Cross-fade between screens via the View Transitions API where available.
-function vt(fn, cls) {
+function vt(fn) {
   if (document.startViewTransition && !REDUCED()) {
-    // [E2] optional scope class on <html> so ::view-transition keyframes can be
-    // directional (e.g. a forward question swap slides left, not just cross-fades).
-    if (cls) document.documentElement.classList.add(cls);
     const t = document.startViewTransition(fn);
     /* [C] rapid successive navigations skip a transition; the ready/finished
        promises then reject with a benign AbortError — swallow it. */
     t.ready?.catch(() => {}); t.finished?.catch(() => {});
-    if (cls) { const done = () => document.documentElement.classList.remove(cls); t.finished?.then(done, done); }
   } else fn();
 }
 
-/* ---------- ambient graphics: spotlight, parallax, scroll reveals ---------- */
+/* ---------- ambient graphics: spotlight, parallax ---------- */
 // Pointer spotlight: glass cards get a specular highlight that follows the
 // cursor (CSS paints a radial gradient at --mx/--my; see style.css §16).
 const SPOT_SEL = ".tile,.topic-card,.review-card,.badge,.opt,.modrow,.sectiontile,.miss-item,.pathnode";
@@ -945,31 +941,6 @@ if (window.matchMedia("(pointer: fine)").matches) {
       s.setProperty("--par-x", ((_parEv.clientX / innerWidth - 0.5) * 14).toFixed(1) + "px");
       s.setProperty("--par-y", ((_parEv.clientY / innerHeight - 0.5) * 10).toFixed(1) + "px");
     });
-  });
-}
-
-// Scroll-driven reveals: list items rise in as they enter the viewport.
-const _revealObs = "IntersectionObserver" in window
-  ? new IntersectionObserver((entries) => entries.forEach((x) => {
-      if (x.isIntersecting) { x.target.classList.add("in"); _revealObs.unobserve(x.target); }
-    }), { threshold: 0.12 })
-  : null;
-
-function wireReveals() {
-  if (!_revealObs || REDUCED()) return;
-  // [PERF] Drop the previous render's targets before observing this one. app.innerHTML
-  // has already detached them; without this, any tile removed before it scrolled into
-  // view (the safety-net timeout adds "in" but never unobserved) stayed in the target
-  // set forever — a detached-node leak that grew with every Home/Study/picker render.
-  _revealObs.disconnect();
-  // NOTE: utility class is "rise", NOT "reveal" — .reveal is the quiz answer panel.
-  document.querySelectorAll(".grid .tile, .sectiontile, .modrow, .miss-item").forEach((n, i) => {
-    n.classList.add("rise");
-    n.style.transitionDelay = (i % 8) * 30 + "ms";
-    _revealObs.observe(n);
-    // Safety net: if the observer never fires (never scrolled into view, or a
-    // browser quirk), reveal anyway so content is never stuck invisible. Idempotent.
-    setTimeout(() => n.classList.add("in"), 1400 + (i % 8) * 30);
   });
 }
 
@@ -1035,7 +1006,8 @@ function coachMark(anchorSel, text, id) {
   const arrow = tip.querySelector(".cm-arrow");
   arrow.style.left = Math.min(Math.max(14, r.left + r.width / 2 - left - 6), Math.max(14, w - 20)) + "px";
   announce(text);
-  const dismiss = () => {
+  const dismiss = (e) => {
+    if (e.key === "Escape") e.preventDefault();
     tip.remove();
     document.removeEventListener("pointerdown", dismiss, true);
     document.removeEventListener("keydown", dismiss, true);
@@ -1940,7 +1912,6 @@ function renderPractice(view) {
   }
   document.querySelectorAll(".iv-card[data-section]").forEach((b) =>
     b.addEventListener("click", () => go("#/interview/" + b.dataset.section)));
-  wireReveals();
 }
 
 /* ---------- [NAV] Today — a fixed three-slot contract ---------------------
@@ -2143,7 +2114,6 @@ function renderHome() {
   const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
   document.querySelectorAll(".wait-row").forEach((b) =>
     b.addEventListener("click", () => byId[b.dataset.row]?.run()));
-  wireReveals();
 }
 
 /* ---------- [E1] friendly error screens + loading skeletons ---------- */
@@ -2467,7 +2437,6 @@ async function openTopics(section) {
   el("#backBtn").addEventListener("click", () => go("#/home"));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected(), selectedSourceFiles()));
   updateCount();
-  wireReveals();
 }
 
 /* ---------- deck building ---------- */
@@ -3070,18 +3039,17 @@ function isLastInQueue() { return state.cursor >= state.queue.length - 1; }
 
 function comboMult() { return state.combo >= 5 ? 3 : state.combo >= 3 ? 2 : 1; }
 
-// Progress counter over the stable deck (queue length lies once items requeue
-// for redemption / teach-then-test): answered-of-total, plus pending redos.
-function deckProgressCounter() {
-  const DONE = ["correct", "wrong", "learned"];
-  const answered = state.deck.filter((it) => DONE.includes(it.status)).length;
-  const redo = state.deck.filter((it) => it.retry && !it.retried).length;
-  return `${answered}/${state.deck.length}${redo ? ` &middot; ${redo} redo` : ""}`;
+// Position over the stable deck, not the queue: the queue grows when items
+// requeue for redemption or teach-then-test.
+function deckPos() {
+  const total = Math.max(1, state.deck.length);
+  return { pos: Math.min(answeredCount() + 1, total), total };
 }
-function dotsHTML(idx) {
+function dotsHTML(idx, unit = "Question") {
   const DONE = ["correct", "wrong", "learned"];
-  return state.deck.map((it, i) =>
-    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
+  const { pos, total } = deckPos();
+  return `<span class="dots" role="img" aria-label="${unit} ${pos} of ${total}">${state.deck.map((it, i) =>
+    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("")}</span>`;
 }
 
 /* ---------- [B] combo HUD slot ---------- */
@@ -3107,9 +3075,8 @@ function renderBossIntro(bossCount, cb) {
   document.body.classList.add("boss-mode");
   const comboLine = state.combo >= 3
     ? `<div class="boss-intro-combo">Your x${comboMult()} combo carries in.</div>` : "";
-  // Appended to <body> (like moment()/the pause sheet), NOT app.innerHTML — a
-  // direct child of #app inherits the base screen-transition animation, which
-  // (ID beats classes) would silently mask anything this overlay declares.
+  // Appended to <body>, not #app: #app's perspective makes it the containing
+  // block for fixed children, so a fixed overlay inside it would not cover the viewport.
   const o = document.createElement("div");
   o.className = "boss-intro"; o.id = "bossIntro";
   o.innerHTML = `<div class="boss-intro-card">
@@ -3172,16 +3139,13 @@ function deckTitle() {
   return `${label(s)} blitz`;
 }
 function quizTopBarHTML(unit = "question", comboHTML = comboChipHTML(state.combo)) {
-  const DONE = ["correct", "wrong", "learned"];
-  const answered = state.deck.filter((it) => DONE.includes(it.status)).length;
-  const total = Math.max(1, state.deck.length);
-  const pos = Math.min(answered + 1, total);
+  const { pos, total } = deckPos();
+  const redo = state.deck.filter((it) => it.retry && !it.retried).length;
   return `<div class="qtop">
       <button class="qexit" id="qExitBtn">&larr; Exit</button>
-      <span class="qtop-title">${esc(deckTitle())} &middot; ${unit} ${pos} of ${total}</span>
+      <span class="qtop-title"><span class="qt-deck">${esc(deckTitle())}</span><span class="qt-pos">&nbsp;&middot; ${unit} ${pos} of ${total}${redo ? ` &middot; ${redo} redo` : ""}</span></span>
       <span class="combo-slot" id="comboSlot">${comboHTML}</span>
-    </div>
-    <span class="qprog" aria-hidden="true"><i style="width:${Math.round((answered / total) * 100)}%"></i></span>`;
+    </div>`;
 }
 function wireQuizTop() {
   el("#qExitBtn")?.addEventListener("click", () => guardedNav(() => go(quizExitRoute())));
@@ -3246,7 +3210,7 @@ function renderQuestion() {
     ${quizTopBarHTML("question", comboSlotHTML)}
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
-      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright">${dotsHTML(idx)}</span>
     </div>
     ${bossBanner}
     ${prompt}
@@ -3257,8 +3221,8 @@ function renderQuestion() {
     </div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions">
-      ${skippable ? `<button class="skip" id="skipBtn">Skip for now (S) &rarr;</button>` : "<span></span>"}
-      <button class="next" id="nextBtn">${isLastInQueue() ? "Finish" : "Next (↵)"}</button>
+      ${skippable ? `<button class="skip" id="skipBtn">Skip for now <span class="key-hint">(S)</span> &rarr;</button>` : "<span></span>"}
+      <button class="next" id="nextBtn">${isLastInQueue() ? "Finish" : `Next <span class="key-hint">(↵)</span>`}</button>
     </div>`;
   document.querySelectorAll(".opt").forEach((b) =>
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
@@ -3325,14 +3289,14 @@ function renderTeach(item) {
     ${quizTopBarHTML("question")}
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright">${dotsHTML(idx)}</span>
     </div>
     <div class="teach-chip">Concept preview &middot; you skipped this &mdash; learn it, we quiz you shortly</div>
     <div class="qtext teach-head">${qInline(q.questionMd || q.question)}</div>
     <div class="reveal concept show teach-concept">${clozeHTML(q.answerFullMd || q.answerFull, q.concepts)}${hasCloze ? `<div class="cloze-hint">Tap the blurred terms to reveal them</div>` : ""}</div>
     <div class="qactions">
       <span></span>
-      <button class="next show" id="gotItBtn">Got it &mdash; quiz me later (↵)</button>
+      <button class="next show" id="gotItBtn">Got it, quiz me later <span class="key-hint">(↵)</span></button>
     </div>`;
   document.querySelectorAll(".cloze").forEach((c) => c.addEventListener("click", () => c.classList.add("shown")));
   el("#gotItBtn").addEventListener("click", teachDone);
@@ -3350,11 +3314,12 @@ function teachDone() {
   saveDeckSnapshot();                              // teach records nothing beyond "taught"
 }
 
-// A4: first tap on an option locks the pick and asks for confidence; grading
-// waits until the learner says how sure they were. testMode / retryMode grade
+// A4: first tap on an option picks it and asks for confidence; until the learner
+// says how sure they were, another tap moves the pick. testMode / retryMode grade
 // immediately (no calibration on lock-ins or redemption re-tests).
 function answer(i) {
-  if (state.answered || state.awaitingConf) return;
+  if (state.answered) return;
+  if (state.awaitingConf) { lockChoice(i); return; }
   const item = state.deck[state.queue[state.cursor]];
   if (state.prime) { gradeAnswer(i, null); return; }   // [A2] prime: instant reveal, no confidence step
   const testMode = item.status === "skipped";
@@ -3363,17 +3328,18 @@ function answer(i) {
   gradeAnswer(i, null);
 }
 function lockChoice(i) {
+  const repick = state.awaitingConf;
   state.awaitingConf = true; state.pendingPick = i;
   document.querySelectorAll(".opt").forEach((b, k) => {
-    b.disabled = true;
-    b.classList.add(k === i ? "picked" : "dim");
+    b.classList.toggle("picked", k === i);
+    b.classList.toggle("dim", k !== i);
   });
-  const bar = document.createElement("div");
-  bar.className = "confbar"; bar.id = "confBar";
-  bar.innerHTML = `<span class="conf-q">How sure?</span>
+  if (repick) { announce(`Option ${i + 1} picked. How sure are you?`); return; }
+  const acts = el(".qactions");
+  acts.classList.add("confirming");
+  acts.insertAdjacentHTML("afterbegin", `<div class="confbar" id="confBar"><span class="conf-q">How sure?</span>
     <button class="conf-btn" id="confSure"><kbd>1</kbd> Sure</button>
-    <button class="conf-btn" id="confUnsure"><kbd>2</kbd> Not sure</button>`;
-  el(".options").insertAdjacentElement("afterend", bar);
+    <button class="conf-btn" id="confUnsure"><kbd>2</kbd> Not sure</button></div>`);
   el("#confSure").addEventListener("click", () => pickConfidence("high"));
   el("#confUnsure").addEventListener("click", () => pickConfidence("low"));
   announce("Choice locked. How sure are you?");
@@ -3381,7 +3347,8 @@ function lockChoice(i) {
 function pickConfidence(conf) {
   if (!state.awaitingConf) return;
   state.awaitingConf = false;
-  const bar = el("#confBar"); if (bar) bar.remove();
+  el("#confBar")?.remove();
+  el(".qactions")?.classList.remove("confirming");
   gradeAnswer(state.pendingPick, conf);
 }
 
@@ -3545,10 +3512,8 @@ function skipQuestion() {
 
 function nextQuestion() {
   state.cursor++;
-  // [E2] beauty: the next question slides in from the right (directional vt);
-  // vt() falls back to an instant swap when view transitions are unsupported or
-  // reduced-motion is on.
-  if (state.cursor < state.queue.length) vt(() => renderQuestion(), "vt-qnext");
+  // No vt() here: taps during a view transition hit the pseudo-element overlay and are lost.
+  if (state.cursor < state.queue.length) renderQuestion();
   else if (state.prime) finishPrime();               // [A2] prime: quiet save, then open the reader
   else finish();
 }
@@ -3561,19 +3526,16 @@ function renderCard() {
   document.body.classList.remove("boss-mode");     // [B] flashcards never boss-stage
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
-  const DONE = ["correct", "wrong", "learned"];
-  const dots = state.deck.map((it, i) =>
-    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
   // [B] recall-streak chip — accumulated Got-it/Easy grades in a row this deck.
   const streakChip = state._cardStreak >= 2 ? ` <span class="card-streak">${state._cardStreak} in a row</span>` : "";
   app.innerHTML = `
     ${quizTopBarHTML("card")}
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="qright"><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="qright">${dotsHTML(idx, "Card")}</span>
     </div>
     <div class="flash-label">Flashcard &middot; recall it, then grade yourself${streakChip}</div>
-    <div class="qtext">${esc(q.question)}</div>
+    <div class="qtext">${qInline(q.questionMd || q.question)}</div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions" id="cardActions">
       <span></span>
@@ -3802,7 +3764,6 @@ async function finish(opts = {}) {
   el("#progBtn").addEventListener("click", () => go("#/progress"));
   document.querySelectorAll(".miss-deeper").forEach((b) =>
     b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openReaderPath(`${b.dataset.mod}/${b.dataset.src}`, b.dataset.name); }));
-  wireReveals();
   app.focus({ preventScroll: true });
   coachMark(".result .sub", "Missed questions return on a schedule. Miss a day? A freeze covers you.", "first_results");   // [E1]
   /* [C] gauntlet / interviewer result banners, then drop the deck-scoped state */
@@ -4648,7 +4609,6 @@ function renderProgress(view) {
     if (sc) sc.addEventListener("click", () => startRefresh(slippingModules().flatMap((m) => m.ids)));
     wireInsights();
   }
-  wireReveals();
 }
 
 /* ---------- study mode (pure reading) ---------- */
@@ -4690,7 +4650,6 @@ function renderStudy() {
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
   el("#studySearch").addEventListener("click", () => openPalette());
   el("#studyTech").addEventListener("click", () => go("#/tech"));
-  wireReveals();
 }
 
 /* ---------- [TECH] technologies index (a top-level screen) ---------- */
@@ -5375,7 +5334,6 @@ async function renderTech() {
   // counts, and left "Databases 211" on screen while 7 tools matched the query.
   el("#techSec").addEventListener("change", (e) => { secPick = e.target.value; safeSet("sd_tech_sec", secPick); repaint(); });
   findEl.addEventListener("input", () => { shown = { tech: TECH_PAGE, trade: TRADE_PAGE }; repaint(); });
-  wireReveals();
 }
 
 /* ---------- learning path (Study section graph) ---------- */
@@ -5443,7 +5401,6 @@ function renderBookPicker(section, mods) {
   wireCrumb();
   document.querySelectorAll(".bookcard").forEach((b) =>
     b.addEventListener("click", () => go("#/study/book/" + b.dataset.book)));
-  wireReveals();
 }
 
 // [W5] the study path's resize listener, tracked module-level so re-entering the
@@ -9298,7 +9255,6 @@ function renderDebrief() {
     ${questChipsHTML(quests)}`;
   wireSubnav();
   announce("Progress — debrief");
-  wireReveals();
 }
 
 /* ---------- [D] same-day streak nudge (tab-open only) ---------- */
@@ -9587,6 +9543,8 @@ document.addEventListener("keydown", (e) => {
   if (!state.inQuiz) return;
   if (e.repeat) return;   // holding a key must not auto-advance/grade a deck
   if (typing) return;
+  // A popover or coach mark that closed on this Esc has already called preventDefault.
+  if (e.key === "Escape") { if (!e.defaultPrevented) guardedNav(() => go(quizExitRoute())); return; }
   if (state.mode === "flash") {
     if (!state.answered) {
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); revealCard(); }
@@ -9888,7 +9846,6 @@ function renderCodex() {
   announce("Progress — codex");
   document.querySelectorAll(".cx-card").forEach((b) =>
     b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/" + modulePage(b.dataset.mod), prettyMod(b.dataset.mod)); }));
-  wireReveals();
 }
 
 /* ---------- [C] 3. THE SKYLINE — ambient retention city ---------- */

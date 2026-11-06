@@ -321,15 +321,6 @@ svg.icon { width: 15px; height: 15px; vertical-align: -2px; flex: 0 0 auto; }
 
 main { flex: 1; width: 100%; max-width: 48.75rem; margin: 0 auto; padding: 30px 22px 48px; }
 
-/* screen-enter: new nodes animate on insertion (innerHTML swaps recreate them) */
-#app > * { animation: screen-in 0.42s var(--ease-out) backwards; }
-#app > *:nth-child(2) { animation-delay: 0.05s; }
-#app > *:nth-child(3) { animation-delay: 0.10s; }
-#app > *:nth-child(4) { animation-delay: 0.15s; }
-#app > *:nth-child(5) { animation-delay: 0.20s; }
-#app > *:nth-child(n+6) { animation-delay: 0.24s; }
-@keyframes screen-in { from { opacity: 0; transform: translateY(10px); } }
-
 /* ---------- 3. Top bar ---------------------------------------------------- */
 
 .topbar {
@@ -669,6 +660,8 @@ button:active { transform: scale(0.98); }
   background: var(--glass); border: 1px solid var(--glass-brd);
   animation: fade 0.2s var(--ease-out);
 }
+.qactions.confirming > :not(.confbar) { display: none; }
+.qactions .confbar { flex: 1; margin: 0; }
 .conf-q { color: var(--muted); font-size: var(--fs-md); font-weight: 600; margin-right: auto; }
 .conf-btn { padding: 8px 16px; font-weight: 700; font-size: var(--fs-md); background: var(--glass); color: var(--text); border: 1px solid var(--glass-brd); }
 .conf-btn:hover { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--glass-2); }
@@ -2023,7 +2016,6 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   /* Must out-specify .mesh.m1/.m2/.m3 (0-2-0), which is where the drift is
      declared — a bare `.mesh` here is 0-1-0 and silently loses. */
   .mesh.m1, .mesh.m2, .mesh.m3 { animation: none; }
-  #app > * { animation: none; }
   html { scroll-behavior: auto; }
 }
 
@@ -2057,10 +2049,6 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .tile:hover::after, .topic-card:hover::after, .review-card:hover::after, .badge:hover::after,
 .opt:hover:not(:disabled)::after, .modrow:hover::after,
 .sectiontile:hover::after, .miss-item:hover::after, .pathnode:hover::after { opacity: 1; }
-
-/* scroll-driven reveals (.rise — ".reveal" is taken by the quiz answer panel) */
-.rise { opacity: 0; transform: translateY(12px); transition: opacity 0.5s var(--ease-out), transform 0.5s var(--ease-out); }
-.rise.in { opacity: 1; transform: none; }
 
 /* @keyframes shimmer drives the capsule/gauntlet foil sweeps (c-flip cards) */
 @keyframes shimmer { to { background-position: -200% 0; } }
@@ -2145,7 +2133,6 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 
 /* quiz header extras: counter + difficulty chip */
 .qright { display: flex; align-items: center; gap: 10px; }
-.qnum { font-family: var(--mono); font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
 .diff {
   margin-left: 6px; padding: 1px 7px; border-radius: 999px;
   font-family: var(--mono); font-size: 0.625rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
@@ -2376,7 +2363,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
     0 7px 24px -10px color-mix(in srgb, var(--tile-accent, var(--accent)) 58%, transparent), var(--glass-hilite);
 }
 
-/* edge legend under the section hero (qnum/eyebrow family: mono, small, quiet) */
+/* edge legend under the section hero (eyebrow family: mono, small, quiet) */
 .hero .path-legend {
   margin: 8px 0 0; font-family: var(--mono); font-size: 0.6875rem;
   color: var(--muted); letter-spacing: 0.02em;
@@ -2623,10 +2610,6 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
   color: color-mix(in srgb, var(--accent-2) 70%, var(--text));
 }
 #app { perspective: 1000px; }
-/* NOTE: #app > * (base & backdrop) sets `animation` on every direct child of
-   #app, incl. #reveal, and an ID beats any number of classes in specificity —
-   ".reveal.card-flip" would be silently masked. Anchor on the element's own
-   #reveal id so this animation-name actually wins. */
 #reveal.card-flip { animation: card-flip-in 0.5s var(--ease-out); }
 @keyframes card-flip-in { from { transform: rotateY(90deg); opacity: 0; } to { transform: rotateY(0deg); opacity: 1; } }
 
@@ -3078,11 +3061,6 @@ body.interview-mode #app::before {
 ::view-transition-new(root) { animation: vt-fade-in 0.24s var(--ease-out) both; }
 @keyframes vt-fade-out { to { opacity: 0; transform: translateY(-12px); } }
 @keyframes vt-fade-in { from { opacity: 0; transform: translateY(12px); } }
-/* directional: the next question slides in from the right (overrides the default) */
-:root.vt-qnext::view-transition-old(root) { animation: q-out-left 0.22s var(--ease-out) both; }
-:root.vt-qnext::view-transition-new(root) { animation: q-in-right 0.24s var(--ease-out) both; }
-@keyframes q-out-left { to { opacity: 0; transform: translateX(-16px); } }
-@keyframes q-in-right { from { opacity: 0; transform: translateX(16px); } }
 
 /* ---- [BANK] faceted technology browse ------------------------------------
    Tier chips are the entry point; roles appear only once a tier is chosen (95
@@ -3338,6 +3316,11 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 
 /* --- bottom bar (< 47rem) ------------------------------------------------ */
 body.nav-hidden #tabbar { display: none !important; }
+@media (max-width: 46.99rem) {
+  body.nav-hidden main { padding-bottom: 40px; }
+  body.nav-hidden .qactions { bottom: 0; }
+  body.nav-hidden .toast, body.nav-hidden .nudge-toast { bottom: calc(12px + env(safe-area-inset-bottom)); }
+}
 .tab { min-height: 46px; }
 
 /* --- header day chip ----------------------------------------------------- */
@@ -3478,17 +3461,17 @@ body.nav-hidden #tabbar { display: none !important; }
 
 /* ---------- 20. [NAV] Quiz chrome ---------------------------------------- */
 /* Nav is suppressed during a deck, so the deck must name itself AND its exit. */
-.qtop { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.qtop { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .qexit {
   flex: 0 0 auto; padding: 6px 12px; border-radius: var(--radius-sm);
   background: var(--glass); border: 1px solid var(--glass-brd);
   color: var(--muted); font-size: var(--fs-sm); font-weight: 600;
 }
 .qexit:hover { color: var(--text); border-color: var(--glass-brd-hi); background: var(--glass-2); }
-.qtop-title { flex: 1; text-align: center; font-size: var(--fs-sm); color: var(--muted); font-family: var(--mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qtop-title { flex: 1; display: flex; justify-content: center; font-size: var(--fs-sm); color: var(--muted); font-family: var(--mono); min-width: 0; white-space: nowrap; }
+.qt-deck { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.qt-pos { flex: none; }
 .qtop .combo-slot { flex: 0 0 auto; }
-.qprog { display: block; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-bottom: 16px; }
-.qprog i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s var(--ease-out); }
 
 /* ---------- 21. [NAV] odds and ends -------------------------------------- */
 .more-about { margin: 12px 2px 0; font-size: var(--fs-2xs); color: var(--faint); text-align: center; }

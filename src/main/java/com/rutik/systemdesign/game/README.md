@@ -109,8 +109,9 @@ and `scripts/prerender_diagrams.sh`, then publishes the whole repo root to Pages
 - **SM-2-lite spaced repetition** — every first-attempt answer schedules a per-question
   review (`ease`/`interval`/`reps`/`lapses`/`due`) in `sd_progress.reviews`. A
   much-slower-than-typical correct answer schedules like a low-confidence one.
-- **Two-step confidence** — lock a pick, then rate **Sure / Not sure**; the tallies drive
-  the Insights calibration strip and a "hard for you" difficulty label.
+- **Two-step confidence** — pick an option (another tap moves the pick), then rate **Sure /
+  Not sure** from the action bar; the tallies drive the Insights calibration strip and a
+  "hard for you" difficulty label.
 - **Miss loop (Redemption)** — a wrong answer re-queues the same question a few cards
   later for a flat-bonus second shot; the first miss still counts.
 - **Skip → Teach 2.0** — skip a question and it returns in teach mode: the concept is
@@ -218,8 +219,9 @@ hover-only prerequisite chords are hidden and the side gutters reclaimed.
 ### Accessibility & motion
 
 `prefers-reduced-motion` gates every animation (view transitions gate in JS); the beauty
-pass (reveal glow sweep, directional question slide, results stagger, mastery-delta shine,
-screen slide-fade) is all reduced-motion-safe. `:focus-visible`, an aria-live region,
+pass (reveal glow sweep, results stagger, mastery-delta shine, screen slide-fade between
+routes) is all reduced-motion-safe. A screen plays one entrance per navigation, and the next
+question swaps in instantly so a fast tap is never lost to a transition. `:focus-visible`, an aria-live region,
 focus management, no emojis, tabular numerals throughout.
 
 ---
