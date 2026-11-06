@@ -646,11 +646,11 @@ function syncThemeColor() {
 
 function applyMode(mode, save = true) {
   mode = mode === "light" ? "light" : "dark";
-  document.documentElement.dataset.mode = mode;
+  const swap = () => { document.documentElement.dataset.mode = mode; syncThemeColor(); };
+  if (document.documentElement.dataset.mode === mode) swap(); else vt(swap);
   if (save) safeSet("sd_theme_mode", mode);
   document.querySelectorAll(".mode-opt").forEach((b) =>
     b.setAttribute("aria-checked", b.dataset.mode === mode ? "true" : "false"));
-  syncThemeColor();
 }
 
 /* [NAV] APPEARANCE — an anchored popover, three rows, no modal.
@@ -667,14 +667,16 @@ function applyMode(mode, save = true) {
    untouched. */
 function closeAppearance() {
   const pop = document.getElementById("appearPop");
-  if (pop) { pop._release?.(); pop.remove(); }
+  if (pop) { pop._release?.(); fadeOut(pop); }
   document.querySelectorAll("#railAppear, #moreBtn").forEach((b) => b.setAttribute("aria-expanded", "false"));
 }
 
 function openAppearance(anchorBtn) {
-  if (document.getElementById("appearPop")) { closeAppearance(); return; }
+  const ex = document.getElementById("appearPop");
+  if (ex && !ex.classList.contains("closing")) { closeAppearance(); return; }
   const anchor = anchorBtn || el("#railAppear") || el("#moreBtn");
   if (!anchor) return;
+  if (ex) { ex.classList.remove("closing"); armPopover(ex, anchor, closeAppearance, "#railAppear, #moreBtn"); return; }
   const mode = curMode(), theme = curTheme();
   const pop = document.createElement("div");
   pop.id = "appearPop"; pop.className = "appear-pop";
@@ -703,7 +705,6 @@ function openAppearance(anchorBtn) {
       <button class="ap-switch" id="apSound" role="switch" aria-checked="${sfx.isOn()}"><span class="ap-knob"></span></button>
     </div>`;
   document.body.appendChild(pop);
-  anchor.setAttribute("aria-expanded", "true");
 
   // Position beside the trigger, clamped to the viewport. The rail item sits at
   // the bottom-left, the header ⋯ at the top-right, so both cases are handled by
@@ -715,6 +716,7 @@ function openAppearance(anchorBtn) {
   let top = railOpen ? r.bottom - h : r.bottom + 8;
   pop.style.left = Math.max(8, Math.min(left, window.innerWidth - w - 8)) + "px";
   pop.style.top = Math.max(8, Math.min(top, window.innerHeight - h - 8)) + "px";
+  pop.style.transformOrigin = railOpen ? "left bottom" : "right top";
 
   const modeGrp = el("#apMode");
   modeGrp.querySelectorAll(".mode-opt").forEach((b) => b.addEventListener("click", () => {
@@ -736,15 +738,24 @@ function openAppearance(anchorBtn) {
     snd.setAttribute("aria-checked", sfx.isOn() ? "true" : "false");
     announce(sfx.isOn() ? "Sound on" : "Sound off");
   });
+  // NOT a modal: the page behind stays visible and live, so a theme pick can be
+  // judged against real content.
+  armPopover(pop, anchor, closeAppearance, "#railAppear, #moreBtn");
+}
 
+// Focus trap plus Esc and click-away dismissal for an anchored popover. close()
+// must call pop._release(), which also drops the dismiss listeners.
+function armPopover(pop, anchor, close, triggers) {
+  anchor.setAttribute("aria-expanded", "true");
   pop.tabIndex = -1;
-  pop._release = trapFocus(pop, { restoreTo: anchor });
-  // Esc and click-away close it. NOT a modal: the page behind stays visible and
-  // live, so a theme pick can be judged against real content.
+  const release = trapFocus(pop, { restoreTo: anchor });
   const dismiss = (e) => {
     if (e.type === "keydown") { if (e.key !== "Escape") return; e.preventDefault(); }
-    else if (pop.contains(e.target) || e.target.closest?.("#railAppear, #moreBtn")) return;
-    closeAppearance();
+    else if (pop.contains(e.target) || e.target.closest?.(triggers)) return;
+    close();
+  };
+  pop._release = () => {
+    release();
     document.removeEventListener("pointerdown", dismiss, true);
     document.removeEventListener("keydown", dismiss, true);
   };
@@ -754,14 +765,16 @@ function openAppearance(anchorBtn) {
 
 function closeStreakPop() {
   const pop = document.getElementById("streakPop");
-  if (pop) { pop._release?.(); pop.remove(); }
+  if (pop) { pop._release?.(); fadeOut(pop); }
   const chip = document.getElementById("streakChip");
   if (chip) chip.setAttribute("aria-expanded", "false");
 }
 function toggleStreakPop() {
-  if (document.getElementById("streakPop")) { closeStreakPop(); return; }
+  const ex = document.getElementById("streakPop");
+  if (ex && !ex.classList.contains("closing")) { closeStreakPop(); return; }
   const anchor = document.getElementById("streakChip");
   if (!anchor) return;
+  if (ex) { ex.classList.remove("closing"); armPopover(ex, anchor, closeStreakPop, "#streakChip"); return; }
   const p = state.progress || {};
   const lastFreezes = (p.freezeUsedOn || []).slice(-3).reverse();
   const pop = document.createElement("div");
@@ -778,21 +791,10 @@ function toggleStreakPop() {
     ${lastFreezes.length ? `<div class="sp-sub">Last used</div><div class="sp-dates">${lastFreezes.map((d) => `<span>${fmtDate(d)}</span>`).join("")}</div>` : ""}
   `;
   document.body.appendChild(pop);
-  anchor.setAttribute("aria-expanded", "true");
   const r = anchor.getBoundingClientRect();
   pop.style.top = (r.bottom + 8) + "px";
   pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 12) + "px";
-  pop.tabIndex = -1;
-  pop._release = trapFocus(pop, { restoreTo: anchor });
-  const dismiss = (e) => {
-    if (e.type === "keydown") { if (e.key !== "Escape") return; e.preventDefault(); }
-    else if (pop.contains(e.target) || e.target.closest?.("#streakChip")) return;
-    closeStreakPop();
-    document.removeEventListener("pointerdown", dismiss, true);
-    document.removeEventListener("keydown", dismiss, true);
-  };
-  document.addEventListener("pointerdown", dismiss, true);
-  document.addEventListener("keydown", dismiss, true);
+  armPopover(pop, anchor, closeStreakPop, "#streakChip");
 }
 
 const app = document.getElementById("app");
@@ -901,6 +903,17 @@ function wireRadioGroup(container) {
 
 const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+// Plays the node's .closing transition, then removes it. A re-open that drops
+// .closing first cancels the removal and the transition reverses mid-flight.
+function fadeOut(node) {
+  if (REDUCED()) { node.remove(); return; }
+  node.classList.add("closing");
+  const done = () => { if (node.classList.contains("closing")) node.remove(); };
+  node.ontransitionend = (e) => { if (e.target === node) done(); };
+  clearTimeout(node._fadeT);
+  node._fadeT = setTimeout(done, parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dur-spring")));
+}
+
 // Cross-fade between screens via the View Transitions API where available.
 function vt(fn) {
   if (document.startViewTransition && !REDUCED()) {
@@ -928,6 +941,8 @@ document.addEventListener("pointermove", (e) => {
     t.style.setProperty("--my", (((_spotEv.clientY - r.top) / r.height) * 100).toFixed(1) + "%");
   });
 });
+// iOS Safari applies :active only when a touch listener exists.
+document.addEventListener("touchstart", () => {}, { passive: true });
 
 // Aurora-mesh pointer parallax (fine pointers only; keyframes consume --par-*).
 if (window.matchMedia("(pointer: fine)").matches) {
@@ -967,10 +982,7 @@ function showToast(msg, ms = 3600) {
   o.className = "toast"; o.textContent = msg;
   document.body.appendChild(o);
   announce(msg);
-  setTimeout(() => {
-    o.classList.add("out");
-    setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
-  }, ms);
+  setTimeout(() => fadeOut(o), ms);
 }
 
 /* ---------- [E1] first-run coach marks ---------- */
@@ -994,7 +1006,7 @@ function coachMark(anchorSel, text, id) {
   if (!anchor || el(".coach-mark")) return;
   safeSet(key, "1");                    // mark seen immediately — no re-show race
   const tip = document.createElement("div");
-  tip.className = "coach-mark" + (REDUCED() ? " reduced" : "");
+  tip.className = "coach-mark";
   tip.innerHTML = `<div class="cm-arrow"></div><div class="cm-body">${esc(text)}</div>`;
   document.body.appendChild(tip);
   const r = anchor.getBoundingClientRect();
@@ -1716,16 +1728,19 @@ function rustiestSection() {
 
 function refreshStats() {
   // Pop-animate a stat when its value actually changes.
-  const set = (sel, val) => {
+  const set = (sel, val, also) => {
     const n = el(sel);
     if (!n) return;
     const s = String(val);
     if (n.textContent === s) return;
     n.textContent = s;
-    n.classList.remove("pop"); void n.offsetWidth;   // restart the animation
-    n.classList.add("pop");
+    for (const x of [n, also]) {
+      if (!x) continue;
+      x.classList.remove("pop"); void x.getBoundingClientRect();   // restart the animation
+      x.classList.add("pop");
+    }
   };
-  set("#streakVal", state.progress.streak || 0);
+  set("#streakVal", state.progress.streak || 0, el("#streakChip .i-flame"));
   set("#xpVal", state.progress.totalXP || 0);
   set("#lvlVal", levelFromXP(state.progress.totalXP));
   set("#lvlTitle", titleForLevel(levelFromXP(state.progress.totalXP)));  // [B] career ladder
@@ -2516,6 +2531,7 @@ function startDeck(questions, replayFn, opts = {}) {
 }
 
 function showResumeSheet(r, startNew) {
+  el("#resumeSheet.closing")?.remove();
   if (el("#resumeSheet")) return;
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "resumeSheet";
@@ -2530,7 +2546,7 @@ function showResumeSheet(r, startNew) {
     </div>`;
   document.body.appendChild(o);
   const release = trapFocus(o, { initial: "#resumeOld" });
-  const close = () => { release(false); o.remove(); };
+  const close = () => { release(false); fadeOut(o); };
   el("#resumeOld").addEventListener("click", () => { close(); resumeDeck(); });
   el("#resumeNew").addEventListener("click", () => { close(); startNew(); });
 }
@@ -2799,6 +2815,7 @@ function maybePrime(section, m, bank, justRead) {
   return true;
 }
 function showPrimeSheet(section, m, justRead) {
+  el("#primeSheet.closing")?.remove();
   if (el("#primeSheet")) return;
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "primeSheet";  // same glass-confirm pattern as the pause sheet
@@ -2813,7 +2830,7 @@ function showPrimeSheet(section, m, justRead) {
     </div>`;
   document.body.appendChild(o);
   const release = trapFocus(o, { initial: "#primeGo" });
-  const close = () => { release(false); o.remove(); };   // every prime close path navigates away
+  const close = () => { release(false); fadeOut(o); };   // every prime close path navigates away
   el("#primeGo").addEventListener("click", () => {
     safeSet("sd_prime_opt", "0");   // engagement resets the opt-out
     close(); startPrime(section, m.module, m.name);
@@ -4024,6 +4041,7 @@ function guardedNav(fn) {
 
 // pending: a function to run on leave (Pause & leave / Finish now). null -> Home.
 function openPauseSheet(pending) {
+  el("#pauseSheet.closing")?.remove();
   if (el("#pauseSheet")) return;
   const leave = pending || (() => go("#/home"));
   const done = answeredCount(), total = state.deck.length;
@@ -4050,7 +4068,7 @@ function openPauseSheet(pending) {
     </div>`;
   document.body.appendChild(o);
   const release = trapFocus(o, { initial: "#pauseKeep" });
-  const closeSheet = (restore = true) => { release(restore); o.remove(); };
+  const closeSheet = (restore = true) => { release(restore); fadeOut(o); };
   o._close = closeSheet;
   el("#pauseKeep").addEventListener("click", () => closeSheet());
   el("#pauseLeave")?.addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(false); leave(); });
@@ -4068,6 +4086,7 @@ function openPauseSheet(pending) {
    only doors to them in short landscape, where the rail's footer group is
    hidden) and the About line the removed .foot used to carry. */
 function openMoreSheet() {
+  el("#moreSheet.closing")?.remove();
   if (el("#moreSheet")) return;
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "moreSheet";
@@ -4084,7 +4103,7 @@ function openMoreSheet() {
     </div>`;
   document.body.appendChild(o);
   const release = trapFocus(o, { initial: "#moreClose", restoreTo: el("#moreBtn") });
-  const close = (restore = true) => { release(restore); o.remove(); };
+  const close = (restore = true) => { release(restore); fadeOut(o); };
   o._close = close;
   el("#moreAppear").addEventListener("click", () => { close(false); openAppearance(el("#moreBtn")); });
   el("#moreSearch").addEventListener("click", () => { close(false); openPalette(); });
@@ -9317,8 +9336,7 @@ function maybeShowNudge() {
   document.body.appendChild(o);
   const dismiss = () => {
     const c = loadCoach(); c.nudgedOn = todayISO(); saveCoach(c);
-    o.classList.add("out");
-    setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
+    fadeOut(o);
   };
   el("#nudgeDismiss").addEventListener("click", dismiss);
   el("#nudgeStart").addEventListener("click", () => {
@@ -9429,7 +9447,7 @@ function renderNav() {
       `<button class="rail-item" data-tab="${n.id}">${navSvg(n.icon, "railicon")}<span>${n.label}</span></button>`).join("")}</div>
      <div class="rail-foot">
        <button class="rail-item" id="railAppear">${navSvg(`<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/>`, "railicon")}<span>Appearance</span></button>
-       <button class="rail-item" id="railSearch">${navSvg(`<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>`, "railicon")}<span>Search</span><kbd class="rail-kbd">&#8984;K</kbd></button>
+       <button class="rail-item" id="railSearch">${navSvg(`<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>`, "railicon")}<span>Search</span><kbd class="rail-kbd">${/Mac|iPhone|iPad|iPod/.test(navigator.platform) ? "&#8984;K" : "Ctrl K"}</kbd></button>
      </div>`;
   if (bar) bar.innerHTML = NAV.map((n) =>
     `<button class="tab" data-tab="${n.id}" aria-label="${n.label}">${navSvg(n.icon, "tabicon")}<span>${n.label}</span></button>`).join("");
@@ -9558,11 +9576,11 @@ document.addEventListener("keydown", (e) => {
   // [A2] toggle explain-back with E (guarded against typing into its own textarea)
   const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay")._close(); return; }
-  if (e.key === "Escape" && el("#moreSheet")) { el("#moreSheet")._close(); return; }
-  if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet")._close(); return; }
+  if (e.key === "Escape" && el("#moreSheet:not(.closing)")) { el("#moreSheet")._close(); return; }
+  if (e.key === "Escape" && el("#pauseSheet:not(.closing)")) { el("#pauseSheet")._close(); return; }
   // Any other key while a modal sheet is up must not fall through to the quiz
   // handler below — it would lock/grade the question hidden behind the overlay.
-  if (el("#helpOverlay") || el("#pauseSheet") || el("#moreSheet") || el("#primeSheet") || el("#resumeSheet")) return;
+  if (el("#helpOverlay") || el(".pause-sheet:not(.closing)")) return;
   // [E2] command palette: Cmd/Ctrl+K toggles anywhere; "/" opens when not typing.
   if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }

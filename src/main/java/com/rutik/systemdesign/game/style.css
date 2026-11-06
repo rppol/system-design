@@ -78,6 +78,16 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.64, 0, 0.78, 0);
+  --dur-press: 100ms;
+  --dur-fast: 160ms;
+  --dur-base: 220ms;
+  /* A var() that resolves to an unsupported linear() falls back to `ease`, not to the
+     previous declaration, so the springs are assigned only inside the @supports below. */
+  --spring: var(--ease-out);
+  --dur-spring: 404ms;
+  --spring-bounce: var(--ease-out);
+  --dur-bounce: 447ms;
 
   --reader-w: min(58%, 760px);   /* reader pane width; updated live by the drag grip */
   --modules-w: 160px;            /* left sidebar width; drag-resizable */
@@ -104,6 +114,14 @@
   /* Bar/meter TRACK, distinct from the glass SURFACE tokens. Never use
      --glass-2 as a track: it is near-white in light mode. */
   --track: var(--glass-brd-hi);
+}
+
+/* Step responses: damping 1.0 / response 0.30 s, and damping 0.8 / response 0.35 s. */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring: linear(0, 0.049, 0.158, 0.285, 0.412, 0.526, 0.624, 0.706, 0.772, 0.825, 0.867, 0.899, 0.924, 0.943, 0.957, 0.968, 0.976, 0.983, 0.987, 0.991, 0.993, 0.995, 0.996, 0.997, 1);
+    --spring-bounce: linear(0, 0.027, 0.096, 0.188, 0.292, 0.397, 0.499, 0.593, 0.677, 0.75, 0.812, 0.862, 0.904, 0.936, 0.961, 0.98, 0.994, 1.003, 1.009, 1.013, 1.015, 1.015, 1.015, 1.014, 1.012, 1.011, 1.009, 1.007, 1.006, 1.005, 1.004, 1.003, 1);
+  }
 }
 
 /* Stamped on <html> pre-paint by the boot script, so the rail never flashes
@@ -352,7 +370,7 @@ main { flex: 1; width: 100%; max-width: 48.75rem; margin: 0 auto; padding: 30px 
 button {
   font: inherit; cursor: pointer; border: none; border-radius: var(--radius-sm);
   color: var(--text); background: none;
-  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease,
+  transition: color var(--dur-fast) ease, background var(--dur-fast) ease, border-color var(--dur-fast) ease,
               box-shadow 0.2s ease, transform 0.12s ease;
 }
 button:active { transform: scale(0.98); }
@@ -374,11 +392,9 @@ button:active { transform: scale(0.98); }
               inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 .cta:hover, .next:hover, .row .primary:hover {
-  transform: translateY(-1px);
   box-shadow: 0 14px 36px color-mix(in srgb, var(--accent) 45%, transparent),
               inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
-.cta:active, .next:active, .row .primary:active { transform: translateY(0) scale(0.99); }
 
 .cta { display: block; width: 100%; margin-top: 20px; padding: 16px; font-size: 1.0625rem; border-radius: 14px; }
 .cta small { display: block; font-weight: 600; opacity: 0.82; margin-top: 2px; font-size: var(--fs-sm); }
@@ -444,7 +460,7 @@ button:active { transform: scale(0.98); }
   border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
   color: var(--text); cursor: pointer; box-shadow: var(--shadow-sm), var(--glass-hilite);
 }
-.review-card:hover { transform: translateY(-1px); border-color: var(--good); }
+.review-card:hover { border-color: var(--good); }
 .review-card h2 { margin: 4px 0 2px; font-size: 1.1875rem; letter-spacing: -0.01em; }
 .review-card .msg { color: var(--muted); margin: 4px 0 0; font-size: 0.875rem; }
 .review-card .review-go { font-weight: 700; color: var(--good); white-space: nowrap; }
@@ -492,13 +508,13 @@ button:active { transform: scale(0.98); }
   color: var(--text); display: flex; flex-direction: column; gap: 3px;
   box-shadow: var(--glass-hilite);
 }
-.tile:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); transform: translateY(-2px); box-shadow: var(--shadow-sm), var(--glass-hilite); }
+.tile:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); box-shadow: var(--shadow-sm), var(--glass-hilite); }
 /* Book picker (#/study/book): one card per book, reading-order numbered. */
 .tile.bookcard { flex-direction: row; align-items: center; gap: 12px; }
 .bookcard .bk-num { font-family: var(--mono, ui-monospace, monospace); font-size: 0.8125rem; font-weight: 700; color: var(--accent); flex-shrink: 0; }
 .bookcard .bk-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .bookcard .bk-go { margin-left: auto; color: var(--muted); font-size: 1.125rem; flex-shrink: 0; transition: transform 0.15s; }
-.bookcard:hover .bk-go { transform: translateX(3px); color: var(--text); }
+.bookcard:hover .bk-go { color: var(--text); }
 .tile.suggested {
   border-color: color-mix(in srgb, var(--accent-2) 65%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-2) 45%, transparent) inset,
@@ -549,12 +565,11 @@ button:active { transform: scale(0.98); }
   opacity: 0; transition: opacity 0.3s ease; pointer-events: none; z-index: 1;
 }
 .sec-tile:hover {
-  transform: translateY(-3px) scale(1.015);
   border-color: color-mix(in srgb, var(--tile-accent) 78%, transparent);
   box-shadow: var(--shadow-sm), var(--glass-hilite);
 }
 .sec-tile:hover::before { opacity: 0.95; }
-.sec-tile:hover .tile-glyph { opacity: 0.22; transform: scale(1.06); }
+.sec-tile:hover .tile-glyph { opacity: 0.22; }
 
 /* freeze chip / saved banner */
 .freeze-chip {
@@ -602,7 +617,7 @@ button:active { transform: scale(0.98); }
   background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius-sm);
   color: var(--text); font-size: 0.9375rem; box-shadow: var(--glass-hilite);
 }
-.opt:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--glass-2); transform: translateX(2px); }
+.opt:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--glass-2); }
 .opt:disabled { cursor: default; }
 .opt:disabled:active { transform: none; }
 .opt.correct {
@@ -701,13 +716,6 @@ button:active { transform: scale(0.98); }
 }
 .showopts kbd { margin-left: 8px; padding: 1px 6px; border-radius: 5px; background: rgba(0, 0, 0, 0.18); font-family: var(--mono); font-size: 0.6875rem; }
 .options.gated { display: none; }
-@media (prefers-reduced-motion: no-preference) {
-  .showopts { animation: showopts-pulse 1.8s ease-in-out infinite; }
-}
-@keyframes showopts-pulse {
-  0%, 100% { transform: scale(1); box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 30%, transparent); }
-  50% { transform: scale(1.03); box-shadow: 0 12px 38px color-mix(in srgb, var(--accent) 48%, transparent); }
-}
 
 /* A5: teach concept card + cloze chips */
 .teach-chip {
@@ -1110,15 +1118,13 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
 /* [E1] generic ephemeral toast — same visual language as the [D] nudge, but
    auto-dismissing with no button (one-shot confirmations). */
 .toast {
-  position: fixed; left: calc(50% + var(--nav-inset) / 2); bottom: 22px; transform: translateX(-50%);
+  position: fixed; left: var(--nav-inset); right: 0; margin-inline: auto; width: fit-content; bottom: 22px;
   z-index: 80; max-width: min(92dvw, 420px); padding: 12px 18px; border-radius: 999px;
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
   box-shadow: var(--shadow), var(--glass-hilite);
-  font-size: var(--fs-md); color: var(--text); animation: nudge-in 0.3s var(--ease-out);
+  font-size: var(--fs-md); color: var(--text);
 }
-.toast.out { animation: nudge-in 0.2s ease reverse forwards; }
-@media (prefers-reduced-motion: reduce) { .toast, .toast.out { animation: none; } }
 
 /* [E1] first-run coach marks: a single glass tooltip, shown once ever per id
    (localStorage sd_cm_<id>), dismissed by any click/keydown anywhere. */
@@ -1128,17 +1134,14 @@ html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inse
   background: var(--glass-2); border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--glass-brd-hi));
   color: var(--text); box-shadow: var(--shadow), var(--glass-hilite);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
-  animation: cm-float 2.4s ease-in-out infinite, fade 0.2s var(--ease-out);
+  animation: fade 0.2s var(--ease-out);
 }
-.coach-mark.reduced { animation: fade 0.2s var(--ease-out); }
 .cm-arrow {
   position: absolute; top: -6px; width: 11px; height: 11px; background: var(--glass-2);
   border-left: 1px solid color-mix(in srgb, var(--accent) 55%, var(--glass-brd-hi));
   border-top: 1px solid color-mix(in srgb, var(--accent) 55%, var(--glass-brd-hi));
   transform: rotate(45deg);
 }
-@keyframes cm-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
-@media (prefers-reduced-motion: reduce) { .coach-mark { animation: fade 0.2s var(--ease-out) !important; } }
 
 /* ---------- 11. Reader ----------------------------------------------------- */
 
@@ -1911,7 +1914,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   -webkit-backdrop-filter: blur(26px) saturate(1.6); backdrop-filter: blur(26px) saturate(1.6);
   border: 1px solid var(--glass-brd-hi); border-radius: var(--radius);
   box-shadow: var(--shadow), var(--glass-hilite);
-  animation: pop-in 0.2s var(--ease-out); font-size: 0.8125rem;
+  font-size: 0.8125rem; transform-origin: left top;
 }
 .streak-pop .tp-h { font-family: var(--mono); font-size: var(--fs-2xs); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
 .sp-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; gap: 14px; }
@@ -2014,6 +2017,41 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   .touch-hint { display: inline; }
 }
 
+/* On touch, :hover fires on tap and sticks, so the lifts only apply to a real hover. */
+@media (hover: hover) {
+  .cta:hover, .next:hover, .row .primary:hover, .review-card:hover, .pathnode:hover,
+  .c-gaunt-card:hover, .cx-card:hover { transform: translateY(-1px); }
+  .tile:hover { transform: translateY(-2px); }
+  .sec-tile:hover { transform: translateY(-3px) scale(1.015); }
+  .sec-tile:hover .tile-glyph { transform: scale(1.06); }
+  .bookcard:hover .bk-go { transform: translateX(3px); }
+  .opt:hover:not(:disabled) { transform: translateX(2px); }
+}
+/* After the lifts: equal specificity, so source order makes the press win. */
+.cta:active, .next:active, .row .primary:active { transform: translateY(0) scale(0.99); }
+.tile:active, .wait-row:active, .review-card:active, .iv-card:active, .cx-card:active,
+.pn-main:active, .opt:not(:disabled):active {
+  transform: scale(0.97); transition-duration: var(--dur-press); transition-timing-function: var(--ease-out);
+}
+
+/* Transitions, not keyframes: a re-open while .closing (fadeOut in app.js) reverses
+   from the on-screen value instead of restarting. */
+.appear-pop, .streak-pop, .pause-sheet, .pause-card, .toast, .nudge-toast {
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-spring) var(--spring);
+}
+@starting-style {
+  .appear-pop, .streak-pop { opacity: 0; transform: scale(0.96); }
+  .pause-sheet { opacity: 0; }
+  .pause-card { transform: scale(0.96); }
+  .toast, .nudge-toast { opacity: 0; transform: translateY(14px); }
+}
+.closing { pointer-events: none; }
+.closing, .closing .pause-card { transition-duration: var(--dur-base); transition-timing-function: var(--ease-in); }
+.appear-pop.closing, .streak-pop.closing { opacity: 0; transform: scale(0.96); }
+.pause-sheet.closing { opacity: 0; }
+.pause-sheet.closing .pause-card { transform: scale(0.96); }
+.toast.closing, .nudge-toast.closing { opacity: 0; transform: translateY(14px); }
+
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .topbar, .topic-card, .tile, .badge, .opt, .reveal, .review-card,
   .sectiontile, .modrow, .theme-pop, .pathnode, #reader { background: var(--bg-2); }
@@ -2069,7 +2107,8 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .options .opt:nth-child(3) { animation-delay: 0.15s; }
 .options .opt:nth-child(4) { animation-delay: 0.21s; }
 @keyframes opt-in { from { opacity: 0; transform: translateY(10px) scale(0.99); } }
-.opt.correct .mark, .opt.wrong .mark { animation: pop-in 0.3s var(--ease-out); }
+.opt.correct .mark { animation: pop-in var(--dur-bounce) var(--spring-bounce); }
+.opt.wrong .mark { animation: pop-in 0.3s var(--ease-out); }
 
 /* floating +XP particle */
 .xp-float {
@@ -2093,17 +2132,10 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 }
 @keyframes ripple-out { to { transform: scale(14); opacity: 0; } }
 
-/* boss banner pulse */
-.boss-banner { animation: boss-pulse 1.6s ease-in-out infinite alternate; }
-@keyframes boss-pulse {
-  from { box-shadow: 0 6px 20px rgba(245, 158, 11, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35); }
-  to { box-shadow: 0 6px 30px rgba(245, 158, 11, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.35); }
-}
-
 /* topbar stat pop + flame flicker */
 .stat b.pop, .stat.lvl b.pop, .daychip b.pop { animation: stat-pop 0.45s var(--ease-out); display: inline-block; }
 @keyframes stat-pop { 35% { transform: scale(1.35); color: var(--accent); } }
-.i-flame { animation: flicker 2.8s ease-in-out infinite; transform-origin: 50% 85%; }
+.i-flame.pop { animation: flicker 0.6s var(--ease-out); transform-origin: 50% 85%; }
 @keyframes flicker {
   0%, 100% { transform: scale(1); } 25% { transform: scale(1.06) rotate(-2deg); }
   55% { transform: scale(0.97) rotate(1.5deg); } 80% { transform: scale(1.04); }
@@ -2275,7 +2307,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   box-shadow: var(--glass-hilite);
   transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.2s ease, transform 0.12s ease;
 }
-.pathnode:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); transform: translateY(-1px); }
+.pathnode:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); }
 /* map nodes: section accent on the BORDER only (--tile-accent from .path-screen).
    Cursor spotlight + hover shadow stay neutral; read/here keep their own
    border tint (higher specificity). */
@@ -2289,6 +2321,8 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 9px;
   padding: 9px 12px; text-align: left; background: none; border: none; color: var(--text);
 }
+/* .pathnode clips overflow, which hides the button's own focus ring. */
+.pathnode:has(.pn-main:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pn-num {
   font-family: var(--mono); font-size: 0.6875rem; font-weight: 800; color: var(--accent-text);
   flex: 0 0 auto; font-variant-numeric: tabular-nums; opacity: 0.9;
@@ -2397,12 +2431,12 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   background: color-mix(in srgb, var(--bg) 55%, transparent);
   -webkit-backdrop-filter: blur(16px) saturate(1.3);
   backdrop-filter: blur(16px) saturate(1.3);
-  animation: fade 0.18s ease; padding: 20px;
+  padding: 20px;
 }
 .pause-card {
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
   box-shadow: var(--shadow), var(--glass-hilite); padding: 24px 26px; max-width: 420px; width: 100%;
-  animation: pop-in 0.22s var(--ease-out); text-align: center;
+  text-align: center;
 }
 .pause-card h2 { margin: 0 0 8px; font-size: 1.25rem; letter-spacing: -0.015em; }
 .pause-card p { margin: 0 0 18px; color: var(--muted); font-size: 0.875rem; }
@@ -2456,7 +2490,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 .moment.out { animation: fade 0.18s ease reverse forwards; }
 .moment-card {
   position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 10px;
-  animation: moment-in 0.5s var(--ease-out);
+  animation: moment-in var(--dur-bounce) var(--spring-bounce);
 }
 .moment-icon { display: flex; align-items: center; justify-content: center; }
 .moment-icon .icon { width: 40px; height: 40px; color: var(--accent); }
@@ -2724,9 +2758,8 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
   background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
   -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
   box-shadow: var(--shadow), var(--glass-hilite);
-  font-size: var(--fs-md); color: var(--text); animation: nudge-up 0.3s var(--ease-out);
+  font-size: var(--fs-md); color: var(--text);
 }
-.nudge-toast.out { animation: nudge-up 0.2s ease reverse forwards; }
 .nudge-dismiss {
   flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--glass-brd-hi);
   /* px ON PURPOSE: 16px glyph in a fixed 26px circle is already ~62% fill. */
@@ -2737,15 +2770,10 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
   flex: 0 0 auto; padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: var(--fs-sm);
   color: var(--accent-ink); background: linear-gradient(135deg, var(--accent), var(--accent-2));
 }
-@keyframes nudge-in { from { opacity: 0; transform: translateX(-50%) translateY(14px); } }
-@keyframes nudge-up { from { opacity: 0; transform: translateY(14px); } }
 @media (max-width: 46.99rem) {
   .nudge-toast { bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom)); max-width: calc(100% - 32px); border-radius: var(--radius); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .nudge-toast, .nudge-toast.out { animation: none; }
-  .qc-bar i { transition: none; }
-}
+@media (prefers-reduced-motion: reduce) { .qc-bar i { transition: none; } }
 
 /* ============================================================================
    [C] PHASE C — Gauntlet · Codex · Skyline · Ledger · Interviewer
@@ -2784,7 +2812,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
   border: 1px solid color-mix(in srgb, #fbbf24 42%, transparent);
   box-shadow: var(--shadow-sm), var(--glass-hilite);
 }
-.c-gaunt-card:hover { transform: translateY(-1px); border-color: #fbbf24; }
+.c-gaunt-card:hover { border-color: #fbbf24; }
 .c-gaunt-body { flex: 1; min-width: 0; }
 .c-gaunt-card h2, .c-gaunt-card .msg { overflow-wrap: anywhere; }
 .c-gaunt-card h2 { margin: 3px 0 2px; font-size: 1.1875rem; letter-spacing: -0.01em; }
@@ -2841,7 +2869,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
   display: flex; flex-direction: column; gap: 8px; text-align: left; padding: 12px 14px; min-height: 58px;
   border-radius: var(--radius-sm); background: var(--glass); border: 1px solid var(--glass-brd); color: var(--text); cursor: pointer;
 }
-.cx-card:hover { background: var(--glass-2); border-color: var(--glass-brd-hi); transform: translateY(-1px); }
+.cx-card:hover { background: var(--glass-2); border-color: var(--glass-brd-hi); }
 .cx-card.dim { opacity: 0.5; }
 .cx-card.captured { opacity: 1; border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 8%, var(--glass)); }
 .cx-card.tarnished { filter: grayscale(1); opacity: 0.6; }
@@ -3563,7 +3591,6 @@ body.nav-hidden #tabbar { display: none !important; }
   -webkit-backdrop-filter: blur(26px) saturate(1.6); backdrop-filter: blur(26px) saturate(1.6);
   border: 1px solid var(--glass-brd-hi); border-radius: var(--radius);
   box-shadow: var(--shadow), var(--glass-hilite);
-  animation: pop-in 0.18s var(--ease-out);
 }
 .ap-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
 .ap-row.ap-col { flex-direction: column; align-items: stretch; gap: 9px; }
