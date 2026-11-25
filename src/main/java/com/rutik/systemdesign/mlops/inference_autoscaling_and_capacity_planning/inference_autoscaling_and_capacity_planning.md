@@ -74,6 +74,8 @@ scaling prefill and decode pools as one replica group is
 GPU quotas and fair share across teams are
 [GPU Cluster Scheduling and Quotas](../gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
 
+See also: [Agent Runtime and Sandbox Fleet Operations](../agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) for sizing a warm pool of agent sandboxes with the same arrival-rate and start-time arithmetic.
+
 ---
 
 ## 2. Intuition

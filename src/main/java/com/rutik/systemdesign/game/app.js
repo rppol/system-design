@@ -448,7 +448,7 @@ const STUDY_ORDER = {
     "mlops/ml_pipelines_and_orchestration","mlops/evaluation_gates_and_eval_sets","mlops/continuous_training_and_refresh_policy","mlops/ai_release_engineering",
     "mlops/deployment_targets_and_serving_patterns","mlops/model_serving_platforms","mlops/inference_engine_operations_and_benchmarking","mlops/distributed_inference_and_disaggregation","mlops/lora_adapter_serving_and_lifecycle","mlops/model_storage_loading_and_cold_start","mlops/inference_autoscaling_and_capacity_planning","mlops/progressive_delivery_for_model_servers","mlops/edge_and_on_device_deployment",
     "mlops/gpu_cluster_scheduling_and_quotas","mlops/ai_networking_and_storage_fabric","mlops/training_infrastructure_operations","mlops/gpu_observability_and_fleet_health",
-    "mlops/ai_gateway_operations","mlops/decision_models","mlops/production_quality_monitoring_and_drift","mlops/ai_incident_response_and_reliability",
+    "mlops/ai_gateway_operations","mlops/agent_runtime_and_sandbox_fleet_operations","mlops/decision_models","mlops/production_quality_monitoring_and_drift","mlops/ai_incident_response_and_reliability",
     "mlops/ai_governance_and_model_risk_operations","mlops/ml_supply_chain_security","mlops/ai_cost_engineering_and_unit_economics","mlops/ml_platform_architecture_and_build_vs_buy",
   ],
   python: [

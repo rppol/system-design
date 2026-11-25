@@ -72,6 +72,7 @@ listed in the right column, link to it. Do not repeat it.
 | `training_infrastructure_operations` | parallelism theory: `llm/training_infrastructure/training_infrastructure.md`; `ml/distributed_training/distributed_training.md`; `devops/case_studies/cross_cutting/gpu_node_lifecycle.md` |
 | `gpu_observability_and_fleet_health` | `cuda/profiling_and_performance_analysis/profiling_and_performance_analysis.md`, `devops/cloud_cost_optimization_finops/gpu_and_ai_finops.md` |
 | `ai_gateway_operations` | `llm/llm_routing_and_model_selection/llm_routing_and_model_selection.md`, `llm/llm_caching/llm_caching.md`, `fastapi/serving_llm_and_ai_workloads/serving_llm_and_ai_workloads.md` |
+| `agent_runtime_and_sandbox_fleet_operations` | sandbox threat model and agent code-execution design: `llm/agents_and_tool_use/sandboxed_code_execution.md`, `llm/coding_agents/coding_agents.md`; runtime mechanics (runc, gVisor, Kata, Firecracker) and image lazy pulling: `devops/container_runtimes_and_oci/container_runtimes_and_oci.md`, `devops/container_runtimes_and_oci/oci_image_formats_and_lazy_pulling.md`; agent-platform operations: `devops/platform_engineering_and_idp/ai_workloads_and_agent_operations.md`; RL environment design: `llm/alignment_and_rlhf/rl_environments_and_agentic_rl.md` |
 | `decision_models` | logit and grammar mechanics: `llm/inference_and_decoding/constrained_decoding_and_structured_outputs.md`; calibration theory: `ml/case_studies/cross_cutting/model_calibration_and_thresholding.md`, `ml/uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md`; judge design: `llm/error_analysis_and_eval_design/error_analysis_and_eval_design.md`; routing strategy: `llm/llm_routing_and_model_selection/llm_routing_and_model_selection.md` |
 | `production_quality_monitoring_and_drift` | drift statistics: `ml/monitoring_and_drift_detection/monitoring_and_drift_detection.md`; instrumentation: `llm/llm_observability_and_monitoring/llm_observability_and_monitoring.md` |
 | `ai_incident_response_and_reliability` | `devops/incident_management_and_oncall/incident_management_and_oncall.md`, `devops/sre_principles_and_slos/sre_principles_and_slos.md` |
@@ -127,6 +128,7 @@ that remains is a release date, sample data or deliberate history, not a check d
 | OpenAI Decisions API | generally available, `POST /v1/decisions`, model `gpt-6-luna` (the only supported model); uncached input $0.10 per 1M tokens, cache reads $0.01 per 1M, cache writes $0.125 per 1M, no output charge; prompt caching needs a reusable `input` prefix of at least 1,024 tokens; 1 to 400 questions per request (200 in the beta); `input_json` content parts and hosted image URLs | checked 2026-11-25 | https://developers.openai.com/api/docs/guides/decisions, https://developers.openai.com/api/docs/models/gpt-6-luna |
 | TypeSafe System One API | model family Jev, `POST /v1/systemone`; current models `jev-1.14.0` (available 2026-10-14, adds Box questions) and `jev-1.13.0`, both $42 per billion input tokens with output free; aliases `jev-latest` and `jev-preview` both point to `jev-1.14.0`; pin a versioned id | checked 2026-11-25 | https://docs.typesafe.ai/models |
 | vLLM Semantic Router | v0.4.0 (signal-driven decisions; Router Replay plugin since v0.2.0) | 2026-09-27 | https://github.com/vllm-project/semantic-router/releases |
+| agent-sandbox / gVisor / Firecracker / Kata Containers | `kubernetes-sigs/agent-sandbox` v1.0.12 (2026-11-20), CRDs served only as `v1beta1` (`Sandbox` in `agents.x-k8s.io`; `SandboxTemplate`, `SandboxClaim`, `SandboxWarmPool` in `extensions.agents.x-k8s.io`); gVisor release 20261123.0 (2026-11-24); Firecracker v1.18.0 (2026-11-09); Kata Containers 4.4.0 (2026-11-17). Taken from the version anchor of `agent_runtime_and_sandbox_fleet_operations`, read from the project pages on 2026-11-25; re-fetch before an audit pass | 2026-11-25 | https://github.com/kubernetes-sigs/agent-sandbox/releases, https://github.com/google/gvisor/releases, https://github.com/firecracker-microvm/firecracker/releases, https://github.com/kata-containers/kata-containers/releases |
 | Agent Router | v1.3.0; the repo moved from `envoyproxy/ai-gateway` to `theagentrouter/agent-router` (the old path redirects); renamed from Envoy AI Gateway at v1.2.0, API group `aigateway.envoyproxy.io` unchanged; v1.3.0 makes `QuotaPolicy` a token-budget system (charged at response end, live policy changes, `fromMetadata` per-tenant limits, `1w`/`1mo`/`1y` windows, cross-namespace targets with a ReferenceGrant, quota-aware backend failover in preview), adds the OpenAI Files and Decisions APIs, moves to Envoy Gateway v1.10.0 | 2026-11-18 | https://github.com/theagentrouter/agent-router/releases |
 | LiteLLM | v1.111.0; stdio MCP servers disabled by default since v1.106.0 (#44066) | 2026-11-25 | https://github.com/BerriAI/litellm/releases |
 | NVIDIA GPU Operator | v26.7.3 (ships dcgm-exporter 4.9.0 and DCGM 4.7.0, so its metric renames are a breaking change of this Operator release); the v26.7.2 notes name DRA Driver v0.5.1 managed through the `GPUCluster` CR | 2026-11-17 | https://github.com/NVIDIA/gpu-operator/releases, https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/release-notes.html |
@@ -204,7 +206,7 @@ terminology is not settled across vendors.
 
 ---
 
-## Module list (32 modules, 6 phases)
+## Module list (33 modules, 6 phases)
 
 | Phase | Module directory | Q&A floor |
 |---|---|---|
@@ -233,6 +235,7 @@ terminology is not settled across vendors.
 | 4 | `training_infrastructure_operations/` | 15 |
 | 4 | `gpu_observability_and_fleet_health/` | 15 |
 | 5 Running AI in production | `ai_gateway_operations/` | 15 |
+| 5 | `agent_runtime_and_sandbox_fleet_operations/` | 15 |
 | 5 | `decision_models/` | 15 |
 | 5 | `production_quality_monitoring_and_drift/` | 15 |
 | 5 | `ai_incident_response_and_reliability/` | 15 |
@@ -268,7 +271,7 @@ components move between repos monthly.
 
 ---
 
-## Case studies (8 plus 1 cross-cutting)
+## Case studies (10 plus 1 cross-cutting)
 
 11-section principal template. Quality bar for every study, senior or principal: 900-1100
 lines; 4+ `cross_cutting/` references; executable code in §4; a broken-then-fixed example
@@ -281,6 +284,8 @@ in §4; named companies in §6; quantified impact in §9; 10+ Q&As in §11 under
 | `case_studies/design_an_embedding_model_migration.md` | senior, principal | 2B chunks to a new embedding model with zero downtime: dual index, re-embed cost, shadow recall, cutover and rollback |
 | `case_studies/design_a_multi_tenant_lora_serving_platform.md` | senior | 5,000 customer adapters over 3 base models: registry, hot-load, affinity routing, base-upgrade campaign |
 | `case_studies/design_a_model_weight_distribution_system.md` | senior | 0 to 64 nodes of a frontier MoE in under 3 minutes: OCI artifacts, P2P, NVMe cache, streaming load |
+| `case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md` | principal | a 10,240-GPU fleet moves driver R580 to R620, GPU Operator v26.7.3, dcgm-exporter 4.9.0, vLLM v0.34.0 and NCCL 2.32.7-1: compatibility matrix, canary waves, burn-in, numeric-drift replay, rollback limits |
+| `case_studies/design_an_agent_sandbox_fleet.md` | senior, principal | 100k concurrent coding-agent sandboxes, p99 start under 1 s: warm pools, cells, park by artifact, egress and credential broker, cost per session |
 | `case_studies/design_an_on_device_model_delivery_system.md` | - | a 3B model plus adapters to 50M phones: OTA deltas, cohort rollout, device matrix, hybrid fallback |
 | `case_studies/design_a_continuous_training_and_champion_challenger_system.md` | principal | CT for a scoring model with 30-day label delay: challenger shadowing, promotion rules, decision-policy versioning |
 | `case_studies/design_an_ai_quality_incident_response_program.md` | principal | a silent provider model update cuts task success by 8%: quality SLOs, detection, kill switch, re-qualification |
@@ -322,7 +327,9 @@ and `ai_networking_and_storage_fabric` were on no tier; all three are craft (ste
 digests and batch inference, OTA and device-matrix delivery, NCCL triage and fabric acceptance tests), so they
 joined the senior tier. `gpu_cluster_scheduling_and_quotas` moved from principal to senior and
 principal, because its §6 (MIG relayout, Kueue YAML, KAI sharing modes) is craft while its quota
-design stays principal judgment. Senior is now 28 modules, principal 11 modules and 13 files.
+design stays principal judgment. `agent_runtime_and_sandbox_fleet_operations` (2026-11-25) is
+craft (warm pools, park and resume, egress brokering), so it is senior only. Senior is now 29
+modules, principal 11 modules and 13 files.
 
 Membership is declared once, in the `<!-- study-paths -->` block in `README.md`. Order comes
 from `STUDY_ORDER.mlops` in `game/app.js`. There is no path array in `app.js` to edit.
@@ -335,7 +342,7 @@ from `STUDY_ORDER.mlops` in `game/app.js`. There is no path array in `app.js` to
 - 18+ for `rag_and_vector_index_lifecycle`, `evaluation_gates_and_eval_sets`,
   `ai_release_engineering`, `model_serving_platforms`,
   `distributed_inference_and_disaggregation`, `inference_autoscaling_and_capacity_planning`
-  and `gpu_cluster_scheduling_and_quotas`. Floor total for the section: 561.
+  and `gpu_cluster_scheduling_and_quotas`. Floor total for the section: 576.
 - Every Q&A is `**Q: ...?**` followed by an authored `**Short:**` line (15-220 chars) as the
   first non-blank answer line. This section ships Short-migrated from the start.
 - Order by interview frequency: traps first, then mechanics, then edge cases.

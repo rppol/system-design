@@ -12,7 +12,7 @@ The lifecycle and platform layer for AI systems: every artifact an AI feature sh
 - **Pipelines, gates and release**: orchestration, eval sets and release gates, the statistics behind a gate, refresh policy per artifact type, rollout ladders, flags and rollback semantics
 - **Serving infrastructure**: deployment targets, serving platforms and KServe, engine benchmarking and upgrade qualification, disaggregated inference, multi-LoRA serving, cold start, autoscaling, progressive delivery, edge and on-device delivery
 - **Compute platform and training infrastructure**: GPU schedulers and quota policy, GPU networking and storage fabric, training job operations and checkpoints, GPU telemetry and fleet health
-- **Running AI in production**: AI gateways, decision models, quality monitoring and drift, AI incident response
+- **Running AI in production**: AI gateways, agent sandbox fleets, decision models, quality monitoring and drift, AI incident response
 - **Governance, security, cost and platform strategy**: model risk operations, ML supply chain security, unit economics, platform build vs buy
 
 ---
@@ -46,13 +46,14 @@ The lifecycle and platform layer for AI systems: every artifact an AI feature sh
 | 23 | [training_infrastructure_operations](training_infrastructure_operations/training_infrastructure_operations.md) | 4 | senior | Kubeflow Trainer, JobSet, Ray Train, goodput and ETTR, failure taxonomy, checkpoint frequency, RL post-training infrastructure |
 | 24 | [gpu_observability_and_fleet_health](gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md) | 4 | senior | DCGM and dcgm-exporter fields, XID and ECC, substrate triage, engine and GPU metric correlation, MFU reporting |
 | 25 | [ai_gateway_operations](ai_gateway_operations/ai_gateway_operations.md) | 5 Running AI in production | senior | LiteLLM, Agent Router, vLLM Semantic Router, virtual keys and budgets, fallback chains, MCP gateway auth |
-| 26 | [decision_models](decision_models/decision_models.md) | 5 | senior | `/v1/decisions` and `/v1/systemone`, the decision artifact, calibration on your own labels, thresholds, decision monitoring |
-| 27 | [production_quality_monitoring_and_drift](production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md) | 5 | senior | Online eval, feedback, drift taxonomy per artifact, label delay and proxy metrics, quality SLOs |
-| 28 | [ai_incident_response_and_reliability](ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) | 5 | senior, principal | AI SLOs, incident classes, replaying non-deterministic failures, kill switches and degradation modes |
-| 29 | [ai_governance_and_model_risk_operations](ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md) | 6 Governance, security, cost and platform strategy | principal | AI inventory, risk tiering, SR 26-2, ISO/IEC 42001, NIST AI RMF, EU AI Act evidence, deploy gates |
-| 30 | [ml_supply_chain_security](ml_supply_chain_security/ml_supply_chain_security.md) | 6 | senior | Pickle risks, model scanners, OpenSSF Model Signing, SLSA provenance, CycloneDX ML-BOM, signature checks at admission |
-| 31 | [ai_cost_engineering_and_unit_economics](ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md) | 6 | principal | Cost per successful task, self-host break-even, cost levers with their quality gates, budgets, chargeback, cost SLOs |
-| 32 | [ml_platform_architecture_and_build_vs_buy](ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md) | 6 | principal | Reference platform stacks, CNCF Kubernetes AI Conformance, build vs buy vs assemble, what not to build |
+| 26 | [agent_runtime_and_sandbox_fleet_operations](agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) | 5 | senior | The sandbox as a fleet unit, agent-sandbox CRDs and warm pools, gVisor vs Kata vs Firecracker, park and resume by artifact, egress and credential brokering, cost per session |
+| 27 | [decision_models](decision_models/decision_models.md) | 5 | senior | `/v1/decisions` and `/v1/systemone`, the decision artifact, calibration on your own labels, thresholds, decision monitoring |
+| 28 | [production_quality_monitoring_and_drift](production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md) | 5 | senior | Online eval, feedback, drift taxonomy per artifact, label delay and proxy metrics, quality SLOs |
+| 29 | [ai_incident_response_and_reliability](ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) | 5 | senior, principal | AI SLOs, incident classes, replaying non-deterministic failures, kill switches and degradation modes |
+| 30 | [ai_governance_and_model_risk_operations](ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md) | 6 Governance, security, cost and platform strategy | principal | AI inventory, risk tiering, SR 26-2, ISO/IEC 42001, NIST AI RMF, EU AI Act evidence, deploy gates |
+| 31 | [ml_supply_chain_security](ml_supply_chain_security/ml_supply_chain_security.md) | 6 | senior | Pickle risks, model scanners, OpenSSF Model Signing, SLSA provenance, CycloneDX ML-BOM, signature checks at admission |
+| 32 | [ai_cost_engineering_and_unit_economics](ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md) | 6 | principal | Cost per successful task, self-host break-even, cost levers with their quality gates, budgets, chargeback, cost SLOs |
+| 33 | [ml_platform_architecture_and_build_vs_buy](ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md) | 6 | principal | Reference platform stacks, CNCF Kubernetes AI Conformance, build vs buy vs assemble, what not to build |
 
 ### Sub-Files
 
@@ -99,8 +100,8 @@ flowchart LR
 | 2 Pipelines, gates and release | 8-11 | What blocks a release, and how does it reach users and come back? |
 | 3 Serving infrastructure | 12-20 | Where does the model run, how fast does it start, and how does traffic move to a new version? |
 | 4 Compute platform and training infrastructure | 21-24 | Who gets which GPUs, and how do jobs survive the fleet? |
-| 5 Running AI in production | 25-28 | How is quality watched, and what happens when it drops? |
-| 6 Governance, security, cost and platform strategy | 29-32 | Who approves it, can it be trusted, what does it cost, and what should the platform team build? |
+| 5 Running AI in production | 25-29 | How is quality watched, and what happens when it drops? |
+| 6 Governance, security, cost and platform strategy | 30-33 | Who approves it, can it be trusted, what does it cost, and what should the platform team build? |
 
 ---
 
@@ -109,7 +110,7 @@ flowchart LR
 The Full Path is every module in the order above. The game's **Study** view shows it with a Full / Senior / Principal toggle (Full is the default). The tier tables below are generated from the `<!-- study-paths -->` block by `python3 game/extract.py --write-paths`. Do not edit them by hand.
 
 <!-- study-path-table senior -->
-### Senior Path (28 modules)
+### Senior Path (29 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -137,12 +138,13 @@ The Full Path is every module in the order above. The game's **Study** view show
 | 23 | [training_infrastructure_operations](training_infrastructure_operations/training_infrastructure_operations.md) | module page only |
 | 24 | [gpu_observability_and_fleet_health](gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md) | module page only |
 | 25 | [ai_gateway_operations](ai_gateway_operations/ai_gateway_operations.md) | module page only |
-| 26 | [decision_models](decision_models/decision_models.md) | module page only |
-| 27 | [production_quality_monitoring_and_drift](production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md) | module page only |
-| 28 | [ai_incident_response_and_reliability](ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) | module page only |
-| 30 | [ml_supply_chain_security](ml_supply_chain_security/ml_supply_chain_security.md) | module page only |
+| 26 | [agent_runtime_and_sandbox_fleet_operations](agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) | module page only |
+| 27 | [decision_models](decision_models/decision_models.md) | module page only |
+| 28 | [production_quality_monitoring_and_drift](production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md) | module page only |
+| 29 | [ai_incident_response_and_reliability](ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) | module page only |
+| 31 | [ml_supply_chain_security](ml_supply_chain_security/ml_supply_chain_security.md) | module page only |
 
-**Not in this path** (4 of 32, Full Path only): `continuous_training_and_refresh_policy`, `ai_governance_and_model_risk_operations`, `ai_cost_engineering_and_unit_economics`, `ml_platform_architecture_and_build_vs_buy`
+**Not in this path** (4 of 33, Full Path only): `continuous_training_and_refresh_policy`, `ai_governance_and_model_risk_operations`, `ai_cost_engineering_and_unit_economics`, `ml_platform_architecture_and_build_vs_buy`
 <!-- /study-path-table -->
 
 The Senior Path is the craft: build the release pipeline, debug the serving stack, and say why a rollout broke. It covers the artifact and release mechanics, pipelines and orchestration, the serving platform and its scaling signals, edge delivery, GPU scheduling, fabric and triage, and the production quality loop.
@@ -159,12 +161,12 @@ The Senior Path is the craft: build the release pipeline, debug the serving stac
 | 12 | [deployment_targets_and_serving_patterns](deployment_targets_and_serving_patterns/deployment_targets_and_serving_patterns.md) | 2 files |
 | 15 | [distributed_inference_and_disaggregation](distributed_inference_and_disaggregation/distributed_inference_and_disaggregation.md) | module page only |
 | 21 | [gpu_cluster_scheduling_and_quotas](gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md) | module page only |
-| 28 | [ai_incident_response_and_reliability](ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) | module page only |
-| 29 | [ai_governance_and_model_risk_operations](ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md) | module page only |
-| 31 | [ai_cost_engineering_and_unit_economics](ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md) | module page only |
-| 32 | [ml_platform_architecture_and_build_vs_buy](ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md) | module page only |
+| 29 | [ai_incident_response_and_reliability](ai_incident_response_and_reliability/ai_incident_response_and_reliability.md) | module page only |
+| 30 | [ai_governance_and_model_risk_operations](ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md) | module page only |
+| 32 | [ai_cost_engineering_and_unit_economics](ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md) | module page only |
+| 33 | [ml_platform_architecture_and_build_vs_buy](ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md) | module page only |
 
-**Not in this path** (21 of 32, Full Path only): `mlops_foundations_and_the_ai_lifecycle`, `artifact_versioning_and_lineage`, `dataset_and_label_versioning`, `prompt_lifecycle_and_versioning`, `model_registry_and_packaging`, `agent_tool_and_mcp_server_lifecycle`, `ml_pipelines_and_orchestration`, `model_serving_platforms`, `inference_engine_operations_and_benchmarking`, `lora_adapter_serving_and_lifecycle`, `model_storage_loading_and_cold_start`, `inference_autoscaling_and_capacity_planning`, `progressive_delivery_for_model_servers`, `edge_and_on_device_deployment`, `ai_networking_and_storage_fabric`, `training_infrastructure_operations`, `gpu_observability_and_fleet_health`, `ai_gateway_operations`, `decision_models`, `production_quality_monitoring_and_drift`, `ml_supply_chain_security`
+**Not in this path** (22 of 33, Full Path only): `mlops_foundations_and_the_ai_lifecycle`, `artifact_versioning_and_lineage`, `dataset_and_label_versioning`, `prompt_lifecycle_and_versioning`, `model_registry_and_packaging`, `agent_tool_and_mcp_server_lifecycle`, `ml_pipelines_and_orchestration`, `model_serving_platforms`, `inference_engine_operations_and_benchmarking`, `lora_adapter_serving_and_lifecycle`, `model_storage_loading_and_cold_start`, `inference_autoscaling_and_capacity_planning`, `progressive_delivery_for_model_servers`, `edge_and_on_device_deployment`, `ai_networking_and_storage_fabric`, `training_infrastructure_operations`, `gpu_observability_and_fleet_health`, `ai_gateway_operations`, `agent_runtime_and_sandbox_fleet_operations`, `decision_models`, `production_quality_monitoring_and_drift`, `ml_supply_chain_security`
 <!-- /study-path-table -->
 
 The Principal Path is the judgment: which refresh policy, scheduler, quota model or platform stack at what cost, what migration, and what not to build. It is a different cut, not senior plus extras. Six of its 13 files (four module pages and two sub-files) are material the Senior Path never covers.
@@ -187,6 +189,7 @@ The Principal Path is the judgment: which refresh policy, scheduler, quota model
 | "Why does a new replica take minutes before it serves a request?" | [model_storage_loading_and_cold_start](model_storage_loading_and_cold_start/model_storage_loading_and_cold_start.md) |
 | "What should the autoscaler watch on an LLM server, if not GPU utilization?" | [inference_autoscaling_and_capacity_planning](inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md) |
 | "GPU utilization reads 100%, so why is throughput low?" | [gpu_observability_and_fleet_health](gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md) |
+| "How do we start 100,000 isolated agent sandboxes with a p99 start under a second?" | [agent_runtime_and_sandbox_fleet_operations](agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) |
 | "Can training borrow the serving GPUs at night without hurting serving?" | [gpu_cluster_scheduling_and_quotas](gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md) |
 | "Is the probability a decision endpoint returns calibrated?" | [decision_models](decision_models/decision_models.md) |
 | "What does one successful task cost, all-in?" | [ai_cost_engineering_and_unit_economics](ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md) |
@@ -200,7 +203,7 @@ The Principal Path is the judgment: which refresh policy, scheduler, quota model
 |--------|-------|
 | **Weekend crash (2 days)** | Phase 1 modules 1-5, then `evaluation_gates_and_eval_sets`, `ai_release_engineering` and `progressive_delivery_for_model_servers`. Enough to explain the release bundle, the gate and the rollout |
 | **Two weeks** | The Senior Path in order, plus `design_an_ai_release_pipeline` and `design_a_model_weight_distribution_system` |
-| **One month** | Full Path phases 1-6, all eight case studies, and `cross_cutting/ai_release_bundle_and_lineage` |
+| **One month** | Full Path phases 1-6, all ten case studies, and `cross_cutting/ai_release_bundle_and_lineage` |
 | **Staff prep** | The Principal Path, then `design_an_ai_governance_and_model_inventory_platform` and `design_a_continuous_training_and_champion_challenger_system` |
 
 ---
@@ -247,6 +250,7 @@ Each tool has one home page. Other pages link there.
 | Kubeflow Trainer, Ray Train, torchrun elastic, SkyPilot | [training_infrastructure_operations](training_infrastructure_operations/training_infrastructure_operations.md) |
 | DCGM, dcgm-exporter | [gpu_observability_and_fleet_health](gpu_observability_and_fleet_health/gpu_observability_and_fleet_health.md) |
 | LiteLLM, Agent Router, vLLM Semantic Router, Portkey, Kong AI Gateway | [ai_gateway_operations](ai_gateway_operations/ai_gateway_operations.md) |
+| agent-sandbox (`Sandbox`, `SandboxClaim`, `SandboxWarmPool`), gVisor, Kata Containers, Firecracker, E2B, Modal sandboxes | [agent_runtime_and_sandbox_fleet_operations](agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) |
 | OpenAI Decisions API, TypeSafe System One API, decision models in SGLang, vLLM, Ollama and llama.cpp | [decision_models](decision_models/decision_models.md) |
 | Evidently, NannyML, Arize Phoenix, Fiddler | [production_quality_monitoring_and_drift](production_quality_monitoring_and_drift/production_quality_monitoring_and_drift.md) |
 | OPA and Kyverno deploy gates for models | [ai_governance_and_model_risk_operations](ai_governance_and_model_risk_operations/ai_governance_and_model_risk_operations.md) |
@@ -265,6 +269,8 @@ Each tool has one home page. Other pages link there.
 | [Design an Embedding Model Migration](case_studies/design_an_embedding_model_migration.md) | senior, principal | 2B chunks to a new embedding model with zero downtime: dual index, re-embed cost, shadow recall, cutover and rollback |
 | [Design a Multi-Tenant LoRA Serving Platform](case_studies/design_a_multi_tenant_lora_serving_platform.md) | senior | 5,000 customer adapters over 3 base models: registry, hot-load, affinity routing, base-upgrade campaign |
 | [Design a Model Weight Distribution System](case_studies/design_a_model_weight_distribution_system.md) | senior | 0 to 64 nodes of a frontier MoE in under 3 minutes: OCI artifacts, P2P, NVMe cache, streaming load, warm pools |
+| [Design a GPU Fleet Driver and Engine Upgrade Campaign](case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) | principal | A 10,240-GPU fleet moves driver R580 to R620, GPU Operator 26.3.x to v26.7.3, dcgm-exporter 4.9.0, vLLM v0.33.0 to v0.34.0 and NCCL 2.32.7-1: compatibility matrix, canary waves, burn-in, golden numeric-drift replay, rollback limits |
+| [Design an Agent Sandbox Fleet](case_studies/design_an_agent_sandbox_fleet.md) | senior, principal | 100k concurrent coding-agent sandboxes, p99 start under 1 s: warm pools, cells, park by artifact, egress and credential broker, cost per session |
 | [Design an On-Device Model Delivery System](case_studies/design_an_on_device_model_delivery_system.md) | - | A 3B model plus adapters to 50M phones: OTA deltas, cohort rollout, device matrix, hybrid fallback |
 | [Design a Continuous Training and Champion-Challenger System](case_studies/design_a_continuous_training_and_champion_challenger_system.md) | principal | CT for a scoring model with 30-day label delay: challenger shadowing, promotion rules, decision-policy versioning |
 | [Design an AI Quality Incident Response Program](case_studies/design_an_ai_quality_incident_response_program.md) | principal | A silent provider model update cuts task success by 8%: quality SLOs, detection, kill switch, re-qualification |
@@ -350,6 +356,9 @@ See [case_studies/case_studies.md](case_studies/case_studies.md) for the learnin
 | 44 | `case_studies/design_an_ai_quality_incident_response_program.md` | done |
 | 45 | `case_studies/design_an_ai_governance_and_model_inventory_platform.md` | done |
 | 46 | `case_studies/case_studies.md` | done |
+| 47 | `agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md` | done |
+| 48 | `case_studies/design_an_agent_sandbox_fleet.md` | done |
+| 49 | `case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md` | done |
 
 ---
 
@@ -416,6 +425,8 @@ gpu_observability_and_fleet_health
   gpu_observability_and_fleet_health.md  senior
 ai_gateway_operations
   ai_gateway_operations.md  senior
+agent_runtime_and_sandbox_fleet_operations
+  agent_runtime_and_sandbox_fleet_operations.md  senior
 decision_models
   decision_models.md  senior
 production_quality_monitoring_and_drift
@@ -435,6 +446,8 @@ case_studies
   design_an_embedding_model_migration.md                          senior, principal
   design_a_multi_tenant_lora_serving_platform.md                  senior
   design_a_model_weight_distribution_system.md                    senior
+  design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md        principal
+  design_an_agent_sandbox_fleet.md                                senior, principal
   design_an_on_device_model_delivery_system.md                    -
   design_a_continuous_training_and_champion_challenger_system.md  principal
   design_an_ai_quality_incident_response_program.md               principal

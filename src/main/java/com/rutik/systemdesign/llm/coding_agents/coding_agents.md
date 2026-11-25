@@ -6,6 +6,8 @@ Coding agents are LLM agents specialized for software engineering tasks: reading
 
 The landscape spans IDE-integrated and terminal agents (Cursor Composer, Claude Code, OpenAI Codex CLI, Gemini CLI, Continue, Cline), cloud and autonomous platforms (Codex cloud, Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). SWE-bench Verified, the 500-task benchmark the field quoted for two years, was retired as a frontier metric on 2026-02-23 when OpenAI stopped reporting it: its state of the art had crept to 80.9%, many of its hard tasks had flawed tests, and frontier models could reproduce its gold patches from training. The benchmark to quote now is **SWE-bench Pro** (1,865 tasks over 41 actively maintained repos, including private startup codebases, with the public set copyleft-licensed to resist training-set leakage), where top models scored about 23% on the public set at release. The frontier of the *product* is multi-hour autonomous tasks (Cursor Background Agents, Devin sessions, Claude Code subagents) spanning dozens of files.
 
+See also: [Agent Runtime and Sandbox Fleet Operations](../../mlops/agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) for operating the sandbox fleet that coding agents run in.
+
 ---
 
 ## 2. Intuition

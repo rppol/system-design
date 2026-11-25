@@ -20,6 +20,8 @@ The **OCI specs** define three things: the **image spec** (v1.1.1, layered image
 
 **Where containerd itself stands:** the project is on the **2.x line** (2.3 is the current LTS, cut 2026-04-30; 2.4, released 2026-09-16, is a non-LTS line). **Kubernetes 1.35 is the last release the project supports running against containerd 1.x**: a node must be upgraded to containerd 2.0 or later before its kubelet moves to 1.36, and containerd 1.7, the final 1.x LTS, reached the end of its extended support in September 2026. CRI-O sidesteps this migration: its release train tracks the Kubernetes minor version 1:1, so there is no separate CRI-O 1.x/2.x runtime line to move off.
 
+See also: [Agent Runtime and Sandbox Fleet Operations](../../mlops/agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) for how gVisor, Kata and Firecracker sandboxes are pooled and operated as a fleet.
+
 ---
 
 ## 2. Intuition

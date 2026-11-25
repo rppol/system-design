@@ -56,6 +56,8 @@ method (warmup, variance, confidence intervals, coordinated omission) lives in
 Speculative decoding theory lives in
 [Speculative Decoding](../../llm/inference_and_decoding/speculative_decoding.md).
 
+See also: [Design a GPU Fleet Driver and Engine Upgrade Campaign](../case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) for qualifying an engine upgrade (vLLM v0.33.0 to v0.34.0) together with a driver change across a 10,240-GPU fleet.
+
 ---
 
 ## 2. Intuition

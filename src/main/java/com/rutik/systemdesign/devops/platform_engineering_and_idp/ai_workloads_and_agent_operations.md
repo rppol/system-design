@@ -27,6 +27,8 @@ The platform response is not a new category of control. It is **applying existin
 
 Versioning, testing, and release of agent tools and MCP servers are covered in [Agent, Tool and MCP Server Lifecycle](../../mlops/agent_tool_and_mcp_server_lifecycle/agent_tool_and_mcp_server_lifecycle.md).
 
+See also: [Agent Runtime and Sandbox Fleet Operations](../../mlops/agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) for the fleet operations of agent sandboxes (warm pools, egress and credential isolation at scale, cost per session).
+
 ---
 
 ## 2. Intuition

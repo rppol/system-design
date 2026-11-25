@@ -1,8 +1,8 @@
 # MLOps Case Studies - Learning Path
 
-Eight case studies. Each designs the system that runs one mlops module at fleet scale: many features, many tenants, many devices, or many models at once. They stop where the neighboring sections start. The eval platform, the LLM gateway and the GPU inference platform themselves are in [llm/case_studies](../../llm/case_studies/case_studies.md). The ML platform and the experimentation platform are in [ml/case_studies](../../ml/case_studies/case_studies.md). The GPU cluster and ML platform infrastructure are in [devops/case_studies](../../devops/case_studies/case_studies.md).
+Ten case studies. Each designs the system that runs one mlops module at fleet scale: many features, many tenants, many devices, many sandboxes or many models at once. They stop where the neighboring sections start. The eval platform, the LLM gateway and the GPU inference platform themselves are in [llm/case_studies](../../llm/case_studies/case_studies.md). The ML platform and the experimentation platform are in [ml/case_studies](../../ml/case_studies/case_studies.md). The GPU cluster and ML platform infrastructure are in [devops/case_studies](../../devops/case_studies/case_studies.md).
 
-Every study uses the 11-section principal template and cites at least 4 `cross_cutting/` files. The shared reference for this section is [ai_release_bundle_and_lineage](cross_cutting/ai_release_bundle_and_lineage.md): all 8 studies key their design on the bundle digest it defines.
+Every study uses the 11-section principal template and cites at least 4 `cross_cutting/` files. The shared reference for this section is [ai_release_bundle_and_lineage](cross_cutting/ai_release_bundle_and_lineage.md): all 10 studies key their design on the bundle digest it defines.
 
 Tiers come from the `<!-- study-paths -->` block in [the section README](../README.md). `-` means Full path only.
 
@@ -38,6 +38,13 @@ Grouped by engineering concern. Within a group, read in the order given.
 | [Design a Multi-Tenant LoRA Serving Platform](design_a_multi_tenant_lora_serving_platform.md) | senior | Base digest as the partition key | 5,000 customer adapters over 3 base models. Adapter registry keyed by base digest, node sync, affinity routing that avoids hot pods, tenant isolation, and a base-upgrade campaign that moves every adapter to a new digest. |
 | [Design an On-Device Model Delivery System](design_an_on_device_model_delivery_system.md) | - | Fleet as an eventually consistent store | A 3B model plus adapters to 50M phones. Signed manifests per cohort and device class, CDN chunks and OTA deltas, cohort rollout, a device matrix, a cloud fallback sized for a kill switch, and telemetry that never reads user text. |
 
+### Compute platform and fleet operations: running the hardware and the execution fleet itself
+
+| Case Study | Tiers | Concern | Summary |
+|---|---|---|---|
+| [Design a GPU Fleet Driver and Engine Upgrade Campaign](design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) | principal | Upgrades as a compatibility matrix | A 10,240-GPU fleet moves driver R580 to R620, GPU Operator 26.3.x to v26.7.3, dcgm-exporter 4.9.0, vLLM v0.33.0 to v0.34.0 and NCCL 2.32.7-1 without breaking training jobs, dashboards or answers. Builds the compatibility matrix, canary waves, burn-in, a golden numeric-drift replay and the points where rollback stops being possible. |
+| [Design an Agent Sandbox Fleet](design_an_agent_sandbox_fleet.md) | senior, principal | Start latency and isolation at 100k sessions | 100k concurrent coding-agent sandboxes with p99 start under 1 s. Sizes warm pools, splits the fleet into cells, parks idle sessions by artifact, puts egress and credentials behind a broker and prices cost per session. |
+
 ### Operating and governing: keeping it correct after launch
 
 | Case Study | Tiers | Concern | Summary |
@@ -53,16 +60,16 @@ The mlops file lives in `cross_cutting/`, which is in `CS_EXCLUDE_DIRS`: it is n
 
 | File | Becomes relevant when | Cited by |
 |---|---|---|
-| [ai_release_bundle_and_lineage](cross_cutting/ai_release_bundle_and_lineage.md) | Release and refresh: the first time two artifacts must ship as one unit and an audit must find which bytes ran | All 8 studies |
+| [ai_release_bundle_and_lineage](cross_cutting/ai_release_bundle_and_lineage.md) | Release and refresh: the first time two artifacts must ship as one unit and an audit must find which bytes ran | All 10 studies |
 | [llm_eval_harness_in_production](../../llm/case_studies/cross_cutting/llm_eval_harness_in_production.md) | Release and refresh: a gate needs a repeatable eval run | Release pipeline, embedding migration, LoRA serving, quality incident |
-| [gpu_pool_economics](../../llm/case_studies/cross_cutting/gpu_pool_economics.md) | Serving and delivery: sizing a backfill or a warm pool in GPU-hours | Embedding migration, LoRA serving, weight distribution |
+| [gpu_pool_economics](../../llm/case_studies/cross_cutting/gpu_pool_economics.md) | Serving and delivery: sizing a backfill or a warm pool in GPU-hours | Embedding migration, LoRA serving, weight distribution, GPU upgrade campaign |
 | [tenant_isolation_patterns](../../llm/case_studies/cross_cutting/tenant_isolation_patterns.md) | Serving and delivery: one pool serves many customers | Embedding migration, LoRA serving |
 | [opentelemetry_for_llm_apps](../../llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md) | Operating and governing: traces must carry the bundle digest and model id | Release pipeline, quality incident, governance, on-device |
 | [red_team_eval_harness](../../llm/case_studies/cross_cutting/red_team_eval_harness.md) | Operating and governing: safety evidence for an approval or a re-qualification | Quality incident, governance |
-| [slo_error_budget_math](../../devops/case_studies/cross_cutting/slo_error_budget_math.md) | Release and refresh: a rollout rung or a quality SLO needs a burn-rate rule | Release pipeline, embedding migration, quality incident, on-device |
-| [supply_chain_security_pipeline](../../devops/case_studies/cross_cutting/supply_chain_security_pipeline.md) | Serving and delivery: weights must be signed and verified before load | Weight distribution, governance, on-device |
-| [gpu_node_lifecycle](../../devops/case_studies/cross_cutting/gpu_node_lifecycle.md) | Serving and delivery: node bring-up time is part of the cold-start budget | Weight distribution |
-| [prometheus_cardinality_and_scale](../../devops/case_studies/cross_cutting/prometheus_cardinality_and_scale.md) | Release and refresh: per-release or per-adapter labels on metrics | Release pipeline, LoRA serving |
+| [slo_error_budget_math](../../devops/case_studies/cross_cutting/slo_error_budget_math.md) | Release and refresh: a rollout rung or a quality SLO needs a burn-rate rule | Release pipeline, embedding migration, quality incident, on-device, GPU upgrade campaign |
+| [supply_chain_security_pipeline](../../devops/case_studies/cross_cutting/supply_chain_security_pipeline.md) | Serving and delivery: weights must be signed and verified before load | Weight distribution, governance, on-device, agent sandbox fleet |
+| [gpu_node_lifecycle](../../devops/case_studies/cross_cutting/gpu_node_lifecycle.md) | Serving and delivery: node bring-up time is part of the cold-start budget | Weight distribution, GPU upgrade campaign |
+| [prometheus_cardinality_and_scale](../../devops/case_studies/cross_cutting/prometheus_cardinality_and_scale.md) | Release and refresh: per-release or per-adapter labels on metrics | Release pipeline, LoRA serving, GPU upgrade campaign |
 | [experimentation_and_online_evaluation](../../ml/case_studies/cross_cutting/experimentation_and_online_evaluation.md) | Release and refresh: an A/B rung or a cohort rollout needs a decision rule | Release pipeline, continuous training, on-device |
 | [drift_monitoring_and_retraining](../../ml/case_studies/cross_cutting/drift_monitoring_and_retraining.md) | Release and refresh: retraining triggers | Continuous training |
 | [model_calibration_and_thresholding](../../ml/case_studies/cross_cutting/model_calibration_and_thresholding.md) | Release and refresh: thresholds ship with the model | Continuous training |
@@ -104,6 +111,21 @@ _model_migration      continuous_   ai_quality  tenant_lora_        model_delive
 
 The release pipeline is the root for the release and operating studies. The weight distribution study is the root for the serving studies. The governance study reads evidence that the continuous training and incident studies produce.
 
+The two fleet-operations studies hang off the weight distribution study, because both reuse its bring-up and cache numbers. Neither depends on the other.
+
+```
+        design_a_model_weight_distribution_system
+        (node bring-up, image and weight caches)
+                          |
+          +---------------+----------------+
+          |                                |
+          v                                v
+design_a_gpu_fleet_driver_and_     design_an_agent_sandbox_fleet
+engine_upgrade_campaign            (warm pools, cells, park by artifact,
+(compatibility matrix, canary       egress and credential broker)
+ waves, numeric-drift replay)
+```
+
 ---
 
 ## 5. Interview Prep Shortcuts
@@ -115,6 +137,8 @@ The release pipeline is the root for the release and operating studies. The weig
 | "Serve thousands of fine-tuned adapters per customer" | [Multi-Tenant LoRA Serving Platform](design_a_multi_tenant_lora_serving_platform.md) | Registry keyed by base digest, affinity routing, isolation, base-upgrade campaign |
 | "Why does our 600 GB model take 20 minutes to scale out?" | [Model Weight Distribution System](design_a_model_weight_distribution_system.md) | Fixed vs variable cold-start budget, per-rank shards, P2P, NVMe pre-seeding |
 | "Ship an LLM to millions of phones" | [On-Device Model Delivery System](design_an_on_device_model_delivery_system.md) | Signed cohort manifests, OTA deltas, device matrix, offline kill switch |
+| "How do you roll a GPU driver and serving-engine upgrade across a 10k-GPU fleet without breaking training jobs, dashboards or answers?" | [GPU Fleet Driver and Engine Upgrade Campaign](design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) | Compatibility matrix, canary waves, burn-in, golden numeric-drift replay, rollback limits |
+| "Design an agent sandbox or code-execution fleet" | [Agent Sandbox Fleet](design_an_agent_sandbox_fleet.md) | Warm pools and p99 start, cells, park by artifact, egress and credential broker, cost per session |
 | "Retrain a fraud or risk model when labels arrive a month late" | [Continuous Training and Champion-Challenger System](design_a_continuous_training_and_champion_challenger_system.md) | Challenger shadowing, exploration slice, inverse-propensity gates, policy versioning |
 | "Our LLM feature got worse and nothing alerted" | [AI Quality Incident Response Program](design_an_ai_quality_incident_response_program.md) | Task-success SLOs, model-id change detection, kill switch, re-qualification |
 | "Build a model inventory that passes a bank audit" | [AI Governance and Model Inventory Platform](design_an_ai_governance_and_model_inventory_platform.md) | Discovery-fed inventory, risk tiers, validation routing, evidence by digest |

@@ -9,6 +9,8 @@ The core tension: LLM agents need to run code to be useful (data analysis, test 
 
 Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes that spin up in tens to a couple of hundred milliseconds, run the code, return output, and disappear — giving agents the power of code execution without the risk of arbitrary host access.
 
+See also: [Agent Runtime and Sandbox Fleet Operations](../../mlops/agent_runtime_and_sandbox_fleet_operations/agent_runtime_and_sandbox_fleet_operations.md) for running these sandboxes as a fleet (warm pools, start latency, park and resume, egress and credential brokering).
+
 ---
 
 ## 2. Intuition

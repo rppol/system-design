@@ -23,6 +23,8 @@ The **GPU node lifecycle** is the set of controls that manage this from cradle t
 
 The whole point is to never let a Pod land on a node whose GPUs aren't ready, never lose work to an ungraceful termination, and never keep paying for a node that's broken or idle.
 
+See also: [Design a GPU Fleet Driver and Engine Upgrade Campaign](../../../mlops/case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) for the fleet-scale driver and engine upgrade that sits on top of this node lifecycle.
+
 ---
 
 ## 2. Intuition

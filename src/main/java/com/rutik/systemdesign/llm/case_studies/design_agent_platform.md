@@ -455,6 +455,8 @@ This is what turns §10's raw worker count (~75-80) into a provisioning plan rat
 
 ### 4c. Sandbox Pool
 
+See also: [Design an Agent Sandbox Fleet](../../mlops/case_studies/design_an_agent_sandbox_fleet.md) for the fleet-scale version of this pool (cells, park by artifact, egress and credential broker).
+
 Isolation mechanics — microVM vs gVisor vs WASM, network egress policy, filesystem scoping — are [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)'s job; this file does not re-derive them. What the platform layer owns is **pool economics and per-tenant boundary enforcement**: a warm pool sized from the §2/§10 concurrency arithmetic (cold-starting a microVM per call, at 100-500ms, blows the p95 latency budget for the 8% of runs that need one), and a hard rule that a sandbox's network egress allow-list is a property of the *tenant*, not the *tool* — two tenants both calling `execute_python` must never share an egress policy, because the tool is shared but the trust boundary is not. See [Tenant Isolation Patterns §1](cross_cutting/tenant_isolation_patterns.md) on why a shared execution surface is exactly the kind of channel that leaks silently across tenants if the isolation is enforced by application logic instead of the sandbox boundary itself.
 
 The pool-checkout contract is deliberately dumb — the isolation mechanics live one layer down in the sandbox provider, so this code has exactly one job: hand out a warm worker that already carries the *calling tenant's* egress policy, or fail loud rather than silently reuse a worker provisioned for someone else:

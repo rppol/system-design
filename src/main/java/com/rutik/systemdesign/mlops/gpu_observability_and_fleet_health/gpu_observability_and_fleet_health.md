@@ -478,6 +478,8 @@ sets agree on the old pool and the new rules fire on the new pool, then delete t
 Byte thresholds that were written in MiB need a factor of 1,048,576; clock thresholds written in
 MHz need a factor of 1,000,000.
 
+See also: [Design a GPU Fleet Driver and Engine Upgrade Campaign](../case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) for the fleet-wide rollout that carries this rename, with canary waves, burn-in and rollback limits.
+
 ### 6.4 XID triage
 
 XID messages come from the NVIDIA kernel driver (`dmesg`, `NVRM: Xid`). NVIDIA's Xid Catalog

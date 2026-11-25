@@ -21,6 +21,8 @@ An upgrade is not one operation. It is an ordered sequence across components tha
 
 **Fleet upgrades** apply the same sequence to tens or hundreds of clusters in waves (a canary cluster, then non-production, then production Region by Region), with the version of every cluster declared in Git and the rollout driven by Cluster API, the provider's API, or Terraform.
 
+See also: [Design a GPU Fleet Driver and Engine Upgrade Campaign](../../mlops/case_studies/design_a_gpu_fleet_driver_and_engine_upgrade_campaign.md) for rolling a GPU driver, GPU Operator and serving-engine upgrade across a 10k-GPU fleet.
+
 ---
 
 ## 2. Intuition

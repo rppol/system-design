@@ -171,6 +171,7 @@ Each No-branch loops back through apply → test with the specific failure messa
 
 See also: [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md) for checkpoint-per-tool-call design.
 See also: [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for SWE-bench integration.
+See also: [Design an Agent Sandbox Fleet](../../mlops/case_studies/design_an_agent_sandbox_fleet.md) for the sandbox fleet the executor runs on at 100k concurrent sessions.
 
 ---
 
