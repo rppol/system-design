@@ -647,6 +647,8 @@ The 32 KB limit is the one that hurts a GEMM author most. An H100 FlashAttention
 
 **llama.cpp.** Its build documentation states that Metal is enabled by default on macOS, can be disabled at build time with `-DGGML_METAL=OFF`, and that `--n-gpu-layers 0` disables GPU inference at run time. The project reached v1.0.0 on 2026-11-13. It is the alternative runtime in §5 and the fallback the product keeps for machines where MLX is not supported.
 
+See also: the hardware, runtime and model landscape around this design is in [Local AI](../../llm/local_ai/local_ai.md).
+
 ---
 
 ## 7. Technologies & Tools

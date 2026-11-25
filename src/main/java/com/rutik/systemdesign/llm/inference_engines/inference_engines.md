@@ -119,7 +119,7 @@ trtllm-serve meta-llama/Meta-Llama-3-70B-Instruct \
 
 ### 4.3 llama.cpp
 
-CPU-first inference engine with Metal (Apple Silicon), CUDA, Vulkan and SYCL backends (plus narrower ones such as OpenCL for Adreno and HIP for AMD). Enables running LLMs on consumer hardware.
+CPU-first inference engine with Metal (Apple Silicon), CUDA, Vulkan and SYCL backends (plus narrower ones such as OpenCL for Adreno, HIP for AMD, OpenVINO, and Hexagon for Qualcomm NPUs). Enables running LLMs on consumer hardware. Version 1.0.0 (2026-11-13) moved llama.cpp and ggml to semantic versioning with a stable public C API/ABI; rolling `bNNNNN` builds continue alongside it.
 
 **Key features:**
 - GGUF quantized format: Q4_K_M (4-bit with mixed precision)
@@ -127,6 +127,7 @@ CPU-first inference engine with Metal (Apple Silicon), CUDA, Vulkan and SYCL bac
 - CPU SIMD optimizations (AVX-512, NEON)
 - Low memory: 4-bit quantized 7B fits in 4.5GB RAM
 - Minimal dependencies: just C/C++
+- `llama-server` speaks the OpenAI chat completions, Responses and embeddings APIs and the Anthropic Messages API; continuous batching is on by default and `--parallel` slots are sized automatically
 
 ```bash
 # Build and run
@@ -138,7 +139,7 @@ cmake -B build && cmake --build build --config Release
     --color -ngl 35 -n 512 \
     -p "You are a helpful assistant."
 
-# As server
+# As server (the default port is 9931; --port overrides it)
 ./build/bin/llama-server -m ./models/llama-3.1-8b-Q4_K_M.gguf --port 8080
 ```
 
@@ -214,9 +215,11 @@ curl http://localhost:11434/api/chat -d '{
 
 **Features:**
 - Automatic hardware detection (CPU/GPU/Metal)
-- Model library: 200+ curated models at ollama.com/library
-- OpenAI-compatible API (via `ollama serve`)
-- Model management: pull, list, delete
+- Two engines underneath: since v0.30.0 (2026-05-13) the non-Apple path runs on upstream llama.cpp (v0.40.18 bundles build b12651), and since v0.40.0 (2026-09-25) models run on MLX by default on Apple silicon for supported architectures; Macs serve concurrent requests since v0.40.17
+- Model library at ollama.com/library, plus GGUF models pulled straight from Hugging Face
+- Native `/api/*`, OpenAI-compatible (chat completions, Responses) and Anthropic Messages APIs; `ollama launch` wires Claude Code, Codex and OpenCode to local models
+- Optional cloud models alongside local ones (off unless you use them)
+- Model management: pull, list, delete; `ollama ps` shows the loaded context and GPU/CPU split
 
 **Best for:** Development, demos, personal use, testing models locally.
 
@@ -735,9 +738,10 @@ replicas.
   `--tensor-parallel-size 8`. The unquantized BF16 weights do not fit an 8×80GB node
 
 ### Local AI Community
-- llama.cpp runs on everything from Raspberry Pi to Apple Silicon MacBooks
-- Ollama is the most common one-command path to a local model; its registry carries 200+ models
-- LM Studio: GUI wrapper around llama.cpp (and MLX on Apple Silicon) for non-technical users
+- llama.cpp runs on everything from Raspberry Pi to Apple Silicon MacBooks, and reached a stable v1.0.0 C API on 2026-11-13
+- Ollama is the most common one-command path to a local model; it now runs MLX on Apple silicon and llama.cpp elsewhere
+- LM Studio: desktop app over llama.cpp and MLX engines; 0.4.0 (2026-01-28) added `llmster`, a headless daemon with continuous batching for server use, and LM Studio Bionic (2026-07-16) is its separate agent app
+- Hardware, runtime and model choices for laptops and desk-side boxes: [Local AI](../local_ai/local_ai.md)
 
 ---
 
@@ -794,11 +798,11 @@ replicas.
 |------|-------|
 | **vLLM** | pip install vllm; industry standard |
 | **TensorRT-LLM** | Complex setup; max performance on NVIDIA |
-| **llama.cpp** | C++; minimal deps; CPU/Metal/CUDA |
+| **llama.cpp** | C++; minimal deps; CPU/Metal/CUDA/Vulkan and more; v1.0.0 stable C API |
 | **SGLang** | Radix attention; constrained gen |
-| **Ollama** | One-command local LLMs |
+| **Ollama** | One-command local LLMs; MLX on Apple silicon, llama.cpp elsewhere |
 | **HuggingFace TGI** | Docker image; HF Hub integration. Archived read-only 2026-03-21 — inherit-and-migrate, not a new-build choice |
-| **LM Studio** | GUI for local models |
+| **LM Studio** | Desktop app plus headless `llmster` server; llama.cpp and MLX engines |
 | **ExLlamaV2** | Fast GPTQ; consumer GPUs |
 | **MLC-LLM** | Mobile/browser inference |
 | **ONNX Runtime** | Cross-platform inference |
@@ -850,8 +854,8 @@ llama.cpp supports multiple quantization formats — Q8_0, Q5_K_M, Q4_K_M, Q3_K_
 SGLang's radix attention uses a radix tree (prefix tree) to cache and reuse KV cache entries across requests that share common prefixes, similar to vLLM's prefix caching but optimized for structured generation patterns. For structured outputs (JSON, function calls), SGLang's frontend language allows defining generation patterns that automatically share KV cache across branches. Example: generating a JSON object with 5 fields — all fields share the system prompt + schema prefix, and SGLang caches this shared prefix once. Additionally, SGLang's constrained decoding uses a *compressed* FSM: Outlines also compiles the schema into an FSM, but decodes one token per forward pass, whereas SGLang collapses runs of singular-transition edges so a deterministic multi-token span is emitted in a single step (jump-forward decoding). LMSYS's published benchmark reports up to 2x lower latency and up to 2.5x higher throughput than Outlines+vLLM on JSON decoding — measure your own schemas rather than quoting a fixed multiple. Choose SGLang when your application generates many structured outputs with shared prompt prefixes (API backends, data extraction pipelines).
 
 **Q: How do you choose between cloud inference (vLLM/TRT-LLM) and edge inference (llama.cpp/Ollama)?**
-**Short:** Cloud engines like vLLM suit multi-user GPU serving at low TTFT, while edge engines like llama.cpp and Ollama suit single-user, low-resource, or privacy-constrained deployment.
-Cloud inference engines (vLLM, TensorRT-LLM, TGI) are designed for multi-user serving with high concurrency, while edge engines (llama.cpp, Ollama, MLC-LLM) are optimized for single-user, low-resource environments. Decision matrix: (1) Concurrency: many users on shared GPUs favour cloud engines (llama-server also serves concurrent requests through `--parallel` slots with continuous batching on by default, so the split is about scale and GPU efficiency, not serialization); (2) Hardware: vLLM/TRT-LLM on NVIDIA GPUs, llama.cpp/MLX on Apple Silicon, llama.cpp on CPU only; (3) Model size: cloud GPUs above 13B parameters (edge devices struggle), edge viable at 1B-7B; (4) Latency: cloud with GPU for <100ms TTFT, edge when <1s is acceptable; (5) Privacy: edge only when data cannot leave the device. Ollama adds a user-friendly API and model management on top of GGML-based inference (its own engine on GGML since 2025-05-15, multimodal models first, alongside llama.cpp), making it ideal for developer machines and prototyping. For mobile deployment: use MLC-LLM (Android/iOS) or ONNX Runtime with quantized models. Production pattern: use cloud inference for real-time features, edge inference for offline-capable features.
+**Short:** Cloud engines such as vLLM suit many users on shared GPUs; llama.cpp and Ollama suit one or a few users on owned hardware, where privacy, offline use or a 128 GB desk box decides.
+Cloud inference engines (vLLM, TensorRT-LLM, SGLang) are designed for multi-user serving with high concurrency, while edge engines (llama.cpp, Ollama, LM Studio) are optimized for one user or a small team on owned hardware. Decision matrix: (1) Concurrency: many users on shared GPUs favour cloud engines (llama-server also serves concurrent requests through `--parallel` slots with continuous batching on by default, so the split is about scale and GPU efficiency, not serialization); (2) Hardware: vLLM/TRT-LLM on NVIDIA GPUs, llama.cpp/MLX on Apple Silicon, llama.cpp on CPU only; (3) Model size: datacenter GPUs for frontier-scale open models, while owned hardware now runs 25-35B MoE models on laptops and 120B-class MoE models on 128 GB desk boxes such as DGX Spark or an M5 Max; (4) Latency: cloud with GPU for <100ms TTFT, edge when <1s is acceptable; (5) Privacy: edge only when data cannot leave the device. Ollama adds a user-friendly API and model management on top of two engines: upstream llama.cpp since v0.30.0 and, on Apple silicon, MLX by default since v0.40.0, with OpenAI- and Anthropic-compatible endpoints, which makes it ideal for developer machines, coding agents and prototyping. For mobile deployment: use LiteRT-LM, ExecuTorch, or the OS-provided model APIs. Production pattern: use cloud inference for real-time features, edge inference for offline-capable features. The local hardware and runtime decisions are covered in [Local AI](../local_ai/local_ai.md).
 
 **Q: When do you use tensor parallelism vs pipeline parallelism to serve a model too big for one GPU?**
 **Short:** Tensor parallelism needs NVLink-class bandwidth within one node, while pipeline parallelism only passes activations at stage boundaries and tolerates slower inter-node links.
@@ -1061,7 +1065,7 @@ async def generate(prompt: str, request_id: str) -> str:
 |---|---|---|---|
 | vLLM (PagedAttention) | High (measure it — the vLLM/TGI ordering flips between releases) | Maximum throughput, speculative decoding, complex batching | Steeper ops complexity; less HuggingFace native integration |
 | TGI (HuggingFace) | High | Existing SageMaker / HF-Hub fleets you already run | **Archived read-only 2026-03-21** — no new models, no CVE patches; `3.3.7` is the final release. Fewer scheduler knobs than vLLM |
-| llama.cpp | Low-medium (CPU/low VRAM) | Edge deployment, MacBook M-series, 4-bit quantized models | Not suitable for multi-user high-RPS serving; no continuous batching |
+| llama.cpp | Low-medium (CPU/low VRAM) | Edge deployment, MacBook M-series, 4-bit quantized models | Continuous batching is on by default with `--parallel` slots sized automatically, but it is built for one to a few users per box, not multi-user high-RPS fleets |
 | SGLang | High (RadixAttention prefix caching) | High prefix reuse (system prompts, RAG boilerplate) | Smaller community; fewer deployment examples |
 
 **Pitfall — vLLM PagedAttention fragmentation under long-context requests wastes GPU memory.**

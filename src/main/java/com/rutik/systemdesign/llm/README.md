@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **55 topic directories** plus **30 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (80 module sub-files plus the cross-cutting case study sub-files — 9 content files and the `cross_cutting.md` index — listed in the Sub-Files Index below):
+This section is organized into **56 topic directories** plus **31 real-world case studies**, covering the full LLM lifecycle. Sixteen topics have **deep-dive sub-files** (82 module sub-files plus the cross-cutting case study sub-files — 9 content files and the `cross_cutting.md` index — listed in the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -85,12 +85,13 @@ column reflects learning sequence, not addition order.
 | 47 | 6 — Advanced | [Vision-Language Models](vision_language_models/vision_language_models.md) | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | Advanced |
 | 48 | 6 — Advanced | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/vla_and_robotics_foundation_models.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | Advanced |
 | 49 | 6 — Advanced | [Small Language Models & Edge AI](small_language_models_and_edge_ai/small_language_models_and_edge_ai.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
-| 50 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/mixture_of_experts.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
-| 51 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/diffusion_language_models.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
-| 52 | 6 — Advanced | [AI Applications](ai_applications/ai_applications.md) | Healthcare, legal, finance, education, customer support | Beginner |
-| 53 | 6 - Advanced | [Applied AI Product Decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) | Use-case portfolio ranking, AI feasibility spikes, vendor product vs model API, IP indemnity terms, adoption funnel, autonomy promotion per action class | Advanced |
-| 54 | 6 - Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | Model families, licensing, cost analysis, timeline | Beginner |
-| 55 | 6 - Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
+| 50 | 6 — Advanced | [Local AI](local_ai/local_ai.md) | 2026 landscape: unified-memory desktops, bandwidth sizing, llama.cpp/Ollama/LM Studio/MLX, FP4 and speculative decoding locally, local agents and hybrid routing — with 2 deep-dive sub-files | Intermediate |
+| 51 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/mixture_of_experts.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
+| 52 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/diffusion_language_models.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
+| 53 | 6 — Advanced | [AI Applications](ai_applications/ai_applications.md) | Healthcare, legal, finance, education, customer support | Beginner |
+| 54 | 6 - Advanced | [Applied AI Product Decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) | Use-case portfolio ranking, AI feasibility spikes, vendor product vs model API, IP indemnity terms, adoption funnel, autonomy promotion per action class | Advanced |
+| 55 | 6 - Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | Model families, licensing, cost analysis, timeline | Beginner |
+| 56 | 6 - Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 
 ---
 
@@ -238,6 +239,12 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [privacy_and_data_governance.md](llm_security/privacy_and_data_governance.md) | Memorization & extraction, membership inference, PII pipelines, DP-SGD, machine unlearning, deletion requests |
 | [agent_identity_and_authorization.md](llm_security/agent_identity_and_authorization.md) | Agent workload identity (SPIFFE), OAuth token exchange (RFC 8693), delegated and least-privilege tool access, the confused-deputy problem |
 
+### Local AI (`local_ai/`)
+| File | Topic |
+|------|-------|
+| [local_ai_hardware_and_sizing.md](local_ai/local_ai_hardware_and_sizing.md) | Memory capacity, bandwidth and prefill compute per device class (Apple M5/M6/Ultra, Strix Halo, DGX Spark, RTX 50, Copilot+ NPUs, phones), decode = bandwidth / active bytes, MoE offload, multi-box, measured benchmark tables, buying guide |
+| [local_agents_and_hybrid_routing.md](local_ai/local_agents_and_hybrid_routing.md) | Harness wiring (`ollama launch`, Anthropic and OpenAI compatible local APIs), prefix-cache discipline, the context-length trap, small-model tool-use limits, MCP on local servers, local RAG, local-first cloud-burst routing, OS any-provider APIs, local server security |
+
 ---
 
 ## Recommended Learning Order
@@ -324,13 +331,13 @@ then hardens production safety.
 ```
 Safety & Alignment  -->  Mechanistic Interpretability  -->  LLM Security  -->  AI Regulations & Compliance
         -->  Multimodal Models  -->  Vision-Language Models  -->  VLA & Robotics Foundation Models
-        -->  Small Language Models & Edge AI  -->  Mixture of Experts  -->  Diffusion Language Models
-        -->  AI Applications  -->  Applied AI Product Decisions  -->  LLM Ecosystem & Landscape
-        -->  Data Flywheels & Continuous Learning
+        -->  Small Language Models & Edge AI  -->  Local AI  -->  Mixture of Experts
+        -->  Diffusion Language Models  -->  AI Applications  -->  Applied AI Product Decisions
+        -->  LLM Ecosystem & Landscape  -->  Data Flywheels & Continuous Learning
 ```
 Broaden understanding of safety, security threats and defenses, the regulatory landscape (EU AI
 Act, NIST AI RMF), multimodal capabilities, VLM internals (CLIP, LLaVA, BLIP-2), embodied/robotics
-foundation models, small models, MoE architecture, non-autoregressive generation, domain
+foundation models, small models, local AI on owned hardware, MoE architecture, non-autoregressive generation, domain
 applications, the full landscape, and continuous improvement. Mechanistic Interpretability follows
 Safety & Alignment because it provides the white-box tooling (SAEs, activation patching, circuit
 tracing) that underlies the scalable-oversight and debugging techniques introduced there. AI
@@ -338,7 +345,10 @@ Regulations follows LLM Security because compliance obligations (DPIA, conformit
 on the threat models covered there; Vision-Language Models deepens the architecture half of
 Multimodal Models. VLA & Robotics Foundation Models follows Vision-Language Models directly because
 a VLA is architecturally a VLM plus an action head — the perception stack (Grounding DINO/SAM) is
-shared. Diffusion Language Models follows Mixture of Experts to group the two
+shared. Local AI follows Small Language Models & Edge AI because it widens the same question from
+phones to laptops and desk-side boxes (25-35B MoE models, unified-memory desktops, local agents),
+and it sits just before Mixture of Experts because MoE is why those models run fast at home.
+Diffusion Language Models follows Mixture of Experts to group the two
 architecture/generation-alternative modules (MoE's sparse activation, diffusion's non-autoregressive
 decoding) adjacently, both contrasted against the dense-autoregressive default.
 
@@ -531,6 +541,10 @@ vla_and_robotics_foundation_models
   vla_and_robotics_foundation_models.md  -
 small_language_models_and_edge_ai
   small_language_models_and_edge_ai.md  -
+local_ai
+  local_ai.md                         senior, principal
+  local_ai_hardware_and_sizing.md     senior
+  local_agents_and_hybrid_routing.md  senior, principal
 mixture_of_experts
   mixture_of_experts.md  senior
 diffusion_language_models
@@ -574,15 +588,16 @@ case_studies
   design_video_generation_platform.md   -
   design_voice_cloning_tts_platform.md  -
   design_agent_platform.md  principal
+  design_local_first_coding_agent.md  principal
 -->
 ## Learning Paths
 
-This section is deliberately exhaustive: 55 modules covering the full LLM lifecycle. That is the right
+This section is deliberately exhaustive: 56 modules covering the full LLM lifecycle. That is the right
 depth for a reference, but the wrong shape for someone with an interview in two weeks. So there are **two
 ways through it**. Pick based on your goal; the browser learning game's **Study** view surfaces both as a
 **Full / Interview** toggle (Full is the default).
 
-### Full Path (55 modules)
+### Full Path (56 modules)
 
 The complete curriculum, in the order above — see [Recommended Learning Order](#recommended-learning-order).
 Use this when you want genuine mastery of the whole field: research frontier (diffusion LMs, VLA/robotics,
@@ -590,7 +605,7 @@ mechanistic interpretability), breadth (multimodal, edge SLMs, ecosystem, regula
 specialized agent type. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (35 modules)
+### Senior Path (36 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -628,9 +643,10 @@ specialized agent type. Nothing is dropped.
 | 41 | [guardrails_and_content_safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | 2 files |
 | 42 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
 | 44 | [llm_security](llm_security/llm_security.md) | 3 files |
-| 50 | [mixture_of_experts](mixture_of_experts/mixture_of_experts.md) | module page only |
+| 50 | [local_ai](local_ai/local_ai.md) | 3 files |
+| 51 | [mixture_of_experts](mixture_of_experts/mixture_of_experts.md) | module page only |
 
-**Not in this path** (20 of 55, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `applied_ai_product_decisions`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
+**Not in this path** (20 of 56, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `applied_ai_product_decisions`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
@@ -648,15 +664,16 @@ why it earns senior time.
 | Operate | "Cut serving cost 10x" is a staple system-design ask |
 | Quality & Safety | LLM-as-judge pitfalls, error analysis and failure taxonomies, prompt injection defense, hallucination mitigation |
 | Architecture | MoE training/serving tradeoffs come up whenever frontier models are discussed |
+| Local AI | "Will it run on our hardware, how fast, and is it safe to expose?" is now a common ask: bandwidth sizing, runtime choice, local agents |
 
 infrastructure, synthetic data, Constitutional AI, the remaining agentic-framework surveys, voice/
 browser agents, distillation & merging, observability, LLMOps platforms, PromptOps, mechanistic
 interpretability, AI regulations, multimodal & vision-language models, VLA & robotics, small/edge models,
 diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A niche flagged in an interview
-(e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 35 above are solid.
+(e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 36 above are solid.
 
 <!-- study-path-table principal -->
-### Principal Path (31 modules)
+### Principal Path (32 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -688,11 +705,12 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 | 42 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
 | 44 | [llm_security](llm_security/llm_security.md) | 3 files |
 | 45 | [ai_regulations_and_compliance](ai_regulations_and_compliance/ai_regulations_and_compliance.md) | module page only |
-| 53 | [applied_ai_product_decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) | module page only |
-| 54 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | module page only |
-| 55 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | module page only |
+| 50 | [local_ai](local_ai/local_ai.md) | 2 files |
+| 54 | [applied_ai_product_decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) | module page only |
+| 55 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | module page only |
+| 56 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | module page only |
 
-**Not in this path** (24 of 55, Full Path only): `tokenization_and_embeddings`, `embeddings_and_similarity_search`, `faiss_deep_dive`, `pre_training`, `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `prompt_engineering`, `code_generation`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `context_windows_and_long_context`, `vllm_deep_dive`, `llm_ops_platforms`, `llm_testing_strategies`, `mechanistic_interpretability`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `mixture_of_experts`, `diffusion_language_models`, `ai_applications`
+**Not in this path** (24 of 56, Full Path only): `tokenization_and_embeddings`, `embeddings_and_similarity_search`, `faiss_deep_dive`, `pre_training`, `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `prompt_engineering`, `code_generation`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `context_windows_and_long_context`, `vllm_deep_dive`, `llm_ops_platforms`, `llm_testing_strategies`, `mechanistic_interpretability`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `mixture_of_experts`, `diffusion_language_models`, `ai_applications`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes system-level ownership of an LLM product: evaluation you can trust, the cost and latency envelope, and the failure and safety modes you design for before launch. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -774,6 +792,7 @@ The highest-frequency LLM *knowledge* questions mapped to the exact file that an
 | How do AI agents pay for things autonomously — what protocols enforce spend limits? | [agentic_commerce_and_payments.md](multi_agent_systems/agentic_commerce_and_payments.md) |
 | How do you secure a multi-agent system against a compromised or colluding peer agent? | [multi_agent_security.md](multi_agent_systems/multi_agent_security.md) |
 | Should this be an AI feature, which use case goes first, and do we buy or build it? | [Applied AI Product Decisions](applied_ai_product_decisions/applied_ai_product_decisions.md) |
+| Will this model run on our laptops, how fast, and how do we wire a coding agent to it safely? | [Local AI](local_ai/local_ai.md), [local_ai_hardware_and_sizing.md](local_ai/local_ai_hardware_and_sizing.md), [local_agents_and_hybrid_routing.md](local_ai/local_agents_and_hybrid_routing.md) |
 
 ---
 
@@ -789,7 +808,7 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | 4 | Agents (Phase 4) | Agents & Tool Use, Agentic Workflow Patterns, Agentic Frameworks, Multi-Agent Systems, MCP | function_calling_and_tool_design, agent_memory, langgraph, mcp_server_building | [Design Autonomous SWE Agent](case_studies/design_autonomous_swe_agent.md) |
 | 5 | Serving (Phase 5a) | Inference & Decoding, Context Windows, Inference Engines, vLLM Deep Dive, Optimization & Quantization, Distillation & Merging | gpu_architecture_and_roofline, constrained_decoding_and_structured_outputs, speculative_decoding, sampling_and_decoding_strategies, kv_cache_optimization | [Design GPU Inference Platform](case_studies/design_gpu_inference_platform.md) |
 | 6 | Operating (Phases 5b + 5c) | Deployment & MLOps, LLM Caching, Observability, LLMOps Platforms, Token Economics, Routing, PromptOps, Evaluation, Testing, Guardrails | framework_observability | [Design LLM Gateway](case_studies/design_llm_gateway.md), [Design LLM Eval Platform](case_studies/design_llm_eval_platform.md) |
-| 7 | Advanced (Phase 6) | Safety, Mechanistic Interpretability, LLM Security, AI Regulations, Multimodal, VLMs, VLA & Robotics, SLMs & Edge, MoE, Diffusion Language Models, Applications, Ecosystem, Data Flywheels | privacy_and_data_governance, mcp_security, automated_jailbreak_algorithms | [Design AI Content Moderation](case_studies/design_ai_content_moderation.md) |
+| 7 | Advanced (Phase 6) | Safety, Mechanistic Interpretability, LLM Security, AI Regulations, Multimodal, VLMs, VLA & Robotics, SLMs & Edge, Local AI, MoE, Diffusion Language Models, Applications, Ecosystem, Data Flywheels | privacy_and_data_governance, mcp_security, automated_jailbreak_algorithms, local_agents_and_hybrid_routing | [Design AI Content Moderation](case_studies/design_ai_content_moderation.md), [Design a Local-First Coding Agent](case_studies/design_local_first_coding_agent.md) |
 | 8 | Interview drills | Re-read weak areas; all 9 [cross_cutting/](case_studies/cross_cutting/cross_cutting.md) primitives | — | 3–4 principal case studies via the [interview shortcuts](case_studies/case_studies.md) + mock "design X" sessions using the 5-step framework above |
 
 ---
@@ -869,7 +888,8 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | Reasoning Models | Prompt Engineering (CoT), Evaluation & Benchmarks |
 | Code Generation | Agents & Tool Use, Evaluation (HumanEval, SWE-bench) |
 | MCP | Agents & Tool Use, Agentic Frameworks, Function Calling |
-| Small Language Models | Optimization & Quantization, Inference Engines, Deployment |
+| Small Language Models | Optimization & Quantization, Inference Engines, Deployment, Local AI |
+| Local AI | SLMs & Edge AI, Inference Engines, Optimization & Quantization, Speculative Decoding, MCP, Coding Agents |
 | Mixture of Experts | Foundations & Architecture, Inference Engines, LLM Ecosystem |
 | LLM Routing | Deployment & MLOps, Token Economics, Evaluation |
 | Token Economics | Deployment & MLOps, LLM Ecosystem, LLM Routing |
@@ -926,6 +946,7 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | [Design Synthetic Data Platform](case_studies/design_synthetic_data_platform.md) | Diversity sampling, best-of-N preference pairs, quality filter pipeline, lineage tracking | Principal |
 | [Design Avatar Video Platform](case_studies/design_avatar_video_platform.md) | Sequential pipeline pipelining, lip-sync tier economics, deepfake consent gates, C2PA | Principal |
 | [Design an Internal Multi-Tenant Agent Platform](case_studies/design_agent_platform.md) | Per-tenant tool registry, durable agent runtime, sandboxed execution, atomic budget ledger, agent tracing | Principal |
+| [Design a Local-First Coding Agent](case_studies/design_local_first_coding_agent.md) | Code never leaves company hardware: laptop MoE models, team DGX Spark pods with session affinity, prefix-stable harness adapter, redaction gateway, model artifact gate | Principal |
 
 ### Cross-Cutting Case Study Sub-Files (`case_studies/cross_cutting/`)
 

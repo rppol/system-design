@@ -154,7 +154,7 @@ Gemini 3.5 Flash-Lite (high volume):
 
 Batch API: 50% off both input and output rates across the line
 
-Gemma 4 (open weights, 2026-03-31):
+Gemma 4 (open weights, 2026-04-02):
   E2B, E4B, 26B-A4B (MoE) and 31B; 12B Unified added 2026-06-03
   License: Apache 2.0
   Gemma 1-3 remain under the Gemma Terms of Use plus a prohibited-use
@@ -164,7 +164,13 @@ Gemma 4 (open weights, 2026-03-31):
 ### 4.4 Meta (LLaMA)
 
 ```
-Llama 4 (current open-weight flagship, April 2025):
+Muse Glimmer 30B (Meta Superintelligence Labs, 2026-08-10):
+  Meta MSL's first open model; ~29.6B dense with a 1.8B perception
+    encoder, 128K+ context, reasoning strength low/medium/high/xhigh
+  Built for local coding agents; published under the meta-models org
+  License: Apache 2.0
+
+Llama 4 (April 2025; still the newest weights in the meta-llama org):
   Scout: MoE, 17B active params, ~109B total; fits on a single high-end
     GPU; very long context (10M tokens advertised)
   Maverick: MoE, 17B active params, ~400B total; flagship generalist
@@ -642,8 +648,14 @@ Start with:
     Reasoning/Math: Claude Fable 5.2, gpt-6.2-astra, Gemini 4 Carbon, DeepSeek-V4
     RAG/Documents: Claude Sonnet 5.5, Gemini 3.1 Pro
     Multilingual: Gemini, Qwen 3.6, Mistral Large 3
-    Edge/On-device: Phi-4 mini, Llama 3.2 1B, Gemma 4 E2B / E4B
+    Edge/On-device: Gemma 4 E2B / E4B, Qwen3.5 0.8B-9B, Ministral 3 3B/8B,
+      LFM3-1.7B, Aion-1.0-Instruct 2.3B
+    Local desktop (24-128 GB): Qwen3.6-35B-A3B, Gemma 4 26B-A4B,
+      gpt-oss-20b / 120b, Muse Glimmer 30B
 ```
+
+For hardware sizing, local runtimes and the local model shortlist by memory tier, see
+[Local AI](../local_ai/local_ai.md).
 
 ### Chinchilla Scaling Laws vs. Over-Training
 
@@ -758,7 +770,7 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 |------|----------|---------|-------------|
 | LiteLLM | Abstraction | Unified API across 100+ providers | Drop-in OpenAI SDK replacement; cost tracking; fallback routing |
 | OpenRouter | API aggregator | Single endpoint for 200+ models | Best-of price routing; model comparison; usage analytics |
-| Ollama | Local inference | Run open-weight models locally | One-command model pull; OpenAI-compatible API; Mac Metal support |
+| Ollama | Local inference | Run open-weight models locally | MLX engine on Apple silicon, llama.cpp elsewhere; OpenAI and Anthropic APIs; see [Local AI](../local_ai/local_ai.md) |
 | HuggingFace Hub | Model registry | Download, share, and version models | Largest open-weight model registry; Inference API; Spaces |
 | Together AI | Managed inference | Run open-weight models via API | Llama, Mistral, DeepSeek, Qwen; fast inference; serverless |
 | Replicate | Managed inference | Run open-weight models via API | Per-second billing; easy deployment of custom models |

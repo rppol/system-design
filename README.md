@@ -193,6 +193,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Applied AI Product Decisions](src/main/java/com/rutik/systemdesign/llm/applied_ai_product_decisions/applied_ai_product_decisions.md) | Use-case portfolio ranking, AI feasibility spikes, vendor product vs model API, IP indemnity terms, adoption funnel, autonomy promotion |
 | [LLM Ecosystem & Landscape](src/main/java/com/rutik/systemdesign/llm/llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | Model families, licensing, cost analysis, timeline 2017-2025 |
 | [Small Language Models & Edge AI](src/main/java/com/rutik/systemdesign/llm/small_language_models_and_edge_ai/small_language_models_and_edge_ai.md) | Phi-3/4, Gemma, on-device inference, quantization for mobile |
+| [Local AI](src/main/java/com/rutik/systemdesign/llm/local_ai/local_ai.md) | Unified-memory desktops, bandwidth sizing, llama.cpp/Ollama/LM Studio/MLX, FP4 and speculative decoding locally, local agents, hybrid routing |
 | [Mixture of Experts](src/main/java/com/rutik/systemdesign/llm/mixture_of_experts/mixture_of_experts.md) | MoE routing, Mixtral, DeepSeek-V3, load balancing, sparse activation |
 | [MCP (Model Context Protocol)](src/main/java/com/rutik/systemdesign/llm/mcp_model_context_protocol/mcp_model_context_protocol.md) | Universal LLM-tool protocol, servers/clients, JSON-RPC, A2A |
 | [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing |
@@ -241,6 +242,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Design Synthetic Data Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_synthetic_data_platform.md) | Diversity sampling, best-of-N DPO pairs, quality filter pipeline, dataset lineage |
 | [Design Avatar Video Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_avatar_video_platform.md) | TTS→lip-sync pipeline pipelining, tier economics, deepfake consent, C2PA signing |
 | [Design an Agent Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_agent_platform.md) | Multi-tenant agent execution, tenant isolation at the execution boundary, durable resumption across tool calls, per-tenant token accounting |
+| [Design a Local-First Coding Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_local_first_coding_agent.md) | Code never leaves company hardware: laptop MoE models, owned team pods, prefix-stable harness, redaction gateway |
 
 See the [LLM Master Index](src/main/java/com/rutik/systemdesign/llm/README.md) for the full 6-phase learning path and system design interview framework.
 

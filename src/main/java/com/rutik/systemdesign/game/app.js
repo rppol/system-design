@@ -431,7 +431,7 @@ const STUDY_ORDER = {
     "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization","llm/knowledge_distillation_and_model_merging",
     "llm/deployment_and_mlops","llm/llm_caching","llm/llm_observability_and_monitoring","llm/llm_ops_platforms","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection","llm/prompt_management_and_promptops",
     "llm/evaluation_and_benchmarks","llm/error_analysis_and_eval_design","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
-    "llm/safety_and_alignment","llm/mechanistic_interpretability","llm/llm_security","llm/ai_regulations_and_compliance","llm/multimodal_models","llm/vision_language_models","llm/vla_and_robotics_foundation_models","llm/small_language_models_and_edge_ai","llm/mixture_of_experts","llm/diffusion_language_models","llm/ai_applications","llm/applied_ai_product_decisions","llm/llm_ecosystem_and_landscape","llm/data_flywheels_and_continuous_learning",
+    "llm/safety_and_alignment","llm/mechanistic_interpretability","llm/llm_security","llm/ai_regulations_and_compliance","llm/multimodal_models","llm/vision_language_models","llm/vla_and_robotics_foundation_models","llm/small_language_models_and_edge_ai","llm/local_ai","llm/mixture_of_experts","llm/diffusion_language_models","llm/ai_applications","llm/applied_ai_product_decisions","llm/llm_ecosystem_and_landscape","llm/data_flywheels_and_continuous_learning",
   ],
   ml: [
     "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",

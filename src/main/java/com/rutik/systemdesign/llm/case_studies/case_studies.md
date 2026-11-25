@@ -1,6 +1,6 @@
 # LLM Case Studies — Learning Path
 
-30 case studies + 9 cross-cutting infrastructure deep-dives.
+31 case studies + 9 cross-cutting infrastructure deep-dives.
 
 Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII and Mermaid), executable Python code, production war stories, and 10+ design-rationale interview Q&As. Each cross-cutting file is 600–800 lines covering one infrastructure primitive that recurs across many products.
 
@@ -13,6 +13,8 @@ Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII a
 | 1 | [design_chatgpt.md](./design_chatgpt.md) | Canonical reference — covers the core LLM serving loop, streaming, tiered model routing, prefix-cache economics. All other case studies assume you know this foundation. |
 | 2 | [design_rag_pipeline.md](./design_rag_pipeline.md) | The backbone of 80% of enterprise LLM applications. Covers chunking, embedding, hybrid retrieval, and reranking end-to-end. |
 | 3 | [design_gpu_inference_platform.md](./design_gpu_inference_platform.md) | Infrastructure layer that every product sits on top of. Covers multi-tenant GPU scheduling, cold-start, LoRA multiplexing, autoscaling. |
+
+If your constraint is that code or data must stay on company hardware, read [design_local_first_coding_agent.md](./design_local_first_coding_agent.md) after these three: it replaces the elastic fleet of file 3 with laptops and owned team boxes.
 
 ---
 
@@ -84,6 +86,7 @@ Systems that other products run on top of. Highest engineering depth in the coll
 | [design_llm_fine_tuning_platform.md](./design_llm_fine_tuning_platform.md) | Distributed training platform | Training loop code (forward/backward/optimizer), FSDP wrap policy, async checkpoint manager, loss-spike detection, per-tenant K8s namespace + GPU quotas |
 | [design_llm_eval_platform.md](./design_llm_eval_platform.md) | Eval-gated continuous delivery | Golden dataset construction, LLM-as-judge orchestration, regression detection with statistical significance, eval-gated CI that blocks deploys, online eval sampling in production |
 | [design_synthetic_data_platform.md](./design_synthetic_data_platform.md) | Data quality and diversity at scale | Inverse-frequency diversity sampling (prevents topic collapse), best-of-N preference pairs with margin thresholds, 5-stage quality filter pipeline, SHA-256 content-addressed dataset registry |
+| [design_local_first_coding_agent.md](./design_local_first_coding_agent.md) | Inference on owned hardware | A coding agent whose code never leaves company hardware: 35B-A3B MoE on engineer laptops sized by bandwidth, DGX Spark team pods with session affinity, a prefix-stable harness adapter, a class-based redaction gateway for cloud escalation, and a model artifact gate (digest, template diff, replay eval) |
 
 ---
 
@@ -120,7 +123,7 @@ These nine files live in `cross_cutting/` and are referenced by multiple case st
 | Phase 2 | [tenant_isolation_patterns.md](./cross_cutting/tenant_isolation_patterns.md) | Per-tenant vector DB namespacing vs collections vs clusters, ACL pushdown into retrieval, noisy-neighbor mitigation, cross-tenant injection defenses |
 | Phase 3 | [red_team_eval_harness.md](./cross_cutting/red_team_eval_harness.md) | Adversarial dataset construction, jailbreak scoring, prompt-injection corpora, model card generation, continuous red-team CI |
 | Phase 4 | [agent_durability_patterns.md](./cross_cutting/agent_durability_patterns.md) | Checkpointing, mid-task interruption + resume, replay determinism, idempotent tool calls, Temporal/LangGraph integration — read before any agent case study |
-| Phase 5 | [gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.md) | A100/H100/H200/B200 utilization math (MFU/MBU, dense vs sparsity FLOPS), spot/preemptible blending, cold-start optimization, prefill/decode disaggregation cost accounting |
+| Phase 5 | [gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.md) | A100/H100/H200/B200 utilization math (MFU/MBU, dense vs sparsity FLOPS), spot/preemptible blending, cold-start optimization, prefill/decode disaggregation cost accounting; the same utilization argument sizes the owned team pods in design_local_first_coding_agent |
 | Phase 5 | [training_loop_internals.md](./cross_cutting/training_loop_internals.md) | Forward/backward/optimizer step code, gradient accumulation, FSDP wrap policy, async checkpoint manager, loss-spike detection |
 
 ---
@@ -134,6 +137,10 @@ design_chatgpt
     └─> design_llm_gateway          (routing and rate limiting)
     └─> design_copilot              (latency-critical serving)
     └─> design_gpu_inference_platform (infrastructure layer)
+            └─> design_local_first_coding_agent (owned hardware instead of an elastic fleet)
+
+design_ai_coding_assistant
+    └─> design_local_first_coding_agent (same agent loop, code never leaves company hardware)
 
 design_rag_pipeline
     └─> design_ai_search_engine     (adds grounding + citations)
@@ -169,3 +176,4 @@ If you are preparing for a specific interview question, jump directly to the cas
 | "Design a content moderation system" | [design_ai_content_moderation.md](./design_ai_content_moderation.md) |
 | "Design a legal / medical / financial AI platform" | Phase 6 files |
 | Design an internal agent platform | [Design an Agent Platform](design_agent_platform.md) |
+| "Design a coding assistant whose code never leaves company hardware" | [design_local_first_coding_agent.md](./design_local_first_coding_agent.md) |

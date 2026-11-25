@@ -676,6 +676,7 @@ Compare that 37.5% to the ~1.4% FLOPs-ratio estimate a capacity plan would have 
 - **Medusa** (Together AI / Princeton, 2024) — open-source heads + training recipe; the paper reports over 2.2x speedup for Medusa-1 and 2.3-3.6x for Medusa-2.
 - **EAGLE** (Peking University / Microsoft, 2024-25) — open-source EAGLE/EAGLE-2/EAGLE-3 weights for popular Llama and Qwen checkpoints; widely adopted as the default "bolt-on" speculative method for new deployments because it requires no target fine-tuning.
 - **DeepSeek-V3 / DeepSeek-R1** — ship with trained MTP modules used both during pretraining (densified supervision) and inference (speculative draft), reported α≈0.85-0.9 for the first speculative token at scale.
+- **Local runtimes (llama.cpp, Ollama)** — speculation is now standard on local hardware too: llama.cpp added MTP (2026-05-16), EAGLE3 (2026-06-12) and DFlash (2026-06-28), selected with `--spec-type` (default `none`) and fetched as a sidecar drafter with `--spec-draft-hf`, while Ollama's MLX engine runs MTP by default with an auto-tuned draft length. The local angle (which models ship drafters, when to turn it off) is in [Local AI](../local_ai/local_ai.md).
 
 ---
 
@@ -728,7 +729,7 @@ Compare that 37.5% to the ~1.4% FLOPs-ratio estimate a capacity plan would have 
 | SGLang | EAGLE/EAGLE-2 with radix-tree KV sharing between draft and target |
 | TensorRT-LLM | Fused tree-attention kernels for Medusa-style verification on H100/B200 |
 | HuggingFace `transformers` (assisted generation) | Reference implementation of vanilla draft-model speculation |
-| llama.cpp | Draft-model speculative decoding for local/edge inference |
+| llama.cpp | Local and edge speculation: draft-model, MTP, EAGLE3 and DFlash via `--spec-type` and `--spec-draft-hf` |
 | EAGLE / EAGLE-2 / EAGLE-3 (open weights) | Feature-level autoregression draft layers for popular checkpoints |
 | Medusa (open weights + training recipe) | Parallel-head + tree-attention draft, no separate model |
 | LayerSkip | Training recipe (layer dropout + early exit) enabling self-speculative decoding |

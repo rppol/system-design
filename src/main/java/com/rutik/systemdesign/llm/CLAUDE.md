@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List: 55 Modules
+## Module List: 56 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
@@ -46,7 +46,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `llm_ecosystem_and_landscape/` | Model families, licensing, cost analysis, timeline | — |
 | `vllm_deep_dive/` | PagedAttention, continuous batching, prefix caching, TP/PP | — |
 | `mcp_model_context_protocol/` | MCP protocol, servers/clients, resources/tools/prompts, JSON-RPC, transports, security, registries | mcp_server_building, mcp_client_patterns, mcp_transports_and_jsonrpc, mcp_security, mcp_registries_and_ecosystem |
-| `small_language_models_and_edge_ai/` | Phi-3/4, Gemma, on-device inference, ONNX, Core ML, quantization | — |
+| `small_language_models_and_edge_ai/` | Phones, embedded and OS-provided models; distillation; quantization for mobile | — |
+| `local_ai/` | Local AI on owned hardware: unified-memory desktops, bandwidth sizing, local runtimes, FP4 and speculative decoding locally, local agents, hybrid routing | local_ai_hardware_and_sizing, local_agents_and_hybrid_routing |
 | `mixture_of_experts/` | MoE routing, Mixtral 8x7B, DeepSeek-V3, load balancing, sparse activation | — |
 | `llm_routing_and_model_selection/` | Multi-model routing, cascade patterns, confidence thresholds, cost optimization | — |
 | `token_economics_and_cost_optimization/` | Per-token pricing, prompt caching, batch APIs, self-hosting break-even | — |
@@ -107,8 +108,8 @@ cosmetic in the reader only.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 55 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (35 modules) and **Principal** (31). They are
+`README.md` documents the **Full Path** (all 56 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (36 modules) and **Principal** (32). They are
 different cuts, not nested depths — senior is the craft (ship the pipeline, debug the
 eval that lies), principal is the judgment (which architecture at what token cost, what
 failure domains, what you tell a team *not* to do), so the two lists overlap only partly
@@ -141,10 +142,10 @@ The following are gaps for senior AI engineer coverage, identified by the 2026-0
 
 ---
 
-## Case Studies — 30 Total
+## Case Studies — 31 Total
 
 `case_studies/` directory. The 11-section principal template is the standard for every case study,
-but it is **not yet met by all 30**: the 2026-11-25 audit found 14 off-template — all 13 Wave-1
+but it is **not yet met by all 31**: the 2026-11-25 audit found 14 off-template — all 13 Wave-1
 studies plus `design_gpu_inference_platform` (7 numbered sections, no Real-World Implementations,
 Technologies & Tools or Common Pitfalls, 8 interview Q&As). Re-templating them is tracked work; do
 not describe the set as conformant until it is done.
@@ -164,6 +165,8 @@ Learning-path index: `case_studies/case_studies.md` (mandatory; update with ever
 **Wave 4 (5):** design_ai_companion_platform, design_ai_meeting_assistant, design_financial_research_agent, design_synthetic_data_platform, design_avatar_video_platform
 
 **Wave 5 (1):** design_agent_platform
+
+**Wave 6 (1):** design_local_first_coding_agent
 
 ---
 
@@ -192,6 +195,7 @@ Principal case studies must cross-reference at least 4 of these files via relati
 | `embeddings_and_similarity_search/` | `../../database/vector_databases/` — pgvector, HNSW at DB level |
 | `deployment_and_mlops/`, `prompt_management_and_promptops/`, `inference_engines/`, `llm_ops_platforms/` | `../../mlops/`: the release lifecycle for prompts, adapters, indexes and MCP servers, serving platforms (KServe, llm-d), engine benchmarking and upgrade qualification, AI gateway operations. This section keeps the technique; `mlops/` links here and does not re-teach it (see `../mlops/CLAUDE.md` "Non-overlap boundary") |
 | `faiss_deep_dive/` | `../../database/vector_databases/` — the operated-product side of the same algorithms; `../../ml/natural_language_processing/text_representation_and_retrieval.md` — a worked `build_faiss_index()` inside a retrieval stack |
+| `local_ai/` | `../../mlops/edge_and_on_device_deployment/` — getting models onto devices and operating the fleet; `../../cuda/apple_silicon_gpu_architecture/` — Apple GPU families and Metal kernels; `../../technologies/intel_openvino/` — Intel NPU path |
 
 ---
 

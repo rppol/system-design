@@ -68,7 +68,9 @@ Quantization, pruning and distillation as techniques are in
 [Model Compression and Efficiency](../../ml/model_compression_and_efficiency/model_compression_and_efficiency.md).
 OpenVINO internals are in [Intel OpenVINO](../../technologies/intel_openvino/intel_openvino.md).
 Federated learning and differential privacy theory are in
-[Privacy-Preserving ML](../../ml/privacy_preserving_ml/privacy_preserving_ml.md). This page
+[Privacy-Preserving ML](../../ml/privacy_preserving_ml/privacy_preserving_ml.md). Choosing local
+hardware, runtimes and models for laptops and desk-side boxes, and local agents:
+[Local AI](../../llm/local_ai/local_ai.md). This page
 assumes the model is already small enough and asks how it gets to the device and stays healthy
 there.
 

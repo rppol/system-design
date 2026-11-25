@@ -10,23 +10,27 @@ Key models in this space:
 
 | Model | Parameters | Organization | Notable Strength |
 |---|---|---|---|
-| Phi-3 Mini | 3.8B | Microsoft | Textbook-quality training data |
-| Phi-3.5 / Phi-4 | 3.8B–14B | Microsoft | Reasoning, instruction following |
-| LLaMA 3.2 1B / 3B | 1B, 3B | Meta | Permissive license, multilingual |
-| Gemma 4 E2B / E4B | ~2B, ~4B effective | Google DeepMind | On-device multimodal, Apache 2.0 (2026-03-31) |
+| Gemma 4 E2B / E4B | 2.3B / 4.5B effective (5.1B / 8B with embeddings) | Google DeepMind | On-device multimodal (text, image, audio), 128K context, Apache 2.0 (2026-04-02) |
+| Qwen3.5 0.8B / 2B / 4B / 9B | 0.8B-9B | Alibaba | Natively multimodal, 262,144-token context, MTP heads, thinking on by default, Apache-2.0 |
+| Ministral 3 3B / 8B / 14B | 3B-14B | Mistral AI | Vision, 256K context, edge-focused; 8B fits 12 GB VRAM in FP8; Apache-2.0 |
+| LFM3-1.7B | 1.7B | Liquid AI | About 1 GB at 4-bit, 256K context, post-trained for local agent harnesses; LFM 1.0 licence (not OSI) |
+| Aion-1.0-Instruct | 2.3B | Microsoft | On-device and WebGPU (ONNX build); Edge's built-in model and Phi Silica's successor on Windows; MIT |
+| SmolLM3-3B | 3B | Hugging Face | Fully open data and recipe, dual-mode reasoning, Apache-2.0 |
+| gpt-oss-20b | 21B total / 3.6B active (MoE) | OpenAI | The 16 GB option: MXFP4 weights run in 16 GB of memory; Apache-2.0 |
 | Gemma 3n E2B / E4B | ~2B, ~4B effective | Google DeepMind | Mobile-first multimodal (2025-06-26) |
 | Gemma 3 270M / 1B / 4B | 270M-4B | Google DeepMind | 270M (2025-08-14) is built for task-specific fine-tuning |
-| TinyLlama | 1.1B | Community | Extreme resource efficiency |
-| Qwen3 0.6B / 1.7B / 4B | 0.6B-4B | Alibaba | Thinking and non-thinking modes, multilingual, Apache 2.0 |
-| Gemini Nano | ~1.8B | Google | Android on-device integration |
+| LLaMA 3.2 1B / 3B | 1B, 3B | Meta | SpinQuant INT4 builds remain Meta's official mobile checkpoints |
+| Gemini Nano | not published | Google | Android on-device model in AICore, shipped as Nano 2, 3 and 4 device tiers |
 
-The defining insight from Microsoft's Phi series — "textbooks are all you need" — is that training on high-quality, curated synthetic data can produce a 3B model that outperforms 13B models trained on raw web crawls on many benchmarks. Data quality drives capability more than raw parameter count within the SLM range.
+The defining insight from Microsoft's Phi series — "textbooks are all you need" — is that training on high-quality, curated synthetic data can produce a 3B model that outperforms 13B models trained on raw web crawls on many benchmarks. Data quality drives capability more than raw parameter count within the SLM range. Later sections keep Phi-3 Mini (3.8B) as the worked example for memory, KV-cache and thermal arithmetic because its published constants are exact; the current models above follow the same arithmetic.
 
 On-device inference delivers three structural advantages over cloud API calls: offline operation (no network dependency), privacy preservation (data never leaves the device), and zero-network-latency responses (inference time is the only latency).
 
 Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robots, and embedded systems — any environment where cloud connectivity is unreliable, regulated, or economically prohibitive.
 
 For delivering, updating, and rolling back models on devices the platform team does not own, see [Edge and On-Device Deployment](../../mlops/edge_and_on_device_deployment/edge_and_on_device_deployment.md).
+
+This page stays with phones, embedded devices and OS-provided models. Laptops, desktops and desk-side boxes (Apple M5/M6 and Ultra, Ryzen AI Max, DGX Spark, RTX 50), the runtime landscape (llama.cpp, Ollama, LM Studio, MLX), 25-120B local models, FP4 and speculative decoding on local hardware, and local agents live in [Local AI](../local_ai/local_ai.md).
 
 ---
 
@@ -70,7 +74,7 @@ For delivering, updating, and rolling back models on devices the platform team d
 
 **Embedding models** are encoder-only or bi-encoder models used for semantic search, RAG retrieval, and similarity. Examples: all-MiniLM-L6-v2 (22M), snowflake-arctic-embed-s (33M), BGE-small-en (33M). These are not autoregressive and are extremely lightweight.
 
-**On-device platform-optimized models** are compiled for specific hardware accelerators by device vendors. Examples: Gemini Nano 1/2 (Google, Android NPU), Apple Intelligence on-device models (Apple Silicon Neural Engine), Samsung Gauss (Exynos NPU).
+**On-device platform-optimized models** are compiled for specific hardware accelerators by device vendors. Examples: Gemini Nano 2/3/4 device tiers (Google, AICore on Android), Apple's on-device foundation model (Neural Engine and GPU), Microsoft Phi Silica on Copilot+ NPUs (being replaced by Aion Instruct from December 2026).
 
 ### 4.2 By Deployment Strategy
 
@@ -80,7 +84,7 @@ For delivering, updating, and rolling back models on devices the platform team d
 
 **Core ML / Apple Neural Engine:** Apple's on-device ML framework. Models converted with `coremltools` or `exportcoreml` run on the Neural Engine for ~10x energy efficiency vs CPU inference. Used by Apple Intelligence.
 
-**TensorFlow Lite / MediaPipe:** Google's mobile ML stack. LiteRT (the new TFLite brand) supports INT8/INT4 models on Android and iOS. MediaPipe LLM Inference API wraps Gemma 2B with a simple cross-platform interface.
+**LiteRT / LiteRT-LM:** Google's mobile ML stack. LiteRT (the TensorFlow Lite successor) supports INT8/INT4 models on Android and iOS, and LiteRT-LM (0.20.0, 2026-11-23) is its LLM layer: Kotlin, C++ and Python APIs are stable, Swift and JavaScript (WebGPU) are in early preview, and NPU execution is stable on Android and in preview on Windows. The MediaPipe LLM Inference documentation now redirects to LiteRT-LM.
 
 **MLC-LLM:** Machine Learning Compilation for LLMs. Compiles models via TVM to native code for iOS (Metal), Android (Vulkan/OpenCL), and WebGPU. Achieves near-native GPU throughput on mobile GPUs.
 
@@ -175,21 +179,25 @@ Use cases: personalized autocomplete (adapting to user's writing style), domain 
 
 ### 4.6 NPU and Mobile Hardware Accelerators
 
-On-device inference performance depends heavily on which hardware accelerator is available:
+On-device inference performance depends heavily on which hardware accelerator is available, and in 2026 the vendors themselves publish less about it:
 
-| Hardware | TOPS (INT8) | Organization | Key Devices |
+| Hardware | Published AI figure | Memory | Key devices |
 |---|---|---|---|
-| Apple Neural Engine (ANE) | ~35 TOPS | Apple | iPhone 15 Pro (A17), M-series Macs |
-| Qualcomm Hexagon NPU | ~45 TOPS | Qualcomm | Snapdragon 8 Gen 3, 8 Elite |
-| Google Tensor TPU (mobile) | ~10 TOPS | Google | Pixel 8/9 series |
-| Samsung Exynos NPU | ~34.7 TOPS | Samsung | Galaxy S24 (Exynos 2400) |
-| MediaTek APU | ~36 TOPS | MediaTek | Dimensity 9300 |
+| Apple A20 Pro: Dual 16-core Neural Engine + GPU Neural Accelerators | No TOPS published | RAM not published | iPhone 18 Pro |
+| Apple M5 / M6: Neural Engine + GPU Neural Accelerators | No TOPS published | M5 153 GB/s; M6 up to 32 GB at 170 GB/s | iPad Pro, MacBook Air and Pro, Mac mini |
+| Qualcomm Hexagon NPU (Snapdragon 8 Elite Gen 5 / Gen 6) | No TOPS published; relative claims only ("37% faster" Gen 5 NPU) | not published | Android flagships |
+| Google Tensor G6 TPU | Not published | 12-16 GB RAM | Pixel 11 series (Gemini Nano 4 tier) |
+| Qualcomm Hexagon NPU (Snapdragon X2 Elite / Extreme) | 80-85 TOPS | 135-228 GB/s by SKU | Windows laptops |
+| Intel Core Ultra Series 3 (Panther Lake) NPU | 50 TOPS | system RAM | Copilot+ laptops |
+| AMD Ryzen AI 400 / Ryzen AI Max+ 395 NPU | up to 60 / 50 TOPS | Max+ 395: 256 GB/s (derived from 256-bit LPDDR5x-8000) | laptops, mini PCs |
+
+Microsoft's Copilot+ PC bar is an NPU above 40 TOPS; every 2026 PC platform above clears it. The phone rows are the point of this section: the numbers that would let you size a phone deployment are not on any spec sheet, so benchmark the target device (Google's LiteRT-LM table, for example, measures Gemma-4-E2B at 52 tok/s decode on a Galaxy S26 Ultra GPU and 56 on an iPhone 17 Pro GPU). Desktop-class and desk-side hardware is covered in [Local AI Hardware and Sizing](../local_ai/local_ai_hardware_and_sizing.md).
 
 **GPU fallback:** When the NPU does not support a specific operation (custom activations, non-standard layer types), inference falls back to the mobile GPU, which is 3-5x slower and 5-10x less energy efficient for transformer inference.
 
-**Framework support mapping:** Core ML targets ANE on Apple devices. QNN SDK (Qualcomm Neural Network) targets Hexagon NPU. NNAPI provides a generic Android abstraction across NPU vendors. TensorFlow Lite delegates to hardware-specific backends automatically.
+**Framework support mapping:** Core ML (traditional models) and Core AI (LLMs and generative models, new in 2026) target Apple silicon; the Foundation Models framework reaches Apple's own model. QNN SDK (Qualcomm Neural Network) targets the Hexagon NPU. LiteRT and LiteRT-LM delegate to GPU and NPU backends on Android, and llama.cpp now has Hexagon and OpenVINO backends of its own.
 
-**TOPS as a sizing metric:** Divide model FLOPs per token by the NPU's TOPS rating to estimate minimum inference time. A 3B model at ~6 GFLOPs/token on a 35 TOPS NPU theoretically achieves ~0.17 ms/token (nearly 6,000 tokens/second) — but memory bandwidth and scheduling overhead typically reduce this to 50-100 tokens/second in practice.
+**TOPS as a sizing metric:** Divide model FLOPs per token by the NPU's TOPS rating to estimate minimum inference time. A 3B model at ~6 GFLOPs/token on a hypothetical 35 TOPS NPU theoretically achieves ~0.17 ms/token (nearly 6,000 tokens/second) — but memory bandwidth and scheduling overhead typically reduce this to 50-100 tokens/second in practice.
 
 ```
 compute_ceiling   = FLOPs_per_token / TOPS
@@ -232,22 +240,23 @@ Flagship parts with wider memory buses land at the 50-100 tokens/second quoted a
 The platform owner now ships the model. Instead of bundling a 1-2 GB GGUF or `.mlpackage`, an app
 calls a model that the operating system or browser downloads once, updates, and shares across apps.
 
-| | Apple Foundation Models framework | Android ML Kit GenAI APIs | Chrome built-in AI |
-|---|---|---|---|
-| Model | Apple's on-device model, about 3B parameters | Gemini Nano, run by the AICore system service | Gemini Nano, downloaded by Chrome |
-| Platform | iOS, iPadOS, macOS and visionOS 26, on Apple Intelligence devices | Supported Pixel, Samsung, OPPO, Xiaomi and other devices; Prompt API depends on the Nano version on the device | Desktop Chrome on Windows 10/11, macOS 13+, Linux, Chromebook Plus; not Android or iOS |
-| Task APIs | Free-form session; content tagging adapter | Summarization, Proofreading, Rewriting, Image description (beta); Speech recognition (alpha) | Summarizer, Translator, Language Detector (stable in Chrome 138); Writer, Rewriter, Proofreader (origin trial) |
-| Free-form prompting | `LanguageModelSession` | Prompt API (beta) | Prompt API: stable for extensions from Chrome 138, origin trial for web pages |
-| Structured output | `@Generable` Swift types; constrained decoding in an OS daemon | JSON via prompting | `responseConstraint` with a JSON Schema |
-| Tool calling | `Tool` protocol, parallel and serial calls | No | No |
-| Custom weights | Rank-32 LoRA adapters from Apple's Python toolkit, retrained for every base-model version | No | No |
-| Limits | 4,096-token context per session | Per-app inference quota (`ErrorCode.BUSY`), daily battery quota, foreground only (`BACKGROUND_USE_BLOCKED`) | 22 GB free disk, GPU over 4 GB VRAM or 16 GB RAM and 4 cores; the model is deleted if free space falls under 10 GB |
+| | Apple Foundation Models framework | Android ML Kit GenAI APIs | Chrome built-in AI | Edge built-in AI |
+|---|---|---|---|---|
+| Model | Apple's on-device model, rebuilt for OS 27 with vision input (the 2025 model is about 3B parameters); a Private Cloud Compute model with a 32,000-token context behind the same API | Gemini Nano, run by the AICore system service, in Nano 2, 3 and 4 device tiers | Gemini Nano, downloaded by Chrome | Aion Instruct, 2.3B, open weights (replaced Phi-4-mini on 2026-11-19) |
+| Platform | iOS, iPadOS, macOS and visionOS 26 and 27, on Apple Intelligence devices | Devices in the Nano 2/3/4 tiers: Pixel 9, 10 and 11, Galaxy S25 and S26, Googlebook laptops and others; check the tier list per feature | Desktop Chrome on Windows 10/11, macOS 13+, Linux, Chromebook Plus; not Android or iOS | Desktop Edge |
+| Task APIs | Free-form session; content tagging | Summarization, Proofreading, Rewriting, Image description, Speech recognition, Speech translation, Text to speech, Embeddings | Summarizer, Translator, Language Detector (stable in Chrome 138); Writer, Rewriter, Proofreader (developer trial, behind a flag) | Writing assistance, translation and speech APIs (developer preview 2026-06-02); experimental Decisions API in Canary and Dev |
+| Free-form prompting | `LanguageModelSession`; the Language Model protocol also fronts PCC, Claude, Gemini, Core AI and MLX models | Prompt API (`GenerativeModel`); `AgentRunner` for multi-step tool-calling loops | Prompt API: stable on the web from Chrome 148 (extensions from 138); sampling parameters in a separate origin trial | Prompt API origin trial (2026-11-19) |
+| Structured output | `@Generable` Swift types; constrained decoding in an OS daemon | Typed structured output | `responseConstraint` with a JSON Schema | - |
+| Tool calling | `Tool` protocol, parallel and serial calls | Tool declarations; `AgentRunner` runs the loop | No | - |
+| Custom weights | Rank-32 LoRA adapters only through OS 26: adapter toolkit 26.0.0 is the last release and does not support OS 27; ship your own model through Core AI or MLX instead | No | No | No (the open weights can be bundled separately) |
+| Limits | 4,096-token context per session on OS 26; read the context-size API (iOS 26.4+) instead of hard-coding it | Per-app inference quota (`ErrorCode.BUSY`), daily battery quota, foreground only (`BACKGROUND_USE_BLOCKED`) | 22 GB free disk, GPU over 4 GB VRAM or 16 GB RAM and 4 cores; the model is deleted if free space falls under 10 GB | - |
 
 Apple's on-device model (June 2025 technical report) stores weights at 2 bits per weight via
 quantization-aware training, with 4-bit embeddings and an 8-bit KV cache, and splits its layers into
 two blocks at a 5:3 depth ratio where the second block reuses the first block's KV cache, cutting KV
-memory by 37.5%. None of that is visible to the app, which is the point: the OS owns compression,
-scheduling and updates.
+memory by 37.5%. That describes the 2025 model; OS 27 ships a rebuilt model with vision input, and
+Apple has not published a 2026 technical report for it. None of that is visible to the app, which is
+the point: the OS owns compression, scheduling and updates.
 
 ```swift
 import FoundationModels
@@ -281,9 +290,10 @@ Trade-offs against bundling your own model:
   every app, against 1-2 GB per app that bundles its own.
 - **Coverage.** Each API runs only on its eligible devices. The `availability` check is mandatory and
   the cloud or a smaller bundled model is the fallback, so the feature still needs two code paths.
-- **Version drift.** The OS updates the model under you. A prompt or adapter tuned against one base
-  version can change behavior after an OS update, and Apple's adapters must be retrained per base
-  version. Pin an on-device eval set and run it against each OS beta.
+- **Version drift.** The OS updates the model under you. A prompt tuned against one base version can
+  change behavior after an OS update, and custom Apple adapters stop at OS 26 because the adapter
+  toolkit ended at 26.0.0. Pin an on-device eval set and run it against each OS beta (Apple's
+  Evaluations framework, new in 2026, is built for this).
 - **Control.** No choice of model, quantization, sampler internals or context length beyond what the
   API exposes. If you need a 32K context or a domain fine-tune on Android, bundle your own model.
 
@@ -414,25 +424,28 @@ flowchart TD
 
 ```
 APPLICATION LAYER
-+-----------------------------------+
-| Mobile App / SDK (iOS / Android)  |
-+-----------------------------------+
-              |
++----------------------------------------------+
+| Mobile App / SDK (iOS / Android)             |
++----------------------------------------------+
+                      |
 RUNTIME LAYER
-+-----------------------------------+
-| llama.cpp | ONNX Runtime | MLC   |
-| Core ML   | MediaPipe    | ExecuTorch |
-+-----------------------------------+
-              |
++----------------------------------------------+
+| llama.cpp     | ONNX Runtime  | ExecuTorch   |
+| Core ML / AI  | LiteRT-LM     | MLC          |
+| OS models: Foundation Models, ML Kit GenAI   |
++----------------------------------------------+
+                      |
 HARDWARE ABSTRACTION LAYER
-+-----------------------------------+
-| Apple Neural Engine (ANE)         |  ~38 TOPS
-| Qualcomm Hexagon NPU              |  ~73 TOPS (Snapdragon 8 Elite)
-| Google Tensor TPU (Pixel)         |  ~17 TOPS
-| ARM Mali GPU / Apple GPU          |  Fallback for unsupported ops
-| CPU (ARM Cortex / Apple Firestorm)|  Final fallback
-+-----------------------------------+
++----------------------------------------------+
+| Apple Neural Engine + GPU Neural Accel.      |  no TOPS published (A20, M5, M6)
+| Qualcomm Hexagon NPU                         |  no TOPS published for 8 Elite Gen 5/6
+| Google Tensor TPU (Pixel)                    |  not published for Tensor G6
+| ARM Mali GPU / Apple GPU                     |  Fallback for unsupported ops
+| CPU (ARM Cortex / Apple CPU cores)           |  Final fallback
++----------------------------------------------+
 ```
+
+Apple, Qualcomm and Google publish no TOPS figure for their current phone chips (A20 Pro, Snapdragon 8 Elite Gen 5 and Gen 6, Tensor G6), and Apple publishes none for M5 or M6, which is a hint: decode speed on these parts follows memory bandwidth (section 4.6), so a TOPS column would not predict tokens per second anyway.
 
 ---
 
@@ -503,7 +516,7 @@ Intermediate layer distillation (used in TinyBERT, MiniLLM):
 
 ### 6.3 GGUF Format and llama.cpp Inference
 
-GGUF (GPT-Generated Unified Format) is the standard file format for quantized models in the llama.cpp ecosystem.
+GGUF (GPT-Generated Unified Format) is the standard file format for quantized models in the llama.cpp ecosystem. The metadata and throughput figures below use Phi-3 Mini as a worked example; the structure is identical for current GGUF models, which add MXFP4 and NVFP4 tensor types to the k-quants and i-quants (see [Local AI](../local_ai/local_ai.md) for 2026 format choice).
 
 ```
 GGUF File Structure:
@@ -602,11 +615,14 @@ mlmodel.save("phi3_mini.mlpackage")
 ```
 
 Apple Neural Engine characteristics:
-- Dedicated matrix multiply hardware: ~38 TOPS on A17 Pro
+- Dedicated matrix multiply hardware; Apple publishes no TOPS figure for A20, M5 or M6, and from M5
+  on the GPU also carries Neural Accelerators that MLX and Core AI can use
 - Extremely power efficient: ~0.5W vs ~4W for GPU equivalent work
 - Constraint: operations must be in ANE's supported op set
   (standard Transformer ops are supported; custom CUDA ops are not)
 - Models compiled for ANE run inference at ~3-4x the energy efficiency of GPU
+- Apple now positions Core ML for traditional models; for LLMs and other generative models it points
+  developers to Core AI (WWDC 2026: Swift API, ahead-of-time compilation, PyTorch extensions)
 
 **Qualcomm AI Engine / Hexagon NPU:**
 ```
@@ -622,30 +638,46 @@ Key constraint: Hexagon NPU requires static shapes.
 Dynamic sequence lengths require padding or model splitting.
 ```
 
-**MediaPipe LLM Inference API (Android/iOS):**
-```java
-// Android example
-LlmInferenceOptions options = LlmInferenceOptions.builder()
-    .setModelPath("/data/local/tmp/gemma-2b-it-gpu-int4.bin")
-    .setMaxTokens(1024)
-    .setMaxTopK(40)
-    .setTemperature(0.8f)
-    .build();
+**LiteRT-LM (Android, JVM; replaces the MediaPipe LLM Inference API):**
+```kotlin
+// build.gradle.kts: implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
+import android.content.Context
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.SamplerConfig
 
-LlmInference llmInference = LlmInference.createFromOptions(context, options);
-
-// Async streaming generation
-llmInference.generateResponseAsync(
-    "Summarize the following text: " + inputText,
-    (partialResult, done) -> {
-        runOnUiThread(() -> textView.append(partialResult));
+suspend fun summarize(context: Context, modelPath: String, inputText: String, onChunk: (String) -> Unit) {
+    val engineConfig = EngineConfig(
+        modelPath = modelPath,              // a .litertlm build, e.g. Gemma 4 E2B from litert-community
+        backend = Backend.GPU(),            // or Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir)
+        cacheDir = context.cacheDir.path,   // speeds up the second load
+    )
+    Engine(engineConfig).use { engine ->
+        engine.initialize()                 // can take up to ~10 s: never on the UI thread
+        val config = ConversationConfig(
+            systemInstruction = Contents.of("You summarize text in three sentences."),
+            samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.8),
+        )
+        engine.createConversation(config).use { conversation ->
+            conversation.sendMessageAsync("Summarize the following text: $inputText")
+                .collect { onChunk(it.toString()) }
+        }
     }
-);
+}
 ```
+
+The GPU backend needs `libvndksupport.so` and `libOpenCL.so` declared as optional
+`<uses-native-library>` entries in `AndroidManifest.xml`. LiteRT-LM also enables multi-token
+prediction through `ExperimentalFlags.enableSpeculativeDecoding`, which Google recommends for all
+tasks on GPU backends, and `litert-lm serve` exposes the same models through an OpenAI-compatible
+endpoint on desktops.
 
 ### 6.5 Memory Footprint Calculation
 
-For a 3.8B parameter model (Phi-3 Mini):
+Worked example with Phi-3 Mini (3.8B), kept because its published constants (32 layers, 8 KV heads, head dimension 96) make every line checkable; substitute the `config.json` values of the model you ship:
 
 ```
 FP32: 3.8B * 4 bytes = 15.2 GB  (not viable for mobile)
@@ -765,38 +797,38 @@ Every published tokens/second number is really two numbers: a burst figure measu
 
 ## 7. Real-World Examples
 
-### Apple Intelligence (iOS 18, iPadOS 18, macOS Sequoia)
+### Apple Intelligence (OS 26 and OS 27)
 
-Apple deploys a suite of on-device models across iPhone 15 Pro and all iPhone 16 devices. The primary on-device model handles writing tools, summaries, Smart Reply, and notification prioritization. Apple has disclosed the model runs on the Apple Neural Engine and uses a "3B-class" architecture. A larger server-side model (~70B scale, running on Apple Silicon servers in Private Cloud Compute) handles requests requiring broader world knowledge. The privacy architecture guarantees: the on-device model processes data locally, the server model processes only the necessary context with no logging, and Apple cryptographically attests to this. Context is never stored on Apple's servers.
+Apple's on-device foundation model (about 3B parameters in its 2025 generation) runs writing tools, summaries and notification features on Apple Intelligence devices, and since OS 26 apps reach it through the Foundation Models framework. OS 27 (shipped 2026-09-14) rebuilt the on-device model with vision input and better tool calling, and put a Private Cloud Compute model with a 32,000-token context behind the same API; PCC carries no cloud API cost for Small Business Program apps with fewer than 2M first-time downloads. The framework's Language Model protocol also fronts Claude, Gemini, Core AI and MLX models, and Dynamic Profiles switch model, tools and instructions inside one session, so "on-device or cloud" becomes a routing decision inside one API. The privacy architecture guarantees: the on-device model processes data locally, the server model processes only the necessary context with no logging, and Apple cryptographically attests to this. Custom LoRA adapters end with the 26.0.0 adapter toolkit, which does not support OS 27.
 
 ### Google Gemini Nano (Android)
 
-Gemini Nano ships on Pixel 8+ and Samsung Galaxy S24+ devices. Two versions: Nano-1 (~1.8B) for lower-memory devices, Nano-2 for flagship phones. Use cases: Summarize in Recorder app (Pixel), Smart Reply in Gboard, Pixel Screenshots summarization. Nano runs on the Tensor G3 TPU at ~100 tokens/second on Pixel 8 Pro. Google's AICore system service manages model loading, quantization, and sharing across apps — so multiple apps can use Gemini Nano without each bundling their own copy.
+Gemini Nano runs inside the AICore system service, which handles model distribution, updates and Private Compute Core isolation, so apps share one copy instead of bundling their own. ML Kit lists three device tiers: Gemini Nano 2 (Xiaomi 15 and 17, POCO and others), Nano 3 (Pixel 9 and the Googlebook laptops from Acer, ASUS, Dell, HP and Lenovo) and Nano 4 (Pixel 10 and 11, Galaxy S25 and S26, OnePlus 15, Find X9 and X10, vivo X300 and others). Apps reach it through the ML Kit Prompt API (typed structured output, tool declarations), `AgentRunner` for multi-step tool loops, and task APIs for summarization, proofreading, rewriting, image description, speech and embeddings; Firebase AI Logic's hybrid API falls back to a cloud model when the device model is unavailable. Google said the newest Gemini Nano ran "2.6x faster and 2x more efficiently" on the Tensor G5 in Pixel 10 (2025-08-20).
 
 ### Samsung Galaxy AI
 
-Samsung deploys a combination of on-device and cloud models on Galaxy S24 series. Chat Assist, Note Assist, and Transcript Assist use on-device Gauss models for privacy-sensitive tasks. The Live Translate feature in Phone app runs fully on-device at ~50ms latency, translating speech in real time without sending audio to the cloud. Samsung Gauss Language model is ~7B parameters, optimized for Exynos and Snapdragon NPUs.
+Samsung deploys a combination of on-device and cloud models on Galaxy S24 series. Chat Assist, Note Assist, and Transcript Assist use on-device Gauss models for privacy-sensitive tasks. The Live Translate feature in Phone app runs fully on-device at ~50ms latency, translating speech in real time without sending audio to the cloud. Galaxy S25 and S26 phones are in ML Kit's Gemini Nano 4 tier, so third-party apps on them can call Gemini Nano through AICore instead of shipping a model.
 
 ### Ollama for Local Development
 
 Ollama provides a Docker-like experience for running SLMs locally on developer machines:
 
 ```bash
-# Pull and run Phi-3 Mini
-ollama pull phi3:mini
+# Pull and run Gemma 4
+ollama pull gemma4
 
 # Run interactive session
-ollama run phi3:mini
+ollama run gemma4
 
-# API server (OpenAI-compatible)
+# Native API (OpenAI-compatible routes live under /v1, Anthropic-compatible Messages too)
 curl http://localhost:11434/api/generate -d '{
-  "model": "phi3:mini",
+  "model": "gemma4",
   "prompt": "Explain gradient descent in one paragraph",
   "stream": false
 }'
 ```
 
-Ollama manages GGUF model storage, quantization selection, GPU/CPU layer splitting, and exposes an OpenAI-compatible REST API. Used extensively for local RAG development, offline coding assistance, and CI environments without API key requirements.
+Ollama manages model storage, quantization selection and GPU/CPU layer splitting. Since v0.40.0 it runs models on MLX by default on Apple silicon and, since v0.30.0, on upstream llama.cpp elsewhere; it exposes native, OpenAI-compatible and Anthropic-compatible APIs. Used extensively for local RAG development, offline coding assistance, and CI environments without API key requirements. Desktop runtimes, models and hardware are compared in [Local AI](../local_ai/local_ai.md).
 
 ### Industrial Edge Inference
 
@@ -818,14 +850,14 @@ A semiconductor manufacturer deploys Phi-3 Mini Q4 on Nvidia Jetson Orin NX (16G
 | Offline capability | Full — no network required | None |
 | Cost per inference | Zero marginal cost (device hardware) | $0.0001-$0.015 per 1K tokens |
 | Model update cadence | Requires app update + download | Instant (server-side) |
-| Context window | Limited by device RAM (2K-8K typical) | 128K-1M tokens (server RAM) |
-| Multi-modal capability | Limited (few SLM vision models) | Strong (GPT-4o, Gemini 1.5 Pro) |
+| Context window | 128K-262K native on current SLMs (Gemma 4 E2B/E4B 128K, Qwen3.5 262,144); the usable length is bound by device RAM for the KV cache | 128K-1M tokens (server RAM) |
+| Multi-modal capability | Native in current SLMs (Gemma 4 E2B/E4B take text, image and audio; Qwen3.5 is natively multimodal) but weaker on complex visual reasoning | Strong (frontier hosted models) |
 | Complex reasoning | Weak — planning, multi-step math | Strong |
 | Deployment complexity | High (per-platform runtimes, quantization) | Low (REST API call) |
 | Energy / battery | 2-5W per inference session | Device sends only HTTP request |
 | Fine-tuning flexibility | Full — own model, own data | Limited to providers that offer fine-tuning |
 
-### Quantization Quality vs Size Tradeoff (Phi-3 Mini 3.8B)
+### Quantization Quality vs Size Tradeoff (worked example: Phi-3 Mini 3.8B)
 
 | Format | File Size | RAM Usage | MMLU Score | Tokens/sec (M3 CPU) |
 |---|---|---|---|---|
@@ -854,10 +886,10 @@ Q4_K_M is the practical standard: loses under 1.5% MMLU while cutting file size 
 ### Do NOT Use SLMs and On-Device Inference When:
 
 - **The task requires broad reasoning or world knowledge.** Complex multi-step math, nuanced legal analysis across many jurisdictions, sophisticated code architecture design, open-ended creative writing — 3B models will hallucinate or produce shallow output.
-- **Context windows exceeding 8K tokens are needed.** Summarizing a 100-page document, analyzing large codebases, long-form research synthesis — SLMs cannot hold enough context.
+- **The context you need does not fit the device's RAM as KV cache.** Current SLMs advertise 128K-262K tokens, but on a phone the KV cache for a 100-page document or a large codebase competes with the OS and the app for a few GB; long-document synthesis still belongs on a server or a desk-side machine.
 - **Model updates must be instant.** SLMs bundled in apps require users to update or re-download. If your model changes weekly, server-side is appropriate.
 - **You have no control over the end user's hardware.** If you cannot guarantee minimum device specs (6+ GB RAM, modern NPU), an on-device approach will fail or degrade on a large fraction of your user base.
-- **Multi-modal with rich image/video understanding is required.** SLM vision models exist but significantly underperform cloud frontier models (GPT-4V, Gemini 1.5 Pro) on complex visual reasoning.
+- **Multi-modal with rich image/video understanding is required.** SLMs now take images and audio natively, but they significantly underperform frontier hosted models on complex visual reasoning.
 - **You need to support legacy devices.** Pre-2021 phones lack sufficient NPU capability and RAM for 3B+ models.
 - **The task is infrequent.** If users make one inference request per week, the infrastructure savings of on-device may not justify the deployment complexity.
 
@@ -929,34 +961,39 @@ def build_prompt(history: list[str], user_msg: str, summary: str) -> str:
 
 | Model | Params | License | Strengths | HuggingFace |
 |---|---|---|---|---|
-| Phi-3 Mini | 3.8B | MIT | Reasoning, instruction following | microsoft/Phi-3-mini-4k-instruct |
-| Phi-3.5 Mini | 3.8B | MIT | Multilingual, long context (128K) | microsoft/Phi-3.5-mini-instruct |
-| Phi-4 | 14B | MIT | Best-in-class at 14B | microsoft/phi-4 |
-| LLaMA 3.2 1B / 3B | 1B, 3B | Meta LLaMA | Lightweight, permissive | meta-llama/Llama-3.2-1B-Instruct |
-| Gemma 4 E2B / E4B | ~2B, ~4B effective | Apache 2.0 | On-device multimodal | google/gemma-4-E4B-it |
+| Gemma 4 E2B / E4B | 2.3B / 4.5B effective | Apache 2.0 | On-device multimodal (text, image, audio), 128K context; QAT and LiteRT-LM builds | google/gemma-4-E2B-it |
+| Qwen3.5 0.8B-9B | 0.8B-9B | Apache 2.0 | Natively multimodal, 262K context, MTP heads | Qwen/Qwen3.5-9B |
+| Ministral 3 | 3B, 8B, 14B | Apache 2.0 | Vision, 256K context, edge-focused | mistralai/Ministral-3-8B-Instruct-2512 |
+| LFM3-1.7B | 1.7B | LFM 1.0 (not OSI) | About 1 GB at 4-bit, 256K context, agent-harness post-training | LiquidAI/LFM3-1.7B |
+| Aion-1.0-Instruct | 2.3B | MIT | On-device and ONNX-WebGPU build; Edge's built-in model | microsoft/Aion-1.0-Instruct-2.3B |
+| SmolLM3-3B | 3B | Apache 2.0 | Fully open data and training recipe | HuggingFaceTB/SmolLM3-3B |
+| gpt-oss-20b | 21B / 3.6B active | Apache 2.0 | The 16 GB option: MoE with MXFP4 weights | openai/gpt-oss-20b |
+| Phi-4 | 14B | MIT | Reasoning at 14B | microsoft/phi-4 |
+| LLaMA 3.2 1B / 3B | 1B, 3B | Meta LLaMA | Official SpinQuant INT4 mobile builds | meta-llama/Llama-3.2-1B-Instruct |
 | Gemma 3n E2B / E4B | ~2B, ~4B effective | Gemma ToS | Mobile-first multimodal | google/gemma-3n-E4B-it |
 | Gemma 3 270M | 270M | Gemma ToS | Task-specific fine-tuning at tiny size | google/gemma-3-270m-it |
-| Qwen3 | 0.6B-4B | Apache 2.0 | Multilingual, code, math, thinking mode | Qwen/Qwen3-4B |
-| TinyLlama | 1.1B | Apache 2.0 | Extreme efficiency | TinyLlama/TinyLlama-1.1B-Chat |
 | Moondream 2 | 1.86B | Apache 2.0 | On-device vision | vikhyatk/moondream2 |
 
 ### Inference Runtimes
 
 | Runtime | Platform | Format | Notes |
 |---|---|---|---|
-| llama.cpp | Cross-platform | GGUF | CPU + GPU offload, reference impl |
-| Ollama | Mac/Linux/Win | GGUF | Docker-like UX, OpenAI API compat |
+| llama.cpp | Cross-platform | GGUF | v1.0.0 (2026-11-13) stable C API; CPU, Metal, CUDA, Vulkan, OpenCL, Hexagon and OpenVINO backends |
+| Ollama | Mac/Linux/Win | GGUF, MLX | MLX engine on Apple silicon, llama.cpp elsewhere; native, OpenAI and Anthropic APIs |
 | MLC-LLM | iOS/Android/Web | MLC format | TVM compilation, mobile GPU optimized |
-| ONNX Runtime Mobile | iOS/Android | ONNX | Microsoft, QNN/ANE backends |
-| Core ML | iOS/macOS | .mlpackage | Apple ANE, highest energy efficiency on Apple |
-| MediaPipe LLM | iOS/Android | TFLite | Google, Gemma-optimized |
-| ExecuTorch | iOS/Android | .pte | Meta's new mobile runtime |
-| Apple Foundation Models framework | iOS/macOS 26+ | OS-provided | Swift API to Apple's ~3B on-device model; `@Generable` structured output, tool calling, LoRA adapters |
-| ML Kit GenAI APIs | Android (AICore devices) | OS-provided | Gemini Nano task APIs plus Prompt API; per-app quota, foreground only |
-| Chrome built-in AI | Desktop Chrome 138+ | Browser-provided | Gemini Nano via Summarizer, Translator, Language Detector and Prompt API (extensions) |
+| ONNX Runtime Mobile | iOS/Android | ONNX | Microsoft, QNN/ANE backends; ONNX Runtime 1.32.0 |
+| Core ML | iOS/macOS | .mlpackage | Apple's runtime for traditional models; Neural Engine, highest energy efficiency on Apple |
+| Core AI | iOS/macOS 27 | Core AI models | Apple's framework for LLMs and generative models (WWDC 2026): Swift API, AOT compilation, PyTorch extensions |
+| LiteRT-LM | Android/iOS/Web/desktop | .litertlm | Google, 0.20.0 (2026-11-23); replaces MediaPipe LLM Inference; NPU on Android; `litert-lm serve` OpenAI-compatible |
+| ExecuTorch | iOS/Android/desktop | .pte | PyTorch on-device runtime, 1.6.0 (2026-11-12): TensorRT backend beta, DFlash speculative decoding on CUDA and MLX |
+| Foundry Local / Windows ML | Windows 11 24H2+ | ONNX | Foundry Local runs in-process and picks a CPU, GPU or NPU variant; Windows ML is Microsoft's maintained ONNX Runtime with vendor execution providers |
+| Apple Foundation Models framework | iOS/macOS 26+ | OS-provided | Swift API to Apple's on-device model (rebuilt with vision input in OS 27) and the 32K-context PCC model; `@Generable` structured output, tool calling; any-provider Language Model protocol; adapters only through OS 26 |
+| ML Kit GenAI APIs | Android (AICore devices) | OS-provided | Gemini Nano 2/3/4 tiers; Prompt API with typed output and tool declarations, `AgentRunner`, task APIs; per-app quota, foreground only |
+| Chrome built-in AI | Desktop Chrome 138+ | Browser-provided | Gemini Nano via Summarizer, Translator, Language Detector (138) and the Prompt API, stable on the web from Chrome 148 |
+| Edge built-in AI | Desktop Edge | Browser-provided | Aion Instruct 2.3B; Prompt API origin trial (2026-11-19) |
 | TensorRT-LLM | Jetson/edge GPU | TensorRT | NVIDIA edge hardware |
-| llama.cpp Android | Android | GGUF via JNI | Community JNI wrapper |
-| MLX / `mlx-lm` | macOS (Apple silicon) | MLX safetensors | Apple's array framework. Unified memory means no host-to-device copy; also does 4/8-bit quantization and local LoRA fine-tuning |
+| llama.cpp Android | Android | GGUF | Official Android arm64 builds, including a Snapdragon Hexagon build |
+| MLX / `mlx-lm` | macOS (Apple silicon) | MLX safetensors | Apple's array framework (0.32.5 / 0.32.2). Unified memory means no host-to-device copy; 4/8-bit and nvfp4/mxfp4 quantization and local LoRA fine-tuning |
 
 ### Quantization Tools
 
@@ -1022,8 +1059,8 @@ The label is correct because "E" counts effective parameters, the ones that must
 A MatFormer (Matryoshka Transformer) orders each feed-forward block's hidden units so that a prefix of them forms a smaller model trained jointly with the full one. Gemma 3n E4B contains E2B: run only the inner slice and you get E2B with no second checkpoint, or pick slice widths per layer (Mix-n-Match) to build sizes between 2B and 4B. Separate checkpoints would double download size and storage, and the two models would not share weights or behavior, so a prompt tuned on one can act differently on the other. Nesting lets an app ship one file and pick the size at load time from device RAM, thermal state or battery, and the smaller slice behaves like a degraded version of the same model rather than a different one. The limit is that slices must be chosen from what was trained jointly; an arbitrary pruned width is not guaranteed to work, so evaluate each size you plan to serve.
 
 **Q: How does the Apple Neural Engine differ from a CPU for LLM inference, and what are the constraints?**
-**Short:** The Apple Neural Engine delivers roughly 10x the energy efficiency of CPU inference at about 38 TOPS, but requires static tensor shapes and Core-ML compilation.
-The Apple Neural Engine is dedicated matrix multiply hardware optimized for neural network operations, delivering approximately 38 TOPS on A17 Pro compared to the CPU's ~3-5 TOPS equivalent for matrix ops. ANE inference is ~10x more energy efficient than CPU inference, critical for battery-powered devices. However, the ANE requires static tensor shapes (no dynamic sequence lengths without workarounds), supports only a specific set of operations (standard transformer ops are supported; exotic activations or custom ops fall back to CPU), and models must be compiled specifically for ANE using Core ML's compilation pipeline.
+**Short:** The Neural Engine is a matrix engine about 10x more energy-efficient than the CPU, but it needs static tensor shapes, a supported op set and compilation through Apple's frameworks.
+The Apple Neural Engine is dedicated matrix multiply hardware optimized for neural network operations, with far more matrix throughput than the CPU; Apple publishes no TOPS figure for its 2025-2026 chips (A20 Pro, M5, M6). ANE inference is ~10x more energy efficient than CPU inference, critical for battery-powered devices. However, the ANE requires static tensor shapes (no dynamic sequence lengths without workarounds), supports only a specific set of operations (standard transformer ops are supported; exotic activations or custom ops fall back to CPU), and models must be compiled specifically for it through Apple's pipeline: Core ML for traditional models, Core AI (new in 2026) for LLMs and generative models. From M5 and A20 Pro the GPU also carries Neural Accelerators, which MLX uses to speed up prefill, so on current Apple silicon the GPU is often the better target for a custom LLM and the ANE for small, always-on models.
 
 **Q: What are the thermal and power constraints that affect sustained SLM inference on mobile devices?**
 **Short:** Flagship phones sustain only about 5W for AI workloads before thermal throttling within 60-120 seconds, dropping CPU inference to roughly 15-20 tok/s sustained.
@@ -1033,9 +1070,9 @@ Flagship smartphones (Snapdragon 8 Elite, A17 Pro) can sustain approximately 5W 
 **Short:** A hybrid mobile architecture uses a lightweight local classifier to route privacy-sensitive or simple requests on-device and complex ones to the cloud.
 The architecture uses a local routing layer that classifies each request before sending it anywhere. Simple, privacy-sensitive, or latency-critical requests route to the on-device SLM. Complex, knowledge-intensive, or long-context requests route to the cloud API. The routing classifier itself is extremely lightweight (a fine-tuned BERT-tiny or simple rule-based system). The system includes a cloud fallback for when the on-device model fails (returns low confidence or hits context limits), graceful degradation when offline (on-device only), and telemetry to measure which tasks were handled locally vs remotely to tune the routing threshold over time.
 
-**Q: When should a mobile or web app use the OS-provided model (Foundation Models, ML Kit GenAI, Chrome built-in AI) instead of bundling its own SLM?**
-**Short:** Use the OS model when its task APIs fit and you can tolerate device coverage gaps and silent model updates; bundle your own when you need a fine-tune, a long context or a pinned model version.
-The OS model costs zero app bytes, shares one copy of the weights across all apps, and is updated and scheduled by the platform: Apple's Foundation Models framework exposes a ~3B on-device model with `@Generable` structured output, tool calling and rank-32 adapters; ML Kit GenAI exposes Gemini Nano through AICore with Summarization, Proofreading, Rewriting, Image description and a Prompt API; Chrome exposes Gemini Nano through Summarizer, Translator, Language Detector and a Prompt API stable for extensions since Chrome 138. The costs are real. Coverage is limited to eligible hardware, so every call starts with an availability check and needs a fallback path. Limits are fixed by the platform: a 4,096-token session context on Apple; per-app quotas and foreground-only inference on Android; 22 GB free disk and a 4 GB-VRAM GPU or 16 GB RAM on desktop Chrome. And the model changes under you on OS updates, with Apple adapters needing retraining per base version. Bundle your own GGUF, Core ML or ExecuTorch model when you need a domain fine-tune on Android or web, a longer context, background inference, or reproducible behavior across OS versions; otherwise start with the OS model and keep a pinned eval set to run on every OS beta.
+**Q: When should a mobile or web app use the OS-provided model (Foundation Models, ML Kit GenAI, Chrome or Edge built-in AI) instead of bundling its own SLM?**
+**Short:** Use the OS model when its APIs fit and you can tolerate device coverage gaps and silent model updates; bundle your own when you need a fine-tune, a pinned model version or background inference.
+The OS model costs zero app bytes, shares one copy of the weights across all apps, and is updated and scheduled by the platform. Apple's Foundation Models framework on OS 27 exposes a rebuilt on-device model with vision input, `@Generable` structured output and tool calling, plus a Private Cloud Compute model with a 32,000-token context, and its Language Model protocol can route the same session to Claude, Gemini, Core AI or MLX models. ML Kit GenAI exposes Gemini Nano through AICore with a Prompt API (typed output, tool declarations), `AgentRunner` for tool loops, and task APIs for summarization, proofreading, rewriting, image description, speech and embeddings, across Nano 2, 3 and 4 device tiers. Chrome's Prompt API is stable on the web from Chrome 148 beside the stable Summarizer, Translator and Language Detector, and Edge opened a Prompt API origin trial on 2026-11-19 backed by the 2.3B Aion Instruct. The costs are real. Coverage is limited to eligible hardware, so every call starts with an availability check and needs a fallback path (Firebase AI Logic's hybrid API automates the cloud fallback on Android and web). Limits are fixed by the platform: a 4,096-token session context on OS 26 (read the context-size API on newer releases); per-app quotas and foreground-only inference on Android; 22 GB free disk and a 4 GB-VRAM GPU or 16 GB RAM on desktop Chrome. And the model changes under you on OS updates, while custom Apple adapters end with toolkit 26.0.0, which does not support OS 27. Bundle your own GGUF, LiteRT-LM, Core AI or ExecuTorch model when you need a domain fine-tune, background inference, or reproducible behavior across OS versions; otherwise start with the OS model and keep a pinned eval set to run on every OS beta.
 
 **Q: What privacy guarantees does on-device inference actually provide, and what are the limits?**
 **Short:** On-device inference only guarantees that data doesn't leave the device for inference, not protection against a malicious app, memory access, or prompt injection.
@@ -1050,16 +1087,16 @@ Start with a task-specific evaluation set representing your production distribut
 Standard Multi-Head Attention (MHA) maintains separate K and V heads for every attention head — for a model with 32 heads, that is 32 separate KV cache entries per token. Grouped Query Attention shares K and V heads across groups of Q heads: for example, 32 Q heads sharing 8 KV heads. This reduces the KV cache size by 4x, which is critical on memory-constrained devices. Phi-3 Mini uses GQA with 32 Q heads and 8 KV heads, reducing KV cache memory from ~1.6 GB to ~400 MB at 4K context. Without GQA, many SLMs would be impractical for long-context on-device inference.
 
 **Q: How does Ollama differ from running llama.cpp directly, and when would you choose each?**
-**Short:** Ollama wraps llama.cpp with model management and an OpenAI-compatible server for easy local deployment, while raw llama.cpp gives finer inference control.
-Ollama wraps llama.cpp with a model registry, lifecycle management, and an OpenAI-compatible REST API server. It handles model downloads, version management, automatic GPU/CPU layer splitting, and concurrent request queuing — providing a production-ready local server with minimal configuration. Running llama.cpp directly gives lower-level control: custom quantization parameters, specific thread counts, fine-grained GPU layer assignment, and embedding extraction that Ollama does not expose. Use Ollama for local development, prototyping, and simple deployment scenarios. Use llama.cpp directly when you need fine-grained control over inference parameters or are embedding the runtime into a custom application.
+**Short:** Ollama is a model manager and local server that runs llama.cpp (and MLX on Apple silicon) underneath; run llama.cpp directly when you need flags Ollama does not expose or want to embed the library.
+Ollama wraps an inference engine with a model registry, lifecycle management, and a local REST server that speaks its native API plus OpenAI-compatible and Anthropic-compatible endpoints. Since v0.30.0 (2026-05-13) its non-Apple path runs on upstream llama.cpp, and since v0.40.0 (2026-09-25) models run on MLX by default on Apple silicon, so on a Mac "Ollama" and "llama.cpp" are no longer the same engine. It handles model downloads, version management, automatic GPU/CPU layer splitting, concurrent requests (on Apple silicon since v0.40.17), and `ollama launch` wiring for coding agents — a production-ready local server with minimal configuration. Running llama.cpp directly gives lower-level control: exact quant files, `--n-cpu-moe` expert offload, the speculative-decoding type (`--spec-type`), thread counts, per-slot KV sizing, and embedding the stable v1.0.0 C library in your own application. Watch one trap with Ollama on small GPUs: its default context depends on VRAM (4k under 24 GiB), so set `OLLAMA_CONTEXT_LENGTH` for long prompts. Use Ollama for local development, prototyping, and simple deployments; use llama.cpp directly when you need fine-grained control or are embedding the runtime. The broader runtime comparison is in [Local AI](../local_ai/local_ai.md).
 
 **Q: What are the challenges and approaches for on-device fine-tuning of SLMs?**
 **Short:** On-device fine-tuning uses low-rank LoRA adapters to keep memory near 4GB for a 3B model, but training runs 10-100x slower than GPU training.
 On-device fine-tuning adapts a deployed model to user-specific data without sending that data to the cloud. The primary approach is LoRA with low rank (4-8) — only small adapter matrices are trained while base weights stay frozen, requiring ~4 GB RAM for a 3B model versus ~12 GB for full fine-tuning. Key challenges: on-device training is 10-100x slower than GPU training (a 50-example LoRA session takes 5-15 minutes on an NPU versus seconds on an A100), memory is shared with the OS and other apps (training must yield resources under pressure), and battery drain during training is significant (~3-5W sustained). Practical mitigations: schedule fine-tuning during charging or idle time, limit to 50-200 examples per session, use federated learning to aggregate user-specific adapters centrally without sharing raw data. Apple uses on-device adaptation for personalized keyboard predictions, and Google uses federated LoRA for Gboard.
 
 **Q: How do NPU hardware differences across mobile platforms affect SLM deployment decisions?**
-**Short:** Mobile NPUs vary widely in TOPS, supported operations, and framework compatibility, so deployment should target the most constrained device as the baseline.
-Mobile NPUs vary significantly in raw throughput (10-45 TOPS INT8), supported operations, and framework compatibility. Apple's Neural Engine (~35 TOPS on A17 Pro) requires Core ML models with static tensor shapes and offers ~10x energy efficiency over CPU inference. Qualcomm's Hexagon NPU (~45 TOPS on Snapdragon 8 Gen 3) supports INT4 quantization natively via the QNN SDK but has limited support for custom operations. Google's mobile Tensor TPU (~10 TOPS) is optimized for TensorFlow Lite workloads on Pixel devices. The practical impact: a model that runs at 40 tokens/second on an iPhone 15 Pro (ANE) may only achieve 15 tokens/second on a Pixel 8 (Tensor) and 25 tokens/second on a Galaxy S24 (Hexagon). Deployment strategy: target the most constrained hardware in your user base as your baseline, use platform-specific runtimes (Core ML for iOS, QNN for Snapdragon Android) for optimal performance, and implement the NNAPI abstraction for broad Android compatibility at the cost of ~20% throughput versus vendor-specific SDKs.
+**Short:** Mobile accelerators differ in supported operations, runtimes and memory, and vendors no longer publish TOPS for current phone chips, so benchmark the weakest target device and use each platform's runtime.
+Mobile accelerators vary in supported operations, framework compatibility and memory, and the old way of comparing them by TOPS has stopped working: Apple publishes no TOPS for A20 Pro, Qualcomm gives only relative claims for the Snapdragon 8 Elite Gen 5 and Gen 6 NPUs, and Google publishes none for Tensor G6. What is published is measured throughput: Google's LiteRT-LM table shows Gemma-4-E2B decoding at 52 tok/s on a Galaxy S26 Ultra GPU and 56 on an iPhone 17 Pro GPU, against 47 and 25 on their CPUs, which also shows that decode tracks memory bandwidth more than accelerator ratings. Apple's Neural Engine needs static tensor shapes and compilation through Core ML (traditional models) or Core AI (LLMs), and from A20 Pro the GPU also carries Neural Accelerators. Qualcomm's Hexagon NPU is reached through the QNN SDK, LiteRT-LM's NPU path (stable on Android), or llama.cpp's Hexagon backend, which gained NVFP4 support on 2026-11-14. Gemini Nano is split into Nano 2, 3 and 4 device tiers, so the OS model you get depends on the phone. Deployment strategy: target the most constrained hardware in your user base as your baseline, benchmark it rather than trusting spec sheets, use platform runtimes (Core AI on iOS, LiteRT-LM or QNN on Android) for the best performance, and prefer the OS model where its tier coverage matches your users.
 
 **Q: Why does a 35-45 TOPS phone NPU deliver only 50-100 tokens/second on a 3B model when the TOPS math suggests thousands?**
 **Short:** Decode is memory-bandwidth-bound, not compute-bound, so a phone's memory bus streaming model weights caps tokens/second far below what raw TOPS would suggest.
