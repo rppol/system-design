@@ -899,3 +899,7 @@ A: The same way any critical-path relational store does at this scale — the sc
 - [`../cdn/cdn.md`](../cdn/cdn.md) — edge caching and cache-invalidation concepts underlying the delivery tier this pipeline's renditions feed into.
 - [`../message_queues/message_queues.md`](../message_queues/message_queues.md) — the queueing/backpressure primitives underlying the DAG orchestrator's work-dispatch model (§4.3, §10).
 - [`../capacity_estimation/capacity_estimation.md`](../capacity_estimation/capacity_estimation.md) — the general back-of-envelope estimation technique this design's §2/§10 apply to upload volume, transcode compute, and storage growth.
+- **The general upload and processing-pipeline pattern this study specializes** -> [`../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md`](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md)
+- **Async job contracts, result delivery and workflow engines for multi-step processing** -> [`../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md`](../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md)
+- **A photo and short-video pipeline that reuses this transcode shape** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
+- **A profile-photo pipeline that borrows this media shape** -> [`./design_tinder.md`](./design_tinder.md)

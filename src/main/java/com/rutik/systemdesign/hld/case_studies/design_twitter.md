@@ -874,4 +874,8 @@ A: It's an empirically-tuned constant balancing two costs: set it too low, and t
 - **Sharding the tweet/social-graph stores** -> [`../../database/sharding_and_partitioning/`](../../database/sharding_and_partitioning/sharding_and_partitioning.md), [`../../hld/consistent_hashing/`](../consistent_hashing/consistent_hashing.md)
 - **Snowflake ID generator implementation** -> [`../../java/case_studies/design_snowflake_id_generator_java.md`](../../java/case_studies/design_snowflake_id_generator_java.md)
 - **Rate-limiting fan-out writes for near-celebrity accounts** -> [`../rate_limiting/rate_limiting.md`](../rate_limiting/rate_limiting.md)
+- **The read and write ladders that fan-out-on-write vs. fan-out-on-read sit on** -> [`../scaling_reads_and_writes/scaling_reads_and_writes.md`](../scaling_reads_and_writes/scaling_reads_and_writes.md)
+- **The cache tier behind timeline reads: routing, hot keys, invalidation** -> [`./design_distributed_cache.md`](./design_distributed_cache.md)
+- **The media side of a feed product: uploads, renditions, CDN delivery** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
+- **Class-level feed: per-user inbox, hybrid push/pull fan-out, ranking Strategy, keyset pagination** -> [`../../lld/system_design_problems/FeedGenerator.md`](../../lld/system_design_problems/FeedGenerator.md)
 

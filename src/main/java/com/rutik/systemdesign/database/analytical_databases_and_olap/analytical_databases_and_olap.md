@@ -1316,3 +1316,6 @@ is in
 and the object-storage version of the same table — where the parts become Parquet files and the
 merges become compaction jobs — is in
 [Lakehouse and Table Formats](../lakehouse_and_table_formats/lakehouse_and_table_formats.md).
+Where this engine sits in the wider platform (batch vs. stream, Lambda vs. Kappa, warehouse vs.
+lakehouse, serving layers) is in
+[Data Platform Architecture](../../hld/data_platform_architecture/data_platform_architecture.md).

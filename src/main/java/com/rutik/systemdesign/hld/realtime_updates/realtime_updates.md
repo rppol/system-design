@@ -573,6 +573,8 @@ A: A single comment posted by one viewer has to reach roughly a million open con
 - **Verify the Upgrade handshake through every intermediary in production**, not just from a developer machine with a direct connection — a CDN, WAF, or corporate proxy silently dropping `Connection: Upgrade` fails with no server-side signal at all (§10 pitfall 5).
 - **Close the realtime connection deliberately on mobile backgrounding** and rely on platform push for anything that must reach a backgrounded user; fighting the OS's background network suspension is not a winnable design.
 
+**Cross-references:** Related HLD pages: [Long-Running Tasks and Workflows](../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) (push vs. poll for job results), [Design a Local Delivery Service](../case_studies/design_local_delivery_service.md) (courier tracking fan-out), [Design an Online Auction](../case_studies/design_online_auction.md) (live price fan-out to watchers), [Design an Online Judge](../case_studies/design_online_judge.md) (SSE vs. polling for verdicts), [Design Video Conferencing](../case_studies/design_video_conferencing.md) (signalling, reconnect storms and resume).
+
 ---
 
 ## 14. Case Study: Live-Comments Fan-Out at 1M Concurrent Viewers

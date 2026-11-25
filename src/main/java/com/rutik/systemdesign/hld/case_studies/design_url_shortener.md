@@ -992,4 +992,5 @@ A: Origin infrastructure cost becomes the binding constraint, and edge cache hit
 - **Kafka internals for the analytics pipeline** -> [`../../backend/kafka_deep_dive/kafka_deep_dive.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
 - **Distributed ID generation (counter/Snowflake-style alternatives)** -> [`../../java/case_studies/design_snowflake_id_generator_java.md`](../../java/case_studies/design_snowflake_id_generator_java.md)
 - **CDN edge caching for 301/302 responses** -> [`../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md`](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md)
+- **Class-level design inside one service instance: id blocks, code generation, custom aliases (the LLD twin)** -> [`../../lld/system_design_problems/UrlShortener.md`](../../lld/system_design_problems/UrlShortener.md)
 

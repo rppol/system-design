@@ -902,3 +902,7 @@ Every specific mechanism in this design — the deadline-aware transcode queue (
 - **Circuit breakers and graceful degradation underlying the ingest failover and CDN saturation runbooks** -> [`../resilience_patterns/resilience_patterns.md`](../resilience_patterns/resilience_patterns.md)
 - **Adaptive-bitrate quality ladder and the CDN fallback hierarchy this design's playback path reuses without re-deriving** -> [`./design_netflix.md`](./design_netflix.md) §4
 - **Pre-scaling ahead of a known, forecastable traffic peak, applied here to a broadcast kickoff rather than a sale's T+0** -> [`./design_flash_sale_ticketing.md`](./design_flash_sale_ticketing.md) §8, §11
+- **Many-to-many calls under a few hundred milliseconds: an SFU instead of segments and a CDN** -> [`./design_video_conferencing.md`](./design_video_conferencing.md)
+- **Photo and short-video delivery without a live clock** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
+- **Live-auctioneer auctions that hand the video to this design** -> [`./design_online_auction.md`](./design_online_auction.md)
+- **Pre-provisioning for a known contest start time** -> [`./design_online_judge.md`](./design_online_judge.md)

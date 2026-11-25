@@ -913,3 +913,7 @@ A: Everything outside the code path itself: a deployment that regresses the atom
 - **Async fulfilment queue and outbox-to-consumer decoupling (§4.f, §7)** -> [`../message_queues/message_queues.md`](../message_queues/message_queues.md)
 - **Contention resolution primitives underlying the atomic inventory decrement (§4.b)** -> [`../coordination_and_contention/coordination_and_contention.md`](../coordination_and_contention/coordination_and_contention.md)
 - **Dedicated-infrastructure isolation boundary for the sale (§3, §8, §11)** -> [`../cell_based_architecture/cell_based_architecture.md`](../cell_based_architecture/cell_based_architecture.md)
+- **Atomic decrement and holds for per-store inventory at checkout** -> [`./design_local_delivery_service.md`](./design_local_delivery_service.md)
+- **The same hot-key burst on one auction in its final minute** -> [`./design_online_auction.md`](./design_online_auction.md)
+- **Pre-provisioning for a contest start** -> [`./design_online_judge.md`](./design_online_judge.md)
+- **An exactly-once state transition on a contended key (the mutual match)** -> [`./design_tinder.md`](./design_tinder.md)

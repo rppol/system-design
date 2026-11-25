@@ -867,3 +867,5 @@ A: **Both** accounts are charged the **full logical size** of the file, independ
 - **Chunk hash index and ACL store as sharded KV stores (§4.1, §4.6, §7)** -> [`../../database/key_value_stores/key_value_stores.md`](../../database/key_value_stores/key_value_stores.md)
 - **Per-account change log as an event-sourced sync primitive (§4.3)** -> [`../event_sourcing_cqrs/event_sourcing_cqrs.md`](../event_sourcing_cqrs/event_sourcing_cqrs.md)
 - **Conflicted-copy creation rate limiting (§9 War Story 2)** -> [`../rate_limiting/rate_limiting.md`](../rate_limiting/rate_limiting.md)
+- **The general large-blob pattern: presigned and resumable uploads, chunking and dedup** -> [`../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md`](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md)
+- **Photo upload sessions and renditions, the media-product neighbour of file sync** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)

@@ -109,6 +109,15 @@ Patterns that deal with communication between objects, defining how objects inte
 | [Security and Authentication/Authorization](src/main/java/com/rutik/systemdesign/hld/security_and_auth/security_and_auth.md) | AuthN vs AuthZ, OAuth2/OIDC, JWT, mTLS, RBAC vs ABAC, encryption |
 | [Resilience Patterns](src/main/java/com/rutik/systemdesign/hld/resilience_patterns/resilience_patterns.md) | Circuit breaker, bulkhead, retries with backoff + jitter, graceful degradation, failover |
 | [Cell-Based Architecture](src/main/java/com/rutik/systemdesign/hld/cell_based_architecture/cell_based_architecture.md) | Cells as blast-radius containment, cell routing, poison-pill isolation, and per-cell capacity |
+| [Large Blobs and Media Pipelines](src/main/java/com/rutik/systemdesign/hld/large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) | Presigned, multipart and resumable uploads, chunking and dedup, download strategies, media processing pipelines |
+| [Scaling Reads and Writes](src/main/java/com/rutik/systemdesign/hld/scaling_reads_and_writes/scaling_reads_and_writes.md) | The read and write ladders: which rung to climb next and what each costs, plus hot-key handling |
+| [Search Systems](src/main/java/com/rutik/systemdesign/hld/search_systems/search_systems.md) | Indexing pipeline and freshness, index partitioning, query fan-out, ranking stages |
+| [Long-Running Tasks and Workflows](src/main/java/com/rutik/systemdesign/hld/long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) | Async jobs, job tables, result delivery, orchestration vs choreography, workflow engines |
+| [Time, Clocks and Ordering](src/main/java/com/rutik/systemdesign/hld/time_clocks_and_ordering/time_clocks_and_ordering.md) | Clock skew, Lamport and vector clocks, hybrid logical clocks, TrueTime-style bounds, last-writer-wins |
+| [Failure Detection and Membership](src/main/java/com/rutik/systemdesign/hld/failure_detection_and_membership/failure_detection_and_membership.md) | Heartbeats, gossip, phi accrual, SWIM, membership views, anti-entropy |
+| [Data Platform Architecture](src/main/java/com/rutik/systemdesign/hld/data_platform_architecture/data_platform_architecture.md) | Batch vs stream, Lambda vs Kappa, warehouse vs lake vs lakehouse, medallion layering |
+
+HLD also ships 37 end-to-end case studies; see the [HLD case-study index](src/main/java/com/rutik/systemdesign/hld/case_studies/case_studies.md).
 
 ---
 

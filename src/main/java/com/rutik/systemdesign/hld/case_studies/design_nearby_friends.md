@@ -890,6 +890,8 @@ A: It records *when a sharing relationship changed state* — granted, revoked, 
 - **Durable-queue alternative to at-most-once Pub/Sub fan-out, and when that tradeoff would flip (§4.c, §5, §7)** -> [`../message_queues/message_queues.md`](../message_queues/message_queues.md)
 - **The in-memory-fronting-durable-store pattern this design deliberately does NOT use for live location, contrasted directly (§4.d, §5)** -> [`./design_flash_sale_ticketing.md`](./design_flash_sale_ticketing.md)
 - **Back-of-the-envelope QPS/storage/connection estimation methodology underlying every derivation in §2** -> [`../capacity_estimation/capacity_estimation.md`](../capacity_estimation/capacity_estimation.md)
+- **Courier location fan-out for order tracking** -> [`./design_local_delivery_service.md`](./design_local_delivery_service.md)
+- **Moving users and geoshard migration for discovery** -> [`./design_tinder.md`](./design_tinder.md)
 
 ### A Note on Reading This Case Study Alongside Its Two Nearest Neighbors
 

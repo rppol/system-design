@@ -942,4 +942,6 @@ A: Open Connect's physical logistics — growing the appliance fleet tenfold bec
 - **Hystrix/Resilience4j circuit breakers** -> [`../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md), [`../../spring/spring_cloud_patterns/spring_cloud_patterns.md`](../../spring/spring_cloud_patterns/spring_cloud_patterns.md)
 - **Cross-region Cassandra replication (LOCAL_QUORUM)** -> [`../../database/replication_and_high_availability/replication_and_high_availability.md`](../../database/replication_and_high_availability/replication_and_high_availability.md), [`../../database/consistency_models_and_consensus/consistency_models_and_consensus.md`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md)
 - **Watch-event streaming for analytics/training** -> [`../../backend/kafka_deep_dive/kafka_deep_dive.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- **Upload, processing and download patterns for large media objects** -> [`../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md`](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md)
+- **Image renditions and CDN delivery for a photo product** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
 

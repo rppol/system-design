@@ -1287,4 +1287,7 @@ the engines that query these tables are in
 Iceberg's own spec versions, catalog implementations and maintenance procedures in product depth
 are in [Apache Iceberg](../../technologies/apache_iceberg/apache_iceberg.md); and the
 immutable-file-plus-background-compaction pattern this shares with LSM storage is in
-[Storage Engines Internals](../storage_engines_internals/storage_engines_internals.md).
+[Storage Engines Internals](../storage_engines_internals/storage_engines_internals.md). The
+architecture-level choice between a warehouse, a lake and a lakehouse, and where streaming and
+medallion layers fit around it, is in
+[Data Platform Architecture](../../hld/data_platform_architecture/data_platform_architecture.md).

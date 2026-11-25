@@ -734,6 +734,8 @@ A: The naive approach — one dashboard per cell — is exactly the operational 
   the condition under which that check matters most, not the condition under which it's safe to
   compress.
 
+**Cross-references:** Related HLD pages: [Design an Online Auction](../case_studies/design_online_auction.md) (isolating a hot listing on its own shard), [Design an Online Judge](../case_studies/design_online_judge.md) (a dedicated pool per contest as a blast-radius boundary).
+
 ---
 
 ## 14. Case Study: Migrating a Single-Region Monolith to 12 Cells

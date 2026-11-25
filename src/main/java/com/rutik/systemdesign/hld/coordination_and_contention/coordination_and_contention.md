@@ -878,6 +878,8 @@ with jitter,** exactly as in
 retry loop on a contended resource is how a transient collision becomes a self-inflicted
 storm.
 
+**Cross-references:** Related HLD pages: [Failure Detection and Membership](../failure_detection_and_membership/failure_detection_and_membership.md) (deciding a lease holder is dead), [Large Blobs and Media Pipelines](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) (upload sessions and completion races), [Long-Running Tasks and Workflows](../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) (job leases and visibility timeouts), [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (the hot-key toolkit that breaks both ladders), [Time, Clocks and Ordering](../time_clocks_and_ordering/time_clocks_and_ordering.md) (lease expiry under clock skew), [Design a Distributed Cache](../case_studies/design_distributed_cache.md) (fill leases and hot keys), [Design a Local Delivery Service](../case_studies/design_local_delivery_service.md) (hold-with-TTL inventory reservations), [Design an Online Auction](../case_studies/design_online_auction.md) (per-auction compare-and-set and fencing), [Design an Online Judge](../case_studies/design_online_judge.md) (judge-queue leases and fencing), [Design Tinder](../case_studies/design_tinder.md) (per-pair serialization for exactly-once matches), [Design Video Conferencing](../case_studies/design_video_conferencing.md) (compare-and-set room placement).
+
 ---
 
 ## 14. Case Study: A 50,000-Seat Onsale Against 500,000 Concurrent Buyers

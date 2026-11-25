@@ -1018,4 +1018,6 @@ The leaderboard's core building blocks — sharded sorted sets, consistent-hash 
 - **Horizontal scaling and stateless-service principles applied to the merger fleet (§4.2, §10)** -> [`../scalability/scalability.md`](../scalability/scalability.md)
 - **Time-windowed/tumbling-window aggregation, contrasted with leaderboard key-naming-with-TTL (§4.4)** -> [`./design_ad_click_aggregation.md`](./design_ad_click_aggregation.md)
 - **WebSocket/SSE push delivery for live-viewed leaderboard screens (§7)** -> [`../../backend/websockets_and_sse/websockets_and_sse.md`](../../backend/websockets_and_sse/websockets_and_sse.md)
+- **The cache-cluster design underneath sorted-set workloads** -> [`./design_distributed_cache.md`](./design_distributed_cache.md)
+- **Contest ranking as a leaderboard consumer** -> [`./design_online_judge.md`](./design_online_judge.md)
 

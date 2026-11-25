@@ -973,7 +973,7 @@ Tag related content (all pages using a specific product image, all pages in a ca
 
 ---
 
-**Cross-references:** [devops/cloud_networking_and_cdn](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md) (CloudFront/Fastly configuration, origin shield, Anycast routing).
+**Cross-references:** [devops/cloud_networking_and_cdn](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md) (CloudFront/Fastly configuration, origin shield, Anycast routing). Related HLD pages: [Large Blobs and Media Pipelines](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) (download strategies and signed URLs for large objects), [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (the edge rung of the read ladder), [Design Instagram Photo Sharing](../case_studies/design_instagram_photo_sharing.md) (rendition delivery and deletion across edge copies), [Design a Distributed Cache](../case_studies/design_distributed_cache.md) (what stays in the cache tier when bytes go through the CDN).
 
 ---
 

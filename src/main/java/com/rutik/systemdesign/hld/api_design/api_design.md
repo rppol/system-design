@@ -616,7 +616,7 @@ Key tools: Datadog APM, AWS X-Ray, Prometheus + Grafana, New Relic, Jaeger (dist
 
 ---
 
-**Cross-references:** [backend/rest_api_design](../../backend/rest_api_design/rest_api_design.md) (resource modeling, HATEOAS, status codes), [backend/grpc_and_protobuf](../../backend/grpc_and_protobuf/grpc_and_protobuf.md) (binary protocols, streaming RPC), [backend/graphql](../../backend/graphql/graphql.md) (schema design, N+1 resolution), [backend/api_gateway_patterns](../../backend/api_gateway_patterns/api_gateway_patterns.md) (gateway-level versioning, auth, rate limiting).
+**Cross-references:** [backend/rest_api_design](../../backend/rest_api_design/rest_api_design.md) (resource modeling, HATEOAS, status codes), [backend/grpc_and_protobuf](../../backend/grpc_and_protobuf/grpc_and_protobuf.md) (binary protocols, streaming RPC), [backend/graphql](../../backend/graphql/graphql.md) (schema design, N+1 resolution), [backend/api_gateway_patterns](../../backend/api_gateway_patterns/api_gateway_patterns.md) (gateway-level versioning, auth, rate limiting). Related HLD pages: [Long-Running Tasks and Workflows](../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) (the 202 Accepted and status-resource contract for work that outlives a request).
 
 ---
 

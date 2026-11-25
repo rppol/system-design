@@ -715,6 +715,8 @@ Because a Kafka transaction's exactly-once guarantee (see the [Kafka deep dive �
 - **Choose Lambda's extra batch codepath only when a consumer genuinely needs zero streaming-layer approximation** — an audit trail, a billing number — not as a default "more correct" posture for every pipeline (§4.4).
 - **Base the watermark delay on measured out-of-order arrival data, not a guessed round number**, and revisit it when the mobile/offline client population that drives lateness changes (§12).
 
+**Cross-references:** Related HLD pages: [Data Platform Architecture](../data_platform_architecture/data_platform_architecture.md) (where streaming sits next to batch: Lambda vs. Kappa), [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (stream processing on the write ladder), [Time, Clocks and Ordering](../time_clocks_and_ordering/time_clocks_and_ordering.md) (event time vs. processing time and watermarks), [Design an Online Auction](../case_studies/design_online_auction.md) (a risk stream over every bid).
+
 ---
 
 ## 14. Case Study: A Real-Time Fraud-Scoring Pipeline with a 200ms Budget

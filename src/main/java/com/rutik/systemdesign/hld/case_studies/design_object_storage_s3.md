@@ -1035,3 +1035,5 @@ A: The single-`bucketId`-shard model (§4.1) becomes the bottleneck — one buck
 - **Repair-queue depth, durability-floor, and freshness alerting (§8, War Story 1)** -> [`../observability/observability.md`](../observability/observability.md)
 - **Bucket policies, object ACLs, and request signing/authorization (§1, §7)** -> [`../security_and_auth/security_and_auth.md`](../security_and_auth/security_and_auth.md)
 - **CDN offload for hot-object GET traffic (§2, §7)** -> [`../cdn/cdn.md`](../cdn/cdn.md)
+- **How applications use an object store for large uploads: presigned URLs, multipart, resumable sessions** -> [`../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md`](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md)
+- **A media product byte plane built on object storage** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)

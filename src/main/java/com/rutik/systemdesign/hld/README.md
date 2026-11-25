@@ -115,6 +115,13 @@ Pick 2-3 components to go deep on (interviewer often guides):
 | [Cell-Based Architecture](cell_based_architecture/cell_based_architecture.md) | Cells as blast-radius containment, cell routing, poison-pill isolation | Advanced |
 | [Multi-Region and Data Residency](multi_region_and_data_residency/multi_region_and_data_residency.md) | Active-active vs active-passive, write locality, residency constraints | Advanced |
 | [Stream Processing](stream_processing/stream_processing.md) | Watermarks, windowing, exactly-once, state backends | Advanced |
+| [Large Blobs and Media Pipelines](large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) | Proxy vs presigned upload, multipart and resumable sessions, content-defined chunking and dedup, download strategies, processing pipelines | Intermediate |
+| [Scaling Reads and Writes](scaling_reads_and_writes/scaling_reads_and_writes.md) | The read ladder and the write ladder (which rung to climb next and what it costs), plus the hot-key toolkit that breaks both | Intermediate |
+| [Search Systems](search_systems/search_systems.md) | Indexing pipeline and freshness, CDC into the index, query fan-out across shards, ranking stages, typeahead vs full-text | Intermediate |
+| [Long-Running Tasks and Workflows](long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) | Sync-with-timeout vs async job (queue, worker pool, job table), database as the queue, poll/push/callback delivery, orchestration vs choreography, workflow engines | Intermediate |
+| [Time, Clocks and Ordering](time_clocks_and_ordering/time_clocks_and_ordering.md) | Physical and monotonic clocks, Lamport and vector clocks, hybrid logical clocks, TrueTime-style bounds, last-writer-wins, sequencers | Advanced |
+| [Failure Detection and Membership](failure_detection_and_membership/failure_detection_and_membership.md) | Heartbeats vs pings, gossip, phi accrual, SWIM and Lifeguard, membership views, anti-entropy and repair, leader leases | Advanced |
+| [Data Platform Architecture](data_platform_architecture/data_platform_architecture.md) | Batch vs stream, Lambda vs Kappa, warehouse vs lake vs lakehouse, ingestion patterns, medallion layering, serving layers | Advanced |
 
 ---
 
@@ -136,20 +143,27 @@ Pick 2-3 components to go deep on (interviewer often guides):
 
 **Phase 3 — Advanced Topics**:
 11. CDN — global content delivery
-12. Consistent Hashing — elegant distributed data placement
-13. Database Sharding — scaling writes
-14. Geospatial Indexing — geohash, S2, H3, quadtrees, k-nearest search
-15. Microservices — large-scale architecture
-16. Distributed Transactions — consistency across service boundaries (2PC, Saga, TCC, outbox)
-17. Coordination and Contention — distributed locks, leases, fencing tokens, hot keys
-18. Observability — instrumenting and operating what you've built (metrics, logs, traces, SLOs)
-19. Security and Authentication/Authorization — securing the system end-to-end
-20. Resilience Patterns — designing for graceful failure (circuit breakers, bulkheads, retries)
-21. Cell-Based Architecture — cells as blast-radius containment, cell routing
-22. Consensus Algorithms — Raft/Paxos leader election, log replication, quorum sizing, etcd/ZooKeeper
-23. Multi-Region and Data Residency — active-active vs active-passive, write locality, residency constraints
-24. Event Sourcing & CQRS — append-only event log, projections, snapshots, command/query separation
-25. Stream Processing — watermarks, windowing, exactly-once, stateful rescaling
+12. Large Blobs and Media Pipelines — keep gigabytes off the application servers (presigned, multipart, resumable uploads)
+13. Consistent Hashing — elegant distributed data placement
+14. Database Sharding — scaling writes
+15. Scaling Reads and Writes — the read and write ladders: which rung to climb next and what it costs
+16. Geospatial Indexing — geohash, S2, H3, quadtrees, k-nearest search
+17. Search Systems — the system around the search engine: indexing pipeline, freshness, query fan-out, ranking hooks
+18. Microservices — large-scale architecture
+19. Distributed Transactions — consistency across service boundaries (2PC, Saga, TCC, outbox)
+20. Coordination and Contention — distributed locks, leases, fencing tokens, hot keys
+21. Long-Running Tasks and Workflows — async jobs, result delivery, orchestration, workflow engines
+22. Observability — instrumenting and operating what you've built (metrics, logs, traces, SLOs)
+23. Security and Authentication/Authorization — securing the system end-to-end
+24. Resilience Patterns — designing for graceful failure (circuit breakers, bulkheads, retries)
+25. Cell-Based Architecture — cells as blast-radius containment, cell routing
+26. Time, Clocks and Ordering — physical vs logical time, HLC, TrueTime-style bounds, last-writer-wins hazards
+27. Failure Detection and Membership — heartbeats, phi accrual, SWIM, membership views, anti-entropy
+28. Consensus Algorithms — Raft/Paxos leader election, log replication, quorum sizing, etcd/ZooKeeper
+29. Multi-Region and Data Residency — active-active vs active-passive, write locality, residency constraints
+30. Event Sourcing & CQRS — append-only event log, projections, snapshots, command/query separation
+31. Stream Processing — watermarks, windowing, exactly-once, stateful rescaling
+32. Data Platform Architecture — batch vs stream, Lambda vs Kappa, warehouse vs lake vs lakehouse
 
 **Phase 4 — Apply to Case Studies**:
 - [Design Twitter](case_studies/design_twitter.md)
@@ -182,8 +196,15 @@ Pick 2-3 components to go deep on (interviewer often guides):
 - [Design Nearby Friends](case_studies/design_nearby_friends.md)
 - [Design a Top-K / Heavy-Hitters Service](case_studies/design_top_k_heavy_hitters.md)
 - [Design a Video Upload and Transcoding Pipeline](case_studies/design_youtube_upload_pipeline.md)
+- [Design a Distributed Cache](case_studies/design_distributed_cache.md)
+- [Design Instagram Photo Sharing](case_studies/design_instagram_photo_sharing.md)
+- [Design a Local Delivery Service](case_studies/design_local_delivery_service.md)
+- [Design an Online Auction](case_studies/design_online_auction.md)
+- [Design an Online Judge](case_studies/design_online_judge.md)
+- [Design Tinder](case_studies/design_tinder.md)
+- [Design Video Conferencing](case_studies/design_video_conferencing.md)
 
-See [case_studies/case_studies.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 30 case studies.
+See [case_studies/case_studies.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 37 case studies.
 
 ---
 
@@ -265,6 +286,13 @@ case_studies
   design_top_k_heavy_hitters.md  senior, principal
   design_email_service.md  senior, principal
   design_nearby_friends.md  senior
+  design_distributed_cache.md  senior
+  design_instagram_photo_sharing.md  senior
+  design_local_delivery_service.md  principal
+  design_online_auction.md  senior, principal
+  design_online_judge.md  senior
+  design_tinder.md  senior
+  design_video_conferencing.md  senior, principal
 capacity_estimation
   capacity_estimation.md  senior, principal
 realtime_updates
@@ -279,17 +307,31 @@ multi_region_and_data_residency
   multi_region_and_data_residency.md  principal
 stream_processing
   stream_processing.md  senior
+large_blobs_and_media_pipelines
+  large_blobs_and_media_pipelines.md  senior
+scaling_reads_and_writes
+  scaling_reads_and_writes.md  senior, principal
+search_systems
+  search_systems.md  senior
+long_running_tasks_and_workflows
+  long_running_tasks_and_workflows.md  senior
+time_clocks_and_ordering
+  time_clocks_and_ordering.md  senior, principal
+failure_detection_and_membership
+  failure_detection_and_membership.md  principal
+data_platform_architecture
+  data_platform_architecture.md  principal
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 25 modules spanning the full architectural-overview curriculum, from scalability fundamentals through consensus algorithms and event sourcing. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **three ways through it**; the browser learning game's **Study** view surfaces them as a **Full / Senior / Principal** toggle (Full is the default).
+This section is exhaustive by design — 32 modules spanning the full architectural-overview curriculum, from scalability fundamentals through consensus algorithms, event sourcing and data platform architecture. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **three ways through it**; the browser learning game's **Study** view surfaces them as a **Full / Senior / Principal** toggle (Full is the default).
 
-### Full Path (25 modules)
+### Full Path (32 modules)
 
-The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 30 case studies. Nothing is dropped.
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 37 case studies. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (19 modules)
+### Senior Path (24 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -304,31 +346,39 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 | 9 | [message_queues](message_queues/message_queues.md) | module page only |
 | 10 | [rate_limiting](rate_limiting/rate_limiting.md) | module page only |
 | 11 | [cdn](cdn/cdn.md) | module page only |
-| 12 | [consistent_hashing](consistent_hashing/consistent_hashing.md) | module page only |
-| 13 | [database_sharding](database_sharding/database_sharding.md) | module page only |
-| 15 | [microservices](microservices/microservices.md) | module page only |
-| 16 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
-| 17 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
-| 18 | [observability](observability/observability.md) | 2 files |
-| 20 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
-| 25 | [stream_processing](stream_processing/stream_processing.md) | module page only |
+| 12 | [large_blobs_and_media_pipelines](large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) | module page only |
+| 13 | [consistent_hashing](consistent_hashing/consistent_hashing.md) | module page only |
+| 14 | [database_sharding](database_sharding/database_sharding.md) | module page only |
+| 15 | [scaling_reads_and_writes](scaling_reads_and_writes/scaling_reads_and_writes.md) | module page only |
+| 17 | [search_systems](search_systems/search_systems.md) | module page only |
+| 18 | [microservices](microservices/microservices.md) | module page only |
+| 19 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 20 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
+| 21 | [long_running_tasks_and_workflows](long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) | module page only |
+| 22 | [observability](observability/observability.md) | 2 files |
+| 24 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
+| 26 | [time_clocks_and_ordering](time_clocks_and_ordering/time_clocks_and_ordering.md) | module page only |
+| 31 | [stream_processing](stream_processing/stream_processing.md) | module page only |
 
-**Not in this path** (6 of 25, Full Path only): `geospatial_indexing`, `security_and_auth`, `cell_based_architecture`, `consensus_algorithms`, `multi_region_and_data_residency`, `event_sourcing_cqrs`
+**Not in this path** (8 of 32, Full Path only): `geospatial_indexing`, `security_and_auth`, `cell_based_architecture`, `failure_detection_and_membership`, `consensus_algorithms`, `multi_region_and_data_residency`, `event_sourcing_cqrs`, `data_platform_architecture`
 <!-- /study-path-table -->
 
-A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 6 modules dropped. Each group below says why it earns senior time.
+A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 8 modules dropped. Each group below says why it earns senior time.
 
 | Group | Why it's tested |
 |-------|-----------------|
 | Foundations | The vocabulary every interview opens with — horizontal vs vertical scaling, traffic distribution, cache-aside/write-through, and SQL vs NoSQL schema tradeoffs |
 | Core Tradeoffs & Communication | The theorem you must state correctly (CP vs AP, PACELC), how services talk synchronously (REST/gRPC/GraphQL, versioning), and asynchronously (delivery guarantees, DLQ, backpressure) |
 | Protecting the System | The two standard "how do you protect and scale reads at the edge" follow-ups — token bucket vs sliding window, push vs pull edge caching |
-| Distributed Data Placement | The standard answer to "how do you scale writes past one machine" — hash ring + virtual nodes, shard-key selection, resharding cost |
+| Moving Big Bytes | The "users upload photos or video" follow-up — presigned and resumable uploads, and why the application servers never touch the bytes |
+| Distributed Data Placement | The standard answer to "how do you scale writes past one machine" — hash ring + virtual nodes, shard-key selection, resharding cost — and the read/write ladder that says which rung to climb first |
+| Search | The "add search to this" follow-up — getting changes into the index, freshness, and query fan-out across shards |
 | Large-Scale Architecture | Service decomposition, bounded contexts, and data ownership — the senior-level "monolith vs microservices, and why" discussion |
 | Cross-Service Consistency & Failure Handling | 2PC/Saga/TCC/outbox for consistency across service boundaries, plus circuit breakers/bulkheads/retries for the "what if this call fails" probe every interviewer asks |
+| Async Work & Ordering | "This takes five minutes, what does the API return?" (job table, polling vs push, workflow engines), and "which write wins?" (clock skew, logical clocks, last-writer-wins) |
 
 <!-- study-path-table principal -->
-### Principal Path (15 modules)
+### Principal Path (19 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -336,19 +386,23 @@ A ruthless cut to what a **senior system design interview** actually probes — 
 | 2 | [capacity_estimation](capacity_estimation/capacity_estimation.md) | module page only |
 | 6 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
 | 7 | [api_design](api_design/api_design.md) | module page only |
-| 13 | [database_sharding](database_sharding/database_sharding.md) | module page only |
-| 15 | [microservices](microservices/microservices.md) | module page only |
-| 16 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
-| 17 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
-| 18 | [observability](observability/observability.md) | module page only |
-| 19 | [security_and_auth](security_and_auth/security_and_auth.md) | module page only |
-| 20 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
-| 21 | [cell_based_architecture](cell_based_architecture/cell_based_architecture.md) | module page only |
-| 22 | [consensus_algorithms](consensus_algorithms/consensus_algorithms.md) | module page only |
-| 23 | [multi_region_and_data_residency](multi_region_and_data_residency/multi_region_and_data_residency.md) | module page only |
-| 24 | [event_sourcing_cqrs](event_sourcing_cqrs/event_sourcing_cqrs.md) | module page only |
+| 14 | [database_sharding](database_sharding/database_sharding.md) | module page only |
+| 15 | [scaling_reads_and_writes](scaling_reads_and_writes/scaling_reads_and_writes.md) | module page only |
+| 18 | [microservices](microservices/microservices.md) | module page only |
+| 19 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 20 | [coordination_and_contention](coordination_and_contention/coordination_and_contention.md) | module page only |
+| 22 | [observability](observability/observability.md) | module page only |
+| 23 | [security_and_auth](security_and_auth/security_and_auth.md) | module page only |
+| 24 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
+| 25 | [cell_based_architecture](cell_based_architecture/cell_based_architecture.md) | module page only |
+| 26 | [time_clocks_and_ordering](time_clocks_and_ordering/time_clocks_and_ordering.md) | module page only |
+| 27 | [failure_detection_and_membership](failure_detection_and_membership/failure_detection_and_membership.md) | module page only |
+| 28 | [consensus_algorithms](consensus_algorithms/consensus_algorithms.md) | module page only |
+| 29 | [multi_region_and_data_residency](multi_region_and_data_residency/multi_region_and_data_residency.md) | module page only |
+| 30 | [event_sourcing_cqrs](event_sourcing_cqrs/event_sourcing_cqrs.md) | module page only |
+| 32 | [data_platform_architecture](data_platform_architecture/data_platform_architecture.md) | module page only |
 
-**Not in this path** (10 of 25, Full Path only): `load_balancing`, `caching`, `database_design`, `realtime_updates`, `message_queues`, `rate_limiting`, `cdn`, `consistent_hashing`, `geospatial_indexing`, `stream_processing`
+**Not in this path** (13 of 32, Full Path only): `load_balancing`, `caching`, `database_design`, `realtime_updates`, `message_queues`, `rate_limiting`, `cdn`, `large_blobs_and_media_pipelines`, `consistent_hashing`, `geospatial_indexing`, `search_systems`, `long_running_tasks_and_workflows`, `stream_processing`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes the tradeoff frame itself: choosing a consistency and partitioning model, sizing the blast radius of each dependency, and defending the design you rejected. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -381,6 +435,13 @@ The highest-frequency HLD interview questions mapped to the module that answers 
 | How do you decompose a monolith into microservices — what defines a bounded context? | [Microservices](microservices/microservices.md) |
 | 2PC vs Saga vs TCC — how do you keep data consistent across service boundaries? | [Distributed Transactions](distributed_transactions/distributed_transactions.md) |
 | Circuit breaker vs bulkhead vs retry-with-backoff — which failure mode does each defend against? | [Resilience Patterns](resilience_patterns/resilience_patterns.md) |
+| How do you let users upload multi-gigabyte files without routing the bytes through your API servers? | [Large Blobs and Media Pipelines](large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) |
+| Reads (or writes) are outgrowing the database — which rung do you climb first: index, cache, replica, queue, or shard? | [Scaling Reads and Writes](scaling_reads_and_writes/scaling_reads_and_writes.md) |
+| How do changes in the primary store reach the search index, and how fresh can search results be? | [Search Systems](search_systems/search_systems.md) |
+| An operation takes minutes — what does the API return, and how does the client learn it finished? | [Long-Running Tasks and Workflows](long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) |
+| Why can't you order events across machines by wall-clock timestamp, and what do you use instead? | [Time, Clocks and Ordering](time_clocks_and_ordering/time_clocks_and_ordering.md) |
+| How does a cluster decide a node is dead without false positives on every GC pause? | [Failure Detection and Membership](failure_detection_and_membership/failure_detection_and_membership.md) |
+| Lambda vs Kappa, warehouse vs lakehouse — where should analytics live relative to the services that produce the data? | [Data Platform Architecture](data_platform_architecture/data_platform_architecture.md) |
 
 ---
 
@@ -583,3 +644,10 @@ HLD stays at architectural-overview depth. For production-grade implementation d
 | [Observability](observability/observability.md) | [Observability & Monitoring](../backend/observability_and_monitoring/observability_and_monitoring.md), [Observability: Tracing & OTel](../devops/observability_tracing_and_otel/observability_tracing_and_otel.md), [Observability: Metrics (Prometheus)](../devops/observability_metrics_prometheus/observability_metrics_prometheus.md), [Observability: Logging](../devops/observability_logging/observability_logging.md) | — |
 | [Security and Authentication/Authorization](security_and_auth/security_and_auth.md) | [Auth & Authorization Systems](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md), [Backend Security & OWASP](../backend/backend_security_owasp/backend_security_owasp.md), [Spring Security Architecture](../spring/spring_security_architecture/spring_security_architecture.md), [Spring Security: JWT & OAuth2](../spring/spring_security_jwt_oauth/spring_security_jwt_oauth.md) | — |
 | [Resilience Patterns](resilience_patterns/resilience_patterns.md) | [Fault Tolerance Patterns](../backend/fault_tolerance_patterns/fault_tolerance_patterns.md), [Resilience4j Patterns](../spring/case_studies/cross_cutting/resilience4j_patterns.md) | — |
+| [Large Blobs and Media Pipelines](large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) | [File Upload and Media Handling](../backend/file_upload_and_media_handling/file_upload_and_media_handling.md) | — |
+| [Scaling Reads and Writes](scaling_reads_and_writes/scaling_reads_and_writes.md) | [Workload Characterization and Load Modelling](../backend/workload_characterization_and_load_modelling/workload_characterization_and_load_modelling.md) | [Indexing Deep Dive](../database/indexing_deep_dive/indexing_deep_dive.md), [Replication and High Availability](../database/replication_and_high_availability/replication_and_high_availability.md) |
+| [Search Systems](search_systems/search_systems.md) | [Search Integration Patterns](../backend/search_integration_patterns/search_integration_patterns.md) | [Search Engines](../database/search_engines/search_engines.md), [Elasticsearch Internals](../database/elasticsearch_internals/elasticsearch_internals.md) |
+| [Long-Running Tasks and Workflows](long_running_tasks_and_workflows/long_running_tasks_and_workflows.md) | [Durable Execution and Workflows](../backend/durable_execution_and_workflows/durable_execution_and_workflows.md), [Messaging Patterns](../backend/messaging_patterns/messaging_patterns.md) | — |
+| [Time, Clocks and Ordering](time_clocks_and_ordering/time_clocks_and_ordering.md) | — | [Consistency Models & Consensus](../database/consistency_models_and_consensus/consistency_models_and_consensus.md) |
+| [Failure Detection and Membership](failure_detection_and_membership/failure_detection_and_membership.md) | [Service Mesh & Service Discovery](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | — |
+| [Data Platform Architecture](data_platform_architecture/data_platform_architecture.md) | [Privacy Engineering and Data Lifecycle](../backend/privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) | [Analytical Databases and OLAP](../database/analytical_databases_and_olap/analytical_databases_and_olap.md), [Lakehouse and Table Formats](../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md) |

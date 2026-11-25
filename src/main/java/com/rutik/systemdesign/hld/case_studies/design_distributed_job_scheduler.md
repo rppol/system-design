@@ -917,3 +917,6 @@ A: §4.3's retry lineage already keeps a job's own successive attempts from over
 - **Retry/backoff and dead-letter delivery for a different at-least-once system, worth comparing against §4.3** -> [`./design_notification_system.md`](./design_notification_system.md)
 - **Airflow's production scheduler architecture, the real-world system §6 draws its multi-scheduler HA comparison from** -> [`../../technologies/apache_airflow/apache_airflow.md`](../../technologies/apache_airflow/apache_airflow.md)
 - **Temporal's durable-execution model, the real-world system §5 and §6 contrast this design's at-least-once default against** -> [`../../technologies/temporal_durable_execution/temporal_durable_execution.md`](../../technologies/temporal_durable_execution/temporal_durable_execution.md)
+- **Choosing between a job queue, a scheduler and a workflow engine** -> [`../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md`](../long_running_tasks_and_workflows/long_running_tasks_and_workflows.md)
+- **Close timers for millions of auctions as a scheduler workload** -> [`./design_online_auction.md`](./design_online_auction.md)
+- **The untrusted-code sibling: the same queue, leases and retries, plus a sandbox** -> [`./design_online_judge.md`](./design_online_judge.md)

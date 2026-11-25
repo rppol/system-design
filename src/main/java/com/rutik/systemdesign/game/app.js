@@ -406,7 +406,7 @@ const STUDY_ORDER = {
   hld: [
     "hld/scalability","hld/capacity_estimation","hld/load_balancing","hld/caching","hld/database_design",
     "hld/cap_theorem","hld/api_design","hld/realtime_updates","hld/message_queues","hld/rate_limiting",
-    "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/geospatial_indexing","hld/microservices","hld/distributed_transactions","hld/coordination_and_contention","hld/observability","hld/security_and_auth","hld/resilience_patterns","hld/cell_based_architecture","hld/consensus_algorithms","hld/multi_region_and_data_residency","hld/event_sourcing_cqrs","hld/stream_processing",
+    "hld/cdn","hld/large_blobs_and_media_pipelines","hld/consistent_hashing","hld/database_sharding","hld/scaling_reads_and_writes","hld/geospatial_indexing","hld/search_systems","hld/microservices","hld/distributed_transactions","hld/coordination_and_contention","hld/long_running_tasks_and_workflows","hld/observability","hld/security_and_auth","hld/resilience_patterns","hld/cell_based_architecture","hld/time_clocks_and_ordering","hld/failure_detection_and_membership","hld/consensus_algorithms","hld/multi_region_and_data_residency","hld/event_sourcing_cqrs","hld/stream_processing","hld/data_platform_architecture",
   ],
   java: [
     "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io","java/json_processing_jackson",

@@ -1314,7 +1314,7 @@ Putting sharding logic in application code creates a maintenance nightmare as ro
 
 ---
 
-**Cross-references:** [database/sharding_and_partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) (shard-key selection, resharding mechanics, hotspot mitigation), [database/newsql_and_distributed_sql](../../database/newsql_and_distributed_sql/newsql_and_distributed_sql.md) (Vitess, CockroachDB, Spanner-style auto-sharding).
+**Cross-references:** [database/sharding_and_partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) (shard-key selection, resharding mechanics, hotspot mitigation), [database/newsql_and_distributed_sql](../../database/newsql_and_distributed_sql/newsql_and_distributed_sql.md) (Vitess, CockroachDB, Spanner-style auto-sharding). Related HLD pages: [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (when sharding is the right rung, and what comes before it), [Search Systems](../search_systems/search_systems.md) (partitioning a search index), [Design Instagram Photo Sharing](../case_studies/design_instagram_photo_sharing.md) (sharding media metadata by owner), [Design an Online Auction](../case_studies/design_online_auction.md) (sharding auctions and isolating a hot listing).
 
 ---
 

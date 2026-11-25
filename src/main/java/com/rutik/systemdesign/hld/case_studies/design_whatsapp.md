@@ -1103,4 +1103,7 @@ The connection layer scales roughly linearly, going from ~500 to ~5,000 chat ser
 - **"Let it crash" supervision and failure recovery** -> [`../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md)
 - **Media delivery via CDN** -> [`../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md`](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md)
 - **Partitioning by conversation_id and data residency sharding** -> [`../../database/sharding_and_partitioning/sharding_and_partitioning.md`](../../database/sharding_and_partitioning/sharding_and_partitioning.md)
+- **Multiparty voice and video calls next to presence and 1:1 messaging** -> [`./design_video_conferencing.md`](./design_video_conferencing.md)
+- **Chat after a match** -> [`./design_tinder.md`](./design_tinder.md)
+- **A photo product that hands its direct messages to this design** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
 

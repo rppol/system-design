@@ -942,3 +942,6 @@ A: PSPs provide sandbox/test-mode environments with well-documented "magic" test
 - **Idempotency key chain across PSPs and rails, unknown outcome after a timeout (fintech/)** -> [`../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md`](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md)
 - **Card authorization, capture, clearing and settlement (fintech/)** -> [`../../fintech/card_payments_lifecycle/card_payments_lifecycle.md`](../../fintech/card_payments_lifecycle/card_payments_lifecycle.md)
 - **Three-way reconciliation, settlement files and break handling (fintech/)** -> [`../../fintech/reconciliation_and_settlement_files/reconciliation_and_settlement_files.md`](../../fintech/reconciliation_and_settlement_files/reconciliation_and_settlement_files.md)
+- **Payment authorization after an inventory reservation** -> [`./design_local_delivery_service.md`](./design_local_delivery_service.md)
+- **Authorization and capture when an auction settles** -> [`./design_online_auction.md`](./design_online_auction.md)
+- **Class-level design: idempotency store, payment state machine, ordered account locks, a journal that sums to zero** -> [`../../lld/system_design_problems/PaymentProcessor.md`](../../lld/system_design_problems/PaymentProcessor.md)

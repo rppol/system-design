@@ -1031,5 +1031,6 @@ A: Start from `N=3` as the default (tolerates 1 node failure with `W=R=2` still 
 - **RED-method metrics, alerting thresholds, and freshness/lag dashboards underlying §8's key metrics and runbooks** -> [`../observability/observability.md`](../observability/observability.md)
 - **Caching tier in front of hot keys, complementing (not replacing) the replication factor's headroom (§2)** -> [`../caching/caching.md`](../caching/caching.md)
 - **Saga-based application-level transactions for multi-key operations explicitly out of scope for this store (§1)** -> [`../distributed_transactions/distributed_transactions.md`](../distributed_transactions/distributed_transactions.md)
+- **The store that is allowed to forget: no quorum, no durable log** -> [`./design_distributed_cache.md`](./design_distributed_cache.md)
 
 This case study is deliberately scoped to the storage layer's replication, partitioning, and consistency mechanics — the cross-references above are the on-ramps to the adjacent layers (query patterns, transactions, caching, observability) that a production deployment composes around this core.

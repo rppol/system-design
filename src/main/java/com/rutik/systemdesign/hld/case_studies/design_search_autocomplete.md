@@ -1002,3 +1002,4 @@ A: Deploy regional replica pools (§4.7) and geo-route users to the nearest one 
 - **In-memory data structures and Redis sorted sets as an alternative suggestion index (§5)** -> [`../../database/in_memory_databases/in_memory_databases.md`](../../database/in_memory_databases/in_memory_databases.md)
 - **Elasticsearch Completion Suggester / FST and search-engine indexing internals (§6)** -> [`../../database/search_engines/search_engines.md`](../../database/search_engines/search_engines.md)
 - **Rate-limiting query-log ingestion to prevent trending false positives (§8)** -> [`../rate_limiting/rate_limiting.md`](../rate_limiting/rate_limiting.md)
+- **The full-text search system around typeahead: indexing pipeline, fan-out and ranking stages** -> [`../search_systems/search_systems.md`](../search_systems/search_systems.md)

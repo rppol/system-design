@@ -7,7 +7,7 @@ HLD is the architectural overview layer. The `backend/` section contains product
 
 ---
 
-## Module List — 25 Modules
+## Module List — 32 Modules
 
 | Module | Key Concepts |
 |--------|-------------|
@@ -36,14 +36,35 @@ HLD is the architectural overview layer. The `backend/` section contains product
 | `security_and_auth/` | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit, secrets management |
 | `resilience_patterns/` | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover, load shedding |
 | `cell_based_architecture/` | Cells as blast-radius containment, cell routing, poison-pill isolation, per-cell capacity |
-| `case_studies/` | HLD case study problems |
+| `large_blobs_and_media_pipelines/` | Proxy vs presigned upload, multipart and resumable sessions, content-defined chunking, download strategies, processing pipelines, metadata-to-blob consistency |
+| `scaling_reads_and_writes/` | The read ladder and the write ladder (which rung next, what it costs), the hot-key toolkit |
+| `search_systems/` | The system around the search engine: getting changes into the index, freshness, index partitioning, cluster topology, query types, ranking stages |
+| `long_running_tasks_and_workflows/` | Sync-with-timeout vs async job, job table + worker pool, database as queue, poll/push/callback delivery, orchestration vs choreography, workflow engines |
+| `time_clocks_and_ordering/` | Physical and monotonic clocks, Lamport and vector clocks, HLC, TrueTime-style bounds, last-writer-wins, sequencers, the ordering-guarantee ladder |
+| `failure_detection_and_membership/` | Heartbeat vs ping, gossip, phi accrual, SWIM and Lifeguard, membership views, anti-entropy and repair, leader leases |
+| `data_platform_architecture/` | Batch vs stream, Lambda vs Kappa, warehouse vs lake vs lakehouse, ingestion patterns, medallion layering, serving layers |
+| `case_studies/` | HLD case study problems — 37 (see `case_studies/case_studies.md`) |
+
+**Ownership notes for the 2026-11-25 modules.** Each stays at architectural-overview depth and
+links out for the mechanics: `search_systems/` owns the system around the engine (indexing
+pipeline, fan-out, topology); inverted indexes, BM25 and Lucene internals live in
+`../database/search_engines/` and `../database/elasticsearch_internals/`, and the service-to-index
+sync code in `../backend/search_integration_patterns/`. `large_blobs_and_media_pipelines/` owns the
+architecture; the upload API contract and resume protocol live in
+`../backend/file_upload_and_media_handling/`. `long_running_tasks_and_workflows/` owns the
+decision; deterministic replay and workflow versioning live in
+`../backend/durable_execution_and_workflows/` and `../technologies/temporal_durable_execution/`.
+`time_clocks_and_ordering/` owns clock engineering; `../cs_fundamentals/distributed_systems_theory/`
+owns the theory (FLP, impossibility results) and links here. `data_platform_architecture/` owns
+the platform shape; engines and table formats live in `../database/analytical_databases_and_olap/`
+and `../database/lakehouse_and_table_formats/`.
 
 ---
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 25 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (19 modules) and **Principal** (15). They are
+`README.md` documents the **Full Path** (all 32 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (24 modules) and **Principal** (19). They are
 different cuts, not nested depths — senior is the craft, principal is the judgment
 (which approach at what cost, what failure domains, what you tell a team *not* to do),
 so principal is usually the smaller list and much of it is material senior never sees.
@@ -56,15 +77,22 @@ markers and emits the gitignored `questions/paths.json`, which the game fetches 
 The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` markers and
 are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
 hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
-are tiered in the same README block under `case_studies` (21 senior / 10 principal of
-the 30), driving the Level filter on the game's Case Studies tab. The README
+are tiered in the same README block under `case_studies` (27 senior / 13 principal of
+the 37), driving the Level filter on the game's Case Studies tab. The README
 also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
 ## Planned / Missing Topics (not yet created)
 
-No topics currently planned. All expected senior engineer topics have been created.
+Nothing is queued right now. The 2026-11-25 gap pass found 14 missing topics and all 14
+were built that day: 7 modules (`large_blobs_and_media_pipelines/`, `scaling_reads_and_writes/`,
+`search_systems/`, `long_running_tasks_and_workflows/`, `time_clocks_and_ordering/`,
+`failure_detection_and_membership/`, `data_platform_architecture/`) and 7 case studies
+(`design_distributed_cache`, `design_instagram_photo_sharing`, `design_local_delivery_service`,
+`design_online_auction`, `design_online_judge`, `design_tinder`, `design_video_conferencing`).
+This does not mean the section is complete. A later gap pass may find more. Record any new gap
+here before you create its page, and do not link to a page that is only listed here.
 
 ---
 
@@ -90,6 +118,13 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 | `observability/` | `../backend/observability_and_monitoring/`, `../devops/observability_tracing_and_otel/`, `../devops/observability_metrics_prometheus/`, `../devops/observability_logging/` | — |
 | `security_and_auth/` | `../backend/auth_and_authorization_systems/`, `../backend/backend_security_owasp/`, `../spring/spring_security_architecture/`, `../spring/spring_security_jwt_oauth/` | — |
 | `resilience_patterns/` | `../backend/fault_tolerance_patterns/`, `../spring/case_studies/cross_cutting/resilience4j_patterns.md` | — |
+| `large_blobs_and_media_pipelines/` | `../backend/file_upload_and_media_handling/` | — |
+| `scaling_reads_and_writes/` | `../backend/workload_characterization_and_load_modelling/` | `../database/indexing_deep_dive/`, `../database/replication_and_high_availability/` |
+| `search_systems/` | `../backend/search_integration_patterns/` | `../database/search_engines/`, `../database/elasticsearch_internals/` |
+| `long_running_tasks_and_workflows/` | `../backend/durable_execution_and_workflows/`, `../backend/messaging_patterns/` | — |
+| `time_clocks_and_ordering/` | — | `../database/consistency_models_and_consensus/` |
+| `failure_detection_and_membership/` | `../backend/service_mesh_and_service_discovery/` | — |
+| `data_platform_architecture/` | `../backend/privacy_engineering_and_data_lifecycle/` | `../database/analytical_databases_and_olap/`, `../database/lakehouse_and_table_formats/` |
 
 The payment, wallet and exchange case studies (`case_studies/design_payment_system.md`, `case_studies/design_digital_wallet.md`, `case_studies/design_stock_exchange.md`) stay here. The domain concepts and the dated rule facts live in `../fintech/` (see `../fintech/CLAUDE.md`). Do not add rail or regulation facts to these studies. Link the `fintech/` module that owns the fact.
 

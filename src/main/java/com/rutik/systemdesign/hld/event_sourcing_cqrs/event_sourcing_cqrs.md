@@ -653,7 +653,7 @@ The standard answer is **crypto-shredding**, because it satisfies erasure withou
 
 ---
 
-**Cross-references:** [backend/event_sourcing_and_cqrs](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) (event store implementation, snapshotting code), [database/polyglot_persistence_patterns](../../database/polyglot_persistence_patterns/polyglot_persistence_patterns.md) (separate read/write stores for CQRS), [database/distributed_transactions](../../database/distributed_transactions/distributed_transactions.md) (saga as a transaction-coordination alternative).
+**Cross-references:** [backend/event_sourcing_and_cqrs](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) (event store implementation, snapshotting code), [database/polyglot_persistence_patterns](../../database/polyglot_persistence_patterns/polyglot_persistence_patterns.md) (separate read/write stores for CQRS), [database/distributed_transactions](../../database/distributed_transactions/distributed_transactions.md) (saga as a transaction-coordination alternative). Related HLD pages: [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (CQRS read models as a rung on the read ladder), [Design a Local Delivery Service](../case_studies/design_local_delivery_service.md) (an inventory ledger with a materialized stock row), [Design an Online Auction](../case_studies/design_online_auction.md) (bid history as an ordered, replayable log).
 
 ---
 

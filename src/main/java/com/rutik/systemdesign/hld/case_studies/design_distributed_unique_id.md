@@ -976,3 +976,6 @@ A: This is the stress-test of the §10 disaster-recovery analysis. Each restarti
 - **URL Shortener's distributed-counter and Snowflake-style alternatives for short-key generation (§4.4, §4.5)** -> [`./design_url_shortener.md`](./design_url_shortener.md)
 - **NTP offset/drift and clock-backward-jump metrics as part of a broader observability strategy (§8)** -> [`../observability/observability.md`](../observability/observability.md)
 - **Database-segment allocation as a key-value range-reservation pattern (§4.6)** -> [`../../database/key_value_stores/key_value_stores.md`](../../database/key_value_stores/key_value_stores.md)
+- **Clock skew, monotonic clocks and why timestamp-ordered IDs are only roughly ordered** -> [`../time_clocks_and_ordering/time_clocks_and_ordering.md`](../time_clocks_and_ordering/time_clocks_and_ordering.md)
+- **Time-ordered 64-bit media IDs in a photo product** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
+- **Id-block allocation inside one service instance, as a URL shortener's code generator** -> [`../../lld/system_design_problems/UrlShortener.md`](../../lld/system_design_problems/UrlShortener.md)

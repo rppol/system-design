@@ -670,3 +670,5 @@ A: Backpressure requires cooperation — a sender that receives a "slow down" si
 **6. Classify requests by priority before shedding uniformly** — shedding a "recently viewed" widget and shedding a checkout request are not the same decision, and treating them the same wastes the business value shedding exists to protect (§4.4).
 
 **7. Prefer adaptive concurrency limits over a hand-tuned static bulkhead for dependencies whose latency drifts** — the operational cost of tuning an algorithm once is usually lower than the recurring cost of manually re-tuning a static number every time the dependency's behavior changes (§6.5, §8).
+
+**Cross-references:** Related HLD pages: [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (queues and shedding as rungs on the write ladder).

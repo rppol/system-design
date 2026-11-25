@@ -963,3 +963,6 @@ A: Without a deterministic tiebreaker, two equal-scoring businesses can swap pos
 - **Outbox pattern and CDC propagation for the write path (§4.6, §5)** -> [`../distributed_transactions/distributed_transactions.md`](../distributed_transactions/distributed_transactions.md)
 - **A/B test bucketing and consistent-hashing-based experiment assignment (§11)** -> [`../consistent_hashing/consistent_hashing.md`](../consistent_hashing/consistent_hashing.md)
 - **Graceful degradation during a search-cluster outage (§11)** -> [`../resilience_patterns/resilience_patterns.md`](../resilience_patterns/resilience_patterns.md)
+- **Geo plus attribute search over per-store catalogues** -> [`./design_local_delivery_service.md`](./design_local_delivery_service.md)
+- **Two-phase geo plus attribute search for a discovery deck** -> [`./design_tinder.md`](./design_tinder.md)
+- **Listing search for an auction catalogue, which reuses this two-phase index pattern** -> [`./design_online_auction.md`](./design_online_auction.md)

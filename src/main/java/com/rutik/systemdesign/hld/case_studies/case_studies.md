@@ -16,6 +16,8 @@ If you only have time for three, read these first:
 | [Design Uber](design_uber.md) | Real-time geo-matching under high write load. Teaches geospatial indexing, quadtrees, and the driver-rider matching loop — the foundation for [Design Google Maps](design_google_maps.md). |
 | [Design a URL Shortener](design_url_shortener.md) | The simplest well-scoped system design problem. Best for understanding how to handle 100:1 read-write ratio and ID generation at scale. |
 
+**Next three, once those are done** (from the 2026-11-25 additions): [Design a Distributed Cache](design_distributed_cache.md) for routing, hot keys and invalidation in the tier every other design leans on; [Design Instagram Photo Sharing](design_instagram_photo_sharing.md) for the metadata-plane / byte-plane split behind any media product; and [Design an Online Auction](design_online_auction.md) for a contended per-key total order with a deadline. The other four new studies ([Local Delivery Service](design_local_delivery_service.md), [Online Judge](design_online_judge.md), [Tinder](design_tinder.md), [Video Conferencing](design_video_conferencing.md)) sit in their concern groups below.
+
 ---
 
 ## Full Learning Path
@@ -48,6 +50,8 @@ Grouped by primary engineering concern:
 | [Design Google Maps](design_google_maps.md) | Geospatial indexing, route precomputation, live traffic | Geohash vs. Quadtree vs. S2 vs. H3 tradeoffs; Contraction-Hierarchy-based routing with bidirectional search; live traffic-overlay layered on a precomputed graph; tile-pyramid CDN serving; versioned-URL cache invalidation. |
 | [Design a Proximity Service](design_proximity_service.md) | Geo + attribute search at sub-second latency (Yelp/nearby) | Two-phase geo-index + attribute-index search with geohash neighbor-cell expansion; Redis GEO vs. PostGIS vs. Elasticsearch `geo_point` backend tradeoffs; split-TTL caching for "open now" freshness vs. static attributes; dense-vs-sparse adaptive geohash precision; personalization re-ranking layered on top of base ranking. |
 | [Design Nearby Friends](design_nearby_friends.md) | Moving points, mutual consent, and one-to-K location fan-out | Adaptive-interval location ingest; pub/sub fan-out to mutual friends instead of a geo-search query on the hot path; TTL live-location store; geospatial cell-key lookup; ghost mode and precision reduction; client battery budget. |
+| [Design a Local Delivery Service](design_local_delivery_service.md) | Dark-store serviceability and per-store inventory under checkout contention (Gopuff-style) | Address to H3 cell to distribution-centre serviceability table; per-DC availability vs. checkout reservation (hold-with-TTL, broken then fixed); short picks and substitutions; the single-courier constraint on multi-DC carts; promise-time dispatch and a zone controller that sheds load; idempotent inventory events and counter reconciliation. |
+| [Design Tinder](design_tinder.md) | Geo-bounded discovery search plus exactly-once mutual matching | Geosharding the discovery index by S2 cell; geoshard migration as users move; deck building (filter, dedup, rank); match creation as a compare-and-set on the unordered pair `(min(id), max(id))`, broken then fixed; fair exposure and hot profiles; distance without revealing position. |
 
 ### Distributed Transactions & Strong Consistency
 
@@ -56,6 +60,7 @@ Grouped by primary engineering concern:
 | [Design a Payment System](design_payment_system.md) | Exactly-once charges, double-entry ledger | `Idempotency-Key` for safe retries; saga pattern for multi-step payment flows; outbox pattern for reliable event propagation; double-entry ledger as the system of record; PCI-DSS tokenization; reconciliation against PSP statements. |
 | [Design a Digital Wallet](design_digital_wallet.md) | P2P stored-value transfers, optimistic-locking ledger updates | Double-entry ledger as the system of record for wallet balances; optimistic concurrency control (version column + retry) for concurrent debits on the same account; idempotency keys for client-retried transfers; top-up/withdrawal vs. instant P2P transfer state machines; KYC/AML checks — contrasted with [design_payment_system](design_payment_system.md)'s merchant/PSP focus. |
 | [Design a Hotel Reservation System](design_hotel_reservation.md) | Inventory consistency under concurrent bookings, overbooking prevention | Inventory model keyed by `(hotel_id, room_type, date)`; hold-with-TTL + atomic decrement to close the search-to-book race; booking saga (search -> hold -> pay -> confirm); search-cache staleness tradeoffs during flash sales; sharding inventory by `hotel_id`/region. |
+| [Design an Online Auction](design_online_auction.md) | A contended per-auction total order with a server-clock deadline (eBay-style) | Bid acceptance as compare-and-set on one auction, broken then fixed; second-price proxy bidding with increments; hard vs. soft close decided by server ordering, never the bidder's clock; isolating a hot auction in its final minute; live price fan-out to watchers; idempotent bid retries; settlement from hammer price to payment; shill-bidding hooks. Contrasted with [design_stock_exchange](design_stock_exchange.md)'s continuous two-sided matching. |
 
 ### Low-Latency Matching & Trading Systems
 
@@ -69,6 +74,7 @@ Grouped by primary engineering concern:
 |------------|----------------|----------------|
 | [Design Google Docs](design_google_docs.md) | Convergent concurrent editing | Operational Transformation vs. CRDTs; the convergence invariant; operation log as event-sourced source of truth; document-to-shard routing via consistent hashing; WebSocket session lifecycle, presence, and cursors. |
 | [Design Google Drive](design_google_drive.md) | File-level sync, content dedup, and conflict resolution at scale | Content-addressed chunking with cross-account dedup; metadata tree as adjacency-list + closure table for folder hierarchies; file-level "conflicted copy" resolution contrasted with Google Docs' operation-level CRDT/OT; resumable multipart uploads; dual-counter storage-quota accounting (logical usage vs. chunk reference count); two-phase trash/GC. |
+| [Design Video Conferencing](design_video_conferencing.md) | Many-to-many real-time media at a few hundred milliseconds one way (Zoom-style) | Mesh vs. MCU vs. SFU topology; signalling and room placement by compare-and-set, broken then fixed; ICE/STUN/TURN NAT traversal; simulcast and SVC layer selection per receiver; two congestion-control loops around the SFU; active-speaker detection; SFU cascading for large meetings; hop-by-hop vs. end-to-end encryption; reconnection and network handover. |
 
 ### Large-Scale Crawling & Data Pipelines
 
@@ -84,6 +90,7 @@ Grouped by primary engineering concern:
 | [Design a Distributed Unique ID Generator](design_distributed_unique_id.md) | Globally unique, roughly time-ordered IDs with no central bottleneck | Snowflake 64-bit layout (timestamp/datacenter/worker/sequence); worker-ID allocation via ZooKeeper/etcd ephemeral znodes; clock-skew detection and NTP slew vs. step; the time-ordered-ID hotspotting tradeoff. |
 | [Design a Distributed Message Queue](design_distributed_message_queue.md) | Ordered, durable, partitioned event streaming at scale | Topic/partition/offset model and log-structured storage; producer partitioning (key-hash vs. sticky); leader/ISR replication and `acks` tradeoffs; consumer-group rebalancing (eager vs. incremental cooperative); idempotent/transactional exactly-once delivery. |
 | [Design Object Storage (S3)](design_object_storage_s3.md) | Durable blob storage at exabyte scale with a separate metadata index | Erasure coding (Reed-Solomon 6+3) vs. 3x replication for an 11-nines durability target; metadata index as a sharded KV store decoupled from blob storage; the S3 Dec-2020 shift to strong read-after-write consistency; hashed-prefix key design to avoid sequential-key hotspots; multipart upload and lifecycle tiering. |
+| [Design a Distributed Cache](design_distributed_cache.md) | A sub-millisecond, sharded cache that is allowed to forget (Memcached / Redis Cluster class) | Key-to-node partitioning and smart-client vs. proxy routing; eviction and memory management; replication and failover; hot keys; fill stampedes and the stale-set race (leases); invalidation and near caching with server-assisted invalidation; resharding and warm-up; multi-region invalidation behind replication lag. Contrasted with [design_key_value_store](design_key_value_store.md)'s durable, quorum-replicated store. |
 
 ### Analytics & Real-Time Aggregation Pipelines
 
@@ -120,6 +127,8 @@ The transfer from this section is direct: an LLM gateway is [rate limiting](../r
 | [Design a Distributed Job Scheduler](design_distributed_job_scheduler.md) | Exactly-once triggering under clock skew and restarts | Lease-based ownership, the difference between at-least-once firing and exactly-once effect, catch-up storms after an outage, and why a missed-run policy is a product decision. |
 | [Design Flash-Sale Ticketing](design_flash_sale_ticketing.md) | Extreme contention on a tiny hot key | Why a single inventory row serializes the whole sale, admission control and virtual queueing ahead of the write path, reservation-then-confirm, and the oversell/undersell tradeoff. |
 | [Design a Live Streaming Platform](design_live_streaming.md) | Ingest fan-in and CDN fan-out under a live clock | RTMP vs. SRT vs. WHIP ingest; real-time transcode ladder; LL-HLS / LL-DASH packaging and the latency budget; segment-boundary thundering herd at the CDN; DVR window; chat fan-out at 1M+ concurrent viewers. |
+| [Design Instagram Photo Sharing](design_instagram_photo_sharing.md) | A small transactional metadata plane joined to a huge immutable byte plane | Upload sessions and a media state machine that gates publish until every rendition exists; rendition ladder and format negotiation; treating uploads as hostile (EXIF stripping, safety scans); blob layout and storage tiering; signed CDN URLs; feed-entry hydration; deletion and Stories expiry across CDN copies; atomic carousels; multi-region uploads. Feed fan-out itself is left to [design_twitter](design_twitter.md). |
+| [Design an Online Judge](design_online_judge.md) | Running hostile code fairly and repeatably (LeetCode-style) | Idempotent, rate-limited submission intake; judge-queue lanes, fairness and fencing; layered sandbox isolation, broken then fixed; measuring CPU time and memory so verdicts repeat; compilation as a separate sandboxed step; test-data distribution and checkers; verdict delivery; contest mode, ranking and rejudge. The trusted-job sibling is [design_distributed_job_scheduler](design_distributed_job_scheduler.md). |
 
 ## Cross-Cutting / Shared Primitives
 
@@ -129,30 +138,37 @@ Each case study's `## Cross-References` footer points to deep-dive modules in `b
 |-----------|---------|------|
 | [Wide-Column Databases](../../database/wide_column_databases/wide_column_databases.md) | Twitter, Netflix, Uber, URL Shortener, WhatsApp, Distributed Key-Value Store | Primary store for high-write-throughput data: tweets, watch history, trip records, URL mappings, messages, KV-store rows |
 | [Kafka Deep Dive](../../backend/kafka_deep_dive/kafka_deep_dive.md) | Twitter, Netflix, Uber, URL Shortener, WhatsApp, Notification System, Distributed Message Queue, YouTube Upload Pipeline, Distributed Job Scheduler | Async pipelines: fan-out delivery, analytics ingestion, location-update streams, offline message queues, per-channel delivery topics, partition/ISR internals |
-| [Key-Value Stores (Redis / Wide-Column)](../../database/key_value_stores/key_value_stores.md) | Twitter, Uber, URL Shortener, WhatsApp, Search Autocomplete, Web Crawler, Distributed Key-Value Store, Distributed Unique ID, Ad Click Aggregation, Leaderboard, Metrics Monitoring, Google Drive, Flash-Sale Ticketing | Hot-path cache: timelines, redirect cache, driver-location index, presence, hot-prefix suggestions, crawl metadata + DNS cache, KV-store persistence model, ID-segment reservation, real-time OLAP rollup storage, write-behind leaderboard durability, time-series rollup storage (Metrics Monitoring), chunk/metadata lookups (Google Drive) |
+| [Key-Value Stores (Redis / Wide-Column)](../../database/key_value_stores/key_value_stores.md) | Twitter, Uber, URL Shortener, WhatsApp, Search Autocomplete, Web Crawler, Distributed Key-Value Store, Distributed Unique ID, Ad Click Aggregation, Leaderboard, Metrics Monitoring, Google Drive, Flash-Sale Ticketing, Distributed Cache | Hot-path cache: timelines, redirect cache, driver-location index, presence, hot-prefix suggestions, crawl metadata + DNS cache, KV-store persistence model, ID-segment reservation, real-time OLAP rollup storage, write-behind leaderboard durability, time-series rollup storage (Metrics Monitoring), chunk/metadata lookups (Google Drive); the in-memory cache cluster as the system under design (Distributed Cache) |
 | [Sharding & Partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) | Twitter, Uber, URL Shortener, WhatsApp, Distributed Key-Value Store, Distributed Unique ID, Object Storage, Digital Wallet, Hotel Reservation, Metrics Monitoring, Google Drive | Horizontal scaling strategy for the primary datastore; ID-as-shard-key hotspotting; metadata-index sharding for object storage; account-ID sharding for wallet ledgers (Digital Wallet); `hotel_id`/region sharding for room inventory (Hotel Reservation); shard-by-metric-name for time-series writes (Metrics Monitoring); file-tree metadata sharding (Google Drive) |
-| [Caching Strategies Deep Dive](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md) + [Database Caching Patterns](../../database/database_caching_patterns/database_caching_patterns.md) + [Caching (HLD)](../caching/caching.md) | Twitter, Netflix, Uber, URL Shortener, Search Autocomplete, Proximity Service, Leaderboard, Hotel Reservation, Google Drive | Cache-aside vs. read-through, stampede prevention, TTL design; split-TTL freshness tiers (Proximity Service) and Top-N cache refresh (Leaderboard); search-result caching with staleness tradeoffs during flash sales (Hotel Reservation) and metadata/folder-tree caching (Google Drive) |
+| [Caching Strategies Deep Dive](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md) + [Database Caching Patterns](../../database/database_caching_patterns/database_caching_patterns.md) + [Caching (HLD)](../caching/caching.md) | Twitter, Netflix, Uber, URL Shortener, Search Autocomplete, Proximity Service, Leaderboard, Hotel Reservation, Google Drive, Distributed Cache, Instagram Photo Sharing, Local Delivery Service, Online Auction | Cache-aside vs. read-through, stampede prevention, TTL design; split-TTL freshness tiers (Proximity Service) and Top-N cache refresh (Leaderboard); search-result caching with staleness tradeoffs during flash sales (Hotel Reservation) and metadata/folder-tree caching (Google Drive); routing, fills and invalidation for the cache tier itself (Distributed Cache), metadata hydration cache (Instagram Photo Sharing) |
 | [Consistency Models & Consensus](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md) | Netflix, Uber, WhatsApp, Stock Exchange, Hotel Reservation | Cross-region replication trade-offs, LOCAL_QUORUM vs. strict ordering; strict single-writer ordering for exchange order books (Stock Exchange) and inventory holds (Hotel Reservation) |
 | [Fault Tolerance Patterns](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) | Netflix, Uber, WhatsApp | Circuit breakers, "let it crash" supervision, multi-region failover |
 | [Microservices](../microservices/microservices.md) | Netflix, Uber, WhatsApp | Service decomposition and bounded contexts |
-| [Consistent Hashing](../consistent_hashing/consistent_hashing.md) | Twitter, Uber, URL Shortener, Web Crawler, Google Docs, Distributed Key-Value Store, Distributed Message Queue, Object Storage, Leaderboard, Proximity Service, Digital Wallet, Hotel Reservation, Metrics Monitoring | Distributing keys/load across nodes without full reshuffle — frontier sharding by domain (Web Crawler), document-to-shard routing (Google Docs), ring placement (KV Store), partition assignment (Message Queue), metadata-shard placement (Object Storage), `playerId`-based shard placement (Leaderboard), A/B-test bucketing (Proximity Service), account-ID shard placement (Digital Wallet), `hotel_id`/date shard placement (Hotel Reservation), metric-name shard placement (Metrics Monitoring) |
+| [Consistent Hashing](../consistent_hashing/consistent_hashing.md) | Twitter, Uber, URL Shortener, Web Crawler, Google Docs, Distributed Key-Value Store, Distributed Message Queue, Object Storage, Leaderboard, Proximity Service, Digital Wallet, Hotel Reservation, Metrics Monitoring, Distributed Cache | Distributing keys/load across nodes without full reshuffle — frontier sharding by domain (Web Crawler), document-to-shard routing (Google Docs), ring placement (KV Store), partition assignment (Message Queue), metadata-shard placement (Object Storage), `playerId`-based shard placement (Leaderboard), A/B-test bucketing (Proximity Service), account-ID shard placement (Digital Wallet), `hotel_id`/date shard placement (Hotel Reservation), metric-name shard placement (Metrics Monitoring); key-to-node ownership for cache shards (Distributed Cache) |
 | [Cloud Networking & CDN](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md) | Netflix, URL Shortener, WhatsApp | Edge delivery for media, redirects, and static assets |
-| [CDN](../cdn/cdn.md) | Google Maps, Object Storage | Tile-pyramid serving with >99% edge cache-hit rate; hot-object GET offload for object storage |
-| [Rate Limiting](../rate_limiting/rate_limiting.md) | Twitter, URL Shortener, Notification System, Search Autocomplete, Ad Click Aggregation, Google Drive | Protecting write paths and third-party providers from abuse and traffic spikes; per-IP/device click-fraud rate limiting; per-account upload/API rate limiting (Google Drive) |
-| [Resilience Patterns](../resilience_patterns/resilience_patterns.md) | Notification System, Payment System, Web Crawler, Google Maps, Distributed Key-Value Store, Distributed Message Queue, Proximity Service, Stock Exchange, Metrics Monitoring | Circuit breakers, retries with backoff/jitter, and graceful degradation for provider, host, regional, broker/replica, and search-cluster outages; matching-engine failover and durable-log replay (Stock Exchange); scrape-target and alert-pipeline degradation (Metrics Monitoring) |
-| [Observability](../observability/observability.md) | Notification System, Google Maps, Distributed Key-Value Store, Distributed Unique ID, Distributed Message Queue, Object Storage, Ad Click Aggregation, Digital Wallet, Stock Exchange, Metrics Monitoring | RED-method metrics, SLI/SLO framing, freshness/lag alerting and runbooks; repair-queue/durability-floor alerting (Object Storage); watermark-lag and discrepancy-% alerting (Ad Click Aggregation); ledger-drift/reconciliation alerting (Digital Wallet); matching-engine latency SLOs (Stock Exchange); the system this case study is itself about (Metrics Monitoring) |
-| [Distributed Transactions](../distributed_transactions/distributed_transactions.md) | Payment System, Distributed Key-Value Store, Distributed Message Queue, Ad Click Aggregation, Proximity Service, Digital Wallet, Hotel Reservation | Saga, TCC, outbox pattern, and idempotency keys for exactly-once charges, exactly-once message delivery, exactly-once click counting, and CDC-based listing-update propagation; optimistic-locking transfer retries (Digital Wallet) and the search -> hold -> pay -> confirm booking saga (Hotel Reservation) |
-| [Event Sourcing & CQRS](../event_sourcing_cqrs/event_sourcing_cqrs.md) | Payment System, Google Docs, Distributed Message Queue, Ad Click Aggregation, Digital Wallet, Google Drive | Operation/event log as the source of truth, with projections and snapshots; raw click events as the append-only log with rollups as projections; append-only ledger entries as the event log (Digital Wallet); the version-manifest chain as a projection over file-edit events (Google Drive) |
-| [Security & Auth](../security_and_auth/security_and_auth.md) | Payment System, Google Maps, Object Storage, Digital Wallet, Google Drive | PCI-DSS tokenization and secrets management; location-data minimization and retention; bucket policies, object ACLs, and request signing; KYC/AML identity verification (Digital Wallet); ACL-inheritance for shared folders (Google Drive) |
-| [Search Engines](../../database/search_engines/search_engines.md) | Web Crawler, Search Autocomplete, Google Maps, Proximity Service | Inverted indexes over crawled content, suggestion FSTs, geocoding address tokens, and Elasticsearch `geo_point` queries |
-| [Message Queues (HLD)](../message_queues/message_queues.md) | Web Crawler, Google Maps, Distributed Message Queue | URL frontier transport; GPS-ping ingestion for the Traffic Service; the conceptual model this case study implements directly |
-| [WebSockets & SSE](../../backend/websockets_and_sse/websockets_and_sse.md) | Google Docs, Leaderboard, Google Drive | Real-time bidirectional session management for collaborative editing; push delivery for live-viewed leaderboard screens; sync-event push to connected devices (Google Drive) |
+| [CDN](../cdn/cdn.md) | Google Maps, Object Storage, Instagram Photo Sharing, Distributed Cache | Tile-pyramid serving with >99% edge cache-hit rate; hot-object GET offload for object storage; signed rendition URLs and deletion across edge copies (Instagram Photo Sharing); bytes through the CDN while the cache holds metadata (Distributed Cache) |
+| [Rate Limiting](../rate_limiting/rate_limiting.md) | Twitter, URL Shortener, Notification System, Search Autocomplete, Ad Click Aggregation, Google Drive, Distributed Cache, Online Auction, Online Judge, Tinder, Video Conferencing | Protecting write paths and third-party providers from abuse and traffic spikes; per-IP/device click-fraud rate limiting; per-account upload/API rate limiting (Google Drive); bid, submission, location-jump and meeting-join limits (Online Auction, Online Judge, Tinder, Video Conferencing) |
+| [Resilience Patterns](../resilience_patterns/resilience_patterns.md) | Notification System, Payment System, Web Crawler, Google Maps, Distributed Key-Value Store, Distributed Message Queue, Proximity Service, Stock Exchange, Metrics Monitoring, Distributed Cache, Local Delivery Service, Video Conferencing | Circuit breakers, retries with backoff/jitter, and graceful degradation for provider, host, regional, broker/replica, and search-cluster outages; matching-engine failover and durable-log replay (Stock Exchange); scrape-target and alert-pipeline degradation (Metrics Monitoring); load shedding when the hit ratio falls (Distributed Cache), zone-controller shedding (Local Delivery Service), SFU failover and draining (Video Conferencing) |
+| [Observability](../observability/observability.md) | Notification System, Google Maps, Distributed Key-Value Store, Distributed Unique ID, Distributed Message Queue, Object Storage, Ad Click Aggregation, Digital Wallet, Stock Exchange, Metrics Monitoring, Distributed Cache, Online Judge, Video Conferencing | RED-method metrics, SLI/SLO framing, freshness/lag alerting and runbooks; repair-queue/durability-floor alerting (Object Storage); watermark-lag and discrepancy-% alerting (Ad Click Aggregation); ledger-drift/reconciliation alerting (Digital Wallet); matching-engine latency SLOs (Stock Exchange); the system this case study is itself about (Metrics Monitoring); hit-ratio SLOs (Distributed Cache), queue-wait and determinism alerting (Online Judge), client-reported call quality (Video Conferencing) |
+| [Distributed Transactions](../distributed_transactions/distributed_transactions.md) | Payment System, Distributed Key-Value Store, Distributed Message Queue, Ad Click Aggregation, Proximity Service, Digital Wallet, Hotel Reservation, Local Delivery Service, Online Judge | Saga, TCC, outbox pattern, and idempotency keys for exactly-once charges, exactly-once message delivery, exactly-once click counting, and CDC-based listing-update propagation; optimistic-locking transfer retries (Digital Wallet) and the search -> hold -> pay -> confirm booking saga (Hotel Reservation); why to avoid cross-shard carts (Local Delivery Service) and persist-then-enqueue vs. outbox for submissions (Online Judge) |
+| [Event Sourcing & CQRS](../event_sourcing_cqrs/event_sourcing_cqrs.md) | Payment System, Google Docs, Distributed Message Queue, Ad Click Aggregation, Digital Wallet, Google Drive, Local Delivery Service, Online Auction | Operation/event log as the source of truth, with projections and snapshots; raw click events as the append-only log with rollups as projections; append-only ledger entries as the event log (Digital Wallet); the version-manifest chain as a projection over file-edit events (Google Drive); bid history as an ordered, replayable log (Online Auction) |
+| [Security & Auth](../security_and_auth/security_and_auth.md) | Payment System, Google Maps, Object Storage, Digital Wallet, Google Drive, Instagram Photo Sharing, Video Conferencing | PCI-DSS tokenization and secrets management; location-data minimization and retention; bucket policies, object ACLs, and request signing; KYC/AML identity verification (Digital Wallet); ACL-inheritance for shared folders (Google Drive); signed media URLs and signing-key secrets (Instagram Photo Sharing); hop-by-hop vs. end-to-end media encryption (Video Conferencing) |
+| [Search Engines](../../database/search_engines/search_engines.md) | Web Crawler, Search Autocomplete, Google Maps, Proximity Service, Tinder, Local Delivery Service | Inverted indexes over crawled content, suggestion FSTs, geocoding address tokens, and Elasticsearch `geo_point` queries; geosharded discovery index (Tinder) and per-DC catalogue search (Local Delivery Service) |
+| [Message Queues (HLD)](../message_queues/message_queues.md) | Web Crawler, Google Maps, Distributed Message Queue, Instagram Photo Sharing, Online Auction, Online Judge, Tinder | URL frontier transport; GPS-ping ingestion for the Traffic Service; the conceptual model this case study implements directly; upload-complete and media-ready events (Instagram Photo Sharing), judge lanes (Online Judge), at-least-once swipe consumers (Tinder) |
+| [WebSockets & SSE](../../backend/websockets_and_sse/websockets_and_sse.md) | Google Docs, Leaderboard, Google Drive, Online Auction, Video Conferencing | Real-time bidirectional session management for collaborative editing; push delivery for live-viewed leaderboard screens; sync-event push to connected devices (Google Drive); live price fan-out to watchers (Online Auction) and call signalling (Video Conferencing) |
 | [Snowflake ID Generator (Java)](../../java/case_studies/design_snowflake_id_generator_java.md) | Twitter, URL Shortener, Distributed Unique ID | Reference implementation for distributed unique ID generation — Distributed Unique ID is its fleet-operations companion |
 | [CAP Theorem](../cap_theorem/cap_theorem.md) | Distributed Key-Value Store | AP-vs-CP framing for tunable-consistency stores |
 | [Consensus Algorithms](../consensus_algorithms/consensus_algorithms.md) | Distributed Key-Value Store, Distributed Unique ID, Stock Exchange | ZooKeeper/etcd-style coordination for CP metadata and worker-ID allocation; sequencer/leader election for deterministic per-symbol order processing (Stock Exchange) |
 | [Storage Engines Internals](../../database/storage_engines_internals/storage_engines_internals.md) | Distributed Key-Value Store, Object Storage, Metrics Monitoring | LSM-tree vs. B-tree tradeoffs for the per-node storage engine, applied here to both the KV store and the object-storage metadata index; columnar TSM/Gorilla-style compression for time-series data points (Metrics Monitoring) |
 | [Vector Databases](../../database/vector_databases/vector_databases.md) | RAG Pipeline, AI Search, any retrieval-backed design (AI-Backed Systems above) | Embedding storage and approximate nearest-neighbour search — HNSW/IVF index tradeoffs, recall vs. latency, filtered ANN, and when `pgvector` inside the existing Postgres beats a dedicated store |
 | [Scalability](../scalability/scalability.md) | Object Storage, Ad Click Aggregation, Leaderboard, Metrics Monitoring | Horizontal scaling and stateless-tier principles applied to the metadata-index gateway tier, stream-processor parallelism, and the global top-K merger fleet; stateless query-fan-out tier for federated PromQL-style queries (Metrics Monitoring) |
+| [Coordination and Contention](../coordination_and_contention/coordination_and_contention.md) | Flash-Sale Ticketing, Distributed Cache, Local Delivery Service, Online Auction, Online Judge, Tinder, Video Conferencing | Hot keys, leases and fencing tokens: the onsale hot row (Flash-Sale Ticketing), fill leases (Distributed Cache), hold-with-TTL reservations (Local Delivery Service), per-auction compare-and-set (Online Auction), judge-queue fencing (Online Judge), per-pair match serialization (Tinder), room placement (Video Conferencing) |
+| [Geospatial Indexing](../geospatial_indexing/geospatial_indexing.md) | Nearby Friends, Local Delivery Service, Tinder | Cell math for moving points (Nearby Friends), address-to-H3 serviceability (Local Delivery Service), S2 geosharding of the discovery index (Tinder) |
+| [Realtime Updates](../realtime_updates/realtime_updates.md) | Live Streaming, Nearby Friends, Local Delivery Service, Online Auction, Online Judge, Video Conferencing | Choosing polling, SSE or WebSockets and budgeting connections: chat and location fan-out, order tracking, live price updates, verdict delivery, call signalling and resume |
+| [Large Blobs and Media Pipelines](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md) | Instagram Photo Sharing | Presigned and resumable uploads, completion events, orphan GC and metadata-to-blob consistency, applied to photos and short video |
+| [Multi-Region and Data Residency](../multi_region_and_data_residency/multi_region_and_data_residency.md) | Instagram Photo Sharing, Local Delivery Service, Video Conferencing | Home-region uploads and read-your-own-upload (Instagram Photo Sharing), each store's inventory ledger homed in its nearest region (Local Delivery Service), nearest-region meeting placement (Video Conferencing) |
+| [Cell-Based Architecture](../cell_based_architecture/cell_based_architecture.md) | Flash-Sale Ticketing, Live Streaming, Online Auction, Online Judge | Blast-radius containment: isolating a hot listing on its own shard (Online Auction), a dedicated pool per contest (Online Judge) |
+| [Capacity Estimation](../capacity_estimation/capacity_estimation.md) | Email Service, Nearby Friends, YouTube Upload Pipeline, Instagram Photo Sharing, Online Judge, Video Conferencing | Back-of-envelope method behind each study's Scale Estimation and Capacity Planning sections |
 
 ---
 
@@ -185,17 +201,21 @@ flowchart LR
         UB("Uber")
         GM("Google<br/>Maps")
         PROX("Proximity<br/>Service")
+        LDS("Local<br/>Delivery")
+        TIN("Tinder")
     end
 
     subgraph DT["Distributed Transactions"]
         PAY("Payment<br/>System")
         DW("Digital<br/>Wallet")
         HR("Hotel<br/>Reservation")
+        AUC("Online<br/>Auction")
     end
 
     subgraph RC["Real-Time Collaboration"]
         GDOC("Google<br/>Docs")
         GD("Google<br/>Drive")
+        VC("Video<br/>Conferencing")
     end
 
     subgraph CI["Core Infrastructure"]
@@ -203,6 +223,7 @@ flowchart LR
         DID("Distributed<br/>Unique ID")
         MQ("Message<br/>Queue")
         OBJ@{ icon: "logos:aws-s3", form: "square", label: "Object<br/>Storage", pos: "b", h: 44 }
+        DC("Distributed<br/>Cache")
     end
 
     subgraph AN["Analytics and Aggregation"]
@@ -214,6 +235,9 @@ flowchart LR
         YT(["YouTube<br/>Upload Pipeline"])
         JOBS(["Distributed<br/>Job Scheduler"])
         FLASH(["Flash-Sale<br/>Ticketing"])
+        LIVE(["Live<br/>Streaming"])
+        IG(["Instagram<br/>Photo Sharing"])
+        OJ(["Online<br/>Judge"])
     end
 
     SE("Stock<br/>Exchange")
@@ -284,16 +308,33 @@ flowchart LR
     LB -.->|"tiering<br/>parallel"| MM
     GD -.->|"file vs<br/>op-level"| GDOC
 
+    %% 2026-11-25 additions
+    TW -->|"feed<br/>fan-out"| IG
+    OBJ -->|"byte<br/>plane"| IG
+    YT -->|"rendition<br/>pipeline"| IG
+    DC -->|"metadata<br/>cache tier"| IG
+    JOBS -->|"queue, lease,<br/>retry"| OJ
+    FLASH -->|"hot-key<br/>contention"| AUC
+    HR -->|"hold-with-<br/>TTL"| AUC
+    HR -->|"hold-with-<br/>TTL"| LDS
+    FLASH -->|"atomic<br/>decrement"| LDS
+    UB -->|"courier<br/>dispatch"| LDS
+    PROX -->|"geo + attribute<br/>search"| TIN
+    KV -.->|"durable vs<br/>may forget"| DC
+    SE -.->|"continuous vs<br/>timed close"| AUC
+    LIVE -.->|"broadcast vs<br/>many-to-many"| VC
+    AUC -.->|"exactly-once<br/>transition"| TIN
+
     class URL,NF,SAC,LB req
-    class KV,DID,MQ base
-    class PAY,DW,HR train
-    class UB,GM,PROX,WC,ADCLK,MM,GDOC,GD mathOp
+    class KV,DID,MQ,DC base
+    class PAY,DW,HR,AUC train
+    class UB,GM,PROX,WC,ADCLK,MM,GDOC,GD,LDS,TIN,VC mathOp
     class TW,WA,NS,SNOW frozen
     class SE lossN
-    class YT,JOBS,FLASH io
+    class YT,JOBS,FLASH,LIVE,IG,OJ io
 ```
 
-Solid arrows point from the case study that originates a pattern to the one that reuses it; dotted arrows mark a contrast, or an independently-arrived-at echo of the same idea, rather than direct reuse. Key-Value Store and Distributed Message Queue (gold, Core Infrastructure) are the busiest hubs, together feeding their hash-ring, ring-placement, and partitioned-log primitives out to nine other case studies; Stock Exchange (red) sits at the end of two of those chains — it consumes the ordered log and the monotonic-ID need but feeds no pattern back out.
+Solid arrows point from the case study that originates a pattern to the one that reuses it; dotted arrows mark a contrast, or an independently-arrived-at echo of the same idea, rather than direct reuse. Key-Value Store and Distributed Message Queue (gold, Core Infrastructure) are the busiest hubs, together feeding their hash-ring, ring-placement, and partitioned-log primitives out to nine other case studies; Stock Exchange (red) sits at the end of two of those chains — it consumes the ordered log and the monotonic-ID need but feeds no pattern back out. Among the 2026-11-25 additions, Flash-Sale Ticketing and Hotel Reservation are the sources of the contention thread (hold-with-TTL, atomic decrement) that Online Auction and Local Delivery reuse, and Instagram Photo Sharing is the busiest sink: it reuses Twitter's fan-out, Object Storage's byte plane, the YouTube rendition pipeline and the Distributed Cache tier.
 
 ---
 
@@ -304,7 +345,7 @@ Solid arrows point from the case study that originates a pattern to the one that
 | Design a URL shortener / TinyURL | [design_url_shortener](design_url_shortener.md) |
 | Design a pastebin | [design_url_shortener](design_url_shortener.md) — same read-heavy KV pattern |
 | Design Twitter / social feed | [design_twitter](design_twitter.md) |
-| Design Instagram feed | [design_twitter](design_twitter.md) — fan-out patterns identical |
+| Design Instagram feed | [design_twitter](design_twitter.md) — fan-out patterns identical; for uploads and media delivery see [design_instagram_photo_sharing](design_instagram_photo_sharing.md) |
 | Design WhatsApp / messaging system | [design_whatsapp](design_whatsapp.md) |
 | Design Slack | [design_whatsapp](design_whatsapp.md) + channel fan-out from [design_twitter](design_twitter.md) |
 | Design Signal / Telegram / a secure messaging app | [design_whatsapp](design_whatsapp.md) — §4 (E2E encryption) and §6 (Comparable Systems table) cover the protocol differences directly |
@@ -319,7 +360,7 @@ Solid arrows point from the case study that originates a pattern to the one that
 | Design typeahead / search autocomplete | [design_search_autocomplete](design_search_autocomplete.md) |
 | Design Google Maps / a navigation app | [design_google_maps](design_google_maps.md) |
 | Design Yelp / nearby places search | [design_proximity_service](design_proximity_service.md) — geo + attribute search; see also [design_google_maps](design_google_maps.md) §4.4 for geo-index theory |
-| Design a distributed cache / key-value store (Redis, DynamoDB, Memcached) | [design_key_value_store](design_key_value_store.md) |
+| Design a distributed cache / key-value store (Redis, DynamoDB, Memcached) | [design_key_value_store](design_key_value_store.md) for the durable, quorum-replicated store; [design_distributed_cache](design_distributed_cache.md) when the store may forget (Memcached, Redis Cluster as a cache) |
 | Design a unique ID generator (Snowflake, distributed counter, ticket server) | [design_distributed_unique_id](design_distributed_unique_id.md) |
 | Design a distributed message queue / Kafka / pub-sub system | [design_distributed_message_queue](design_distributed_message_queue.md) |
 | Design S3 / a cloud object-storage service (blob layer) | [design_object_storage_s3](design_object_storage_s3.md) |
@@ -340,6 +381,13 @@ Solid arrows point from the case study that originates a pattern to the one that
 | Design Twitch / a live streaming platform | [Design a Live Streaming Platform](design_live_streaming.md) |
 | Design Facebook Nearby Friends / live friend locations | [Design Nearby Friends](design_nearby_friends.md) |
 | Design top-K trending items / heavy hitters | [Design a Top-K / Heavy-Hitters Service](design_top_k_heavy_hitters.md) |
+| Design Memcached / a distributed cache tier (hot keys, stampedes, invalidation) | [Design a Distributed Cache](design_distributed_cache.md) |
+| Design Instagram / Flickr / a photo-sharing service (upload, renditions, CDN delivery) | [Design Instagram Photo Sharing](design_instagram_photo_sharing.md) — the media pipeline; feed fan-out comes from [design_twitter](design_twitter.md) |
+| Design Gopuff / Instacart / a quick-commerce or grocery delivery service | [Design a Local Delivery Service](design_local_delivery_service.md) — courier dispatch itself is in [design_uber](design_uber.md) |
+| Design eBay / an online auction / a bidding system | [Design an Online Auction](design_online_auction.md) |
+| Design LeetCode / an online judge / a remote code-execution service | [Design an Online Judge](design_online_judge.md) |
+| Design Tinder / Bumble / a dating app with swipe matching | [Design Tinder](design_tinder.md) |
+| Design Zoom / Google Meet / a video conferencing service | [Design Video Conferencing](design_video_conferencing.md) — one-to-millions broadcast is [design_live_streaming](design_live_streaming.md) |
 
 ---
 

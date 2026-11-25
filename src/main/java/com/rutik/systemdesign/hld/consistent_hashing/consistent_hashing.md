@@ -1065,7 +1065,7 @@ Before decommissioning a node, first transfer its data to its successor(s). Then
 
 ---
 
-**Cross-references:** [database/sharding_and_partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) (partitioning strategies that build on consistent hashing), [database/key_value_stores](../../database/key_value_stores/key_value_stores.md) (DynamoDB/Cassandra ring implementations), [database/newsql_and_distributed_sql](../../database/newsql_and_distributed_sql/newsql_and_distributed_sql.md).
+**Cross-references:** [database/sharding_and_partitioning](../../database/sharding_and_partitioning/sharding_and_partitioning.md) (partitioning strategies that build on consistent hashing), [database/key_value_stores](../../database/key_value_stores/key_value_stores.md) (DynamoDB/Cassandra ring implementations), [database/newsql_and_distributed_sql](../../database/newsql_and_distributed_sql/newsql_and_distributed_sql.md). Related HLD pages: [Design a Distributed Cache](../case_studies/design_distributed_cache.md) (key-to-node ownership and resharding for a cache cluster).
 
 ---
 

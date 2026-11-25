@@ -214,6 +214,9 @@ Consumer A never swallows the pill — it re-`put()`s it before exiting, so Cons
 - **Async job processing** — Web tier (producer) drops jobs into a queue; a worker fleet (consumers) processes them asynchronously. This decouples peak request volume from processing throughput and enables independent scaling of web and worker tiers.
 - **Stream processing pipelines** — Flink and Kafka Streams chains are cascaded Producer-Consumer stages: each stage consumes from an upstream topic (bounded buffer) and produces to a downstream topic, with backpressure managed by consumer lag monitoring.
 - **Connection pool as consumer** — A connection pool is a Producer-Consumer variant: requests (producers) submit work; pooled threads (consumers) process it from a bounded work queue. Queue saturation triggers the rejection handler — the system's backpressure mechanism.
+- **Write batching as a scaling rung** — an aggregating consumer that buffers writes and flushes on size or time is one rung of the write ladder in [Scaling Reads and Writes](../../hld/scaling_reads_and_writes/scaling_reads_and_writes.md).
+
+**Interview problem built on it:** [Concurrency Problems Toolkit](ConcurrencyProblemsToolkit.md) builds a bounded blocking queue by hand from one lock and two conditions, and drives 10,000 items through a capacity-4 queue to prove it.
 
 ---
 

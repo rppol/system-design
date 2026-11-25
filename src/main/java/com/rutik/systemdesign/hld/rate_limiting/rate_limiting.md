@@ -1089,7 +1089,7 @@ Provide SDK helpers that track and respect rate limits proactively, sending `X-R
 
 ---
 
-**Cross-references:** [backend/rate_limiting_in_depth](../../backend/rate_limiting_in_depth/rate_limiting_in_depth.md) (production implementation: Redis Lua scripts, sliding-window counters, header conventions), [llm/token_economics_and_cost_optimization](../../llm/token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) (token-bucket rate limiting for LLM API quotas).
+**Cross-references:** [backend/rate_limiting_in_depth](../../backend/rate_limiting_in_depth/rate_limiting_in_depth.md) (production implementation: Redis Lua scripts, sliding-window counters, header conventions), [llm/token_economics_and_cost_optimization](../../llm/token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) (token-bucket rate limiting for LLM API quotas). Related HLD pages: [Scaling Reads and Writes](../scaling_reads_and_writes/scaling_reads_and_writes.md) (limiting before the ladder runs out), [Design a Distributed Cache](../case_studies/design_distributed_cache.md) (rate-limit counters on the same cluster technology), [Design an Online Auction](../case_studies/design_online_auction.md) (bid-rate limits), [Design an Online Judge](../case_studies/design_online_judge.md) (per-user, per-lane token buckets), [Design Tinder](../case_studies/design_tinder.md) (limiting abusive location jumps), [Design Video Conferencing](../case_studies/design_video_conferencing.md) (meeting-join limits and enumeration defence).
 
 ---
 

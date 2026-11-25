@@ -850,3 +850,5 @@ A: A `GROUP BY hour` query over a database table is computed **on demand**, agai
 - **Partition count and stream-processor parallelism as horizontal-scaling decisions (§10)** -> [`../scalability/scalability.md`](../scalability/scalability.md)
 - **Real-time OLAP store as a specialized key-value/columnar store for rollup queries (§4.5, §10)** -> [`../../database/key_value_stores/key_value_stores.md`](../../database/key_value_stores/key_value_stores.md)
 - **Geo/device dimension breakdowns echoing the dimension-based aggregation patterns used for real-time location matching (§4, §2)** -> [`./design_uber.md`](./design_uber.md)
+- **Where this pipeline sits in the wider data platform: batch vs. stream, Lambda vs. Kappa, warehouse vs. lakehouse** -> [`../data_platform_architecture/data_platform_architecture.md`](../data_platform_architecture/data_platform_architecture.md)
+- **The write ladder this pipeline climbs** -> [`../scaling_reads_and_writes/scaling_reads_and_writes.md`](../scaling_reads_and_writes/scaling_reads_and_writes.md)

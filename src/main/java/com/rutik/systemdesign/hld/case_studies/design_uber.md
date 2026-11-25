@@ -938,4 +938,6 @@ A: Kafka-based location ingestion is the first thing that breaks. At ~5M updates
 - **LWT / Paxos-based consistency for trip-state transitions** -> [`../../database/consistency_models_and_consensus/consistency_models_and_consensus.md`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md)
 - **Microservices decomposition (per-city services, DISCO, payments)** -> [`../microservices/microservices.md`](../microservices/microservices.md)
 - **Multi-region failover patterns** -> [`../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md)
+- **Courier dispatch reused for dark-store deliveries** -> [`./design_local_delivery_service.md`](./design_local_delivery_service.md)
+- **A contrasting use of geo cells: discovery instead of dispatch** -> [`./design_tinder.md`](./design_tinder.md)
 

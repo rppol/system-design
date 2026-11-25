@@ -777,6 +777,8 @@ A `REGION` survival goal governs how many *whole regions'* worth of failure the 
 - **Budget cross-region backup and restore egress into the DR cost estimate up front.** It is invisible until the first real drill or incident produces the bill, and by then it is a surprise rather than a line item (§10, Pitfall 6).
 - **Treat a vendor's Data Processing Agreement and a Transfer Impact Assessment as two separate deliverables.** A DPA satisfies procurement; only a TIA satisfies the *Schrems II* requirement for a lawful international transfer (§10, Pitfall 8).
 
+**Cross-references:** Related HLD pages: [Time, Clocks and Ordering](../time_clocks_and_ordering/time_clocks_and_ordering.md) (ordering writes across regions), [Design Instagram Photo Sharing](../case_studies/design_instagram_photo_sharing.md) (home-region uploads and read-your-own-upload), [Design a Local Delivery Service](../case_studies/design_local_delivery_service.md) (each store's inventory ledger homed in its nearest region), [Design Video Conferencing](../case_studies/design_video_conferencing.md) (nearest-region meeting placement).
+
 ---
 
 ## 14. Case Study: Taking a US-Only SaaS to EU Customers Under a Residency Requirement

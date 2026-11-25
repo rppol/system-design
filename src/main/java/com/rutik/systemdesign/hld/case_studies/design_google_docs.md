@@ -970,3 +970,4 @@ A: Comments and suggestions can be modeled as a **parallel, secondary operation 
 - **Jittered exponential backoff for reconnects (§9 War Story 2)** -> [`../resilience_patterns/resilience_patterns.md`](../resilience_patterns/resilience_patterns.md)
 - **WebSocket session lifecycle and protocol details (§4.3, §7)** -> [`../../backend/websockets_and_sse/websockets_and_sse.md`](../../backend/websockets_and_sse/websockets_and_sse.md)
 - **Connection-density comparison for capacity planning (§10)** -> [`./design_whatsapp.md`](./design_whatsapp.md)
+- **Logical clocks, version vectors and why wall-clock order fails for concurrent edits** -> [`../time_clocks_and_ordering/time_clocks_and_ordering.md`](../time_clocks_and_ordering/time_clocks_and_ordering.md)

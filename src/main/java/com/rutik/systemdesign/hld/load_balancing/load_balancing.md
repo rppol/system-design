@@ -755,7 +755,7 @@ Because the packet never has to climb the network stack and the backend lookup s
 
 ---
 
-**Cross-references:** [backend/fault_tolerance_patterns](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) (retries, circuit breakers, and timeouts behind the LB), [devops/cloud_networking_and_cdn](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md) (ALB/NLB, Route 53 weighted/latency routing, global server load balancing), [devops/kubernetes_networking](../../devops/kubernetes_networking/kubernetes_networking.md) (Service/Ingress/IPVS load balancing in Kubernetes), [spring/spring_cloud_patterns](../../spring/spring_cloud_patterns/spring_cloud_patterns.md) (client-side load balancing with Spring Cloud LoadBalancer).
+**Cross-references:** [backend/fault_tolerance_patterns](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) (retries, circuit breakers, and timeouts behind the LB), [devops/cloud_networking_and_cdn](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md) (ALB/NLB, Route 53 weighted/latency routing, global server load balancing), [devops/kubernetes_networking](../../devops/kubernetes_networking/kubernetes_networking.md) (Service/Ingress/IPVS load balancing in Kubernetes), [spring/spring_cloud_patterns](../../spring/spring_cloud_patterns/spring_cloud_patterns.md) (client-side load balancing with Spring Cloud LoadBalancer). Related HLD pages: [Failure Detection and Membership](../failure_detection_and_membership/failure_detection_and_membership.md) (health checks as one kind of failure detector), [Design Video Conferencing](../case_studies/design_video_conferencing.md) (steering a call to its nearest region).
 
 ---
 
