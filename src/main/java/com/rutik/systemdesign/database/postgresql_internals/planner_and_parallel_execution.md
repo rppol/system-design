@@ -15,6 +15,8 @@
 
 ---
 
+> **See also:** [Query Execution and Join Algorithms](../query_execution_and_join_algorithms/query_execution_and_join_algorithms.md) (Volcano vs vectorized execution, nested-loop, sort-merge and hash joins, spills and memory grants).
+
 ## 1. Concept Overview
 
 The planner turns a parsed, rewritten query tree into an executable plan by assigning every

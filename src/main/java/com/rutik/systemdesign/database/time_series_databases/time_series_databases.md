@@ -15,6 +15,8 @@
 > June 2025). **ClickHouse 26.x** is current. Behaviour that depends on a
 > specific version is tagged inline, e.g. `[3.8]`, `[InfluxDB 3]`.
 
+> **See also:** [Temporal and Bitemporal Data](../temporal_and_bitemporal_data/temporal_and_bitemporal_data.md) (valid time vs transaction time, SQL:2011 periods and as-of queries); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction).
+
 ## 1. Concept Overview
 
 Time-series databases (TSDBs) are optimized for data with a natural time dimension: metrics, events, sensor readings, financial ticks, and application logs. They exploit the append-only, time-ordered nature of this data for dramatic compression and query performance. Key engines: `TimescaleDB` (PostgreSQL extension, developed by Tiger Data), InfluxDB 3 (Rust/Arrow-based purpose-built TSDB), ClickHouse (columnar OLAP with time-series strengths), Prometheus 3.x (pull-based metrics), QuestDB (high-throughput SQL TSDB built for financial tick data), and VictoriaMetrics (Prometheus-compatible long-term storage).

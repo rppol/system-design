@@ -17,6 +17,8 @@
 > This module owns the **category**: why analytical engines are built the way they are, and
 > how to choose among the four families.
 
+> **See also:** [Query Execution and Join Algorithms](../query_execution_and_join_algorithms/query_execution_and_join_algorithms.md) (Volcano vs vectorized execution, nested-loop, sort-merge and hash joins, spills and memory grants); [Data Warehouse Modeling](../data_warehouse_modeling/data_warehouse_modeling.md) (Kimball facts and dimensions, SCD types 0 to 7, Data Vault and medallion layers); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction); [Design a Data Warehouse and Semantic Layer](../case_studies/design_data_warehouse_and_semantic_layer/design_data_warehouse_and_semantic_layer.md) (case study: order-line-grain star schema, SCD2 dimensions and one governed metric layer).
+
 ## 1. Concept Overview
 
 An analytical database is one whose entire design is bent around a single access pattern:

@@ -1,5 +1,7 @@
 # Case Study: Design a Banking Ledger
 
+> **See also:** [Design a Data Warehouse and Semantic Layer](../design_data_warehouse_and_semantic_layer/design_data_warehouse_and_semantic_layer.md) (case study: order-line-grain star schema, SCD2 dimensions and one governed metric layer); [Design a DynamoDB Single-Table Order Service](../design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) (case study: access-pattern-first keys, hot partition keys, idempotent order placement).
+
 ## Intuition
 
 A ledger is not a balance — it is a history that a balance falls out of. The single biggest mental

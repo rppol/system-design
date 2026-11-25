@@ -19,6 +19,8 @@
 > the pipeline view — orchestration, ingestion, the ML feature story — is in
 > [ML Data Pipelines](../../ml/data_pipelines_and_processing/data_pipelines_and_processing.md).
 
+> **See also:** [Data Warehouse Modeling](../data_warehouse_modeling/data_warehouse_modeling.md) (Kimball facts and dimensions, SCD types 0 to 7, Data Vault and medallion layers); [Temporal and Bitemporal Data](../temporal_and_bitemporal_data/temporal_and_bitemporal_data.md) (valid time vs transaction time, SQL:2011 periods and as-of queries); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction); [Design a Data Warehouse and Semantic Layer](../case_studies/design_data_warehouse_and_semantic_layer/design_data_warehouse_and_semantic_layer.md) (case study: order-line-grain star schema, SCD2 dimensions and one governed metric layer).
+
 ## 1. Concept Overview
 
 A **table format** is a specification for a set of files in object storage plus the metadata

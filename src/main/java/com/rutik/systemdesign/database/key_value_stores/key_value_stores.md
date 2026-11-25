@@ -9,6 +9,8 @@
 > Functions versus `EVALSHA`, and the Redis-vs-Valkey licence split) live in
 > [Redis Internals](../redis_internals/redis_internals.md). Read this page first.
 
+> **See also:** [DynamoDB Deep Dive](../dynamodb_deep_dive/dynamodb_deep_dive.md) (partitions, capacity arithmetic, single-table design and Global Tables); [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner); [Design a DynamoDB Single-Table Order Service](../case_studies/design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) (case study: access-pattern-first keys, hot partition keys, idempotent order placement).
+
 ## 1. Concept Overview
 
 Key-value stores are the simplest NoSQL data model: a distributed hash map mapping keys to values. Redis is the dominant in-memory key-value store, combining sub-millisecond latency with rich data structures, persistence, pub/sub, Lua scripting, and clustering. Amazon DynamoDB is the dominant managed, disk-backed one: a partitioned table with no size limit, priced per request, where the partition key decides both data placement and the throughput ceiling of each key. Understanding Redis data structures and their internal encodings is critical for building efficient caching, session, rate limiting, and real-time systems.

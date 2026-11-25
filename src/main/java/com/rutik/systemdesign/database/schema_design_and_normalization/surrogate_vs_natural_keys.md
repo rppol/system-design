@@ -9,6 +9,8 @@ Pitfall 4, the UUIDv4 page-split story in miniature — and are cross-referenced
 
 ---
 
+> **See also:** [Data Warehouse Modeling](../data_warehouse_modeling/data_warehouse_modeling.md) (Kimball facts and dimensions, SCD types 0 to 7, Data Vault and medallion layers).
+
 ## 1. Concept Overview
 
 A **natural key** is a column (or set of columns) that already identifies the row in the real world:

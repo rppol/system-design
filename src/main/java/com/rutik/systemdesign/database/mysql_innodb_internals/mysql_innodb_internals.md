@@ -13,6 +13,8 @@
 > until the next Innovation release. Everything in this module is InnoDB behaviour
 > common to 8.4 LTS and later unless tagged inline like `[9.7]`.
 
+> **See also:** [Logging, Recovery and Checkpointing](../logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) (the WAL rules, ARIES redo and undo, checkpoints and group commit).
+
 ## 1. Concept Overview
 
 InnoDB is MySQL's default storage engine. It provides full ACID compliance, MVCC, row-level locking, foreign key enforcement, and crash recovery. Understanding InnoDB's internal architecture — especially its dual-log design, clustered index structure, and buffer pool mechanics — is essential for optimizing MySQL performance and diagnosing production issues.

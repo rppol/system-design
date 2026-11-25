@@ -1,5 +1,7 @@
 # Case Study: Design a Real-Time Analytics Platform
 
+> **See also:** [Design a Metrics Platform](../design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction); [Design a Data Warehouse and Semantic Layer](../design_data_warehouse_and_semantic_layer/design_data_warehouse_and_semantic_layer.md) (case study: order-line-grain star schema, SCD2 dimensions and one governed metric layer).
+
 ## Intuition
 
 A real-time analytics platform is a printing press that never stops for the ledger to close. Every event is written once, column-major, so a dashboard asking "clicks per day for the last 30 days" reads only the `event_name` and `timestamp` columns off disk and never touches `properties`, `user_agent`, or the other 90% of each row it does not need. The mental model is three speed tiers stacked on top of one durable log: Kafka absorbs bursty writes and gives you a replay window; ClickHouse's columnar merge tree answers anything that fits in seconds by scanning compressed columns instead of rows; Redis answers anything that must be instant by never scanning at all, trading an exact count for a HyperLogLog sketch it can union in microseconds.

@@ -1,5 +1,7 @@
 # Polyglot Persistence Patterns
 
+> **See also:** [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner); [Design a DynamoDB Single-Table Order Service](../case_studies/design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) (case study: access-pattern-first keys, hot partition keys, idempotent order placement).
+
 ## 1. Concept Overview
 
 Polyglot persistence is the architectural pattern of using multiple purpose-built databases within the same system, choosing the optimal storage engine for each data type and access pattern. The term was coined by Martin Fowler: "application databases should be chosen for the type of data they store and the access patterns." A social feed, a product catalog, a search index, and a session store each have different access patterns — no single database optimally serves all four.

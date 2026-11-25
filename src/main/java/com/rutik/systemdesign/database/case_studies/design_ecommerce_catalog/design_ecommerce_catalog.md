@@ -1,5 +1,7 @@
 # Case Study: Design an E-Commerce Product Catalog
 
+> **See also:** [Design a DynamoDB Single-Table Order Service](../design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) (case study: access-pattern-first keys, hot partition keys, idempotent order placement).
+
 ## Intuition
 
 A product catalog is a "one write path, three read shapes" problem. Merchants write

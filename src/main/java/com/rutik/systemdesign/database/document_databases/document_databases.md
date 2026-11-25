@@ -9,6 +9,8 @@
 > self-managed Community and Enterprise from 8.2, so "MongoDB 8" alone does not pin a
 > feature set. Behaviour that depends on a version is tagged inline like `[9.0]`.
 
+> **See also:** [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner); [DynamoDB Deep Dive](../dynamodb_deep_dive/dynamodb_deep_dive.md) (partitions, capacity arithmetic, single-table design and Global Tables).
+
 ## 1. Concept Overview
 
 Document databases store data as semi-structured documents (typically JSON/BSON), allowing each document to have a different structure. The document model is natural for hierarchical data and objects that map directly to application code. MongoDB is the dominant document database, with WiredTiger as its storage engine since 3.2.

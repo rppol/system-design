@@ -1,5 +1,7 @@
 # Case Study: Design a Global Multi-Region OLTP Database
 
+> **See also:** [Design a DynamoDB Single-Table Order Service](../design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) (case study: access-pattern-first keys, hot partition keys, idempotent order placement).
+
 ## Intuition
 
 Every multi-region OLTP design is an argument with the speed of light, and the argument has

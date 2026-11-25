@@ -362,9 +362,9 @@ const STUDY_ORDER = {
     "cuda/cross_vendor_gpu_concept_map","cuda/gpu_portability_hip_sycl_and_beyond",
   ],
   database: [
-    "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
-    "database/postgresql_internals","database/mysql_innodb_internals","database/sql_query_optimization","database/schema_design_and_normalization","database/database_migrations_zero_downtime",
-    "database/document_databases","database/key_value_stores","database/redis_internals","database/wide_column_databases","database/search_engines","database/elasticsearch_internals","database/graph_databases","database/time_series_databases","database/analytical_databases_and_olap",
+    "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking","database/logging_recovery_and_checkpointing",
+    "database/postgresql_internals","database/mysql_innodb_internals","database/query_execution_and_join_algorithms","database/sql_query_optimization","database/schema_design_and_normalization","database/temporal_and_bitemporal_data","database/database_migrations_zero_downtime",
+    "database/document_databases","database/mongodb_internals","database/key_value_stores","database/redis_internals","database/dynamodb_deep_dive","database/wide_column_databases","database/search_engines","database/elasticsearch_internals","database/graph_databases","database/time_series_databases","database/analytical_databases_and_olap","database/data_warehouse_modeling",
     "database/vector_databases","database/newsql_and_distributed_sql","database/in_memory_databases","database/embedded_and_edge_databases","database/lakehouse_and_table_formats",
     "database/replication_and_high_availability","database/sharding_and_partitioning","database/distributed_transactions","database/consistency_models_and_consensus","database/database_caching_patterns",
     "database/connection_pool_management","database/database_performance_tuning","database/backup_recovery_and_disaster_recovery","database/database_security_and_compliance",

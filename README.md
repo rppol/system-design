@@ -892,7 +892,7 @@ See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/READ
 
 ### Database Engineering — Principal Engineer & Interview Prep Guide
 
-A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 34 modules across 7 phases plus 11 case studies, covering relational, NoSQL, emerging, and distributed database concepts.
+A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 40 modules across 7 phases plus 14 case studies, covering relational, NoSQL, emerging, and distributed database concepts.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -901,28 +901,34 @@ A laser-focused, principal-engineer-level reference for database internals, sele
 | [Storage Engines Internals](src/main/java/com/rutik/systemdesign/database/storage_engines_internals/storage_engines_internals.md) | B+tree, LSM-tree, WAL, buffer pool, row vs columnar storage |
 | [Indexing Deep Dive](src/main/java/com/rutik/systemdesign/database/indexing_deep_dive/indexing_deep_dive.md) | B+tree, GIN, BRIN, covering indexes, partial, composite, index bloat |
 | [Concurrency Control & Locking](src/main/java/com/rutik/systemdesign/database/concurrency_control_and_locking/concurrency_control_and_locking.md) | MVCC, deadlocks, gap locks, SELECT FOR UPDATE SKIP LOCKED, advisory locks |
+| [Logging, Recovery & Checkpointing](src/main/java/com/rutik/systemdesign/database/logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) | The two WAL rules, STEAL/NO-FORCE, LSNs, ARIES analysis/redo/undo and CLRs, checkpoints, group commit, torn pages, fsync failure |
 
 #### Phase 2 — Relational Databases
 | Module | Key Concepts |
 |--------|-------------|
 | [PostgreSQL Internals](src/main/java/com/rutik/systemdesign/database/postgresql_internals/postgresql_internals.md) | VACUUM, autovacuum, EXPLAIN ANALYZE, TOAST, replication slots, partitioning |
 | [MySQL InnoDB Internals](src/main/java/com/rutik/systemdesign/database/mysql_innodb_internals/mysql_innodb_internals.md) | Clustered index, redo/undo log, binary log, online DDL, GTID |
+| [Query Execution & Join Algorithms](src/main/java/com/rutik/systemdesign/database/query_execution_and_join_algorithms/query_execution_and_join_algorithms.md) | Volcano vs vectorized vs compiled execution, nested-loop/sort-merge/Grace hash joins, external sort, memory grants and spills, adaptive joins |
 | [SQL Query Optimization](src/main/java/com/rutik/systemdesign/database/sql_query_optimization/sql_query_optimization.md) | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
 | [Schema Design & Normalization](src/main/java/com/rutik/systemdesign/database/schema_design_and_normalization/schema_design_and_normalization.md) | Normal forms, temporal data, audit trails, multi-tenancy, JSONB |
+| [Temporal & Bitemporal Data](src/main/java/com/rutik/systemdesign/database/temporal_and_bitemporal_data/temporal_and_bitemporal_data.md) | Valid vs transaction time, SQL:2011 periods, `WITHOUT OVERLAPS` and temporal FKs, `FOR PORTION OF`, system versioning, as-of queries |
 | [Database Migrations (Zero Downtime)](src/main/java/com/rutik/systemdesign/database/database_migrations_zero_downtime/database_migrations_zero_downtime.md) | Flyway, Liquibase, expand-contract, gh-ost, CREATE INDEX CONCURRENTLY |
 
 #### Phase 3 — NoSQL Databases
 | Module | Key Concepts |
 |--------|-------------|
 | [Document Databases](src/main/java/com/rutik/systemdesign/database/document_databases/document_databases.md) | MongoDB WiredTiger, embedding vs referencing, aggregation pipeline, sharding |
+| [MongoDB Internals](src/main/java/com/rutik/systemdesign/database/mongodb_internals/mongodb_internals.md) | WiredTiger cache and history store, journal and checkpoints, oplog, elections and rollback, write/read concern, chunk migration and resharding, plan cache |
 | [Key-Value Stores](src/main/java/com/rutik/systemdesign/database/key_value_stores/key_value_stores.md) | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock |
 | [Redis Internals](src/main/java/com/rutik/systemdesign/database/redis_internals/redis_internals.md) | SDS/listpack/dict encodings, event loop and io-threads, eviction (LRU/LFU), fork + copy-on-write, multi-part AOF, PSYNC and resharding, locks and fencing, Redis 8 vs Valkey 9 |
+| [DynamoDB Deep Dive](src/main/java/com/rutik/systemdesign/database/dynamodb_deep_dive/dynamodb_deep_dive.md) | Partitions and replication groups, RCU/WCU arithmetic, per-partition ceilings, adaptive capacity, single-table design, GSI vs LSI, Global Tables, cost model |
 | [Wide-Column Databases](src/main/java/com/rutik/systemdesign/database/wide_column_databases/wide_column_databases.md) | Cassandra ring, partition key, compaction strategies, consistency levels |
 | [Search Engines](src/main/java/com/rutik/systemdesign/database/search_engines/search_engines.md) | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | [Elasticsearch Internals](src/main/java/com/rutik/systemdesign/database/elasticsearch_internals/elasticsearch_internals.md) | Lucene segment files, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 one-byte norms, per-shard IDF and `dfs_query_then_fetch`, PIT + `search_after`, routing factor and `_split`, seq_no/primary-term checkpoints, voting configuration, `doc_count_error`, logsdb/TSDS, frozen tier, `dense_vector` BBQ |
 | [Graph Databases](src/main/java/com/rutik/systemdesign/database/graph_databases/graph_databases.md) | Property graph, Neo4j index-free adjacency, Cypher, fraud detection patterns |
 | [Time-Series Databases](src/main/java/com/rutik/systemdesign/database/time_series_databases/time_series_databases.md) | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla XOR compression |
 | [Analytical Databases and OLAP](src/main/java/com/rutik/systemdesign/database/analytical_databases_and_olap/analytical_databases_and_olap.md) | Columnar storage, vectorized execution, MergeTree parts, sort keys vs indexes, ClickHouse/Druid/Pinot/DuckDB |
+| [Data Warehouse Modeling](src/main/java/com/rutik/systemdesign/database/data_warehouse_modeling/data_warehouse_modeling.md) | Kimball grain and star schemas, fact table types, conformed dimensions, SCD types 0-7, Data Vault 2.0, medallion layers, data contracts |
 
 #### Phase 4 — Emerging Databases
 | Module | Key Concepts |
@@ -970,6 +976,9 @@ A laser-focused, principal-engineer-level reference for database internals, sele
 | [Chat Message Store](src/main/java/com/rutik/systemdesign/database/case_studies/design_chat_message_store/design_chat_message_store.md) | Cassandra, PostgreSQL, Redis | Clustering key, cursor pagination, read receipts | Advanced |
 | [Job Queue on PostgreSQL](src/main/java/com/rutik/systemdesign/database/case_studies/design_job_queue_on_postgres/design_job_queue_on_postgres.md) | PostgreSQL | `SKIP LOCKED` work queue before reaching for a broker | Advanced |
 | [10TB Table Migration](src/main/java/com/rutik/systemdesign/database/case_studies/design_10tb_table_migration/design_10tb_table_migration.md) | PostgreSQL, gh-ost, pg_repack | Change a 10TB table's type or schema with no downtime | Expert |
+| [Metrics Platform](src/main/java/com/rutik/systemdesign/database/case_studies/design_metrics_platform/design_metrics_platform.md) | Grafana Mimir (Prometheus TSDB blocks), S3, Memcached | Head block + WAL, chunk codec, postings index, compaction, series budget at 150M active series | Expert |
+| [Data Warehouse & Semantic Layer](src/main/java/com/rutik/systemdesign/database/case_studies/design_data_warehouse_and_semantic_layer/design_data_warehouse_and_semantic_layer.md) | Snowflake, Apache Iceberg, dbt, MetricFlow | Fact grain, SCD type 2 dimensions, governed metric definitions, ledger reconciliation | Expert |
+| [DynamoDB Single-Table Order Service](src/main/java/com/rutik/systemdesign/database/case_studies/design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) | DynamoDB | Access-pattern-first keys, hot partition keys, idempotent order placement | Advanced |
 
 See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign/database/README.md) for the full 7-phase learning path, version matrix, and cross-reference map.
 

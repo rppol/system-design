@@ -1,5 +1,7 @@
 # Sharding and Partitioning
 
+> **See also:** [DynamoDB Deep Dive](../dynamodb_deep_dive/dynamodb_deep_dive.md) (partitions, capacity arithmetic, single-table design and Global Tables); [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction).
+
 ## 1. Concept Overview
 
 Sharding (horizontal scaling) splits data across multiple independent database instances so that no single server holds all the data or handles all requests. Partitioning splits data within a single database instance into logical segments (partitions) for query performance and manageability. Both involve dividing data by a key, but sharding crosses server boundaries while partitioning stays within one database.

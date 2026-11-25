@@ -1120,7 +1120,9 @@ def _study_order():
 PRODUCT_DEEP_DIVES = {
     "backend/kafka_deep_dive/kafka_deep_dive.md",
     "backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md",
+    "database/dynamodb_deep_dive/dynamodb_deep_dive.md",
     "database/elasticsearch_internals/elasticsearch_internals.md",
+    "database/mongodb_internals/mongodb_internals.md",
     "database/mysql_innodb_internals/mysql_innodb_internals.md",
     "database/postgresql_internals/postgresql_internals.md",
     "database/redis_internals/redis_internals.md",

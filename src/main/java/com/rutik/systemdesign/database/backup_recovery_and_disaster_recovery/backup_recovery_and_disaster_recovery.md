@@ -1,5 +1,7 @@
 # Backup, Recovery, and Disaster Recovery
 
+> **See also:** [Logging, Recovery and Checkpointing](../logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) (the WAL rules, ARIES redo and undo, checkpoints and group commit); [Temporal and Bitemporal Data](../temporal_and_bitemporal_data/temporal_and_bitemporal_data.md) (valid time vs transaction time, SQL:2011 periods and as-of queries); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction).
+
 ## 1. Concept Overview
 
 Backup and recovery is the discipline of ensuring that a database's data can be restored to a consistent, known-good state after a failure. The failure modes span a wide spectrum: disk failure, operator error (accidental DROP TABLE), software bugs, datacenter disasters, and ransomware. Each requires a different recovery approach. The key metrics are RPO (Recovery Point Objective — how much data loss is acceptable) and RTO (Recovery Time Objective — how long can the service be unavailable).

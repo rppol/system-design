@@ -8,6 +8,8 @@
 
 ---
 
+> **See also:** [Data Warehouse Modeling](../data_warehouse_modeling/data_warehouse_modeling.md) (Kimball facts and dimensions, SCD types 0 to 7, Data Vault and medallion layers); [Temporal and Bitemporal Data](../temporal_and_bitemporal_data/temporal_and_bitemporal_data.md) (valid time vs transaction time, SQL:2011 periods and as-of queries).
+
 ## 1. Concept Overview
 
 Schema design determines how data is structured in tables, what relationships exist, and what constraints enforce correctness. Normalization is the formal process of organizing columns and tables to reduce redundancy and preserve data integrity. Denormalization is the deliberate reversal — duplicating data or combining tables to improve read performance at the cost of update complexity.

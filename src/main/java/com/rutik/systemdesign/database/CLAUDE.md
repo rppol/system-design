@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 34 Modules (7 Phases)
+## Module List — 40 Modules (7 Phases)
 
 ### Phase 1 — Foundations
 
@@ -15,6 +15,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `storage_engines_internals/` | Expert | 20 | B+tree, LSM-tree, WAL, buffer pool, row vs columnar |
 | `indexing_deep_dive/` | Advanced | 19 | B+tree, GIN, BRIN, covering, partial, composite, index bloat |
 | `concurrency_control_and_locking/` | Advanced | 18 | MVCC, deadlocks, gap locks, SELECT FOR UPDATE, advisory locks |
+| `logging_recovery_and_checkpointing/` | Expert | 20 | UNDO/REDO, STEAL/NO-FORCE, the two WAL rules, LSNs, ARIES analysis/redo/undo and CLRs, checkpoints, group commit, torn pages, fsync failure (CMU 15-445 #21-22) |
 
 ### Phase 2 — Relational Databases
 
@@ -22,23 +23,28 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 |--------|-------|------|--------------|
 | `postgresql_internals/` | Expert | 18 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning; sub-file: `planner_and_parallel_execution` |
 | `mysql_innodb_internals/` | Advanced | 15 | Clustered index, redo/undo log, binary log, online DDL, GTID |
+| `query_execution_and_join_algorithms/` | Expert | 20 | Volcano vs vectorized vs compiled execution, nested-loop/sort-merge/Grace hash joins, external sort, hash vs sort aggregation, memory grants and spills, morsel-driven parallelism, adaptive joins (CMU 15-445 #11-14) |
 | `sql_query_optimization/` | Advanced | 16 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
 | `schema_design_and_normalization/` | Intermediate | 16 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB — sub-file: `surrogate_vs_natural_keys` |
+| `temporal_and_bitemporal_data/` | Advanced | 18 | Valid vs transaction time, half-open periods, SQL:2011 period tables, `WITHOUT OVERLAPS` and temporal FKs (PostgreSQL 18), `FOR PORTION OF`, SQL Server/MariaDB system versioning |
 | `database_migrations_zero_downtime/` | Intermediate | 19 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
 
 ### Phase 3 — NoSQL Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `document_databases/` | Advanced | 20 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
-| `key_value_stores/` | Expert | 20 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock — the CATEGORY; Redis product internals belong in `redis_internals/` |
+| `document_databases/` | Advanced | 20 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams — the CATEGORY; MongoDB product internals belong in `mongodb_internals/` |
+| `mongodb_internals/` | Expert | 19 | WiredTiger cache, MVCC and history store, tickets, journal and checkpoints, oplog, elections and rollback, write/read concern, transactions, balancer and chunk migration, resharding, plan cache, change streams; MongoDB 9.0 |
+| `key_value_stores/` | Expert | 20 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock — the CATEGORY; Redis product internals belong in `redis_internals/`, DynamoDB product internals in `dynamodb_deep_dive/` |
 | `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the ten eviction policies (`allkeys-lrm`/`volatile-lrm` from 8.6) + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, vector sets (`VADD`/`VSIM`, HNSW + filtered ANN), Redis 8 vs Valkey 9 |
+| `dynamodb_deep_dive/` | Expert | 21 | Request path, partition replication groups, RCU/WCU arithmetic, per-partition ceilings, burst/adaptive capacity, single-table design, GSI vs LSI, conditional writes and transactions, Streams, TTL, Global Tables (MREC/MRSC), cost model — pinned to AWS docs and us-east-1 prices read 2026-11-25 |
 | `wide_column_databases/` | Advanced | 22 | Cassandra ring, partition key, compaction (STCS/LCS/TWCS/UCS), consistency levels, tombstones, SAI vs legacy 2i, `VECTOR` + ANN, trie memtables/BTI, Accord `[6.0-alpha]`, HBase/Bigtable lineage, ScyllaDB shard-per-core |
 | `search_engines/` | Advanced | 16 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | `elasticsearch_internals/` | Expert | 38 | Lucene segments and file extensions, refresh/flush/merge, translog durability, block-tree term index, inlined skip data, doc values vs stored vs `_source`, BM25 norms, per-shard IDF, PIT + `search_after`, routing factor and `_split`, seq-no/primary-term checkpoints, voting configuration, `doc_count_error_upper_bound`, logsdb/TSDS, frozen tier, `dense_vector` BBQ — the PRODUCT internals; the category lives in `search_engines/` |
 | `graph_databases/` | Intermediate | 21 | Property graph, Neo4j index-free adjacency, Cypher 25, GQL (ISO/IEC 39075:2024), SQL/PGQ (Oracle AI Database 26ai; reverted from PostgreSQL 19 before release), fraud detection; sub-file: `graph_query_languages` |
 | `time_series_databases/` | Intermediate | 21 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 | `analytical_databases_and_olap/` | Advanced | 18 | Columnar storage, vectorized execution, late materialization, MergeTree parts and the part-count cliff, sparse index granules, sort key vs index, ClickHouse/Druid/Pinot vs warehouses vs DuckDB, HTAP and zero-ETL |
+| `data_warehouse_modeling/` | Advanced | 19 | Kimball four-step design, grain, fact table types, additivity, conformed dimensions, SCD types 0-7, Data Vault 2.0, medallion layers, dbt snapshots, data contracts (ODCS v3.2.0) |
 
 ### Phase 4 — Emerging Databases
 
@@ -80,9 +86,9 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 34 modules — the 7-phase order in
+`README.md` documents the **Full Path** (all 40 modules — the 7-phase order in
 "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
-**Senior** (24 modules) and **Principal** (16). They are different cuts, not nested
+**Senior** (27 modules) and **Principal** (18). They are different cuts, not nested
 depths — senior is the craft, principal is the judgment (which engine at what cost,
 what migration, what you tell a team *not* to do), so principal is usually the smaller
 list and much of it is material senior never sees. Membership is declared ONCE per section, the `<!-- study-paths -->` block in this section's `README.md`, naming every module, every file it owns, and the tiers each file
@@ -94,13 +100,13 @@ in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
 regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
 fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
-in the same `README.md` block (6 senior / 7 principal), driving the Level
+in the same `README.md` block (8 senior / 8 principal of the 14), driving the Level
 filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
 and a 6-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 11 Total
+## Case Studies — 14 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
@@ -117,6 +123,25 @@ and a 6-week Study Plan (prose; no path impact).
 | `design_chat_message_store/` | Cassandra, PostgreSQL, Redis | Advanced |
 | `design_job_queue_on_postgres/` | PostgreSQL (`SKIP LOCKED`) | Advanced |
 | `design_10tb_table_migration/` | PostgreSQL, gh-ost, pg_repack | Expert |
+| `design_metrics_platform/` | Grafana Mimir (Prometheus TSDB blocks), S3, Memcached | Expert |
+| `design_data_warehouse_and_semantic_layer/` | Snowflake, Apache Iceberg, dbt, MetricFlow, Debezium | Expert |
+| `design_dynamodb_single_table_order_service/` | DynamoDB | Advanced |
+
+**Ownership notes for the 2026-11-25 pages.** Product vs category follows the Redis and
+Elasticsearch precedent: `mongodb_internals/` owns MongoDB engine internals and
+`document_databases/` stays the category; `dynamodb_deep_dive/` owns DynamoDB internals and
+`key_value_stores/` stays the category. Both product pages match `DEEP_NAME_RE` and are listed in
+`PRODUCT_DEEP_DIVES` in `game/build_tech.py`. `logging_recovery_and_checkpointing/` owns WAL
+rules, ARIES restart and checkpoints; `storage_engines_internals/` keeps its WAL overview and links
+there, and `backup_recovery_and_disaster_recovery/` keeps PITR and DR.
+`query_execution_and_join_algorithms/` owns the executor (CMU #11-14) and stops where the planner
+starts; plan reading stays in `sql_query_optimization/` and
+`postgresql_internals/planner_and_parallel_execution.md`. `data_warehouse_modeling/` owns
+dimensional modeling, SCDs and Data Vault; engines stay in `analytical_databases_and_olap/` and
+table formats in `lakehouse_and_table_formats/`. `temporal_and_bitemporal_data/` owns valid and
+transaction time; warehouse SCD history stays in `data_warehouse_modeling/`. The case studies apply
+those modules and do not re-teach them: `design_metrics_platform/` is the storage-engine half only
+(the system half is `../hld/case_studies/design_metrics_monitoring.md`).
 
 ---
 
@@ -126,6 +151,13 @@ and a 6-week Study Plan (prose; no path impact).
 |-------|---------------|----------|
 | ACID transactions | `database_fundamentals/` | `distributed_transactions/` |
 | B+tree internals | `storage_engines_internals/` | `indexing_deep_dive/`, `postgresql_internals/` |
+| WAL, ARIES, checkpoints | `logging_recovery_and_checkpointing/` | `storage_engines_internals/`, `postgresql_internals/`, `mysql_innodb_internals/`, `backup_recovery_and_disaster_recovery/`, `../cs_fundamentals/file_systems_and_persistent_storage/` |
+| Join algorithms, executor | `query_execution_and_join_algorithms/` | `sql_query_optimization/`, `postgresql_internals/planner_and_parallel_execution.md`, `analytical_databases_and_olap/` |
+| DynamoDB | `dynamodb_deep_dive/` | `key_value_stores/`, `case_studies/design_dynamodb_single_table_order_service/` |
+| MongoDB internals | `mongodb_internals/` | `document_databases/`, `replication_and_high_availability/`, `sharding_and_partitioning/` |
+| Dimensional modeling, SCDs | `data_warehouse_modeling/` | `analytical_databases_and_olap/`, `lakehouse_and_table_formats/`, `case_studies/design_data_warehouse_and_semantic_layer/` |
+| Valid / transaction time | `temporal_and_bitemporal_data/` | `data_warehouse_modeling/`, `../hld/event_sourcing_cqrs/` |
+| TSDB storage layer | `time_series_databases/` | `case_studies/design_metrics_platform/`, `../hld/case_studies/design_metrics_monitoring.md` |
 | Raft consensus | `consistency_models_and_consensus/` | `newsql_and_distributed_sql/`, `replication_and_high_availability/` |
 | Outbox pattern | `distributed_transactions/` | `polyglot_persistence_patterns/` |
 | Connection pool | `connection_pool_management/` | `../backend/connection_pooling_deep_dive/` |

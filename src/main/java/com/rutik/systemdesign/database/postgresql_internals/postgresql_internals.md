@@ -6,6 +6,8 @@
 > changes several long-standing *defaults* plus the bloat story this module spends most of §6 on. Read §11.1 before you plan an
 > upgrade.
 
+> **See also:** [Query Execution and Join Algorithms](../query_execution_and_join_algorithms/query_execution_and_join_algorithms.md) (Volcano vs vectorized execution, nested-loop, sort-merge and hash joins, spills and memory grants); [Logging, Recovery and Checkpointing](../logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) (the WAL rules, ARIES redo and undo, checkpoints and group commit).
+
 ## 1. Concept Overview
 
 PostgreSQL is a fully ACID-compliant, multi-process relational database with an extensible architecture. Understanding its internals — process model, VACUUM mechanics, query planner, replication, partitioning, and extensions — is essential for building high-throughput production systems and diagnosing performance issues.

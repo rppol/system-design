@@ -1,5 +1,7 @@
 # Distributed Transactions
 
+> **See also:** [DynamoDB Deep Dive](../dynamodb_deep_dive/dynamodb_deep_dive.md) (partitions, capacity arithmetic, single-table design and Global Tables); [Design a DynamoDB Single-Table Order Service](../case_studies/design_dynamodb_single_table_order_service/design_dynamodb_single_table_order_service.md) (case study: access-pattern-first keys, hot partition keys, idempotent order placement).
+
 ## 1. Concept Overview
 
 A distributed transaction is an atomic operation spanning multiple independent services, databases, or nodes. ACID guarantees (atomicity, consistency, isolation, durability) that are trivially enforced within a single database become fundamentally hard when data lives across service boundaries. The core challenge: no single node controls all the resources, so "commit or abort together" requires coordination, and coordination introduces failure scenarios that cannot be fully eliminated.

@@ -1,5 +1,7 @@
 # Replication and High Availability
 
+> **See also:** [Logging, Recovery and Checkpointing](../logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) (the WAL rules, ARIES redo and undo, checkpoints and group commit); [DynamoDB Deep Dive](../dynamodb_deep_dive/dynamodb_deep_dive.md) (partitions, capacity arithmetic, single-table design and Global Tables); [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction).
+
 ## 1. Concept Overview
 
 Replication is the process of maintaining copies of data on multiple database servers so that the system continues to function when individual nodes fail. High availability (HA) combines replication with automated failover to eliminate (or minimize) downtime from hardware failures, software crashes, or planned maintenance. The key tension is between consistency (synchronous replication = zero data loss, high latency) and availability/performance (asynchronous replication = low latency, potential data loss on failover).

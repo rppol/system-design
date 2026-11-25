@@ -10,6 +10,8 @@
 > subsection — this module is named for the wide-column *category*, not only for Cassandra.
 > Behavior gated to a specific release is tagged inline, e.g. `[5.0]`, `[6.0-alpha]`.
 
+> **See also:** [DynamoDB Deep Dive](../dynamodb_deep_dive/dynamodb_deep_dive.md) (partitions, capacity arithmetic, single-table design and Global Tables); [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner).
+
 ## 1. Concept Overview
 
 Wide-column databases (also called column-family stores) store data in rows with dynamic columns, where different rows can have different columns. Apache Cassandra is the dominant open-source wide-column database, offering leaderless distributed architecture, tunable consistency, and linear scalability. Unlike relational tables, Cassandra's data model is designed around query patterns, not entity relationships.
