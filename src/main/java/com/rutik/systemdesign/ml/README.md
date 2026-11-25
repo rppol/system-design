@@ -200,20 +200,20 @@ See [`case_studies/cross_cutting/cross_cutting.md`](case_studies/cross_cutting/c
 
 ## Case Studies (27)
 
-All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–27 use the 11-section principal template (same format as LLM case studies). See [`case_studies/case_studies.md`](case_studies/case_studies.md) for the full learning-path index with dependency map and interview prep shortcuts.
+All case studies are in `case_studies/`. All 27 use the 11-section principal template (same format as LLM case studies); studies #1–10 moved to it from the old 12-section layout on 2026-11-25. See [`case_studies/case_studies.md`](case_studies/case_studies.md) for the full learning-path index with dependency map and interview prep shortcuts.
 
 | # | Case Study | Core ML Concepts | Template | Link |
 |---|-----------|-----------------|----------|------|
-| 1 | Design a Recommendation Engine | Two-tower retrieval, ANN, ranking, A/B testing, feature store | Legacy | [design_recommendation_engine](case_studies/design_recommendation_engine.md) |
-| 2 | Design a Fraud Detection System | Supervised learning, class imbalance, real-time inference, concept drift, graph features | Legacy | [design_fraud_detection](case_studies/design_fraud_detection.md) |
-| 3 | Design a Search Ranking System | Learning to rank, query understanding, feature engineering, online evaluation, BM25 + ML blend | Legacy | [design_search_ranking](case_studies/design_search_ranking.md) |
-| 4 | Design an Image Classification Pipeline | CNN, transfer learning, data augmentation, distributed training, model registry, serving | Legacy | [design_image_classification_pipeline](case_studies/design_image_classification_pipeline.md) |
-| 5 | Design an Ads Click Prediction System | Logistic regression, GBDT, DLRM, sparse embeddings, calibration, low-latency serving | Legacy | [design_ads_click_prediction](case_studies/design_ads_click_prediction.md) |
-| 6 | Design an Anomaly Detection System | Unsupervised baselines, isolation forest, autoencoders, streaming detection, alerting | Legacy | [design_anomaly_detection](case_studies/design_anomaly_detection.md) |
-| 7 | Design a Demand Forecasting System | Time series, ARIMA, Prophet, LightGBM, hierarchical forecasting, uncertainty quantification | Legacy | [design_demand_forecasting](case_studies/design_demand_forecasting.md) |
-| 8 | Design a Content Feed Ranking System | Engagement prediction, multi-objective ranking, explore-exploit, position bias correction | Legacy | [design_content_feed_ranking](case_studies/design_content_feed_ranking.md) |
-| 9 | Design Autonomous Driving Perception | Multi-sensor fusion, object detection, BEV representation, safety constraints, latency budget | Legacy | [design_autonomous_driving_perception](case_studies/design_autonomous_driving_perception.md) |
-| 10 | Design an ML Platform | Feature store, training orchestration, model registry, serving infrastructure, experiment tracking | Legacy | [design_ml_platform](case_studies/design_ml_platform.md) |
+| 1 | Design a Recommendation Engine | Two-tower retrieval, ANN, ranking, A/B testing, feature store | Principal | [design_recommendation_engine](case_studies/design_recommendation_engine.md) |
+| 2 | Design a Fraud Detection System | Supervised learning, class imbalance, real-time inference, concept drift, graph features | Principal | [design_fraud_detection](case_studies/design_fraud_detection.md) |
+| 3 | Design a Search Ranking System | Learning to rank, query understanding, feature engineering, online evaluation, BM25 + ML blend | Principal | [design_search_ranking](case_studies/design_search_ranking.md) |
+| 4 | Design an Image Classification Pipeline | CNN, transfer learning, data augmentation, distributed training, model registry, serving | Principal | [design_image_classification_pipeline](case_studies/design_image_classification_pipeline.md) |
+| 5 | Design an Ads Click Prediction System | Logistic regression, GBDT, DLRM, sparse embeddings, calibration, low-latency serving | Principal | [design_ads_click_prediction](case_studies/design_ads_click_prediction.md) |
+| 6 | Design an Anomaly Detection System | Unsupervised baselines, isolation forest, autoencoders, streaming detection, alerting | Principal | [design_anomaly_detection](case_studies/design_anomaly_detection.md) |
+| 7 | Design a Demand Forecasting System | Time series, ARIMA, Prophet, LightGBM, hierarchical forecasting, uncertainty quantification | Principal | [design_demand_forecasting](case_studies/design_demand_forecasting.md) |
+| 8 | Design a Content Feed Ranking System | Engagement prediction, multi-objective ranking, explore-exploit, position bias correction | Principal | [design_content_feed_ranking](case_studies/design_content_feed_ranking.md) |
+| 9 | Design Autonomous Driving Perception | Multi-sensor fusion, object detection, BEV representation, safety constraints, latency budget | Principal | [design_autonomous_driving_perception](case_studies/design_autonomous_driving_perception.md) |
+| 10 | Design an ML Platform | Feature store, training orchestration, model registry, serving infrastructure, experiment tracking | Principal | [design_ml_platform](case_studies/design_ml_platform.md) |
 | 11 | Design a Churn Prediction System | Temporal CV, GBDT vs survival vs uplift, T-learner, calibration for budgeting, SHAP adverse-action | Principal | [design_churn_prediction](case_studies/design_churn_prediction.md) |
 | 12 | Design a Credit Risk Scoring System | WOE/scorecard, monotonic constraints, reject inference, ECOA/FCRA adverse-action, fairness audit | Principal | [design_credit_risk_scoring](case_studies/design_credit_risk_scoring.md) |
 | 13 | Design an ETA Prediction System | Quantile regression, cyclic geo features, real-time traffic pipeline, p90 coverage SLO | Principal | [design_eta_prediction](case_studies/design_eta_prediction.md) |

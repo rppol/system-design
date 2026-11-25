@@ -344,6 +344,14 @@ Why `epsilon` exists: with `epsilon = 0` the node's own vector is just one more 
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     subgraph DB[Relational database]
         C[(customers)]
         O[(orders)]
@@ -356,6 +364,11 @@ flowchart LR
     G --> S
     S --> H[Heterogeneous GNN<br/>per-table encoders]
     H --> Y[Prediction per entity]
+
+    class C,O,P base
+    class G,S mathOp
+    class T,Y io
+    class H train
 ```
 
 **RelBench** (Robinson et al., NeurIPS 2024 Datasets and Benchmarks) is the benchmark for this: real databases (Formula 1, Amazon reviews, Stack Exchange, clinical trials, and others) with entity classification, regression, and recommendation tasks, each defined by a training table of (entity, seed time, label). Its user study found the RDL model matched a data scientist's hand-built LightGBM features with about an order of magnitude less human time and code. RelBench v2 (January 2026) added four databases (SALT, RateBeer, arXiv, MIMIC-IV), 36 tasks, and an autocomplete task type; v3 (August 2026) loads datasets and tasks from Hugging Face and adds a leaderboard with automated submissions.
@@ -921,7 +934,7 @@ In the broken split, each training node aggregates features from test-period nei
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| PyTorch Geometric (PyG) | GNN layers, datasets, samplers | Industry standard. 2.8 (June 2026) supports PyTorch 2.9-2.12, adds `from_relbench`, and deprecates torch-cluster and torch-spline-conv in favor of pyg-lib 0.6.0+; 2.7 added `torch_geometric.llm` and deprecated `torch_geometric.distributed` |
+| PyTorch Geometric (PyG) | GNN layers, datasets, samplers | Industry standard. Latest is 2.8.1 (2026-10-06, bug fixes only). 2.8 (June 2026) supports PyTorch 2.9-2.12 with prebuilt wheels up to CUDA 13.2, adds `from_relbench`, and deprecates torch-cluster and torch-spline-conv in favor of pyg-lib 0.7.0; 2.7 added `torch_geometric.llm` and deprecated `torch_geometric.distributed`. No release lists PyTorch 2.13-2.15 yet (checked 2026-11-25), so pin PyTorch 2.12 for PyG work that needs the accelerated extensions |
 | DGL (Deep Graph Library) | Alternative to PyG with its own message-passing API | Last release v2.4.0 (September 2024), built for PyTorch up to 2.4; PyG is the active choice for new work |
 | NetworkX | Graph construction, analysis | CPU-only; preprocessing |
 | OGB (Open Graph Benchmark) | Benchmark datasets (ogbn-arxiv, ogbg-molhiv) | Standard eval protocol |

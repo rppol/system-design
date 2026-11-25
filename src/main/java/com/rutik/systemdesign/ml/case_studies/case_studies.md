@@ -1,6 +1,6 @@
 # ML Case Studies — Learning Path
 
-Twenty-seven end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. Ten use the legacy 12-section template (rich, detailed). Seventeen use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
+Twenty-seven end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. All twenty-seven use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview); the ten oldest moved to it from a 12-section layout on 2026-11-25. Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
 
 ---
 
@@ -234,3 +234,13 @@ Track completion status across sessions.
 | `design_llm_hybrid_support_triage.md` | done | 11-section principal template, 15 Q&As |
 | `design_experimentation_platform.md` | done | 11-section principal template, 24 Q&As |
 | `design_document_ai_extraction.md` | done | 11-section principal template, 13 Q&As |
+| `design_recommendation_engine.md` | done | 11-section principal template (migrated 2026-11-25), 11 Q&As |
+| `design_fraud_detection.md` | done | 11-section principal template (migrated 2026-11-25), 11 Q&As |
+| `design_search_ranking.md` | done | 11-section principal template (migrated 2026-11-25), 11 Q&As |
+| `design_image_classification_pipeline.md` | done | 11-section principal template (migrated 2026-11-25), 10 Q&As |
+| `design_ads_click_prediction.md` | done | 11-section principal template (migrated 2026-11-25), 11 Q&As |
+| `design_anomaly_detection.md` | done | 11-section principal template (migrated 2026-11-25), 11 Q&As |
+| `design_demand_forecasting.md` | done | 11-section principal template (migrated 2026-11-25), 11 Q&As |
+| `design_content_feed_ranking.md` | done | 11-section principal template (migrated 2026-11-25), 10 Q&As |
+| `design_autonomous_driving_perception.md` | done | 11-section principal template (migrated 2026-11-25), 10 Q&As |
+| `design_ml_platform.md` | done | 11-section principal template (migrated 2026-11-25), 10 Q&As |

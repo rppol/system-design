@@ -33,17 +33,21 @@ Key insight: the goal is not to log more data — it is to log the right data so
 
 ## 3. Core Principles
 
-**Log everything at run start, not at run end**: hyperparameters, dataset version, git SHA, and environment must be captured before training begins. A crash mid-run should still leave a partial record.
+**Log the inputs at run start, not at run end.** Hyperparameters, dataset version, git SHA and environment are recorded before training begins, so a crash mid-run still leaves a record of what was attempted. Metrics stream during the run; artifacts land at checkpoints.
 
-**Immutability of runs**: a completed run's logged data should never be edited. If you want to add notes, use tags or a separate linked artifact — don't mutate the original metrics.
+**Immutability of runs.** A finished run's logged data is never edited. Add notes as tags or linked artifacts, and rerun instead of overwriting; mutable history makes every comparison suspect.
 
-**Metric naming consistency**: use the same metric names across all experiments (val_loss not validation_loss in some runs, val_loss in others). Schema drift in metric names makes comparison impossible.
+**A run is reproducible only if its data is pinned.** Log a content hash or table version of the training data (a DVC hash, a Delta or Iceberg snapshot ID), not just a path; the same path can hold different data next week.
 
-**Artifact versioning**: every model checkpoint saved must be linked to the run that produced it. Never save checkpoints to a flat directory — version by run ID and epoch.
+**Consistent metric names and definitions.** Use one name per metric across all experiments (`val_loss`, never `validation_loss` in some runs) and one definition (same split, same averaging). Drift in names or definitions makes comparison impossible.
 
-**Reproducibility over ergonomics**: it is better to log too much than too little. The cost of storage is negligible; the cost of being unable to reproduce a result is hours of re-training.
+**Artifact lineage.** Every checkpoint and model links to the run that produced it and is versioned by run ID and step, and every registry version points back to that run. Never save checkpoints to a flat shared directory.
 
-**Separation of concerns**: the training loop should not know which tracking backend is used. Abstract the logging calls behind a thin interface so you can swap MLflow for W&B without modifying training code.
+**Compare on the same evaluation set.** A leaderboard is only valid when every run is scored on the same frozen evaluation split with the same code; version the evaluation set and log its ID with each metric.
+
+**Log too much rather than too little.** Storage is cheap compared with retraining to recover a lost detail. Log configs as artifacts (for example with `mlflow.log_dict`), not as one huge parameter string.
+
+**Separation of concerns.** The training loop should not know which tracking backend is used. Wrap logging calls behind a thin interface so MLflow can be swapped for W&B, or both used, without changing training code.
 
 ---
 
@@ -723,7 +727,7 @@ The broken run looks complete in the UI: it has a data parameter and the right m
 | pip-tools / `pip lock` | Environment locking | `pip-compile --generate-hashes` for requirements files; `pip lock` (pip 25.1+, experimental) writes `pylock.toml` |
 | Delta Lake | Data versioning | ACID Parquet, time travel queries |
 | Git LFS | Large file versioning | Simple but not ML-optimized |
-| Pachyderm (HPE) | Data versioning | Kubernetes-native, strong lineage |
+| Pachyderm (HPE) | Data versioning | Kubernetes-native, strong lineage; open-source repo inactive since its last release, v2.12.2 (2025-01-15, checked 2026-11-25), so treat it as legacy and prefer DVC or lakeFS for new work |
 | W&B Artifacts | Artifact versioning | Lineage graph between datasets + models |
 | Marquez / OpenLineage | Data lineage | Vendor-neutral lineage standard |
 

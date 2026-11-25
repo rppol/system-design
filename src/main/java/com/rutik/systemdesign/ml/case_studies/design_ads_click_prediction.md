@@ -1,9 +1,27 @@
 # Design an Ads Click-Through Rate (CTR) Prediction System
-## Problem Statement
+## Intuition
+
+> CTR prediction is the exchange rate of an ad auction. Bids are in dollars per click, inventory is sold per impression, and the predicted click-through rate converts one into the other a million times a second. If the exchange rate is wrong by 2x, every trade is priced wrong.
+
+**Key insight:** in ads, calibration is a revenue property, not a nicety. A generalized second-price auction ranks by bid x pCTR and charges the winner the runner-up's score divided by the winner's own pCTR, so a pCTR twice too high halves the price. That is why the metrics of record are Normalized Entropy and the calibration ratio, not AUC, and why any change to negative sampling must change the calibration correction with it (§9 Failure 2).
+
+Mental model: three layers. Sparse IDs are hashed into embedding tables held in Redis. A DeepFM network on GPU scores about 20 candidate ads per auction. A calibration layer (the negative-sampling correction, then Platt scaling) turns scores into the probabilities the auction prices with.
+
+Why this system exists: 86.4B served impressions a day at about 1% CTR is about 864M clicks a day. A 1% calibration error is a 1% pricing error on each of them.
+
+---
+
+## 1. Requirements Clarification
+
 
 Design a CTR prediction system for online advertising. For every ad auction (1 million per second), predict P(click | user, ad, context) within 10ms. Training data consists of roughly 1-2 billion labelled impressions per day after negative subsampling (the capacity model in §10 derives ~1.72B from the served-impression rate, which is the number to size against). The model must be well-calibrated — predicted CTR should closely match actual observed CTR at the same predicted score level (a predicted CTR of 5% should correspond to a 5% actual click rate in aggregate). Miscalibration directly distorts auction mechanics: in a generalized second-price auction ads are *ranked* by bid × predicted CTR, and the winner is *charged* the runner-up's rank score divided by the winner's own predicted CTR — so a 2x calibration error halves or doubles what the platform collects per impression.
 
-Constraints:
+**Functional requirements:**
+- Score about 20 candidate ads per auction and return a calibrated pCTR for each.
+- Train daily and fine-tune hourly; a campaign launched today gets a usable prediction today.
+- Report calibration ratio and NE per advertiser and per score bucket.
+
+**Non-functional requirements:**
 - 1M QPS, <10ms P99 end-to-end latency
 - ~1-2B training examples per day after subsampling (sparse: 0.1-2% click rate)
 - Billions of unique user/ad/publisher IDs — sparse ID features dominate
@@ -11,9 +29,60 @@ Constraints:
 - Daily retraining minimum; hourly preferred (fresh data = higher accuracy on new campaigns)
 - Model size: embedding tables can be hundreds of GB — too large for GPU serving
 
+**Out of scope:**
+- The auction and pricing logic itself, and budget pacing.
+- Conversion prediction (an extension, discussed in §11).
+- Creative generation and ad review.
+
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+| Quantity | Derivation | Result |
+|---|---|---|
+| Auctions per day | 1M/s x 86,400 s | 86.4B |
+| Model scoring calls | ~20 candidates per auction | 20M scores/s, 1.73T/day (sizes the GPU fleet) |
+| Served impressions | 1 per auction | 86.4B/day (sizes storage and training) |
+| Clicks | ~1% of impressions | ~864M/day |
+| Training rows after sampling | all positives + 1% of negatives | ~1.72B/day |
+| Embedding table per field | 2^24 buckets x 16 dims x 4 bytes | 1 GB, 10 GB for 10 fields |
+
+The second and third rows differ by 20x, and conflating them is the most common sizing error in this design: scoring calls size the GPUs, served impressions size the logs and the training set.
+
+### Data Volume Projections
+
+```
+An impression is an ad that was SERVED, not an ad that was scored. One auction scores
+~20 candidates and serves 1. Conflating the two inflates every downstream number 20x.
+
+Year 0 (current):
+  1M auctions/sec x 86400 sec        = 86.4B auctions/day
+  20 candidates scored per auction   = 1.73T scoring calls/day  (sizes the GPU fleet)
+  1 ad served per auction            = 86.4B impressions/day    (sizes storage/training)
+  Click rate ~1%                     = 864M clicks/day
+  Log size per impression: ~500 bytes (hashed features + metadata)
+  Daily log: 86.4B x 500B = 43.2TB/day (Kafka + Parquet)
+  After negative subsampling (keep ALL 864M positives + 1% of 85.5B negatives = 855M):
+    ~1.72B examples/day, ~0.86TB/day training data
+    Note this is ~2% of the raw log, not 1% — the positives are never dropped.
+  Model artifact (embedding tables): 10 fields x 1GB = 10GB per model version
+
+Year 1 (30% traffic growth):
+  1.3M auctions/sec, 112B auctions/day, 112B impressions/day
+  Training data (subsampled): ~1.1TB/day, ~2.2B examples/day
+  Embedding tables: 10GB (unchanged — bucket sizes fixed)
+
+Year 3 (3x traffic growth):
+  3M auctions/sec, 259B auctions/day, 259B impressions/day
+  Kafka throughput: 3M impressions/sec x 500B = 1.5GB/sec -> 30-partition cluster
+  Training data (subsampled): ~2.6TB/day, ~5.2B examples/day
+  Full log: 259B x 500B = 130TB/day; S3 30-day retention = 3.9PB
+  Compressed (10:1 Parquet compression): ~390TB for the 30-day window
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -91,25 +160,12 @@ Redis embedding fetch (2ms) and GPU inference (3ms) dominate while feature hashi
 
 ---
 
-## Key Design Decisions
+## 4. Component Deep Dives
 
-**Feature hashing over explicit vocabulary**: With billions of unique user IDs and ad IDs, maintaining a lookup vocabulary table is costly (memory, update latency). Feature hashing maps any ID to a fixed-size bucket via MurmurHash(field:id) % bucket_count. No vocabulary management is needed — new users and ads are handled automatically on day 1. Collisions are the price, and they are not negligible: with n distinct IDs into m buckets the share of IDs sharing a bucket with at least one other is about 1 - e^(-n/m). At m = 2^24 (16.8M) that is ~6% for 1M ad IDs but effectively 100% for a billion user IDs — every user bucket is then a blend of ~60 users. That is an accepted design choice for user_id (the embedding degrades to a coarse behavioural cluster, and per-user signal is carried by other features), not evidence that collisions are rare. Size the ad and publisher tables so their occupancy stays low; do not assume the same holds for user_id.
+Hourly fine-tuning trains on impressions whose features were logged at serve time; joining labels to features recomputed later would leak post-impression signal. The rule is in [Feature Store and Point-in-Time Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md).
 
-**DeepFM over Wide & Deep**: Both are standard architectures for CTR. DeepFM replaces the "wide" linear component of Wide & Deep with a Factorization Machine (FM) component that captures all pairwise embedding interactions. The FM is parameter-efficient: it does not learn a separate weight per pair (which would be O(d^2) parameters) but instead uses the dot product of embedding vectors, sharing parameters across pairs. This is crucial when there are 100+ feature fields.
 
-**Adagrad for sparse features**: Sparse ID features (user_id, ad_id) get gradient updates only when they appear in a batch. SGD with uniform LR over-adjusts frequent features (appearing in every batch) and under-adjusts rare features. Adagrad maintains per-parameter accumulated squared gradient, effectively giving rare features a higher learning rate — exactly the right behavior. The dense MLP layers use Adam (adaptive but without sparsity concern).
-
-**Negative downsampling with calibration correction**: At 1% CTR, 99% of training examples are negatives. Training on all negatives is wasteful (100B non-click examples/day). Subsample negatives at rate q = 1% (keep 1 in 100 non-clicks). This changes the training distribution. To restore calibration, apply correction at inference: calibrated_ctr = raw_ctr / (raw_ctr + (1 - raw_ctr) / q). Platt scaling absorbs this correction automatically if calibrated on the original (unsubsampled) distribution.
-
-**Embedding table in Redis, not GPU**: At embedding dimension 16 and 2^24 buckets per feature, each feature table is 16 * 16M * 4 bytes = 1GB. With 10 feature fields, total is 10GB per table set. Multiple versions during A/B testing mean 20-40GB of embedding tables. That does not literally exceed an 80GB A100's HBM, and the honest reason for keeping it off the GPU is different: HBM is the scarcest resource in the serving fleet, and spending half of it on a static lookup table means every inference GPU must also carry a full replica, so the table cost scales with GPU count instead of being shared. An external store also lets embeddings be updated by the hourly training job without redeploying the inference fleet. Redis Cluster serves the lookups in 0.5-1ms using pipelined batch GETs; the cluster is sized by read throughput, not by the 10GB of data.
-
-**Per-advertiser calibration**: Global calibration may hide per-advertiser miscalibration. A new advertiser with no historical data gets the global calibration factor, which may be wrong for their ad creative. Monitor calibration ratio (predicted/actual) per advertiser daily; apply a per-advertiser scalar correction factor if ratio deviates >10%.
-
----
-
-## Implementation
-
-### Feature Hashing
+### 4.1 Feature Hashing
 
 ```python
 import hashlib
@@ -193,7 +249,7 @@ class FeatureHasher:
         return {"field_ids": field_ids, "indices": indices}
 ```
 
-### DeepFM Architecture (PyTorch)
+### 4.2 DeepFM Architecture (PyTorch)
 
 ```python
 import torch
@@ -355,7 +411,7 @@ def train_deepfm(
         print(f"Epoch {epoch+1}: loss={total_loss/len(train_loader):.5f}")
 ```
 
-### Calibration with Platt Scaling
+### 4.3 Calibration with Platt Scaling
 
 ```python
 import numpy as np
@@ -457,7 +513,7 @@ def evaluate_calibration_by_score_bucket(
         print(f"{i+1:>10} {pred_mean:>10.4f} {actual_mean:>12.4f} {ratio:>8.3f}{status}")
 ```
 
-### Online Serving (Embedding Lookup from Redis)
+### 4.4 Online Serving (Embedding Lookup from Redis)
 
 ```python
 import redis
@@ -551,9 +607,149 @@ class EmbeddingStore:
         return calibrated.tolist()
 ```
 
+### 4.5 Field-Namespaced Hashing — Broken Then Fixed
+
+```python
+# BROKEN: Feature hashing without field namespacing
+# user_id=12345 and ad_id=12345 hash to the same bucket
+# Their embeddings are summed/averaged, causing cross-field contamination
+
+def feature_hash_broken(field_name: str, value: str, num_buckets: int) -> int:
+    # BUG: only hashes the value, not the field name
+    # user_id="grocery_ads" and ad_id="grocery_ads" -> same bucket!
+    import hashlib
+    return int(hashlib.md5(value.encode()).hexdigest(), 16) % num_buckets
+
+
+# FIX: Always include field name in hash key to prevent cross-field collision
+
+def feature_hash_correct(field_name: str, value: str, num_buckets: int) -> int:
+    """
+    Include field_name in hash key to prevent cross-field collision.
+    user_id:grocery_ads -> different bucket from ad_id:grocery_ads
+    """
+    import hashlib
+    key = f"{field_name}:{value}"
+    return int(hashlib.md5(key.encode()).hexdigest(), 16) % num_buckets
+
+
+def verify_no_crossfield_collision(
+    field_names: list[str],
+    test_values: list[str],
+    num_buckets: int,
+) -> bool:
+    """Verify that same value in different fields hashes to different buckets."""
+    for value in test_values:
+        buckets = {
+            field: feature_hash_correct(field, value, num_buckets)
+            for field in field_names
+        }
+        unique_buckets = len(set(buckets.values()))
+        if unique_buckets < len(field_names):
+            print(f"Cross-field collision for value='{value}': {buckets}")
+            return False
+    return True
+```
+
+### 4.6 Negative Downsampling Correction — Broken Then Fixed
+
+```python
+# BROKEN: Trained on 1% negative sample but serving without calibration correction
+# Model trained on P(click | sampled_data) where negatives are 100x underrepresented
+# Raw model output is 100x too high (inflated CTR estimates)
+
+import numpy as np
+
+
+def train_with_sampling_broken(
+    features: np.ndarray,
+    labels: np.ndarray,
+    negative_sample_rate: float = 0.01,
+) -> "LogisticRegression":
+    """BUG: Sample negatives, train model, deploy without correction."""
+    from sklearn.linear_model import LogisticRegression
+
+    positive_mask = labels == 1
+    negative_mask = labels == 0
+    neg_sample = np.random.choice(
+        np.where(negative_mask)[0],
+        size=int(negative_mask.sum() * negative_sample_rate),
+        replace=False,
+    )
+    sampled_idx = np.concatenate([np.where(positive_mask)[0], neg_sample])
+
+    X_sampled = features[sampled_idx]
+    y_sampled = labels[sampled_idx]
+
+    model = LogisticRegression()
+    model.fit(X_sampled, y_sampled)
+    # Raw model.predict_proba output is ~100x inflated for the true click rate
+    return model
+
+
+# FIX: Apply calibration correction at inference time
+# If negative_sample_rate=q, apply: p_corrected = p / (p + (1 - p) / q)
+
+def calibrate_for_sampling(
+    raw_proba: np.ndarray,
+    negative_sample_rate: float = 0.01,
+) -> np.ndarray:
+    """
+    Correct for negative downsampling bias.
+    Derivation: P(click|all) = P(click|sampled) / (P(click|sampled) + (1-P(click|sampled))/q)
+    where q = negative_sample_rate.
+
+    At raw_proba=0.50, q=0.01: corrected = 0.5 / (0.5 + 0.5/0.01) = 0.5 / 50.5 ≈ 0.0099 (≈ 1%)
+    This correctly converts the overestimated 50% to a realistic ~1%.
+    """
+    p = raw_proba
+    q = negative_sample_rate
+    return p / (p + (1.0 - p) / q)
+```
+
 ---
 
-## ML Components Used
+## 5. Design Decisions & Tradeoffs
+
+
+**Feature hashing over explicit vocabulary**: With billions of unique user IDs and ad IDs, maintaining a lookup vocabulary table is costly (memory, update latency). Feature hashing maps any ID to a fixed-size bucket via MurmurHash(field:id) % bucket_count. No vocabulary management is needed — new users and ads are handled automatically on day 1. Collisions are the price, and they are not negligible: with n distinct IDs into m buckets the share of IDs sharing a bucket with at least one other is about 1 - e^(-n/m). At m = 2^24 (16.8M) that is ~6% for 1M ad IDs but effectively 100% for a billion user IDs — every user bucket is then a blend of ~60 users. That is an accepted design choice for user_id (the embedding degrades to a coarse behavioural cluster, and per-user signal is carried by other features), not evidence that collisions are rare. Size the ad and publisher tables so their occupancy stays low; do not assume the same holds for user_id.
+
+**DeepFM over Wide & Deep**: Both are standard architectures for CTR. DeepFM replaces the "wide" linear component of Wide & Deep with a Factorization Machine (FM) component that captures all pairwise embedding interactions. The FM is parameter-efficient: it does not learn a separate weight per pair (which would be O(d^2) parameters) but instead uses the dot product of embedding vectors, sharing parameters across pairs. This is crucial when there are 100+ feature fields.
+
+**Adagrad for sparse features**: Sparse ID features (user_id, ad_id) get gradient updates only when they appear in a batch. SGD with uniform LR over-adjusts frequent features (appearing in every batch) and under-adjusts rare features. Adagrad maintains per-parameter accumulated squared gradient, effectively giving rare features a higher learning rate — exactly the right behavior. The dense MLP layers use Adam (adaptive but without sparsity concern).
+
+**Negative downsampling with calibration correction**: At 1% CTR, 99% of training examples are negatives. Training on all negatives is wasteful (100B non-click examples/day). Subsample negatives at rate q = 1% (keep 1 in 100 non-clicks). This changes the training distribution. To restore calibration, apply correction at inference: calibrated_ctr = raw_ctr / (raw_ctr + (1 - raw_ctr) / q). Platt scaling absorbs this correction automatically if calibrated on the original (unsubsampled) distribution.
+
+**Embedding table in Redis, not GPU**: At embedding dimension 16 and 2^24 buckets per feature, each feature table is 16 * 16M * 4 bytes = 1GB. With 10 feature fields, total is 10GB per table set. Multiple versions during A/B testing mean 20-40GB of embedding tables. That does not literally exceed an 80GB A100's HBM, and the honest reason for keeping it off the GPU is different: HBM is the scarcest resource in the serving fleet, and spending half of it on a static lookup table means every inference GPU must also carry a full replica, so the table cost scales with GPU count instead of being shared. An external store also lets embeddings be updated by the hourly training job without redeploying the inference fleet. Redis Cluster serves the lookups in 0.5-1ms using pipelined batch GETs; the cluster is sized by read throughput, not by the 10GB of data.
+
+**Per-advertiser calibration**: Global calibration may hide per-advertiser miscalibration. A new advertiser with no historical data gets the global calibration factor, which may be wrong for their ad creative. Monitor calibration ratio (predicted/actual) per advertiser daily; apply a per-advertiser scalar correction factor if ratio deviates >10%.
+
+**Tradeoff summary:**
+
+| Decision | Chosen | Alternative | Reasoning |
+|----------|--------|-------------|-----------|
+| Model | DeepFM | Wide & Deep, DLRM | DeepFM: FM component more parameter-efficient than wide linear; comparable to DLRM |
+| Feature representation | Feature hashing | Vocabulary lookup table | Hashing: no vocabulary maintenance, handles new IDs day-zero; ~6% of 1M ad IDs share a bucket at 2^24, accepted in exchange for zero vocabulary state |
+| Calibration | Platt scaling | Isotonic regression, temperature scaling | Platt: monotonic, low variance, 2 parameters; isotonic is also monotone but step-shaped and needs more calibration data |
+| Embedding storage | Redis Cluster | GPU HBM, in-process memory | Redis: one shared copy instead of a full replica in every inference GPU's HBM, and refreshable without redeploying the fleet |
+| Negative sampling | Subsample 99% negatives | Full dataset | Keeps every positive plus 1-in-100 negatives: ~2% of the raw log, ~50x less training data, with the q-correction restoring calibration |
+| Retraining frequency | Daily full + hourly fine-tune | Daily only | Hourly fine-tune on latest 3h data captures new campaign launches same day |
+
+---
+
+## 6. Real-World Implementations
+
+**Google (FTRL-Proximal at production scale):** McMahan et al., "Ad Click Prediction: a View from the Trenches" (KDD 2013), describe a deployed CTR system trained online with the FTRL-Proximal algorithm, chosen for its sparsity and convergence properties, with per-coordinate learning rates. They also cover memory-saving tricks, confidence estimates for predicted probabilities, calibration methods and automated feature management, and list ideas that did not pay off. Per-coordinate learning rates are the same idea as the Adagrad choice in §5: rare features need larger steps than frequent ones.
+
+**Facebook (trees plus logistic regression, and freshness):** He et al., "Practical Lessons from Predicting Clicks on Ads at Facebook" (ADKDD 2014), working at over 750 million daily active users and over 1 million active advertisers, combined decision trees with logistic regression and beat either method alone by over 3%. Their ranking of what matters carries over directly: the right features (historical information about the user or ad) dominate; data freshness, the learning-rate schedule and sampling improve the model only slightly by comparison. The paper also popularised Normalized Entropy as the headline CTR metric (§11).
+
+**Huawei (DeepFM):** Guo et al., "DeepFM: A Factorization-Machine based Neural Network for CTR Prediction" (IJCAI 2017, arXiv:1703.04247), introduced the architecture in §4.2. Unlike Google's Wide & Deep, its wide (FM) part and deep part share one input, so it needs no hand-built cross features; the paper evaluates it on benchmark and commercial data.
+
+**What transfers and what does not:** all three treat freshness and calibration as first-class concerns. None publishes a latency budget or a cost model, so §2 and §10 are this design's assumptions.
+
+---
+
+## 7. Technologies & Tools
 
 | Component | Technology | Role |
 |-----------|-----------|------|
@@ -571,36 +767,103 @@ class EmbeddingStore:
 
 ---
 
-## Tradeoffs and Alternatives
+## 8. Operational Playbook
 
-| Decision | Chosen | Alternative | Reasoning |
-|----------|--------|-------------|-----------|
-| Model | DeepFM | Wide & Deep, DLRM | DeepFM: FM component more parameter-efficient than wide linear; comparable to DLRM |
-| Feature representation | Feature hashing | Vocabulary lookup table | Hashing: no vocabulary maintenance, handles new IDs day-zero; ~6% of 1M ad IDs share a bucket at 2^24, accepted in exchange for zero vocabulary state |
-| Calibration | Platt scaling | Isotonic regression, temperature scaling | Platt: monotonic, low variance, 2 parameters; isotonic is also monotone but step-shaped and needs more calibration data |
-| Embedding storage | Redis Cluster | GPU HBM, in-process memory | Redis: one shared copy instead of a full replica in every inference GPU's HBM, and refreshable without redeploying the fleet |
-| Negative sampling | Subsample 99% negatives | Full dataset | Keeps every positive plus 1-in-100 negatives: ~2% of the raw log, ~50x less training data, with the q-correction restoring calibration |
-| Retraining frequency | Daily full + hourly fine-tune | Daily only | Hourly fine-tune on latest 3h data captures new campaign launches same day |
+Calibration is the primary production signal here; the bucketed ratio and ECE code below follow [Model Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md). Feature drift and retraining triggers follow [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md), and model promotion uses shadow traffic then an A/B test as in [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md).
+
+### Features That Drift Fastest
+
+| Feature | Drift rate | Reason |
+|---------|-----------|--------|
+| ad_id embedding (new campaigns) | Very high | New campaigns launch daily; old ones end |
+| hour_of_day CTR baseline | High | DST changes; seasonal shopping hours |
+| user interest signal (ad_category) | High | User interests shift; ad content changes |
+| publisher_id (new publishers) | Medium | New app/web inventory enters network |
+| user_age_bucket distribution | Very low | Changes only with data pipeline refresh |
+| device_type distribution | Low | Gradual mobile-to-desktop-back shifts |
+
+### Calibration Monitoring (Primary Signal)
+
+```python
+from dataclasses import dataclass
+import numpy as np
+
+
+@dataclass
+class CalibrationBucket:
+    predicted_ctr_min: float
+    predicted_ctr_max: float
+    num_impressions: int
+    actual_clicks: int
+
+    @property
+    def actual_ctr(self) -> float:
+        return self.actual_clicks / max(self.num_impressions, 1)
+
+    @property
+    def predicted_ctr_midpoint(self) -> float:
+        return (self.predicted_ctr_min + self.predicted_ctr_max) / 2
+
+    @property
+    def calibration_ratio(self) -> float:
+        """Should be ~1.0. >1.05 = overestimating CTR. <0.95 = underestimating."""
+        return self.predicted_ctr_midpoint / max(self.actual_ctr, 1e-6)
+
+
+def compute_ece(buckets: list[CalibrationBucket]) -> float:
+    """Expected Calibration Error: weighted average |predicted - actual| per bucket."""
+    total_impressions = sum(b.num_impressions for b in buckets)
+    ece = sum(
+        (b.num_impressions / total_impressions) * abs(b.predicted_ctr_midpoint - b.actual_ctr)
+        for b in buckets
+    )
+    return ece
+
+
+# Alert thresholds
+CALIBRATION_THRESHOLDS = {
+    "global_ratio_alert": (0.95, 1.05),     # per-5-min window alert
+    "per_bucket_ratio_alert": (0.85, 1.15), # per-score-decile alert
+    "ece_threshold": 0.02,                  # 2% ECE threshold for retraining
+    "brier_score_degradation": 0.005,       # relative to previous model
+}
+```
+
+### Retraining Triggers and Cadence
+
+| Cadence | Trigger | Action |
+|---------|---------|--------|
+| Daily | Scheduled (2 AM UTC) | Full DeepFM retrain + Platt recalibration |
+| Hourly | Scheduled | Incremental fine-tune on last 3h impressions |
+| Every 5min | Calibration ratio outside (0.95, 1.05) | Alert on-call; apply scalar correction factor |
+| Triggered | ECE > 0.02 | Emergency recalibration (Platt refit) |
+| Triggered | NE improvement < 0.5% vs baseline LR | Model may have degraded; investigate |
+| Triggered | Any Redis shard null-rate > 2% | Embedding fallback activated; alert |
+| Triggered | New major advertiser onboarding | Add advertiser prior CTR to fallback table |
+| Weekly | Scheduled | Feature importance audit; hash collision rate check |
+| Monthly | Scheduled | Full calibration audit per advertiser segment |
+
+### Incident runbooks
+
+**Runbook 1 — Calibration ratio outside 0.95-1.05 in a 5-minute window:**
+Mitigation: apply the scalar correction factor (1 / ratio) in serving immediately; it is one config value and is reversible.
+Diagnosis: check that the serving path's sampling rate q and Platt parameters come from the same training run as the model (§9 Failure 2), then check for a traffic-mix change (new publisher, new geography).
+Resolution: refit Platt on fresh unsampled data and remove the scalar.
+
+**Runbook 2 — Redis shard null rate above 2%:**
+Mitigation: the circuit breaker switches affected auctions to the advertiser-prior CTR (§9 Failure 1); confirm it fired.
+Resolution: confirm the cluster client refreshed its slot map; never let a null embedding fall through as a zero vector.
+
+**Runbook 3 — NE improvement over the baseline below 0.5%:**
+Diagnosis: compare the latest hourly fine-tune with the last daily model on the same hour of traffic.
+Mitigation: if the fine-tune is worse, pin serving to the daily model and pause hourly updates.
+
+**Runbook 4 — Effective learning rate of a top-50 field below 1e-6:**
+Resolution: schedule the Adagrad accumulator reset (§9 Failure 3) at the next daily retrain and watch that field's gradient norm recover.
 
 ---
 
-## Interview Discussion Points
-
-**Q: Why is calibration critical for an ad CTR model and how do you achieve it?**
-Calibration is critical because the price charged is divided by the predicted CTR, so any calibration error scales platform revenue per impression directly. Search and display ad auctions are overwhelmingly generalized second-price (GSP), not VCG: GSP is the industry standard, and VCG is the other generalization of Vickrey that most platforms did not adopt. Ads are ranked by rank score = bid × pCTR, and the winner's price per click is the runner-up's rank score divided by the winner's own pCTR: CPC_1 = (bid_2 × pCTR_2) / pCTR_1. Because the winner's pCTR is in the denominator, over-predicting it lowers the price charged: predict 2% when the true rate is 1% and the platform collects half the correct revenue per impression. Under-predict and advertisers are overcharged, cut bids, and fill rate falls. Calibration is achieved by (1) training with proper loss (log-loss directly optimizes calibration), (2) applying Platt scaling on a held-out set to correct systematic over/under-confidence, and (3) monitoring calibration ratio hourly — alert if predicted/actual deviates beyond 5% in any score bucket.
-
-**Q: How does feature hashing work and what are its failure modes?**
-Feature hashing maps a string feature value to an integer bucket via h = hash(field_name + str(value)) % bucket_count. Advantages: no vocabulary needed, handles arbitrary new values, constant memory regardless of cardinality. The failure mode is hash collisions: two different values mapping to the same bucket. The right statistic is not "does any collision exist" (at these scales, always yes) but what share of IDs land in a shared bucket, which is about 1 - e^(-n/m) for n IDs into m buckets. At m = 2^24 = 16.8M buckets with n = 1M unique ad IDs that is 1 - e^(-0.0596) ≈ 5.8%, acceptable because the embedding for a colliding pair is a noisy average of what the two individual embeddings would have been. The same formula shows the design's limit: at a billion user IDs the ratio n/m is ~60 and effectively every bucket is shared, so user_id embeddings are coarse clusters by construction. Using the field name in the hash key prevents cross-field collisions (user_id:123 ≠ ad_id:123).
-
-**Q: How do you handle the latency requirement of 10ms at 1M QPS?**
-The 10ms budget breaks down as: network + load balancing 1ms, feature hashing (in-memory, microseconds) <0.1ms, Redis embedding batch GET 1-2ms, ONNX GPU inference for batch of 100 ads 2-3ms, Platt calibration (scalar multiply, microseconds) <0.1ms, response serialization 0.5ms = ~5ms P50, 8ms P99. The critical optimizations are: (1) batch all ads in one auction together (one Redis call, one GPU kernel launch), (2) keep embeddings in Redis Cluster, which assigns each key to one of 16,384 hash slots by CRC16 (hash slots, not consistent hashing) so a key deterministically lands on one shard — use hash tags to co-locate the keys of a single auction and avoid cross-shard scatter-gather, (3) use ONNX INT8 quantization for the MLP — reduces inference from 3ms to 1.5ms with <0.1% NE degradation.
-
-**Q: How do you handle model staleness as new ad campaigns launch throughout the day?**
-A campaign launched at 9 AM will not appear in training data until the nightly retrain, meaning predictions for its ads use only the hashed bucket embedding (which may collide with other ads). Strategy: (1) hourly fine-tuning on the latest 3 hours of impression data — new campaigns see their first gradient update within 1 hour. (2) Cold-start CTR: for ads with fewer than 100 impressions, blend the model prediction with the advertiser's historical average CTR (beta distribution conjugate prior), weighted by impression count. This provides a reasonable estimate for new campaigns before enough data exists to rely on the model.
-
----
-
-## Failure Scenarios and Recovery
+## 9. Common Pitfalls & War Stories
 
 ### Failure 1: Embedding Table Desynchronization During Redis Cluster Failover
 
@@ -651,38 +914,9 @@ A campaign launched at 9 AM will not appear in training data until the nightly r
 
 ---
 
-## Capacity Planning
+## 10. Capacity Planning
 
-### Data Volume Projections
-
-```
-An impression is an ad that was SERVED, not an ad that was scored. One auction scores
-~20 candidates and serves 1. Conflating the two inflates every downstream number 20x.
-
-Year 0 (current):
-  1M auctions/sec x 86400 sec        = 86.4B auctions/day
-  20 candidates scored per auction   = 1.73T scoring calls/day  (sizes the GPU fleet)
-  1 ad served per auction            = 86.4B impressions/day    (sizes storage/training)
-  Click rate ~1%                     = 864M clicks/day
-  Log size per impression: ~500 bytes (hashed features + metadata)
-  Daily log: 86.4B x 500B = 43.2TB/day (Kafka + Parquet)
-  After negative subsampling (keep ALL 864M positives + 1% of 85.5B negatives = 855M):
-    ~1.72B examples/day, ~0.86TB/day training data
-    Note this is ~2% of the raw log, not 1% — the positives are never dropped.
-  Model artifact (embedding tables): 10 fields x 1GB = 10GB per model version
-
-Year 1 (30% traffic growth):
-  1.3M auctions/sec, 112B auctions/day, 112B impressions/day
-  Training data (subsampled): ~1.1TB/day, ~2.2B examples/day
-  Embedding tables: 10GB (unchanged — bucket sizes fixed)
-
-Year 3 (3x traffic growth):
-  3M auctions/sec, 259B auctions/day, 259B impressions/day
-  Kafka throughput: 3M impressions/sec x 500B = 1.5GB/sec -> 30-partition cluster
-  Training data (subsampled): ~2.6TB/day, ~5.2B examples/day
-  Full log: 259B x 500B = 130TB/day; S3 30-day retention = 3.9PB
-  Compressed (10:1 Parquet compression): ~390TB for the 30-day window
-```
+Data volume projections are in §2; this section sizes training and serving.
 
 ### Training Compute Requirements
 
@@ -760,199 +994,49 @@ figure worth getting right).
 
 ---
 
-## Additional War Stories
+## 11. Interview Discussion Points
 
-**War Story 1 — Hash Collision Causing Ad Category Leakage:**
+**Q: Why is calibration critical for an ad CTR model and how do you achieve it?**
+**Short:** GSP charges the winner the runner-up's score divided by the winner's own pCTR, so pCTR errors scale price directly; train with log loss, Platt-scale on held-out data and monitor the ratio hourly.
+Calibration is critical because the price charged is divided by the predicted CTR, so any calibration error scales platform revenue per impression directly. Search and display ad auctions are overwhelmingly generalized second-price (GSP), not VCG: GSP is the industry standard, and VCG is the other generalization of Vickrey that most platforms did not adopt. Ads are ranked by rank score = bid × pCTR, and the winner's price per click is the runner-up's rank score divided by the winner's own pCTR: CPC_1 = (bid_2 × pCTR_2) / pCTR_1. Because the winner's pCTR is in the denominator, over-predicting it lowers the price charged: predict 2% when the true rate is 1% and the platform collects half the correct revenue per impression. Under-predict and advertisers are overcharged, cut bids, and fill rate falls. Calibration is achieved by (1) training with proper loss (log-loss directly optimizes calibration), (2) applying Platt scaling on a held-out set to correct systematic over/under-confidence, and (3) monitoring calibration ratio hourly — alert if predicted/actual deviates beyond 5% in any score bucket.
 
-```python
-# BROKEN: Feature hashing without field namespacing
-# user_id=12345 and ad_id=12345 hash to the same bucket
-# Their embeddings are summed/averaged, causing cross-field contamination
+**Q: How does feature hashing work and what are its failure modes?**
+**Short:** Hashing maps field-prefixed IDs into fixed buckets with no vocabulary; the cost is collisions, with about 1 - e^(-n/m) of IDs sharing a bucket, ~6% for 1M ads in 2^24 buckets.
+Feature hashing maps a string feature value to an integer bucket via h = hash(field_name + str(value)) % bucket_count. Advantages: no vocabulary needed, handles arbitrary new values, constant memory regardless of cardinality. The failure mode is hash collisions: two different values mapping to the same bucket. The right statistic is not "does any collision exist" (at these scales, always yes) but what share of IDs land in a shared bucket, which is about 1 - e^(-n/m) for n IDs into m buckets. At m = 2^24 = 16.8M buckets with n = 1M unique ad IDs that is 1 - e^(-0.0596) ≈ 5.8%, acceptable because the embedding for a colliding pair is a noisy average of what the two individual embeddings would have been. The same formula shows the design's limit: at a billion user IDs the ratio n/m is ~60 and effectively every bucket is shared, so user_id embeddings are coarse clusters by construction. Using the field name in the hash key prevents cross-field collisions (user_id:123 ≠ ad_id:123).
 
-def feature_hash_broken(field_name: str, value: str, num_buckets: int) -> int:
-    # BUG: only hashes the value, not the field name
-    # user_id="grocery_ads" and ad_id="grocery_ads" -> same bucket!
-    import hashlib
-    return int(hashlib.md5(value.encode()).hexdigest(), 16) % num_buckets
+**Q: How do you handle the latency requirement of 10ms at 1M QPS?**
+**Short:** Batch every candidate of an auction into one Redis pipeline and one GPU call, co-locate an auction's keys with hash tags, and quantize the MLP; the stages total ~5 ms P50 and 8 ms P99.
+The 10ms budget breaks down as: network + load balancing 1ms, feature hashing (in-memory, microseconds) <0.1ms, Redis embedding batch GET 1-2ms, ONNX GPU inference for batch of 100 ads 2-3ms, Platt calibration (scalar multiply, microseconds) <0.1ms, response serialization 0.5ms = ~5ms P50, 8ms P99. The critical optimizations are: (1) batch all ads in one auction together (one Redis call, one GPU kernel launch), (2) keep embeddings in Redis Cluster, which assigns each key to one of 16,384 hash slots by CRC16 (hash slots, not consistent hashing) so a key deterministically lands on one shard — use hash tags to co-locate the keys of a single auction and avoid cross-shard scatter-gather, (3) use ONNX INT8 quantization for the MLP — reduces inference from 3ms to 1.5ms with <0.1% NE degradation.
 
+**Q: How do you handle model staleness as new ad campaigns launch throughout the day?**
+**Short:** Fine-tune hourly on the last 3 hours of impressions, and blend predictions for ads with under 100 impressions with the advertiser's historical CTR as a Beta prior.
+A campaign launched at 9 AM will not appear in training data until the nightly retrain, meaning predictions for its ads use only the hashed bucket embedding (which may collide with other ads). Strategy: (1) hourly fine-tuning on the latest 3 hours of impression data — new campaigns see their first gradient update within 1 hour. (2) Cold-start CTR: for ads with fewer than 100 impressions, blend the model prediction with the advertiser's historical average CTR (beta distribution conjugate prior), weighted by impression count. This provides a reasonable estimate for new campaigns before enough data exists to rely on the model.
 
-# FIX: Always include field name in hash key to prevent cross-field collision
-
-def feature_hash_correct(field_name: str, value: str, num_buckets: int) -> int:
-    """
-    Include field_name in hash key to prevent cross-field collision.
-    user_id:grocery_ads -> different bucket from ad_id:grocery_ads
-    """
-    import hashlib
-    key = f"{field_name}:{value}"
-    return int(hashlib.md5(key.encode()).hexdigest(), 16) % num_buckets
-
-
-def verify_no_crossfield_collision(
-    field_names: list[str],
-    test_values: list[str],
-    num_buckets: int,
-) -> bool:
-    """Verify that same value in different fields hashes to different buckets."""
-    for value in test_values:
-        buckets = {
-            field: feature_hash_correct(field, value, num_buckets)
-            for field in field_names
-        }
-        unique_buckets = len(set(buckets.values()))
-        if unique_buckets < len(field_names):
-            print(f"Cross-field collision for value='{value}': {buckets}")
-            return False
-    return True
-```
-
-**War Story 2 — Negative Downsampling Without Calibration Correction:**
-
-```python
-# BROKEN: Trained on 1% negative sample but serving without calibration correction
-# Model trained on P(click | sampled_data) where negatives are 100x underrepresented
-# Raw model output is 100x too high (inflated CTR estimates)
-
-import numpy as np
-
-
-def train_with_sampling_broken(
-    features: np.ndarray,
-    labels: np.ndarray,
-    negative_sample_rate: float = 0.01,
-) -> "LogisticRegression":
-    """BUG: Sample negatives, train model, deploy without correction."""
-    from sklearn.linear_model import LogisticRegression
-
-    positive_mask = labels == 1
-    negative_mask = labels == 0
-    neg_sample = np.random.choice(
-        np.where(negative_mask)[0],
-        size=int(negative_mask.sum() * negative_sample_rate),
-        replace=False,
-    )
-    sampled_idx = np.concatenate([np.where(positive_mask)[0], neg_sample])
-
-    X_sampled = features[sampled_idx]
-    y_sampled = labels[sampled_idx]
-
-    model = LogisticRegression()
-    model.fit(X_sampled, y_sampled)
-    # Raw model.predict_proba output is ~100x inflated for the true click rate
-    return model
-
-
-# FIX: Apply calibration correction at inference time
-# If negative_sample_rate=q, apply: p_corrected = p / (p + (1 - p) / q)
-
-def calibrate_for_sampling(
-    raw_proba: np.ndarray,
-    negative_sample_rate: float = 0.01,
-) -> np.ndarray:
-    """
-    Correct for negative downsampling bias.
-    Derivation: P(click|all) = P(click|sampled) / (P(click|sampled) + (1-P(click|sampled))/q)
-    where q = negative_sample_rate.
-
-    At raw_proba=0.50, q=0.01: corrected = 0.5 / (0.5 + 0.5/0.01) = 0.5 / 50.5 ≈ 0.0099 (≈ 1%)
-    This correctly converts the overestimated 50% to a realistic ~1%.
-    """
-    p = raw_proba
-    q = negative_sample_rate
-    return p / (p + (1.0 - p) / q)
-```
-
----
-
-## Monitoring and Drift Detection Deep-Dive
-
-### Features That Drift Fastest
-
-| Feature | Drift rate | Reason |
-|---------|-----------|--------|
-| ad_id embedding (new campaigns) | Very high | New campaigns launch daily; old ones end |
-| hour_of_day CTR baseline | High | DST changes; seasonal shopping hours |
-| user interest signal (ad_category) | High | User interests shift; ad content changes |
-| publisher_id (new publishers) | Medium | New app/web inventory enters network |
-| user_age_bucket distribution | Very low | Changes only with data pipeline refresh |
-| device_type distribution | Low | Gradual mobile-to-desktop-back shifts |
-
-### Calibration Monitoring (Primary Signal)
-
-```python
-from dataclasses import dataclass
-import numpy as np
-
-
-@dataclass
-class CalibrationBucket:
-    predicted_ctr_min: float
-    predicted_ctr_max: float
-    num_impressions: int
-    actual_clicks: int
-
-    @property
-    def actual_ctr(self) -> float:
-        return self.actual_clicks / max(self.num_impressions, 1)
-
-    @property
-    def predicted_ctr_midpoint(self) -> float:
-        return (self.predicted_ctr_min + self.predicted_ctr_max) / 2
-
-    @property
-    def calibration_ratio(self) -> float:
-        """Should be ~1.0. >1.05 = overestimating CTR. <0.95 = underestimating."""
-        return self.predicted_ctr_midpoint / max(self.actual_ctr, 1e-6)
-
-
-def compute_ece(buckets: list[CalibrationBucket]) -> float:
-    """Expected Calibration Error: weighted average |predicted - actual| per bucket."""
-    total_impressions = sum(b.num_impressions for b in buckets)
-    ece = sum(
-        (b.num_impressions / total_impressions) * abs(b.predicted_ctr_midpoint - b.actual_ctr)
-        for b in buckets
-    )
-    return ece
-
-
-# Alert thresholds
-CALIBRATION_THRESHOLDS = {
-    "global_ratio_alert": (0.95, 1.05),     # per-5-min window alert
-    "per_bucket_ratio_alert": (0.85, 1.15), # per-score-decile alert
-    "ece_threshold": 0.02,                  # 2% ECE threshold for retraining
-    "brier_score_degradation": 0.005,       # relative to previous model
-}
-```
-
-### Retraining Triggers and Cadence
-
-| Cadence | Trigger | Action |
-|---------|---------|--------|
-| Daily | Scheduled (2 AM UTC) | Full DeepFM retrain + Platt recalibration |
-| Hourly | Scheduled | Incremental fine-tune on last 3h impressions |
-| Every 5min | Calibration ratio outside (0.95, 1.05) | Alert on-call; apply scalar correction factor |
-| Triggered | ECE > 0.02 | Emergency recalibration (Platt refit) |
-| Triggered | NE improvement < 0.5% vs baseline LR | Model may have degraded; investigate |
-| Triggered | Any Redis shard null-rate > 2% | Embedding fallback activated; alert |
-| Triggered | New major advertiser onboarding | Add advertiser prior CTR to fallback table |
-| Weekly | Scheduled | Feature importance audit; hash collision rate check |
-| Monthly | Scheduled | Full calibration audit per advertiser segment |
-
----
-
-## Additional Interview Questions
 
 **Q: How does the FM (Factorization Machine) component capture 2nd-order feature interactions efficiently?**
+**Short:** FM gives each field a k-dim embedding and models a pair as their dot product, so it needs n x k parameters, and the sum over all pairs is computable in O(nk) with the square-of-sum identity.
 A naive approach to 2nd-order interactions requires learning a weight for every pair of features: with 100 feature fields, that is 100×99/2 = 4,950 parameters — manageable for few features but explodes with hashing to millions of dimensions. FM replaces this with embedding vectors: each feature field i has an embedding v_i of dimension k (k=16 in practice). The interaction between fields i and j is approximated as v_i · v_j (dot product), requiring only n×k parameters (n features × k dims) instead of n^2. The computational trick: sum_over_pairs(v_i · v_j) = 0.5 × (||sum(v_i)||^2 - sum(||v_i||^2)), computable in O(n×k) time instead of O(n^2×k). This is the key efficiency of FM that makes it practical with 100+ feature fields and millions of sparse IDs.
 
 **Q: How would you extend this system to support conversion prediction (P(purchase | click)) in addition to CTR?**
+**Short:** Add a conversion head that shares embeddings with the CTR head, wait out the 7-day attribution window before labels are final, and score with bid x pCTR x pCVR.
 Conversion prediction requires predicting a much sparser signal (purchase rate ~1-5% of clicks, vs click rate 1-2% of impressions). Architecture extensions: (1) Multi-task learning: add a conversion prediction head alongside the CTR head, sharing the lower-level embeddings and MLP layers but with task-specific output layers. The shared representation transfers click behavior knowledge to the sparser conversion signal. (2) Survival modeling: predict time-to-conversion (some purchases happen days after click) rather than binary next-click conversion. (3) Join time: conversion labels arrive with 7-day delay (attribution window); training data must be held for 7 days before conversion labels are final — this means the conversion model lags the CTR model by 7 days. The final auction score is then: effective_value = bid × P(click) × P(conversion | click), used for value-based bidding.
 
 **Q: What is Normalized Entropy (NE) and why is it preferred over AUC for CTR model evaluation?**
+**Short:** NE divides the model's log loss by the log loss of always predicting the average CTR; unlike AUC it penalizes miscalibration, which is what sets auction prices.
 NE (Normalized Entropy) = cross-entropy of the model / cross-entropy of a baseline predictor (e.g., predicting the global average CTR for every impression). NE = 1.0 means the model is no better than predicting the mean; NE < 1.0 means the model improves on the baseline (lower cross-entropy = better calibration and ranking). AUC only measures ranking quality (which ad is more likely clicked) but ignores calibration — a miscalibrated model can have high AUC but NE close to 1.0 if its rankings are correct but predictions are systematically biased. For ad auction economics, calibration matters more than ranking; hence NE is the primary metric. NE was popularized as the headline CTR metric by He et al., "Practical Lessons from Predicting Clicks on Ads at Facebook" (ADKDD 2014). The often-repeated rule that a ~1% relative NE improvement is "significant" is a convention, not a published constant, and the revenue it maps to is entirely platform-specific — establish your own NE-to-revenue elasticity from A/B results before treating any threshold as meaningful.
 
 **Q: How do you handle the exploration-exploitation tradeoff in a CTR prediction system serving a live auction?**
+**Short:** Only winners generate labels, so reserve a small slice for exploration: epsilon-greedy, Thompson sampling on a per-ad Beta, or a UCB bonus that shrinks with impressions.
 The serving system only observes outcomes for ads that win auctions — ads that are consistently outbid never accumulate data, creating a feedback loop where underexplored ads remain underexplored. Strategies: (1) epsilon-greedy exploration: for 2% of auctions, randomly select a winning ad independent of CTR prediction, observe the outcome, and use it as exploration data. (2) Thompson sampling: model CTR as a Beta distribution per ad, sample one CTR from the distribution, use the sample in the auction. Ads with fewer impressions have higher variance, giving them more exploration opportunity. (3) Upper Confidence Bound (UCB): boost predicted CTR by a term proportional to 1/sqrt(impressions), so new ads with high uncertainty get exploration chance. In practice, epsilon-greedy is simplest and lowest-risk; Thompson sampling provides better exploration efficiency but requires distributional modeling of CTR uncertainty.
 
 **Q: How does the hourly incremental fine-tuning avoid catastrophic forgetting of long-term patterns?**
+**Short:** Replay ~30% of examples from the 30-day archive into each hourly batch and fine-tune at a tenth of the base learning rate; EWC is rarely worth its extra complexity.
 Hourly fine-tuning on only 3 hours of data risks the model forgetting longer-term user behavior patterns that are not represented in the short window (e.g., weekly cyclicality, long-term user interest evolution). Mitigations: (1) Experience replay: mix 30% of training examples from a random sample of the 30-day archive into each hourly fine-tuning batch — the model retains long-term knowledge. (2) Low learning rate for fine-tuning (lr = initial_lr × 0.1): large updates are more likely to destroy learned representations. (3) Elastic Weight Consolidation (EWC): penalize changes to parameters that were most important for previous tasks, measured by the Fisher information matrix. In practice, experience replay alone is sufficient and EWC adds implementation complexity without significant benefit for CTR prediction.
+
+**Q: Facebook found trees plus logistic regression beat either alone. Why choose DeepFM here instead?**
+**Short:** Trees learn crosses of dense features; with billions of hashed sparse IDs carrying the signal, DeepFM learns crosses through shared embeddings that trees cannot split on usefully.
+In He et al. (ADKDD 2014) boosted trees act as a feature transformer: each tree's leaf index becomes a categorical input to a logistic regression, and the combination beat either model alone by over 3%. Trees split on dense, informative features such as historical CTR counters; a hashed `user_id` with a billion values gives them nothing to split on. DeepFM's FM part learns every pairwise cross between sparse fields as an embedding dot product and its MLP learns higher-order ones, from one shared input (Guo et al. 2017). Choose GBDT+LR when most signal sits in dense historical counters and CPU training cost matters; choose DeepFM when sparse ID crosses carry the signal. Both still need the calibration layer, because neither trains on the unsampled distribution.
+
+**Q: How do you compute the negative-downsampling correction, and why must it change whenever the sampling rate changes?**
+**Short:** With negatives kept at rate q, the true probability is p / (p + (1 - p) / q); the formula is tied to q, so changing the sampling rate without recalibrating misprices every impression.
+Keeping only a fraction q of negatives multiplies the training odds of a click by 1/q, so the true odds are q times the model's odds, which gives `p_true = p / (p + (1 - p) / q)`. At a raw output of 0.5 and q = 0.01 the corrected value is about 0.0099, close to the 1% base rate. The correction is only right for the q the model was trained with. In §9 Failure 2 the pipeline moved to q = 0.002 while serving kept the q = 0.01 correction, predictions ran 4.2x too high, and advertisers were charged about 4.2x too little for about 4 hours. Store q in the model artifact's metadata, have serving read it from there rather than from a separate config, and block deployment unless the holdout calibration ratio is 1.0 +/- 0.05.

@@ -49,17 +49,21 @@ Key insight: the most important design decision is often not the model architect
 
 ## 3. Core Principles
 
-**Reproducibility**: every training run must be reproducible given the same data snapshot and code version. This requires data versioning, code versioning, and deterministic random seeds.
+**Reproducibility.** Every training run must be reproducible from a data snapshot, a code version and a config: version the data (a snapshot or table version), pin the environment, record the seeds, and store all three with the model. Without it, a regression cannot be bisected.
 
-**Isolation of training and serving**: training code and serving code should be validated to produce identical feature values for identical inputs. Training-serving skew is the most common production failure mode.
+**One feature definition for training and serving.** Training and serving must produce identical feature values for identical inputs. Enforce it with a shared feature library or a feature store plus a parity test, because training-serving skew is among the most common production failures and it is silent.
 
-**Fail-safe defaults**: when a model or feature store is unavailable, the system should fall back to a simpler strategy (popularity-based ranking, rule-based filtering) rather than failing hard.
+**Point-in-time training data.** Training rows join features as they were at the label's timestamp, never as they are today. Leakage from the future is the most common reason offline metrics beat online ones.
 
-**Decoupled iteration velocity**: data engineers, ML engineers, and serving engineers should be able to iterate independently. Feature stores and model registries are the contracts that decouple these teams.
+**Fail-safe defaults.** When a model, feature store or dependency is unavailable, fall back to a simpler strategy (popularity ranking, rules, the previous model) inside the latency budget instead of failing the request. Decide the fallback at design time and test it.
 
-**Observability by default**: every prediction should be logged with its input features, model version, and serving latency. Without this, debugging production issues is impossible.
+**Decoupled iteration velocity.** Data engineers, ML engineers and serving engineers should be able to ship independently. Feature stores and model registries are the contracts between them, and a versioned model artifact is the unit of deployment.
 
-**Proportional accuracy investment**: a 2% improvement in AUC rarely justifies doubling serving cost. Design for the accuracy-cost-latency tradeoff explicitly.
+**Observability by default.** Log every prediction with its input features, model version and latency, and join outcomes later. Without these logs you can neither debug an incident nor build the next training set.
+
+**Safe rollout.** Every new model goes through shadow mode, a canary and an A/B test with guardrails, and rollback is one registry change. An offline win is a hypothesis until an online test confirms it.
+
+**Proportional accuracy investment.** A 2% AUC gain rarely justifies doubling serving cost or latency. Make the accuracy-cost-latency trade explicit, in money where possible.
 
 ---
 
@@ -509,9 +513,9 @@ A structured approach: (1) Clarify requirements — scale (QPS, users), latency 
 **Short:** A cheap model scores millions of items for recall while an expensive model ranks only the surviving hundred for precision.
 A two-stage design is used because it allows different accuracy/cost tradeoffs at each stage. Retrieval must score millions of items quickly, so it uses a simple embedding similarity model with ANN search, achieving recall@100 in <10ms. Ranking scores only 100-1000 candidates with a rich, expensive model, achieving high precision in <20ms. A single expensive model scoring all items would require either seconds of latency or a simpler model that achieves neither good recall nor good precision.
 
-**Q: What is training-serving skew and how do you prevent it?**
-**Short:** It is a mismatch between feature values computed at training time and at serving time for the same logical input.
-Training-serving skew is a mismatch between feature values computed during training and feature values computed during serving for the same logical input. It is the most common production failure in ML systems. Common causes: different code paths for feature computation, schema changes in upstream data, different join logic. Prevention: (1) compute features using a shared library used in both training and serving; (2) write integration tests that compare training-time and serving-time feature values for the same entity; (3) log serving-time features and compare distributions against training data.
+**Q: Offline AUC is 0.85 but the same model scores 0.78 online, and the input distributions have not drifted. How do you find out whether training-serving skew is the cause?**
+**Short:** Log the features the model saw at serving time, rebuild the same rows with the training pipeline as of the request time, and diff them feature by feature; any mismatch is skew.
+Training-serving skew is a mismatch between the feature values computed for training and those computed at serving time for the same logical input, and it is one of the most common causes of an offline/online gap. Diagnose it directly: (1) sample logged serving requests together with the feature vectors the model actually received; (2) regenerate those rows through the offline training pipeline as of each request's timestamp; (3) compare feature by feature, exact match for categoricals and a tolerance for floats, and rank features by mismatch rate weighted by importance. The usual culprits are separate code paths for training and serving, an upstream schema change, and different join or window logic (time zones, a 7-day window offline against a daily-reset counter online). Prevent it with one shared feature definition or a feature store ([Feature Store Design](feature_store_design.md)), an integration test that runs this comparison in CI, and continuous logging of serving features.
 
 **Q: How do you handle the cold start problem in recommendation systems?**
 **Short:** New users get demographic or exploration-based fallbacks, and new items get content-based features until interactions accumulate.
@@ -537,9 +541,9 @@ Position bias is the tendency for users to click on items shown in higher positi
 **Short:** Combine a two-stage architecture, aggressive feature caching, request batching, and autoscaling so only a cheap model absorbs full traffic.
 Scale horizontally with a two-stage architecture, aggressive feature caching, request batching, and autoscaling so only the cheap model sees full QPS. Key components: (1) Load-balanced prediction servers behind an API gateway, auto-scaling based on CPU utilization; (2) Feature cache (Redis) to avoid recomputing static features on every request — cache user features with 60-second TTL; (3) Model server with batching enabled (max_batch=32, max_wait=5ms) to amortize GPU cost; (4) Two-stage architecture so only a cheap retrieval model handles full QPS and the expensive ranking model handles fewer requests; (5) Circuit breakers to fall back to a simpler model when latency spikes; (6) Canary deployments to catch latency regressions before they affect all traffic.
 
-**Q: What is the difference between batch features and real-time features in a feature store?**
-**Short:** Batch features come from scheduled Spark/Hive jobs while real-time features stream from Flink or Kafka with sub-minute freshness.
-Batch features are computed over historical data using Spark or Hive jobs, written to the offline store (S3/Hive), and synced to the online store (Redis) on a schedule (hourly or daily). They include aggregates like "user's average purchase value over the last 30 days." Real-time features are computed from streaming events using Flink or Kafka Streams and written directly to the online store, providing sub-minute freshness. They include signals like "number of page views in the last 5 minutes." The feature store serves both at request time; the serving latency is dominated by the online store read (<10ms for Redis) not the feature type.
+**Q: A fraud feature, card transactions in the last 10 minutes, comes from a nightly batch job. What breaks, and how do you decide which features need a streaming path?**
+**Short:** A nightly value can be a day stale, so the feature is blind to a fast attack; move a feature to streaming only when it changes faster than the batch interval and that change moves predictions.
+A 10-minute velocity feature computed nightly describes yesterday, so during an attack it reads as normal; the model cannot see the burst it was designed to catch. Batch features are computed over historical data with Spark or Hive, written to the offline store and synced to the online store (Redis) hourly or daily; they suit slow signals such as a user's 30-day average purchase value. Streaming features are computed from events with Flink or Kafka Streams and written straight to the online store with sub-minute freshness; they suit signals such as page views in the last 5 minutes. The decision rule: stream a feature only if its value changes meaningfully within the batch interval and a backtest shows that fresher values change predictions; streaming costs a second pipeline, state management and a backfill path for training. Serving latency is dominated by the online-store read (under 10 ms for Redis), not by how the feature was computed.
 
 **Q: How do you evaluate a recommendation model before deploying it?**
 **Short:** Evaluate offline with ranking metrics, then shadow-deploy, then run a statistically significant A/B test before full rollout.
@@ -557,9 +561,9 @@ A cascade runs a cheap model on all traffic and escalates only low-confidence ca
 **Short:** Sharing one backbone across objectives improves data efficiency, but conflicting task gradients can degrade every task at once.
 Multi-task learning trains one shared backbone to predict several objectives (CTR, CVR, dwell time) at once, improving data efficiency and preventing over-optimizing one metric. Auxiliary tasks let data-poor objectives borrow signal from related ones. Negative transfer is the failure mode where conflicting task gradients degrade the shared representation so no task is served well. Mitigate with task-specific heads, uncertainty-based task weighting, or gradient surgery.
 
-**Q: How do you decompose a P99 latency budget across an ML serving pipeline?**
-**Short:** Assign each pipeline stage a slice of the total budget and keep deliberate headroom for tail effects like GC pauses.
-Assign each stage a slice of the total budget — network, feature fetch, retrieval, ranking, post-processing — and keep headroom for tail latency. For a 100ms P99 budget a typical split is 10ms network, 3ms gateway, 8ms feature fetch, 12ms retrieval, 18ms ranking, 4ms post-processing and 8ms serialization — 63ms modeled, leaving ~37ms for GC pauses and tail effects. Measure each stage independently so a regression is attributable to one component rather than the whole request.
+**Q: Your ranking service starts missing its 100 ms P99 after a new feature group is added. How do you find which stage to cut?**
+**Short:** Trace every request, compare each stage's measured P99 with its slice of the budget, and start with the new feature fetch; stage percentiles do not add, so check the end-to-end P99 as well.
+Start from the budget: give each stage a slice and keep headroom for tail effects. For a 100 ms P99 a typical split is 10 ms network, 3 ms gateway, 8 ms feature fetch, 12 ms retrieval, 18 ms ranking, 4 ms post-processing and 8 ms serialization, 63 ms modelled, leaving about 37 ms for GC pauses and other tail effects. With per-stage tracing, compare each stage's measured P99 against its slice; a new feature group usually lands in the feature-fetch stage as an extra sequential read. The fixes, in order of cost: fetch the new group in parallel with the existing one, cache it or precompute it, then drop its least valuable features. Percentiles do not add, so a stage-by-stage check is a diagnostic; confirm the fix on the end-to-end P99.
 
 **Q: What should an ML system do when the model or feature store is unavailable?**
 **Short:** Fall back to a simpler strategy like popularity ranking or cached features instead of failing the request outright.

@@ -206,6 +206,14 @@ PatchCore reaches up to 99.6% image-level AUROC on MVTec AD with a few hundred g
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     G[Good images only] --> E[Frozen WideResNet-50<br/>layer2 + layer3]
     E --> P[Patch embeddings<br/>3x3 neighborhood avg]
     P --> C[Greedy coreset<br/>keep 1-10%]
@@ -215,6 +223,12 @@ flowchart LR
     M --> N
     N --> H[Pixel heatmap]
     N --> S[Image score = max patch distance]
+
+    class G,T io
+    class E,E2 frozen
+    class P,C,N mathOp
+    class M base
+    class H,S req
 ```
 
 The same score-then-threshold rule from 6.2 applies: the threshold is set on a validation set of good images (for example their 99.5th percentile score) plus whatever defects exist, never fixed at a constant.

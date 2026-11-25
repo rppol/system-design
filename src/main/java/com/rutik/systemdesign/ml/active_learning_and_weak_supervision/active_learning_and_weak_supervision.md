@@ -479,6 +479,14 @@ An LLM can act as one more labeling function or as the primary pre-labeler. Trea
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     U[Unlabeled pool] --> P[LLM pre-label<br/>label + confidence]
     G[Gold set<br/>300-500 human labels] --> A[Agreement check<br/>kappa, per-class confusion]
     P --> A
@@ -489,6 +497,13 @@ flowchart LR
     H -->|no| Q[Human review queue]
     Q --> T
     T --> M[Train downstream model]
+
+    class U,G io
+    class P,C,M train
+    class A,H mathOp
+    class R lossN
+    class Q req
+    class T base
 ```
 
 The loop has four checks, each with a number attached:

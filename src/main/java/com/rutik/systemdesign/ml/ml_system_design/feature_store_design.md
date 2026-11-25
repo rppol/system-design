@@ -23,15 +23,21 @@ Why it matters: feature stores solve three painful production problems: (1) trai
 
 ## 3. Core Principles
 
-**Single source of truth**: every feature is defined once (in a feature registry) and computed once. All consumers — training pipelines, online serving, analytics — read from the same definition and the same storage.
+**Single source of truth.** Every feature is defined once, in a registry, and computed by one code path. Training pipelines, online serving and analytics read the same definition, so a fix lands everywhere at once and two teams cannot ship two different "7-day CTR" features.
 
-**Point-in-time correctness**: training data joins must retrieve the feature value that would have been available at the exact moment the label event occurred, not the current value. This is the single most important correctness property of a feature store.
+**Point-in-time correctness.** A training row must use the feature value that was available when the label event happened, not today's value. The offline store therefore keeps every value with its event timestamp, and training data is built with an as-of join. Get this wrong and the future leaks in: offline metrics rise and production metrics fall. It is the single most important correctness property of a feature store.
 
-**Dual storage with sync**: the offline store holds the complete history; the online store holds only the latest value (or a short rolling window). A materialization pipeline syncs from offline to online.
+**Dual storage with one-way sync.** The offline store (Parquet, Delta or Iceberg tables) holds the full history for training; the online store (Redis, DynamoDB, Bigtable) holds only the latest value, or a short window, for single-digit-millisecond reads. A materialization job moves values from offline to online, and nothing writes to the online store that the offline store will not also see.
 
-**Feature versioning**: when a feature computation logic changes, the new version is a different feature (new name or version tag). Old models pin to old feature versions; new models use new versions. Never silently change a feature definition.
+**Freshness is a per-feature contract.** Each feature declares how stale it may be (a daily aggregate, an hourly count, a 10-second streaming value), and the platform alerts when that is exceeded. Freshness drives cost: a streaming feature needs a second pipeline and a backfill path, so stream only where staleness measurably moves predictions.
 
-**Monitoring at the feature level**: every feature should have distribution statistics computed daily. Drift detection alerts when a feature shifts significantly from its training distribution.
+**Parity is tested, not assumed.** Log the feature vector served with each prediction and compare a sample against values regenerated offline for the same entity and timestamp. A mismatch rate above a small threshold blocks the next model release.
+
+**Feature versioning.** A change in computation logic creates a new feature version (a new name or version tag). Old models stay pinned to old versions and new models opt in. Never change a definition in place: a model trained on the old meaning will keep serving against the new one.
+
+**Entity keys and TTLs are design decisions.** Choose the entity (user, user-item pair, session) and the online TTL deliberately. A TTL shorter than the materialization interval creates nulls between runs, and a pair key such as user x item can multiply online storage by orders of magnitude.
+
+**Monitoring at the feature level.** Compute distribution statistics for every feature daily, alert on drift against the training distribution, and track null rates; a silently dead upstream source usually shows up first as a jump in nulls.
 
 ---
 

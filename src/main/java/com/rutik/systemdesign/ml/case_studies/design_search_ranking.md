@@ -1,18 +1,78 @@
 # Design a Search Ranking System (E-commerce Scale)
-## Problem Statement
+## Intuition
+
+> Search ranking is a shop assistant who hears "red running shoes size 10" and has a tenth of a second to pick 20 boxes from 10 million. Two clerks fetch candidates: one reads labels exactly (BM25), the other understands what the customer means (dense retrieval). The assistant then orders the pile by what this customer will actually buy.
+
+**Key insight:** clicks are the training data, and clicks are biased by the ranking that produced them. Users click position 1 five to ten times more often than position 5, whatever is shown there, so a ranker trained on raw clicks learns to repeat the old ranking. The core of this design is therefore not the model but the data: inverse-propensity weighting of clicks, features logged at serve time, and an evaluation set collected under randomization.
+
+Mental model: query understanding (about 10 ms), then hybrid retrieval fused with RRF (about 500 candidates), then a LambdaMART ranker over 500 features, then bounded business rules. Each stage can hide the failures of the one before it, so each has its own monitor (§8).
+
+Why this system exists: at 4.3B queries a day the ranker decides which of 10M products anyone sees. Against 5M purchases a day, a 1% relative lift in purchase rate is about 50k extra orders a day, which is why ranking changes ship only after an A/B test on purchase rate.
+
+---
+
+## 1. Requirements Clarification
+
 
 Design a search ranking system for an e-commerce platform. Given a text query (e.g., "red running shoes size 10"), return the top 20 most relevant products within 100ms P99. The system must balance three objectives: relevance (match user intent), conversion (surface products users actually buy), and business objectives (margin, inventory clearance). The system processes 50K queries per second across 100M users and 10M product listings. Click data is abundant but biased toward top positions; purchase signal is sparse but high-quality.
 
-Constraints:
+**Functional requirements:**
+- Return the top 20 products for a free-text query, with structured filters (size, colour, in stock).
+- Correct spelling, classify intent (navigational, transactional, informational) and expand synonyms where safe.
+- Make a newly listed product searchable within 5 minutes.
+- Keep sponsored placement separate from the organic ranking.
+
+**Non-functional requirements:**
 - 100M users, 10M products, 50K QPS
 - 100ms P99 end-to-end latency
 - NDCG@10 > 0.55 (offline), CTR improvement > 5% over BM25 baseline (online)
 - Support real-time index updates (new products live within 5 minutes)
 - Click data: 500M clicks/day; purchase data: 5M purchases/day
 
+**Out of scope:**
+- Homepage and "more like this" recommendations (see [Recommendation Engine](design_recommendation_engine.md)).
+- Sponsored-listing auctions and bidding.
+- Catalog ingestion and product deduplication.
+
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+| Quantity | Derivation | Result |
+|---|---|---|
+| Queries per day | 50K QPS x 86,400 s | ~4.3B |
+| Ranker scoring load | 50K QPS x 500 candidates | 25M LTR scores/s |
+| Click events in the 30-day window | 500M/day x 30 | 15B (sampled to 500M labelled pairs, §10) |
+| Purchase density | 4.3B queries / 5M purchases | 1 purchase per ~860 queries, too sparse to be the only label |
+| Dense item index | 10M x 32-byte PQ codes | 320 MB per replica |
+| Feature logs | 500M clicked impressions x ~2 KB | ~1 TB/day |
+
+The ranker line sizes the serving fleet, and the purchase line explains the label design: purchases are the label the business cares about, but at one per ~860 queries they cannot train a 500-feature ranker alone, so clicks, dwell and cart events are blended in as graded relevance (§11).
+
+### Data Volume Projections
+
+```
+Current state (Year 0):
+  - 50K QPS * 86400 sec/day = 4.3B query events/day
+  - 500M clicks/day logged (feature vector: ~2KB each) = ~1TB/day raw logs
+  - 5M purchases/day (training signal)
+  - 10M products × 256 float32 dims = 10GB dense index (uncompressed)
+  - PQ-compressed FAISS: 10M × 32 bytes = 320MB RAM
+
+Year 1 projection (20% QPS growth):
+  - 60K QPS, 5.2B query events/day, ~1.2TB/day logs
+  - 12M products: FAISS index 384MB (PQ-compressed)
+
+Year 3 projection (2x growth):
+  - 100K QPS, 8.6B query events/day, ~2TB/day logs
+  - 20M products: FAISS index 640MB
+  - LTR training data: 15B examples/month in Parquet (~60TB/month)
+  - S3 cold storage (2-year retention): ~1.4PB total
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -101,319 +161,7 @@ xychart-beta
 
 Position 1 draws roughly 5x the clicks of position 5 regardless of true relevance, so training on raw clicks merely replicates the current ranking. IPW re-weights each click by 1/P(examined|position) to strip out this bias before training the ranker.
 
----
-
-## Key Design Decisions
-
-**Hybrid retrieval (BM25 + dense)**: BM25 handles exact keyword matching well ("iPhone 14 Pro 256GB") but fails on semantic queries ("phone with good camera under $500"). Dense retrieval handles semantics but misses rare exact terms. RRF fusion exploits both without needing to tune a combination weight.
-
-**LambdaMART for LTR**: LambdaMART (MART = gradient boosted trees with LambdaRank gradients targeting NDCG) is the industry standard for search ranking. It optimizes NDCG via the lambda gradients (an approximation — NDCG itself is non-differentiable), handles mixed feature types and missing values, and is interpretable via feature importance. Neural rankers can match or beat it, but on the purely tabular feature set used here the accuracy gap is small while the training-time and operational gap is large (2 hours on CPU here vs a multi-hour GPU job).
-
-**Position bias debiasing**: Users click on position 1 items 5-10x more than position 5 items regardless of relevance. Training directly on click counts produces a ranker that learns to rank what was already ranked highly. IPW (Inverse Propensity Weighting) corrects this: each click is weighted by 1/P(examined|position). P(examined|position) is estimated from randomization experiments (swap positions for 1% of traffic, observe CTR ratio).
-
-**Dense retrieval model choice**: BERT-mini (Turc et al. 2019: L=4, H=256, ~11M params — the `google/bert_uncased_L-4_H-256_A-4` checkpoint) is small enough to encode a query on CPU inside the latency budget while its 256-dim hidden size is exactly the retrieval embedding width used downstream. Query encoder runs on CPU in 8ms; item encoders are precomputed and stored in FAISS. Fine-tuned on in-domain (query, product title) pairs with in-batch negatives. Expect a real quality gap versus a base-size encoder — measure it against your own relevance labels rather than assuming a fixed retention percentage.
-
-**Query expansion with caution**: Synonym expansion ("shoes" → "footwear, sneakers") increases recall but risks precision loss (expanding "apple" in a grocery context to "iPhone" is a failure mode). Expansion is applied only to BM25 retrieval, not dense retrieval (dense already captures semantics). Expansion candidates are filtered by co-occurrence in the product catalog.
-
----
-
-## Implementation
-
-### LambdaMART with XGBoost
-
-```python
-import numpy as np
-import pandas as pd
-import xgboost as xgb
-from sklearn.model_selection import GroupShuffleSplit
-from sklearn.preprocessing import StandardScaler
-
-
-def build_ltr_features(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Build 500 LTR features from (query, product, user, context) tuple.
-    df columns: query_id, product_id, user_id,
-                bm25_score, dense_score,
-                product_ctr_7d, product_conversion_rate, product_avg_rating,
-                product_review_count, product_price, product_inventory_count,
-                user_avg_order_value, user_category_affinity (dict stored as cols),
-                device_type (mobile/desktop), hour_of_day, session_depth
-    """
-    f = df.copy()
-
-    # Query-product match features
-    f["combined_retrieval_score"] = (
-        0.6 * f["bm25_score"] + 0.4 * f["dense_score"]
-    )
-    f["score_product"] = f["bm25_score"] * f["dense_score"]
-    f["score_difference"] = f["bm25_score"] - f["dense_score"]
-
-    # Product quality features (log-transform to handle long tails)
-    f["log_review_count"] = np.log1p(f["product_review_count"])
-    f["log_ctr_7d"] = np.log1p(f["product_ctr_7d"])
-    f["inventory_available"] = (f["product_inventory_count"] > 0).astype(int)
-    f["low_stock"] = f["product_inventory_count"].between(1, 5).astype(int)
-
-    # User-product cross features (critical for personalization)
-    f["price_vs_user_avg"] = f["product_price"] / (f["user_avg_order_value"] + 1.0)
-    f["price_below_user_avg"] = (f["product_price"] < f["user_avg_order_value"]).astype(int)
-
-    # Context features
-    f["is_mobile"] = (f["device_type"] == "mobile").astype(int)
-    f["is_prime_shopping_hour"] = f["hour_of_day"].between(19, 22).astype(int)
-    f["deep_session"] = (f["session_depth"] > 5).astype(int)
-
-    # Quality-weighted retrieval
-    f["quality_weighted_score"] = (
-        f["combined_retrieval_score"] *
-        (1 + 0.1 * f["product_avg_rating"]) *
-        (1 + 0.05 * np.log1p(f["product_review_count"]))
-    )
-
-    feature_cols = [
-        "bm25_score", "dense_score", "combined_retrieval_score",
-        "score_product", "score_difference", "quality_weighted_score",
-        "product_ctr_7d", "log_ctr_7d", "product_conversion_rate",
-        "product_avg_rating", "log_review_count",
-        "product_price", "inventory_available", "low_stock",
-        "price_vs_user_avg", "price_below_user_avg",
-        "is_mobile", "is_prime_shopping_hour", "deep_session",
-    ]
-    return f[feature_cols]
-
-
-def train_lambdamart(
-    df: pd.DataFrame,
-    label_col: str = "relevance_label",
-    group_col: str = "query_id",
-) -> xgb.XGBRanker:
-    """Train LambdaMART ranker optimizing NDCG@10."""
-    # Sort by query id first: XGBoost's ranking objective requires rows of the
-    # same query to be contiguous, and `qid` must be non-decreasing.
-    df = df.sort_values(group_col).reset_index(drop=True)
-    X = build_ltr_features(df)
-    y = df[label_col].values.astype(np.float32)
-    qid = df[group_col].values
-
-    splitter = GroupShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
-    train_idx, val_idx = next(splitter.split(X, y, groups=qid))
-    # GroupShuffleSplit keeps whole queries on one side of the split, but returns
-    # them unsorted; re-sort so qid stays non-decreasing within each side.
-    train_idx = np.sort(train_idx)
-    val_idx = np.sort(val_idx)
-
-    ranker = xgb.XGBRanker(
-        objective="rank:ndcg",
-        ndcg_exp_gain=True,
-        lambdarank_pair_method="topk",  # focus gradients on top-K positions
-        lambdarank_num_pair_per_sample=8,
-        eval_metric=["ndcg@5", "ndcg@10"],
-        n_estimators=1000,
-        max_depth=8,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.7,
-        min_child_weight=10,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
-        random_state=42,
-        n_jobs=-1,
-        tree_method="hist",
-    )
-
-    # Pass `qid` rather than `group`: XGBRanker.fit accepts either, but qid is
-    # per-row and cannot silently desynchronize from the split the way a
-    # sliced group-size array does.
-    ranker.fit(
-        X.iloc[train_idx], y[train_idx],
-        qid=qid[train_idx],
-        eval_set=[(X.iloc[val_idx], y[val_idx])],
-        eval_qid=[qid[val_idx]],
-        verbose=100,
-    )
-    return ranker
-```
-
-### Reciprocal Rank Fusion (Hybrid Retrieval)
-
-```python
-from collections import defaultdict
-
-
-def reciprocal_rank_fusion(
-    ranked_lists: list[list[str]],
-    k: int = 60,  # standard RRF constant, dampens effect of outlier ranks
-    top_n: int = 500,
-) -> list[tuple[str, float]]:
-    """
-    Combine multiple ranked lists via RRF.
-    RRF score = sum(1 / (k + rank_i)) for each list i.
-
-    ranked_lists: each element is a list of product_ids in rank order
-    Returns: top_n (product_id, score) sorted descending
-    """
-    scores: dict[str, float] = defaultdict(float)
-    for ranked_list in ranked_lists:
-        for rank, product_id in enumerate(ranked_list, start=1):
-            scores[product_id] += 1.0 / (k + rank)
-
-    sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return sorted_items[:top_n]
-
-
-def hybrid_retrieve(
-    query: str,
-    bm25_results: list[str],    # product_ids from ElasticSearch, ordered
-    dense_results: list[str],   # product_ids from FAISS, ordered
-    top_k: int = 500,
-) -> list[str]:
-    """Fuse BM25 and dense retrieval results."""
-    fused = reciprocal_rank_fusion([bm25_results, dense_results], top_n=top_k)
-    return [product_id for product_id, _ in fused]
-```
-
-### Position Bias Debiasing with IPW
-
-```python
-import numpy as np
-import pandas as pd
-from scipy.optimize import minimize
-
-
-def estimate_examination_probability(
-    clicks_df: pd.DataFrame,
-    method: str = "regression_em",
-) -> np.ndarray:
-    """
-    Estimate P(examined | position) from click logs.
-
-    clicks_df: columns [position, clicked, query_id, product_id, relevance_label]
-    method: 'regression_em' uses EM algorithm assuming click = examine * relevance
-            'swap_experiment' requires dedicated randomization experiment data
-
-    Returns: array of shape (max_position,) with examination probabilities
-    """
-    if method == "regression_em":
-        # EM algorithm: click = Bernoulli(theta_q_d * gamma_k)
-        # theta_q_d = relevance of document d for query q
-        # gamma_k = P(examined | position k)
-        # Iteratively update theta and gamma until convergence
-        max_pos = int(clicks_df["position"].max()) + 1
-        gamma = np.ones(max_pos)  # examination probabilities, init uniform
-        theta = np.full(len(clicks_df), 0.5)  # relevance estimates
-
-        for iteration in range(20):  # typically converges in 10-15 iterations
-            # E-step: update theta given gamma
-            for idx, row in clicks_df.iterrows():
-                pos = int(row["position"])
-                clicked = int(row["clicked"])
-                if clicked:
-                    theta[idx] = 1.0
-                else:
-                    # P(theta=1 | not clicked) = theta * (1 - gamma_k) / (1 - theta * gamma_k)
-                    old_theta = theta[idx]
-                    old_gamma = gamma[pos]
-                    theta[idx] = old_theta * (1 - old_gamma) / max(
-                        1 - old_theta * old_gamma, 1e-9
-                    )
-
-            # M-step: update gamma given theta
-            for k in range(max_pos):
-                pos_mask = clicks_df["position"] == k
-                if pos_mask.sum() == 0:
-                    continue
-                pos_theta = theta[pos_mask]
-                pos_clicked = clicks_df.loc[pos_mask, "clicked"].values
-                # gamma_k = sum(clicks) / sum(theta)
-                gamma[k] = pos_clicked.sum() / max(pos_theta.sum(), 1e-9)
-                gamma[k] = np.clip(gamma[k], 0.01, 1.0)
-
-        return gamma
-
-    raise ValueError(f"Unknown method: {method}")
-
-
-def apply_ipw_weights(
-    df: pd.DataFrame,
-    examination_probs: np.ndarray,
-    min_weight: float = 0.1,
-    max_weight: float = 10.0,
-) -> pd.Series:
-    """
-    Compute IPW sample weights for training data debiasing.
-    Weight = 1 / P(examined | position).
-    """
-    positions = df["position"].clip(0, len(examination_probs) - 1).astype(int)
-    weights = 1.0 / examination_probs[positions].clip(min=0.01)
-    return pd.Series(weights.clip(min_weight, max_weight), index=df.index)
-
-
-def build_debiased_training_data(
-    clicks_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """Full pipeline: estimate bias, compute weights, label construction."""
-    exam_probs = estimate_examination_probability(clicks_df)
-    ipw_weights = apply_ipw_weights(clicks_df, exam_probs)
-
-    # Multi-level relevance labels from user behavior
-    clicks_df = clicks_df.copy()
-    clicks_df["relevance_label"] = 0.0
-    clicks_df.loc[clicks_df["clicked"] == 1, "relevance_label"] = 0.5
-    clicks_df.loc[clicks_df["dwell_time_sec"] > 30, "relevance_label"] = 1.0
-    clicks_df.loc[clicks_df["add_to_cart"] == 1, "relevance_label"] = 2.0
-    clicks_df.loc[clicks_df["purchased"] == 1, "relevance_label"] = 3.0
-
-    clicks_df["sample_weight"] = ipw_weights
-    return clicks_df
-```
-
----
-
-## ML Components Used
-
-| Component | Technology | Role |
-|-----------|-----------|------|
-| Spell Correction | symspell (Python) | Query normalization, <1ms |
-| Query Intent | Fine-tuned BERT classifier | navigational / transactional / informational |
-| Query Expansion | BERT masked LM + catalog co-occurrence | Synonym generation for BM25 |
-| Lexical Retrieval | ElasticSearch BM25 | Exact term matching, inverted index |
-| Dense Retrieval | Two-Tower (BERT-mini) + FAISS | Semantic matching |
-| Result Fusion | Reciprocal Rank Fusion (RRF) | Hybrid BM25 + dense combination |
-| Learning to Rank | XGBoost LambdaMART (rank:ndcg) | NDCG@10 optimization over 500 features |
-| Position Bias | IPW with EM estimation | Click data debiasing for training labels |
-| Experiment Platform | A/B test framework + interleaving | Online evaluation (CTR, conversion) |
-
----
-
-## Tradeoffs and Alternatives
-
-| Decision | Chosen | Alternative | Reasoning |
-|----------|--------|-------------|-----------|
-| Retrieval fusion | RRF | Linear score combination | RRF requires no weight tuning; robust across query types |
-| LTR model | LambdaMART (XGBoost) | Neural LTR (DNN) | LambdaMART: 2h CPU training, interpretable, competitive NDCG on a purely tabular feature set |
-| Bias correction | IPW / regression EM | Randomization experiments | EM requires no traffic sacrifice; swap experiments give cleaner estimates but costly |
-| Query expansion | Catalog-filtered BERT synonyms | WordNet / thesaurus | Catalog-filtered prevents off-domain expansions |
-| Dense retrieval encoder | BERT-mini (L=4, H=256, ~11M) | BERT-base (L=12, H=768, 110M) | BERT-mini is ~10x smaller and its 256-dim output halves index size; the relevance gap must be measured per-corpus, not assumed |
-| Label source | Click + purchase + dwell time | Purchase only | Purchase signal is too sparse; blending improves coverage at cost of noise |
-
----
-
-## Interview Discussion Points
-
-**Q: How do you deal with position bias when training on click data?**
-Click data is the most abundant training signal but heavily biased: position 1 receives 5-10x more clicks than position 5 regardless of product quality. Training a ranker directly on click counts teaches it to replicate the existing ranking, not improve it. IPW correction weights each click by 1/P(examined|position), estimated via the EM algorithm on historical click-through rates. An alternative is interleaving experiments where the candidate model and production model are interleaved in results, then observed — this is less biased than A/B tests for ranking evaluation.
-
-**Q: How do you balance relevance, conversion, and business objectives in ranking?**
-Three-layer approach: (1) LambdaMART optimizes a combined relevance label (click=0.5, long dwell=1, cart=2, purchase=3) capturing both relevance and conversion signals in one model. (2) Post-ranking business rules apply constraints: out-of-stock items are demoted, promoted listings receive a bounded boost (cap at +3 positions to avoid quality degradation), brand diversity enforced via cap-3-per-brand. (3) Separate margin-weighted ranking model for "sponsored" slots. This separation keeps the organic ranker clean while allowing business control.
-
-**Q: How do you evaluate the ranking system? When do you trust offline metrics vs online experiments?**
-Offline NDCG@10 on a held-out click dataset measures ranking quality but is biased by the same position bias present in training data. Use a randomization experiment (5% of traffic with fully randomized results) to collect an unbiased offline evaluation set. Online A/B tests measure CTR, conversion rate, and revenue per search. Measure the correlation between your own offline NDCG and online CTR before trusting it — in most search teams it is positive but well short of 1, which is enough to use offline metrics for fast iteration but not enough to skip the A/B test. Never skip A/B testing: a model with +2% offline NDCG routinely fails to move online CTR.
-
----
-
-## Extended Architecture — Two-Stage Retrieval + Ranking Pipeline
+### End-to-End Request Walk-Through (100 ms budget)
 
 ```
   FULL PIPELINE: Query → Top-20 Products (100ms budget)
@@ -558,168 +306,263 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
 
 ---
 
-## Failure Scenarios and Recovery
+## 4. Component Deep Dives
 
-### Failure 1: FAISS Index Staleness Under High Write Load
+Every feature the ranker trains on is the value logged at serve time, joined later to its click and purchase labels. Recomputing a feature when the label arrives leaks the future into training (§4.4); the general rule is in [Feature Store and Point-in-Time Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md).
 
-**What failed:** During a flash sale (10x normal new product upload rate), 50,000 new products were uploaded in 2 hours. The nightly FAISS index rebuild had not yet run. These products were invisible to dense retrieval, appearing only in BM25 results. A/B metrics showed CTR on sale products dropped 18% because many new sale items only existed in FAISS after the next day's rebuild.
 
-**Detection:** Real-time monitoring tracked the ratio of BM25-only results to hybrid results. When >40% of candidates came exclusively from BM25 (no dense retrieval match), a Datadog alert fired. Time-to-detect: 22 minutes.
+### 4.1 LambdaMART with XGBoost
 
-**Recovery steps:**
-1. Emergency FAISS hot-shard: new items added to an in-memory HNSW index (hnswlib) sharded separately.
-2. At query time, search both FAISS IVF (existing items) and HNSW hot shard (new items, last 24h).
-3. Merge top-K from both, apply RRF fusion across all three sources.
-4. After flash sale, next scheduled rebuild consolidated hot shard into main index.
+```python
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.preprocessing import StandardScaler
 
-**Prevention:** Scheduled full FAISS rebuild every 6 hours (not nightly), with HNSW hot shard always active as a bridge. Alert if hot shard grows beyond 100K items (indicates rebuild lag).
 
----
+def build_ltr_features(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build 500 LTR features from (query, product, user, context) tuple.
+    df columns: query_id, product_id, user_id,
+                bm25_score, dense_score,
+                product_ctr_7d, product_conversion_rate, product_avg_rating,
+                product_review_count, product_price, product_inventory_count,
+                user_avg_order_value, user_category_affinity (dict stored as cols),
+                device_type (mobile/desktop), hour_of_day, session_depth
+    """
+    f = df.copy()
 
-### Failure 2: Position Bias Feedback Loop
+    # Query-product match features
+    f["combined_retrieval_score"] = (
+        0.6 * f["bm25_score"] + 0.4 * f["dense_score"]
+    )
+    f["score_product"] = f["bm25_score"] * f["dense_score"]
+    f["score_difference"] = f["bm25_score"] - f["dense_score"]
 
-**What failed:** Over 6 months, NDCG@10 improved on the internal test set (+3%) while online CTR plateaued. Investigation revealed: IPW weight estimation was broken due to a bug in the EM algorithm that clipped gamma values too aggressively (gamma always 1.0 for position 1-3). This meant training data was not debiased — the ranker was learning to replicate the existing rank distribution, not discover better rankings. Products already at position 1 accumulated more clicks, got higher training weight, and continued ranking at position 1.
+    # Product quality features (log-transform to handle long tails)
+    f["log_review_count"] = np.log1p(f["product_review_count"])
+    f["log_ctr_7d"] = np.log1p(f["product_ctr_7d"])
+    f["inventory_available"] = (f["product_inventory_count"] > 0).astype(int)
+    f["low_stock"] = f["product_inventory_count"].between(1, 5).astype(int)
 
-**Detection:** Audit of click-through rates by position in the test set. All products in training data had nearly identical weight regardless of position — clear indicator that bias correction was not working. Time-to-detect: 6 months (quarterly audit surfaced it).
+    # User-product cross features (critical for personalization)
+    f["price_vs_user_avg"] = f["product_price"] / (f["user_avg_order_value"] + 1.0)
+    f["price_below_user_avg"] = (f["product_price"] < f["user_avg_order_value"]).astype(int)
 
-**Recovery steps:**
-1. Ran a 2-week randomization experiment: 5% of traffic received fully randomized product ordering. Collected ~1B clicks under randomization as an unbiased evaluation dataset.
-2. Fixed EM algorithm: removed aggressive clipping, proper numerical stability with log-space computation.
-3. Re-estimated examination probabilities on randomization data for ground truth validation.
-4. Retrained ranker on corrected IPW labels; deployed after A/B test showed +6% online CTR.
+    # Context features
+    f["is_mobile"] = (f["device_type"] == "mobile").astype(int)
+    f["is_prime_shopping_hour"] = f["hour_of_day"].between(19, 22).astype(int)
+    f["deep_session"] = (f["session_depth"] > 5).astype(int)
 
-**Prevention:** Quarterly randomization experiment (1% traffic, 1 week) produces a ground-truth reference. Monitor distribution of IPW weights: if median weight for position 1 is within 10% of median weight for position 5, bias correction is broken.
+    # Quality-weighted retrieval
+    f["quality_weighted_score"] = (
+        f["combined_retrieval_score"] *
+        (1 + 0.1 * f["product_avg_rating"]) *
+        (1 + 0.05 * np.log1p(f["product_review_count"]))
+    )
 
----
+    feature_cols = [
+        "bm25_score", "dense_score", "combined_retrieval_score",
+        "score_product", "score_difference", "quality_weighted_score",
+        "product_ctr_7d", "log_ctr_7d", "product_conversion_rate",
+        "product_avg_rating", "log_review_count",
+        "product_price", "inventory_available", "low_stock",
+        "price_vs_user_avg", "price_below_user_avg",
+        "is_mobile", "is_prime_shopping_hour", "deep_session",
+    ]
+    return f[feature_cols]
 
-### Failure 3: Query Expansion Vocabulary Explosion
 
-**What failed:** The synonym expansion system added "apple" synonyms from a generic WordNet expansion. For the query "apple pie filling," the system expanded "apple" to include "Apple Inc, iPhone, MacBook" — all valid synsets in WordNet. The BM25 retrieval pulled hundreds of electronics products for food queries. Recall improved (more candidates retrieved) but precision dropped 35% for food-category queries. Business impact: conversion rate on food queries fell 12%.
+def train_lambdamart(
+    df: pd.DataFrame,
+    label_col: str = "relevance_label",
+    group_col: str = "query_id",
+) -> xgb.XGBRanker:
+    """Train LambdaMART ranker optimizing NDCG@10."""
+    # Sort by query id first: XGBoost's ranking objective requires rows of the
+    # same query to be contiguous, and `qid` must be non-decreasing.
+    df = df.sort_values(group_col).reset_index(drop=True)
+    X = build_ltr_features(df)
+    y = df[label_col].values.astype(np.float32)
+    qid = df[group_col].values
 
-**Detection:** Category-level precision monitoring showed food category precision drop 3 days after the synonym library update. Correlation identified the vocabulary update as root cause. Time-to-detect: 3 days.
+    splitter = GroupShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
+    train_idx, val_idx = next(splitter.split(X, y, groups=qid))
+    # GroupShuffleSplit keeps whole queries on one side of the split, but returns
+    # them unsorted; re-sort so qid stays non-decreasing within each side.
+    train_idx = np.sort(train_idx)
+    val_idx = np.sort(val_idx)
 
-**Recovery steps:**
-1. Rolled back synonym vocabulary to previous version (< 1 hour).
-2. Implemented catalog-filtered expansion: synonyms only valid if >100 products in the catalog contain the synonym term.
-3. Added category-aware synonym filtering: for food queries (intent classifier output), synonyms are restricted to food-related terms.
+    ranker = xgb.XGBRanker(
+        objective="rank:ndcg",
+        ndcg_exp_gain=True,
+        lambdarank_pair_method="topk",  # focus gradients on top-K positions
+        lambdarank_num_pair_per_sample=8,
+        eval_metric=["ndcg@5", "ndcg@10"],
+        n_estimators=1000,
+        max_depth=8,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.7,
+        min_child_weight=10,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        tree_method="hist",
+    )
 
-**Prevention:** Synonym vocabulary changes require an offline precision impact test on a 10K-query evaluation set before deployment. Alert if any category's retrieval precision drops >5% week-over-week.
-
----
-
-## Capacity Planning
-
-### Data Volume Projections
-
-```
-Current state (Year 0):
-  - 50K QPS * 86400 sec/day = 4.3B query events/day
-  - 500M clicks/day logged (feature vector: ~2KB each) = ~1TB/day raw logs
-  - 5M purchases/day (training signal)
-  - 10M products × 256 float32 dims = 10GB dense index (uncompressed)
-  - PQ-compressed FAISS: 10M × 32 bytes = 320MB RAM
-
-Year 1 projection (20% QPS growth):
-  - 60K QPS, 5.2B query events/day, ~1.2TB/day logs
-  - 12M products: FAISS index 384MB (PQ-compressed)
-
-Year 3 projection (2x growth):
-  - 100K QPS, 8.6B query events/day, ~2TB/day logs
-  - 20M products: FAISS index 640MB
-  - LTR training data: 15B examples/month in Parquet (~60TB/month)
-  - S3 cold storage (2-year retention): ~1.4PB total
-```
-
-### Training Compute Requirements
-
-```
-LambdaMART (XGBoost LTR):
-  Dataset: 500M labeled (query, product) pairs (30-day window)
-  Training: 16-core CPU cluster (r5.4xlarge, 128GB RAM)
-  Duration: 2 hours/day
-  Cost: ~$12/run (AWS r5.4xlarge at $1.008/hr × 2hr × 6 machines)
-  Monthly: ~$360
-
-Two-Tower Dense Retrieval (BERT-mini fine-tuning):
-  Dataset: 100M (query, product) pairs with in-batch negatives
-  Hardware: one p4d.24xlarge (8x A100 40GB); the job uses 4 GPUs, but p4d is
-            rented whole, so bill the whole node
-  Duration: 8 hours per weekly retrain
-  Cost: $21.96/hr x 8hr = ~$176/run
-  Monthly: ~$176 x 4.33 weekly runs = ~$760
-
-Cross-Encoder Reranker:
-  Fine-tuning: one p4d.24xlarge (8x A100), 12 hours, monthly refresh
-  Cost: $21.96/hr x 12hr = ~$264/month
-
-Total monthly training cost estimate: ~$360 + $760 + $264 = ~$1,384
-```
-
-All GPU figures use the p4d.24xlarge us-east-1 on-demand rate of $21.96/hr (this
-instance was repriced downward from its original $32.77/hr list rate — recheck it,
-GPU list prices move).
-
-### Serving Infrastructure
-
-```
-LTR Ranker Serving:
-  Query: 50K QPS × 500 candidates = 25M feature vectors/sec
-  XGBoost inference: 500 features × 1000 trees = ~5ms on CPU
-    (the 40ms LTR stage in the pipeline above is ~5ms of model inference
-     plus ~35ms assembling 500 candidates × 500 features from the feature store)
-  Servers: 20× c5.2xlarge (8 vCPU, 16GB RAM), each serving 2,500 QPS
-  Memory per server: XGBoost model = 200MB; feature cache = 2GB
-  Cost: 20 × $0.34/hr = $6.80/hr = ~$4,900/month
-
-FAISS Dense Retrieval:
-  Index: 320MB PQ-compressed in RAM per node
-  3 replicas for high availability
-  Servers: 7× r5.large (2 vCPU, 16GB RAM), each handles 8K QPS search
-           (7 × 8K = 56K QPS, covering the 50K QPS peak with headroom)
-  Latency: 8ms @ nprobe=64 on single thread
-  Cost: 7 × $0.126/hr = $0.882/hr = ~$644/month
-
-ElasticSearch BM25:
-  10M product documents with inverted index
-  ES index size: ~15GB (with BM25 term frequencies, stored fields)
-  Cluster: 5-node ES (r5.2xlarge, 64GB RAM), hot-warm architecture
-  Cost: 5 × $0.504/hr = ~$1,800/month
-
-Feature Store (Redis for real-time user features):
-  50K QPS × 10 feature lookups = 500K Redis GET/sec
-  Redis Cluster: 10 nodes (r5.xlarge, 32GB RAM), 50K ops/node
-  Memory: 100M users × 1KB per user profile = 100GB → 4 nodes' worth of RAM;
-          the node count is driven by ops/sec (500K / 50K = 10), not by memory
-  Cost: 10 × $0.252/hr = ~$1,800/month
-
-Total monthly serving infrastructure: $4,900 + $644 + $1,800 + $1,800 = ~$9,144
+    # Pass `qid` rather than `group`: XGBRanker.fit accepts either, but qid is
+    # per-row and cannot silently desynchronize from the split the way a
+    # sliced group-size array does.
+    ranker.fit(
+        X.iloc[train_idx], y[train_idx],
+        qid=qid[train_idx],
+        eval_set=[(X.iloc[val_idx], y[val_idx])],
+        eval_qid=[qid[val_idx]],
+        verbose=100,
+    )
+    return ranker
 ```
 
-Instance rates used above (AWS on-demand, us-east-1, Linux, 730 hr/month):
-c5.2xlarge $0.34/hr, r5.large $0.126/hr, r5.xlarge $0.252/hr, r5.2xlarge $0.504/hr,
-r5.4xlarge $1.008/hr. These scale linearly with instance size within a family.
+### 4.2 Reciprocal Rank Fusion (Hybrid Retrieval)
 
-### Storage Costs
+```python
+from collections import defaultdict
 
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[str]],
+    k: int = 60,  # standard RRF constant, dampens effect of outlier ranks
+    top_n: int = 500,
+) -> list[tuple[str, float]]:
+    """
+    Combine multiple ranked lists via RRF.
+    RRF score = sum(1 / (k + rank_i)) for each list i.
+
+    ranked_lists: each element is a list of product_ids in rank order
+    Returns: top_n (product_id, score) sorted descending
+    """
+    scores: dict[str, float] = defaultdict(float)
+    for ranked_list in ranked_lists:
+        for rank, product_id in enumerate(ranked_list, start=1):
+            scores[product_id] += 1.0 / (k + rank)
+
+    sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_items[:top_n]
+
+
+def hybrid_retrieve(
+    query: str,
+    bm25_results: list[str],    # product_ids from ElasticSearch, ordered
+    dense_results: list[str],   # product_ids from FAISS, ordered
+    top_k: int = 500,
+) -> list[str]:
+    """Fuse BM25 and dense retrieval results."""
+    fused = reciprocal_rank_fusion([bm25_results, dense_results], top_n=top_k)
+    return [product_id for product_id, _ in fused]
 ```
-Feature logs (S3, 2-year retention):
-  2TB/day raw × 730 days = 1.46PB
-  S3 Standard: $0.023/GB = ~$34,000/month (compress 5:1 → $6,800/month)
 
-Model artifacts (MLflow, S3):
-  ~500 model versions/year × 500MB each = 250GB
-  Cost: negligible (~$6/month)
+### 4.3 Position Bias Debiasing with IPW
 
-FAISS index snapshots (3 copies):
-  320MB × 3 × 365 = 350GB/year
-  Cost: ~$8/month
+```python
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+
+
+def estimate_examination_probability(
+    clicks_df: pd.DataFrame,
+    method: str = "regression_em",
+) -> np.ndarray:
+    """
+    Estimate P(examined | position) from click logs.
+
+    clicks_df: columns [position, clicked, query_id, product_id, relevance_label]
+    method: 'regression_em' uses EM algorithm assuming click = examine * relevance
+            'swap_experiment' requires dedicated randomization experiment data
+
+    Returns: array of shape (max_position,) with examination probabilities
+    """
+    if method == "regression_em":
+        # EM algorithm: click = Bernoulli(theta_q_d * gamma_k)
+        # theta_q_d = relevance of document d for query q
+        # gamma_k = P(examined | position k)
+        # Iteratively update theta and gamma until convergence
+        max_pos = int(clicks_df["position"].max()) + 1
+        gamma = np.ones(max_pos)  # examination probabilities, init uniform
+        theta = np.full(len(clicks_df), 0.5)  # relevance estimates
+
+        for iteration in range(20):  # typically converges in 10-15 iterations
+            # E-step: update theta given gamma
+            for idx, row in clicks_df.iterrows():
+                pos = int(row["position"])
+                clicked = int(row["clicked"])
+                if clicked:
+                    theta[idx] = 1.0
+                else:
+                    # P(theta=1 | not clicked) = theta * (1 - gamma_k) / (1 - theta * gamma_k)
+                    old_theta = theta[idx]
+                    old_gamma = gamma[pos]
+                    theta[idx] = old_theta * (1 - old_gamma) / max(
+                        1 - old_theta * old_gamma, 1e-9
+                    )
+
+            # M-step: update gamma given theta
+            for k in range(max_pos):
+                pos_mask = clicks_df["position"] == k
+                if pos_mask.sum() == 0:
+                    continue
+                pos_theta = theta[pos_mask]
+                pos_clicked = clicks_df.loc[pos_mask, "clicked"].values
+                # gamma_k = sum(clicks) / sum(theta)
+                gamma[k] = pos_clicked.sum() / max(pos_theta.sum(), 1e-9)
+                gamma[k] = np.clip(gamma[k], 0.01, 1.0)
+
+        return gamma
+
+    raise ValueError(f"Unknown method: {method}")
+
+
+def apply_ipw_weights(
+    df: pd.DataFrame,
+    examination_probs: np.ndarray,
+    min_weight: float = 0.1,
+    max_weight: float = 10.0,
+) -> pd.Series:
+    """
+    Compute IPW sample weights for training data debiasing.
+    Weight = 1 / P(examined | position).
+    """
+    positions = df["position"].clip(0, len(examination_probs) - 1).astype(int)
+    weights = 1.0 / examination_probs[positions].clip(min=0.01)
+    return pd.Series(weights.clip(min_weight, max_weight), index=df.index)
+
+
+def build_debiased_training_data(
+    clicks_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Full pipeline: estimate bias, compute weights, label construction."""
+    exam_probs = estimate_examination_probability(clicks_df)
+    ipw_weights = apply_ipw_weights(clicks_df, exam_probs)
+
+    # Multi-level relevance labels from user behavior
+    clicks_df = clicks_df.copy()
+    clicks_df["relevance_label"] = 0.0
+    clicks_df.loc[clicks_df["clicked"] == 1, "relevance_label"] = 0.5
+    clicks_df.loc[clicks_df["dwell_time_sec"] > 30, "relevance_label"] = 1.0
+    clicks_df.loc[clicks_df["add_to_cart"] == 1, "relevance_label"] = 2.0
+    clicks_df.loc[clicks_df["purchased"] == 1, "relevance_label"] = 3.0
+
+    clicks_df["sample_weight"] = ipw_weights
+    return clicks_df
 ```
 
----
+### 4.4 Feature Logging — Broken Then Fixed
 
-## Additional War Stories
-
-**War Story 1 — Feature Skew Between Training and Serving:**
 
 ```python
 # BROKEN: Computing features at label join time, not at serve time
@@ -760,9 +603,8 @@ def build_training_features_correct(
 
 The broken version caused the model to learn from future data: product CTR measured 7 days after the impression included clicks generated by the very ranking being trained. When deployed, the model saw pre-impression CTR but had learned from post-impression CTR — a systematic bias that inflated expected CTR for popular products. NDCG on offline test set was 0.61 vs the actual online CTR improvement of 0% (no improvement over baseline).
 
----
+### 4.5 RRF Constant k — Broken Then Fixed
 
-**War Story 2 — RRF Parameter k Misconfiguration:**
 
 ```python
 # BROKEN: k=0 in RRF turns it into a winner-takes-all combiner
@@ -807,7 +649,66 @@ With k=0, the BM25 rank-1 product always dominated the fused list. A/B test show
 
 ---
 
-## Monitoring and Drift Detection Deep-Dive
+## 5. Design Decisions & Tradeoffs
+
+
+**Hybrid retrieval (BM25 + dense)**: BM25 handles exact keyword matching well ("iPhone 14 Pro 256GB") but fails on semantic queries ("phone with good camera under $500"). Dense retrieval handles semantics but misses rare exact terms. RRF fusion exploits both without needing to tune a combination weight.
+
+**LambdaMART for LTR**: LambdaMART (MART = gradient boosted trees with LambdaRank gradients targeting NDCG) is the industry standard for search ranking. It optimizes NDCG via the lambda gradients (an approximation — NDCG itself is non-differentiable), handles mixed feature types and missing values, and is interpretable via feature importance. Neural rankers can match or beat it, but on the purely tabular feature set used here the accuracy gap is small while the training-time and operational gap is large (2 hours on CPU here vs a multi-hour GPU job).
+
+**Position bias debiasing**: Users click on position 1 items 5-10x more than position 5 items regardless of relevance. Training directly on click counts produces a ranker that learns to rank what was already ranked highly. IPW (Inverse Propensity Weighting) corrects this: each click is weighted by 1/P(examined|position). P(examined|position) is estimated from randomization experiments (swap positions for 1% of traffic, observe CTR ratio).
+
+**Dense retrieval model choice**: BERT-mini (Turc et al. 2019: L=4, H=256, ~11M params — the `google/bert_uncased_L-4_H-256_A-4` checkpoint) is small enough to encode a query on CPU inside the latency budget while its 256-dim hidden size is exactly the retrieval embedding width used downstream. Query encoder runs on CPU in 8ms; item encoders are precomputed and stored in FAISS. Fine-tuned on in-domain (query, product title) pairs with in-batch negatives. Expect a real quality gap versus a base-size encoder — measure it against your own relevance labels rather than assuming a fixed retention percentage.
+
+**Query expansion with caution**: Synonym expansion ("shoes" → "footwear, sneakers") increases recall but risks precision loss (expanding "apple" in a grocery context to "iPhone" is a failure mode). Expansion is applied only to BM25 retrieval, not dense retrieval (dense already captures semantics). Expansion candidates are filtered by co-occurrence in the product catalog.
+
+**Ranker scores are not probabilities:** LambdaMART outputs are only meaningful relative to other items for the same query. The zero-result detector in §11 thresholds them (all scores below 0.01), so either calibrate a per-query score into a relevance probability or threshold the cross-encoder instead; see [Model Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md).
+
+**Tradeoff summary:**
+
+
+| Decision | Chosen | Alternative | Reasoning |
+|----------|--------|-------------|-----------|
+| Retrieval fusion | RRF | Linear score combination | RRF requires no weight tuning; robust across query types |
+| LTR model | LambdaMART (XGBoost) | Neural LTR (DNN) | LambdaMART: 2h CPU training, interpretable, competitive NDCG on a purely tabular feature set |
+| Bias correction | IPW / regression EM | Randomization experiments | EM requires no traffic sacrifice; swap experiments give cleaner estimates but costly |
+| Query expansion | Catalog-filtered BERT synonyms | WordNet / thesaurus | Catalog-filtered prevents off-domain expansions |
+| Dense retrieval encoder | BERT-mini (L=4, H=256, ~11M) | BERT-base (L=12, H=768, 110M) | BERT-mini is ~10x smaller and its 256-dim output halves index size; the relevance gap must be measured per-corpus, not assumed |
+| Label source | Click + purchase + dwell time | Purchase only | Purchase signal is too sparse; blending improves coverage at cost of noise |
+
+---
+
+## 6. Real-World Implementations
+
+**Airbnb (from a GBDT plateau to neural ranking):** Haldar et al., "Applying Deep Learning to Airbnb Search" (KDD 2019, arXiv:1810.09591), report that much of Airbnb's initial search-ranking gain came from a gradient boosted decision tree model, that the gains then plateaued, and that the team moved to neural networks to break out of the plateau ("Deep learning was steep learning for us"). The follow-up, "Improving Deep Learning for Airbnb Search" (arXiv:2002.05515, 2020), organises the next round as architecture, bias and cold start: a ranking network beyond the first two-layer fully connected one, a positional-bias method that was one of the most significant improvements for inventory the DNN had found hard, and new treatment for new listings. The lesson for this design: LambdaMART is the right starting point; position bias and cold start are not solved by changing the model family; and a move to a neural ranker should be justified by a measured plateau.
+
+**Microsoft Research (LambdaMART):** Burges, "From RankNet to LambdaRank to LambdaMART: An Overview" (MSR-TR-2010-82, June 2010), describes LambdaMART as the boosted-tree version of LambdaRank, and notes that an ensemble of LambdaMART rankers won Track 1 of the 2010 Yahoo! Learning to Rank Challenge. XGBoost's `rank:ndcg` objective in §4.1 is an implementation of the same lambda-gradient idea.
+
+**Interleaving at search-engine scale:** the interleaving evaluation in §8 follows the large-scale validation by Chapelle, Joachims, Radlinski and Yue ("Large-scale validation and analysis of interleaved search evaluation", ACM TOIS 2012), cited for the 10-100x sample-efficiency range in §11.
+
+---
+
+## 7. Technologies & Tools
+
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| Spell Correction | symspell (Python) | Query normalization, <1ms |
+| Query Intent | Fine-tuned BERT classifier | navigational / transactional / informational |
+| Query Expansion | BERT masked LM + catalog co-occurrence | Synonym generation for BM25 |
+| Lexical Retrieval | ElasticSearch BM25 | Exact term matching, inverted index |
+| Dense Retrieval | Two-Tower (BERT-mini) + FAISS | Semantic matching |
+| Result Fusion | Reciprocal Rank Fusion (RRF) | Hybrid BM25 + dense combination |
+| Learning to Rank | XGBoost LambdaMART (rank:ndcg) | NDCG@10 optimization over 500 features |
+| Position Bias | IPW with EM estimation | Click data debiasing for training labels |
+| Experiment Platform | A/B test framework + interleaving | Online evaluation (CTR, conversion) |
+
+---
+
+## 8. Operational Playbook
+
+Drift thresholds, degradation signals, retraining cadence and the promotion lifecycle are below. The PSI mechanics are in [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md); the interleaving and A/B design follows [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md).
+
 
 ### Features That Drift Fastest
 
@@ -902,21 +803,231 @@ Experiment lifecycle:
   5. Ramp: 5% → 20% → 50% → 100% over 2 weeks post-significance
 ```
 
+### Incident runbooks
+
+**Runbook 1 — Over 40% of candidates come only from BM25:**
+Diagnosis: the dense index is missing new products (§9 Failure 1). Check the time since the last FAISS rebuild and the hot-shard size.
+Mitigation: make sure the HNSW hot shard is on and searched; trigger an out-of-cycle rebuild.
+Resolution: if the hot shard regularly exceeds 100K items, shorten the rebuild interval.
+
+**Runbook 2 — CTR@1 / CTR@5 ratio below 2.0 (normal is 4-6):**
+Diagnosis: the ranker can no longer separate good from bad. Check the serve-time feature log for null or constant features first; a broken feature pipeline looks exactly like a bad model.
+Mitigation: roll back the ranker to the previous version, which also uses the previous feature contract.
+
+**Runbook 3 — Null-retrieval rate spike (queries with fewer than 20 products):**
+Diagnosis: break it down by category, then check recent synonym, filter or index deploys (§9 Failure 3).
+Mitigation: roll back the offending config (under 1 hour); relax filters for the affected categories.
+
+**Runbook 4 — IPW weights look flat (position-1 median within 10% of position-5):**
+Diagnosis: the propensity estimator is broken (§9 Failure 2).
+Mitigation: freeze LTR retraining and keep the last good propensity table.
+Resolution: re-estimate propensities against the latest randomization slice before retraining.
+
 ---
 
-## Additional Interview Questions
+## 9. Common Pitfalls & War Stories
+
+
+### Failure 1: FAISS Index Staleness Under High Write Load
+
+**What failed:** During a flash sale (10x normal new product upload rate), 50,000 new products were uploaded in 2 hours. The nightly FAISS index rebuild had not yet run. These products were invisible to dense retrieval, appearing only in BM25 results. A/B metrics showed CTR on sale products dropped 18% because many new sale items only existed in FAISS after the next day's rebuild.
+
+**Detection:** Real-time monitoring tracked the ratio of BM25-only results to hybrid results. When >40% of candidates came exclusively from BM25 (no dense retrieval match), a Datadog alert fired. Time-to-detect: 22 minutes.
+
+**Recovery steps:**
+1. Emergency FAISS hot-shard: new items added to an in-memory HNSW index (hnswlib) sharded separately.
+2. At query time, search both FAISS IVF (existing items) and HNSW hot shard (new items, last 24h).
+3. Merge top-K from both, apply RRF fusion across all three sources.
+4. After flash sale, next scheduled rebuild consolidated hot shard into main index.
+
+**Prevention:** Scheduled full FAISS rebuild every 6 hours (not nightly), with HNSW hot shard always active as a bridge. Alert if hot shard grows beyond 100K items (indicates rebuild lag).
+
+---
+
+### Failure 2: Position Bias Feedback Loop
+
+**What failed:** Over 6 months, NDCG@10 improved on the internal test set (+3%) while online CTR plateaued. Investigation revealed: IPW weight estimation was broken due to a bug in the EM algorithm that clipped gamma values too aggressively (gamma always 1.0 for position 1-3). This meant training data was not debiased — the ranker was learning to replicate the existing rank distribution, not discover better rankings. Products already at position 1 accumulated more clicks, got higher training weight, and continued ranking at position 1.
+
+**Detection:** Audit of click-through rates by position in the test set. All products in training data had nearly identical weight regardless of position — clear indicator that bias correction was not working. Time-to-detect: 6 months (quarterly audit surfaced it).
+
+**Recovery steps:**
+1. Ran a 2-week randomization experiment: 5% of traffic received fully randomized product ordering. Collected ~1B clicks under randomization as an unbiased evaluation dataset.
+2. Fixed EM algorithm: removed aggressive clipping, proper numerical stability with log-space computation.
+3. Re-estimated examination probabilities on randomization data for ground truth validation.
+4. Retrained ranker on corrected IPW labels; deployed after A/B test showed +6% online CTR.
+
+**Prevention:** Quarterly randomization experiment (1% traffic, 1 week) produces a ground-truth reference. Monitor distribution of IPW weights: if median weight for position 1 is within 10% of median weight for position 5, bias correction is broken.
+
+---
+
+### Failure 3: Query Expansion Vocabulary Explosion
+
+**What failed:** The synonym expansion system added "apple" synonyms from a generic WordNet expansion. For the query "apple pie filling," the system expanded "apple" to include "Apple Inc, iPhone, MacBook" — all valid synsets in WordNet. The BM25 retrieval pulled hundreds of electronics products for food queries. Recall improved (more candidates retrieved) but precision dropped 35% for food-category queries. Business impact: conversion rate on food queries fell 12%.
+
+**Detection:** Category-level precision monitoring showed food category precision drop 3 days after the synonym library update. Correlation identified the vocabulary update as root cause. Time-to-detect: 3 days.
+
+**Recovery steps:**
+1. Rolled back synonym vocabulary to previous version (< 1 hour).
+2. Implemented catalog-filtered expansion: synonyms only valid if >100 products in the catalog contain the synonym term.
+3. Added category-aware synonym filtering: for food queries (intent classifier output), synonyms are restricted to food-related terms.
+
+**Prevention:** Synonym vocabulary changes require an offline precision impact test on a 10K-query evaluation set before deployment. Alert if any category's retrieval precision drops >5% week-over-week.
+
+---
+
+### Failure 4: Features Recomputed at Label-Join Time
+
+**What failed:** `product_ctr_7d` was computed when labels were joined, 7 days after the impression (§4.4), so training saw CTR that included clicks caused by the ranking being trained.
+
+**Impact:** offline NDCG@10 was 0.61, above the 0.55 target, and the online CTR lift over the baseline was 0%. The release cost a full A/B cycle (2 weeks minimum, §8) for no gain.
+
+**Prevention:** the training job may only read the serve-time feature log; a CI check fails any training pipeline that calls the online feature store.
+
+### Failure 5: RRF with k = 0
+
+**What failed:** the fusion constant was set to 0 (§4.5), so a product ranked first by one retriever always beat products ranked well by both.
+
+**Impact:** NDCG was 4% lower than with k = 60 in the A/B test; the losers were robust, doubly relevant products.
+
+**Prevention:** pin k = 60 in config with a test that asserts rank 1 scores at most 1.2x rank 10.
+
+---
+
+## 10. Capacity Planning
+
+Data volume projections are in §2; this section sizes training, serving and storage.
+
+### Training Compute Requirements
+
+```
+LambdaMART (XGBoost LTR):
+  Dataset: 500M labeled (query, product) pairs (30-day window)
+  Training: 16-core CPU cluster (r5.4xlarge, 128GB RAM)
+  Duration: 2 hours/day
+  Cost: ~$12/run (AWS r5.4xlarge at $1.008/hr × 2hr × 6 machines)
+  Monthly: ~$360
+
+Two-Tower Dense Retrieval (BERT-mini fine-tuning):
+  Dataset: 100M (query, product) pairs with in-batch negatives
+  Hardware: one p4d.24xlarge (8x A100 40GB); the job uses 4 GPUs, but p4d is
+            rented whole, so bill the whole node
+  Duration: 8 hours per weekly retrain
+  Cost: $21.96/hr x 8hr = ~$176/run
+  Monthly: ~$176 x 4.33 weekly runs = ~$760
+
+Cross-Encoder Reranker:
+  Fine-tuning: one p4d.24xlarge (8x A100), 12 hours, monthly refresh
+  Cost: $21.96/hr x 12hr = ~$264/month
+
+Total monthly training cost estimate: ~$360 + $760 + $264 = ~$1,384
+```
+
+All GPU figures use the p4d.24xlarge us-east-1 on-demand rate of $21.96/hr (this
+instance was repriced downward from its original $32.77/hr list rate — recheck it,
+GPU list prices move).
+
+### Serving Infrastructure
+
+```
+LTR Ranker Serving:
+  Query: 50K QPS × 500 candidates = 25M feature vectors/sec
+  XGBoost inference: 500 features × 1000 trees = ~5ms on CPU
+    (the 40ms LTR stage in the pipeline above is ~5ms of model inference
+     plus ~35ms assembling 500 candidates × 500 features from the feature store)
+  Servers: 20× c5.2xlarge (8 vCPU, 16GB RAM), each serving 2,500 QPS
+  Memory per server: XGBoost model = 200MB; feature cache = 2GB
+  Cost: 20 × $0.34/hr = $6.80/hr = ~$4,900/month
+
+FAISS Dense Retrieval:
+  Index: 320MB PQ-compressed in RAM per node
+  3 replicas for high availability
+  Servers: 7× r5.large (2 vCPU, 16GB RAM), each handles 8K QPS search
+           (7 × 8K = 56K QPS, covering the 50K QPS peak with headroom)
+  Latency: 8ms @ nprobe=64 on single thread
+  Cost: 7 × $0.126/hr = $0.882/hr = ~$644/month
+
+ElasticSearch BM25:
+  10M product documents with inverted index
+  ES index size: ~15GB (with BM25 term frequencies, stored fields)
+  Cluster: 5-node ES (r5.2xlarge, 64GB RAM), hot-warm architecture
+  Cost: 5 × $0.504/hr = ~$1,800/month
+
+Feature Store (Redis for real-time user features):
+  50K QPS × 10 feature lookups = 500K Redis GET/sec
+  Redis Cluster: 10 nodes (r5.xlarge, 32GB RAM), 50K ops/node
+  Memory: 100M users × 1KB per user profile = 100GB → 4 nodes' worth of RAM;
+          the node count is driven by ops/sec (500K / 50K = 10), not by memory
+  Cost: 10 × $0.252/hr = ~$1,800/month
+
+Total monthly serving infrastructure: $4,900 + $644 + $1,800 + $1,800 = ~$9,144
+```
+
+Instance rates used above (AWS on-demand, us-east-1, Linux, 730 hr/month):
+c5.2xlarge $0.34/hr, r5.large $0.126/hr, r5.xlarge $0.252/hr, r5.2xlarge $0.504/hr,
+r5.4xlarge $1.008/hr. These scale linearly with instance size within a family.
+
+### Storage Costs
+
+```
+Feature logs (S3, 2-year retention):
+  2TB/day raw × 730 days = 1.46PB
+  S3 Standard: $0.023/GB = ~$34,000/month (compress 5:1 → $6,800/month)
+
+Model artifacts (MLflow, S3):
+  ~500 model versions/year × 500MB each = 250GB
+  Cost: negligible (~$6/month)
+
+FAISS index snapshots (3 copies):
+  320MB × 3 × 365 = 350GB/year
+  Cost: ~$8/month
+```
+
+---
+
+## 11. Interview Discussion Points
+
+
+**Q: How do you deal with position bias when training on click data?**
+**Short:** Weight each click by the inverse of its examination probability at that position, estimated by EM or from a small randomization slice, so the ranker stops relearning the old order.
+Click data is the most abundant training signal but heavily biased: position 1 receives 5-10x more clicks than position 5 regardless of product quality. Training a ranker directly on click counts teaches it to replicate the existing ranking, not improve it. IPW correction weights each click by 1/P(examined|position), estimated via the EM algorithm on historical click-through rates. An alternative is interleaving experiments where the candidate model and production model are interleaved in results, then observed — this is less biased than A/B tests for ranking evaluation.
+
+**Q: How do you balance relevance, conversion, and business objectives in ranking?**
+**Short:** Train one LambdaMART on graded labels (click, dwell, cart, purchase), apply bounded business rules after ranking, and keep sponsored slots in a separate margin-aware model.
+Three-layer approach: (1) LambdaMART optimizes a combined relevance label (click=0.5, long dwell=1, cart=2, purchase=3) capturing both relevance and conversion signals in one model. (2) Post-ranking business rules apply constraints: out-of-stock items are demoted, promoted listings receive a bounded boost (cap at +3 positions to avoid quality degradation), brand diversity enforced via cap-3-per-brand. (3) Separate margin-weighted ranking model for "sponsored" slots. This separation keeps the organic ranker clean while allowing business control.
+
+**Q: How do you evaluate the ranking system? When do you trust offline metrics vs online experiments?**
+**Short:** Use offline NDCG on a randomization set for fast iteration and an online A/B test on purchase rate for decisions; a +2% offline NDCG gain often fails to move online CTR.
+Offline NDCG@10 on a held-out click dataset measures ranking quality but is biased by the same position bias present in training data. Use a randomization experiment (5% of traffic with fully randomized results) to collect an unbiased offline evaluation set. Online A/B tests measure CTR, conversion rate, and revenue per search. Measure the correlation between your own offline NDCG and online CTR before trusting it — in most search teams it is positive but well short of 1, which is enough to use offline metrics for fast iteration but not enough to skip the A/B test. Never skip A/B testing: a model with +2% offline NDCG routinely fails to move online CTR.
+
 
 **Q: How does a cross-encoder reranker differ from a bi-encoder, and when do you use each?**
+**Short:** A bi-encoder embeds query and item separately so items are precomputed for fast ANN retrieval; a cross-encoder attends across both for higher accuracy, so it only reranks the top ~50.
 A bi-encoder independently encodes the query and document into separate embedding vectors, then computes similarity via dot product. This enables precomputing document embeddings offline, making retrieval over millions of documents feasible in milliseconds. A cross-encoder takes the concatenation of query and document tokens as a single input and produces a relevance score via full attention between both, capturing complex query-document interactions. Cross-encoders score meaningfully higher NDCG but are orders of magnitude slower because they cannot precompute document embeddings — every (query, document) pair needs its own forward pass. The standard pattern is bi-encoder for retrieval (top-1000 candidates) and cross-encoder for reranking (top-50 candidates) where latency budget permits.
 
 **Q: How would you handle a query with no relevant results in the catalog?**
+**Short:** Detect it from low candidate counts and scores, then relax the query, try the spell-corrected form, fall back to dense-only retrieval, and finally show popular items in the predicted category.
 Three signals indicate zero-result situations: (1) retrieval candidate count below 20, (2) all LTR scores below 0.01, (3) cross-encoder max score below 0.10. Recovery strategies in order: (1) Query relaxation — drop the most specific tokens (size, color) and re-retrieve; (2) Spell-corrected alternative query; (3) Semantic fallback — use dense retrieval only without BM25 exact-match constraints; (4) Category-level fallback — if query intent is classified as "shoes," return top-10 most popular shoes even with low relevance. Zero-result rate should be monitored per category; spikes indicate catalog gaps, not ranking failures.
 
 **Q: How do you ensure the LTR model remains interpretable for product managers and business stakeholders?**
+**Short:** Publish weekly SHAP importances and partial-dependence plots, and add monotonic constraints on features such as rating so the ranker cannot learn a result stakeholders would find absurd.
 Three mechanisms: (1) SHAP feature importance computed weekly on a 10K-sample hold-out set and published in an internal dashboard, showing the top-20 features and their average impact on rank score. (2) PDP (Partial Dependence Plots) for the 5 most important continuous features (e.g., product_ctr_7d vs rank score), showing the model's learned relationship. (3) Monotonicity constraints in XGBoost: constrain features like `product_avg_rating` and `product_review_count` to be monotonically increasing — the ranker cannot learn that a product with a 4.9 rating should rank below one with a 4.5 rating. This prevents the model from learning spurious negative correlations that would alarm stakeholders.
 
 **Q: How do you handle long-tail queries that have very few clicks in training data?**
+**Short:** Lean on dense retrieval, which generalises without per-query clicks; drop queries with under 10 clicks from LTR labels, cluster similar rare queries, and keep BM25 as the safety net.
 Long-tail queries are usually most of the *unique* queries but only a small share of *total traffic*. Measure the exact split on your own log (a common cut is "fewer than 10 occurrences in 30 days") — it decides how much LTR capacity is worth spending on them. Strategies: (1) Dense retrieval is the primary mechanism for long-tail — it generalizes via semantic similarity even without query-specific training examples. (2) In LTR training, long-tail queries have high-variance labels (few clicks = noisy signal); minimum 10 click events required for a query to contribute to LTR training. (3) Query clustering: group semantically similar long-tail queries together for LTR training, treating the cluster as a single "meta-query." (4) The two-stage fallback ensures long-tail queries receive BM25 results as a safety net even if dense retrieval quality is low.
 
 **Q: What is interleaving and why is it preferred over A/B testing for ranking evaluation?**
+**Short:** Interleaving merges two rankers' results into one list per user and credits each click to its source, so every user is their own control; it needs roughly 10-100x fewer impressions than A/B.
 Interleaving presents a single merged list to the user where items from two competing ranking models are interleaved according to team-draft algorithm: model A picks its top unselected item, then model B, alternating until the list is full. User clicks on interleaved results indicate which model produced more clicked items. Interleaving detects ranking differences with roughly 10-100x fewer user impressions than traditional A/B testing (the range reported across the interleaving literature, e.g. Chapelle et al. 2012) because each user serves as their own control — the same user sees items from both models in the same session. Drawback: interleaving measures pairwise preference, not absolute business metrics; use A/B for final revenue and conversion validation.
+
+**Q: Why log ranking features at serve time instead of recomputing them when labels arrive?**
+**Short:** Recomputing at label-join time leaks post-impression activity into training; in §4.4 offline NDCG reached 0.61 while the online lift was zero. Logged serve-time features are what the model sees live.
+A feature such as `product_ctr_7d` computed 7 days after the impression includes the clicks that the impression and its ranking caused. The model learns a relationship that cannot exist at inference, when only pre-impression CTR is available, and it over-trusts popular products. Logging the full feature vector with each impression (500 features, about 2 KB) and joining only the labels later removes the skew by construction. The storage cost (about 1 TB/day, §2) is the price of being able to trust offline metrics.
+
+**Q: What does the RRF constant k control, and why is 60 the usual default?**
+**Short:** k flattens the reciprocal-rank curve: at k = 60 rank 1 scores only ~1.15x rank 10, so items ranked well by both retrievers beat single-list champions; at k = 0, rank 1 dominates.
+RRF scores each document as the sum of `1 / (k + rank)` over the lists it appears in. With k = 0, rank 1 is worth 1.0 and rank 2 only 0.5, so a document at the top of one list beats one at rank 5 in both. With k = 60 (Cormack, Clarke and Buettcher, 2009), rank 1 is worth 1/61 and rank 10 is worth 1/70, and agreement between retrievers decides the order. RRF needs no score normalisation, which is why it is the default for fusing BM25 and dense lists whose scores live on different scales. Tune k only with an online test; in this design k = 0 cost 4% NDCG (§9 Failure 5).
+
+**Q: Airbnb's GBDT search ranker plateaued. What does that teach you about when to move to a neural ranker?**
+**Short:** Move when measured gains from features and tuning flatten, as Airbnb's GBDT gains did; even then, position bias and cold start need their own fixes, which the model family does not supply.
+Airbnb reported that most early search-ranking gains came from a GBDT model and then plateaued, and that neural networks were how it broke out (KDD 2019). Its 2020 follow-up shows the next gains came from architecture, a dedicated positional-bias method and new-listing treatment, not from the switch alone. Apply the same test here: track the NDCG gain per retrain and per feature added; when it flattens while new signal types (sequences, text, images) are waiting, a neural ranker can use them and trees cannot. Budget for the cost side too: GPU training, slower iteration, and harder explanations for stakeholders (§11 interpretability question).

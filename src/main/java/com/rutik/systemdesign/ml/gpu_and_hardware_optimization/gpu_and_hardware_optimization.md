@@ -31,11 +31,11 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 
 **Profile before optimizing**: never guess which operation is slow. torch.profiler gives per-operator timing; nvtx markers enable function-level annotations in Nsight Systems. The slowest 10% of operations typically account for 80% of the wasted time.
 
-**Memory hierarchy awareness**: understand the latency and bandwidth of each tier — registers (< 1 ns, effectively infinite bandwidth), shared memory (SRAM, ~1 ns, 19 TB/s on A100), L2 cache (40 MB, ~5 ns, ~4 TB/s), HBM (80 GB, ~100 ns, 2 TB/s), CPU RAM (~100 ns, 51 GB/s PCIe), NVMe SSD (~100 µs, 7 GB/s). Operations should maximize time in fast memory.
+**Memory hierarchy awareness**: understand the latency and bandwidth of each tier — registers (< 1 ns, effectively infinite bandwidth), shared memory (SRAM, ~1 ns, 19 TB/s on A100), L2 cache (40 MB, ~5 ns, ~4 TB/s), HBM (80 GB, ~100 ns, 2 TB/s), CPU RAM (~100 ns, reached over PCIe 4.0 x16 at ~32 GB/s per direction), NVMe SSD (~100 µs, 7 GB/s). Operations should maximize time in fast memory.
 
 **Tensor Core utilization**: Tensor Cores on A100 achieve 312 TFLOP/s in BF16 against 19.5 TFLOP/s for CUDA cores in FP32. Two separate conditions govern whether you see that number, and they fail differently. **Precision is the hard gate**: an operand in plain FP32 (with TF32 disabled) or FP64 has no Tensor Core path and runs on CUDA cores. **Alignment is a soft gate**: cuBLAS engages Tensor Cores for any supported dtype (FP16/BF16/TF32/INT8) regardless of dimension, but reaches peak only when operands and their leading dimensions are 16-byte aligned — a multiple of 8 elements at BF16's two bytes each, and multiples of 64 for the fastest A100 kernels. Miss the alignment and you keep the Tensor Cores but get a kernel that cannot issue 128-bit vector loads and must handle a ragged edge tile, which is the real cliff people misattribute to "Tensor Cores not engaging." Neither failure raises an error, so profiled TFLOP/s against the GPU's peak is the only signal ([NVIDIA matrix-multiplication performance guide](https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html)).
 
-**Minimize host-device transfers**: copying data between CPU RAM and GPU VRAM is extremely slow (~16 GB/s for PCIe 4.0 vs 2,000 GB/s for HBM). Move data to GPU once and keep it there; use pin_memory=True to enable DMA transfers that bypass the CPU.
+**Minimize host-device transfers**: copying data between CPU RAM and GPU VRAM is extremely slow (~32 GB/s per direction for PCIe 4.0 x16, 64 GB/s bidirectional, vs ~2,000 GB/s for HBM). Move data to GPU once and keep it there; use pin_memory=True to enable DMA transfers that bypass the CPU.
 
 **Batch size sensitivity**: larger batches increase arithmetic intensity (more work per memory access) and improve Tensor Core utilization. Training on batch_size=8 vs batch_size=256 can be 5-10x slower per sample on the same hardware.
 
@@ -82,7 +82,7 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 
 ## 5. Architecture Diagrams
 
-**A100 memory hierarchy — bandwidth drops ~1000x from on-chip SRAM to PCIe**
+**A100 memory hierarchy — bandwidth drops ~600x from on-chip SRAM to PCIe**
 
 ```mermaid
 flowchart TD
@@ -100,8 +100,8 @@ flowchart TD
         smem["Shared memory SRAM\n192 KB per SM, 19 TB/s"]
     end
     SM --> l2["L2 cache\n40 MB, ~4 TB/s"]
-    l2 --> hbm["HBM3 global memory\n80 GB, 2 TB/s, ~100 ns"]
-    hbm -->|"PCIe 16 GB/s"| cpu["CPU RAM\n~51 GB/s"]
+    l2 --> hbm["HBM2e global memory\n80 GB, 2 TB/s, ~100 ns"]
+    hbm -->|"PCIe 4.0 x16<br/>32 GB/s per direction"| cpu["CPU RAM\n~51 GB/s"]
     cpu --> nvme["NVMe SSD\n7 GB/s, ~100 us"]
 
     class tc mathOp
@@ -112,7 +112,7 @@ flowchart TD
 ```
 
 Every optimization aims to keep data in the fast tiers: shared-memory SRAM moves
-data ~10x faster than HBM and ~1000x faster than the PCIe link to CPU RAM, so a
+data ~10x faster than HBM and ~600x faster than the PCIe link to CPU RAM, so a
 host-device copy costs as much as thousands of on-chip operations.
 
 **A100 BF16 roofline — which side of the ridge an operation sits on**
@@ -957,6 +957,18 @@ Adam stores two FP32 moment buffers per parameter (8 bytes) versus SGD-momentum'
 **Short:** Confirming a DataLoader bottleneck means checking whether GPU utilization stays below 80% while a CPU core is pegged at 100%, then benchmarking loader throughput in isolation.
 If GPU utilization sits below 80% while a CPU core is pegged at 100%, the data pipeline — not the GPU — is the limit. Do not guess: benchmark the loader in isolation (iterate N batches, measure samples/sec) and compare against the GPU's step time; if the loader is slower, the GPU is starving between batches. The fix is parallel prefetch (`num_workers=4`, `pin_memory=True`, `persistent_workers=True`, `prefetch_factor=2`) plus `non_blocking=True` transfers, which routinely lifts utilization from ~65% to >90% with zero extra hardware. Adding GPUs before checking this just doubles the cost of a CPU-bound job.
 
+**Q: How do you profile a training job to tell compute-bound kernels from memory-bound ones?**
+**Short:** Capture a few steps with torch.profiler, export a Chrome trace, and compare each hot kernel's achieved FLOP/s and memory bandwidth against the GPU's peaks.
+Use `torch.profiler` with `record_shapes=True, profile_memory=True, with_stack=True`. Export to Chrome trace format (`prof.export_chrome_trace("trace.json")`) and look for SM utilization (target > 80% for compute-bound), memory bandwidth utilization (target > 70% for memory-bound), and kernel launch overhead. Alternatively, `nvidia-smi dmon -s puc` samples power/utilization every second. An SM utilization of 30% on a compute-intensive workload indicates excessive kernel launch overhead or poor occupancy — check batch size and tensor shapes.
+
+**Q: Which limit, compute or memory bandwidth, bounds LLM token generation, and why?**
+**Short:** Decode is memory-bandwidth bound: each token rereads every weight from HBM, so a 7B FP16 model on a 2 TB/s A100 needs at least ~7 ms per decode step.
+Compute throughput (FLOPS) limits matrix-multiply-heavy operations (prefill/prompt processing). Memory bandwidth limits memory-bound operations (token generation: loading weights and the KV cache from HBM for each token). An A100 has 312 TFLOPS (BF16) and 2TB/s memory bandwidth. For a 7B model with 2-byte (FP16) weights = 14GB, loading all weights takes 14GB / 2TB/s = 7ms — the minimum time per decode step regardless of batch size. This is why LLM generation is memory-bandwidth bound and why techniques like speculative decoding and continuous batching matter: they increase arithmetic intensity (more tokens computed per weight load) to better utilize compute.
+
+**Q: How do you get Tensor Core speed for FP32 matmuls on Ampere and newer GPUs?**
+**Short:** Opt into TF32 with torch.backends.cuda.matmul.fp32_precision = "tf32"; PyTorch measures A100 matmuls ~7x faster, at a relative error about 100x larger than FP32.
+TF32 rounds FP32 inputs to a 10-bit mantissa, runs them on Tensor Cores and accumulates in FP32, so you keep FP32's dynamic range. Opt in with `torch.backends.cuda.matmul.fp32_precision = "tf32"` (or the global `torch.set_float32_matmul_precision("high")`); do not combine it with the older `allow_tf32` flags, because PyTorch 2.15's CUDA notes state that mixing the old and new settings is not supported. On an A100 the peak gain is 156 TFLOP/s TF32 against 19.5 TFLOP/s FP32, about 8x, and PyTorch's own 10240x10240 benchmark measures ~7x, with relative error about two orders of magnitude larger than FP32. Leave it off (`"ieee"`) for numerically sensitive work such as solvers or reference evaluations.
+
 ---
 
 ## 13. Best Practices
@@ -1110,25 +1122,3 @@ stream_a.synchronize()   # wait for stream_a to finish
 with torch.cuda.stream(stream_b):
     result_b = model_b(result_a)  # safe: result_a is committed
 ```
-
-**How do you profile GPU utilization to find compute vs memory bottlenecks?** Use `torch.profiler` with `record_shapes=True, profile_memory=True, with_stack=True`. Export to Chrome trace format (`prof.export_chrome_trace("trace.json")`) and look for SM utilization (target > 80% for compute-bound), memory bandwidth utilization (target > 70% for memory-bound), and kernel launch overhead. Alternatively, `nvidia-smi dmon -s puc` samples power/utilization every second. An SM utilization of 30% on a compute-intensive workload indicates excessive kernel launch overhead or poor occupancy — check batch size and tensor shapes.
-
-**What is mixed precision training and when does BF16 outperform FP16?** Mixed precision (AMP) computes forward/backward in half precision (FP16 or BF16) and accumulates gradients in FP32. FP16 has 5 exponent bits and 10 mantissa bits — it overflows for values > 65,504 (requires loss scaling). BF16 has 8 exponent bits and 7 mantissa bits — same dynamic range as FP32, no overflow, no loss scaling needed. BF16 is preferred on Ampere and newer (A100, H100/H200, B200) and for LLM training where activation magnitudes can be large. Use FP16 only on Volta/Turing (V100, T4) where BF16 hardware support is absent.
-
-**What is GPU memory bandwidth vs. compute throughput, and which limits LLM inference?** Compute throughput (FLOPS) limits matrix-multiply-heavy operations (prefill/prompt processing). Memory bandwidth limits memory-bound operations (token generation: loading KV cache from HBM for each token). An A100 has 312 TFLOPS (BF16) and 2TB/s memory bandwidth. For a 7B model with 2-byte (FP16) weights = 14GB, loading all weights takes 14GB / 2TB/s = 7ms — the minimum per-token generation time regardless of batch size. This is why LLM generation is memory-bandwidth bound and why techniques like speculative decoding and continuous batching matter: they increase arithmetic intensity to better utilize compute.
-
-**What is tensor core utilization and how do matrix dimensions affect it?** Alignment picks the kernel, it does not switch Tensor Cores on: cuBLAS uses them for FP16/BF16/TF32 at any shape, but operands whose leading dimensions are multiples of 8 elements (16 bytes at BF16) get the vectorized kernels, and anything else gets a slower ragged-edge kernel. The padding itself is cheap — a hidden size of 4097 padded to the next multiple of 16 (4112) adds 15/4097 = 0.4% extra work — so the cost of 4097 is the slow kernel choice, not wasted tile area; pad to 4104 (multiple of 8) or better to 4160 (multiple of 64) and profile achieved TFLOP/s. For FP32 matmuls on Ampere and newer, opt into TF32 with `torch.backends.cuda.matmul.fp32_precision = "tf32"` (or the global `torch.set_float32_matmul_precision("high")`); do not combine it with the older `allow_tf32` flags, because PyTorch 2.15's CUDA notes state that mixing the old and new settings is not supported. On an A100 the peak gain is 156 TFLOP/s TF32 against 19.5 TFLOP/s FP32, about 8x, and PyTorch's own 10240x10240 benchmark measures ~7x, with relative error about two orders of magnitude larger than FP32.
-
-**What is gradient checkpointing and what is the compute-memory trade-off?** During backpropagation, PyTorch stores all intermediate activations from the forward pass to compute gradients. For a 7B LLM with sequence length 4k, this can require 80GB+. Gradient checkpointing (`torch.utils.checkpoint.checkpoint_sequential`) discards activations after the forward pass and recomputes them during backward when needed. Memory reduction: O(sqrt(N)) vs. O(N) for N layers (recompute the N/2 discarded activations from the N/2 checkpointed). Compute overhead: ~30% more FLOPS (one extra partial forward pass). The trade-off: pay 30% more compute to train models 5-10× larger than VRAM allows.
-
----
-
-**Quick-reference comparison table:**
-
-| Approach | When to use | Trade-off |
-|---|---|---|
-| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
-| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
-| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
-| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
-| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

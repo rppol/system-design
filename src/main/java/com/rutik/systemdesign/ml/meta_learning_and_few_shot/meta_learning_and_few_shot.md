@@ -99,6 +99,14 @@ GPT-3-style in-context learning (Brown et al., 2020) hands a frozen model a prom
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     A(["Task distribution"]) --> B["Sample an episode:\nN-way K-shot"]
     B --> C["Support set S\nN x K labeled examples"]
     B --> D["Query set Q\nN x Q held-out examples"]
@@ -108,6 +116,12 @@ flowchart LR
     F --> G["Episode loss"]
     G --> H["Meta-update:\nshared params, metric, or update rule"]
     H -.->|"next episode"| A
+
+    class A io
+    class B,C,D req
+    class E,F train
+    class G lossN
+    class H mathOp
 ```
 
 Every step of meta-training is this same loop, regardless of family: sample a fresh episode, adapt or embed using only the support set, score on the disjoint query set, and push that signal back into whatever is shared across episodes. Metric-based methods skip any real "adapt" step (the base-learner is just the shared encoder); optimization-based methods make the adapt step several real gradient updates.
@@ -189,6 +203,14 @@ Getting these three counts straight is the difference between reading a benchmar
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     S1(["Support images\nN classes x K shots"]) --> ENC["Shared encoder"]
     ENC --> EMB["Support embeddings"]
     EMB --> PROTO["Class prototypes:\nmean embedding per class"]
@@ -198,6 +220,12 @@ flowchart LR
     ZQ --> DIST
     DIST --> SOFT["Softmax of\nnegative distance"]
     SOFT --> PRED(["Predicted class"])
+
+    class S1,Q1 io
+    class ENC,ENC2 frozen
+    class EMB,ZQ,PROTO base
+    class DIST,SOFT mathOp
+    class PRED train
 ```
 
 The entire "adaptation" step is an average — no gradient descent runs on the support set at all. This is why metric-based methods are cheap at meta-test time: registering a new class costs one forward pass over K images plus a mean.
@@ -206,6 +234,14 @@ The entire "adaptation" step is an average — no gradient descent runs on the s
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     THETA(["Meta-parameters"]) --> T1["Task 1 support:\nk gradient steps"]
     THETA --> T2["Task 2 support:\nk gradient steps"]
     THETA --> T3["Task 3 support:\nk gradient steps"]
@@ -217,6 +253,12 @@ flowchart TD
     Q3 --> SUM
     SUM --> OUTER["Outer-loop update:\nbackprops through every inner step"]
     OUTER -.->|"next meta-step"| THETA
+
+    class THETA io
+    class T1,T2,T3 train
+    class Q1,Q2,Q3 req
+    class SUM lossN
+    class OUTER mathOp
 ```
 
 Each task gets its own short-lived, per-task copy of the parameters (the inner loop); the outer loop then updates the ONE shared initialization by differentiating through all of those per-task adaptations at once. Reptile draws the same picture but deletes everything from "Adapted weights, evaluated on query" onward — it moves theta toward the adapted weights directly, with no query-loss backward pass.

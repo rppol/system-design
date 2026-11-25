@@ -134,6 +134,14 @@ Worked numbers for a 7B model on 8 nodes x 8 H100 with mixed-precision Adam (16 
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     subgraph N0[Node 0 - replica 0]
         A0[GPU 0..7<br/>1/8 shard each]
     end
@@ -146,6 +154,8 @@ flowchart LR
     A0 -. AllGather + ReduceScatter<br/>per layer, NVLink .- A0
     A0 <== gradient AllReduce<br/>once per step, InfiniBand ==> A1
     A1 <== gradient AllReduce ==> A2
+
+    class A0,A1,A2 train
 ```
 
 **DeepSpeed ZeRO**

@@ -142,6 +142,14 @@ The production side of these systems, consent and watermarking for cloned voices
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     wav(["raw waveform\n16 kHz PCM"]) --> frame["frame + window\n25 ms / 10 ms hop"]
     frame --> fft["FFT per frame"]
     fft --> mag["power spectrum\n201 bins (400-pt FFT)"]
@@ -150,6 +158,10 @@ flowchart LR
     logf --> melspec(["log-mel-spectrogram\n(80, T)"])
     melspec --> dct["DCT (optional)"]
     dct --> mfcc(["MFCC\n13 coeffs + deltas"])
+
+    class wav io
+    class frame,fft,mag,mel,logf,dct mathOp
+    class melspec,mfcc base
 ```
 
 Every task-specific pipeline in this module (ASR, speaker, KWS) branches off after the log-mel-spectrogram step; the DCT into MFCC is now optional rather than default for deep models.
@@ -158,12 +170,25 @@ Every task-specific pipeline in this module (ASR, speaker, KWS) branches off aft
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     enc(["encoder output\nT frames"]) --> softmax["per-frame softmax\nover vocab + blank"]
     softmax --> lattice["forward-backward DP:\nsum over all monotonic\nalignments"]
     lattice --> loss(["CTC loss\n-log P(y given x)"])
     softmax --> greedy["greedy argmax path\n(inference)"]
     greedy --> collapse["collapse repeats,\nthen drop blanks"]
     collapse --> text(["decoded text"])
+
+    class enc,text io
+    class softmax,lattice mathOp
+    class loss lossN
+    class greedy,collapse req
 ```
 
 Training marginalizes over every valid alignment via dynamic programming; inference instead takes the single most-likely path per frame and must explicitly collapse it (Section 6, and the ASCII diagram below).
@@ -172,12 +197,24 @@ Training marginalizes over every valid alignment via dynamic programming; infere
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     audio(["audio encoder\n(acoustic frames)"]) --> joint["joint network"]
     prev(["previous non-blank\nlabels"]) --> pred["prediction network\n(label-history LM)"]
     pred --> joint
     joint --> out["softmax over\nvocab + blank"]
     out -->|"emit label: advance u"| pred
     out -->|"blank: advance t to\nnext audio frame"| audio
+
+    class audio,prev io
+    class pred,joint train
+    class out mathOp
 ```
 
 Emitting a real label advances the label position u without consuming new audio; emitting blank advances the audio frame t. This dual-advance rule is what makes RNN-T naturally streaming — everything inferable from frames up to t has already been emitted.
@@ -186,6 +223,14 @@ Emitting a real label advances the label position u without consuming new audio;
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     a(["audio frames"]) --> pyr["pyramidal BLSTM encoder\n(3 layers, 8x time reduction)"]
     pyr --> henc(["encoder states"])
     henc --> att["attention\n(soft, non-monotonic)"]
@@ -194,6 +239,11 @@ flowchart LR
     ctx --> dec["decoder step"]
     dprev --> dec
     dec --> ychar(["next character\nor subword"])
+
+    class a,ychar io
+    class pyr,dec train
+    class henc,ctx,dprev base
+    class att mathOp
 ```
 
 Unlike CTC/RNN-T, nothing here enforces monotonic alignment — the attention weights are free to jump around, which is exactly what allows LAS to skip or repeat words on hard audio.
@@ -202,6 +252,14 @@ Unlike CTC/RNN-T, nothing here enforces monotonic alignment — the attention we
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     enroll(["enrollment audio"]) --> embA["speaker embedding\n(x-vector)"]
     test(["test audio"]) --> embB["speaker embedding\n(x-vector)"]
     embA --> score["cosine similarity\nor PLDA score"]
@@ -209,6 +267,12 @@ flowchart LR
     score --> thresh{"score vs\nthreshold"}
     thresh -->|"above"| accept(["accept: same speaker"])
     thresh -->|"below"| reject(["reject: different speaker"])
+
+    class enroll,test io
+    class embA,embB train
+    class score,thresh mathOp
+    class accept req
+    class reject lossN
 ```
 
 Diarization reuses the same embedding step but replaces the single 1:1 comparison with clustering across many short segments of a multi-speaker recording to assign "who spoke when" labels without a 1:1 threshold decision.
@@ -217,11 +281,24 @@ Diarization reuses the same embedding step but replaces the single 1:1 compariso
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     text(["input text"]) --> norm["text normalization +\ngrapheme-to-phoneme"]
     norm --> am["acoustic model\n(Tacotron 2 / FastSpeech 2)"]
     am --> melout(["predicted\nmel-spectrogram"])
     melout --> voc["vocoder\n(HiFi-GAN / WaveGlow)"]
     voc --> outwav(["output waveform"])
+
+    class text,outwav io
+    class norm req
+    class am,voc train
+    class melout base
 ```
 
 **Streaming partial-hypothesis timeline:**

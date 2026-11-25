@@ -26,15 +26,21 @@ Key insight: Most neural network weights are redundant. Han et al.'s Deep Compre
 
 ## 3. Core Principles
 
-**Accuracy-efficiency Pareto frontier**: Every compression technique trades accuracy for efficiency. The goal is to operate on the Pareto frontier — maximum efficiency for a given accuracy budget.
+**Operate on the accuracy-efficiency Pareto frontier.** Every technique trades some accuracy for latency, memory or cost. Plot the candidates (FP16, INT8 post-training quantization, INT8 quantization-aware training, pruned, distilled) as accuracy against latency on the target hardware, and pick the cheapest point inside the accuracy budget.
 
-**Calibration data required for quantization**: PTQ requires a small representative dataset (100–1,000 samples) to measure activation ranges. Using unrepresentative calibration data causes accuracy collapse.
+**Speed-ups are a property of the hardware.** INT8 helps only where the silicon has INT8 math units (NVIDIA Turing tensor cores onward, Intel CPUs with VNNI or AMX); unstructured sparsity helps only with sparse kernels; NVIDIA Ampere and later GPUs accelerate only the 2:4 structured-sparsity pattern. Measure on the deployment target, not on a development GPU.
 
-**Structured vs unstructured sparsity**: Unstructured pruning (individual weights) achieves higher sparsity but requires sparse matrix libraries to realize speed gains. Structured pruning (channels, heads, layers) produces dense subnetworks that benefit from standard hardware without specialized libraries.
+**Memory follows bit width.** FP32 to FP16 halves weight memory, INT8 quarters it, and 4-bit weight-only quantization cuts it about 8x: a 7B-parameter model is about 28 GB in FP32, 14 GB in FP16, 7 GB in INT8 and 3.5 GB at 4 bits, before overhead. Memory-bound workloads (small-batch inference, LLM decoding) speed up roughly in proportion; compute-bound ones gain only where the hardware has faster low-precision math.
 
-**Temperature in distillation**: Soft labels at temperature T=3–5 carry more information than hard one-hot labels. The teacher's "wrong" probabilities (e.g., 0.01 for horse, 0.005 for car) encode class similarity that hard labels discard.
+**Calibration data must match production.** Post-training quantization needs a small representative dataset (typically 100-1,000 samples) to set activation ranges. Unrepresentative calibration data clips real activations and can collapse accuracy, often only on a slice (long-range objects, rare classes) that an aggregate metric hides.
 
-**Iterative refinement**: Single-shot compression often underperforms iterative compress-fine-tune cycles. Alternating between compression and brief fine-tuning recovers accuracy incrementally.
+**Structured vs unstructured sparsity.** Unstructured pruning removes individual weights and reaches high sparsity, but needs sparse kernels to turn zeros into speed. Structured pruning removes channels, heads or layers and leaves a smaller dense model that standard hardware runs faster without special libraries.
+
+**Temperature in distillation.** Soft labels at temperature T = 3-5 carry more information than one-hot labels: the teacher's small probabilities on wrong classes (0.01 for horse, 0.005 for car) encode class similarity that hard labels discard. Multiply the soft-label loss by T² so its gradients stay comparable in size to the hard-label term.
+
+**Iterate and fine-tune.** One-shot compression usually loses more accuracy than compress-then-fine-tune cycles. Prune or quantize in steps with brief fine-tuning between them, and move to quantization-aware training when post-training quantization loses too much.
+
+**Evaluate per slice, not only in aggregate.** Compression error concentrates in rare classes, long inputs and small activations, so gate deployment on per-slice metrics as well as the overall one.
 
 ---
 

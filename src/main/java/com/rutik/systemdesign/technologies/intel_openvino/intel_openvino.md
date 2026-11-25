@@ -1,6 +1,6 @@
 # Intel OpenVINO — CPU/Edge Inference & Model Optimization
 
-> **Version anchor (2026-10-19):** OpenVINO **2026.4.1** (2026-10-01; API 2.0 / `ov::` namespace era). Every
+> **Version anchor (checked 2026-11-25; no newer release):** OpenVINO **2026.4.1** (2026-10-01; API 2.0 / `ov::` namespace era). Every
 > version-specific behavior is tagged inline against the release it landed in — e.g.
 > `[2022.1]` for the `ov::` API, `[2024.0]` for the removal of the legacy
 > `InferenceEngine::` API, `[2025.0]` for the removal of the Model Optimizer (`mo`)

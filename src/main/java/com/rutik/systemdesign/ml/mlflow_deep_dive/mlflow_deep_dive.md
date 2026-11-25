@@ -830,7 +830,7 @@ missing values you expect, or declare those columns as doubles.
 ### Dependency capture — what MLflow pins, and what it cannot see
 
 At log time MLflow walks the imported modules, maps them to distributions, and writes the
-installed versions. For the sklearn model above that produced exactly:
+installed versions. For the sklearn model above, logged in the 3.15.1 environment this module was verified in, that produced exactly:
 
 ```
 mlflow==3.15.1
@@ -840,6 +840,10 @@ scikit-learn==1.9.0
 scipy==1.18.0
 skops==0.14.0
 ```
+
+Logged again today, the same call would pin today's releases (PyPI, checked 2026-11-25: `mlflow==3.18.0`, `numpy==2.5.5`,
+`pandas==3.1.1`, `scikit-learn==1.9.1`, `scipy==1.18.1`, `skops==0.16.0`; MLflow 3.18.0 declares `pandas<4`, so
+pandas 3 is in range). The file is a snapshot of whatever happened to be installed, which is the problem the next list describes.
 
 **MLflow pins what it saw, not what you meant.** The honest list of what is outside the model:
 
@@ -858,7 +862,7 @@ Override the inference when you know better:
 ```python
 mlflow.sklearn.log_model(
     model, name="model",
-    pip_requirements=["scikit-learn==1.9.1", "numpy==2.5.1"],   # replace inference entirely
+    pip_requirements=["scikit-learn==1.9.1", "numpy==2.5.5"],   # replace inference entirely
     # or: extra_pip_requirements=["boto3>=1.40"]                # add to what was inferred
 )
 ```

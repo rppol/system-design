@@ -1,13 +1,19 @@
 # Design a Social Media Content Feed Ranking System (Twitter/LinkedIn Scale)
-## Problem Statement
+## Intuition
 
-Design a content feed ranking system for a social media platform with 500 million users and
-100K requests per second. Given a user session, select and rank 100 posts from thousands of
-candidates (posts from followed accounts, algorithmically recommended content, and ads). The
-system must optimize for multiple objectives simultaneously: engagement (likes, comments, shares),
-dwell time (meaningful content consumption), and content quality/diversity (avoid echo chambers
-and low-quality bait). The system must run end-to-end within 150ms and must not exhibit
-popularity bias that starves new creators.
+> A feed ranker is the editor of a newspaper printed separately for each of 100 million readers every few minutes. It has thousands of stories, room for 100 and 150 ms to choose, and it answers to several bosses at once: what readers click, what they actually read, what keeps creators publishing, and what the platform can defend in public.
+
+**Key insight:** the objective is the design. The model trains on engagement it caused itself, its labels are biased by position and by what it chose to show, and its objectives conflict (clicks against dwell against quality). The architecture is a set of answers to those conflicts: MMoE with one gate per objective, IPS for position bias, delayed negatives for unseen posts, an exploration budget, and DPP plus hard caps for diversity. How much the weights matter: one config change that zeroed the quality weight raised session length 8% and the report rate 45% (§9 Failure 3).
+
+Mental model: in-network candidates (followed accounts) and out-of-network candidates (two-tower retrieval) merge into one MMoE multi-task ranker, a weighted multi-objective score orders them, and DPP plus business rules re-rank the top. Logged impressions with delayed labels feed the next training run.
+
+Why this system exists: at 8.64B feed requests a day, the ranker decides what 100M daily users read and which creators get reach. Small weight changes move both user attention and creator livelihoods.
+
+---
+
+## 1. Requirements Clarification
+
+Design a content feed ranking system for a social media platform with 500 million users and 100K requests per second. Given a user session, select and rank 100 posts from thousands of candidates (posts from followed accounts, algorithmically recommended content, and ads). The system must optimize for multiple objectives simultaneously: engagement (likes, comments, shares), dwell time (meaningful content consumption), and content quality/diversity (avoid echo chambers and low-quality bait). The system must run end-to-end within 150ms and must not exhibit popularity bias that starves new creators.
 
 ### Functional Requirements
 - Rank feed for each of 500M users within 150ms
@@ -30,7 +36,46 @@ popularity bias that starves new creators.
 
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+| Quantity | Derivation | Result |
+|---|---|---|
+| Feed requests per day | 100K QPS x 86,400 s | 8.64B |
+| Candidate feature reads | 2,000 candidates x ~500 B per request | ~1 MB per request, ~100 GB/s at 100K QPS |
+| Feature log | 100K QPS x 100 ranked posts x 300 B | ~3 GB/s raw; a 1% sample is ~2.6 TB/day |
+| Engagement events | 100M DAU x 20 events | ~2B/day |
+| Latency budget (P99) | retrieval + ranking + re-ranking | 10 + 80 + 60 = 150 ms |
+| Peak traffic | viral events | 3x, 300K QPS |
+
+The second row is why candidate features are precomputed and cached rather than assembled per request, and the third is why the training log is sampled.
+
+### Data Volume Projections
+
+```
+Year 0 (current):
+  Users: 500M registered, 100M DAU
+  Posts: 10M new posts/day ingested for ranking
+  Requests: 100K QPS × 86400 = 8.64B feed requests/day
+  Per-request candidates: 2000 posts × 500 bytes feature vector = 1MB per request
+  Feature log: 100K QPS × 100 posts ranked × 300 bytes = 3GB/sec → 259TB/day (sample 1%)
+  Sampled event log: 2.59TB/day
+  User engagement events (Kafka): 100M DAU × 20 events = 2B events/day = ~1TB/day
+
+Year 1 (20% user growth):
+  600M users, 120M DAU, 120K QPS
+  Sampled feature log: 3.1TB/day
+  Engagement events: 2.4B/day
+
+Year 3 (2x growth + 2 new regions):
+  1B users, 200M DAU, 200K QPS
+  Kafka throughput for events: 4B events/day = 46K events/sec sustained
+  Model training data (30-day): ~78TB Parquet
+  User embedding store (Redis): 1B users × 256 dims × 4 bytes = 1TB Redis cluster
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -109,58 +154,11 @@ Offline training pipeline: engagement events stream through Kafka and Flink into
 
 ---
 
-## Key Design Decisions
+## 4. Component Deep Dives
 
-### 1. Multi-gate Mixture of Experts (MMOE) for Multi-Task Learning
+User embeddings and engagement features are written by background jobs and read by serving, and training rows join features as of the impression time. Both rules are covered in [Feature Store and Point-in-Time Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md); §4.3 shows the serving-side race.
 
-Naive multi-task learning with a shared bottom network suffers from the "seesaw effect": improving
-engagement task degrades dwell time task because the gradient directions conflict. MMOE solves this
-with expert networks (specialized sub-networks) and gating networks (one gate per task). Each task's
-gating network learns to selectively use the experts most relevant to that task. The engagement gate
-might rely on experts that learned short-form viral content signals, while the dwell gate relies on
-experts that learned long-form quality signals.
-
-### 2. Two-Tower Model for Algorithmic Candidate Retrieval
-
-For non-followed content (recommendations), exact scoring of the whole corpus per user is
-impossible at 100K QPS. Two-tower (dual encoder): user tower encodes user embedding, content tower
-encodes post embedding. Similarity = dot product. Both towers are pre-computed — user embeddings
-updated every 5 minutes, post embeddings at index time. FAISS enables approximate nearest neighbor
-search in < 10ms. Scope the index deliberately: it covers the *eligible* recent corpus (~10M posts,
-the figure carried into Capacity Planning), not the multi-billion-post archive. 10B 256-dim float32
-vectors are 10TB of raw vectors before any graph overhead, so an unquantized HNSW graph over the
-full archive is not servable — the production index is IVF+PQ over the eligible window.
-
-### 3. Determinantal Point Processes for Diversity
-
-Maximizing engagement alone produces filter bubbles and author monopolization (top 5 creators
-dominate every feed). DPP models diversity explicitly: the probability of selecting a set of posts
-is proportional to the determinant of the kernel matrix, which is large when posts are both
-high-quality (diagonal entries = relevance scores) and diverse (off-diagonal entries = similarity,
-penalized). DPP naturally prevents the same author from appearing 5 times consecutively.
-
-### 4. Delayed Negative Sampling
-
-Naive training labels: shown post that was not clicked = negative example. But a user may not
-have scrolled to that post yet. Training on these false negatives produces a model that penalizes
-content in the lower feed. Solution: delayed negative sampling. Wait 48 hours before labeling a
-shown post as negative. If the user re-opens the app and clicks the post within 48 hours, it
-becomes a positive label.
-
-### 5. Feedback Loop Mitigation
-
-A pure ranking model trained on engagement creates feedback loops: viral content becomes more viral
-because the model shows it more, generating more signals. Mitigations:
-- Exploration budget: 5% of feed positions reserved for under-explored content (epsilon-greedy)
-- Creator fairness: new posts from new creators receive a minimum 200 impressions before ranking
-  data is used (warm-up period)
-- Position bias correction: inverse propensity scoring (IPS) de-biases training labels for
-  position effects (post at position 1 gets 3x more clicks than position 5, not because it is 3x
-  better)
-
----
-
-## Implementation
+### 4.1 Ranking Pipeline Implementation
 
 ```python
 from __future__ import annotations
@@ -172,9 +170,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
+# --- Data structures ---
 
 @dataclass
 class Post:
@@ -195,9 +191,7 @@ class RankedPost:
     final_score: float
 
 
-# ---------------------------------------------------------------------------
-# MMOE: Multi-gate Mixture of Experts
-# ---------------------------------------------------------------------------
+# --- MMOE: Multi-gate Mixture of Experts ---
 
 class ExpertNetwork(nn.Module):
     """Single expert: a 2-layer MLP processing the shared input."""
@@ -351,9 +345,7 @@ def build_feature_vector(
     return np.concatenate([user_features, content_features])  # 512-dim
 
 
-# ---------------------------------------------------------------------------
-# DPP Diversity Re-ranking
-# ---------------------------------------------------------------------------
+# --- DPP Diversity Re-ranking ---
 
 class DPPReranker:
     """
@@ -417,7 +409,7 @@ class DPPReranker:
 
         COMPLEXITY: this reference version recomputes a full Cholesky per candidate
         per step, so it is O(k * n * k^3), NOT the O(k * n) quoted for greedy MAP.
-        Production uses the incremental rank-1 gain update (see War Story 1 below,
+        Production uses the incremental rank-1 gain update (see §4.2 below,
         `dpp_greedy_map_correct`), which is what actually fits the latency budget.
         """
         n = len(posts)
@@ -479,9 +471,7 @@ class DPPReranker:
         return result
 
 
-# ---------------------------------------------------------------------------
-# Multi-Objective Score Aggregation
-# ---------------------------------------------------------------------------
+# --- Multi-Objective Score Aggregation ---
 
 def aggregate_scores(
     ranked_posts: list[tuple[Post, list[float]]],   # (post, [engage, dwell, quality])
@@ -520,9 +510,7 @@ def aggregate_scores(
     return sorted(result, key=lambda r: r.final_score, reverse=True)
 
 
-# ---------------------------------------------------------------------------
-# Position Bias Correction (Inverse Propensity Scoring)
-# ---------------------------------------------------------------------------
+# --- Position Bias Correction (Inverse Propensity Scoring) ---
 
 def ips_corrected_label(
     label: float,             # raw binary label (1 = clicked, 0 = not clicked)
@@ -548,233 +536,7 @@ def ips_corrected_label(
     return label / (propensity + 1e-9)
 ```
 
----
-
-## ML Components Used
-
-| Component | Purpose | Key Parameters |
-|-----------|---------|----------------|
-| Two-Tower Model | Candidate retrieval for non-followed content | 256-dim embeddings, FAISS HNSW index |
-| MMOE | Multi-task ranking: engagement + dwell + quality | 8 experts, 3 tasks, joint training |
-| DPP (Greedy MAP) | Diversity re-ranking, author diversity | diversity_weight=0.3, greedy O(k*n) |
-| Bloom Filter | De-duplicate seen posts at O(1) per post | 10M bits, 5 hash functions -> ~1% FPR at ~1M items; re-size as seen-history grows |
-| IPS Correction | De-bias training labels for position effects | propensity from 1% randomized bucket |
-| Delayed Negative Sampling | Prevent false negatives from unviewed posts | 48-hour label assignment window |
-| Kafka | User action event stream (clicks, likes, dwells) | 16 partitions, 7-day retention |
-| Flink | Training label construction (join actions with impressions) | 48h join window |
-| Redis | Feature store online serving (user embeddings) | 5-min TTL, <5ms read |
-| Triton Inference Server | MMOE model serving (ONNX Runtime or TensorRT backend) | `dynamic_batching` with a small `max_queue_delay_microseconds`, 4xA100 GPU |
-
----
-
-## Tradeoffs and Alternatives
-
-| Decision | Chosen Approach | Alternative | Reason |
-|----------|----------------|-------------|--------|
-| Multi-task architecture | MMOE | Shared-bottom MTL | MMOE eliminates seesaw effect between conflicting tasks; simple shared-bottom fails for engagement vs dwell conflict |
-| Diversity | DPP re-ranking | Greedy MMR | DPP: principled probabilistic diversity; MMR simpler but only considers pairwise similarity to already-selected set |
-| Candidate retrieval | Two-tower + FAISS | BM25 text retrieval | Two-tower: captures semantic similarity beyond keyword overlap; BM25 good for text search but misses visual/social signals |
-| Training labels | Delayed negatives | Immediate negatives | Delayed negatives: eliminates false negatives for unseen posts; immediate labels cause model to penalize lower-feed content |
-| Position bias | IPS correction | No correction | IPS: de-biases gradient; without it, model learns position > content quality |
-| Diversity constraint | Hard author limit + DPP | Pure DPP | Hard limits enforce business rules deterministically; DPP provides soft diversity across topics |
-
----
-
-## Interview Discussion Points
-
-**Q: How do you handle the feedback loop where popular content becomes more popular?**
-A: Three mechanisms. First, exploration budget: 5% of feed positions use epsilon-greedy random
-selection from the top-500 candidates instead of top-ranked. This gives under-explored posts
-click data. Second, creator fairness: new creator posts receive a minimum 200 impressions with
-boosted ranking before their organic engagement data drives their score. Third, feature normalization:
-the engagement_density feature (engagement per hour) prevents viral posts from dominating because
-a post with 100K likes over 24 hours has the same density as one with 4K likes over 1 hour.
-
-**Q: How do you evaluate the multi-objective ranking model when objectives conflict?**
-A: Pareto front analysis. Run A/B tests varying objective weights. For each weight combination,
-measure engagement rate, median dwell time, and creator diversity index (Gini coefficient of
-creator share). Plot the tradeoff surface. Business stakeholders select the weight combination
-on the Pareto front that meets minimum thresholds for each objective. The key insight: there is
-no single "best" weight — it is a business decision about which tradeoff is acceptable. Online
-metrics (A/B test) are the source of truth; offline NDCG metrics are used only for fast iteration.
-
-**Q: How do you prevent the DPP re-ranking from being too slow at 100K QPS?**
-A: Three optimizations. First, greedy MAP instead of exact DPP, and specifically the incremental
-Cholesky-update form (Chen, Zhang and Zhou, "Fast Greedy MAP Inference for Determinantal Point
-Process to Improve Recommendation Diversity", arXiv:1709.05135) rather than recomputing a
-determinant per candidate. Be careful with the arithmetic here: k*n = 100 * 800 = 80,000 counts
-*candidate evaluations*, not floating-point operations — each evaluation is a vector update over
-the already-selected set, so the real per-request cost is several million flops and the core count
-must be measured on your own kernel, not read off the 80,000. Second, topic dimension reduction:
-64-dim topic vectors (from BERTopic) instead of full embedding for the kernel matrix, reducing
-memory and compute. Third, hardware: DPP runs on CPU (no GPU required for matrix operations on
-800x800 matrices). For further speedup: approximate DPP via random sketching reduces the 800-item
-pool to a quality-stratified sample of 200 before DPP — this is the lever that actually moves the
-cost, since the work is roughly quadratic in the pool size.
-
-**Q: How do you A/B test a new ranking model without degrading the full user base?**
-A: Shadow mode first, then canary, then full rollout. Shadow mode: new model runs for 5% of
-requests but results are discarded — only used to compare offline metrics (logging scores vs served
-scores). After shadow validation, canary: 1% traffic sees new model results. Monitor engagement
-rate, session length, and unfollows (leading indicator of feed dissatisfaction). If P99 latency
-and business metrics stay within 5% of control after 48 hours, roll to 10%, then 100%. Rollback
-trigger: any 10% degradation in session engagement rate or any latency regression above 20ms P99.
-
----
-
-## Failure Scenarios and Recovery
-
-*The three scenarios below are illustrative composites — failure modes that recur in systems of this shape, written up with representative numbers so the mechanics are concrete. They are not accounts of specific, publicly documented incidents at any named company, and the dollar figures, percentages and time-to-detect values are teaching magnitudes rather than measured results.*
-
-### Failure 1: MMOE Expert Collapse During Multi-Task Training
-
-**What failed:** The MMOE ranker was trained jointly on engagement, dwell time, and content quality tasks. After a model update that removed content quality labels from 40% of training examples (labeling pipeline bug), two of the 8 shared expert networks collapsed: they learned to specialize exclusively on engagement prediction and stopped contributing meaningfully to dwell time or quality tasks. The result: the quality gate in re-ranking was producing near-constant scores (expert outputs flat), so all content passed the quality filter. Low-quality bait posts (high engagement, low dwell time, low quality) flooded the feed. Report rate (users reporting content as low quality) increased 22% over 2 weeks.
-
-**Detection:** Expert utilization monitoring: track the variance of each expert network's output across a 10,000-sample diagnostic batch. Two experts had output variance < 0.001 (effectively constant). Alert triggered. Time-to-detect: 4 days (monitoring ran weekly).
-
-**Recovery steps:**
-1. Fixed labeling pipeline: restored content quality labels, validated label completeness as >95% before next training run.
-2. Added expert diversity loss: auxiliary loss penalizing low variance in expert outputs, added to main training loss with weight 0.01.
-3. Retrained MMOE model; expert outputs recovered full variance within 2 epochs.
-4. Changed expert utilization monitoring from weekly to per-training-run.
-
-**Prevention:** Require all training data labels to have completeness > 95% before starting training. Validate in CI/CD preprocessing step; abort training run if completeness is below threshold.
-
----
-
-### Failure 2: Bloom Filter False Positive Eliminating Freshly-Published Content
-
-**What failed:** The candidate filter used a Bloom filter to exclude already-seen posts from the feed. The Bloom filter was initialized with 10M items per user (7-day seen history) at 0.1% false positive rate (well-designed for that capacity). However, the platform grew rapidly and the number of posts per user grew to 25M items without resizing the Bloom filter. The false positive rate climbed accordingly: a filter sized for 10M items at 0.1% holds about 14.4 bits per item with k=10 hashes, so at 25M items it has only 5.75 bits per item and its false positive rate is (1 - e^(-10x25/144))^10 = roughly 14%. That means roughly one new post in seven was incorrectly classified as already-seen and excluded from retrieval. For posts published in the last 2 hours (freshness-critical), 14% false positive exclusion was severe — popular new posts were invisible to some users. Content creator trust dropped; several large accounts threatened to leave.
-
-**Detection:** Creator analytics team noticed specific new posts had dramatically lower reach than expected despite high engagement rates on the posts that did surface. Post-hoc analysis showed Bloom filter capacity mismatch. Time-to-detect: 3 weeks.
-
-**Recovery steps:**
-1. Expanded Bloom filter to 50M items per user (target false positive rate 0.1% at that capacity).
-2. Added Bloom filter health monitoring: compute actual false positive rate weekly by sampling 10,000 items from the "not-seen" history and checking if they are wrongly classified as seen.
-3. For posts in the freshness shard (< 2 hours old), bypass the Bloom filter and use a Redis SET for exact deduplication instead.
-
-**Prevention:** Bloom filter capacity alert: if current_item_count > 0.6 × design_capacity, trigger capacity planning review. Automatic resize on next deployment cycle.
-
----
-
-### Failure 3: Multi-Objective Weight Misconfiguration During Weekend Deploy
-
-**What failed:** A configuration change (via feature flag) updated the multi-objective weighting from (engage=0.4, dwell=0.3, quality=0.2, fresh=0.1) to (engage=0.5, dwell=0.4, quality=0.0, fresh=0.1) — the quality weight was accidentally set to 0 in a config file. The deploy happened on Friday at 6 PM. By Saturday morning, quality bait content dominated the feed: clickbait headlines, misleading thumbnails. Session length increased 8% (engagement optimization working) but report rate increased 45% and unfollow rate increased 12%. The signal that something was wrong came from creator feedback, not automated monitoring.
-
-**Detection:** Quality monitoring dashboard: fraction of posts in top-10 feed with quality_score < 0.3 spiked from 5% to 38%. Alert was set to fire at > 15% but the metric was only computed hourly, so the alert fired 1 hour after deploy. Time-to-detect: 1 hour (automated), 12 hours (stakeholder awareness).
-
-**Recovery steps:**
-1. Rolled back config flag within 30 minutes of alert.
-2. Wrote automated test that validates config weights sum to 1.0 and no individual weight is 0.0.
-3. Added pre-deploy validation: shadow mode must show quality_score distribution within 10% of production before config flag deployment.
-
-**Prevention:** Configuration changes to ranking weights require a shadow validation step (minimum 1 hour) before any live traffic is affected. Config values with quality_weight=0 are blocked by validation schema.
-
----
-
-## Capacity Planning
-
-### Data Volume Projections
-
-```
-Year 0 (current):
-  Users: 500M registered, 100M DAU
-  Posts: 10M new posts/day ingested for ranking
-  Requests: 100K QPS × 86400 = 8.64B feed requests/day
-  Per-request candidates: 2000 posts × 500 bytes feature vector = 1MB per request
-  Feature log: 100K QPS × 100 posts ranked × 300 bytes = 3GB/sec → 259TB/day (sample 1%)
-  Sampled event log: 2.59TB/day
-  User engagement events (Kafka): 100M DAU × 20 events = 2B events/day = ~1TB/day
-
-Year 1 (20% user growth):
-  600M users, 120M DAU, 120K QPS
-  Sampled feature log: 3.1TB/day
-  Engagement events: 2.4B/day
-
-Year 3 (2x growth + 2 new regions):
-  1B users, 200M DAU, 200K QPS
-  Kafka throughput for events: 4B events/day = 46K events/sec sustained
-  Model training data (30-day): ~78TB Parquet
-  User embedding store (Redis): 1B users × 256 dims × 4 bytes = 1TB Redis cluster
-```
-
-### Training Compute Requirements
-
-```
-MMOE Ranker (PyTorch, weekly retrain):
-  Dataset: 500M (user, post) labeled examples (30-day rolling)
-  Labels: engagement=Bernoulli, dwell=continuous, quality=categorical
-  Hardware: 8× A100 40GB (p4d.24xlarge), 3 epochs
-  Duration: 12 hours
-  Cost: $32.77/hr × 12hr = $393/week = $1,703/month
-
-Two-Tower Retrieval (bi-weekly retrain):
-  Dataset: 2B positive (user, post) interaction pairs
-  Hardware: 4× A100, 8 hours
-  Cost: $32.77/hr × 8hr × 2 = $524/month
-
-LightGBM Engagement Ranker (daily, for A/B experiments):
-  Dataset: 50M examples/day (fast iteration model)
-  Hardware: c5.4xlarge (16 vCPU)
-  Duration: 2 hours
-  Cost: $0.68/hr × 2hr × 30 = $41/month
-
-Total monthly training cost: ~$2,268
-```
-
-### Serving Infrastructure
-
-```
-MMOE Inference (100K QPS × 800 candidates):
-  Total inference calls: 100K × 800 = 80M model forward passes/sec
-  MMOE model: 8 experts + 3 gates + 3 towers = ~0.47M parameters at the defaults
-    in the code above (131k projection + 329k experts + 6k gates + 6k towers).
-    ID-embedding tables that feed it are far larger but are lookups, not FLOPs.
-  GPU throughput: 1 A10G processes 100K candidates/sec (batch 256)
-  GPUs needed: 80M / 100K = 800 GPUs — clearly infeasible for 100K QPS
-
-  In practice: NOT 80M full model passes.
-  Stage-2 ranking is 800 candidates per user, batched together.
-  100K user requests/sec × 800 candidates = 80M feature vectors assembled,
-  but only 100K MMOE forward passes of batch-800.
-  MMOE of batch 800: ASSUME ~5ms on one A10G → 200 requests/sec per A10G.
-    This 5ms is an assumption, not a measurement — no benchmark is published for
-    an MMoE of unstated width, and every dollar below is linear in it. Treat the
-    block as a sensitivity analysis over two inputs (candidate count, per-batch
-    latency) and re-run it once you have profiled your own graph.
-  A10Gs needed: 100K / 200 = 500.
-  g5.48xlarge carries 8× A10G at $16.288/hr (us-east-1 on-demand),
-  so ceil(500 / 8) = 63 nodes.
-  Cost: 63 × $16.288/hr × 730hr = ~$749,000/month.
-  This single line dwarfs everything else by two orders of magnitude, which is the
-  real lesson: at 100K QPS the stage-2 candidate count, not the model, sets the bill.
-  Optimization 1 — INT8 quantization (~3x throughput): 167 A10Gs → 21 nodes
-    → 21 × $16.288 × 730 = ~$250,000/month.
-  Optimization 2 — shrink the stage-2 set. Halving 800 candidates to 400 halves this
-    line outright and usually costs less ranking quality than any serving trick.
-
-Two-Tower ANN Retrieval:
-  FAISS IVF+PQ over 10M posts, per-user query
-  100K QPS × 8ms = 800K GPU-ms/sec per retrieval node
-  FAISS CPU: 100 nodes (c5.2xlarge at $0.34/hr)
-  Cost: 100 × $0.34 × 720 = ~$24,480/month
-
-Redis User Embeddings:
-  500M users × 256-dim × 4B = 500GB Redis cluster
-  20-node Redis Cluster (r5.4xlarge 128GB RAM): ~$15,000/month
-
-Total monthly serving infrastructure: ~$788,000 before quantization
-  (MMOE $749k + FAISS $24.5k + Redis $15k)
-Post-INT8 optimization: ~$290,000/month (MMOE $250k + FAISS $24.5k + Redis $15k)
-Serving, not training, is the entire cost story here: the ~$2.3K/month training bill
-is a rounding error against it.
-```
-
----
-
-## Additional War Stories
-
-**War Story 1 — DPP Kernel Matrix Numerical Instability for Homogeneous Candidates:**
+### 4.2 DPP Kernel Stability — Broken Then Fixed
 
 ```python
 # BROKEN: DPP kernel matrix becomes nearly singular when all candidates are very similar
@@ -858,7 +620,7 @@ def dpp_greedy_map_correct(
     return selected
 ```
 
-**War Story 2 — Feature Store Race Condition Serving Stale User Embeddings:**
+### 4.3 Embedding Read Race — Broken Then Fixed
 
 ```python
 # BROKEN: User embedding update and read racing without versioning
@@ -930,7 +692,81 @@ class UserEmbeddingStoreCorrect:
 
 ---
 
-## Monitoring and Drift Detection Deep-Dive
+## 5. Design Decisions & Tradeoffs
+
+
+### 1. Multi-gate Mixture of Experts (MMOE) for Multi-Task Learning
+
+Naive multi-task learning with a shared bottom network suffers from the "seesaw effect": improving engagement task degrades dwell time task because the gradient directions conflict. MMOE solves this with expert networks (specialized sub-networks) and gating networks (one gate per task). Each task's gating network learns to selectively use the experts most relevant to that task. The engagement gate might rely on experts that learned short-form viral content signals, while the dwell gate relies on experts that learned long-form quality signals.
+
+### 2. Two-Tower Model for Algorithmic Candidate Retrieval
+
+For non-followed content (recommendations), exact scoring of the whole corpus per user is impossible at 100K QPS. Two-tower (dual encoder): user tower encodes user embedding, content tower encodes post embedding. Similarity = dot product. Both towers are pre-computed — user embeddings updated every 5 minutes, post embeddings at index time. FAISS enables approximate nearest neighbor search in < 10ms. Scope the index deliberately: it covers the *eligible* recent corpus (~10M posts, the figure carried into §10), not the multi-billion-post archive. 10B 256-dim float32 vectors are 10TB of raw vectors before any graph overhead, so an unquantized HNSW graph over the full archive is not servable — the production index is IVF+PQ over the eligible window.
+
+### 3. Determinantal Point Processes for Diversity
+
+Maximizing engagement alone produces filter bubbles and author monopolization (top 5 creators dominate every feed). DPP models diversity explicitly: the probability of selecting a set of posts is proportional to the determinant of the kernel matrix, which is large when posts are both high-quality (diagonal entries = relevance scores) and diverse (off-diagonal entries = similarity, penalized). DPP naturally prevents the same author from appearing 5 times consecutively.
+
+### 4. Delayed Negative Sampling
+
+Naive training labels: shown post that was not clicked = negative example. But a user may not have scrolled to that post yet. Training on these false negatives produces a model that penalizes content in the lower feed. Solution: delayed negative sampling. Wait 48 hours before labeling a shown post as negative. If the user re-opens the app and clicks the post within 48 hours, it becomes a positive label.
+
+### 5. Feedback Loop Mitigation
+
+A pure ranking model trained on engagement creates feedback loops: viral content becomes more viral because the model shows it more, generating more signals. Mitigations:
+- Exploration budget: 5% of feed positions reserved for under-explored content (epsilon-greedy)
+- Creator fairness: new posts from new creators receive a minimum 200 impressions before ranking
+  data is used (warm-up period)
+- Position bias correction: inverse propensity scoring (IPS) de-biases training labels for
+  position effects (post at position 1 gets 3x more clicks than position 5, not because it is 3x better)
+
+**The weighted score needs calibrated heads:** the multi-objective score adds the engagement, dwell and quality heads with fixed weights. That sum only means the same thing after each retrain if every head outputs a calibrated probability; recalibrate the heads per retrain as in [Model Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md).
+
+**Creator reach is a fairness surface:** the new-creator impression floor and the creator Gini target (§8) are fairness controls as much as quality ones; audit them with the methods in [Responsible AI, Fairness and Explainability](./cross_cutting/responsible_ai_fairness_and_explainability.md).
+
+**Tradeoff summary:**
+
+| Decision | Chosen Approach | Alternative | Reason |
+|----------|----------------|-------------|--------|
+| Multi-task architecture | MMOE | Shared-bottom MTL | MMOE eliminates seesaw effect between conflicting tasks; simple shared-bottom fails for engagement vs dwell conflict |
+| Diversity | DPP re-ranking | Greedy MMR | DPP: principled probabilistic diversity; MMR simpler but only considers pairwise similarity to already-selected set |
+| Candidate retrieval | Two-tower + FAISS | BM25 text retrieval | Two-tower: captures semantic similarity beyond keyword overlap; BM25 good for text search but misses visual/social signals |
+| Training labels | Delayed negatives | Immediate negatives | Delayed negatives: eliminates false negatives for unseen posts; immediate labels cause model to penalize lower-feed content |
+| Position bias | IPS correction | No correction | IPS: de-biases gradient; without it, model learns position > content quality |
+| Diversity constraint | Hard author limit + DPP | Pure DPP | Hard limits enforce business rules deterministically; DPP provides soft diversity across topics |
+
+---
+
+## 6. Real-World Implementations
+
+**X (open-sourced For You timeline, 2023):** X published the services behind its For You timeline in the `twitter/the-algorithm` repository. The README splits the pipeline much as §3 does. Candidate sources include the Earlybird search index for in-network posts, which supplies about 50% of the posts, and out-of-network sources coordinated by tweet-mixer, among them a GraphJet user-post interaction graph and follow recommendations. A light ranker runs inside the search index, a neural heavy ranker is one of the main signals after candidate sourcing, and home-mixer mixes and filters, with visibility filters for legal compliance, quality and trust. Embeddings come from SimClusters (community-based sparse embeddings) and TwHIN (dense knowledge-graph embeddings), and models are served by navi, written in Rust. The design point: in-network and out-of-network retrieval are separate candidate sources with separate models, merged before one ranker.
+
+**YouTube (MMoE in production):** Zhao et al., "Recommending What Video to Watch Next: A Multitask Ranking System" (RecSys 2019), use MMoE for multiple ranking objectives on YouTube. In their live experiment an 8-expert MMoE at matched complexity moved the engagement metric +0.45% and the satisfaction metric +3.07% against a shared-bottom baseline (§11). The paper also models position (selection) bias with a separate shallow tower, an alternative to the IPS weighting in §5.
+
+**Fast DPP for recommendation diversity:** the greedy MAP re-ranker in §4 follows Chen, Zhang and Zhou, "Fast Greedy MAP Inference for Determinantal Point Process to Improve Recommendation Diversity" (arXiv:1709.05135), whose algorithm is fast enough for real-time use and whose relevance-diversity gain was confirmed in an online A/B test.
+
+---
+
+## 7. Technologies & Tools
+
+| Component | Purpose | Key Parameters |
+|-----------|---------|----------------|
+| Two-Tower Model | Candidate retrieval for non-followed content | 256-dim embeddings, FAISS HNSW index |
+| MMOE | Multi-task ranking: engagement + dwell + quality | 8 experts, 3 tasks, joint training |
+| DPP (Greedy MAP) | Diversity re-ranking, author diversity | diversity_weight=0.3, greedy O(k*n) |
+| Bloom Filter | De-duplicate seen posts at O(1) per post | 10M bits, 5 hash functions -> ~1% FPR at ~1M items; re-size as seen-history grows |
+| IPS Correction | De-bias training labels for position effects | propensity from 1% randomized bucket |
+| Delayed Negative Sampling | Prevent false negatives from unviewed posts | 48-hour label assignment window |
+| Kafka | User action event stream (clicks, likes, dwells) | 16 partitions, 7-day retention |
+| Flink | Training label construction (join actions with impressions) | 48h join window |
+| Redis | Feature store online serving (user embeddings) | 5-min TTL, <5ms read |
+| Triton Inference Server | MMOE model serving (ONNX Runtime or TensorRT backend) | `dynamic_batching` with a small `max_queue_delay_microseconds`, 4xA100 GPU |
+
+---
+
+## 8. Operational Playbook
+
+Feature drift and creator-distribution metrics are below, using the PSI mechanics in [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md). New rankers go through shadow, canary and ramp as in [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md); objective-weight changes count as new rankers.
 
 ### Features That Drift Fastest
 
@@ -996,21 +832,184 @@ Monthly        Scheduled                                   Multi-objective weigh
 Quarterly      Scheduled                                   Full bias audit (demographic fairness)
 ```
 
+### Incident runbooks
+
+**Runbook 1 — Report rate up more than 10% over a rolling 24 hours:** diff the objective-weight config against the last good version first (§9 Failure 3), then check quality-score PSI. Roll back the config before investigating further; it is one flag.
+
+**Runbook 2 — Any MMoE expert's output variance below 0.01:** expert collapse (§9 Failure 1). Check label completeness for every task in the last training set, then retrain with the expert-diversity loss.
+
+**Runbook 3 — New-creator impression share below 5%:** check the seen-post Bloom filter's fill against its design capacity (§9 Failure 2) and the new-creator boost; raise the boost while the filter is resized.
+
+**Runbook 4 — P99 latency above 120 ms:** switch the ranking stage to the 15 ms tree ranker and turn on segment-level feed caching, then scale out.
+
 ---
 
-## Additional Interview Questions
+## 9. Common Pitfalls & War Stories
+
+*The three scenarios below are illustrative composites — failure modes that recur in systems of this shape, written up with representative numbers so the mechanics are concrete. They are not accounts of specific, publicly documented incidents at any named company, and the dollar figures, percentages and time-to-detect values are teaching magnitudes rather than measured results.*
+
+### Failure 1: MMOE Expert Collapse During Multi-Task Training
+
+**What failed:** The MMOE ranker was trained jointly on engagement, dwell time, and content quality tasks. After a model update that removed content quality labels from 40% of training examples (labeling pipeline bug), two of the 8 shared expert networks collapsed: they learned to specialize exclusively on engagement prediction and stopped contributing meaningfully to dwell time or quality tasks. The result: the quality gate in re-ranking was producing near-constant scores (expert outputs flat), so all content passed the quality filter. Low-quality bait posts (high engagement, low dwell time, low quality) flooded the feed. Report rate (users reporting content as low quality) increased 22% over 2 weeks.
+
+**Detection:** Expert utilization monitoring: track the variance of each expert network's output across a 10,000-sample diagnostic batch. Two experts had output variance < 0.001 (effectively constant). Alert triggered. Time-to-detect: 4 days (monitoring ran weekly).
+
+**Recovery steps:**
+1. Fixed labeling pipeline: restored content quality labels, validated label completeness as >95% before next training run.
+2. Added expert diversity loss: auxiliary loss penalizing low variance in expert outputs, added to main training loss with weight 0.01.
+3. Retrained MMOE model; expert outputs recovered full variance within 2 epochs.
+4. Changed expert utilization monitoring from weekly to per-training-run.
+
+**Prevention:** Require all training data labels to have completeness > 95% before starting training. Validate in CI/CD preprocessing step; abort training run if completeness is below threshold.
+
+---
+
+### Failure 2: Bloom Filter False Positive Eliminating Freshly-Published Content
+
+**What failed:** The candidate filter used a Bloom filter to exclude already-seen posts from the feed. The Bloom filter was initialized with 10M items per user (7-day seen history) at 0.1% false positive rate (well-designed for that capacity). However, the platform grew rapidly and the number of posts per user grew to 25M items without resizing the Bloom filter. The false positive rate climbed accordingly: a filter sized for 10M items at 0.1% holds about 14.4 bits per item with k=10 hashes, so at 25M items it has only 5.75 bits per item and its false positive rate is (1 - e^(-10x25/144))^10 = roughly 14%. That means roughly one new post in seven was incorrectly classified as already-seen and excluded from retrieval. For posts published in the last 2 hours (freshness-critical), 14% false positive exclusion was severe — popular new posts were invisible to some users. Content creator trust dropped; several large accounts threatened to leave.
+
+**Detection:** Creator analytics team noticed specific new posts had dramatically lower reach than expected despite high engagement rates on the posts that did surface. Post-hoc analysis showed Bloom filter capacity mismatch. Time-to-detect: 3 weeks.
+
+**Recovery steps:**
+1. Expanded Bloom filter to 50M items per user (target false positive rate 0.1% at that capacity).
+2. Added Bloom filter health monitoring: compute actual false positive rate weekly by sampling 10,000 items from the "not-seen" history and checking if they are wrongly classified as seen.
+3. For posts in the freshness shard (< 2 hours old), bypass the Bloom filter and use a Redis SET for exact deduplication instead.
+
+**Prevention:** Bloom filter capacity alert: if current_item_count > 0.6 × design_capacity, trigger capacity planning review. Automatic resize on next deployment cycle.
+
+---
+
+### Failure 3: Multi-Objective Weight Misconfiguration During Weekend Deploy
+
+**What failed:** A configuration change (via feature flag) updated the multi-objective weighting from (engage=0.4, dwell=0.3, quality=0.2, fresh=0.1) to (engage=0.5, dwell=0.4, quality=0.0, fresh=0.1) — the quality weight was accidentally set to 0 in a config file. The deploy happened on Friday at 6 PM. By Saturday morning, quality bait content dominated the feed: clickbait headlines, misleading thumbnails. Session length increased 8% (engagement optimization working) but report rate increased 45% and unfollow rate increased 12%. The signal that something was wrong came from creator feedback, not automated monitoring.
+
+**Detection:** Quality monitoring dashboard: fraction of posts in top-10 feed with quality_score < 0.3 spiked from 5% to 38%. Alert was set to fire at > 15% but the metric was only computed hourly, so the alert fired 1 hour after deploy. Time-to-detect: 1 hour (automated), 12 hours (stakeholder awareness).
+
+**Recovery steps:**
+1. Rolled back config flag within 30 minutes of alert.
+2. Wrote automated test that validates config weights sum to 1.0 and no individual weight is 0.0.
+3. Added pre-deploy validation: shadow mode must show quality_score distribution within 10% of production before config flag deployment.
+
+**Prevention:** Configuration changes to ranking weights require a shadow validation step (minimum 1 hour) before any live traffic is affected. Config values with quality_weight=0 are blocked by validation schema.
+
+---
+
+## 10. Capacity Planning
+
+### Training Compute Requirements
+
+```
+MMOE Ranker (PyTorch, weekly retrain):
+  Dataset: 500M (user, post) labeled examples (30-day rolling)
+  Labels: engagement=Bernoulli, dwell=continuous, quality=categorical
+  Hardware: 8× A100 40GB (p4d.24xlarge), 3 epochs
+  Duration: 12 hours
+  Cost: $32.77/hr × 12hr = $393/week = $1,703/month
+
+Two-Tower Retrieval (bi-weekly retrain):
+  Dataset: 2B positive (user, post) interaction pairs
+  Hardware: 4× A100, 8 hours
+  Cost: $32.77/hr × 8hr × 2 = $524/month
+
+LightGBM Engagement Ranker (daily, for A/B experiments):
+  Dataset: 50M examples/day (fast iteration model)
+  Hardware: c5.4xlarge (16 vCPU)
+  Duration: 2 hours
+  Cost: $0.68/hr × 2hr × 30 = $41/month
+
+Total monthly training cost: ~$2,268
+```
+
+### Serving Infrastructure
+
+```
+MMOE Inference (100K QPS × 800 candidates):
+  Total inference calls: 100K × 800 = 80M model forward passes/sec
+  MMOE model: 8 experts + 3 gates + 3 towers = ~0.47M parameters at the defaults
+    in the code above (131k projection + 329k experts + 6k gates + 6k towers).
+    ID-embedding tables that feed it are far larger but are lookups, not FLOPs.
+  GPU throughput: 1 A10G processes 100K candidates/sec (batch 256)
+  GPUs needed: 80M / 100K = 800 GPUs — clearly infeasible for 100K QPS
+
+  In practice: NOT 80M full model passes.
+  Stage-2 ranking is 800 candidates per user, batched together.
+  100K user requests/sec × 800 candidates = 80M feature vectors assembled,
+  but only 100K MMOE forward passes of batch-800.
+  MMOE of batch 800: ASSUME ~5ms on one A10G → 200 requests/sec per A10G.
+    This 5ms is an assumption, not a measurement — no benchmark is published for
+    an MMoE of unstated width, and every dollar below is linear in it. Treat the
+    block as a sensitivity analysis over two inputs (candidate count, per-batch
+    latency) and re-run it once you have profiled your own graph.
+  A10Gs needed: 100K / 200 = 500.
+  g5.48xlarge carries 8× A10G at $16.288/hr (us-east-1 on-demand),
+  so ceil(500 / 8) = 63 nodes.
+  Cost: 63 × $16.288/hr × 730hr = ~$749,000/month.
+  This single line dwarfs everything else by two orders of magnitude, which is the
+  real lesson: at 100K QPS the stage-2 candidate count, not the model, sets the bill.
+  Optimization 1 — INT8 quantization (~3x throughput): 167 A10Gs → 21 nodes
+    → 21 × $16.288 × 730 = ~$250,000/month.
+  Optimization 2 — shrink the stage-2 set. Halving 800 candidates to 400 halves this
+    line outright and usually costs less ranking quality than any serving trick.
+
+Two-Tower ANN Retrieval:
+  FAISS IVF+PQ over 10M posts, per-user query
+  100K QPS × 8ms = 800K GPU-ms/sec per retrieval node
+  FAISS CPU: 100 nodes (c5.2xlarge at $0.34/hr)
+  Cost: 100 × $0.34 × 720 = ~$24,480/month
+
+Redis User Embeddings:
+  500M users × 256-dim × 4B = 500GB Redis cluster
+  20-node Redis Cluster (r5.4xlarge 128GB RAM): ~$15,000/month
+
+Total monthly serving infrastructure: ~$788,000 before quantization
+  (MMOE $749k + FAISS $24.5k + Redis $15k)
+Post-INT8 optimization: ~$290,000/month (MMOE $250k + FAISS $24.5k + Redis $15k)
+Serving, not training, is the entire cost story here: the ~$2.3K/month training bill
+is a rounding error against it.
+```
+
+---
+
+## 11. Interview Discussion Points
+
+**Q: How do you handle the feedback loop where popular content becomes more popular?**
+**Short:** Reserve 5% of slots for exploration, guarantee new creators ~200 impressions before engagement drives their score, and use engagement per hour so raw totals do not compound.
+A: Three mechanisms. First, exploration budget: 5% of feed positions use epsilon-greedy random selection from the top-500 candidates instead of top-ranked. This gives under-explored posts click data. Second, creator fairness: new creator posts receive a minimum 200 impressions with boosted ranking before their organic engagement data drives their score. Third, feature normalization: the engagement_density feature (engagement per hour) prevents viral posts from dominating because a post with 100K likes over 24 hours has the same density as one with 4K likes over 1 hour.
+
+**Q: How do you evaluate the multi-objective ranking model when objectives conflict?**
+**Short:** Sweep objective weights in A/B tests, plot engagement, dwell and creator diversity as a Pareto front, and let the business pick a point that clears every minimum.
+A: Pareto front analysis. Run A/B tests varying objective weights. For each weight combination, measure engagement rate, median dwell time, and creator diversity index (Gini coefficient of creator share). Plot the tradeoff surface. Business stakeholders select the weight combination on the Pareto front that meets minimum thresholds for each objective. The key insight: there is no single "best" weight — it is a business decision about which tradeoff is acceptable. Online metrics (A/B test) are the source of truth; offline NDCG metrics are used only for fast iteration.
+
+**Q: How do you prevent the DPP re-ranking from being too slow at 100K QPS?**
+**Short:** Use fast greedy MAP with incremental Cholesky updates, build the kernel from 64-dim topic vectors on CPU, and cut the pool from 800 to ~200 first, since cost grows quadratically.
+A: Three optimizations. First, greedy MAP instead of exact DPP, and specifically the incremental Cholesky-update form (Chen, Zhang and Zhou, "Fast Greedy MAP Inference for Determinantal Point Process to Improve Recommendation Diversity", arXiv:1709.05135) rather than recomputing a determinant per candidate. Be careful with the arithmetic here: k*n = 100 * 800 = 80,000 counts
+*candidate evaluations*, not floating-point operations — each evaluation is a vector update over
+the already-selected set, so the real per-request cost is several million flops and the core count must be measured on your own kernel, not read off the 80,000. Second, topic dimension reduction: 64-dim topic vectors (from BERTopic) instead of full embedding for the kernel matrix, reducing memory and compute. Third, hardware: DPP runs on CPU (no GPU required for matrix operations on 800x800 matrices). For further speedup: approximate DPP via random sketching reduces the 800-item pool to a quality-stratified sample of 200 before DPP — this is the lever that actually moves the cost, since the work is roughly quadratic in the pool size.
+
+**Q: How do you A/B test a new ranking model without degrading the full user base?**
+**Short:** Run shadow mode, then a 1% canary, then 10% and 100%, watching engagement, session length, unfollows and P99, with rollback on a 10% engagement drop or a 20 ms latency rise.
+A: Shadow mode first, then canary, then full rollout. Shadow mode: new model runs for 5% of requests but results are discarded — only used to compare offline metrics (logging scores vs served scores). After shadow validation, canary: 1% traffic sees new model results. Monitor engagement rate, session length, and unfollows (leading indicator of feed dissatisfaction). If P99 latency and business metrics stay within 5% of control after 48 hours, roll to 10%, then 100%. Rollback trigger: any 10% degradation in session engagement rate or any latency regression above 20ms P99.
 
 **Q: How does MMoE (Multi-gate Mixture of Experts) differ from a simple shared-bottom multi-task network?**
+**Short:** Shared-bottom forces all tasks through one representation; MMoE gives each task its own softmax gate over shared experts, so conflicting objectives stop trading off against each other.
 A shared-bottom network has one shared feature extractor (bottom MLP) that feeds all task-specific heads. All tasks use identical shared representations, which is problematic when tasks conflict: optimizing for engagement might learn representations that hurt dwell time prediction. MMoE introduces n expert networks (each a separate MLP) and k gating networks (one per task). Each task's gating network learns a softmax mixture over the experts, producing a task-specific weighted combination of expert outputs. This means different tasks can specialize to different experts: engagement may rely heavily on experts 1-3 (interaction pattern experts), while quality relies on experts 5-7 (content semantic experts). Expert specialization is learned, not hard-coded. Do not quote a general "x% better" band — the one published production comparison is YouTube's live experiment in Zhao et al. (RecSys 2019, Table 1), where an 8-expert MMoE at matched model complexity (6.1M multiplications) moved the engagement metric +0.45% and the satisfaction metric +3.07% against the shared-bottom baseline. The asymmetry is the point: the secondary objective gains several times what the primary one does, because shared-bottom was the thing sacrificing it.
 
 **Q: How do you define and enforce content diversity in a feed ranking system?**
+**Short:** Measure diversity across topic, creator and format, enforce hard caps in re-ranking, add DPP for soft diversity, and track creator Gini, topic entropy and intra-list distance.
 Diversity has multiple dimensions: (1) topic/content diversity — avoiding 10 consecutive posts about the same news event; (2) creator diversity — avoiding one creator monopolizing the feed; (3) format diversity — mix of video, images, text posts; (4) sentiment diversity — not all negative news. Enforcement mechanisms: (1) Hard constraints in re-ranking: max 3 posts from same creator, max 4 posts on same topic cluster (BERTopic assignment) in top-20. (2) DPP diversity: probabilistic subset selection that explicitly maximizes diversity via kernel matrix. (3) Weighted diversity score in multi-objective: diversity_score = 1 - top_creator_share × top_topic_concentration, added as 4th optimization objective. (4) Evaluation: Gini coefficient of creator share in served feeds; topic entropy (higher = more diverse); intra-list distance (average cosine distance between adjacent feed items).
 
 **Q: What is the exploration-exploitation tradeoff in feed ranking and how do you handle it?**
+**Short:** Pure exploitation starves new content of data, so reserve slots for exploration: epsilon-greedy over the top 500, Thompson sampling on Beta engagement, or a UCB bonus.
 Exploitation: always show the highest-ranked content based on current model predictions — maximizes short-term engagement but starves new content and new creators who have insufficient data for accurate ranking. Exploration: occasionally show content that might not rank highest but provides learning signal. Mechanisms: (1) epsilon-greedy: 5% of slots randomly sample from top-500 candidates uniformly. (2) Thompson sampling: model CTR as a Beta distribution per (user, content) pair; sample from the distribution, giving high variance (new) content more exploration probability. (3) UCB (Upper Confidence Bound): boost score by C/sqrt(impressions), where C controls exploration intensity; new content with 0 impressions gets maximum exploration boost. In practice, epsilon-greedy is simplest and sufficient for feed ranking. Thompson sampling provides better sample efficiency but requires distributional modeling of each user-content pair's engagement probability.
 
 **Q: How do you prevent filter bubbles and echo chambers in content ranking?**
+**Short:** Set topic exposure quotas, diversify perspectives on news, penalize high-click low-dwell bait, and watch 30- and 90-day retention by users' initial topic concentration.
 Filter bubbles form when users see only content confirming their existing beliefs, driven by optimization for engagement (confirmation bias correlates with high engagement). Four mechanisms: (1) Topic exposure quotas: if a user's last 50 served posts are >70% from one topic cluster, force 30% of the next feed from orthogonal topics, even at engagement cost. (2) Perspective diversity signals: for political/news content, use a political spectrum classifier to ensure the feed contains viewpoints from multiple perspectives (measured by Gini coefficient of political leaning). (3) Downweight engagement bait: content with high CTR but low dwell time (< 5 seconds) or high report rate gets quality score penalized — this disproportionately removes emotionally provocative content. (4) Long-term satisfaction monitoring: 30-day and 90-day retention, measured separately by user's initial topic concentration, to detect users who leave due to filter bubble fatigue.
 
 **Q: How would you design the system to handle a sudden surge to 300K QPS from a viral event?**
+**Short:** Pre-scale on viral signals from warm pools, degrade to a 15 ms tree ranker or skip re-ranking when latency climbs, and cache segment feeds for up to 60 seconds.
 The system must auto-scale faster than the viral event ramps. Three mechanisms: (1) Predictive scaling: viral event detection (spike in post creation rate, external news API signals) triggers pre-scaling 5 minutes before traffic peaks. Scale from 100K to 300K QPS capacity requires adding 200% more serving infrastructure — this takes 3-5 minutes with pre-provisioned spare capacity pools (AWS auto-scaling groups with warm pools). (2) Graceful degradation: if scaling has not completed and P99 latency exceeds 120ms, degrade to a faster Stage-2 ranker — replace MMOE (80ms) with a simpler XGBoost ranker (15ms), accepting lower ranking quality. Engagement-only mode: if latency exceeds 150ms, skip re-ranking entirely and serve Stage-1 retrieval results directly with a popularity boost. (3) Feed caching: during viral events, cache the top-100 feed for user segments (similar users, similar location) for up to 60 seconds — most users in the same segment see identical trending content anyway. This reduces unique model calls by 40-60% during peak events.
+
+**Q: X's timeline takes about half its posts from in-network sources. Why keep in-network and out-of-network retrieval separate?**
+**Short:** They answer different questions with different signals: followed accounts need recency and tie strength, recommendations need similarity search, so each gets its own source before one shared ranker.
+In-network candidates come from a small set (followed accounts, last 24 hours) and are ordered mainly by freshness and relationship strength; X uses its Earlybird search index with a light ranker for these, supplying about 50% of For You posts. Out-of-network candidates need retrieval over millions of posts through embeddings or interaction graphs (two-tower plus FAISS here; GraphJet, SimClusters and TwHIN at X). Merging them before one heavy ranker puts both on a common scale, so the mix in the final feed becomes a tunable product decision. Monitor the share from each source: a sudden drop in out-of-network share usually means retrieval broke, not that users changed.

@@ -1,9 +1,28 @@
 # Design a Recommendation Engine (Netflix/YouTube Scale)
-## Problem Statement
+## Intuition
+
+> A recommendation engine is a librarian with 10 million books and 100 ms per visitor. She cannot read every spine, so she walks to the right three shelves (retrieval), pulls 500 likely books, orders them by what this visitor will actually finish (ranking), and makes sure the top ten are not all from one author (re-ranking).
+
+**Key insight:** the two stages solve different problems and fail differently. Retrieval is a recall problem bounded by the embedding space and the ANN index: an item it misses can never be shown. Ranking is a precision problem bounded by features and the objective: it can only reorder what retrieval found. Most production regressions trace to the boundary between them: an index built from one model version queried with embeddings from another, a stale index that cannot see new uploads, or a ranker that learned clicks when the business wanted watch time.
+
+Mental model: a funnel of 10M items to 500 candidates to 10 slots, with a latency budget of 25 ms, about 20 ms and about 5 ms at each step, and a feedback loop that retrains on what the funnel chose to show.
+
+Why this system exists: at 200M users and 50M daily actives, recommendations decide which of 10M videos ever get watched. A ranker that is 1% better at predicting watch time moves more viewing hours than any editorial team can. A feedback loop that only learns from what it already showed also narrows the catalog every week (§9 Failure 2).
+
+---
+
+## 1. Requirements Clarification
+
 
 Design a real-time recommendation engine for a video streaming platform. For every user session, return 10 personalized video recommendations within 100ms P99. The system must serve 200M registered users across 10M videos, processing 1B events per day (watches, clicks, skips, ratings). Handle cold start for new users (no history) and new videos (no interactions). Support A/B testing of different recommendation strategies.
 
-Constraints:
+**Functional requirements:**
+- Return 10 personalized videos per session request, with a per-item reason (for example "because you watched X").
+- Serve new users (no history) and new videos (no interactions) from the first request.
+- Index a newly uploaded video for retrieval within minutes.
+- Run several recommendation strategies side by side under A/B tests.
+
+**Non-functional requirements:**
 - 200M users, 10M items
 - 1B events/day ingested (12K events/sec average, 50K peak)
 - 100ms P99 end-to-end recommendation latency
@@ -11,9 +30,56 @@ Constraints:
 - NDCG@10 > 0.45 after ranking
 - Cold start: new user gets genre-based popular content within session
 
+**Out of scope:**
+- Search ranking for typed queries (see [Search Ranking](design_search_ranking.md)).
+- Ads ranking and auction (see [Ads Click Prediction](design_ads_click_prediction.md)).
+- Content moderation of the candidate pool.
+
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+| Quantity | Derivation | Result |
+|---|---|---|
+| Recommendation requests at peak | serving sizing assumption (§10) | 50K req/s |
+| Ranker scoring load | 50K req/s x 500 candidates | 25M item scores/s |
+| Item-index memory | 10M x 32-byte PQ codes | 320 MB per replica (10.24 GB as raw float32) |
+| User-embedding store | 200M x 256 x 4 bytes | ~200 GB in Redis |
+| Daily training events | 1B events/day | ~12K/s average, 50K/s peak ingest |
+| Two-tower negatives per positive | batch 4,096 in-batch | 4,095 (a batch of 32 gives only 31, §4.4) |
+
+The ranker line is the one that sizes the serving fleet: 25M tree evaluations a second is why the ranker runs on 20 CPU nodes (§10) and why a deep ranker needs a GPU budget before it can replace LightGBM.
+
+### Data Volume Projections
+
+```
+Year 0 (current):
+  Users: 200M registered, 50M DAU
+  Items: 10M videos
+  Events: 1B/day = 12K events/sec avg, 50K peak
+  User embeddings: 200M × 256 dim × 4 bytes = 200GB (Redis cluster)
+  Item embeddings (FAISS PQ): 10M × 32 bytes = 320MB RAM per node
+  Training data: 30-day rolling window = 30B events in Parquet (~15TB)
+
+Year 1 (25% growth):
+  Users: 250M, 62M DAU
+  Events: 1.25B/day
+  User embeddings: 250GB Redis (add 2 Redis nodes)
+  Item catalog: 12M videos, FAISS index 384MB
+
+Year 3 (3x growth):
+  Users: 600M, 150M DAU
+  Events: 3B/day = 35K events/sec avg
+  User embeddings: 600M × 1KB = 600GB Redis → 20-node r5.xlarge cluster
+                   (32GB/node; 16 nodes would be 512GB, short of the requirement)
+  Item catalog: 20M videos, FAISS index 640MB
+  Training data 30-day: 90B events (~45TB Parquet)
+  FAISS rebuild time at 20M items: ~4 hours (needs GPU acceleration or sharding)
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -114,25 +180,12 @@ The feature store is split by latency need: Redis serves online features with a 
 
 ---
 
-## Key Design Decisions
+## 4. Component Deep Dives
 
-**Two-stage retrieval + ranking**: Exhaustive similarity search over 10M items is infeasible at 100ms. ANN retrieval narrows to 500 candidates in 25ms, then a richer LightGBM model (200 features, interaction terms) re-ranks. This candidate-generation-then-ranking split is the standard industry pattern, published most explicitly in YouTube's deep-learning recommender (Covington, Adams & Sargin, RecSys 2016).
+User and item features are computed with one code path for training and serving, and training rows join features as of the impression time; see [Feature Store and Point-in-Time Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md).
 
-**Sampled softmax for two-tower training**: Full softmax over 10M items is prohibitive. Sample 1000 negatives per positive. Use in-batch negatives (treat other items in minibatch as negatives) — cheap and effective. Correction for popularity bias: subtract log(item_frequency) from logits.
 
-**FAISS IVF with PQ compression**: IVF (Inverted File Index) partitions embedding space into 4096 Voronoi cells. At query time, search only nprobe=64 cells. PQ (Product Quantization) compresses 256-dim float32 (1KB/vector) to 32 bytes — a 32× reduction. 10M items: 10M × 32B = 320MB in RAM vs 10.24GB uncompressed. Recall@100 is an acceptance test here, not a property of the index: 32× quantization is aggressive, and the achieved recall depends on how clustered the embedding space is. Measure recall against an exact `IndexFlatIP` on a held-out query sample before shipping the PQ index and agree the bar with the product side — 0.90-0.95 is the usual band for a candidate generator feeding a re-ranker. If PQ32 at nprobe=64 misses that bar, the levers in order of cost are OPQ pre-rotation (free at query time), a higher nprobe, and a less aggressive PQ64 code (which doubles the index to 640MB).
-
-**LightGBM over deep ranking**: LightGBM trains in hours (vs days for deep models), handles missing features gracefully, is interpretable (feature importance), and stays competitive on tabular ranking features. The illustrative gap used throughout this design is NDCG@10 0.47 (LightGBM) vs 0.49 (DNN) — 4% relative — bought back by an order of magnitude faster iteration. Measure the gap on your own feature set: it widens as you add sequence and embedding features, which is exactly where trees stop being competitive.
-
-**Feature store split (online/offline)**: Redis holds real-time features with 24h TTL for sub-10ms lookup. Hive holds historical features for training. Avoids training-serving skew by computing features with the same logic in both pipelines.
-
-**Negative sampling strategy**: Random negatives are too easy (item never seen by user). Use popularity-weighted sampling: P(item as negative) proportional to sqrt(item_frequency). Also use "hard negatives" — items user saw but did not click in the same session.
-
----
-
-## Implementation
-
-### Two-Tower Retrieval Model (PyTorch)
+### 4.1 Two-Tower Retrieval Model (PyTorch)
 
 ```python
 import torch
@@ -286,7 +339,7 @@ def train_two_tower(
         print(f"Epoch {epoch+1}: loss={total_loss/len(dataloader):.4f}")
 ```
 
-### FAISS Index Build and Query
+### 4.2 FAISS Index Build and Query
 
 ```python
 import faiss
@@ -356,7 +409,7 @@ class FaissRetrievalIndex:
         return obj
 ```
 
-### LightGBM Ranking with Cross-Features
+### 4.3 LightGBM Ranking with Cross-Features
 
 ```python
 import lightgbm as lgb
@@ -500,198 +553,10 @@ def mmr_rerank(
     return selected
 ```
 
----
+### 4.4 In-Batch Negatives — Broken Then Fixed
 
-## ML Components Used
+With in-batch negatives, the batch size *is* the negative sample. A small batch makes the retrieval task trivially easy and the model learns nothing about hard negatives.
 
-| Component | Technology | Role |
-|-----------|-----------|------|
-| Collaborative Filtering | Spark MLlib ALS | User/item embeddings from interaction matrix |
-| Retrieval Model | PyTorch Two-Tower | Query-time user embedding generation |
-| ANN Index | FAISS IVF4096,PQ32 | Sub-25ms candidate retrieval over 10M items |
-| Ranking Model | LightGBM LambdaRank | NDCG@10 ranking over 500 candidates |
-| Feature Store (online) | Redis Cluster | <10ms feature lookup during serving |
-| Feature Store (offline) | Apache Hive / S3 | Training feature computation |
-| Event Streaming | Apache Kafka | 1B events/day ingestion |
-| Batch Processing | Apache Spark | Offline feature pipeline |
-| Experiment Tracking | MLflow | Model registry, metric comparison |
-| Diversity | MMR (Maximal Marginal Relevance) | Post-ranking genre diversity |
-
----
-
-## Tradeoffs and Alternatives
-
-| Decision | Chosen | Alternative | Why Chosen |
-|----------|--------|-------------|-----------|
-| Retrieval model | Two-tower neural | ALS matrix factorization | Two-tower handles cold start via features; ALS needs interaction history |
-| ANN library | FAISS IVF+PQ | ScaNN, Hnswlib | FAISS: GPU training support, battle-tested at Meta/Google scale |
-| Ranker | LightGBM | Deep ranking (DNN) | 10x faster iteration, comparable NDCG, handles missing features natively |
-| Negative sampling | Popularity-weighted | Uniform random | Easy negatives degrade model; popularity-weighted surfaces hard negatives |
-| Feature freshness | 24h TTL on Redis | Real-time computation | Sub-10ms lookup vs 30-50ms compute; 24h acceptable for most features |
-| Diversity | MMR post-processing | Diversified training objective | MMR is runtime-controllable without retraining |
-
----
-
-## Interview Discussion Points
-
-**Q: How do you handle the cold start problem for new users?**
-New users have no watch history, so collaborative filtering is useless. Strategy: (1) Onboarding flow asking genre preferences (3-5 clicks), which seeds a genre-based embedding via the item tower. (2) During first session, use popularity-within-genre as proxy ranker. (3) After 5 interactions, enough signal exists for two-tower retrieval. New items get item-tower embedding from metadata alone; ALS score is set to the item's global average until enough interactions accumulate (warm-up threshold: 50 interactions).
-
-**Q: How do you prevent popularity bias where the model keeps recommending already-popular items?**
-Three mitigations: (1) Popularity bias correction in two-tower training — subtract log(item_frequency) from logits so rare items are not penalized. (2) Exploration budget: 10-15% of recommendations are sampled from less-popular content matching user's genre preferences. (3) Freshness boost in re-ranking: items under 7 days old receive a +0.05 score boost, encouraging new content discovery.
-
-**Q: How do you evaluate recommendation quality offline vs online?**
-Offline: NDCG@10 on held-out sessions, Recall@100 from retrieval, coverage (fraction of catalog recommended at least once). Online A/B test: watch time per session (primary), CTR, session length, 30-day retention. Offline NDCG correlates moderately with online watch time (Pearson ~0.6) but is not a perfect proxy — always A/B test before full rollout.
-
-**Q: What happens if the FAISS index becomes stale as new videos are added?**
-New videos added to the catalog need to be indexed immediately or they will never be retrieved. Strategy: (1) Near-real-time index updates — new items are added to a small in-memory HNSW shard. At query time, search both FAISS IVF (existing items) and HNSW shard (new items), merge top-K from both. (2) Full index rebuild nightly to consolidate. This ensures new videos get retrieval exposure within minutes of upload.
-
----
-
-## Failure Scenarios and Recovery
-
-### Failure 1: FAISS Index Memory Overrun During Hot Reload
-
-**What failed:** A nightly index rebuild pushed an uncompressed FAISS index (before the switch to PQ) to serving nodes with only a little more RAM headroom than the index itself. During the hot-reload (loading the new index while still serving requests off the old one), both indexes lived in RAM simultaneously — the peak is always 2× the index size, which is the number the capacity plan has to be built on. The serving node OOM-killed, restarting the process. Because 3 of 10 serving nodes failed simultaneously during the same rebuild window, 30% of traffic had no retrieval backend. Fallback returned global popularity list, degrading NDCG from 0.47 to 0.21 for 22 minutes.
-
-**Detection:** OOM alerts fired from k8s node metrics within 3 minutes. On-call received PagerDuty alert. Grafana dashboard showed FAISS retrieval error rate spiking to 30%. Time-to-detect: 3 minutes.
-
-**Recovery steps:**
-1. Rolled back to previous index version (hot-reload from S3 snapshot).
-2. Reduced rebuild parallelism: stagger rebuild across nodes at 2-minute intervals instead of all-at-once.
-3. Switched to the PQ-compressed index (320MB vs 10.24GB uncompressed) — already planned, but accelerated.
-4. Added memory pre-check in rebuild script: abort if available RAM < 2x index size.
-
-**Prevention:** Index size monitoring in CI/CD — build pipeline fails if index size increases >20% without an explicit acknowledgment. Staged rollout: rebuild one node at a time, verify health before proceeding.
-
----
-
-### Failure 2: Popularity Bias Collapse of New Content Discovery
-
-**What failed:** After 6 months of production, the two-tower model's item embeddings collapsed toward popular items. New videos (< 7 days old) with fewer than 50 interactions had embeddings pulled far from the dense cluster of popular items. When user embeddings were generated, ANN search returned almost exclusively items with >10K interactions. New video discovery rate (fraction of recommendations that are items < 30 days old) fell from 15% to 3% over 3 months, a gradual degradation that was not monitored. A creator complaint surfaced the issue.
-
-**Detection:** Post-hoc audit of recommendation logs showed new content discovery rate declining. Root cause: item tower embeddings were trained on interaction-weighted loss — items with more interactions had more training gradient signal and stronger embedding representations. Time-to-detect: 3 months (monitoring gap).
-
-**Recovery steps:**
-1. Added exploration budget: 15% of final recommendations forcibly sampled from content matching user's genre preferences but published within the last 7 days.
-2. Added popularity-correction to item embedding training: subtract log(item_interaction_count) from similarity logits so rare items are not penalized during in-batch negative training.
-3. Added HNSW freshness shard: new items in a separate index with forced retrieval of top-50 from freshness shard at every request.
-
-**Prevention:** Monitor new content discovery rate weekly (target: >10%). Alert if rolling 14-day average drops below 8%.
-
----
-
-### Failure 3: Redis Feature Store TTL Race Condition
-
-**What failed:** User embeddings in Redis had a 24-hour TTL. During the daily model update (new two-tower model deployed, new user embeddings generated), the Redis write job and the TTL expiry raced: some user embeddings expired during the write batch, resulting in ~2M users having no embedding in Redis for 4-8 minutes. These users received cold-start recommendations (genre popularity) instead of personalized retrieval. Session watch time for affected users dropped 28% in that window.
-
-**Detection:** Monitoring on Redis cache miss rate spiked from baseline 5% to 45% for 6 minutes. Downstream recommendation quality metrics did not alert in time (too coarse). Time-to-detect: 6 minutes (via Redis metrics), 35 minutes (via recommendation quality).
-
-**Recovery steps:**
-1. Changed write strategy: write new embeddings with 48-hour TTL before deleting old ones (double-write with overlap).
-2. Coordinated deployment: pause old TTLs (extend to 48h) before starting write job, then let new 24h TTL take effect after write job completes.
-3. Added Redis health check before serving: if user embedding missing, fall back to ALS embedding (a backup in DynamoDB, updated weekly).
-
-**Prevention:** Blue-green Redis deployment for embedding updates: write to a secondary Redis cluster, then flip the serving pointer, then write to primary. No window where embeddings are missing.
-
----
-
-## Capacity Planning
-
-### Data Volume Projections
-
-```
-Year 0 (current):
-  Users: 200M registered, 50M DAU
-  Items: 10M videos
-  Events: 1B/day = 12K events/sec avg, 50K peak
-  User embeddings: 200M × 256 dim × 4 bytes = 200GB (Redis cluster)
-  Item embeddings (FAISS PQ): 10M × 32 bytes = 320MB RAM per node
-  Training data: 30-day rolling window = 30B events in Parquet (~15TB)
-
-Year 1 (25% growth):
-  Users: 250M, 62M DAU
-  Events: 1.25B/day
-  User embeddings: 250GB Redis (add 2 Redis nodes)
-  Item catalog: 12M videos, FAISS index 384MB
-
-Year 3 (3x growth):
-  Users: 600M, 150M DAU
-  Events: 3B/day = 35K events/sec avg
-  User embeddings: 600M × 1KB = 600GB Redis → 20-node r5.xlarge cluster
-                   (32GB/node; 16 nodes would be 512GB, short of the requirement)
-  Item catalog: 20M videos, FAISS index 640MB
-  Training data 30-day: 90B events (~45TB Parquet)
-  FAISS rebuild time at 20M items: ~4 hours (needs GPU acceleration or sharding)
-```
-
-### Training Compute Requirements
-
-```
-Two-Tower Training (weekly):
-  Dataset: 3B positive (user, item) pairs + in-batch negatives
-  Batch size: 4096, in-batch negatives = 4095 per positive
-  Hardware: one p4d.24xlarge (8× A100 40GB, PyTorch DDP); p4d is rented whole,
-            so bill the whole node even if the job uses 4 GPUs
-  Duration: 18 hours per weekly retrain
-  Cost: p4d.24xlarge at $21.96/hr × 18hr = ~$395/run × 4 runs = ~$1,580/month
-        (this instance was repriced down from its original $32.77/hr list rate —
-         recheck the current rate, GPU list prices move)
-
-ALS Collaborative Filtering (weekly):
-  Interaction matrix: 200M users × 10M items (sparse, ~3B non-zero)
-  Spark MLlib ALS on 20-node EMR cluster (r5.4xlarge)
-  Duration: 6 hours
-  Cost: 20 × $1.008/hr × 6hr = ~$121/run = $484/month
-
-LightGBM Ranker (daily):
-  Dataset: 50M training examples per day (30-day rolling)
-  16-core CPU (c5.4xlarge, $0.68/hr)
-  Duration: 2 hours
-  Cost: $0.68/hr × 2hr = $1.36/day × 30 = ~$41/month
-
-Total monthly training cost: $1,580 + $484 + $41 = ~$2,105
-```
-
-### Serving Infrastructure
-
-```
-FAISS Retrieval (sized for 50K recommendation req/sec peak — note this is a
-  serving-side assumption, not the 50K events/sec peak ingest rate in the
-  constraints; the two happen to coincide but are different quantities):
-  10 serving nodes (c5.2xlarge, 8 vCPU, 16GB RAM)
-  Each node: 5K QPS, 320MB FAISS index, nprobe=64 → 8ms latency
-  Cost: 10 × $0.34/hr = $3.40/hr = ~$2,450/month
-
-LightGBM Ranker:
-  20 nodes (c5.2xlarge), each handling 2,500 QPS
-  200-feature inference: <5ms CPU
-  Cost: 20 × $0.34/hr = ~$4,900/month
-
-Redis Feature Store (user embeddings):
-  200GB active user data, 10-node Redis Cluster (r5.xlarge 32GB RAM each)
-  50K GET/sec distributed across 10 nodes
-  Cost: 10 × $0.252/hr = ~$1,814/month
-
-Kafka (event ingestion):
-  8 partitions, 3 replicas, 12K events/sec sustained
-  3-broker Amazon MSK cluster (kafka.m5.large at $0.21/hr in us-east-1)
-  Cost: 3 × $0.21/hr × 730 = ~$460/month brokers
-        + 3 × 470 GB EBS at $0.10/GB-month = ~$140/month storage
-        = ~$600/month  (both rates from the AWS Price List API, us-east-1)
-
-Total monthly serving cost: $2,450 + $4,900 + $1,814 + $600 = ~$9,764
-```
-
-Instance rates used above (AWS on-demand, us-east-1, Linux, 730 hr/month):
-c5.2xlarge $0.34/hr, c5.4xlarge $0.68/hr, r5.xlarge $0.252/hr, r5.4xlarge $1.008/hr,
-p4d.24xlarge $21.96/hr, MSK kafka.m5.large $0.21/hr.
-
----
-
-## Additional War Stories
-
-**War Story 1 — In-Batch Negative Sampling Collapse with Small Batch Size:**
 
 ```python
 # BROKEN: batch_size=32 with in-batch negatives — only 31 negatives per positive
@@ -728,8 +593,8 @@ def train_two_tower_correct(
     epochs: int = 10,
 ) -> None:
     """
-    Use large effective batch via gradient accumulation + hard negatives.
-    Effective batch: 512 samples, accumulate 8 steps → 4096 effective batch.
+    Gradient accumulation smooths the gradient but does NOT add negatives: each
+    micro-batch still sees only 511 in-batch negatives. Extra negatives come from hard-negative mining.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
     accum_steps = 8
@@ -781,7 +646,8 @@ def train_two_tower_correct(
                 optimizer.zero_grad()
 ```
 
-**War Story 2 — MMR Diversity Causing Recommendation Homogeneity Within Genre:**
+### 4.5 MMR Diversity — Broken Then Fixed
+
 
 ```python
 # BROKEN: lambda_diversity=0.7 (high relevance weight) in MMR
@@ -861,7 +727,72 @@ def mmr_rerank_correct(
 
 ---
 
-## Monitoring and Drift Detection Deep-Dive
+## 5. Design Decisions & Tradeoffs
+
+
+**Two-stage retrieval + ranking**: Exhaustive similarity search over 10M items is infeasible at 100ms. ANN retrieval narrows to 500 candidates in 25ms, then a richer LightGBM model (200 features, interaction terms) re-ranks. This candidate-generation-then-ranking split is the standard industry pattern, published most explicitly in YouTube's deep-learning recommender (Covington, Adams & Sargin, RecSys 2016).
+
+**Sampled softmax for two-tower training**: Full softmax over 10M items is prohibitive. Sample 1000 negatives per positive. Use in-batch negatives (treat other items in minibatch as negatives) — cheap and effective. Correction for popularity bias: subtract log(item_frequency) from logits.
+
+**FAISS IVF with PQ compression**: IVF (Inverted File Index) partitions embedding space into 4096 Voronoi cells. At query time, search only nprobe=64 cells. PQ (Product Quantization) compresses 256-dim float32 (1KB/vector) to 32 bytes — a 32× reduction. 10M items: 10M × 32B = 320MB in RAM vs 10.24GB uncompressed. Recall@100 is an acceptance test here, not a property of the index: 32× quantization is aggressive, and the achieved recall depends on how clustered the embedding space is. Measure recall against an exact `IndexFlatIP` on a held-out query sample before shipping the PQ index and agree the bar with the product side — 0.90-0.95 is the usual band for a candidate generator feeding a re-ranker. If PQ32 at nprobe=64 misses that bar, the levers in order of cost are OPQ pre-rotation (free at query time), a higher nprobe, and a less aggressive PQ64 code (which doubles the index to 640MB).
+
+**LightGBM over deep ranking**: LightGBM trains in hours (vs days for deep models), handles missing features gracefully, is interpretable (feature importance), and stays competitive on tabular ranking features. The illustrative gap used throughout this design is NDCG@10 0.47 (LightGBM) vs 0.49 (DNN) — 4% relative — bought back by an order of magnitude faster iteration. Measure the gap on your own feature set: it widens as you add sequence and embedding features, which is exactly where trees stop being competitive.
+
+**Feature store split (online/offline)**: Redis holds real-time features with 24h TTL for sub-10ms lookup. Hive holds historical features for training. Avoids training-serving skew by computing features with the same logic in both pipelines.
+
+**Negative sampling strategy**: Random negatives are too easy (item never seen by user). Use popularity-weighted sampling: P(item as negative) proportional to sqrt(item_frequency). Also use "hard negatives" — items user saw but did not click in the same session.
+
+**Score additions need calibrated scores:** the freshness boost (+0.05) and the exploration slots are added to ranker outputs. A fixed boost only means the same thing from one retrain to the next if the ranker's scores are calibrated probabilities; recalibrate after each retrain as in [Model Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md).
+
+**Creator exposure is a fairness surface:** the new-content discovery rate (§8) is a supply-side fairness metric as much as a quality one. Track exposure share by creator cohort (new, small, large) with the methods in [Responsible AI, Fairness and Explainability](./cross_cutting/responsible_ai_fairness_and_explainability.md).
+
+**Tradeoff summary:**
+
+
+| Decision | Chosen | Alternative | Why Chosen |
+|----------|--------|-------------|-----------|
+| Retrieval model | Two-tower neural | ALS matrix factorization | Two-tower handles cold start via features; ALS needs interaction history |
+| ANN library | FAISS IVF+PQ | ScaNN, Hnswlib | FAISS: GPU training support, battle-tested at Meta/Google scale |
+| Ranker | LightGBM | Deep ranking (DNN) | 10x faster iteration, comparable NDCG, handles missing features natively |
+| Negative sampling | Popularity-weighted | Uniform random | Easy negatives degrade model; popularity-weighted surfaces hard negatives |
+| Feature freshness | 24h TTL on Redis | Real-time computation | Sub-10ms lookup vs 30-50ms compute; 24h acceptable for most features |
+| Diversity | MMR post-processing | Diversified training objective | MMR is runtime-controllable without retraining |
+
+---
+
+## 6. Real-World Implementations
+
+**YouTube (two-stage retrieval and ranking):** Covington, Adams and Sargin, "Deep Neural Networks for YouTube Recommendations" (RecSys 2016), split the system into a deep candidate-generation model and a separate deep ranking model, the same split as §3. Two details carry over directly. Candidate generation is trained as extreme multiclass classification over the corpus with sampled negatives, and serving it is a nearest-neighbour search in the learned embedding space. The ranker is trained with weighted logistic regression, with positive impressions weighted by watch time, so its learned odds approximate expected watch time rather than click probability. That is the fix for clickbait in §11.
+
+**YouTube (sampling-bias correction for two-tower retrieval):** Yi et al., "Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations" (RecSys 2019), show that the in-batch-negative loss used in §4.1 is biased under a power-law item distribution. They estimate item frequency from streaming data to correct it, and deployed the result as Neural Deep Retrieval (NDR) over a corpus of tens of millions of videos, with gains in live A/B tests. It is the published source of the `log(item_frequency)` correction in §5.
+
+**Meta FAISS (the ANN layer):** the IVF-PQ index in §4.2 is built with FAISS, the open-source similarity-search library from Meta's FAIR group (`facebookresearch/faiss`). Its IVF, PQ and OPQ index types are the levers §5 tunes. The FAISS GPU paper (Johnson, Douze and Jégou, "Billion-scale similarity search with GPUs", 2017) is the starting reference for the 1B-item question in §11.
+
+**What does not transfer:** neither YouTube paper publishes a latency budget, a feature list or an infrastructure cost. The 100 ms budget, the LightGBM ranker and the cost model in §10 are this design's assumptions, not YouTube's. YouTube's 2016 ranker is a DNN; this design starts with LightGBM for iteration speed and plans the move to a deep ranker for when sequence and embedding features dominate (§5).
+
+---
+
+## 7. Technologies & Tools
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| Collaborative Filtering | Spark MLlib ALS | User/item embeddings from interaction matrix |
+| Retrieval Model | PyTorch Two-Tower | Query-time user embedding generation |
+| ANN Index | FAISS IVF4096,PQ32 | Sub-25ms candidate retrieval over 10M items |
+| Ranking Model | LightGBM LambdaRank | NDCG@10 ranking over 500 candidates |
+| Feature Store (online) | Redis Cluster | <10ms feature lookup during serving |
+| Feature Store (offline) | Apache Hive / S3 | Training feature computation |
+| Event Streaming | Apache Kafka | 1B events/day ingestion |
+| Batch Processing | Apache Spark | Offline feature pipeline |
+| Experiment Tracking | MLflow | Model registry, metric comparison |
+| Diversity | MMR (Maximal Marginal Relevance) | Post-ranking genre diversity |
+
+---
+
+## 8. Operational Playbook
+
+Feature drift, output-distribution alerts, retraining cadence and the A/B promotion design are below. The PSI and KS mechanics are in [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md); the interleaving and holdout design follows [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md).
+
 
 ### Features That Drift Fastest
 
@@ -934,21 +865,206 @@ Statistical thresholds:
   - Ramp schedule: 10% → 25% → 50% → 100% at 3-day intervals after significance
 ```
 
+### Incident runbooks
+
+**Runbook 1 — Retrieval Recall@100 below 93%:**
+Diagnosis: run 10,000 sampled queries against the IVF-PQ index and an exact `IndexFlatIP` and compare. If recall fell everywhere, check that the user tower and the item index come from the same model version: user embeddings from v2 against an item index built with v1 collapse recall with no error.
+Mitigation: roll back to the last matched pair of user-tower and index versions.
+Resolution: ship the user tower and the item index as one versioned release artifact.
+
+**Runbook 2 — Redis user-embedding miss rate above 10% (baseline 5%):**
+Mitigation: serve the weekly ALS embedding from the DynamoDB backup for missing users, and pause the embedding write job.
+Resolution: confirm the write job uses the overlapping-TTL or blue-green pattern from §9 Failure 3.
+
+**Runbook 3 — Watch time per session down more than 5% (7-day average) with no deploy:**
+Diagnosis: check `item_popularity_7d` PSI (a viral spike), new-content discovery rate, and the holdout arm. If the holdout fell by the same amount, the cause is outside the model (catalog, holiday, outage).
+Mitigation: if only the treated traffic fell, roll back the last model or index change.
+
+**Runbook 4 — Serving node OOM during index hot-reload:**
+Mitigation: stop the rollout and let healthy nodes keep the old index.
+Resolution: enforce the 2x-index-size RAM pre-check and one-node-at-a-time rollout from §9 Failure 1.
+
 ---
 
-## Additional Interview Questions
+## 9. Common Pitfalls & War Stories
+
+
+### Failure 1: FAISS Index Memory Overrun During Hot Reload
+
+**What failed:** A nightly index rebuild pushed an uncompressed FAISS index (before the switch to PQ) to serving nodes with only a little more RAM headroom than the index itself. During the hot-reload (loading the new index while still serving requests off the old one), both indexes lived in RAM simultaneously — the peak is always 2× the index size, which is the number the capacity plan has to be built on. The serving node OOM-killed, restarting the process. Because 3 of 10 serving nodes failed simultaneously during the same rebuild window, 30% of traffic had no retrieval backend. Fallback returned global popularity list, degrading NDCG from 0.47 to 0.21 for 22 minutes.
+
+**Detection:** OOM alerts fired from k8s node metrics within 3 minutes. On-call received PagerDuty alert. Grafana dashboard showed FAISS retrieval error rate spiking to 30%. Time-to-detect: 3 minutes.
+
+**Recovery steps:**
+1. Rolled back to previous index version (hot-reload from S3 snapshot).
+2. Reduced rebuild parallelism: stagger rebuild across nodes at 2-minute intervals instead of all-at-once.
+3. Switched to the PQ-compressed index (320MB vs 10.24GB uncompressed) — already planned, but accelerated.
+4. Added memory pre-check in rebuild script: abort if available RAM < 2x index size.
+
+**Prevention:** Index size monitoring in CI/CD — build pipeline fails if index size increases >20% without an explicit acknowledgment. Staged rollout: rebuild one node at a time, verify health before proceeding.
+
+---
+
+### Failure 2: Popularity Bias Collapse of New Content Discovery
+
+**What failed:** After 6 months of production, the two-tower model's item embeddings collapsed toward popular items. New videos (< 7 days old) with fewer than 50 interactions had embeddings pulled far from the dense cluster of popular items. When user embeddings were generated, ANN search returned almost exclusively items with >10K interactions. New video discovery rate (fraction of recommendations that are items < 30 days old) fell from 15% to 3% over 3 months, a gradual degradation that was not monitored. A creator complaint surfaced the issue.
+
+**Detection:** Post-hoc audit of recommendation logs showed new content discovery rate declining. Root cause: item tower embeddings were trained on interaction-weighted loss — items with more interactions had more training gradient signal and stronger embedding representations. Time-to-detect: 3 months (monitoring gap).
+
+**Recovery steps:**
+1. Added exploration budget: 15% of final recommendations forcibly sampled from content matching user's genre preferences but published within the last 7 days.
+2. Added popularity-correction to item embedding training: subtract log(item_interaction_count) from similarity logits so rare items are not penalized during in-batch negative training.
+3. Added HNSW freshness shard: new items in a separate index with forced retrieval of top-50 from freshness shard at every request.
+
+**Prevention:** Monitor new content discovery rate weekly (target: >10%). Alert if rolling 14-day average drops below 8%.
+
+---
+
+### Failure 3: Redis Feature Store TTL Race Condition
+
+**What failed:** User embeddings in Redis had a 24-hour TTL. During the daily model update (new two-tower model deployed, new user embeddings generated), the Redis write job and the TTL expiry raced: some user embeddings expired during the write batch, resulting in ~2M users having no embedding in Redis for 4-8 minutes. These users received cold-start recommendations (genre popularity) instead of personalized retrieval. Session watch time for affected users dropped 28% in that window.
+
+**Detection:** Monitoring on Redis cache miss rate spiked from baseline 5% to 45% for 6 minutes. Downstream recommendation quality metrics did not alert in time (too coarse). Time-to-detect: 6 minutes (via Redis metrics), 35 minutes (via recommendation quality).
+
+**Recovery steps:**
+1. Changed write strategy: write new embeddings with 48-hour TTL before deleting old ones (double-write with overlap).
+2. Coordinated deployment: pause old TTLs (extend to 48h) before starting write job, then let new 24h TTL take effect after write job completes.
+3. Added Redis health check before serving: if user embedding missing, fall back to ALS embedding (a backup in DynamoDB, updated weekly).
+
+**Prevention:** Blue-green Redis deployment for embedding updates: write to a secondary Redis cluster, then flip the serving pointer, then write to primary. No window where embeddings are missing.
+
+---
+
+### Failure 4: 31 Negatives for 10 Million Items
+
+**What failed:** the two-tower model trained with a batch of 32, so every positive was contrasted with 31 random items (§4.4). The loss fell quickly and offline Recall@100 looked fine on easy held-out pairs.
+
+**Impact:** 31 uniform negatives out of 10M items almost never include a near-miss, so the embedding space cannot separate "similar but wrong" from "right". Moving to 511 in-batch negatives per step plus 4 mined hard negatives multiplies the negatives per positive by about 16x, which is the change that makes recall on the head of the catalog hold up online.
+
+**Prevention:** treat negatives per positive as a reviewed hyperparameter, log it with every training run, and evaluate recall on hard pairs (same genre, same creator), not on random ones.
+
+### Failure 5: MMR Weight That Never Diversified
+
+**What failed:** MMR ran with a relevance weight of 0.7 (§4.5). For a user who watches 80% Action, the diversity term never outweighed relevance, so all 10 slots were Action.
+
+**Impact:** the `top10_homogeneity_threshold` alert (over 80% of the top 10 from one genre) is the measure; with a 0.7 weight it fires for exactly the heavy single-genre users who most need discovery.
+
+**Prevention:** combine MMR with a hard cap of 3 items per genre in the top 10, and A/B test the cap against 30-day retention, not session watch time.
+
+---
+
+## 10. Capacity Planning
+
+Data volume projections are in §2; this section sizes training and serving.
+
+### Training Compute Requirements
+
+```
+Two-Tower Training (weekly):
+  Dataset: 3B positive (user, item) pairs + in-batch negatives
+  Batch size: 4096, in-batch negatives = 4095 per positive
+  Hardware: one p4d.24xlarge (8× A100 40GB, PyTorch DDP); p4d is rented whole,
+            so bill the whole node even if the job uses 4 GPUs
+  Duration: 18 hours per weekly retrain
+  Cost: p4d.24xlarge at $21.96/hr × 18hr = ~$395/run × 4 runs = ~$1,580/month
+        (this instance was repriced down from its original $32.77/hr list rate —
+         recheck the current rate, GPU list prices move)
+
+ALS Collaborative Filtering (weekly):
+  Interaction matrix: 200M users × 10M items (sparse, ~3B non-zero)
+  Spark MLlib ALS on 20-node EMR cluster (r5.4xlarge)
+  Duration: 6 hours
+  Cost: 20 × $1.008/hr × 6hr = ~$121/run = $484/month
+
+LightGBM Ranker (daily):
+  Dataset: 50M training examples per day (30-day rolling)
+  16-core CPU (c5.4xlarge, $0.68/hr)
+  Duration: 2 hours
+  Cost: $0.68/hr × 2hr = $1.36/day × 30 = ~$41/month
+
+Total monthly training cost: $1,580 + $484 + $41 = ~$2,105
+```
+
+### Serving Infrastructure
+
+```
+FAISS Retrieval (sized for 50K recommendation req/sec peak — note this is a
+  serving-side assumption, not the 50K events/sec peak ingest rate in the
+  constraints; the two happen to coincide but are different quantities):
+  10 serving nodes (c5.2xlarge, 8 vCPU, 16GB RAM)
+  Each node: 5K QPS, 320MB FAISS index, nprobe=64 → 8ms latency
+  Cost: 10 × $0.34/hr = $3.40/hr = ~$2,450/month
+
+LightGBM Ranker:
+  20 nodes (c5.2xlarge), each handling 2,500 QPS
+  200-feature inference: <5ms CPU
+  Cost: 20 × $0.34/hr = ~$4,900/month
+
+Redis Feature Store (user embeddings):
+  200GB active user data, 10-node Redis Cluster (r5.xlarge 32GB RAM each)
+  50K GET/sec distributed across 10 nodes
+  Cost: 10 × $0.252/hr = ~$1,814/month
+
+Kafka (event ingestion):
+  8 partitions, 3 replicas, 12K events/sec sustained
+  3-broker Amazon MSK cluster (kafka.m5.large at $0.21/hr in us-east-1)
+  Cost: 3 × $0.21/hr × 730 = ~$460/month brokers
+        + 3 × 470 GB EBS at $0.10/GB-month = ~$140/month storage
+        = ~$600/month  (both rates from the AWS Price List API, us-east-1)
+
+Total monthly serving cost: $2,450 + $4,900 + $1,814 + $600 = ~$9,764
+```
+
+Instance rates used above (AWS on-demand, us-east-1, Linux, 730 hr/month):
+c5.2xlarge $0.34/hr, c5.4xlarge $0.68/hr, r5.xlarge $0.252/hr, r5.4xlarge $1.008/hr,
+p4d.24xlarge $21.96/hr, MSK kafka.m5.large $0.21/hr.
+
+---
+
+## 11. Interview Discussion Points
+
+
+**Q: How do you handle the cold start problem for new users?**
+**Short:** Seed new users from an onboarding genre pick through the item tower, rank by popularity within genre for the first session, and switch to two-tower retrieval after about 5 interactions.
+New users have no watch history, so collaborative filtering is useless. Strategy: (1) Onboarding flow asking genre preferences (3-5 clicks), which seeds a genre-based embedding via the item tower. (2) During first session, use popularity-within-genre as proxy ranker. (3) After 5 interactions, enough signal exists for two-tower retrieval. New items get item-tower embedding from metadata alone; ALS score is set to the item's global average until enough interactions accumulate (warm-up threshold: 50 interactions).
+
+**Q: How do you prevent popularity bias where the model keeps recommending already-popular items?**
+**Short:** Subtract log item frequency from training logits, reserve 10-15% of slots for less-popular matching content, and give items under 7 days old a small re-ranking boost.
+Three mitigations: (1) Popularity bias correction in two-tower training — subtract log(item_frequency) from logits so rare items are not penalized. (2) Exploration budget: 10-15% of recommendations are sampled from less-popular content matching user's genre preferences. (3) Freshness boost in re-ranking: items under 7 days old receive a +0.05 score boost, encouraging new content discovery.
+
+**Q: How do you evaluate recommendation quality offline vs online?**
+**Short:** Offline, track NDCG@10, retrieval Recall@100 and catalog coverage; online, A/B test on watch time per session with retention as a guardrail, since offline NDCG only partly predicts it.
+Offline: NDCG@10 on held-out sessions, Recall@100 from retrieval, coverage (fraction of catalog recommended at least once). Online A/B test: watch time per session (primary), CTR, session length, 30-day retention. Offline NDCG correlates moderately with online watch time (Pearson ~0.6) but is not a perfect proxy — always A/B test before full rollout.
+
+**Q: What happens if the FAISS index becomes stale as new videos are added?**
+**Short:** Index new videos in a small in-memory HNSW shard searched alongside the main IVF index, merge both top-K lists, and fold the shard in at the nightly full rebuild.
+New videos added to the catalog need to be indexed immediately or they will never be retrieved. Strategy: (1) Near-real-time index updates — new items are added to a small in-memory HNSW shard. At query time, search both FAISS IVF (existing items) and HNSW shard (new items), merge top-K from both. (2) Full index rebuild nightly to consolidate. This ensures new videos get retrieval exposure within minutes of upload.
+
 
 **Q: How do you handle the cold start problem for new videos with no interaction data?**
+**Short:** Give the item tower metadata features so new videos embed on day one, pull a top-50 from a freshness shard on every request, and reserve 15% of slots until 50 interactions.
 New videos have no interaction history so ALS embeddings are undefined and two-tower item embeddings rely only on metadata. Strategy: (1) Item tower is trained with metadata features (genre, duration, description embeddings from a text encoder, creator popularity) so new items have a meaningful embedding from day 1. (2) Force retrieval: new items (<7 days old) are stored in a freshness HNSW shard; every user request retrieves top-50 from this shard in addition to the main FAISS index. (3) Post-ranking: 15% of recommendations are allocated to a "discovery slot" filled from the freshness shard, bypassing relevance ranking for new content. After 50 interactions, the item graduates from forced exposure to organic retrieval competition.
 
 **Q: What is the difference between offline NDCG and online watch time, and why do they sometimes diverge?**
+**Short:** Offline NDCG is scored on logged impressions with position and popularity bias, so it misjudges rarely shown items and rewards clickbait; online watch time measures what users actually do.
 Offline NDCG is computed on historical click data, which suffers from selection bias: it only measures items that were shown (position bias) and already liked (historical popularity bias). Online watch time measures actual user satisfaction in a real session. Divergence occurs when: (1) the new model ranks items that were rarely shown historically (low NDCG from sparse data) but users love them (high watch time); (2) the new model promotes content that is clickable but not watchable (high CTR, low watch time — click-bait dynamics); (3) the held-out test set has different temporal distribution than the current period. Rule: if offline NDCG improves but online watch time does not, investigate for click-bait bias or temporal distribution mismatch before concluding the model is better.
 
 **Q: How do you prevent the recommendation system from creating filter bubbles?**
+**Short:** Cap genre and creator repeats in the top 10, spend a 15% exploration budget on under-watched genres, and reject models that lift short-term clicks but lower 30-day retention.
 Four mechanisms: (1) Genre diversity cap in MMR post-ranking: no more than 3 items from the same genre in the top-10, regardless of user preference strength. (2) Exploration budget: 15% of every user's recommendations come from genres they have watched fewer than 5 times, sampled from popular content in those genres. (3) Creator diversity: limit recommendations from any single creator to 2 items in the top-10. (4) Long-term engagement signals: if 30-day retention is used as a secondary metric in model selection (alongside short-term engagement), models that maximize short-term clicks at the cost of user satisfaction are penalized. A/B tests that show improved 7-day CTR but declining 30-day retention are rejected.
 
 **Q: How would you design the system to handle a catalog of 1 billion items instead of 10 million?**
+**Short:** One PQ index no longer fits a replica (1B x 32 B = 32 GB), so shard the catalog and route each query to a few shards, or add a coarse first-level filter before the ANN search.
 At 1 billion items, FAISS IVF with PQ becomes infeasible in a single machine (even PQ-compressed: 1B × 32 bytes = 32GB per replica). Three approaches: (1) Hierarchical two-level retrieval — coarse retrieval reduces to 1M candidates using a lightweight semantic hash or product category filter, then FAISS IVF over 1M items (32MB PQ). (2) Sharded FAISS: partition the 1B item catalog into 100 shards of 10M items each, route queries to the 2-3 most relevant shards based on a coarse item-space classifier, merge top-K from those shards. (3) ScaNN (Google) or HNSW with product quantization in distributed mode. Do not carry over a single-machine latency figure from a vendor benchmark at this scale — benchmark the candidate index on your own vectors and your own recall target, because ANN latency at 1B vectors is dominated by sharding and network fan-out, not by the index algorithm. The two-tower training pipeline remains the same; only the index infrastructure changes.
 
 **Q: How do you measure and optimize for long-term user retention rather than short-term engagement?**
+**Short:** Gate every A/B test on 30- and 90-day retention, add satisfaction proxies such as re-opens and explicit ratings to the labels, and track per-user recommendation entropy as a leading signal.
 Short-term engagement metrics (CTR, watch time per session) are easy to optimize but can be maximized by recommendation systems that exploit user psychological biases (autoplay, thumbnail sensationalism). Long-term retention is measured as 30-day and 90-day retention rates per user cohort. To optimize for it: (1) Include 30-day retention as a secondary metric in all A/B tests — reject models that improve 7-day metrics at cost of 30-day retention. (2) Add long-term satisfaction proxies to training labels: app re-opens within 3 days, manual search (user was not passively suggested), explicit ratings. (3) Penalize models with high variance in recommendations — high predictability leads to boredom over months. Monitor recommendation entropy (diversity of genres/creators over a 30-day window per user) as a leading indicator for long-term retention.
+
+**Q: Why does in-batch negative sampling need a log-frequency correction, and what goes wrong without it?**
+**Short:** Popular items appear as in-batch negatives far more often, so the model learns to push them down; subtracting log of each item's sampling probability from its logit removes that bias.
+An item lands in a batch as often as it is a positive, so with in-batch negatives the chance an item is used as a negative is proportional to its popularity. The softmax then learns a score proportional to P(item | user) divided by the item's sampling probability, which over-penalises head items and distorts the whole space under a power-law catalog. The fix is to subtract `log p(item)` from each logit during training (not at serving). Yi et al. (Google, RecSys 2019) estimate `p(item)` from streaming data with a hashed frequency sketch, so it works without a fixed vocabulary and adapts as popularity shifts; they deployed it in YouTube's Neural Deep Retrieval. Check it with Recall@100 split by item-popularity decile, corrected against uncorrected.
+
+**Q: The ranker predicts clicks, but the business wants watch time. How do you change the objective without changing the model family?**
+**Short:** Weight each clicked impression by its watch time in a logistic loss, as YouTube's 2016 ranker did, so the model's odds approximate expected watch time instead of click probability.
+Covington et al. (RecSys 2016) train the ranker with weighted logistic regression: positive (clicked) impressions are weighted by watch time and negative impressions get unit weight, so the learned odds approximate expected watch time when click rates are small. In LightGBM the same idea is a `sample_weight` of watch seconds on positives with a binary objective, or, for LambdaRank, graded relevance labels from watch-percentage buckets. Raw seconds favour long videos, so cap the weight or normalise by duration. Validate offline with a watch-time-weighted NDCG, then confirm in an A/B test with watch time as the primary metric and clicks as a diagnostic only.

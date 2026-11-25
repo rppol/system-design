@@ -132,11 +132,23 @@ Bias is not injected at one stage; each of the following can independently make 
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     data(["Training data\n+ protected attribute A"]) --> pre["PRE-PROCESSING\nreweighing, resampling,\ndisparate-impact remover"]
     pre --> inproc["IN-PROCESSING\nfairness-constrained training,\nadversarial debiasing"]
     inproc --> model(["Trained model\none threshold,\nno A needed at inference"])
     model --> post["POST-PROCESSING\nper-group thresholds,\nreject-option classification"]
     post --> decision(["Final decision\nneeds A at decision time"])
+
+    class data,decision io
+    class pre,inproc,post req
+    class model train
 ```
 
 Bias mitigation can enter at three points, and the three stages compose rather than compete.
@@ -178,6 +190,14 @@ Dropping a protected column from `X` does not remove its influence if a correlat
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     q(["Choosing a group-fairness metric"]) --> harm{"What harm are\nyou preventing?"}
     harm -->|"unequal ACCESS to a\nresource or opportunity"| dp{"do base rates differ\nfor a legitimate reason?"}
     harm -->|"unequal ERROR COST\n(false negative vs false positive)"| costs{"which error\nis worse here?"}
@@ -192,6 +212,11 @@ flowchart TD
     EOb --> chk
     pp --> chk
     chk -->|"yes"| imp["calibration and equalized odds\ncannot BOTH hold -- pick one\nand document why (Chouldechova)"]
+
+    class q io
+    class harm,dp,costs,chk mathOp
+    class pp,dpres,EOfull,EOpp,EOb train
+    class imp lossN
 ```
 
 Caption: the choice starts with the harm you are trying to prevent, not the metric you already know how to compute. The bottom node is unavoidable — if base rates genuinely differ, no amount of extra model tuning reconciles calibration with equalized odds.
@@ -200,6 +225,14 @@ Caption: the choice starts with the harm you are trying to prevent, not the metr
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     world(["Historical world\nsocietal inequity"]) -->|"historical bias"| collect["Data collection"]
     collect -->|"representation /\nsampling bias"| labelst["Labeling"]
     labelst -->|"measurement bias +\nlabel bias"| feat["Feature engineering\nand aggregation"]
@@ -207,6 +240,11 @@ flowchart LR
     trainm --> evalm["Evaluation"]
     evalm --> deploy["Deployment"]
     deploy -->|"deployment bias\nfeedback loop"| world
+
+    class world io
+    class collect,labelst,feat req
+    class trainm,evalm train
+    class deploy base
 ```
 
 Caption: each arrow is a place a real production system introduced bias without the model ever "deciding" to discriminate. The loop back to the historical world is not decorative — predictive policing and similar feedback systems feed today's deployment decisions into tomorrow's "historical" training data.

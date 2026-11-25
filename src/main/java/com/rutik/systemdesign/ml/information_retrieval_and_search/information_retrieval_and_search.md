@@ -72,8 +72,19 @@ Pointwise predicts a relevance score or class per (query, doc) pair independentl
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     a["RankNet\npairwise cross-entropy loss\non score difference"] --> b["LambdaRank\nscale the gradient by the\ndelta-NDCG from swapping the pair"]
     b --> c["LambdaMART\nsame lambda gradients,\nfit with gradient-boosted trees"]
+
+    class a,b mathOp
+    class c train
 ```
 
 Each step keeps the previous step's core idea and fixes its blind spot: RankNet knows nothing about the ranking metric it will be judged on; LambdaRank injects that metric directly into the gradient; LambdaMART swaps RankNet's neural net for boosted trees, which is why LambdaMART, not a neural RankNet, is the default production learning-to-rank model on tabular query-document features.
@@ -90,6 +101,14 @@ Spell correction, query segmentation, synonym or query expansion, query rewritin
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     q(["User Query"]) --> qu["Query Understanding\nspell-correct, expand, classify intent"]
     qu --> sp["Sparse Retrieval\nBM25 over inverted index\ntop-300 candidates"]
     qu --> de["Dense Retrieval\nbi-encoder plus ANN index\ntop-300 candidates"]
@@ -98,6 +117,12 @@ flowchart TD
     fu --> re["Reranking\ncross-encoder over fused candidates\nfull cross-attention"]
     re --> ltr["Learning to Rank\nLambdaMART on query-doc features"]
     ltr --> out(["Ranked Results Page"])
+
+    class q,out io
+    class qu req
+    class sp,de base
+    class fu mathOp
+    class re,ltr train
 ```
 
 Sparse and dense retrieval run in parallel over the full corpus and stay cheap only because each stage narrows the set by orders of magnitude before the next, more expensive stage runs — the same retrieve-then-rank shape as a recommender pipeline, except the query is free text instead of a user id, and fusion has no equivalent in a single-retriever recsys pipeline.
@@ -135,6 +160,14 @@ A query only ever touches the postings lists of its own terms — "sat" reaches 
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     q1(["Query"]) --> qenc["Bi-encoder query tower"]
     d1(["Document"]) --> denc["Bi-encoder doc tower\ncomputed offline, cached"]
     qenc --> dot(("dot product\nfast, indexable"))
@@ -143,6 +176,11 @@ flowchart LR
     d2(["Document"]) --> cat
     cat --> attn["full self-attention\nover query and doc tokens jointly"]
     attn --> score(["relevance score\nslow, one pair at a time"])
+
+    class q1,d1,q2,d2 io
+    class qenc,denc,cat train
+    class dot,attn mathOp
+    class score req
 ```
 
 The bi-encoder never lets query and document tokens attend to each other, so every document embedding can be computed once, offline, and stored in an ANN index. The cross-encoder's entire value comes from letting query and document tokens attend to each other jointly, which means it must run a fresh forward pass for every pair and can never be pre-indexed — exactly why it is confined to reranking a few hundred candidates, never full-corpus retrieval.

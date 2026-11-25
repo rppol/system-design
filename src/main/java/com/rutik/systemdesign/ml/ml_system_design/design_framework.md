@@ -33,15 +33,21 @@ Key insight: interviewers are not just evaluating your knowledge of ML algorithm
 
 ## 3. Core Principles
 
-**Requirements before architecture**: every architectural decision must be traceable to a stated requirement. Never choose a model or database technology without first identifying the constraint it addresses.
+**Requirements before architecture.** Every architectural decision must trace back to a stated requirement. Never choose a model, store or serving pattern before naming the constraint it addresses. In a 45-minute interview, spend the first 5-8 minutes on requirements and scale; a design that answers an unstated question reads as a guess.
 
-**Explicit metric hierarchy**: define the primary business metric (e.g., weekly active users), primary ML metric (e.g., NDCG@10), and guardrail metrics (e.g., P99 latency < 100ms, content policy violation rate < 0.01%). Optimization of the primary metric must not degrade guardrail metrics.
+**Explicit metric hierarchy.** Write down three layers: the business metric (weekly active users, revenue per session), the ML metric that is supposed to move it (NDCG@10, PR-AUC), and the guardrails (P99 latency under 100 ms, policy-violation rate under 0.01%). Optimizing the ML metric must never degrade a guardrail, and the link from ML metric to business metric is itself a hypothesis that an online test has to confirm.
 
-**Data availability drives model choice**: the best model for a dataset of 10,000 labeled examples is different from the best model for 10 billion examples. State your assumptions about data size before proposing a model.
+**Data availability drives model choice.** The right model for 10,000 labelled examples (logistic regression, or a GBDT on strong features) is not the right model for 10 billion (deep models with learned embeddings). State data size, label source and label delay before proposing a model; label delay in particular (chargebacks, churn windows) bounds how fresh any model can be.
 
-**Serve the simplest model that meets requirements**: a logistic regression model that meets the latency and accuracy requirements is superior to a transformer model that barely fits the latency budget. Complexity has maintenance and debugging costs.
+**Start with a baseline and a non-ML fallback.** A heuristic such as popularity, recency or a rule gives the number every model must beat, and it is what the system serves when the model or feature store is down. If a model cannot beat the heuristic by a margin worth its cost, ship the heuristic.
 
-**Monitoring is not optional**: a model without monitoring is a time bomb. Plan monitoring from the design phase, not as an afterthought.
+**Serve the simplest model that meets requirements.** A logistic regression that meets the latency and accuracy targets beats a transformer that barely fits the budget; complexity costs debugging time, retraining time and on-call load. Add complexity only when a measured gap justifies it.
+
+**Design the offline-online loop together.** Training data comes from what serving logs, so decide at design time which features and impressions are logged, how labels are joined (point in time), and how an online test will confirm an offline gain. A design that cannot be evaluated online cannot be improved.
+
+**Monitoring is part of the design.** Plan input drift, prediction drift, delayed-label quality and business guardrails from the start, each with an owner and a threshold. A model without monitoring fails silently.
+
+**Name the weakest point and the trade.** Every design has one: cold start, a feedback loop, label leakage, a latency tail. Saying which one you accepted, and why, is what separates a senior answer from a list of components.
 
 ---
 
@@ -776,9 +782,9 @@ Shadow mode (also called shadow deployment or dark launch) runs a new model on p
 **Short:** Monitor data quality, model health, and business metrics as three layers, each with its own alert threshold.
 Three layers of monitoring: (1) Data quality — schema validation on every feature pipeline run; distribution drift (PSI) measured daily on top-20 features; alert threshold PSI > 0.2. (2) Model health — prediction score distribution monitored daily; alert if mean score drifts > 2 standard deviations from baseline; if online labels are available quickly, monitor AUC daily. (3) Business metrics — track primary metric (CTR, engagement) in real-time dashboards with automated rollback if the metric drops > 5% below baseline for > 30 minutes. Monitoring SLA: an alert must fire within 1 hour of a detectable degradation.
 
-**Q: How do you structure the model validation gate before production deployment?**
-**Short:** A validation gate is a set of automated checks on offline metrics, significance, latency, and fairness that must all pass to deploy.
-A model validation gate is a set of automated checks that must pass before a model is promoted. Required checks: (1) offline metric must exceed threshold (e.g., NDCG@10 > 0.65); (2) improvement over production model must be statistically significant (paired t-test p < 0.05 on test set); (3) P99 inference latency must be within SLA (e.g., < 20ms for ranking model); (4) fairness check — performance gap across demographic groups must be < 10% relative; (5) shadow mode comparison — model output correlation with production model > 0.7 (sanity check). If any gate fails, the pipeline halts and sends an alert. No human approval required for routine retraining; human review required for architecture changes.
+**Q: Which validation-gate failures should block a routine retrain automatically, and which should go to a human?**
+**Short:** Block automatically on a metric below threshold, a non-significant gain, latency over SLA, a fairness gap or shadow disagreement; send architecture changes and repeated failures to a human.
+A routine retrain should pass or fail without a person, so every check that can be written as a number blocks automatically: (1) the offline metric is above threshold (for example NDCG@10 > 0.65); (2) the improvement over production is statistically significant (paired test, p < 0.05 on the test set); (3) P99 inference latency is within SLA (for example under 20 ms for a ranking model); (4) the performance gap across demographic groups is under 10% relative; (5) shadow-mode output correlates with production above 0.7 as a sanity check. Any failure halts the pipeline and alerts the owner. Human review is for decisions a threshold cannot make: a new architecture or feature set, a change to the gate thresholds themselves, and a model that has failed the gate several retrains in a row, which usually means the data, not the model, has changed.
 
 **Q: How do you handle cold start for new users in a recommendation system?**
 **Short:** Cold start progresses from demographic-only signals to a content-collaborative blend as interaction history accumulates.

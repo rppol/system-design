@@ -146,6 +146,14 @@ this module.
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     A(["Offline metric looks great\ne.g. ROC-AUC 0.97"]) --> B{"Higher than domain\npriors would suggest?"}
     B -->|"No — plausible"| C(["Proceed to canary\nrollout"])
     B -->|"Yes — suspicious"| D{"Adversarial validation:\nclassify train vs test rows"}
@@ -159,6 +167,12 @@ flowchart TD
     I -->|"Already split correctly"| K{"Preprocessing fit\nbefore or after split?"}
     K -->|"Before the split"| L(["Preprocessing leakage —\nmove fit() inside a Pipeline"])
     K -->|"After, per fold"| M(["No leakage found —\ntrust the metric"])
+
+    class A io
+    class B,D,G,I,K mathOp
+    class C,M train
+    class E,F req
+    class H,J,L lossN
 ```
 
 Each diamond is a single audit question; a suspiciously high offline score
@@ -170,6 +184,14 @@ Section 14 case study's v1 model reached production.
 
 ```mermaid
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     A(["Raw dataset\nX, y"]) --> B["Cross-validation splitter\ne.g. StratifiedKFold(n_splits=5)"]
     B --> C["Fold k — train indices"]
     B --> D["Fold k — validation indices"]
@@ -182,6 +204,11 @@ flowchart TD
     H --> I
     I --> J["Repeat for every fold"]
     J --> K(["Average CV score —\nan unbiased estimate"])
+
+    class A,K io
+    class B,C,D,J req
+    class E,F,G mathOp
+    class H,I train
 ```
 
 The validation fold (right branch) is only ever *transformed*, never *fit

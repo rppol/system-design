@@ -1,14 +1,19 @@
 # Design an ML Platform (Internal Tooling)
-## Problem Statement
+## Intuition
 
-Design an internal ML platform for a large tech company with 500 ML engineers and 1,000 models
-in production. The platform must support the full ML lifecycle: feature engineering and storage,
-experiment tracking, distributed training, model registry with lineage, and multi-framework serving
-infrastructure. Current state: engineers spend 6 weeks going from idea to production due to
-infrastructure friction (manual cluster provisioning, ad-hoc feature pipelines, no standardized
-deployment). Target state: 1 week from idea to production for standard use cases. The platform
-must support PyTorch, TensorFlow, scikit-learn, and XGBoost models without requiring engineers to
-understand Kubernetes internals.
+> An internal ML platform is a city's road network for models. Each team can still build its own car, but nobody should have to pave their own road to production. The platform's job is to make the common path (features, training, registry, serving, rollback) so smooth that taking it is faster than going around it.
+
+**Key insight:** a platform is judged by lead time and by the bugs it makes impossible, not by its component list. The 6-weeks-to-1-week target is met by removing hand-offs: a feature definition used identically for training and serving, a training job that survives node loss, a registry alias that moves only after a champion/challenger check, and a rollback that is one alias change. Each §9 incident is a place where the platform let a team do the wrong thing silently.
+
+Mental model: five layers with one SDK on top. A feature store (offline Parquet, online Redis) feeds training on Kubernetes with gang scheduling, runs and models land in MLflow, KServe with Triton serves them, and observability spans all of it. Every layer exposes a paved path and an escape hatch.
+
+Why this system exists: 500 engineers running 1,000 production models without a shared path rebuild the same feature pipelines, serving containers and rollout scripts over and over, and each copy drifts.
+
+---
+
+## 1. Requirements Clarification
+
+Design an internal ML platform for a large tech company with 500 ML engineers and 1,000 models in production. The platform must support the full ML lifecycle: feature engineering and storage, experiment tracking, distributed training, model registry with lineage, and multi-framework serving infrastructure. Current state: engineers spend 6 weeks going from idea to production due to infrastructure friction (manual cluster provisioning, ad-hoc feature pipelines, no standardized deployment). Target state: 1 week from idea to production for standard use cases. The platform must support PyTorch, TensorFlow, scikit-learn, and XGBoost models without requiring engineers to understand Kubernetes internals.
 
 Layer-by-layer build-vs-buy choices for this kind of platform are covered in [ML Platform Architecture and Build vs Buy](../../mlops/ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md).
 
@@ -34,7 +39,38 @@ Layer-by-layer build-vs-buy choices for this kind of platform are covered in [ML
 
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+| Quantity | Derivation | Result |
+|---|---|---|
+| Users and models | requirement | 500 engineers, 1,000 production models |
+| Training runs | 10K/day | ~7 runs/minute on average, several times that at working-hour peaks |
+| Online feature reads | 50K QPS per feature group at < 5 ms P99 | sized per group, not as one global number |
+| GPU fleet | 200 A100s at the 80% utilization target | ~3,840 busy A100-hours/day |
+| Offline feature data, one tenant | 24M rows/day x 1 KB x 2 years | ~17.5 TB (§10) |
+| Lead time | 6 weeks to 1 week | the platform's headline objective |
+
+The GPU line is the cost driver, and the lead-time line is the success metric; most platform decisions trade one against the other (§11, metrics question).
+
+**Data volume:**
+
+```
+Current: 50 services × 10k events/hr = 500k feature rows/hr = 12M/day
+Year 1:  100 services → 24M feature rows/day
+Year 3:  300 services → 72M/day
+
+Feature store storage (Parquet, 1KB/row):
+  Year 1: 24M × 1KB = 24GB/day × 365 = 8.76TB/year
+  Retention 2 years → 17.5TB offline store (S3, ~$400/month at $0.023/GB)
+  Online store working set (Redis, top-5 features × 1M active entities × 100B/feature):
+    5 × 1M × 100 = 500MB active RAM — fits in a 4GB Redis instance
+    (the 500GB cluster sized in §4 covers the full
+     100M-entity catalogue, not just the daily-active working set)
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -134,105 +170,9 @@ Platform SDK Flow:
 
 ---
 
-## Key Design Decisions
+## 4. Component Deep Dives
 
-### 1. Unified Feature Store with Point-in-Time Correctness
-
-The hardest ML infrastructure problem: training-serving skew. Engineers compute features in
-training notebooks using all available data. At serving time, only features available at request
-time exist. If training uses future data accidentally (e.g., joining on event_date instead of
-feature_available_date), the model trains on leaked future information and fails badly in production.
-
-Point-in-time correct joins: the offline store maintains feature values with effective timestamps.
-A training query for "user's 30-day purchase count as of 2024-01-15" retrieves the exact value
-that was available on that date, not today's value. This requires event sourcing of feature values
-(every write stores a timestamp) and range queries during training data generation.
-
-### 2. Online/Offline Store Duality with Materialization Pipeline
-
-Online store (Redis Cluster): stores only the latest feature value per entity. Latency < 5ms.
-Used at serving time. Offline store (Hive + Parquet): stores full history of feature values with
-timestamps. Used for training data generation. A materialization job (Spark) computes features
-in batch and writes to both stores simultaneously. This guarantees online and offline feature
-values use identical computation logic (same feature definitions, no drift between batch and
-real-time implementations).
-
-### 3. Kubernetes + Volcano for ML Workloads
-
-Standard Kubernetes job scheduling is not designed for ML: a 4-GPU training job needs all 4 GPUs
-simultaneously or it cannot start (gang scheduling). Volcano extends Kubernetes with gang scheduling
-(a job either gets all requested resources or waits), priority queues (research queue vs production
-queue), and queue preemption. Spot instance support: training jobs checkpoint every 15 minutes;
-when a spot node is preempted, the job resumes from the last checkpoint on a new node. Gang
-scheduling removes the dominant source of idle GPU time under stock Kubernetes — partially
-allocated jobs that hold some GPUs while blocking on the rest — which is what makes the platform's
-> 80% GPU-utilization target reachable.
-
-### 4. MLflow as Experiment and Model Registry
-
-MLflow provides: experiment tracking (log parameters, metrics, artifacts at each training run),
-model registry (numbered model versions labelled by mutable aliases such as `@challenger` and
-`@champion`, plus version tags such as `validation_status: passed`),
-and artifact storage (S3 backend for model weights, preprocessors, configs). Model lineage is
-critical for compliance: each registered model version links to the training run, which links to
-the dataset version (S3 path + snapshot date) and the code commit (Git SHA). Full audit trail:
-"which training data and code produced the model currently serving 10M users."
-
-### 5. Multi-Framework Serving with Unified Interface
-
-Engineers use PyTorch, TensorFlow, scikit-learn, and XGBoost. A single serving interface hides
-framework differences. The model server reads the framework tag from the model registry and
-creates one KServe `InferenceService` whose predictor picks the runtime: NVIDIA Triton Inference
-Server for PyTorch (exported to ONNX or TorchScript) and TensorFlow SavedModels, and KServe's
-built-in scikit-learn and XGBoost runtimes for tree and linear models. Triton supplies server-side
-dynamic batching per model; KServe supplies the Kubernetes lifecycle (autoscaling, scale-to-zero
-for idle models, `canaryTrafficPercent` for the canary split in section 6). All expose the same
-gRPC and REST API: {model_name, model_version, inputs} -> {outputs, latency}. Engineers write
-model code once; the platform handles deployment details.
-
-### 6. A/B Testing and Canary Deployments via Traffic Splitting
-
-The A/B router sits in front of all model servers. Traffic splitting is configured via control
-plane API. Supported strategies:
-- Canary: 5% traffic to new model, 95% to current. Automatic rollback if error rate > 1%
-  or P99 latency increases > 20ms over 1 hour.
-- A/B test: 50/50 split, run for statistically significant period (minimum detectable effect
-  configured per experiment).
-- Shadow mode: 100% traffic to current model; new model receives copies of all requests but
-  responses are discarded. Used for integration testing without user impact.
-- Blue-green: full traffic switch with instant rollback capability.
-
-```mermaid
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    new(["New model\nversion"])
-    shadow["Shadow mode\n100% mirrored traffic,\nresponses discarded"]
-    canary["Canary\n5% traffic, 1h+,\nerror and p99 watched"]
-    full["Full rollout\n100% traffic"]
-    rollback(["Auto rollback"])
-    prod(["Production"])
-
-    new --> shadow --> canary
-    canary -->|"pass"| full --> prod
-    canary -->|"error over 1% or p99 up 20ms"| rollback
-
-    class new,rollback,prod io
-    class shadow,canary mathOp
-    class full train
-```
-
-Every promotion walks the same guarded path: shadow mode proves integration safety, then a 5% canary auto-rolls-back if error rate exceeds 1% or P99 latency rises 20ms over one hour, before full rollout to Production.
-
----
-
-## Implementation
+### 4.1 Platform SDK and Services
 
 ```python
 from __future__ import annotations
@@ -255,9 +195,7 @@ from mlflow.exceptions import MlflowException
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Feature Store SDK
-# ---------------------------------------------------------------------------
+# --- Feature Store SDK ---
 
 @dataclass
 class FeatureDefinition:
@@ -384,9 +322,7 @@ class OnlineFeatureStore:
         self._client.setex(key, ttl_seconds, json.dumps(features))
 
 
-# ---------------------------------------------------------------------------
-# Experiment Tracking (MLflow wrapper)
-# ---------------------------------------------------------------------------
+# --- Experiment Tracking (MLflow wrapper) ---
 
 class Experiment:
     """
@@ -470,9 +406,7 @@ class Experiment:
         self.end_run()
 
 
-# ---------------------------------------------------------------------------
-# Model Registry
-# ---------------------------------------------------------------------------
+# --- Model Registry ---
 
 @dataclass
 class ModelVersion:
@@ -574,9 +508,7 @@ class ModelRegistry:
         )
 
 
-# ---------------------------------------------------------------------------
-# A/B Testing Traffic Router
-# ---------------------------------------------------------------------------
+# --- A/B Testing Traffic Router ---
 
 class ABRouter:
     """
@@ -621,22 +553,20 @@ class ABRouter:
         return self.variants[-1]
 
 
-# ---------------------------------------------------------------------------
-# Cost Tracking
-# ---------------------------------------------------------------------------
+# --- Cost Tracking ---
 
 class CostTracker:
     """
     Tracks GPU-hour consumption per team and per model.
     Called at training job completion and serving inference.
 
-    GPU cost: $4.10/hour per A100, i.e. p4d.24xlarge us-east-1 on-demand
-    ($32.7726/hr for 8 x A100 40GB) divided by 8. Spot on the same instance
-    runs about $13.07/hr, or ~$1.63 per A100-hour.
+    GPU cost: $2.74/hour per A100, i.e. p4d.24xlarge us-east-1 on-demand
+    ($21.96/hr for 8 x A100 40GB) divided by 8. Spot is cheaper but its
+    price moves by hour and region, so chargeback uses the on-demand rate.
     Stored in PostgreSQL for monthly chargeback reports.
     """
 
-    GPU_COST_PER_HOUR_USD: float = 4.10
+    GPU_COST_PER_HOUR_USD: float = 2.74
 
     def record_training_cost(
         self,
@@ -671,159 +601,9 @@ class CostTracker:
         return cost_usd
 ```
 
----
+### 4.2 Training/Serving Feature Skew — Broken Then Fixed
 
-## ML Components Used
-
-| Component | Purpose | Key Parameters |
-|-----------|---------|----------------|
-| Redis Cluster | Online feature store | 6 shards, 2 replicas, 500GB, < 5ms P99 |
-| Apache Hive + Parquet | Offline feature store | Point-in-time correct joins, petabyte scale |
-| Apache Spark | Feature materialization + training data generation | 64 workers, Delta Lake |
-| MLflow | Experiment tracking + model registry | S3 artifact backend, PostgreSQL metadata |
-| Kubernetes + Volcano | Training job scheduling | Gang scheduling, priority queues, spot instances |
-| Kubeflow Pipelines | ML workflow orchestration | DAG-based pipeline definition |
-| KServe | Model-serving control plane on Kubernetes | One `InferenceService` per model version, `canaryTrafficPercent`, autoscaling |
-| Triton Inference Server | Runtime for PyTorch (ONNX/TorchScript) and TensorFlow models | `dynamic_batching`, multiple model instances per GPU, gRPC + REST |
-| Prometheus + Grafana | Platform observability | GPU utilization, feature store latency, serving QPS |
-| Argo Workflows | Feature pipeline orchestration | Retry logic, parallelism |
-
----
-
-## Tradeoffs and Alternatives
-
-| Decision | Chosen Approach | Alternative | Reason |
-|----------|----------------|-------------|--------|
-| Online store | Redis Cluster | DynamoDB, Cassandra | Redis: lowest latency (< 2ms typical); DynamoDB: fully managed but 5-10ms; Cassandra: high ops burden |
-| Offline store | Hive + Parquet | Delta Lake / Iceberg | Delta Lake: better ACID transactions and time travel; Hive: more mature tooling in the existing stack, lower migration cost |
-| Experiment tracking | MLflow | Weights & Biases (W&B) | MLflow: self-hosted (data privacy), open source, no per-seat cost; W&B: better UI, more features |
-| Training orchestration | Kubeflow + Volcano | Ray Train | Ray Train: simpler Python API; Kubeflow: more flexible for heterogeneous workloads, better K8s integration |
-| Model serving | KServe control plane + Triton runtime (sklearn/XGBoost on KServe's own runtimes) | Ray Serve, BentoML, one hand-written server per framework | KServe + Triton: one deployment API for every framework and server-side batching on GPU; Ray Serve suits Python-heavy multi-model graphs; BentoML packages fastest but leaves rollout to you; per-framework servers multiply the ops surface |
-| A/B routing | Consistent hash (MD5 mod 100) | Sticky session via cookie | Hash: stateless, no session storage; cookie: simpler but requires client support |
-| Feature pipeline | Batch materialization | Real-time Flink streaming | Batch: simpler, cheaper, works for < 1 hour freshness; streaming needed only for real-time features (e.g., recent clicks) |
-
----
-
-## Interview Discussion Points
-
-**Q: How do you prevent training-serving skew — the most common silent ML bug?**
-A: Three mechanisms. First, point-in-time correct joins in the offline store: training data
-generation queries feature values as they existed at the label timestamp, not at query time.
-Second, unified feature definitions: the same Python function that computes a feature in the
-batch pipeline (Spark) is also used in the real-time pipeline (Flink). The feature definition is
-the single source of truth — not a Jupyter notebook and a separate serving implementation that
-drift apart. Third, shadow mode validation: when deploying a new feature, run the model in shadow
-mode and compare online feature values to what the offline pipeline produces for the same entity
-and timestamp. Discrepancies above 1% flag a skew bug before it reaches production.
-
-**Q: How do you handle a GPU node failure mid-training for a 6-hour distributed training job?**
-A: Checkpoint-based fault tolerance. Training jobs checkpoint model weights to S3 every 15
-minutes (configurable per job). The Kubeflow pipeline tracks the last successful checkpoint.
-When Volcano detects a node failure (preemption or crash), it reschedules the job gang on available
-nodes and the job resumes from the last checkpoint. The job requeues automatically — engineers
-only see a 15-minute delay in training completion. For EC2 spot preemption the instance gets a
-two-minute interruption notice (and, earlier when available, a rebalance recommendation); the job
-receives a SIGTERM and synchronously writes an emergency checkpoint before the node is reclaimed.
-Fault tolerance makes spot instances (p4d.24xlarge us-east-1: ~$13.07/hr spot vs $32.77/hr
-on-demand, about 2.5x cheaper) viable for 95% of training jobs.
-
-**Q: How do you ensure feature access control for PII features (user location, email)?**
-A: Three-layer access control. First, feature registry: each feature definition includes a
-contains_pii flag. PII features require explicit approval from the data governance team before
-a team can read them (approval stored in the registry, checked by the SDK on feature_store.get()).
-Second, audit logging: every PII feature read logs the team, model, entity_id, and timestamp to
-an immutable audit log (AWS CloudTrail). Third, data minimization: PII features are automatically
-hashed at write time for model training (model sees hash of email, not plaintext). Raw PII is
-accessible only in the online serving path for identity resolution. These controls satisfy GDPR
-Article 30 (records of processing) and SOC 2 Type II requirements.
-
-**Q: What metrics do you track to prove the platform reduced time-to-production from 6 weeks to 1 week?**
-A: DORA-style ML metrics. First, lead time: from the Git commit of model code to the model
-serving production traffic. Measured automatically via MLflow metadata (code commit) and deployment
-timestamp. Target: median < 7 days. Second, deployment frequency: number of new model versions
-promoted to production per week per team. Baseline: 0.5/week; target: 3/week. Third, mean time
-to restore: when a serving model degrades, how long to roll back to the previous version.
-Platform target: < 5 minutes (one-click rollback in the web UI). Fourth, GPU utilization:
-platform-wide GPU utilization (80% target). Low utilization = expensive idle capacity; high
-utilization = engineers waiting for resources. Fifth, feature freshness SLA violations: percentage
-of feature reads that exceed the feature's declared freshness guarantee. Target < 0.1%.
-
----
-
-## Failure Scenarios and Recovery
-
-**Failure 1 — Training job OOM kills mid-run, experiment state lost.**
-The experiment tracking database recorded the run as "running" but the process was killed by the OOM killer after 6 hours of training. MLflow showed the run open; no model artifact was saved.
-
-- Detection: MLflow heartbeat monitor — if a run has no new metric logs for 10 minutes, mark it "zombie" and alert.
-- Recovery: implement checkpoint-every-N-steps with `torch.save(state_dict, f"ckpt_{step}.pt")` at the training loop level. On restart, load the latest checkpoint and resume. Log the checkpoint step as a run parameter.
-- Prevention: enforce memory budgets with `ulimit` inside the training container; set `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` to reduce fragmentation-induced OOM.
-
-**Failure 2 — Feature store serving layer returns stale features after Redis failover.**
-Redis Cluster's automatic failover promoted a replica to primary. Because Redis replication is asynchronous, the replica was ~4 seconds behind and those writes were lost. Feature values for 12,000 users were stale, causing the model to serve degraded recommendations for ~90 seconds.
-
-- Detection: feature freshness metric (difference between feature `event_timestamp` and current time) crossed 30s threshold; Grafana alerted.
-- Recovery: automatic — once the new primary caught up, fresh features resumed. No manual intervention.
-- Prevention: Redis has no synchronous replication mode, so bound the loss window instead — `min-replicas-to-write 1` with a low `min-replicas-max-lag` makes the primary reject writes when no replica is within that lag, and `WAIT` blocks a specific write until N replicas have acknowledged it. Neither makes the system CP; use them for real-time features and accept plain async replication for historical/batch features where staleness is acceptable.
-
-**Failure 3 — Model registry API rate limit caused deployment pipeline deadlock.**
-10 teams ran `mlflow.register_model()` simultaneously during a post-deploy validation window. Self-hosted MLflow has no built-in rate limiter, but the ingress fronting it enforced 100 req/min per client, and every pipeline shared one service account. All 10 pipelines blocked with exponential backoff, but their lock on the CI job queue starved other teams' pipelines for 40 minutes.
-
-- Detection: CI pipeline duration alert (> 20 minutes), combined with MLflow API 429 errors in logs.
-- Recovery: manually cancelled 8 of the 10 blocked pipelines; let the remaining 2 proceed sequentially.
-- Prevention: stagger deployment windows per team (time-slotted CI jobs); implement a registration queue service that serializes calls and limits concurrent MLflow API calls to 5.
-
----
-
-## Capacity Planning
-
-This section sizes **one representative tenant workload** — 50 services, one fraud model, one recommender, a 100k req/hr prediction API — not the whole platform. The platform-level figures are the ones in the Problem Statement (1,000 production models, 500 engineers, 200 A100s); a platform bill is this arithmetic run per tenant and summed, with the shared control plane (registry, tracking DB, scheduler) amortised across all of them. Size a tenant first, because that is the unit a platform team actually gets asked to quote.
-
-**Data volume:**
-
-```
-Current: 50 services × 10k events/hr = 500k feature rows/hr = 12M/day
-Year 1:  100 services → 24M feature rows/day
-Year 3:  300 services → 72M/day
-
-Feature store storage (Parquet, 1KB/row):
-  Year 1: 24M × 1KB = 24GB/day × 365 = 8.76TB/year
-  Retention 2 years → 17.5TB offline store (S3, ~$400/month at $0.023/GB)
-  Online store working set (Redis, top-5 features × 1M active entities × 100B/feature):
-    5 × 1M × 100 = 500MB active RAM — fits in a 4GB Redis instance
-    (the 500GB cluster sized in the Implementation section covers the full
-     100M-entity catalogue, not just the daily-active working set)
-```
-
-**Training compute:**
-
-```
-XGBoost fraud model:  12M rows × 200 features × 500 trees × 8 leaves
-  = ~6 minutes on 8-core CPU (sklearn, histogram method)
-  Monthly retraining: 6 min × 12 = 72 min/year — negligible
-
-Deep recommender (two-tower, 100M params):
-  50M training pairs × 5 epochs on 4×A100 → ~8 hours per run
-  Weekly retraining: 8h × 4 GPUs × 52 = 1,664 A100-hours/year
-    → $6,800/year at $4.10/A100-hr on-demand (p4d.24xlarge $32.7726/hr ÷ 8)
-    → $2,700/year on spot (~$1.63/A100-hr)
-```
-
-**Serving infrastructure:**
-
-```
-Prediction API: 100k req/hr = 28 RPS average, 140 RPS peak (5× burst)
-  FastAPI + ONNX Runtime, p99 < 20ms
-  1 replica handles 200 RPS → 1 replica sustains peak with 30% headroom
-  Run 2 replicas for HA: 2 × t3.small (2 vCPU, 2 GiB) at $0.0208/hr
-    = 2 × $0.0208 × 730 = $30/month
-```
-
----
-
-## Additional War Stories
-
-**War Story 1 — Training/serving feature skew caused silent AUC degradation.**
+The fix is the platform's main promise: one feature definition, materialized to both stores, with point-in-time joins for training (see [Feature Store and Point-in-Time Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md)).
 
 ```python
 # BROKEN: training uses SQL window function for 7-day click rate;
@@ -854,7 +634,7 @@ ctr_7d_fv = FeatureView(
 # or feature_store.get_online_features() — same transformation, guaranteed parity
 ```
 
-**War Story 2 — Model promoted to champion without challenger comparison caused revenue regression.**
+### 4.3 Promotion Without a Champion Comparison — Broken Then Fixed
 
 ```python
 # BROKEN: any model with AUC > 0.80 auto-promoted to champion
@@ -883,7 +663,116 @@ def promote_if_better(challenger_version: str, client: MlflowClient) -> bool:
 
 ---
 
-## Monitoring and Drift Detection Deep-Dive
+## 5. Design Decisions & Tradeoffs
+
+### 1. Unified Feature Store with Point-in-Time Correctness
+
+The hardest ML infrastructure problem: training-serving skew. Engineers compute features in training notebooks using all available data. At serving time, only features available at request time exist. If training uses future data accidentally (e.g., joining on event_date instead of feature_available_date), the model trains on leaked future information and fails badly in production.
+
+Point-in-time correct joins: the offline store maintains feature values with effective timestamps. A training query for "user's 30-day purchase count as of 2024-01-15" retrieves the exact value that was available on that date, not today's value. This requires event sourcing of feature values (every write stores a timestamp) and range queries during training data generation.
+
+### 2. Online/Offline Store Duality with Materialization Pipeline
+
+Online store (Redis Cluster): stores only the latest feature value per entity. Latency < 5ms. Used at serving time. Offline store (Hive + Parquet): stores full history of feature values with timestamps. Used for training data generation. A materialization job (Spark) computes features in batch and writes to both stores simultaneously. This guarantees online and offline feature values use identical computation logic (same feature definitions, no drift between batch and real-time implementations).
+
+### 3. Kubernetes + Volcano for ML Workloads
+
+Standard Kubernetes job scheduling is not designed for ML: a 4-GPU training job needs all 4 GPUs simultaneously or it cannot start (gang scheduling). Volcano extends Kubernetes with gang scheduling (a job either gets all requested resources or waits), priority queues (research queue vs production queue), and queue preemption. Spot instance support: training jobs checkpoint every 15 minutes; when a spot node is preempted, the job resumes from the last checkpoint on a new node. Gang scheduling removes the dominant source of idle GPU time under stock Kubernetes — partially allocated jobs that hold some GPUs while blocking on the rest — which is what makes the platform's
+> 80% GPU-utilization target reachable.
+
+### 4. MLflow as Experiment and Model Registry
+
+MLflow provides: experiment tracking (log parameters, metrics, artifacts at each training run), model registry (numbered model versions labelled by mutable aliases such as `@challenger` and `@champion`, plus version tags such as `validation_status: passed`), and artifact storage (S3 backend for model weights, preprocessors, configs). Model lineage is critical for compliance: each registered model version links to the training run, which links to the dataset version (S3 path + snapshot date) and the code commit (Git SHA). Full audit trail: "which training data and code produced the model currently serving 10M users."
+
+### 5. Multi-Framework Serving with Unified Interface
+
+Engineers use PyTorch, TensorFlow, scikit-learn, and XGBoost. A single serving interface hides framework differences. The model server reads the framework tag from the model registry and creates one KServe `InferenceService` whose predictor picks the runtime: NVIDIA Triton Inference Server for PyTorch (exported to ONNX or TorchScript) and TensorFlow SavedModels, and KServe's built-in scikit-learn and XGBoost runtimes for tree and linear models. Triton supplies server-side dynamic batching per model; KServe supplies the Kubernetes lifecycle (autoscaling, scale-to-zero for idle models, `canaryTrafficPercent` for the canary split in section 6). All expose the same gRPC and REST API: {model_name, model_version, inputs} -> {outputs, latency}. Engineers write model code once; the platform handles deployment details.
+
+### 6. A/B Testing and Canary Deployments via Traffic Splitting
+
+The A/B router sits in front of all model servers. Traffic splitting is configured via control plane API. Supported strategies:
+- Canary: 5% traffic to new model, 95% to current. Automatic rollback if error rate > 1%
+  or P99 latency increases > 20ms over 1 hour.
+- A/B test: 50/50 split, run for statistically significant period (minimum detectable effect
+  configured per experiment).
+- Shadow mode: 100% traffic to current model; new model receives copies of all requests but
+  responses are discarded. Used for integration testing without user impact.
+- Blue-green: full traffic switch with instant rollback capability.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    new(["New model\nversion"])
+    shadow["Shadow mode\n100% mirrored traffic,\nresponses discarded"]
+    canary["Canary\n5% traffic, 1h+,\nerror and p99 watched"]
+    full["Full rollout\n100% traffic"]
+    rollback(["Auto rollback"])
+    prod(["Production"])
+
+    new --> shadow --> canary
+    canary -->|"pass"| full --> prod
+    canary -->|"error over 1% or p99 up 20ms"| rollback
+
+    class new,rollback,prod io
+    class shadow,canary mathOp
+    class full train
+```
+
+Every promotion walks the same guarded path: shadow mode proves integration safety, then a 5% canary auto-rolls-back if error rate exceeds 1% or P99 latency rises 20ms over one hour, before full rollout to Production.
+
+**PII controls are part of responsible ML:** the registry's PII flag, approval workflow and audit log (§11) are the platform's privacy surface; pair them with the fairness and explanation checks in [Responsible AI, Fairness and Explainability](./cross_cutting/responsible_ai_fairness_and_explainability.md) so every model inherits both.
+
+**Tradeoff summary:**
+
+| Decision | Chosen Approach | Alternative | Reason |
+|----------|----------------|-------------|--------|
+| Online store | Redis Cluster | DynamoDB, Cassandra | Redis: lowest latency (< 2ms typical); DynamoDB: fully managed but 5-10ms; Cassandra: high ops burden |
+| Offline store | Hive + Parquet | Delta Lake / Iceberg | Delta Lake: better ACID transactions and time travel; Hive: more mature tooling in the existing stack, lower migration cost |
+| Experiment tracking | MLflow | Weights & Biases (W&B) | MLflow: self-hosted (data privacy), open source, no per-seat cost; W&B: better UI, more features |
+| Training orchestration | Kubeflow + Volcano | Ray Train | Ray Train: simpler Python API; Kubeflow: more flexible for heterogeneous workloads, better K8s integration |
+| Model serving | KServe control plane + Triton runtime (sklearn/XGBoost on KServe's own runtimes) | Ray Serve, BentoML, one hand-written server per framework | KServe + Triton: one deployment API for every framework and server-side batching on GPU; Ray Serve suits Python-heavy multi-model graphs; BentoML packages fastest but leaves rollout to you; per-framework servers multiply the ops surface |
+| A/B routing | Consistent hash (MD5 mod 100) | Sticky session via cookie | Hash: stateless, no session storage; cookie: simpler but requires client support |
+| Feature pipeline | Batch materialization | Real-time Flink streaming | Batch: simpler, cheaper, works for < 1 hour freshness; streaming needed only for real-time features (e.g., recent clicks) |
+
+---
+
+## 6. Real-World Implementations
+
+**Uber (Michelangelo):** "Meet Michelangelo: Uber's Machine Learning Platform" (Jeremy Hermann and Mike Del Balso, 2017-09-05) describes an internal ML-as-a-service platform for the whole workflow: manage data, train, evaluate, deploy, predict and monitor. Work began in mid-2015; at publication it had served production for about a year with dozens of teams. Before it, models could not be larger than what fit on a data scientist's desktop, there was no standard place to store experiment results, and teams built a custom serving container per project. Its data layer splits offline pipelines (an HDFS data lake with Spark and Hive) from online features precomputed into Cassandra, either by batch precompute or by near-real-time Samza jobs reading Kafka, both designed so the same data is used for training and serving. A shared feature store lets teams publish features with a little metadata (owner, description, SLA). That is the offline/online duality and the shared-feature argument of §5 Decisions 1 and 2.
+
+**Netflix (Metaflow):** Netflix built Metaflow and open-sourced it; it is now supported by Outerbounds and described as a human-centric framework for building and managing real-life AI and ML systems, from notebook prototypes to production deployments. It sits at the other end of the build spectrum from a heavy in-house platform: a thin framework over existing compute, aimed at data-scientist productivity.
+
+**What this means here:** both put the feature layer and the path to production ahead of model tooling. The per-layer build-versus-buy decision is in [ML Platform Architecture and Build vs Buy](../../mlops/ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md).
+
+---
+
+## 7. Technologies & Tools
+
+| Component | Purpose | Key Parameters |
+|-----------|---------|----------------|
+| Redis Cluster | Online feature store | 6 shards, 2 replicas, 500GB, < 5ms P99 |
+| Apache Hive + Parquet | Offline feature store | Point-in-time correct joins, petabyte scale |
+| Apache Spark | Feature materialization + training data generation | 64 workers, Delta Lake |
+| MLflow | Experiment tracking + model registry | S3 artifact backend, PostgreSQL metadata |
+| Kubernetes + Volcano | Training job scheduling | Gang scheduling, priority queues, spot instances |
+| Kubeflow Pipelines | ML workflow orchestration | DAG-based pipeline definition |
+| KServe | Model-serving control plane on Kubernetes | One `InferenceService` per model version, `canaryTrafficPercent`, autoscaling |
+| Triton Inference Server | Runtime for PyTorch (ONNX/TorchScript) and TensorFlow models | `dynamic_batching`, multiple model instances per GPU, gRPC + REST |
+| Prometheus + Grafana | Platform observability | GPU utilization, feature store latency, serving QPS |
+| Argo Workflows | Feature pipeline orchestration | Retry logic, parallelism |
+
+---
+
+## 8. Operational Playbook
+
+The platform-level signals are below; the PSI and KS mechanics are in [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md), and the shadow, canary and A/B promotion follows [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md). Promotion gates compare calibration (ECE) as well as AUC, because a challenger with better ranking and worse calibration breaks every consumer that thresholds its scores ([Model Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md)).
 
 Key signals for an ML platform:
 
@@ -917,16 +806,111 @@ A/B testing for model promotion:
   Full rollout: if canary passes, promote to 100% traffic
 ```
 
+### Incident runbooks
+
+**Runbook 1 — Feature freshness lag above 30 seconds for a feature group:** check the materialization job and recent Redis failovers (§9 Failure 2); serve the last value with a staleness flag rather than a null.
+
+**Runbook 2 — Runs with no metrics for 10 minutes ("zombie" runs):** look for OOM-kill events on the node, mark the run failed, and resume from the last checkpoint (§9 Failure 1).
+
+**Runbook 3 — CI pipelines over 20 minutes with MLflow 429 errors:** a registration storm (§9 Failure 3). Route registrations through the serializing queue and cancel duplicate pipelines.
+
+**Runbook 4 — Business metric regression after an alias move:** move the `champion` alias back (under 2 minutes), freeze automatic promotion, and rerun the champion/challenger comparison on the affected segment (§4.3).
+
 ---
 
-## Additional Interview Questions
+## 9. Common Pitfalls & War Stories
 
-**How do you ensure reproducibility across training runs in a shared ML platform?** Log all inputs to a training run: dataset hash (DVC content hash), feature store snapshot timestamp, model config (as JSON artifact), library versions (pip freeze artifact), and random seeds. MLflow's `mlflow.log_artifact()` stores these alongside metrics. For full bit-for-bit reproducibility, add `CUBLAS_WORKSPACE_CONFIG=:4096:8` to force deterministic CUDA ops. Treat training runs like database transactions: record everything needed to replay the run from scratch.
+**Failure 1 — Training job OOM kills mid-run, experiment state lost.**
+The experiment tracking database recorded the run as "running" but the process was killed by the OOM killer after 6 hours of training. MLflow showed the run open; no model artifact was saved.
 
-**What is the difference between online and batch feature computation, and how does the platform serve both?** Batch features are computed on historical data in scheduled Spark/SQL jobs and stored in the offline feature store (Parquet/Delta Lake). Online features are computed in real-time (stream processing or point-in-time lookup) and stored in the online feature store (Redis/DynamoDB) for low-latency serving. The platform exposes a unified feature retrieval API: `get_historical_features()` for training (returns Parquet), `get_online_features()` for inference (returns Redis values). Feature definitions are written once; the platform materializes to both stores.
+- Detection: MLflow heartbeat monitor — if a run has no new metric logs for 10 minutes, mark it "zombie" and alert.
+- Recovery: implement checkpoint-every-N-steps with `torch.save(state_dict, f"ckpt_{step}.pt")` at the training loop level. On restart, load the latest checkpoint and resume. Log the checkpoint step as a run parameter.
+- Prevention: enforce memory budgets with `ulimit` inside the training container; set `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` to reduce fragmentation-induced OOM.
 
-**How do you handle model rollback when a production model causes a regression?** The model registry stores all versions with every alias move audited. Rollback is repointing one alias: `client.set_registered_model_alias(MODEL_NAME, "champion", previous_version)` — the artifact never moves, so there is nothing to rebuild. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
+**Failure 2 — Feature store serving layer returns stale features after Redis failover.**
+Redis Cluster's automatic failover promoted a replica to primary. Because Redis replication is asynchronous, the replica was ~4 seconds behind and those writes were lost. Feature values for 12,000 users were stale, causing the model to serve degraded recommendations for ~90 seconds.
 
-**What is a feature store and why is it worth the operational overhead?** A feature store solves three problems: (1) training/serving skew — features are computed once and read identically by both; (2) feature reuse — teams share computed features instead of re-implementing the same 7-day CTR in 5 different codebases; (3) point-in-time correctness — historical training data is fetched with the feature values that were available at each training example's timestamp, preventing future data leakage. The overhead (maintaining Feast/Tecton, running materialization jobs) pays off once 3+ teams share the same feature.
+- Detection: feature freshness metric (difference between feature `event_timestamp` and current time) crossed 30s threshold; Grafana alerted.
+- Recovery: automatic — once the new primary caught up, fresh features resumed. No manual intervention.
+- Prevention: Redis has no synchronous replication mode, so bound the loss window instead — `min-replicas-to-write 1` with a low `min-replicas-max-lag` makes the primary reject writes when no replica is within that lag, and `WAIT` blocks a specific write until N replicas have acknowledged it. Neither makes the system CP; use them for real-time features and accept plain async replication for historical/batch features where staleness is acceptable.
 
-**How do you manage secrets (API keys, DB passwords) in training jobs without baking them into Docker images?** Use Kubernetes Secrets mounted as environment variables into the training pod, or Vault's Kubernetes auth method (pod gets a short-lived Vault token via its service account, exchanges it for the secret at runtime). Never pass secrets as command-line arguments (visible in `ps aux`) or log them (redact in MLflow). The training container's Dockerfile contains no secrets — it reads from env vars at runtime.
+**Failure 3 — Model registry API rate limit caused deployment pipeline deadlock.**
+10 teams ran `mlflow.register_model()` simultaneously during a post-deploy validation window. Self-hosted MLflow has no built-in rate limiter, but the ingress fronting it enforced 100 req/min per client, and every pipeline shared one service account. All 10 pipelines blocked with exponential backoff, but their lock on the CI job queue starved other teams' pipelines for 40 minutes.
+
+- Detection: CI pipeline duration alert (> 20 minutes), combined with MLflow API 429 errors in logs.
+- Recovery: manually cancelled 8 of the 10 blocked pipelines; let the remaining 2 proceed sequentially.
+- Prevention: stagger deployment windows per team (time-slotted CI jobs); implement a registration queue service that serializes calls and limits concurrent MLflow API calls to 5.
+
+---
+
+## 10. Capacity Planning
+
+This section sizes **one representative tenant workload** — 50 services, one fraud model, one recommender, a 100k req/hr prediction API — not the whole platform. The platform-level figures are the ones in §1 and §2 (1,000 production models, 500 engineers, 200 A100s); a platform bill is this arithmetic run per tenant and summed, with the shared control plane (registry, tracking DB, scheduler) amortised across all of them. Size a tenant first, because that is the unit a platform team actually gets asked to quote.
+
+**Training compute:**
+
+```
+XGBoost fraud model:  12M rows × 200 features × 500 trees × 8 leaves
+  = ~6 minutes on 8-core CPU (sklearn, histogram method)
+  Monthly retraining: 6 min × 12 = 72 min/year — negligible
+
+Deep recommender (two-tower, 100M params):
+  50M training pairs × 5 epochs on 4×A100 → ~8 hours per run
+  Weekly retraining: 8h × 4 GPUs × 52 = 1,664 A100-hours/year
+    → ~$4,570/year at ~$2.74/A100-hr on-demand (p4d.24xlarge $21.96/hr ÷ 8, us-east-1)
+    → less on spot, but spot prices move by hour and region; check before budgeting
+```
+
+**Serving infrastructure:**
+
+```
+Prediction API: 100k req/hr = 28 RPS average, 140 RPS peak (5× burst)
+  FastAPI + ONNX Runtime, p99 < 20ms
+  1 replica handles 200 RPS → 1 replica sustains peak with 30% headroom
+  Run 2 replicas for HA: 2 × t3.small (2 vCPU, 2 GiB) at $0.0208/hr
+    = 2 × $0.0208 × 730 = $30/month
+```
+
+---
+
+## 11. Interview Discussion Points
+
+**Q: How do you prevent training-serving skew — the most common silent ML bug?**
+**Short:** Use point-in-time joins for training data, one shared feature definition for batch and streaming, and shadow comparisons of online against offline values before a feature ships.
+A: Three mechanisms. First, point-in-time correct joins in the offline store: training data generation queries feature values as they existed at the label timestamp, not at query time. Second, unified feature definitions: the same Python function that computes a feature in the batch pipeline (Spark) is also used in the real-time pipeline (Flink). The feature definition is the single source of truth — not a Jupyter notebook and a separate serving implementation that drift apart. Third, shadow mode validation: when deploying a new feature, run the model in shadow mode and compare online feature values to what the offline pipeline produces for the same entity and timestamp. Discrepancies above 1% flag a skew bug before it reaches production.
+
+**Q: How do you handle a GPU node failure mid-training for a 6-hour distributed training job?**
+**Short:** Checkpoint to S3 every 15 minutes, let Volcano reschedule the gang and resume from the last checkpoint, and write an emergency checkpoint on the spot-interruption SIGTERM.
+A: Checkpoint-based fault tolerance. Training jobs checkpoint model weights to S3 every 15 minutes (configurable per job). The Kubeflow pipeline tracks the last successful checkpoint. When Volcano detects a node failure (preemption or crash), it reschedules the job gang on available nodes and the job resumes from the last checkpoint. The job requeues automatically — engineers only see a 15-minute delay in training completion. For EC2 spot preemption the instance gets a two-minute interruption notice (and, earlier when available, a rebalance recommendation); the job receives a SIGTERM and synchronously writes an emergency checkpoint before the node is reclaimed. Fault tolerance is what makes spot capacity usable for most training jobs; spot prices for p4d.24xlarge sit well below its $21.96/hr us-east-1 on-demand rate but move by hour and region, so check the spot price history before budgeting.
+
+**Q: How do you ensure feature access control for PII features (user location, email)?**
+**Short:** Flag PII in the feature registry and require governance approval to read it, log every PII read to an immutable audit trail, and hash PII at write time for training.
+A: Three-layer access control. First, feature registry: each feature definition includes a contains_pii flag. PII features require explicit approval from the data governance team before a team can read them (approval stored in the registry, checked by the SDK on feature_store.get()). Second, audit logging: every PII feature read logs the team, model, entity_id, and timestamp to an immutable audit log (AWS CloudTrail). Third, data minimization: PII features are automatically hashed at write time for model training (model sees hash of email, not plaintext). Raw PII is accessible only in the online serving path for identity resolution. These controls satisfy GDPR Article 30 (records of processing) and SOC 2 Type II requirements.
+
+**Q: What metrics do you track to prove the platform reduced time-to-production from 6 weeks to 1 week?**
+**Short:** Track DORA-style ML metrics: commit-to-serving lead time, model versions promoted per week, time to roll back, GPU utilization and freshness-SLA violations.
+A: DORA-style ML metrics. First, lead time: from the Git commit of model code to the model serving production traffic. Measured automatically via MLflow metadata (code commit) and deployment timestamp. Target: median < 7 days. Second, deployment frequency: number of new model versions promoted to production per week per team. Baseline: 0.5/week; target: 3/week. Third, mean time to restore: when a serving model degrades, how long to roll back to the previous version. Platform target: < 5 minutes (one-click rollback in the web UI). Fourth, GPU utilization: platform-wide GPU utilization (80% target). Low utilization = expensive idle capacity; high utilization = engineers waiting for resources. Fifth, feature freshness SLA violations: percentage of feature reads that exceed the feature's declared freshness guarantee. Target < 0.1%.
+
+**Q: How do you ensure reproducibility across training runs in a shared ML platform?**
+**Short:** Record the dataset hash, feature snapshot time, config, library versions and seeds with every run, and force deterministic CUDA ops when bit-for-bit replay matters.
+Log all inputs to a training run: dataset hash (DVC content hash), feature store snapshot timestamp, model config (as JSON artifact), library versions (pip freeze artifact), and random seeds. MLflow's `mlflow.log_artifact()` stores these alongside metrics. For full bit-for-bit reproducibility, add `CUBLAS_WORKSPACE_CONFIG=:4096:8` to force deterministic CUDA ops. Treat training runs like database transactions: record everything needed to replay the run from scratch.
+
+**Q: What is the difference between online and batch feature computation, and how does the platform serve both?**
+**Short:** Batch features are computed on a schedule into the offline store and online features into a low-latency store; one feature definition materializes to both behind one API.
+Batch features are computed on historical data in scheduled Spark/SQL jobs and stored in the offline feature store (Parquet/Delta Lake). Online features are computed in real-time (stream processing or point-in-time lookup) and stored in the online feature store (Redis/DynamoDB) for low-latency serving. The platform exposes a unified feature retrieval API: `get_historical_features()` for training (returns Parquet), `get_online_features()` for inference (returns Redis values). Feature definitions are written once; the platform materializes to both stores.
+
+**Q: How do you handle model rollback when a production model causes a regression?**
+**Short:** Move the registry alias back to the previous version; serving polls the registry and hot-swaps the model in under 2 minutes, with a cached last-good file as fallback.
+The model registry stores all versions with every alias move audited. Rollback is repointing one alias: `client.set_registered_model_alias(MODEL_NAME, "champion", previous_version)` — the artifact never moves, so there is nothing to rebuild. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
+
+**Q: What is a feature store and why is it worth the operational overhead?**
+**Short:** It removes training/serving skew, lets teams reuse features, and gives point-in-time correct training data; the overhead pays off once three or more teams share features.
+A feature store solves three problems: (1) training/serving skew — features are computed once and read identically by both; (2) feature reuse — teams share computed features instead of re-implementing the same 7-day CTR in 5 different codebases; (3) point-in-time correctness — historical training data is fetched with the feature values that were available at each training example's timestamp, preventing future data leakage. The overhead (maintaining Feast/Tecton, running materialization jobs) pays off once 3+ teams share the same feature.
+
+**Q: How do you manage secrets (API keys, DB passwords) in training jobs without baking them into Docker images?**
+**Short:** Inject secrets at runtime from Kubernetes Secrets or Vault's Kubernetes auth; never bake them into images, pass them as command-line arguments, or log them.
+Use Kubernetes Secrets mounted as environment variables into the training pod, or Vault's Kubernetes auth method (pod gets a short-lived Vault token via its service account, exchanges it for the secret at runtime). Never pass secrets as command-line arguments (visible in `ps aux`) or log them (redact in MLflow). The training container's Dockerfile contains no secrets — it reads from env vars at runtime.
+
+**Q: Uber added Michelangelo's shared feature store after training and serving. Why does the feature layer end up central in every ML platform?**
+**Short:** Many models use the same features and each must compute them identically for training and serving; a shared store with offline and online paths removes both duplication and skew.
+Uber's 2017 write-up describes the order: scalable training and deployment first, then feature pipelines, then a shared feature store, because many modelling problems used identical or similar features. Online models could not read the HDFS data lake, so features were precomputed into Cassandra by batch jobs or Samza streaming jobs, both designed to use the same data for training and serving. For a new platform the order is similar: a standard serving path first (the largest time sink), then a feature store once three or more teams share features, then developer-productivity work such as templates and one-click rollback.

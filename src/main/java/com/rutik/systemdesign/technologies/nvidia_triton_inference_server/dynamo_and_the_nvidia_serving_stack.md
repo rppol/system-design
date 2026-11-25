@@ -5,8 +5,11 @@
 > against **v1.5.1** (2026-10-07) and build on the **Dynamo 1.0** production-grade release
 > announced at GTC 2026. Dynamo v1.5.0 (2026-09-21) deprecated the KV Block Manager (KVBM),
 > removed the Go Endpoint Picker in favour of the Rust EPP, and renamed AIConfigurator to
-> AISimulate; v1.7.0 no longer builds or ships KVBM. TensorRT-LLM **1.2.x** (official release-notes
-> page, top entry "TensorRT-LLM Release 1.2"). Triton NGC container **26.11-py3** (server
+> AISimulate; v1.7.0 no longer builds or ships KVBM. TensorRT-LLM **1.3.0** (GitHub release `v1.3.0`,
+> 2026-11-20; 1.4.0 is still at release candidates). 1.3 removed the TensorRT engine-build backend
+> (`trtllm-build` is gone and PyTorch is the only backend), kept only the `llmapi` model in the
+> TensorRT-LLM Triton backend, deprecated `trtllm-serve --backend`, and added Rubin (SM107) preview
+> support and gen-first disaggregated scheduling. Triton NGC container **26.11-py3** (server
 > release 2.75.0, 2026-11-17); NVIDIA ships a new monthly tag, so check
 > `catalog.ngc.nvidia.com` before pinning. NVIDIA's own product page brands the
 > classic server **"NVIDIA Dynamo-Triton"** — the Dynamo *platform* name applied to the
@@ -28,7 +31,7 @@ NVIDIA's current stack, so start with the map:
 
 | Layer | Product | What it is | Runs on |
 |---|---|---|---|
-| Engine | **TensorRT-LLM** | Compiled, optimized execution engine for transformer LLMs (in-flight batching, paged KV cache, FP8/INT4) | One node's GPUs |
+| Engine | **TensorRT-LLM** | NVIDIA's optimized LLM inference library, PyTorch-only since 1.3 removed the engine-build path (in-flight batching, paged KV cache, FP8/NVFP4, speculative decoding) | One node's GPUs |
 | Engine | vLLM, SGLang | Open-source LLM engines with their own continuous batching and paged attention | One node's GPUs |
 | Server | **NVIDIA Triton** (branded **Dynamo-Triton**) | General-purpose multi-framework model server: one process, many models, many backends, dynamic batching | One node |
 | Server | **`trtllm-serve`** | TensorRT-LLM's own OpenAI-compatible server entrypoint — no Triton in the path | One node |
@@ -428,23 +431,24 @@ rules per component and re-deriving them every time the topology changes.
 with no Triton process anywhere in the request path.
 
 ```bash
-# single-node, tensor-parallel across 4 GPUs
+# single-node, tensor-parallel across 4 GPUs (PyTorch is the only backend since 1.3,
+# so the old --backend pytorch flag is deprecated and can be dropped)
 trtllm-serve /path/to/model \
-  --backend pytorch \
   --tp_size 4 \
   --host 0.0.0.0 --port 8000
 
-# gRPC mode, for a deployment fronted by an external router (e.g. sgl-router)
-trtllm-serve /path/to/model --backend pytorch --tp_size 4 --grpc --port 50051
+# gRPC mode, for a deployment fronted by an external router (e.g. sgl-router);
+# --grpc is a prototype flag in 1.3, with --grpc-protocol smg (default) or openengine
+trtllm-serve /path/to/model --tp_size 4 --grpc --port 50051
 
 # multi-node on Slurm
-trtllm-llmapi-launch trtllm-serve /path/to/model --backend pytorch --tp_size 8 --pp_size 2
+trtllm-llmapi-launch trtllm-serve /path/to/model --tp_size 8 --pp_size 2
 ```
 
 Reach for it when the deployment is a single LLM (or a small number of them, each with its
 own process) and you have no other framework or model type to consolidate onto a shared
-server — it is strictly less machinery than routing the same model through Triton's
-`tensorrtllm` backend. It is also the natural single-node building block *inside* a Dynamo
+server — it is strictly less machinery than routing the same model through the TensorRT-LLM
+Triton backend (which since 1.3 keeps only its `llmapi` model). It is also the natural single-node building block *inside* a Dynamo
 worker: a Dynamo TensorRT-LLM worker is, underneath, a `trtllm-serve`-class process that the
 router and planner treat as one addressable unit.
 
@@ -691,7 +695,7 @@ Related reading: [the Triton module](nvidia_triton_inference_server.md) ·
 
 **Q: We run 40 CV models and 3 LLMs on one Triton fleet — what actually moves to Dynamo?**
 **Short:** The 3 LLMs may move to Dynamo or trtllm-serve; the 40 CV models stay on Triton, which is not going anywhere.
-Nothing about the 40 CV models changes — Triton remains actively maintained and is exactly the right server for a heterogeneous multi-framework fleet with no fleet-wide KV cache to route around. The 3 LLMs are the candidates: if they are single-node and modest QPS, `trtllm-serve` or staying on Triton's `tensorrtllm` backend is simpler than adopting Dynamo. If they are large enough to span multiple nodes, or traffic is conversational enough that cache-aware routing matters, that subset moves to a Dynamo deployment. Splitting the fleet this way — not an all-or-nothing migration — is the correct read of NVIDIA's current lineup.
+Nothing about the 40 CV models changes — Triton remains actively maintained and is exactly the right server for a heterogeneous multi-framework fleet with no fleet-wide KV cache to route around. The 3 LLMs are the candidates: if they are single-node and modest QPS, `trtllm-serve` or staying on Triton with the TensorRT-LLM backend's `llmapi` model (the only TensorRT-LLM model left in it since 1.3) is simpler than adopting Dynamo. If they are large enough to span multiple nodes, or traffic is conversational enough that cache-aware routing matters, that subset moves to a Dynamo deployment. Splitting the fleet this way — not an all-or-nothing migration — is the correct read of NVIDIA's current lineup.
 
 **Q: Is Triton deprecated now that NVIDIA has Dynamo?**
 **Short:** No — Triton ships a new NGC container monthly and Dynamo is additive, not a replacement.
@@ -703,7 +707,7 @@ Because the dynamic batcher's unit of work is a batch of requests dispatched to 
 
 **Q: What is `trtllm-serve`, and why would you use it over Triton for an LLM?**
 **Short:** trtllm-serve is TensorRT-LLM's own OpenAI-compatible server with no Triton process in the request path.
-`trtllm-serve` is TensorRT-LLM's own OpenAI-compatible REST/gRPC entrypoint — you point it at a model, choose tensor/pipeline parallelism with `--tp_size`/`--pp_size`, and it serves without any Triton process involved. Use it when the deployment is one LLM (or a few, each its own process) with nothing else to consolidate onto a shared multi-framework server — it is strictly less machinery than routing the same model through Triton's `tensorrtllm` backend. It is also the natural single-node unit that sits inside a Dynamo TensorRT-LLM worker once you scale past one node.
+`trtllm-serve` is TensorRT-LLM's own OpenAI-compatible REST/gRPC entrypoint — you point it at a model, choose tensor/pipeline parallelism with `--tp_size`/`--pp_size`, and it serves without any Triton process involved. Use it when the deployment is one LLM (or a few, each its own process) with nothing else to consolidate onto a shared multi-framework server — it is strictly less machinery than routing the same model through the TensorRT-LLM Triton backend, which since TensorRT-LLM 1.3 keeps only its `llmapi` model. It is also the natural single-node unit that sits inside a Dynamo TensorRT-LLM worker once you scale past one node.
 
 **Q: GenAI-Perf and AIPerf both benchmark LLM serving — which do you reach for now?**
 **Short:** AIPerf is the actively developed successor; GenAI-Perf is in maintenance mode with no new features.
@@ -739,7 +743,7 @@ Check whether the fabric between the prefill and decode pools still supports RDM
 
 **Q: What is the Open Inference Protocol, and does Dynamo use it?**
 **Short:** It's the current name for the KServe v2 protocol Triton implements; Dynamo speaks OpenAI-compatible APIs instead.
-The Open Inference Protocol (OIP) is the current name for what was the KServe v2 (Predict Protocol v2) data-plane contract — the terms are used interchangeably today, and it's the protocol [the Triton module](nvidia_triton_inference_server.md) covers Triton implementing over HTTP and gRPC. Dynamo's frontend, and NIM containers, instead expose an OpenAI-compatible chat/completions API, since that is the surface LLM client libraries and tooling (including AIPerf and GenAI-Perf) already speak. A Dynamo worker running the `tensorrtllm` backend can still sit behind Triton's OIP surface in a non-disaggregated deployment, but the distributed-fleet path standardizes on the OpenAI-compatible contract instead.
+The Open Inference Protocol (OIP) is the current name for what was the KServe v2 (Predict Protocol v2) data-plane contract — the terms are used interchangeably today, and it's the protocol [the Triton module](nvidia_triton_inference_server.md) covers Triton implementing over HTTP and gRPC. Dynamo's frontend, and NIM containers, instead expose an OpenAI-compatible chat/completions API, since that is the surface LLM client libraries and tooling (including AIPerf and GenAI-Perf) already speak. A Dynamo worker running TensorRT-LLM can still sit behind Triton's OIP surface in a non-disaggregated deployment, but the distributed-fleet path standardizes on the OpenAI-compatible contract instead.
 
 **Q: When is aggregated Dynamo the better choice over disaggregated, even at multi-node scale?**
 **Short:** When traffic doesn't stress a fixed prefill:decode ratio enough to justify NIXL, the Planner, and a new failure mode.
@@ -755,7 +759,7 @@ Like Triton, Dynamo's frontend and router expose no built-in authentication or a
 
 **Q: Why might a team see worse latency after migrating an LLM from Triton to Dynamo?**
 **Short:** Usually because the workload was single-node and didn't need fleet-scale routing, so Dynamo's extra hops added overhead for nothing.
-The most common cause is migrating a workload that never needed multi-node serving in the first place — a model that fit comfortably on one GPU pool gains nothing from a KV-aware router or a fleet-scale frontend, and the extra hop through Dynamo's routing layer is pure overhead compared to serving it directly through Triton's `tensorrtllm` backend or `trtllm-serve`. The fix is not to tune Dynamo harder, it's to recognize the deployment shape in §4 that actually matches the traffic: single-node workloads belong on single-node servers regardless of what NVIDIA's newest product is. Reserve Dynamo for the multi-node, cache-locality-sensitive traffic it was built for.
+The most common cause is migrating a workload that never needed multi-node serving in the first place — a model that fit comfortably on one GPU pool gains nothing from a KV-aware router or a fleet-scale frontend, and the extra hop through Dynamo's routing layer is pure overhead compared to serving it directly through Triton's TensorRT-LLM backend or `trtllm-serve`. The fix is not to tune Dynamo harder, it's to recognize the deployment shape in §4 that actually matches the traffic: single-node workloads belong on single-node servers regardless of what NVIDIA's newest product is. Reserve Dynamo for the multi-node, cache-locality-sensitive traffic it was built for.
 
 **Q: What's the relationship between Dynamo's TensorRT-LLM, vLLM, and SGLang workers?**
 **Short:** They're the interchangeable engines Dynamo orchestrates; Dynamo adds fleet routing and scheduling on top of whichever you pick.

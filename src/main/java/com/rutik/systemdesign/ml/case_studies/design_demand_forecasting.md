@@ -1,14 +1,19 @@
 # Design a Demand Forecasting System (Retail Scale)
-## Problem Statement
+## Intuition
 
-Design a demand forecasting system for a large retailer with 1 million products (SKUs) across 10,000
-stores — producing 10 billion individual time series. Forecasts feed three downstream systems:
-inventory ordering (weekly horizon, ordered 2 weeks in advance), logistics planning (daily horizon,
-truck routing and warehouse staffing), and dynamic pricing (hourly horizon, markdown decisions).
-The system must handle strong seasonality (Christmas, Black Friday, back-to-school), promotional
-lift (a 50% price cut can 10x demand), holiday effects, new product cold start (no history), and
-product discontinuations. Target: Mean Absolute Error (MAE) below 15% and weighted RMSSE below 1.0
-(Kaggle M5 competition benchmark).
+> Retail demand forecasting is a weather service for shopping. It issues 10 billion small local forecasts, one per product per store, each noisy on its own. They must still add up to correct national totals and be honest about their uncertainty, because orders go out two weeks before anyone knows the answer.
+
+**Key insight:** the unit of learning is the population, not the series. Ten billion series cannot each get a model, and most have too little history to support one. A single global LightGBM learns shared seasonality, promotion lift and price response across all of them. The hard parts are the data contracts around that model: no feature may use information from after the forecast origin (§9 Failure 1), promotions must be inputs rather than noise, stockouts censor the labels, and the hierarchy must reconcile.
+
+Mental model: lag, rolling, calendar, promotion and price features feed one global model per quantile (P10, P50, P90). MinT reconciliation makes the hierarchy add up, and three consumers read the result: weekly ordering, daily logistics and hourly pricing.
+
+Why this system exists: forecast error costs money in both directions. Over-forecasting a quarter by 38% wrote down $180M of inventory in §9 Failure 1; under-forecasting shows up as empty shelves and lost sales that the sales data then hides.
+
+---
+
+## 1. Requirements Clarification
+
+Design a demand forecasting system for a large retailer with 1 million products (SKUs) across 10,000 stores — producing 10 billion individual time series. Forecasts feed three downstream systems: inventory ordering (weekly horizon, ordered 2 weeks in advance), logistics planning (daily horizon, truck routing and warehouse staffing), and dynamic pricing (hourly horizon, markdown decisions). The system must handle strong seasonality (Christmas, Black Friday, back-to-school), promotional lift (a 50% price cut can 10x demand), holiday effects, new product cold start (no history), and product discontinuations. Target: Mean Absolute Error (MAE) below 15% and weighted RMSSE below 1.0 (Kaggle M5 competition benchmark).
 
 ### Functional Requirements
 - Produce weekly unit-sales forecasts for all 1M SKU × 10K store combinations
@@ -31,7 +36,44 @@ product discontinuations. Target: Mean Absolute Error (MAE) below 15% and weight
 
 ---
 
-## Architecture Overview
+## 2. Scale Estimation
+
+| Quantity | Derivation | Result |
+|---|---|---|
+| Potential series | 1M SKUs x 10K stores | 10B SKU-store pairs |
+| Weekly training rows | 8 weeks x ~9M pairs with recent sales | ~72M rows, ~14.4 GB at ~200 B/row |
+| Values per weekly refresh | 10B pairs x 3 quantiles | 30B, ~2.1M writes/s across the 4-hour window |
+| Single-SKU API | requirement and planning-peak load | < 200 ms at ~1,000 concurrent requests |
+| Sales history in S3 | 10B x 52 weeks x 200 B | ~104 TB |
+
+The third row, not training, is the batch bottleneck: one model trains on 72M rows in about 3 hours, but writing 30B forecast values is what sizes the export and serving stores (§10).
+
+### Data Volume Projections
+
+```
+Year 0 (current):
+  Scope: 1M SKUs × 10K stores = 10B SKU-store pairs
+  Weekly training table: 72M rows (8 weeks history × 9M active SKU-store pairs)
+  Row size: ~200 bytes (50 features + metadata)
+  Training table: 72M × 200B = 14.4GB (fits in memory on r5.4xlarge)
+  Parquet on S3 (52 weeks history): 10B × 52 × 200B = 104TB
+  DynamoDB features: 10B × 1KB feature vector = 10TB (stored as S3 Parquet, DynamoDB for hot)
+
+Year 1 (10% SKU growth):
+  1.1M SKUs × 10K stores = 11B pairs
+  Training table: ~15.8GB
+  S3 historical: 114TB
+
+Year 3 (50% growth + 2 new countries):
+  1.5M SKUs × 15K stores = 22.5B pairs
+  Training table: 14.4GB × 2.25 = ~32GB → may need distributed Spark training (GBM on Spark MLlib)
+  Forecast store: DynamoDB at 22.5B × 500B forecasts = 11.25TB per week
+  S3 forecast archive: 11.25TB × 52 = 585TB/year
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```mermaid
 flowchart TD
@@ -107,65 +149,12 @@ Weekly training pipeline: the full retrain runs in ~3 hours for all 10B series b
 
 ---
 
-## Key Design Decisions
+## 4. Component Deep Dives
 
-### 1. Global Model vs Per-SKU Models
+Every training row is built as of its forecast origin: features, promotions and prices may only come from before that date. That is the point-in-time rule in [Feature Store and Point-in-Time Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md), and breaking it is §9 Failure 1.
 
-The naive approach trains one model per SKU-store pair (10 billion models). This is computationally
-infeasible and fails for cold start (new products have no model). The global model trains a single
-LightGBM on all SKU-store pairs simultaneously. The model sees features identifying which SKU and
-which store it is predicting for. Cross-learning transfers demand patterns across similar products
-(all yogurt SKUs share seasonal patterns). One weekly retrain on ~72M rows (8 weeks of history
-across the ~9M SKU-store pairs with recent sales — the same basis used in Capacity
-Planning below) runs in ~3 hours on a 16-vCPU r5.4xlarge.
+### 4.1 Global Model, Walk-Forward Validation and Reconciliation
 
-### 2. Temporal Cross-Validation (Walk-Forward)
-
-Standard k-fold CV is invalid for time series (data leakage: future informs past). Walk-forward
-validation uses expanding windows: train on weeks 1-52, validate on weeks 53-56; train on weeks
-1-56, validate on 57-60. Three validation folds minimum. LightGBM early stopping monitors WMAE
-on the most recent validation fold to prevent overfitting.
-
-### 3. Feature Engineering as Core IP
-
-The model is only as good as its features. Key feature groups:
-- Lag features: sales at t-7, t-14, t-28, t-56 (capture weekly seasonality)
-- Rolling statistics: 4-week, 13-week, 52-week rolling mean/std (capture trend)
-- Calendar features: day_of_week, week_of_year, is_holiday, days_to_next_holiday, days_since_holiday
-- Promotion features: is_on_promotion, promotion_discount_pct, promotion_type (BOGO, % off)
-- Price features: current_price, price_change_vs_last_week, relative_price_vs_category_median
-- Store features: store_state, store_size_tier (S/M/L), urban_rural_flag
-- Product features: category, subcategory, brand, price_tier, is_perishable
-
-### 4. Quantile Forecasting for Inventory Safety Stock
-
-Point forecasts (P50) drive ordering quantities. Quantile forecasts (P10 for understocking risk,
-P90 for overstocking risk) drive safety stock calculations. LightGBM supports quantile regression
-natively via `objective='quantile'`. Three separate models trained for P10, P50, P90.
-Inventory team uses P90 for high-margin products (stockout cost > overstock cost) and P50 for
-low-margin commodities.
-
-### 5. Hierarchical Reconciliation via MinT
-
-Store-level forecasts are generated independently and will not sum exactly to the national forecast.
-MinT (Minimum Trace Reconciliation) adjusts all hierarchy levels simultaneously to be internally
-consistent while minimizing total forecast error. This is critical: the logistics team plans
-national truck movements from the national forecast; the store team orders from store forecasts.
-Inconsistency creates phantom inventory or shortages.
-
-### 6. Cold Start for New Products
-
-New products with < 4 weeks of history use a category-level proxy:
-1. Find the 5 most similar products (cosine similarity on product feature vector: category,
-   price tier, brand tier, package size)
-2. Average their demand histories normalized by product price ratio
-3. Apply the new product's promotional calendar
-After 4 weeks, the global model begins including the new product in training with exponential
-weighting (recent weeks weighted 2x vs older weeks).
-
----
-
-## Implementation
 
 ```python
 from __future__ import annotations
@@ -180,9 +169,7 @@ from typing import Optional
 from sklearn.preprocessing import LabelEncoder
 
 
-# ---------------------------------------------------------------------------
-# Feature Engineering
-# ---------------------------------------------------------------------------
+# --- Feature Engineering ---
 
 def create_lag_features(
     df: pd.DataFrame,
@@ -297,9 +284,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# Global LightGBM Model
-# ---------------------------------------------------------------------------
+# --- Global LightGBM Model ---
 
 FEATURE_COLS = [
     # Lag features
@@ -410,9 +395,7 @@ def train_lightgbm_global(
     return booster
 
 
-# ---------------------------------------------------------------------------
-# Walk-Forward Cross-Validation
-# ---------------------------------------------------------------------------
+# --- Walk-Forward Cross-Validation ---
 
 def walk_forward_cv(
     df: pd.DataFrame,
@@ -481,9 +464,7 @@ def walk_forward_cv(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Cold Start: New Product Forecasting
-# ---------------------------------------------------------------------------
+# --- Cold Start: New Product Forecasting ---
 
 @dataclass
 class ProductFeatures:
@@ -561,9 +542,7 @@ def cold_start_forecast(
     return avg_proxy.tail(28).reset_index(drop=True)
 
 
-# ---------------------------------------------------------------------------
-# Hierarchical Reconciliation (MinT — simplified)
-# ---------------------------------------------------------------------------
+# --- Hierarchical Reconciliation (MinT — simplified) ---
 
 def mint_reconciliation(
     base_forecasts: dict[str, float],      # level -> forecast value
@@ -594,25 +573,203 @@ def mint_reconciliation(
     return dict(zip(keys, reconciled.tolist()))
 ```
 
+### 4.2 Walk-Forward Validation — Broken Then Fixed
+
+```python
+# BROKEN: Using simple k-fold cross-validation for time series evaluation
+# Fold 3 (training) contains week 40; fold 3 (validation) contains week 35
+# Model has "future knowledge" when predicting week 35 via week 40 training data
+
+import numpy as np
+import pandas as pd
+import lightgbm as lgb
+from sklearn.model_selection import KFold
+
+
+def evaluate_forecast_broken(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    label_col: str = "units_sold",
+) -> dict[str, float]:
+    """BROKEN: K-fold ignores time ordering — massive temporal leakage."""
+    X = df[feature_cols].values
+    y = df[label_col].values
+
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)  # BUG: shuffled
+    maes = []
+    for train_idx, val_idx in kf.split(X):
+        model = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05)
+        model.fit(X[train_idx], y[train_idx])
+        preds = model.predict(X[val_idx])
+        mae = np.abs(preds - y[val_idx]).mean()
+        maes.append(mae)
+
+    # Reported WMAE: 8.2% — looks great!
+    # Actual production WMAE: 19.4% — 2.4x worse than reported
+    return {"mae": np.mean(maes)}
+
+
+# FIX: Walk-forward expanding window validation
+# Train on weeks 1-40, validate on weeks 41-44
+# Train on weeks 1-44, validate on weeks 45-48
+# Etc. — never train on future data
+
+def evaluate_forecast_correct(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    label_col: str = "units_sold",
+    week_col: str = "week_number",
+    n_folds: int = 4,
+    validation_weeks: int = 4,
+) -> dict[str, float]:
+    """
+    Walk-forward cross-validation with expanding training window.
+    Each fold trains on all data before validation period.
+    """
+    max_week = df[week_col].max()
+    first_val_week = max_week - (n_folds * validation_weeks)
+
+    all_maes: list[float] = []
+    for fold in range(n_folds):
+        val_start = first_val_week + fold * validation_weeks
+        val_end = val_start + validation_weeks
+
+        train_mask = df[week_col] < val_start  # strictly before validation window
+        val_mask = (df[week_col] >= val_start) & (df[week_col] < val_end)
+
+        X_train = df.loc[train_mask, feature_cols].values
+        y_train = df.loc[train_mask, label_col].values
+        X_val = df.loc[val_mask, feature_cols].values
+        y_val = df.loc[val_mask, label_col].values
+
+        if len(X_train) == 0 or len(X_val) == 0:
+            continue
+
+        model = lgb.LGBMRegressor(n_estimators=500, learning_rate=0.05)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_val)
+        mae = float(np.abs(preds - y_val).mean())
+        all_maes.append(mae)
+        print(f"Fold {fold}: val weeks [{val_start},{val_end}), MAE={mae:.4f}")
+
+    return {"wmae": float(np.mean(all_maes))}
+```
+
+### 4.3 Promotion Lift — Broken Then Fixed
+
+```python
+# BROKEN: Computing promotion lift by comparing promoted weeks to adjacent weeks
+# Adjacent weeks are affected by stock-up (pre-promotion) and hangover (post-promotion)
+# This contamination makes the lift estimate 30-50% too low
+
+import pandas as pd
+import numpy as np
+
+
+def estimate_promo_lift_broken(
+    sales_df: pd.DataFrame,
+    sku_id: str,
+    promo_week: int,
+) -> float:
+    """BROKEN: Compare promo week to adjacent weeks — contaminated baseline."""
+    sku_data = sales_df[sales_df["sku_id"] == sku_id].set_index("week")
+
+    promo_sales = sku_data.loc[promo_week, "units_sold"]
+
+    # BUG: week promo_week-1 has stock-up effect; week promo_week+1 has hangover
+    # Both adjacent weeks are suppressed by the promotion itself
+    adjacent_weeks = [promo_week - 2, promo_week - 1, promo_week + 1, promo_week + 2]
+    baseline = sku_data.loc[
+        [w for w in adjacent_weeks if w in sku_data.index], "units_sold"
+    ].mean()
+
+    return float(promo_sales / baseline) - 1.0  # lift as fraction
+
+
+# FIX: Use matched control SKUs (never promoted during same period) as counterfactual
+# Plus a regression discontinuity approach for the pre/post comparison
+
+def estimate_promo_lift_correct(
+    sales_df: pd.DataFrame,
+    sku_id: str,
+    promo_week: int,
+    control_sku_ids: list[str],  # similar SKUs never promoted in this window
+    pre_weeks: int = 4,
+    post_weeks: int = 2,
+) -> dict[str, float]:
+    """
+    Difference-in-Differences: compare treated vs control SKU trends.
+    Accounts for pre-promotion stock-up and post-promotion hangover.
+    """
+    sku_data = sales_df[sales_df["sku_id"] == sku_id].set_index("week")
+    control_data = sales_df[sales_df["sku_id"].isin(control_sku_ids)].groupby("week")["units_sold"].mean()
+
+    pre_period = range(promo_week - pre_weeks - post_weeks, promo_week - post_weeks)
+    # Exclude post_weeks immediately before promotion (potential stock-up)
+    pure_baseline_period = range(promo_week - pre_weeks - post_weeks, promo_week - post_weeks)
+
+    sku_pre_avg = sku_data.loc[
+        [w for w in pure_baseline_period if w in sku_data.index], "units_sold"
+    ].mean()
+    control_pre_avg = control_data.loc[
+        [w for w in pure_baseline_period if w in control_data.index]
+    ].mean()
+
+    sku_promo = sku_data.loc[promo_week, "units_sold"]
+    control_promo = control_data.loc[promo_week] if promo_week in control_data.index else control_pre_avg
+
+    # DiD: (treated_after - treated_before) - (control_after - control_before)
+    did_lift = (sku_promo - sku_pre_avg) - (control_promo - control_pre_avg)
+    relative_lift = did_lift / max(sku_pre_avg, 1e-6)
+
+    return {
+        "absolute_lift_units": float(did_lift),
+        "relative_lift_pct": float(relative_lift * 100),
+        "baseline_units": float(sku_pre_avg),
+    }
+```
+
 ---
 
-## ML Components Used
+## 5. Design Decisions & Tradeoffs
 
-| Component | Purpose | Key Parameters |
-|-----------|---------|----------------|
-| LightGBM | Global demand forecasting model | n_estimators=2000, lr=0.05, num_leaves=127, early_stopping=50 |
-| LightGBM Quantile | P10/P50/P90 for safety stock | objective=quantile, alpha=0.1/0.5/0.9 |
-| Walk-Forward CV | Time-series cross-validation (no leakage) | 3 folds, 4-week validation windows |
-| STL (optional) | Detrending for residual modeling | Used in exploratory analysis |
-| MinT Reconciliation | Hierarchical coherence | hierarchicalforecast.methods.MinTrace (Nixtla) |
-| MLflow | Experiment tracking, model registry | Log WMAE, WRMSSE, feature importance |
-| Databricks + Spark | Feature engineering at 10B series scale | 64 workers, Parquet I/O |
-| DynamoDB | Online forecast serving (SKU lookups) | < 5ms P99, provisioned 1,000 RCU (see Capacity Planning) |
-| S3 Parquet | Bulk forecast export for downstream systems | Partitioned by date + store |
+### 1. Global Model vs Per-SKU Models
 
----
+The naive approach trains one model per SKU-store pair (10 billion models). This is computationally infeasible and fails for cold start (new products have no model). The global model trains a single LightGBM on all SKU-store pairs simultaneously. The model sees features identifying which SKU and which store it is predicting for. Cross-learning transfers demand patterns across similar products (all yogurt SKUs share seasonal patterns). One weekly retrain on ~72M rows (8 weeks of history across the ~9M SKU-store pairs with recent sales — the same basis used in §10) runs in ~3 hours on a 16-vCPU r5.4xlarge.
 
-## Tradeoffs and Alternatives
+### 2. Temporal Cross-Validation (Walk-Forward)
+
+Standard k-fold CV is invalid for time series (data leakage: future informs past). Walk-forward validation uses expanding windows: train on weeks 1-52, validate on weeks 53-56; train on weeks 1-56, validate on 57-60. Three validation folds minimum. LightGBM early stopping monitors WMAE on the most recent validation fold to prevent overfitting.
+
+### 3. Feature Engineering as Core IP
+
+The model is only as good as its features. Key feature groups:
+- Lag features: sales at t-7, t-14, t-28, t-56 (capture weekly seasonality)
+- Rolling statistics: 4-week, 13-week, 52-week rolling mean/std (capture trend)
+- Calendar features: day_of_week, week_of_year, is_holiday, days_to_next_holiday, days_since_holiday
+- Promotion features: is_on_promotion, promotion_discount_pct, promotion_type (BOGO, % off)
+- Price features: current_price, price_change_vs_last_week, relative_price_vs_category_median
+- Store features: store_state, store_size_tier (S/M/L), urban_rural_flag
+- Product features: category, subcategory, brand, price_tier, is_perishable
+
+### 4. Quantile Forecasting for Inventory Safety Stock
+
+Point forecasts (P50) drive ordering quantities. Quantile forecasts (P10 for understocking risk, P90 for overstocking risk) drive safety stock calculations. LightGBM supports quantile regression natively via `objective='quantile'`. Three separate models trained for P10, P50, P90. Inventory team uses P90 for high-margin products (stockout cost > overstock cost) and P50 for low-margin commodities.
+
+### 5. Hierarchical Reconciliation via MinT
+
+Store-level forecasts are generated independently and will not sum exactly to the national forecast. MinT (Minimum Trace Reconciliation) adjusts all hierarchy levels simultaneously to be internally consistent while minimizing total forecast error. This is critical: the logistics team plans national truck movements from the national forecast; the store team orders from store forecasts. Inconsistency creates phantom inventory or shortages.
+
+### 6. Cold Start for New Products
+
+New products with < 4 weeks of history use a category-level proxy:
+1. Find the 5 most similar products (cosine similarity on product feature vector: category,
+   price tier, brand tier, package size)
+2. Average their demand histories normalized by product price ratio
+3. Apply the new product's promotional calendar
+After 4 weeks, the global model begins including the new product in training with exponential weighting (recent weeks weighted 2x vs older weeks).
+
+**Tradeoff summary:**
 
 | Decision | Chosen Approach | Alternative | Reason |
 |----------|----------------|-------------|--------|
@@ -626,42 +783,132 @@ def mint_reconciliation(
 
 ---
 
-## Interview Discussion Points
+## 6. Real-World Implementations
 
-**Q: Why use a global model instead of one model per SKU-store pair?**
-A: Three reasons. First, 10 billion models are computationally infeasible to train weekly.
-Second, cold start: a product with 2 weeks of history has no model; the global model handles it
-with lag features as NaN (median-imputed) and learns from similar products. Third, cross-learning:
-all strawberry yogurt SKUs share the same seasonal patterns; the global model learns this shared
-structure from millions of examples. The global model does not overfit to any single SKU because
-the regularization effect of 72M training rows dominates any single SKU's signal.
+**Walmart data, M5 competition (2020):** the M5 competition ran on Kaggle with real Walmart data: about 42,000 hierarchical daily series from SKU level up to large geographical totals, with prices, promotions and calendar information, scored with WRMSSE (the metric in §1). In the published findings, all top performers were pure machine-learning approaches that beat every statistical benchmark and their combinations; LightGBM featured prominently, and the three best each used ensembles of separately trained models. That is the empirical case for the global gradient-boosted model in §5.
 
-**Q: How do you prevent promotional uplift from corrupting the baseline forecast?**
-A: Promotion features are explicit model inputs (is_on_promotion, promotion_discount_pct,
-promo_x_discount interaction term). The model learns the expected lift from promotions and can
-produce two forecasts: one with promotion flags set (promoted scenario) and one without
-(baseline scenario). The difference is the promo lift estimate. For planning, inventory systems
-use the promoted scenario forecast for weeks with planned promotions.
+**Amazon (DeepAR):** Salinas, Flunkert and Gasthaus, "DeepAR: Probabilistic Forecasting with Autoregressive Recurrent Networks" (arXiv:1704.04110), train one autoregressive recurrent network on a large number of related series, framed around retail demand, and report accuracy improvements of around 15% over the state-of-the-art methods they compare against. It is the same global-model bet as this design, with a full predictive distribution instead of three quantile models (§11).
 
-**Q: How do you measure forecast accuracy given that demand is unobservable (stockouts bias actuals)?**
-A: Censored demand problem. When stock runs out, actual sales = stock level, not true demand.
-Naive MAE on censored actuals underestimates error for high-demand items. Three mitigations:
-1. Exclude stockout days from MAE calculation (filter where on-hand inventory dropped to 0).
-2. Use unconstrained demand estimates from MCMC (Bayesian demand estimation from censored data).
-3. Track service level separately from forecast error: a 95% service level means 95% of store-weeks
-had no stockout regardless of forecast accuracy.
-
-**Q: How do you handle the cold start problem for a brand-new store opening?**
-A: Store-level cold start is harder than product cold start. Approach: cluster new store by
-demographic features (population density, median income, nearby competitor density, store size).
-Use the 3 most similar existing stores as proxies. Apply new store forecast = proxy store average
-* (new store size / proxy size) * regional demand index. After 8 weeks of actual sales, the global
-model begins incorporating the new store with exponential upweighting of recent data (recent weeks
-weighted 4x). The new store flag remains a feature until 26 weeks of history accumulate.
+**Uber (M4 winner, hybrid model):** the M4 competition (2018) was won by a hybrid statistical and machine-learning method submitted by Slawek Smyl of Uber, close to 10% more accurate by sMAPE than the competition's combination benchmark. What carries over: a statistical structure (level, seasonality) plus learned components beats either alone, which is what lag and calendar features give LightGBM here.
 
 ---
 
-## Failure Scenarios and Recovery
+## 7. Technologies & Tools
+
+| Component | Purpose | Key Parameters |
+|-----------|---------|----------------|
+| LightGBM | Global demand forecasting model | n_estimators=2000, lr=0.05, num_leaves=127, early_stopping=50 |
+| LightGBM Quantile | P10/P50/P90 for safety stock | objective=quantile, alpha=0.1/0.5/0.9 |
+| Walk-Forward CV | Time-series cross-validation (no leakage) | 3 folds, 4-week validation windows |
+| STL (optional) | Detrending for residual modeling | Used in exploratory analysis |
+| MinT Reconciliation | Hierarchical coherence | hierarchicalforecast.methods.MinTrace (Nixtla) |
+| MLflow | Experiment tracking, model registry | Log WMAE, WRMSSE, feature importance |
+| Databricks + Spark | Feature engineering at 10B series scale | 64 workers, Parquet I/O |
+| DynamoDB | Online forecast serving (SKU lookups) | < 5ms P99, provisioned 1,000 RCU (§10) |
+| S3 Parquet | Bulk forecast export for downstream systems | Partitioned by date + store |
+
+---
+
+## 8. Operational Playbook
+
+Bias, not accuracy, is the first production signal. Quantile forecasts are calibration claims (a P90 should be exceeded about 10% of the time), checked per category as in [Model Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md). Feature drift and retraining triggers follow [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md), and promotion and price effects are measured with holdout stores as in [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md).
+
+### Features That Drift Fastest
+
+```
+Feature                              Drift rate   Reason
+──────────────────────────────────────────────────────────────────────────
+is_on_promotion / discount_pct       Very high    Promotions change weekly by definition
+rolling_4wk_avg_units                High         Demand itself shifts (trend + seasonality)
+lag_7d_units (last week's sales)     High         Captures recent demand shocks
+price_vs_category_median             Medium       Price changes across category shift median
+competitor_out_of_stock_flag         Medium       Supply chain events; competitor launches
+season_indicator (Christmas, etc.)   Predictable  Pre-known annual seasonality
+product_age_weeks                    Low          Linear time variable; no surprise drift
+```
+
+### Forecast Bias Monitoring
+
+```python
+from dataclasses import dataclass
+from typing import Optional
+import numpy as np
+
+
+@dataclass
+class ForecastBiasReport:
+    """Weekly bias report comparing forecast to actuals."""
+    category: str
+    week: int
+    mean_error: float           # positive = overforecast, negative = underforecast
+    wmae: float                 # Weighted Mean Absolute Error
+    bias_ratio: float           # mean_forecast / mean_actual; should be 1.0 ± 0.05
+    stockout_rate: float        # fraction of SKU-store weeks with stockout (actual=0)
+    overstocked_rate: float     # fraction where forecast > 2× actual
+
+
+def compute_forecast_bias(
+    forecasts: np.ndarray,   # shape (N,) predicted units
+    actuals: np.ndarray,     # shape (N,) actual units sold
+    weights: Optional[np.ndarray] = None,  # optional sales-volume weights
+) -> ForecastBiasReport:
+    if weights is None:
+        weights = np.ones(len(actuals))
+
+    errors = forecasts - actuals
+    wmae = float(np.average(np.abs(errors), weights=weights))
+    mean_error = float(np.mean(errors))
+    bias_ratio = float(forecasts.mean() / max(actuals.mean(), 0.01))
+    stockout_rate = float((actuals == 0).mean())  # actual demand but zero sales
+    overstocked_rate = float((forecasts > 2 * actuals).mean())
+
+    return ForecastBiasReport(
+        category="all",
+        week=-1,
+        mean_error=mean_error,
+        wmae=wmae,
+        bias_ratio=bias_ratio,
+        stockout_rate=stockout_rate,
+        overstocked_rate=overstocked_rate,
+    )
+
+# Alert thresholds
+BIAS_ALERTS = {
+    "bias_ratio_bounds": (0.95, 1.05),    # ±5% systematic bias triggers alert
+    "wmae_regression_threshold": 0.03,    # WMAE increase > 3 percentage points
+    "stockout_rate_increase": 0.05,       # stockout rate up > 5 percentage points
+    "overstocked_rate_increase": 0.10,   # overstock rate up > 10 percentage points
+}
+```
+
+### Retraining Triggers and Cadence
+
+```
+Cadence        Trigger                                    Action
+──────────────────────────────────────────────────────────────────────────────
+Weekly         Scheduled (Monday 2 AM)                    Full LightGBM retrain + MinT reconciliation
+Daily          Scheduled (nightly)                        Incremental update (100 trees warm-start)
+Triggered      bias_ratio outside (0.95, 1.05)            Retrain with feature audit
+Triggered      WMAE degrades > 3pp vs trailing 4-week avg Emergency retrain + hyperparameter search
+Triggered      New promotional event type (3-for-2, BOGO) Add new promo feature; retrain
+Triggered      New store opens                            Update store metadata; include in next retrain
+Triggered      New SKU launches in high-volume category   Prototypical forecast via KNN; monitor 8wks
+Quarterly      Scheduled                                  Walk-forward cross-validation audit; hyperparameter tuning
+```
+
+### Incident runbooks
+
+**Runbook 1 — Bias ratio outside 0.95-1.05 for a category:** check first for leakage (promotion or price data joined after the forecast origin, §9 Failure 1), then for stockout censoring in the actuals. While investigating, order the category from the previous model's forecasts.
+
+**Runbook 2 — Over 0.1% of store forecasts negative before clipping:** MinT on sparse SKUs (§9 Failure 2). Confirm clipping plus rescaling ran, and review the error-covariance estimate for those SKUs.
+
+**Runbook 3 — Single-SKU API P99 above 500 ms:** confirm features are read from the precomputed table and not recomputed from the sales database (§9 Failure 3).
+
+**Runbook 4 — WMAE up more than 3 points on the trailing 4 weeks:** check for a shifted holiday or a changed promotion calendar before retraining; then retrain with a feature audit.
+
+---
+
+## 9. Common Pitfalls & War Stories
 
 *The three scenarios below are illustrative composites — failure modes that recur in systems of this shape, written up with representative numbers so the mechanics are concrete. They are not accounts of specific, publicly documented incidents at any named company, and the dollar figures, percentages and time-to-detect values are teaching magnitudes rather than measured results.*
 
@@ -711,30 +958,7 @@ weighted 4x). The new store flag remains a feature until 26 weeks of history acc
 
 ---
 
-## Capacity Planning
-
-### Data Volume Projections
-
-```
-Year 0 (current):
-  Scope: 1M SKUs × 10K stores = 10B SKU-store pairs
-  Weekly training table: 72M rows (8 weeks history × 9M active SKU-store pairs)
-  Row size: ~200 bytes (50 features + metadata)
-  Training table: 72M × 200B = 14.4GB (fits in memory on r5.4xlarge)
-  Parquet on S3 (52 weeks history): 10B × 52 × 200B = 104TB
-  DynamoDB features: 10B × 1KB feature vector = 10TB (stored as S3 Parquet, DynamoDB for hot)
-
-Year 1 (10% SKU growth):
-  1.1M SKUs × 10K stores = 11B pairs
-  Training table: ~15.8GB
-  S3 historical: 114TB
-
-Year 3 (50% growth + 2 new countries):
-  1.5M SKUs × 15K stores = 22.5B pairs
-  Training table: 14.4GB × 2.25 = ~32GB → may need distributed Spark training (GBM on Spark MLlib)
-  Forecast store: DynamoDB at 22.5B × 500B forecasts = 11.25TB per week
-  S3 forecast archive: 11.25TB × 52 = 585TB/year
-```
+## 10. Capacity Planning
 
 ### Training Compute Requirements
 
@@ -823,266 +1047,54 @@ S3 archival storage dominates the ~$6.2K/month bill; compute is a small slice be
 
 ---
 
-## Additional War Stories
+## 11. Interview Discussion Points
 
-**War Story 1 — Walk-Forward Cross-Validation With Data Leakage:**
+**Q: Why use a global model instead of one model per SKU-store pair?**
+**Short:** Ten billion per-pair models are infeasible and fail for new items; one global model trains on ~72M rows, shares seasonality across similar products and copes with sparse history.
+A: Three reasons. First, 10 billion models are computationally infeasible to train weekly. Second, cold start: a product with 2 weeks of history has no model; the global model handles it with lag features as NaN (median-imputed) and learns from similar products. Third, cross-learning: all strawberry yogurt SKUs share the same seasonal patterns; the global model learns this shared structure from millions of examples. The global model does not overfit to any single SKU because the regularization effect of 72M training rows dominates any single SKU's signal.
 
-```python
-# BROKEN: Using simple k-fold cross-validation for time series evaluation
-# Fold 3 (training) contains week 40; fold 3 (validation) contains week 35
-# Model has "future knowledge" when predicting week 35 via week 40 training data
+**Q: How do you prevent promotional uplift from corrupting the baseline forecast?**
+**Short:** Make promotions explicit model inputs, then forecast twice, with and without the promotion flags; the difference is the lift estimate and the baseline stays clean.
+A: Promotion features are explicit model inputs (is_on_promotion, promotion_discount_pct, promo_x_discount interaction term). The model learns the expected lift from promotions and can produce two forecasts: one with promotion flags set (promoted scenario) and one without (baseline scenario). The difference is the promo lift estimate. For planning, inventory systems use the promoted scenario forecast for weeks with planned promotions.
 
-import numpy as np
-import pandas as pd
-import lightgbm as lgb
-from sklearn.model_selection import KFold
+**Q: How do you measure forecast accuracy given that demand is unobservable (stockouts bias actuals)?**
+**Short:** Stockouts cap sales below true demand, so drop stockout days from error metrics, estimate unconstrained demand, and track service level separately from forecast error.
+A: Censored demand problem. When stock runs out, actual sales = stock level, not true demand. Naive MAE on censored actuals underestimates error for high-demand items. Three mitigations:
+1. Exclude stockout days from MAE calculation (filter where on-hand inventory dropped to 0).
+2. Use unconstrained demand estimates from MCMC (Bayesian demand estimation from censored data).
+3. Track service level separately from forecast error: a 95% service level means 95% of store-weeks
+had no stockout regardless of forecast accuracy.
 
-
-def evaluate_forecast_broken(
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    label_col: str = "units_sold",
-) -> dict[str, float]:
-    """BROKEN: K-fold ignores time ordering — massive temporal leakage."""
-    X = df[feature_cols].values
-    y = df[label_col].values
-
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)  # BUG: shuffled
-    maes = []
-    for train_idx, val_idx in kf.split(X):
-        model = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05)
-        model.fit(X[train_idx], y[train_idx])
-        preds = model.predict(X[val_idx])
-        mae = np.abs(preds - y[val_idx]).mean()
-        maes.append(mae)
-
-    # Reported WMAE: 8.2% — looks great!
-    # Actual production WMAE: 19.4% — 2.4x worse than reported
-    return {"mae": np.mean(maes)}
-
-
-# FIX: Walk-forward expanding window validation
-# Train on weeks 1-40, validate on weeks 41-44
-# Train on weeks 1-44, validate on weeks 45-48
-# Etc. — never train on future data
-
-def evaluate_forecast_correct(
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    label_col: str = "units_sold",
-    week_col: str = "week_number",
-    n_folds: int = 4,
-    validation_weeks: int = 4,
-) -> dict[str, float]:
-    """
-    Walk-forward cross-validation with expanding training window.
-    Each fold trains on all data before validation period.
-    """
-    max_week = df[week_col].max()
-    first_val_week = max_week - (n_folds * validation_weeks)
-
-    all_maes: list[float] = []
-    for fold in range(n_folds):
-        val_start = first_val_week + fold * validation_weeks
-        val_end = val_start + validation_weeks
-
-        train_mask = df[week_col] < val_start  # strictly before validation window
-        val_mask = (df[week_col] >= val_start) & (df[week_col] < val_end)
-
-        X_train = df.loc[train_mask, feature_cols].values
-        y_train = df.loc[train_mask, label_col].values
-        X_val = df.loc[val_mask, feature_cols].values
-        y_val = df.loc[val_mask, label_col].values
-
-        if len(X_train) == 0 or len(X_val) == 0:
-            continue
-
-        model = lgb.LGBMRegressor(n_estimators=500, learning_rate=0.05)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_val)
-        mae = float(np.abs(preds - y_val).mean())
-        all_maes.append(mae)
-        print(f"Fold {fold}: val weeks [{val_start},{val_end}), MAE={mae:.4f}")
-
-    return {"wmae": float(np.mean(all_maes))}
-```
-
-**War Story 2 — Promotion Lift Prediction Using Event-Window Instead of Causal Modeling:**
-
-```python
-# BROKEN: Computing promotion lift by comparing promoted weeks to adjacent weeks
-# Adjacent weeks are affected by stock-up (pre-promotion) and hangover (post-promotion)
-# This contamination makes the lift estimate 30-50% too low
-
-import pandas as pd
-import numpy as np
-
-
-def estimate_promo_lift_broken(
-    sales_df: pd.DataFrame,
-    sku_id: str,
-    promo_week: int,
-) -> float:
-    """BROKEN: Compare promo week to adjacent weeks — contaminated baseline."""
-    sku_data = sales_df[sales_df["sku_id"] == sku_id].set_index("week")
-
-    promo_sales = sku_data.loc[promo_week, "units_sold"]
-
-    # BUG: week promo_week-1 has stock-up effect; week promo_week+1 has hangover
-    # Both adjacent weeks are suppressed by the promotion itself
-    adjacent_weeks = [promo_week - 2, promo_week - 1, promo_week + 1, promo_week + 2]
-    baseline = sku_data.loc[
-        [w for w in adjacent_weeks if w in sku_data.index], "units_sold"
-    ].mean()
-
-    return float(promo_sales / baseline) - 1.0  # lift as fraction
-
-
-# FIX: Use matched control SKUs (never promoted during same period) as counterfactual
-# Plus a regression discontinuity approach for the pre/post comparison
-
-def estimate_promo_lift_correct(
-    sales_df: pd.DataFrame,
-    sku_id: str,
-    promo_week: int,
-    control_sku_ids: list[str],  # similar SKUs never promoted in this window
-    pre_weeks: int = 4,
-    post_weeks: int = 2,
-) -> dict[str, float]:
-    """
-    Difference-in-Differences: compare treated vs control SKU trends.
-    Accounts for pre-promotion stock-up and post-promotion hangover.
-    """
-    sku_data = sales_df[sales_df["sku_id"] == sku_id].set_index("week")
-    control_data = sales_df[sales_df["sku_id"].isin(control_sku_ids)].groupby("week")["units_sold"].mean()
-
-    pre_period = range(promo_week - pre_weeks - post_weeks, promo_week - post_weeks)
-    # Exclude post_weeks immediately before promotion (potential stock-up)
-    pure_baseline_period = range(promo_week - pre_weeks - post_weeks, promo_week - post_weeks)
-
-    sku_pre_avg = sku_data.loc[
-        [w for w in pure_baseline_period if w in sku_data.index], "units_sold"
-    ].mean()
-    control_pre_avg = control_data.loc[
-        [w for w in pure_baseline_period if w in control_data.index]
-    ].mean()
-
-    sku_promo = sku_data.loc[promo_week, "units_sold"]
-    control_promo = control_data.loc[promo_week] if promo_week in control_data.index else control_pre_avg
-
-    # DiD: (treated_after - treated_before) - (control_after - control_before)
-    did_lift = (sku_promo - sku_pre_avg) - (control_promo - control_pre_avg)
-    relative_lift = did_lift / max(sku_pre_avg, 1e-6)
-
-    return {
-        "absolute_lift_units": float(did_lift),
-        "relative_lift_pct": float(relative_lift * 100),
-        "baseline_units": float(sku_pre_avg),
-    }
-```
-
----
-
-## Monitoring and Drift Detection Deep-Dive
-
-### Features That Drift Fastest
-
-```
-Feature                              Drift rate   Reason
-──────────────────────────────────────────────────────────────────────────
-is_on_promotion / discount_pct       Very high    Promotions change weekly by definition
-rolling_4wk_avg_units                High         Demand itself shifts (trend + seasonality)
-lag_7d_units (last week's sales)     High         Captures recent demand shocks
-price_vs_category_median             Medium       Price changes across category shift median
-competitor_out_of_stock_flag         Medium       Supply chain events; competitor launches
-season_indicator (Christmas, etc.)   Predictable  Pre-known annual seasonality
-product_age_weeks                    Low          Linear time variable; no surprise drift
-```
-
-### Forecast Bias Monitoring
-
-```python
-from dataclasses import dataclass
-from typing import Optional
-import numpy as np
-
-
-@dataclass
-class ForecastBiasReport:
-    """Weekly bias report comparing forecast to actuals."""
-    category: str
-    week: int
-    mean_error: float           # positive = overforecast, negative = underforecast
-    wmae: float                 # Weighted Mean Absolute Error
-    bias_ratio: float           # mean_forecast / mean_actual; should be 1.0 ± 0.05
-    stockout_rate: float        # fraction of SKU-store weeks with stockout (actual=0)
-    overstocked_rate: float     # fraction where forecast > 2× actual
-
-
-def compute_forecast_bias(
-    forecasts: np.ndarray,   # shape (N,) predicted units
-    actuals: np.ndarray,     # shape (N,) actual units sold
-    weights: Optional[np.ndarray] = None,  # optional sales-volume weights
-) -> ForecastBiasReport:
-    if weights is None:
-        weights = np.ones(len(actuals))
-
-    errors = forecasts - actuals
-    wmae = float(np.average(np.abs(errors), weights=weights))
-    mean_error = float(np.mean(errors))
-    bias_ratio = float(forecasts.mean() / max(actuals.mean(), 0.01))
-    stockout_rate = float((actuals == 0).mean())  # actual demand but zero sales
-    overstocked_rate = float((forecasts > 2 * actuals).mean())
-
-    return ForecastBiasReport(
-        category="all",
-        week=-1,
-        mean_error=mean_error,
-        wmae=wmae,
-        bias_ratio=bias_ratio,
-        stockout_rate=stockout_rate,
-        overstocked_rate=overstocked_rate,
-    )
-
-# Alert thresholds
-BIAS_ALERTS = {
-    "bias_ratio_bounds": (0.95, 1.05),    # ±5% systematic bias triggers alert
-    "wmae_regression_threshold": 0.03,    # WMAE increase > 3 percentage points
-    "stockout_rate_increase": 0.05,       # stockout rate up > 5 percentage points
-    "overstocked_rate_increase": 0.10,   # overstock rate up > 10 percentage points
-}
-```
-
-### Retraining Triggers and Cadence
-
-```
-Cadence        Trigger                                    Action
-──────────────────────────────────────────────────────────────────────────────
-Weekly         Scheduled (Monday 2 AM)                    Full LightGBM retrain + MinT reconciliation
-Daily          Scheduled (nightly)                        Incremental update (100 trees warm-start)
-Triggered      bias_ratio outside (0.95, 1.05)            Retrain with feature audit
-Triggered      WMAE degrades > 3pp vs trailing 4-week avg Emergency retrain + hyperparameter search
-Triggered      New promotional event type (3-for-2, BOGO) Add new promo feature; retrain
-Triggered      New store opens                            Update store metadata; include in next retrain
-Triggered      New SKU launches in high-volume category   Prototypical forecast via KNN; monitor 8wks
-Quarterly      Scheduled                                  Walk-forward cross-validation audit; hyperparameter tuning
-```
-
----
-
-## Additional Interview Questions
+**Q: How do you handle the cold start problem for a brand-new store opening?**
+**Short:** Find the 3 most similar stores by demographics and size, scale their average by size and a regional index, then fold the store into the global model after 8 weeks.
+A: Store-level cold start is harder than product cold start. Approach: cluster new store by demographic features (population density, median income, nearby competitor density, store size). Use the 3 most similar existing stores as proxies. Apply new store forecast = proxy store average
+* (new store size / proxy size) * regional demand index. After 8 weeks of actual sales, the global
+model begins incorporating the new store with exponential upweighting of recent data (recent weeks weighted 4x). The new store flag remains a feature until 26 weeks of history accumulate.
 
 **Q: How do you forecast for a product launched by a competitor that directly impacts your own demand?**
+**Short:** Feed external pricing and category demand indices into the model, and estimate the launch's causal impact with a synthetic control before adjusting the affected SKUs.
 Competitor cannibalization is captured via external data signals: (1) Web scraping or third-party retail measurement data provides competitor pricing and promotional activity. The vendor names have changed — use NielsenIQ or Circana, the latter being the company formed when IRI and NPD merged in 2022 and rebranded in March 2023; "IRI" no longer exists as a brand. (2) Category-level demand index: if total category sales drop 15% in a week coinciding with a competitor launch, the global model learns to attribute this to the category_demand_index feature rather than treating it as noise. (3) Causal inference: estimate the causal impact of the competitor's launch using a synthetic control method — identify a set of "donor" weeks and SKUs not affected by the competitor, construct a weighted average that matches pre-launch trends, use as counterfactual. The forecast for affected SKUs is then adjusted by the difference between observed and counterfactual. This requires a causal inference module separate from the main forecasting model.
 
 **Q: What is hierarchical reconciliation, and why is MinT preferred over proportional or bottom-up aggregation?**
+**Short:** MinT reconciles all hierarchy levels at once using the error covariance, so totals add up while total error variance is minimized; bottom-up passes noisy leaf errors straight upward.
 Hierarchical reconciliation adjusts independently-produced forecasts at each level (SKU, category, store, region, national) so they are consistent — store forecasts sum to regional, regional to national. Bottom-up aggregation: use only the lowest-level forecasts, aggregate to all higher levels. Problem: lower-level forecasts have higher noise; errors accumulate upward. Top-down aggregation: use national forecast, distribute using historical proportions. Problem: ignores store-level patterns. Proportional reconciliation (middle ground): similar issues. MinT (Minimum Trace): computes a reconciled forecast vector that minimizes the total variance of the forecasting error across all levels simultaneously, using the covariance structure of the base forecast errors. MinT requires estimating the error covariance matrix (often approximated as diagonal for scalability). In published hierarchical-forecasting evaluations MinT beats bottom-up most clearly at the intermediate levels (store, region), where bottom-up is accumulating noisy leaf forecasts; the size of the gain is dataset-specific, so measure it on your own hierarchy rather than carrying a headline percentage.
 
 **Q: How would you extend the system to produce probabilistic forecasts (full distribution, not just P10/P50/P90)?**
+**Short:** Train more quantile models, wrap a point model in conformal intervals with the (n+1)/n correction, or use a distributional model such as DeepAR for a full predictive distribution.
 Three approaches: (1) Quantile regression forest: LightGBM supports quantile loss, producing P10/P50/P90 as separate models. Extending to 19 quantiles (P5 to P95 in 5% steps) requires 19 models but provides the full distribution. (2) Conformal prediction: train a point forecast model, then compute residuals on a calibration set. Conformalize the prediction intervals: for a target coverage of 1-alpha, take the ceil((n+1)(1-alpha))/n empirical quantile of the calibration residuals — the (n+1)/n correction is what buys the finite-sample coverage guarantee, and using the plain 90th percentile slightly undercovers. This is distribution-free and computationally cheap. (3) DeepAR (Amazon): autoregressive RNN that models the full demand distribution via parametric families — the paper uses a negative binomial likelihood for count data and a Gaussian for real-valued data; Student-t and other heads are available in GluonTS but are not the paper's default. DeepAR natively produces full predictive distributions but requires GPU training and is harder to interpret than LightGBM. For inventory safety stock optimization (requires the full distribution, not just percentiles), DeepAR or conformal prediction provide the necessary uncertainty estimates.
 
 **Q: How does the demand forecasting system integrate with dynamic pricing to create a feedback loop risk?**
+**Short:** Prices respond to forecasts and demand responds to prices, so include price as a feature, learn elasticity, and run small randomized price tests to measure it independently.
 The pricing engine uses demand forecasts to set prices: higher forecasted demand → higher price; lower demand → markdown. This creates a potential feedback loop: a forecast overestimation leads to higher pricing, which reduces actual demand, which appears to "validate" the lower demand expectation if the model is not careful. Breaking the loop: (1) Price elasticity features must be included in the forecasting model — the model must predict demand given a specific price, not just recent demand trends. (2) Training data must include the actual price as a feature, not just volume, so the model learns the price-demand relationship. (3) Monitor for Simpson's paradox: if overall demand appears stable while prices are rising, the model may be failing to account for price-induced demand suppression. (4) Periodically run price sensitivity experiments (randomly vary prices 5-10% for a short window) to estimate true elasticity independent of the model's learned behavior.
 
 **Q: How do you handle extreme outlier events (a product going viral on social media, causing 100x demand spike) in the training data?**
+**Short:** Cap one-off spikes in the training labels, flag known viral events as a feature, and override the short-term forecast with a decaying rule while the event lasts.
 Extreme viral events violate the stationarity assumption of the forecasting model: they are one-time, nearly unpredictable occurrences that the model cannot generalize from. Including them in training data without handling damages the model for all similar products that did not go viral. Three approaches: (1) Outlier detection and capping: use a rolling z-score; if weekly sales exceed mean + 3 × std for that SKU, cap the training label at mean + 3 × std. This prevents the model from overfit to the outlier. (2) Separate event features: add a viral_event_flag feature when social media monitoring detects an anomalous spike. The model then learns the "viral event effect" explicitly, not as a baseline. (3) For forecasting purposes: when a viral event is occurring, the short-term forecast is overridden by a rule-based system that extrapolates the spike trajectory for 2 weeks, then decays back to baseline. The long-term forecast is unaffected.
+
+**Q: Why do inventory teams order from P90 for some products and P50 for others?**
+**Short:** The right quantile is the newsvendor critical ratio, underage cost / (underage + overage): costly stockouts on high-margin items justify P90, symmetric costs on commodities justify P50.
+The order quantity that minimises expected cost is the demand quantile at q* = c_u / (c_u + c_o), where c_u is the cost of one unit short (lost margin) and c_o the cost of one unit over (holding, markdown, spoilage). A product that loses $10 of margin per missed sale and costs $1 per leftover unit has q* = 10 / 11, about 0.91, so it orders near P90. A commodity with equal costs orders at P50. Perishables raise c_o and push the quantile down. This only works if the quantiles are calibrated: check weekly that actuals exceed the P90 forecast about 10% of the time in each category, and recalibrate when they do not.
+
+**Q: Why do global gradient-boosted models beat classical per-series methods in retail forecasting competitions?**
+**Short:** In M5 on Walmart data, every top entry was a pure ML method that beat all statistical benchmarks, because a global model pools signal across ~42,000 related series that per-series methods see alone.
+A per-series method such as ARIMA or exponential smoothing estimates its parameters from one series' history, so sparse and short series get noisy fits and new products get none. A global model sees every series at once and learns patterns such as holiday lift, price response and day-of-week shape from all of them, with series identity as just another feature. M5 (Walmart, about 42,000 hierarchical series, 2020) showed it at scale: LightGBM featured prominently and the top three were ensembles of separately trained models. The cost is that a global model can be confidently wrong for an unusual series, so keep per-series bias monitoring (§8).

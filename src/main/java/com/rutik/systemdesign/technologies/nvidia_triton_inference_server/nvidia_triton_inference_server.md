@@ -1113,13 +1113,55 @@ No — precision is baked into the artifact at build time, not a runtime toggle 
 
 **Target.** Consolidate onto a shared Triton fleet on A10 GPUs (24 GB), standardize batching and metrics, and cut idle GPU count while holding a P99 of 25 ms per model.
 
-**Capacity math.** The detector is a ResNet-50-class CNN. Unbatched FP32 on an A10 sustains a baseline throughput; converting to a **TensorRT INT8 engine** and enabling **dynamic batching** (preferred sizes [4, 8], `max_queue_delay_microseconds: 1500` ≈ 6% of the 25 ms SLO) lifts throughput roughly **6x** over the unbatched FP32 Flask baseline — INT8 halves memory traffic and doubles Tensor Core rate, and batching turns narrow matmuls into wide ones. At ~1.6 GB per INT8 instance, `instance_group.count: 2` fits comfortably in 24 GB alongside the ranker and embedder, letting three models share one GPU that formerly needed three.
+**Capacity math.** The detector is a ResNet-50-class CNN. Unbatched FP32 on an A10 sustains a baseline throughput; converting to a **TensorRT INT8 engine** and enabling **dynamic batching** (preferred sizes [4, 8], `max_queue_delay_microseconds: 1500` ≈ 6% of the 25 ms SLO) lifts throughput roughly **6x** over the unbatched FP32 Flask baseline — INT8 cuts weight and activation traffic to a quarter of FP32's and runs on Tensor Cores, which plain FP32 does not use, and batching turns narrow matmuls into wide ones. At ~1.6 GB per INT8 instance, `instance_group.count: 2` fits comfortably in 24 GB alongside the ranker and embedder, letting three models share one GPU that formerly needed three.
+
+**Model repository.** One repository per GPU pool, one directory per model, numbered version directories underneath:
+
+```text
+model_repository/
+├── detector/                  # TensorRT INT8 plan
+│   ├── config.pbtxt
+│   ├── 7/model.plan
+│   └── 8/model.plan           # canary version
+├── preprocess_dali/           # DALI decode + resize
+├── crop/                      # Python backend, CPU
+├── classifier/                # TensorRT FP16 plan
+├── vision_pipeline/           # ensemble: preprocess -> detector -> crop -> classifier
+│   └── config.pbtxt
+├── ranker/                    # ONNX Runtime backend
+└── embedder/                  # TensorRT FP16 plan
+```
+
+```protobuf
+# detector/config.pbtxt
+name: "detector"
+platform: "tensorrt_plan"
+max_batch_size: 8
+input  [ { name: "images"     data_type: TYPE_FP32 dims: [ 3, 640, 640 ] } ]
+output [ { name: "detections" data_type: TYPE_FP32 dims: [ 100, 6 ] } ]
+instance_group [ { count: 2 kind: KIND_GPU } ]
+dynamic_batching {
+  preferred_batch_size: [ 4, 8 ]
+  max_queue_delay_microseconds: 1500   # the default is 0, which disables waiting
+}
+version_policy: { specific { versions: [ 7, 8 ] } }
+```
+
+**Sizing from a sweep, not from a guess.** Before moving traffic, each model gets a `perf_analyzer` sweep on the target A10:
+
+```bash
+perf_analyzer -m detector -i grpc --concurrency-range 1:16:1 --percentile=99
+```
+
+Read it with two rules. The operating point is the highest concurrency whose P99 stays under the 25 ms budget; anything past it buys throughput with latency the SLO does not have. And the batch sizes the server actually forms are visible in production as `nv_inference_count / nv_inference_exec_count` (inferences per execution): if that ratio sits near 1 at peak, batching is not happening and the queue delay or the preferred sizes are wrong. Repeat the sweep with all three models loaded on one GPU, because the single-model numbers overstate what each gets when they share compute.
 
 **Vision pipeline as an ensemble.** The detect → crop → classify flow becomes an **ensemble**: a DALI preprocess step, the TensorRT detector, a crop step, and a classifier, executed server-side so the client makes one call and no intermediate tensors cross the network. This removes two network round-trips per image versus the old client-side orchestration.
 
 **Autoscaling.** Prometheus scrapes 8002; the HPA scales each model's deployment on `nv_inference_queue_duration_us`, so pods are added when queue time rises — before the 25 ms P99 is threatened — rather than after GPU utilization pegs.
 
 **Rollout.** New model versions ship as numbered directories under `version_policy: { specific { versions: [N-1, N] } }` for a **canary**: v_{N} takes a small traffic slice via the router while v_{N-1} serves the rest, with rollback reduced to removing a directory. All changes flow through explicit model-control API calls, keeping deploys atomic and auditable.
+
+**Failure during the migration (illustrative).** The first ensemble deployment configured the Python `crop` step with a single CPU instance. Every request through `vision_pipeline` waited for that one process: the detector's GPU sat well below its single-model utilization while `nv_inference_queue_duration_us` on `crop` climbed, and pipeline P99 went past the 25 ms budget at a fraction of the planned load. Per-model queue metrics found it within minutes, because the queue time was on `crop`, not on the GPU models. The fix was `instance_group [ { count: 4 kind: KIND_CPU } ]` plus dynamic batching on `crop`; the follow-up moved cropping into the DALI step so no Python process sits in the GPU path at all. The lesson: in an ensemble, the slowest CPU step sets the throughput, so sweep the ensemble end to end, not only its GPU models.
 
 **Outcome.** Twelve services collapse onto a small shared Triton fleet, average GPU utilization rises from ~18% to a healthy steady-state batched load, idle GPU count drops sharply, and every model now emits the same queue/compute/batch-size metrics — so one dashboard and one autoscaling policy cover the entire model portfolio.
 

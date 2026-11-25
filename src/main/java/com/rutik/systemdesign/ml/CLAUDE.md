@@ -120,9 +120,9 @@ on explicit request (each needs the full "Adding a New ML Module" procedure + ST
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
-**Legacy 12-section (10):** design_recommendation_engine, design_fraud_detection, design_search_ranking, design_image_classification_pipeline, design_ads_click_prediction, design_anomaly_detection, design_demand_forecasting, design_content_feed_ranking, design_autonomous_driving_perception, design_ml_platform
+**Principal 11-section (all 27).** The first ten were migrated from the old 12-section layout on 2026-11-25 (owner decision): design_recommendation_engine, design_fraud_detection, design_search_ranking, design_image_classification_pipeline, design_ads_click_prediction, design_anomaly_detection, design_demand_forecasting, design_content_feed_ranking, design_autonomous_driving_perception, design_ml_platform
 
-**Principal 11-section (17):** design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching, design_customer_ltv_prediction, design_multi_touch_attribution, design_dynamic_pricing, design_nlp_classification_pipeline, design_real_time_personalization, design_semantic_search_engine, design_ner_pipeline, design_question_answering_system, design_video_recommendation, design_harmful_content_detection, design_document_ai_extraction, design_experimentation_platform, design_llm_hybrid_support_triage
+**Built on the principal template from the start (17):** design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching, design_customer_ltv_prediction, design_multi_touch_attribution, design_dynamic_pricing, design_nlp_classification_pipeline, design_real_time_personalization, design_semantic_search_engine, design_ner_pipeline, design_question_answering_system, design_video_recommendation, design_harmful_content_detection, design_document_ai_extraction, design_experimentation_platform, design_llm_hybrid_support_triage
 
 ---
 

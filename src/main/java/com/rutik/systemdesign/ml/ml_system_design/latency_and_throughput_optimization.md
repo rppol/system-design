@@ -24,15 +24,21 @@ Key insight: INT8 post-training quantization cuts FP32 weight memory by exactly 
 
 ## 3. Core Principles
 
-**Measure before optimizing**: profile the complete request path to identify the actual bottleneck. Optimizing model inference when the bottleneck is feature fetching from Redis wastes engineering time.
+**Measure before optimizing.** Trace the full request path per stage before changing anything; optimizing model inference when the bottleneck is a Redis feature fetch wastes weeks. Measure P50, P99 and P99.9 under production-like load, not on an idle machine.
 
-**Latency budget decomposition**: allocate a P99 budget to each pipeline stage before optimizing. Every stage must meet its budget individually; no stage can borrow from another at P99.
+**Budget each stage, verify end to end.** Give every stage a P99 slice before optimizing (for example 10 ms network, 8 ms features, 12 ms retrieval and 18 ms ranking inside a 100 ms budget) and keep headroom for tail effects. Stage percentiles do not add, so confirm the end-to-end P99 after every change.
 
-**Hardware-software co-design**: choose the optimization technique based on the serving hardware. INT8 quantization yields roughly 2-4x speedup only where the silicon has INT8 math units (NVIDIA Turing tensor cores onward, or AVX-512 VNNI / AMX on Intel CPUs); on hardware without them the dequantize-then-compute path can be no faster than FP16, and sometimes slower.
+**Tail latency compounds with fan-out.** A request that waits on N parallel calls is as slow as the slowest one. If each call exceeds its own P99 1% of the time, a fan-out to 100 calls exceeds it on 1 - 0.99^100, about 63% of requests. Reduce fan-out, hedge slow calls, or give each call a timeout and a fallback.
 
-**Quality-efficiency tradeoff**: every optimization reduces some combination of accuracy, latency, cost, or complexity. Quantify the quality loss before deploying any compression technique.
+**Throughput and latency trade through batching.** Dynamic batching raises GPU utilization by waiting a few milliseconds to fill a batch, and every request pays that wait when traffic is light. Size the queue delay from the latency budget and test at off-peak as well as peak arrival rates.
 
-**Caching as the first optimization**: before optimizing the model itself, check if predictions can be cached. Static user segments, popular items, and repeated queries are all candidates for prediction caching.
+**Little's Law sizes the fleet.** Requests in flight = arrival rate x latency: 5,000 requests/s at 40 ms average means about 200 requests in flight, which sets the number of replicas or worker slots before any load test.
+
+**Hardware-software co-design.** Choose the optimization technique for the serving hardware. INT8 quantization yields roughly 2-4x speedup only where the silicon has INT8 math units (NVIDIA Turing tensor cores onward, or AVX-512 VNNI / AMX on Intel CPUs); on hardware without them the dequantize-then-compute path can be no faster than FP16, and sometimes slower.
+
+**Quality-efficiency tradeoff.** Every optimization costs some accuracy, cost or complexity. Quantify the quality loss, per slice as well as overall, before deploying any compression technique.
+
+**Caching as the first optimization.** Before optimizing the model itself, check whether predictions can be cached or precomputed. Static user segments, popular items and repeated queries are all candidates, and a cache hit is the fastest inference there is.
 
 ---
 
