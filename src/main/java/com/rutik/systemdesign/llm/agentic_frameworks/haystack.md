@@ -97,7 +97,7 @@ flowchart LR
         RET(["InMemoryEmbeddingRetriever<br/>top_k=10"])
         RANK(["SentenceTransformersSimilarityRanker<br/>top_k=3"])
         PB(["PromptBuilder"])
-        GEN(["OpenAIChatGenerator<br/>gpt-4o"])
+        GEN(["OpenAIChatGenerator<br/>gpt-6.2-sol"])
         OUT(["Answer"])
         Q -->|"str"| QEMB -->|"embedding"| RET -->|"List[Document]"| RANK -->|"reranked docs"| PB -->|"prompt"| GEN -->|"replies"| OUT
     end
@@ -199,7 +199,7 @@ rag_pipeline.add_component("retriever", InMemoryBM25Retriever(document_store=doc
 rag_pipeline.add_component("prompt_builder", PromptBuilder(template=prompt_template))
 # OpenAIChatGenerator (the only Generator family since 3.0) accepts the
 # PromptBuilder's plain-string "prompt" output directly via its "messages" input
-rag_pipeline.add_component("llm", OpenAIChatGenerator(model="gpt-4o"))
+rag_pipeline.add_component("llm", OpenAIChatGenerator(model="gpt-6.2-sol"))
 rag_pipeline.connect("retriever.documents", "prompt_builder.documents")
 rag_pipeline.connect("prompt_builder.prompt", "llm.messages")
 
@@ -249,7 +249,7 @@ rag.add_component(
     SentenceTransformersSimilarityRanker(model="cross-encoder/ms-marco-MiniLM-L-6-v2", top_k=3)
 )
 rag.add_component("prompt_builder", PromptBuilder(template=prompt_template))
-rag.add_component("llm", OpenAIChatGenerator(model="gpt-4o"))
+rag.add_component("llm", OpenAIChatGenerator(model="gpt-6.2-sol"))
 
 rag.connect("query_embedder.embedding", "retriever.query_embedding")
 rag.connect("retriever.documents", "ranker.documents")
@@ -350,7 +350,7 @@ eval_pipeline = Pipeline()
 eval_pipeline.add_component(
     "faithfulness",
     FaithfulnessEvaluator(  # LLM-as-judge
-        llm=OpenAIChatGenerator(model="gpt-4o")
+        llm=OpenAIChatGenerator(model="gpt-6.2-sol")
     )
 )
 eval_pipeline.add_component(
@@ -637,7 +637,7 @@ flowchart LR
         RET(["OpenSearchEmbeddingRetriever<br/>top_k=20"])
         RANK(["SentenceTransformersSimilarityRanker<br/>top_k=5"])
         PB(["PromptBuilder +<br/>citation template"])
-        GEN(["OpenAIChatGenerator<br/>gpt-4o"])
+        GEN(["OpenAIChatGenerator<br/>gpt-6.2-sol"])
         OUT(["Response +<br/>5 source citations"])
         UQ --> QEMB --> RET
         UQ --> MF --> RET

@@ -65,7 +65,7 @@ CrewAI abstracts the complexity of multi-agent coordination behind familiar work
 | `goal` | Primary objective | "Find accurate, current data on the topic" |
 | `backstory` | Experience description | "Expert with 10 years synthesizing complex research" |
 | `tools` | Available capabilities | `[web_search, arxiv_search]` |
-| `llm` | LLM model to use | `LLM(model="openai/gpt-4o")` (CrewAI's native, LiteLLM-backed class) |
+| `llm` | LLM model to use | `LLM(model="openai/gpt-6.2-sol")` (CrewAI's native, LiteLLM-backed class) |
 | `max_iter` | Max reasoning iterations | 20 (default) |
 | `allow_delegation` | Can delegate to other agents | True/False |
 
@@ -162,7 +162,7 @@ web_search = SerperDevTool()  # Google search via Serper API
 web_reader = WebsiteSearchTool()
 
 # Agents — crewai.LLM is the native, LiteLLM-backed class (no LangChain dependency
-# required); model names take a provider prefix, e.g. "openai/gpt-4o", "anthropic/claude-sonnet-5-5"
+# required); model names take a provider prefix, e.g. "openai/gpt-6.2-sol", "anthropic/claude-sonnet-5-5"
 researcher = Agent(
     role="Senior Research Analyst",
     goal="Uncover cutting-edge developments in AI and synthesize key findings",
@@ -171,7 +171,7 @@ researcher = Agent(
         "You provide well-organized, accurate research reports."
     ),
     tools=[web_search, web_reader],
-    llm=LLM(model="openai/gpt-4o", temperature=0.1),
+    llm=LLM(model="openai/gpt-6.2-sol", temperature=0.1),
     verbose=True,
     max_iter=10
 )
@@ -184,7 +184,7 @@ writer = Agent(
         "Your writing is clear, accurate, and tailored to a tech-savvy audience."
     ),
     tools=[],
-    llm=LLM(model="openai/gpt-4o", temperature=0.7),
+    llm=LLM(model="openai/gpt-6.2-sol", temperature=0.7),
     verbose=True
 )
 
@@ -228,7 +228,7 @@ print(result.raw)
 ```python
 from crewai import Agent, Task, Crew, Process, LLM
 
-manager_llm = LLM(model="openai/gpt-4o")
+manager_llm = LLM(model="openai/gpt-6.2-sol")
 
 researcher = Agent(role="Research Specialist", goal="...", backstory="...", tools=[web_search])
 analyst = Agent(role="Data Analyst", goal="...", backstory="...", tools=[])
@@ -443,7 +443,7 @@ Each task receives all previous task outputs as context. With 6 tasks and 1000 t
   total        15,000 context tokens for 6,000 tokens of actual output
 
   redundancy   15,000 / 6,000                =  2.5x
-  at 10K per task   total = 150,000 tokens   -> past GPT-4o's 128K window
+  at 10K per task   total = 150,000 tokens   -> past a 128K window (e.g. self-hosted Llama 3.3 70B)
 ```
 
 The crew produces 6,000 tokens of work and pays to move 15,000 — a 2.5× tax that nobody
@@ -462,7 +462,7 @@ model must actively ignore.
 If a tool raises an exception, the agent gets an error message and tries to work around it — often by hallucinating the expected output. Add explicit error handling in tool implementations and test tools independently before integrating.
 
 **Pitfall 6: Assuming role determines capability**
-The role is just a prompt. Assigning a "Security Expert" role to GPT-3.5-turbo does not give it GPT-4o's security analysis capability. For complex specialist tasks, use a capable model; role is a steering mechanism, not a capability injection.
+The role is just a prompt. Assigning a "Security Expert" role to GPT-3.5-turbo does not give it a frontier model's security analysis capability. For complex specialist tasks, use a capable model; role is a steering mechanism, not a capability injection.
 
 ---
 
@@ -472,7 +472,7 @@ The role is just a prompt. Assigning a "Security Expert" role to GPT-3.5-turbo d
 |------|----------|-------|
 | `crewai` | Framework core | `pip install crewai` |
 | `crewai-tools` | Pre-built tools | SerperDevTool, WebsiteSearchTool, FileReadTool |
-| `crewai.LLM` | LLM provider (native) | LiteLLM-backed; provider-prefixed model strings (`"openai/gpt-4o"`, `"anthropic/claude-sonnet-5-5"`), no LangChain dependency |
+| `crewai.LLM` | LLM provider (native) | LiteLLM-backed; provider-prefixed model strings (`"openai/gpt-6.2-sol"`, `"anthropic/claude-sonnet-5-5"`), no LangChain dependency |
 | `langchain_openai` | LLM provider (alternative) | `ChatOpenAI` objects still accepted by `llm=` for teams already standardized on LangChain |
 | `langchain_anthropic` | LLM provider (alternative) | `ChatAnthropic` objects still accepted by `llm=` for teams already standardized on LangChain |
 | `SerperDevTool` | Web search | Google search via Serper API |
@@ -529,8 +529,8 @@ Approach: (1) Set `verbose=True` on all agents — this logs the full ReAct trac
 Task-level error handling is limited in CrewAI. Options: (1) Tool-level: catch exceptions in tool `_run()` methods and return error messages as strings; the agent sees "Error: database connection failed" and tries alternatives; (2) Agent-level: set `max_iter` to prevent infinite loops; (3) Task-level: wrap `crew.kickoff()` in try/except for unrecoverable failures; (4) Retry: re-invoke `crew.kickoff()` for transient failures. For granular retry control: LangGraph is the better choice — it allows retry logic per node with explicit error states.
 
 **Q: When should you use a cheaper model for some agents in a crew?**
-**Short:** Route simple classification, formatting, and routing agents to a cheap model and reserve the frontier model for research and synthesis.
-Use cheaper models (GPT-4o-mini) for: simple classification agents, formatting/cleanup agents, routing decisions, and QA checklist agents. Use GPT-4o for: research synthesis, complex reasoning, code generation, and security analysis. A typical crew might use GPT-4o-mini for a "format checker" task and GPT-4o for the "senior researcher" and "technical writer." This can reduce crew cost by 40-60% with minimal quality impact. Test each agent independently with both models to determine where the cost/quality tradeoff is acceptable.
+**Short:** Route classification, formatting, routing and QA-checklist agents to a cheap model and reserve the stronger model for research, synthesis and code.
+Use cheaper models (for example `openai/gpt-6-luna`) for: simple classification agents, formatting/cleanup agents, routing decisions, and QA checklist agents. Use a stronger model (for example `openai/gpt-6.2-sol` or `anthropic/claude-sonnet-5-5`) for: research synthesis, complex reasoning, code generation, and security analysis. A typical crew might use gpt-6-luna for a "format checker" task and gpt-6.2-sol for the "senior researcher" and "technical writer." This can reduce crew cost by 40-60% with minimal quality impact. Test each agent independently with both models to determine where the cost/quality tradeoff is acceptable.
 
 **Q: How does CrewAI handle long-running tasks that exceed context windows?**
 **Short:** Summarize intermediate outputs, limit explicit `context=[...]`, and chunk tool results instead of relying on LLM truncation.
@@ -559,7 +559,7 @@ When `allow_delegation=True` on an agent and the process is hierarchical, the ma
 5. **Set `max_iter`** on all agents — prevents infinite ReAct loops; default is 20, set to 5-10 for most tasks.
 6. **Use sequential process by default** — hierarchical adds complexity and cost; only use when coordination itself is the hard problem.
 7. **Add `verbose=True` during development** — disable in production to reduce log noise.
-8. **Use cheaper models for simple tasks** — GPT-4o-mini for formatting, classification, QA checkers.
+8. **Use cheaper models for simple tasks** — gpt-6-luna or Claude Haiku 5.5 for formatting, classification, QA checkers.
 9. **Handle tool errors gracefully** — return error strings from `_run()`, not exceptions.
 10. **Summarize intermediate outputs** for long pipelines — prevent context window exhaustion.
 
@@ -585,7 +585,7 @@ researcher = Agent(
         "and distinguish between verified facts and speculation."
     ),
     tools=[SerperDevTool(), WebsiteSearchTool()],
-    llm=LLM(model="openai/gpt-4o", temperature=0.1),
+    llm=LLM(model="openai/gpt-6.2-sol", temperature=0.1),
     max_iter=8
 )
 
@@ -598,7 +598,7 @@ writer = Agent(
         "and includes working code snippets."
     ),
     tools=[],
-    llm=LLM(model="openai/gpt-4o", temperature=0.6),
+    llm=LLM(model="openai/gpt-6.2-sol", temperature=0.6),
     max_iter=5
 )
 
@@ -611,7 +611,7 @@ tech_reviewer = Agent(
         "You suggest specific improvements without rewriting the entire article."
     ),
     tools=[],
-    llm=LLM(model="openai/gpt-4o", temperature=0.2),
+    llm=LLM(model="openai/gpt-6.2-sol", temperature=0.2),
     max_iter=5
 )
 
@@ -624,7 +624,7 @@ seo_optimizer = Agent(
         "accurately represent the content."
     ),
     tools=[],
-    llm=LLM(model="openai/gpt-4o-mini", temperature=0.3),  # cheaper model for this task
+    llm=LLM(model="openai/gpt-6-luna", temperature=0.3),  # cheaper model for this task
     max_iter=3
 )
 

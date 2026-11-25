@@ -313,7 +313,7 @@ At each step, output ONLY valid JSON with these fields:
 
 
 class MagenticOneOrchestrator:
-    def __init__(self, client: AsyncOpenAI, model: str = "gpt-4o") -> None:
+    def __init__(self, client: AsyncOpenAI, model: str = "gpt-6.2-sol") -> None:
         self._client = client
         self._model = model
         self._agents: dict[str, SpecialistAgent] = {
@@ -468,7 +468,7 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 
 async def main() -> None:
-    model_client = OpenAIChatCompletionClient(model="gpt-4o")
+    model_client = OpenAIChatCompletionClient(model="gpt-6.2-sol")
 
     # Researcher: gathers information via search tool
     researcher = AssistantAgent(
@@ -657,7 +657,7 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 
 async def main() -> None:
-    model_client = OpenAIChatCompletionClient(model="gpt-4o")
+    model_client = OpenAIChatCompletionClient(model="gpt-6.2-sol")
 
     planner = AssistantAgent(
         name="Planner",
@@ -890,7 +890,7 @@ async def run(self, request: str) -> str:
 import asyncio
 from autogen import AssistantAgent, UserProxyAgent
 
-assistant = AssistantAgent("assistant", llm_config={"model": "gpt-4o"})
+assistant = AssistantAgent("assistant", llm_config={"model": "gpt-6.2-sol"})
 user = UserProxyAgent("user", human_input_mode="NEVER")
 
 async def run():
@@ -910,7 +910,7 @@ from autogen_agentchat.conditions import TextMentionTermination
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 async def run():
-    client = OpenAIChatCompletionClient(model="gpt-4o")
+    client = OpenAIChatCompletionClient(model="gpt-6.2-sol")
     assistant = AssistantAgent("assistant", model_client=client)
     team = RoundRobinGroupChat(
         [assistant],
@@ -926,10 +926,10 @@ asyncio.run(run())
 
 **Broken — raw observation passed to LLM:**
 ```python
-# BROKEN: agent returns 50 KB of HTML; orchestrator prompt exceeds 128K context
+# BROKEN: agent returns 50 KB of HTML; it lands in every later orchestrator prompt
 progress_ledger.last_observation = await agent.handle(instruction)
 # next LLM call carries the full 50 KB (~12,500 tokens) in the prompt, every remaining step:
-# ~$0.03 per step at GPT-4o input pricing, ~$0.94 across a 30-step run, and it crowds the window
+# ~$0.025 per step at gpt-6.2-sol's $2/1M input, ~$0.75 across a 30-step run, and it crowds the window
 ```
 
 **Fixed — truncate + summarize observations:**
@@ -1076,8 +1076,8 @@ A `RoutedAgent` is a base class whose subclasses declare message handlers with t
 Termination conditions are composable objects passed to the team constructor. `MaxMessageTermination(n)` stops after n total messages. `TextMentionTermination("DONE")` stops when any agent's message contains the string "DONE". `StopMessageTermination()` stops when an agent returns a `StopMessage`. Conditions combine with `|` (OR) and `&` (AND) operators, e.g., `MaxMessageTermination(10) | TextMentionTermination("DONE")`.
 
 **Q: Why is the observation truncated before being passed back to the Orchestrator?**
-**Short:** Raw observations can overflow the context window, so truncating to the last few thousand characters keeps cost and size predictable.
-LLM context windows have hard limits (GPT-4o: 128K tokens). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors, and dilute the prompt with irrelevant content. The cost effect is per-step rather than dramatic per-call — a filled 128K GPT-4o prompt is about $0.32 of input, but it is re-paid on every remaining step of the run. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
+**Short:** Raw observations can overflow the context window and are re-paid on every later step, so truncating to the last few thousand characters keeps cost and size predictable.
+LLM context windows have hard limits (about 1M tokens on current frontier APIs such as gpt-6.2-sol, 128K on many self-hosted models). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors, and dilute the prompt with irrelevant content. The cost effect is per-step rather than dramatic per-call — a 128K-token prompt on gpt-6.2-sol is about $0.26 of input, but it is re-paid on every remaining step of the run. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
 
 **Q: What security risks does Magentic-One's ComputerTerminal agent introduce and how are they mitigated?**
 **Short:** ComputerTerminal runs arbitrary shell commands, so sandbox it in a network-restricted Docker container with an explicit executor set.
@@ -1092,8 +1092,8 @@ In v0.2, testing required mocking the global GroupChat state and monkey-patching
 Swarm is a first-class AutoGen team type (`autogen_agentchat.teams.Swarm`) in which each agent picks its own successor by emitting a `HandoffMessage`. No Orchestrator assigns the next step. This eliminates the Orchestrator as a single point of failure and reduces latency by one LLM call per step. Unlike Magentic-One, Swarm has no global task ledger — each agent is responsible for deciding its own successor, which makes complex replanning harder but reduces coordination overhead.
 
 **Q: What token cost does the Orchestrator add per step in Magentic-One?**
-**Short:** Each Orchestrator decision costs roughly a fraction of a cent, adding up to a few cents of overhead across a 20-step task.
-Each Orchestrator decision requires one GPT-4o call consuming roughly 500-1,500 input tokens (ledger prompt + last observation) and 100-200 output tokens (JSON decision). At GPT-4o API pricing ($2.50/M input, $10/M output — the tier introduced with the August 2024 snapshot, still current), this is approximately $0.002-$0.005 per step. A 20-step task costs $0.04-$0.10 in Orchestrator calls alone, plus the cost of the specialist agent calls (WebSurfer screenshot analysis: ~2,000 tokens per page).
+**Short:** Each Orchestrator decision costs about $0.002-$0.005, adding up to a few cents of overhead across a 20-step task before the specialist calls.
+Each Orchestrator decision requires one LLM call consuming roughly 500-1,500 input tokens (ledger prompt + last observation) and 100-200 output tokens (JSON decision). At gpt-6.2-sol pricing ($2/M input, $10/M output, 2026-11-25), this is approximately $0.002-$0.005 per step. A 20-step task costs $0.04-$0.10 in Orchestrator calls alone, plus the cost of the specialist agent calls (WebSurfer screenshot analysis: ~2,000 tokens per page).
 
 **Q: How does SelectorGroupChat handle the case where no agent is clearly the right next speaker?**
 **Short:** SelectorGroupChat retries with corrective feedback a bounded number of times, then falls back to the previous speaker rather than failing.
@@ -1121,7 +1121,7 @@ State persistence via `save_state()` and `load_state()`, checkpointed at step bo
 
 **Enforce a hard MAX_STEPS limit.** Always set a maximum iteration count. `MagenticOneGroupChat` defaults to `max_turns=20`; the 30 used in the worked example above is illustrative, so pick your own from measured workflow length. Without a cap, a hallucinating Orchestrator can spin indefinitely and accumulate thousands of dollars in API costs.
 
-**Truncate and summarize observations.** Cap observations at 2,000-3,000 characters. For large outputs (HTML pages, code stdout), run a separate summarization LLM call with a small, cheap model (GPT-4o-mini, ~$0.00015/K tokens) before passing the result to the Orchestrator.
+**Truncate and summarize observations.** Cap observations at 2,000-3,000 characters. For large outputs (HTML pages, code stdout), run a separate summarization LLM call with a small, cheap model (gpt-6-luna, $0.0001/K input tokens) before passing the result to the Orchestrator.
 
 **Run ComputerTerminal and Coder in Docker.** Provide no host mounts, no root privileges, and an egress-only network policy. Log every command and its exit code. Fail-safe: if a command exits with code other than 0, pass the stderr back to the Orchestrator rather than retrying silently.
 
@@ -1137,7 +1137,7 @@ State persistence via `save_state()` and `load_state()`, checkpointed at step bo
 
 **Test agents in isolation before assembling the team.** Each specialist (WebSurfer, Coder, FileSurfer) should have its own unit tests with mock observations. Only integration-test the full Orchestrator + specialists once each agent is individually validated.
 
-**Version-pin your agent prompts.** System prompts are code. Store them in version control with the same discipline as source code. Include the model name and date in comments. A GPT-4o model upgrade can change agent behavior without changing your prompt.
+**Version-pin your agent prompts.** System prompts are code. Store them in version control with the same discipline as source code. Include the model name and date in comments. A provider model upgrade can change agent behavior without changing your prompt.
 
 ---
 
@@ -1231,7 +1231,7 @@ barely matters.
 | `input_tokens` | Everything in the prompt: ledger, instructions, last observation |
 | `output_tokens` | What the model generates. Priced 4x higher |
 | `Calls` | How many times that component ran. Multiplies both token columns |
-| `$2.50/1M`, `$10.00/1M` | GPT-4o API list pricing (August 2024 snapshot tier, still current July 2026) |
+| `$2.50/1M`, `$10.00/1M` | GPT-4o API list pricing; GPT-4o was deprecated 2026-10-14 and shuts down 2027-01-14, so re-price on gpt-6.2-sol ($2/$10) before reusing these numbers |
 
 **Walk one example.** Every row, rebuilt from scratch:
 

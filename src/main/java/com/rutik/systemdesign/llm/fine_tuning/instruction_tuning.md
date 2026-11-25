@@ -647,6 +647,31 @@ Fix: Balance response length distribution: include long detailed responses (>500
 Multi-turn conversation data requires correct turn-boundary handling: each turn should mask prior turns appropriately in labels.
 Fix: Use `apply_chat_template` with `tokenize=False` to format multi-turn conversations; then re-tokenize and apply masking consistently. TRL's SFTTrainer handles this when the dataset contains properly formatted chat templates.
 
+**Pitfall 2 in code — mask the prompt out of the loss:**
+
+```python
+IGNORE_INDEX = -100
+
+
+# BROKEN: labels copy input_ids, so the loss also trains the model to predict the prompt
+def build_example(tokenizer, prompt: str, response: str) -> dict:
+    ids = tokenizer(prompt + response, add_special_tokens=False)["input_ids"]
+    return {"input_ids": ids, "labels": list(ids)}
+
+
+# FIX: label every prompt token -100 so only response tokens contribute to the loss
+def build_example(tokenizer, prompt: str, response: str) -> dict:
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    response_ids = tokenizer(response + tokenizer.eos_token, add_special_tokens=False)["input_ids"]
+    ids = prompt_ids + response_ids
+    labels = [IGNORE_INDEX] * len(prompt_ids) + response_ids
+    assert len(ids) == len(labels)
+    return {"input_ids": ids, "labels": labels}
+```
+
+`prompt` here is the fully templated prompt (pitfall 1): build it with the same
+`apply_chat_template` call that inference uses.
+
 ---
 
 ## 11. Technologies & Tools

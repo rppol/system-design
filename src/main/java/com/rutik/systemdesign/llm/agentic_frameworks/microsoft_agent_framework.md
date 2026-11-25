@@ -4,13 +4,15 @@
 
 ## 1. Concept Overview
 
-Microsoft Agent Framework (AF) is Microsoft's unified SDK for building AI agents and multi-agent systems in Python and .NET. It is not a new framework competing with [AutoGen](autogen.md) and [Semantic Kernel](semantic_kernel.md) — it is their formal merger. Microsoft's own words: "Semantic Kernel and AutoGen pioneered the concepts of AI agents and multi-agent orchestration. The Agent Framework is the direct successor, created by the same teams... In short, Agent Framework is the next generation of both Semantic Kernel and AutoGen." One codebase now carries AutoGen's simple conversational-agent ergonomics, Semantic Kernel's enterprise plumbing (typed state, filters, telemetry, DI-friendly composition), and a new graph-based `Workflow` engine for explicit multi-agent orchestration.
+Microsoft Agent Framework (AF) is Microsoft's unified SDK for building AI agents and multi-agent systems in Python and .NET, with a Go SDK in public preview. It is not a new framework competing with [AutoGen](autogen.md) and [Semantic Kernel](semantic_kernel.md) — it is their formal merger. Microsoft's own words: "Semantic Kernel and AutoGen pioneered the concepts of AI agents and multi-agent orchestration. The Agent Framework is the direct successor, created by the same teams... In short, Agent Framework is the next generation of both Semantic Kernel and AutoGen." One codebase now carries AutoGen's simple conversational-agent ergonomics, Semantic Kernel's enterprise plumbing (typed state, filters, telemetry, DI-friendly composition), and a new graph-based `Workflow` engine for explicit multi-agent orchestration.
 
 Public preview shipped 2025-10-01 (first PyPI beta `1.0.0b251001`, announced the same day at Microsoft's Foundry devblog). The framework reached **1.0 general availability on 2026-04-03**. Between preview and GA the Python surface went through one framework-defining break: in February 2026 the core agent classes were renamed wholesale, with **no backward-compatibility aliases** — `ChatAgent` became `Agent`, `AgentThread` became `AgentSession`, and several other names changed alongside them (full table in §6 and §10). Any code, tutorial, or blog post predating that rename imports names that no longer exist. This file uses only the post-rename, current API.
 
+Microsoft's overview (updated 2026-10-28) now groups the framework into four areas: **Agents** (an LLM plus tools and MCP servers, with providers including Microsoft Foundry, Azure OpenAI, OpenAI, Anthropic and Ollama), the **Harness Agent** (an opinionated, batteries-included agent for long multi-step tasks: planning and todo tracking, context compaction, file access and memory, don't-ask-again tool approval, and observability, composed from the same chat client and pipeline building blocks rather than a separate runtime), **Workflows** (functional and graph-based), and **Integrations**. The Go SDK supports the harness, bounded looping, planning and todos, RAG, chat-history memory and vector stores, but not declarative agents, CodeAct or functional workflows. Reach for the Harness Agent before hand-building a long-running coding or research loop; reach for a graph `Workflow` when the control flow itself must be explicit and auditable.
+
 For the two source lineages this file replaces, read [AutoGen](autogen.md) §1-2 and [Semantic Kernel](semantic_kernel.md) §1-2 — both now document their frameworks as lineage with a successor pointer here, and this file does not restate their history. See also [LangGraph](langgraph.md) for the closest cross-vendor analog to AF's `Workflow` engine, and [Framework Observability](framework_observability.md) for the OpenTelemetry patterns AF implements natively.
 
-**Current version**: `agent-framework` 1.22.0 on PyPI (2026-10-15); `Microsoft.Agents.AI` and `Microsoft.Agents.AI.Workflows` 1.25.0 on NuGet (2026-10-14)
+**Current version**: `agent-framework` 1.26.0 on PyPI; `Microsoft.Agents.AI` 1.28.0 on NuGet (both checked 2026-11-25); `github.com/microsoft/agent-framework-go` in public preview (requires Go 1.26+)
 **Production adoption signal**: The SDK underlying Microsoft Foundry Agent Service; AutoGen's own README now calls Agent Framework "the enterprise-ready successor to AutoGen." Microsoft states Semantic Kernel 1.x support continues at least one year past GA (into roughly April 2027), while AutoGen is explicitly in community-managed maintenance mode — the two predecessor frameworks are not being deprecated on the same timeline, which shapes migration urgency differently for each.
 
 ---
@@ -217,7 +219,7 @@ def get_weather(location: str) -> str:
     """Get weather for a location."""
     return f"Weather in {location}: sunny"
 
-client = OpenAIChatClient(model="gpt-5")
+client = OpenAIChatClient(model="gpt-6.1-sol")
 agent = Agent(name="assistant", client=client, tools=[get_weather])
 
 result = await agent.run("What's the weather?")
@@ -390,7 +392,7 @@ import pytest
 
 @pytest.mark.integration
 async def test_weather_agent_real_client():
-    agent = Agent(name="assistant", client=OpenAIChatClient(model="gpt-5-mini"), tools=[get_weather])
+    agent = Agent(name="assistant", client=OpenAIChatClient(model="gpt-6.1-terra"), tools=[get_weather])
     result = await agent.run("What's the weather in NYC?")
     assert result.text  # non-empty; do not assert exact wording against a live model
 ```
@@ -419,7 +421,7 @@ Because `Agent` is built around a swappable `client=` object (§3), the same sea
 
 ### AF vs. Other Agent Frameworks (PyPI versions as of 2026-10-18)
 
-| Dimension | Microsoft Agent Framework 1.22.0 | [LangGraph](langgraph.md) 1.2.16 | [OpenAI Agents SDK](openai_agents_sdk.md) `openai-agents` 0.24.0 | [Google ADK](google_adk.md) `google-adk` 2.12.0 | CrewAI `crewai` 1.15.28 |
+| Dimension | Microsoft Agent Framework 1.26.0 | [LangGraph](langgraph.md) 1.2.24 | [OpenAI Agents SDK](openai_agents_sdk.md) `openai-agents` 0.26.0 | [Google ADK](google_adk.md) `google-adk` 2.15.1 | CrewAI `crewai` 1.15.45 |
 |---|---|---|---|---|---|
 | Language surfaces | Python + .NET (not yet fully symmetric) | Python (+ JS) | Python (+ TS) | Python (+ Java) | Python |
 | Orchestration model | Typed data-flow `Workflow` + 5 named builders | Cyclic `StateGraph`, explicit edges | Handoffs between agents-as-tools | `AgentTool` delegation, A2A-native | Role/task delegation (Crew) |
@@ -467,7 +469,7 @@ Read the two tables together, not separately: the first table's "Lock-in" row an
 | Does it lean on `GraphFlow`, custom actor-runtime coordination, or SK planners making runtime routing decisions? | Budget real redesign time for the `Workflow` rewrite and the static-typing constraint (see §10 Pitfall 6, §14) |
 | Is it on AutoGen? | Treat migration as the higher-priority of the two — community maintenance mode has a harder ceiling than SK's supported window |
 | Is it on Semantic Kernel? | Plan the move, but there is no fire drill — SK support runs to roughly April 2027 |
-| Does the team need a stable API today more than the newest capability? | Wait a few more minor releases past 1.22.0, or stay on the current predecessor a while longer |
+| Does the team need a stable API today more than the newest capability? | Wait a few more minor releases past 1.26.0, or stay on the current predecessor a while longer |
 
 None of these rows are exclusive-or decisions — a team can, for instance, be on Semantic Kernel with genuinely `GraphFlow`-shaped coordination needs and land in both the "no fire drill" row and the "budget real redesign time" row simultaneously; read the checklist as independent axes to weigh, not a single branch to follow to one conclusion.
 
@@ -483,7 +485,7 @@ None of these rows are exclusive-or decisions — a team can, for instance, be o
 from agent_framework import ChatAgent, AgentThread
 from agent_framework.openai import OpenAIChatClient
 
-client = OpenAIChatClient(model="gpt-4o")
+client = OpenAIChatClient(model="gpt-6.1-sol")
 agent = ChatAgent(chat_client=client, instructions="You are helpful.")
 thread = agent.get_new_thread()
 result = agent.run_stream("Hello", thread=thread)
@@ -495,7 +497,7 @@ result = agent.run_stream("Hello", thread=thread)
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 
-client = OpenAIChatClient(model="gpt-5")
+client = OpenAIChatClient(model="gpt-6.1-sol")
 agent = Agent(client=client, instructions="You are helpful.")
 session = agent.create_session()
 async for chunk in agent.run("Hello", session=session, stream=True):
@@ -546,14 +548,14 @@ Two Azure-facing PyPI packages currently coexist: `agent-framework-foundry` (the
 
 ## 11. Technologies & Tools
 
-| Package | Registry | Version (2026-10-18) | Purpose |
+| Package | Registry | Version | Purpose |
 |---|---|---|---|
-| `agent-framework` | PyPI | 1.22.0 (2026-10-15) | Bundles `agent-framework-core`; the main Python entry point |
+| `agent-framework` | PyPI | 1.26.0 (checked 2026-11-25) | Bundles `agent-framework-core`; the main Python entry point |
 | `agent-framework-foundry` | PyPI | tracks `agent-framework` | Microsoft Foundry integration (`FoundryChatClient`, etc.) |
 | `agent-framework-azure-ai` | PyPI | 1.0.0rc6 (2026-03-30) | Azure AI integration; coexists with `agent-framework-foundry` — which is canonical going forward is not yet disambiguated in Microsoft's own docs |
 | `agent-framework-copilotstudio` | PyPI | preview, install with `--pre` | Microsoft Copilot Studio integration |
-| `Microsoft.Agents.AI` | NuGet | 1.25.0 (2026-10-14) | .NET core agent abstractions (`AIAgent`, `ChatClientAgent`) |
-| `Microsoft.Agents.AI.Workflows` | NuGet | 1.25.0 (2026-10-14) | .NET typed `Workflow` engine |
+| `Microsoft.Agents.AI` | NuGet | 1.28.0 (checked 2026-11-25) | .NET core agent abstractions (`AIAgent`, `ChatClientAgent`) |
+| `Microsoft.Agents.AI.Workflows` | NuGet | 1.28.0 (checked 2026-11-25) | .NET typed `Workflow` engine |
 | Microsoft Foundry Agent Service | Hosted platform | — | Managed hosting target for AF-built agents; MCP and A2A endpoint support |
 | OpenTelemetry | Instrumentation | GenAI semantic conventions | Native spans/logs/metrics; `ENABLE_INSTRUMENTATION` / `ENABLE_SENSITIVE_DATA` env vars |
 | MCP | Protocol | — | First-class server/client support for tool interoperability |
@@ -566,9 +568,9 @@ Two Azure-facing PyPI packages currently coexist: `agent-framework-foundry` (the
 | 2025-10-01 | Public preview; first PyPI beta `1.0.0b251001` |
 | ~2026-02 | Python API rename (`ChatAgent` -> `Agent`, etc.); no backward-compatibility aliases |
 | 2026-04-03 | 1.0 general availability, stated as direct successor to AutoGen and Semantic Kernel |
-| 2026-10-15 | Current releases: `agent-framework` 1.22.0 (PyPI); `Microsoft.Agents.AI[.Workflows]` 1.25.0 (NuGet, 2026-10-14) |
+| 2026-11-25 | Current releases: `agent-framework` 1.26.0 (PyPI); `Microsoft.Agents.AI[.Workflows]` 1.28.0 (NuGet); Go SDK in public preview |
 
-The gap between GA and the current minor version (1.0 on 2026-04-03 to 1.22 on 2026-10-15) is itself a signal worth reading alongside §9's "API stability today" caveat — this is still a framework shipping meaningful minor-version changes at a fast cadence, not one that has settled into a slow maintenance rhythm.
+The gap between GA and the current minor version (1.0 on 2026-04-03 to 1.26 by 2026-11-25) is itself a signal worth reading alongside §9's "API stability today" caveat — this is still a framework shipping meaningful minor-version changes at a fast cadence, not one that has settled into a slow maintenance rhythm.
 
 ---
 

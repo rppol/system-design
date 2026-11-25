@@ -763,7 +763,7 @@ def generate_answer(query: str, chunks: list[dict]) -> str:
         for c in chunks
     ])
     response = openai_client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-6.2-sol",
         messages=[
             {"role": "system", "content": (
                 "You are a customer support assistant. Answer using only "

@@ -29,9 +29,9 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 - **Three message types**: request (id, expects response), response (echoes id), notification (no id, no response).
 - **Stdio framing**: newline-delimited JSON-RPC over stdin/stdout; messages must not contain embedded newlines, and stdout carries nothing but MCP messages.
 - **HTTP framing**: one POST per message; response may be JSON or an SSE stream.
-- **Bidirectional**: server can send requests too (e.g., `sampling/createMessage`, `elicitation/create`).
+- **Server-to-client traffic**: under `2025-11-25` the server could send requests too (e.g., `sampling/createMessage`, `elicitation/create`); the current `2026-07-28` revision replaces those with Multi Round-Trip Requests, and only notifications still flow server-to-client.
 - **Ordered delivery, unordered completion**: a single stdio or HTTP stream delivers messages in the order written, but the spec requires no in-order *processing* — a receiver may work on requests concurrently and reply out of order, which is exactly why every request carries an `id`.
-- **Lifecycle hygiene**: initialize → operate → close the transport. There is no `shutdown` message; `ping` is the keepalive.
+- **Lifecycle hygiene**: under `2026-07-28`, optional `server/discover` → self-contained requests → close the transport (under `2025-11-25`, `initialize` first, with `ping` as the keepalive). There is no `shutdown` message.
 
 ---
 
@@ -628,8 +628,8 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 ## 12. Interview Questions with Answers
 
 **Q: What's the difference between a request and a notification in JSON-RPC?**
-**Short:** A request carries an id and expects a matching response; a notification has no id and gets no response at all.
-Requests have an `id` field; the receiver MUST send a response with the same id. Notifications have no `id`; no response expected. The MCP `notifications/initialized` message is a notification (no id, no response). Mixing them up causes deadlocks (one party waits forever).
+**Short:** A request carries an id and must get a response with that same id; a notification has no id and gets no response at all.
+Requests have an `id` field; the receiver MUST send a response with the same id. Notifications have no `id`; no response expected. MCP's `notifications/progress` and `notifications/resources/updated` are notifications (no id, no response). Mixing them up causes deadlocks (one party waits forever).
 
 **Q: Why does MCP use JSON-RPC 2.0 specifically?**
 **Short:** It is mature, simple, and language-agnostic with minimal machinery, though MCP drops batch arrays and forbids null ids from the base spec.
@@ -640,16 +640,16 @@ JSON-RPC 2.0 is mature (spec dated 2010), simple, language-agnostic, and models 
 Stdio for local tools (filesystem, local DB) — fastest, most secure, single-user per server. HTTP (Streamable HTTP) for shared cloud services, multi-tenant, requires network — adds 10-50ms RTT but enables scale.
 
 **Q: How does a Streamable HTTP server decide between a JSON response and an SSE stream?**
-**Short:** The server picks per request, so every client POST must accept both content types since the form isn't known until headers arrive.
-The server chooses per request: it may answer a POSTed JSON-RPC request with `Content-Type: application/json` (one object) or with `text/event-stream` (an SSE stream), and the client MUST support both. That is why every client POST must carry `Accept: application/json, text/event-stream` — you cannot know which form is coming until the response headers arrive, so the HTTP call has to be made in streaming mode. A POSTed notification or response is different: it gets HTTP 202 Accepted with no body. A separate client GET on the same endpoint opens a server-to-client SSE stream for server-initiated requests and notifications, or returns 405 if the server offers none.
+**Short:** The server picks per request, so every client POST must accept both JSON and SSE, because the form is not known until the response headers arrive.
+The server chooses per request: it may answer a POSTed JSON-RPC request with `Content-Type: application/json` (one object) or with `text/event-stream` (an SSE stream), and the client MUST support both. That is why every client POST must carry `Accept: application/json, text/event-stream` — you cannot know which form is coming until the response headers arrive, so the HTTP call has to be made in streaming mode. A POSTed notification or response is different: it gets HTTP 202 Accepted with no body. Under the current `2026-07-28` revision there is no separate GET stream: change notifications the client opted into arrive on the response stream of one long-lived `subscriptions/listen` POST. The `2025-11-25` revision used a client GET on the same endpoint for that, returning 405 if the server offered none.
 
 **Q: What's the role of the `MCP-Session-Id` header?**
 **Short:** Under 2025-11-25 it let a stateful Streamable HTTP server route requests to the right session; the current 2026-07-28 revision removed it.
 Under the still-widely-deployed `2025-11-25` revision, this header was for stateful sessions over Streamable HTTP: the server could return `MCP-Session-Id` on the response carrying `InitializeResult`, and if it did, the client had to echo it on every subsequent request so the server could route to the right session state (e.g., conversation memory). Two related rules applied: a server that had expired the session answered with HTTP 404, and the client had to re-initialize without a session id; a client leaving for good sent an HTTP DELETE with the header. The current `2026-07-28` revision removed this header along with the protocol-level session entirely — every request is now self-contained, so there is nothing left to route by session id.
 
-**Q: How does the ping keepalive work?**
-**Short:** Either side sends a ping and expects a prompt empty result back, with no fixed interval mandated, letting the sender detect a stale connection.
-Either party sends a `ping` request and the other MUST reply promptly with an empty `result: {}` — there is no `pong` method, the reply is just an ordinary empty JSON-RPC response. A missed reply lets the sender treat the connection as stale and reconnect. The spec sets no default interval: it says the frequency should be configurable and that excessive pinging should be avoided, so any "every 30s" figure is an implementation choice, not a protocol rule. Most SDKs handle this automatically; it only matters when you implement the transport yourself.
+**Q: Does MCP still have a ping keepalive?**
+**Short:** Not in 2026-07-28: `ping` was removed with the session, so liveness comes from per-request timeouts and, on HTTP, SSE comment heartbeats.
+No. The current `2026-07-28` revision removed the `ping` request together with the protocol-level session: with every request self-contained, there is no long-lived session whose health needs probing. A client detects a dead server the way any stateless RPC client does, with a per-request timeout and a retry as a new request with a new id. On a long-lived Streamable HTTP response stream (a slow tool call or a `subscriptions/listen` stream), keep intermediaries from cutting it with SSE comment lines (`: keepalive`) at about half your proxy's idle timeout. Servers still on `2025-11-25` answer `ping` with an empty `result: {}` (there is no `pong` method), so a client that also talks to older servers keeps that handler.
 
 **Q: What does the initialize handshake negotiate?**
 **Short:** Under 2025-11-25, protocol version and each side's optional capabilities, agreed once and then sent as an HTTP header on every later request.
@@ -672,20 +672,20 @@ No — the Streamable HTTP body MUST be exactly one request, notification, or re
 MCP forbids it: a request id MUST NOT have been used before by the same requestor in that session. MCP also tightens base JSON-RPC by disallowing a `null` id and requiring a string or integer. In practice a reused id means the response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
 
 **Q: Can the server send requests to the client?**
-**Short:** Yes -- communication is bidirectional, with `sampling/createMessage` as the main case of the server asking the client to call its own LLM.
-Yes — bidirectional. The main use case is `sampling/createMessage` (server asks client to call its LLM). Notifications can also flow both ways. JSON-RPC supports this naturally; clients must be prepared to receive and handle.
+**Short:** Not in 2026-07-28: the server returns `resultType: input_required` and the client retries with `inputResponses` (MRTR); Sampling itself is deprecated.
+Not under the current `2026-07-28` revision. Multi Round-Trip Requests (MRTR) replace server-initiated requests such as `roots/list`, `sampling/createMessage` and `elicitation/create`: when a server needs more input, it returns an `InputRequiredResult` (`resultType: "input_required"`) whose `inputRequests` describe what it needs, plus an opaque `requestState`; the client gathers the answers and retries the original request with `inputResponses` and the echoed state. Sampling and Roots are also deprecated in that revision, so in new code the input request is almost always an elicitation. Notifications still flow server-to-client, on the response stream of the request they relate to or on a `subscriptions/listen` stream. Under `2025-11-25`, servers did send JSON-RPC requests to the client, so a client that supports both revisions keeps those handlers.
 
 **Q: Why must stdio MCP servers log to stderr only?**
 **Short:** Stdout carries the JSON-RPC channel, so any non-JSON text written there breaks the client's parser.
 Stdout is the JSON-RPC channel; any non-JSON output breaks the parser. Stderr is for diagnostics/logs and is read separately (or not at all) by the client. All MCP SDK implementations set up logging to stderr by default; custom implementations must do the same.
 
 **Q: How does graceful shutdown work?**
-**Short:** MCP defines no shutdown message at all, so termination is signaled purely by closing the transport, with SIGTERM/SIGKILL as the stdio fallback.
-MCP defines no shutdown or exit message — termination is signalled entirely by the transport, unlike LSP where `shutdown`/`exit` are real requests. For stdio the client closes the server's stdin, waits for the process to exit, then sends SIGTERM and finally SIGKILL if it does not. For HTTP the client closes the connection, and if the server issued an `MCP-Session-Id` it should also send an HTTP DELETE to the MCP endpoint with that header (the server may answer 405 if it does not allow client-initiated session termination). Servers therefore cannot rely on a farewell message and need idle timeouts to reclaim state.
+**Short:** MCP has no shutdown message: the client closes the transport, with SIGTERM then SIGKILL as the stdio fallback, and servers reclaim state on idle timeouts.
+MCP defines no shutdown or exit message — termination is signalled entirely by the transport, unlike LSP where `shutdown`/`exit` are real requests. For stdio the client closes the server's stdin, waits for the process to exit, then sends SIGTERM and finally SIGKILL if it does not. For HTTP the client simply stops sending requests and closes the connection; under `2026-07-28` there is no session to delete. (Against a `2025-11-25` server that issued an `MCP-Session-Id`, the client also sends an HTTP DELETE with that header, which the server may answer with 405.) Servers therefore cannot rely on a farewell message and need idle timeouts to reclaim any state they keep.
 
 **Q: What error codes does JSON-RPC define?**
-**Short:** The standard -32700 to -32603 range plus MCP's own -32002 for resource-not-found, while tool execution failures skip error codes entirely.
--32700 Parse error, -32600 Invalid Request, -32601 Method not found, -32602 Invalid params, -32603 Internal error, and -32000 to -32099 for application-defined server errors. On top of these MCP defines -32002 for "Resource not found". Note that tool *execution* failures do not use error codes at all: they come back as a normal result with `isError: true` so the model can self-correct.
+**Short:** The standard -32700 to -32603 codes; MCP 2026-07-28 uses -32602 for resource-not-found and reserves -32020 to -32099, while tool failures use `isError: true`.
+-32700 Parse error, -32600 Invalid Request, -32601 Method not found, -32602 Invalid params, -32603 Internal error, and -32000 to -32099 for server errors. The current `2026-07-28` MCP revision partitions that server range: -32000 to -32019 stays implementation-defined, and -32020 to -32099 is reserved for the MCP specification (`HeaderMismatch` -32020, `MissingRequiredClientCapability` -32021, `UnsupportedProtocolVersion` -32022). Resource-not-found is now -32602 Invalid params; servers still on `2025-11-25` return -32002 for it, so a client talking to both must accept either. Tool *execution* failures do not use error codes at all: they come back as a normal result with `isError: true` so the model can self-correct.
 
 **Q: How do you debug JSON-RPC traffic?**
 **Short:** Use MCP Inspector interactively, log timestamped messages in your own client, or intercept the pipe or HTTP layer with a proxy tool.

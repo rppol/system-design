@@ -1186,14 +1186,16 @@ Is this action directly consistent with what the user asked for?
 Answer JSON: {{"consistent": true/false, "confidence": 0.0-1.0, "reason": "..."}}"""
 
     response = await client.messages.create(
-        model="claude-haiku-4-5",   # fast, cheap consistency check
-        max_tokens=200,
+        model="claude-haiku-5-5",   # fast, cheap consistency check
+        max_tokens=1024,            # headroom: adaptive thinking shares this budget
+        output_config={"effort": "low"},
         messages=[{"role": "user", "content": check_prompt}],
     )
 
     import json
     try:
-        data = json.loads(response.content[0].text)
+        text = next(b.text for b in response.content if b.type == "text")
+        data = json.loads(text)
         consistent = bool(data.get("consistent", True))
         confidence = float(data.get("confidence", 0.5))
         reason = data.get("reason", "")

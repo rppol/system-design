@@ -232,10 +232,11 @@ most common way this benchmark gets misreported.
 
 Verified is NOT saturated in the mid-90s. Treat any such figure as an
 unattributed aggregator number until you can point at the submission behind it;
-the official leaderboard's own top entry is still under 80%. What IS true in 2026
-is that labs have begun reporting other coding benchmarks instead -- Anthropic's
-Claude Opus 5 launch reports Frontier-Bench and CursorBench and no SWE-bench
-Verified score at all.
+the official leaderboard's top entry was under 80%. What IS true in 2026 is
+that Verified stopped being a frontier metric: on 2026-02-23 OpenAI stopped
+reporting it (state of the art it cited: 80.9%), finding flawed tests on many
+hard tasks and gold patches memorized from training, and recommended SWE-bench
+Pro instead.
 
 Scaffold matters as much as the model: the same weights score very differently
 under different agent harnesses -- the 76.2 -> 81.42 gap above is 5 points bought

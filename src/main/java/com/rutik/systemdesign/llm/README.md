@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **55 topic directories** plus **30 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (80 module sub-files plus 10 cross-cutting case study sub-files, listed in the Sub-Files Index below):
+This section is organized into **55 topic directories** plus **30 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (80 module sub-files plus the cross-cutting case study sub-files — 9 content files and the `cross_cutting.md` index — listed in the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -406,7 +406,7 @@ context_engineering
 reasoning_models
   reasoning_models.md  senior, principal
 code_generation
-  code_generation.md  -
+  code_generation.md  senior
 agents_and_tool_use
   agents_and_tool_use.md                senior, principal
   function_calling_and_tool_design.md   senior
@@ -429,7 +429,7 @@ agents_and_tool_use
 agentic_workflow_patterns
   agentic_workflow_patterns.md  senior, principal
 agentic_frameworks
-  agentic_frameworks.md                 principal
+  agentic_frameworks.md                 senior, principal
   autogen.md                            -
   claude_agent_sdk.md                   -
   crewai.md                             -
@@ -437,8 +437,8 @@ agentic_frameworks
   framework_observability.md            -
   google_adk.md                         -
   haystack.md                           -
-  langchain_and_lcel.md                 -
-  langgraph.md                          -
+  langchain_and_lcel.md                 senior
+  langgraph.md                          senior
   litellm_routing.md                    -
   llamaindex.md                         -
   mastra_typescript.md                  -
@@ -447,7 +447,7 @@ agentic_frameworks
   semantic_kernel.md                    -
   smolagents.md                         -
   strands_aws.md                        -
-  structured_outputs_and_instructor.md  -
+  structured_outputs_and_instructor.md  senior
   microsoft_agent_framework.md  -
 multi_agent_systems
   multi_agent_systems.md              senior, principal
@@ -467,7 +467,7 @@ mcp_model_context_protocol
   mcp_registries_and_ecosystem.md  principal
   mcp_client_patterns.md           -
 coding_agents
-  coding_agents.md  -
+  coding_agents.md  senior
 voice_agents
   voice_agents.md  -
 browser_agents_deep_dive
@@ -590,7 +590,7 @@ mechanistic interpretability), breadth (multimodal, edge SLMs, ecosystem, regula
 specialized agent type. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (32 modules)
+### Senior Path (35 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -606,10 +606,13 @@ specialized agent type. Nothing is dropped.
 | 13 | [advanced_rag](advanced_rag/advanced_rag.md) | 5 files |
 | 14 | [context_engineering](context_engineering/context_engineering.md) | module page only |
 | 15 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
+| 16 | [code_generation](code_generation/code_generation.md) | module page only |
 | 17 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 13 files |
 | 18 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
+| 19 | [agentic_frameworks](agentic_frameworks/agentic_frameworks.md) | 4 files |
 | 20 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 3 files |
 | 21 | [mcp_model_context_protocol](mcp_model_context_protocol/mcp_model_context_protocol.md) | 4 files |
+| 22 | [coding_agents](coding_agents/coding_agents.md) | module page only |
 | 25 | [inference_and_decoding](inference_and_decoding/inference_and_decoding.md) | 5 files |
 | 26 | [context_windows_and_long_context](context_windows_and_long_context/context_windows_and_long_context.md) | module page only |
 | 27 | [inference_engines](inference_engines/inference_engines.md) | module page only |
@@ -627,7 +630,7 @@ specialized agent type. Nothing is dropped.
 | 44 | [llm_security](llm_security/llm_security.md) | 3 files |
 | 50 | [mixture_of_experts](mixture_of_experts/mixture_of_experts.md) | module page only |
 
-**Not in this path** (23 of 55, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `code_generation`, `agentic_frameworks`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `applied_ai_product_decisions`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
+**Not in this path** (20 of 55, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `applied_ai_product_decisions`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
@@ -640,17 +643,17 @@ why it earns senior time.
 | Foundations | "Explain self-attention", scaling laws, BPE, HNSW — the guaranteed openers |
 | Training | LoRA/QLoRA and RLHF-vs-DPO-vs-GRPO are the two most-asked training topics |
 | Using LLMs | RAG design and "RAG vs fine-tune vs long context" are near-universal; o1/R1 test-time compute is current |
-| Agents | Function calling / ReAct mechanics, the Anthropic workflow taxonomy, and MCP are hot |
+| Agents | Function calling / ReAct mechanics, the Anthropic workflow taxonomy, MCP, LangGraph/LCEL and structured outputs are hot; coding agents and code generation are the most-asked agent application |
 | Serving | KV cache, speculative decoding, RoPE/YaRN, PagedAttention, GPTQ/AWQ/FP8 — the systems core |
 | Operate | "Cut serving cost 10x" is a staple system-design ask |
 | Quality & Safety | LLM-as-judge pitfalls, error analysis and failure taxonomies, prompt injection defense, hallucination mitigation |
 | Architecture | MoE training/serving tradeoffs come up whenever frontier models are discussed |
 
-infrastructure, synthetic data, Constitutional AI, code generation, agentic frameworks, coding/voice/
+infrastructure, synthetic data, Constitutional AI, the remaining agentic-framework surveys, voice/
 browser agents, distillation & merging, observability, LLMOps platforms, PromptOps, mechanistic
 interpretability, AI regulations, multimodal & vision-language models, VLA & robotics, small/edge models,
 diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A niche flagged in an interview
-(e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 30 above are solid.
+(e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 35 above are solid.
 
 <!-- study-path-table principal -->
 ### Principal Path (31 modules)
@@ -802,7 +805,7 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | Context length | Long context | RAG | Latency vs. accuracy |
 | Inference engine | vLLM (throughput) | llama.cpp (edge) | Deployment target |
 | Quantization | INT4 (2x faster) | FP16 (better quality) | Quality vs. speed |
-| Sampling | Temperature > 0 (creative) | Temperature = 0 (deterministic) | Task type |
+| Sampling | Temperature > 0 (creative) | Temperature = 0 (greedy, not reproducible; rejected by some current models) | Task type |
 | Guardrails | Pre-LLM filter | Post-LLM filter | Latency sensitivity |
 | Model routing | Single model | Multi-model routing | Cost vs. complexity |
 | Tool integration | Native function calling | MCP protocol | Portability vs. simplicity |

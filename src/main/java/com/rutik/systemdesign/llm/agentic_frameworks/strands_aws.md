@@ -8,6 +8,8 @@ AWS Strands Agents (Apache 2.0, 2025) is AWS's open-source agent SDK with first-
 
 Strands distinguishes itself with: (a) deep Bedrock integration (Claude, Nova, Titan, Llama via Bedrock with no extra setup), (b) `agent_as_tool` pattern for multi-agent composition, (c) built-in observability via OpenTelemetry to CloudWatch/X-Ray/Honeycomb, (d) zero framework cost (you pay only Bedrock API). For teams already on AWS, Strands is the path of least resistance.
 
+**Current version**: strands-agents 1.66.0 (PyPI, checked 2026-11-25).
+
 ---
 
 ## 2. Intuition
@@ -371,8 +373,8 @@ BedrockModel auto-retries on `ThrottlingException` with exponential backoff. For
 Use a conversation manager — Strands ships a sliding-window conversation manager that truncates the oldest turns once history exceeds a configured size, preserving the system prompt and recent turns. Without it, a long-running agent accumulates every tool result in history; a single large tool output (like the 50 KB document cap in `get_document` above) then gets re-sent as input tokens on every subsequent turn, inflating both latency and cost since Bedrock bills the full input each call. Truncate or summarize bulky tool results at the tool boundary, and cap history length before the model caps it for you.
 
 **Q: Is Strands actively developed?**
-**Short:** Yes. Strands Agents 1.0 shipped on July 15, 2025, and `strands-agents` on PyPI reached 1.61.1 on 2026-10-15.
-Yes. AWS announced Strands Agents 1.0 as production-ready on July 15, 2025, together with native multi-agent primitives, and the package has shipped regular releases since then (`strands-agents` 1.61.1 on PyPI, 2026-10-15). It is production-stable, not a preview; several AWS internal teams (Amazon Q Developer, AWS Glue) already run it in production. Still pin an exact version: the API keeps adding features after 1.0.
+**Short:** Yes. Strands Agents 1.0 shipped on July 15, 2025, and `strands-agents` on PyPI was at 1.66.0 on 2026-11-25.
+Yes. AWS announced Strands Agents 1.0 as production-ready on July 15, 2025, together with native multi-agent primitives, and the package has shipped regular releases since then (`strands-agents` 1.66.0 on PyPI as of 2026-11-25). It is production-stable, not a preview; several AWS internal teams (Amazon Q Developer, AWS Glue) already run it in production. Still pin an exact version: the API keeps adding features after 1.0.
 
 ---
 

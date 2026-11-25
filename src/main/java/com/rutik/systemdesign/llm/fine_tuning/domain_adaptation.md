@@ -703,6 +703,28 @@ Fix: Include diverse domain task types: Q&A, summarization, entity extraction, c
 [LoRA](lora.md) is highly effective for preventing forgetting during instruction tuning (frozen base weights). For CPT, LoRA is less effective because shallow adapter matrices can't capture the deep knowledge changes needed for significant domain shifts.
 Fix: For CPT, use either full fine-tuning with data mixing, or high-rank LoRA (r=64 to r=128) if memory is constrained. For instruction tuning, standard r=16 LoRA is appropriate.
 
+**Pitfalls 1 and 2 in code — replay general data and lower the learning rate:**
+
+```python
+from datasets import interleave_datasets, load_dataset
+
+domain = load_dataset("json", data_files="legal_corpus.jsonl", split="train")
+
+# BROKEN: 100% domain text at the original pre-training learning rate
+train_set = domain
+learning_rate = 3e-4  # overwrites general representations fast
+
+# FIX: replay ~20% general-domain text and use the 5e-5 to 1e-4 CPT range
+general = load_dataset("json", data_files="general_replay.jsonl", split="train")  # C4/Pile-style sample
+train_set = interleave_datasets(
+    [domain, general], probabilities=[0.8, 0.2], seed=42, stopping_strategy="first_exhausted"
+)
+learning_rate = 5e-5
+```
+
+Run the general-capability eval from pitfall 4 before and after; the replay ratio is the knob to
+raise if it drops.
+
 ---
 
 ## 11. Technologies & Tools

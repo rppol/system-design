@@ -1,12 +1,12 @@
 # FAISS Deep Dive
 
-> **Version anchor (2026-10-19).** FAISS **1.15.1**: changelog dated 2026-09-15, GitHub release
-> and PyPI wheels 2026-09-16. **MIT licensed**, authored by Meta's Fundamental AI Research group
+> **Version anchor (2026-11-25).** FAISS **1.16.0**: changelog dated 2026-11-09, GitHub release
+> 2026-11-10, and `faiss-cpu`, `faiss-gpu` and `faiss-gpu-cuvs` all at 1.16.0 on PyPI. **MIT licensed**, authored by Meta's Fundamental AI Research group
 > (FAIR). Two papers define it: *Billion-scale similarity search with GPUs*
 > ([arXiv:1702.08734](https://arxiv.org/abs/1702.08734), 2017) and *The Faiss library*
 > ([arXiv:2401.08281](https://arxiv.org/abs/2401.08281), 2024) — read the second one, it is
 > the design document for everything below. Version-specific behaviour is tagged inline as
-> `[1.11.0]`, `[1.13.2]`, `[1.15.0]`; nothing here is described as current without naming the
+> `[1.11.0]`, `[1.15.0]`, `[1.16.0]`; nothing here is described as current without naming the
 > release it landed in.
 
 FAISS is a **library for similarity search over dense vectors**, not a service. You `pip
@@ -64,9 +64,9 @@ Four distributions exist and they are not interchangeable:
 
 | Distribution | Latest | Notes |
 |---|---|---|
-| `faiss-cpu` | **1.15.1** (2026-09-16) | The default. Requires **Python >= 3.10**; wheels through 3.14 |
-| `faiss-gpu` | **1.15.1** (2026-09-16) | Classic CUDA backend. Version list: 1.7.2 (Jan 2022) -> **1.14.3** (2026-06-12) -> 1.15.0 -> 1.15.1 |
-| `faiss-gpu-cuvs` | **1.15.1** (2026-09-16) | GPU backend delegating to NVIDIA cuVS, which is where `CAGRA` lives. Only 1.14.1.post1, 1.15.0 and 1.15.1 on PyPI; requires Python >= 3.11 and CUDA 13 |
+| `faiss-cpu` | **1.16.0** | The default. Requires **Python >= 3.10**; wheels through 3.14 |
+| `faiss-gpu` | **1.16.0** | Classic CUDA backend. Version list: 1.7.2 (Jan 2022) -> **1.14.3** (2026-06-12) -> 1.15.0 -> 1.15.1 -> 1.16.0 |
+| `faiss-gpu-cuvs` | **1.16.0** | GPU backend delegating to NVIDIA cuVS, which is where `CAGRA` lives (cuVS 26.10 from 1.16.0). Only 1.14.1.post1, 1.15.0, 1.15.1 and 1.16.0 on PyPI; requires Python >= 3.11 and CUDA 13 |
 | conda `pytorch/faiss-*` | tracks releases | The channel Meta has published continuously; the historical answer for GPU builds |
 
 **The five-year gap is worth understanding rather than working around.** Between January 2022
@@ -77,9 +77,9 @@ same one, with the same maintainer set (`facebook`, plus two FAIR engineers), au
 Meta AI Research; what changed is that Meta resumed publishing wheels, having spent the gap
 shipping GPU builds only through conda. The practical consequence for you: **pin the
 distribution, not just the version.** A `requirements.txt` that says `faiss-gpu` and resolves
-to 1.7.2 on one machine and 1.15.1 on another is two different libraries — 1.7.2 predates
+to 1.7.2 on one machine and 1.16.0 on another is two different libraries — 1.7.2 predates
 cuVS, RaBitQ, AVX-512 dispatch, and the mmap deserializers, and its index files are readable
-by 1.15.1 but not the reverse.
+by 1.16.0 but not the reverse.
 
 ### Feature landing points
 
@@ -98,6 +98,7 @@ Do not describe any of these as "FAISS supports X" without the version:
 | `faiss-gpu-cuvs` pip wheel packaging | `[1.14.3]` |
 | mmap I/O for Flat and static Vamana/SVS; **EDEN** quantizer; RISC-V RVV kernels | `[1.15.0]` |
 | cuVS dispatch opt-in (`use_cuvs` defaults to `False`); deterministic lock-free HNSW build as the only build; staged RaBitQ storage in HNSW; `IDSelectorWithContext` scan hook | `[1.15.1]` |
+| `remove_ids` on `IndexShards` and `IndexReplicas` (plus `add_with_ids` on `IndexReplicas`); **Metal** backend gains GPU `IVFPQ` search and `MetalIndexBinaryFlat`; `IndexPiPNN` graph index with `index_factory` support; `IndexSQFastScan` / `IndexIVFSQFastScan`; GPU IVF search returns the same neighbours on every run; cuVS 26.10 | `[1.16.0]` |
 
 For building, snapshotting, rebuilding, and rolling back FAISS and other vector indexes in production, see [RAG and Vector Index Lifecycle](../../mlops/rag_and_vector_index_lifecycle/rag_and_vector_index_lifecycle.md).
 
@@ -179,7 +180,7 @@ Roughly sixty index classes ship. These are the ones that appear in production c
 | `IndexRefineFlat` | Wraps | base + 3,072 | Delegates | No | Recover the recall a compressed base gave up |
 | `IndexIDMap` / `IndexIDMap2` | Wraps | base + 8 (or +16) | Yes, ids stable | Delegates | Give a sequential index your own ids |
 | `IndexPreTransform` | Wraps | base | Delegates | Delegates | Apply OPQ/PCA/L2norm before the base index |
-| `IndexShards` / `IndexReplicas` | Wraps | sum | Delegates | Yes | Multi-GPU, or splitting an index across processes |
+| `IndexShards` / `IndexReplicas` | Wraps | sum | Delegates `[1.16.0]` (not supported before) | Yes | Multi-GPU, or splitting an index across processes |
 
 Two rows deserve to be read twice. **`IndexHNSWFlat` cannot remove and cannot go on a GPU** —
 those two facts eliminate it from more designs than its recall wins it. And every `IndexIVF*`
@@ -318,6 +319,12 @@ The hard limits, all of which are compile-time facts rather than tunables:
 
 And the operational one: **`index_gpu_to_cpu()` before `write_index()`.** A GPU index is not
 serialisable.
+
+**Apple silicon is no longer CPU-only.** `[1.16.0]` grows FAISS's Metal backend: GPU-accelerated
+`IVFPQ` search, a `MetalIndexBinaryFlat` with GPU Hamming search and exact top-k, and the
+multi-GPU Python helpers working on Metal. Treat it as a development and edge path, not a drop-in
+for the CUDA list above: the limits in this table are documented for the CUDA backend, so measure
+recall and `k`/`nprobe` behaviour on Metal before you rely on it.
 
 ### 4.9 On-disk and memory-mapped shapes
 
@@ -1375,7 +1382,7 @@ or more, use the database, and use FAISS only in your eval harness.**
 
 ### 11.1 The library and its distributions
 
-- **FAISS** — the library itself: MIT licensed, C++ core with SWIG-generated Python bindings, maintained by Meta FAIR, pinned in this module at 1.15.1 and documented by the 2024 paper *The Faiss library*.
+- **FAISS** — the library itself: MIT licensed, C++ core with SWIG-generated Python bindings, maintained by Meta FAIR, pinned in this module at 1.16.0 and documented by the 2024 paper *The Faiss library*.
 - **Distributions:** **faiss-cpu**, **faiss-gpu**, **faiss-gpu-cuvs** — three separate PyPI projects, not extras of one. The CPU wheel needs Python 3.10+, the cuVS wheel needs Python 3.11+ and CUDA 13, and the classic GPU wheel has a five-year publishing gap between 1.7.2 and 1.14.3 that a loose version pin will happily resolve into.
 
 ### 11.2 The index classes you will actually type
@@ -1729,13 +1736,13 @@ same one from the embeddings module: normalise at index time and use
 and you have one less thing that can silently disagree.
 
 **Q: faiss-cpu, faiss-gpu, faiss-gpu-cuvs — how do you choose, and what is the packaging trap?**
-**Short:** They are three separate PyPI projects, and faiss-gpu's version list jumps from 1.7.2 in 2022 straight to 1.14.3 in 2026.
+**Short:** Three separate PyPI projects (all at 1.16.0 now), and faiss-gpu's version list jumps from 1.7.2 in 2022 straight to 1.14.3 in 2026, so pin distribution and version.
 
 `faiss-cpu` is the default and needs Python 3.10+. `faiss-gpu` is the classic CUDA backend.
 `faiss-gpu-cuvs` delegates to NVIDIA's cuVS and is where `CAGRA` lives; it needs Python 3.11+
-and CUDA 13 and exists on PyPI only as 1.14.1.post1, 1.15.0 and 1.15.1. The trap is the five-year hole
+and CUDA 13 and exists on PyPI only as 1.14.1.post1, 1.15.0, 1.15.1 and 1.16.0. The trap is the five-year hole
 in `faiss-gpu`: between January 2022 and June 2026 Meta published GPU builds only through
-conda, so a loose `faiss-gpu` requirement can resolve to 1.7.2 on one machine and 1.15.1 on
+conda, so a loose `faiss-gpu` requirement can resolve to 1.7.2 on one machine and 1.16.0 on
 another — two libraries that differ by cuVS, RaBitQ, AVX-512 dispatch and the mmap
 deserializers. These are the official Meta-maintained projects, not community rebuilds, so the
 answer is to pin the exact distribution and version rather than to avoid them. A second trap:
@@ -1863,7 +1870,7 @@ share a coarse quantizer, which means one training run every shard started from.
 13. **Emit index age, index version, per-list skew and recall-on-a-golden-set as metrics.** A
     build job that silently stopped is otherwise invisible: every query still returns `k`
     results.
-14. **Pin the distribution and the version** (`faiss-cpu==1.15.1`, not `faiss-gpu`), and record
+14. **Pin the distribution and the version** (`faiss-cpu==1.16.0`, not `faiss-gpu`), and record
     the writing version alongside every index file.
 15. **Keep the source embeddings in durable storage.** The index can always be rebuilt from
     them; it can never be recovered from itself, and its file format has no compatibility

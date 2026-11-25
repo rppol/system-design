@@ -638,7 +638,7 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
                                 │
                                 v Step 2: Self-Instruct Pipeline
   ┌──────────────────────────────────────────────────────────────┐
-  │  Generator: GPT-4o                                           │
+  │  Generator: gpt-6.2-sol                                      │
   │  Method: Evol-Instruct (complexity evolution)                │
   │  Seed prompts → evolved prompts (3 rounds of evolution)      │
   │  Evolution types: (1) add constraints, (2) deepen reasoning, │
@@ -659,7 +659,7 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
   │     → remove 3,100                                          │
   │  3. Legal accuracy: Mistral-7B-Legal-Instruct scores each   │
   │     clause extraction → remove if score < 0.6 → -4,800      │
-  │  4. Instruction following: GPT-4o-mini judge checks if      │
+  │  4. Instruction following: gpt-6-luna judge checks if       │
   │     response follows prompt → remove if "no" → -6,200       │
   │  5. Diversity sampling: cluster by embedding, sample K=2    │
   │     per cluster → retain 52,000 diverse examples            │
@@ -877,9 +877,9 @@ async def score_pair_quality(
     response: str,
 ) -> QualityScore:
     """
-    Use Claude claude-haiku-4-5 as judge (fast, cheap) for quality scoring.
-    GPT-4o-mini as judge: $0.15/1M tokens; 100k pairs × ~500 tokens = $7.50 total.
-    Haiku: $0.25/1M input; 100k × 500 = $12.50 total. Acceptable.
+    Use claude-haiku-5-5 as judge (fast, cheap) for quality scoring.
+    100k pairs × ~500 input tokens = 50M tokens. At $0.10/1M input
+    (claude-haiku-5-5 under 100K-token prompts, or gpt-6-luna) that is $5.00. Acceptable.
     """
     judge_prompt = f"""Rate this legal instruction-tuning pair on three dimensions (0.0-1.0 each):
 
@@ -895,12 +895,14 @@ Return only JSON: {{"instruction_clarity": 0.0, "response_accuracy": 0.0, "instr
 
     try:
         resp = await client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=100,
+            model="claude-haiku-5-5",
+            max_tokens=1024,                   # headroom: adaptive thinking shares this budget
+            output_config={"effort": "low"},
             messages=[{"role": "user", "content": judge_prompt}],
         )
         import json
-        scores = json.loads(resp.content[0].text)
+        text = next(b.text for b in resp.content if b.type == "text")
+        scores = json.loads(text)
         clarity = float(scores.get("instruction_clarity", 0))
         accuracy = float(scores.get("response_accuracy", 0))
         following = float(scores.get("instruction_following", 0))
@@ -954,39 +956,39 @@ Block 3 — BROKEN -> FIX: data contamination and distribution mismatch:
 from __future__ import annotations
 
 
-# BROKEN: Generate synthetic data using model responses at temperature=0.
-# All generated responses are deterministic → massive duplication.
-# 100k "generated" pairs → 60k exact duplicates after dedup.
-# Model memorizes a few patterns rather than learning diverse legal reasoning.
-async def broken_generate_deterministic(prompt: str) -> str:
+# BROKEN: re-send one fixed prompt and expect the sampler to supply diversity.
+# The same prompt collapses onto a few modes → massive duplication
+# (100k "generated" pairs → ~60k near-duplicates after dedup), and current
+# Claude models (Sonnet 5.5, Opus 5.5, Haiku 5.5) reject temperature/top_p/top_k,
+# so there is no sampler knob to turn anyway.
+async def broken_generate_same_prompt(prompt: str) -> str:
     import anthropic
     client = anthropic.AsyncAnthropic()
     resp = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=512,
+        model="claude-sonnet-5-5",
+        max_tokens=2048,
         messages=[{"role": "user", "content": prompt}],
-        # No temperature specified → defaults to model's default (~1.0 or 0 for some)
     )
-    return resp.content[0].text
+    return next(b.text for b in resp.content if b.type == "text")
 
 
-# FIX: Generate with temperature=0.7-1.0 to encourage diversity.
-# Multiple generations per prompt, then keep highest-quality via judge.
-async def fixed_generate_diverse(prompt: str, n_candidates: int = 3) -> str:
+# FIX: put the diversity in the prompt, not the sampler. Give each candidate a
+# different seed (persona, sub-topic, jurisdiction, difficulty), then keep the
+# highest-quality candidate via the judge.
+async def fixed_generate_diverse(prompt: str, seeds: list[str]) -> str:
     import anthropic
     import asyncio
     client = anthropic.AsyncAnthropic()
 
-    async def generate_one() -> str:
+    async def generate_one(seed: str) -> str:
         resp = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
-            temperature=0.8,    # diversity; range 0.7-1.0 for generation tasks
-            messages=[{"role": "user", "content": prompt}],
+            model="claude-sonnet-5-5",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": f"{prompt}\n\nVariation seed: {seed}"}],
         )
-        return resp.content[0].text
+        return next(b.text for b in resp.content if b.type == "text")
 
-    candidates = await asyncio.gather(*[generate_one() for _ in range(n_candidates)])
+    candidates = await asyncio.gather(*[generate_one(s) for s in seeds])
     # Score each candidate, keep highest quality
     # (simplified — production uses the judge function above)
     return max(candidates, key=len)   # length heuristic; replace with judge score
@@ -1016,7 +1018,7 @@ def fixed_anonymize_contract(contract_text: str) -> str:
 
 
 # BROKEN: Skip validation of synthetic data against human expert gold set.
-# 15% of GPT-4o-generated legal clause labels are incorrect for jurisdiction-specific nuances.
+# 15% of LLM-generated legal clause labels are incorrect for jurisdiction-specific nuances.
 # Fine-tuned model inherits these errors → 15% lower accuracy on held-out test.
 def broken_accept_all_synthetic(pairs: list[dict]) -> list[dict]:
     return pairs   # no validation
@@ -1109,15 +1111,15 @@ Cost per *surviving* pair is the honest denominator, and it is still overwhelmin
 
   JUDGE COST (the filter stack is itself an LLM workload -- budget it)
     tokens = 100,000 pairs x 500 tokens = 50,000,000 = 50M tokens
-    GPT-4o-mini at $0.15/1M:  50 x $0.15 =  $7.50
-    Haiku at $0.25/1M:        50 x $0.25 = $12.50
+    gpt-6-luna at $0.10/1M:   50 x $0.10 =  $5.00
+    claude-haiku-5-5 at $0.10/1M (prompts <= 100K tokens): $5.00
 
   JUDGE AS A SHARE OF TOTAL SPEND
-    $12.50 / $3,800 = 0.33%
+    $5.00 / $3,800 = 0.13%
 ```
 
-The judging step costs a third of one percent of the budget. That single figure settles a debate
-teams have constantly — whether to judge a sample of the data or all of it. At 0.33% of spend, there
+The judging step costs about an eighth of one percent of the budget. That single figure settles a debate
+teams have constantly — whether to judge a sample of the data or all of it. At 0.13% of spend, there
 is no economic reason to sample; judge every pair. The expensive part was never the filtering, it
 was the generation, and every pair you filter out is generation cost already sunk. Note too what the
 2,053x does *not* say: it is a cost ratio, not a quality ratio. The 800 human examples remain the
@@ -1159,7 +1161,7 @@ LIMA (Zhou et al. 2023) demonstrated that 1,000 carefully curated examples outpe
 Four techniques: (1) Anonymization — replace company names, person names, dates, and financial figures with generic placeholders before including text in training data; (2) Jurisdictional generalization — rewrite clauses to remove jurisdiction-specific identifiers; (3) Train-test split by document — never include any excerpt from a test document in training data; (4) Decontamination check — embed all test prompts and filter training pairs with cosine similarity > 0.9 to any test prompt. For healthcare and legal AI, data contamination is both a quality problem (model memorizes rather than generalizes) and a compliance problem (PII in training data).
 
 **Q: What is the role of the LLM judge in synthetic data quality filtering?**
-The LLM judge (typically a capable model like GPT-4o-mini or Claude Haiku) evaluates generated pairs on instruction clarity, response accuracy, and instruction-following adherence. It provides a cheap (~$0.15/1M tokens) proxy for human evaluation at scale. Key considerations: (1) The judge should be different from (or larger than) the generator to avoid sycophancy bias; (2) Prompt the judge with rubrics, not just "is this good?"; (3) Validate judge scores against human ratings on a 500-pair sample — judge should achieve > 85% agreement. Judge filtering typically removes 20-30% of generated data, disproportionately removing the worst examples.
+The LLM judge (typically a cheap capable model like gpt-6-luna or Claude Haiku 5.5) evaluates generated pairs on instruction clarity, response accuracy, and instruction-following adherence. It provides a cheap (~$0.10/1M input tokens) proxy for human evaluation at scale. Key considerations: (1) The judge should be different from (or larger than) the generator to avoid sycophancy bias; (2) Prompt the judge with rubrics, not just "is this good?"; (3) Validate judge scores against human ratings on a 500-pair sample — judge should achieve > 85% agreement. Judge filtering typically removes 20-30% of generated data, disproportionately removing the worst examples.
 
 **Q: How do you measure if synthetic data has improved the model versus just increased dataset size?**
 Three controlled experiments: (1) Data ablation — train with 800 human pairs, 800 + 10k synthetic, 800 + 52k synthetic; plot F1 vs dataset size. If curve flattens, more synthetic data is not helping. (2) Quality vs quantity — compare 20k filtered pairs vs 50k unfiltered pairs; higher-quality smaller dataset should win. (3) Distribution analysis — compute embedding cosine similarity between synthetic training pairs and test pairs; if similarity is low (< 0.6), synthetic data may not cover test distribution. Key metric: held-out F1 on human-annotated test set (not synthetic eval) — this is the ground truth measure of real-world quality.

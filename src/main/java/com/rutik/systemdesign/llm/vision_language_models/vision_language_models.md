@@ -25,7 +25,7 @@ Vision-Language Models (VLMs) jointly understand images and text. Unlike pure co
 | Visual Question Answering (VQA) | "How many people are in this image?" — open-ended answers | LLaVA, InstructBLIP, GPT-4V |
 | Visual Grounding | "Where is the red car?" — bounding box output | Grounding DINO, Florence-2 |
 | OCR + document understanding | Reading text embedded in images | PaddleOCR, Florence-2, Claude vision |
-| Multi-image reasoning | Comparing or reasoning across multiple images | GPT-4o, Gemini 1.5 Pro, LLaVA-1.6 |
+| Multi-image reasoning | Comparing or reasoning across multiple images | GPT-6.2 Sol, Gemini 4 Carbon, Claude Opus 5.5, LLaVA-1.6 |
 
 **Key benchmarks**: VQAv2 (general VQA), MMMU (college-level multi-discipline), SEED-Bench (comprehensive visual understanding), MMBench (multilingual VQA), TextVQA (OCR-heavy VQA).
 
@@ -165,9 +165,9 @@ Architecture: CLIP ViT image encoder feeding a small MLP projection layer whose 
 Architecture: a single model that handles text and image input natively, with vision tokens interleaved directly with text tokens in the input sequence. No separate encoder that feeds a separate decoder — one unified transformer stack.
 
 **Key models**:
-- GPT-5.6 family (OpenAI): most capable closed model; natively processes images, text, and audio in one model
-- Gemini 3.1 Pro (Google): multi-image and video frame support; native multimodality from pre-training
-- Claude Opus 5 / Sonnet 5 (Anthropic): strong on text-heavy images, document extraction, form parsing
+- GPT-6.2 family (OpenAI, Astra and Sol): text and image input, text output, 1.05M-token context
+- Gemini 4 family (Google, Carbon, Neon, Hydrogen and Argon): text, image, audio, video and PDF input, 1M-token context; native multimodality from pre-training
+- Claude Opus 5.5 / Sonnet 5.5 (Anthropic): text and image input, 1M-token context; strong on text-heavy images, document extraction, form parsing
 - Llama 4 (Meta, open-weight): early fusion — text and vision tokens are concatenated into one sequence from layer 1 rather than merged through a late adapter, pre-trained jointly on text, image, and video
 - Flamingo (DeepMind, 2022): pioneered the interleaved image-text sequence architecture
 
@@ -176,7 +176,7 @@ Architecture: a single model that handles text and image input natively, with vi
 - Video frame understanding: process N frames as N interleaved images
 - Interleaved image-text sequences: a document with text and images mixed inline
 
-**Cost**: GPT-4o charges ~$2.50/1M input tokens for text. Image tokens add separately: a 512px image costs ~$0.002 at current pricing. High-volume workloads can reach $10K/month quickly.
+**Cost**: image tokens bill as ordinary input tokens — $2/1M on gpt-6.2-sol, Claude Sonnet 5.5 or Gemini 4 Carbon (through 2026-11-30) — but each model converts an image into tokens on its own schedule, so measure tokens per image on your own resolution before budgeting. High-volume workloads can reach $10K/month quickly.
 
 ---
 

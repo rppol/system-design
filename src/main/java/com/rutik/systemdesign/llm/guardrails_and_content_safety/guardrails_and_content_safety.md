@@ -332,7 +332,7 @@ outcome = guard(
     llm_api=openai.chat.completions.create,
     messages=[{"role": "user",
                "content": f"Help this customer with their issue: {user_query}"}],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 response = outcome.validated_output
 ```
@@ -872,7 +872,7 @@ Input guardrails:
     Check against: S11 (self-harm), S6 (medical advice)
     Flag if triggered
 
-LLM Inference (GPT-4o, HIPAA BAA in place):
+LLM Inference (gpt-6.2-sol, HIPAA BAA in place):
   System prompt: "You are a healthcare assistant. You cannot diagnose conditions
     or prescribe medications. Always recommend consulting a doctor for medical decisions."
 
@@ -886,7 +886,7 @@ Output guardrails:
     Is the response grounded in approved medical content?
     Hallucinated drug interactions or dosages → flag → replace with disclaimer
 
-  Layer 3 (200ms): LLM safety check (gpt-4o-mini)
+  Layer 3 (200ms): LLM safety check (gpt-6-luna)
     "Does this response provide inappropriate medical advice?"
     If yes → replace with "Please consult your healthcare provider"
 
@@ -935,8 +935,9 @@ client = Anthropic()
 def semantic_safety_check(user_message: str, age_group: str = "8-12") -> dict:
     """Returns {"safe": bool, "category": str, "confidence": float}"""
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",  # fast, cheap classifier
-        max_tokens=64,
+        model="claude-haiku-5-5",  # fast, cheap classifier
+        max_tokens=1024,           # headroom: adaptive thinking shares this budget
+        output_config={"effort": "low"},
         system=f"""You are a content safety classifier for a {age_group} educational chatbot.
 Classify the intent of the user message. Output JSON only.
 Categories: ["safe", "violence", "adult_content", "self_harm", "hate_speech"]
@@ -945,7 +946,8 @@ A message asking how to hurt a person is "violence".""",
         messages=[{"role": "user", "content": f'Classify: "{user_message}"'}]
     )
     import json
-    return json.loads(resp.content[0].text)
+    text = next(b.text for b in resp.content if b.type == "text")
+    return json.loads(text)
 ```
 
 **Additional interview Q&As:**

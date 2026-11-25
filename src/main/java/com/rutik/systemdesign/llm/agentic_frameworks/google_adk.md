@@ -24,6 +24,8 @@ non-Gemini models work), but is most tightly integrated with **Gemini** (includi
 API** for bidirectional audio/video streaming) and **Vertex AI** (managed `SessionService`,
 `MemoryService`, and the **Vertex AI Agent Engine** deployment target).
 
+**Current version**: google-adk 2.15.1 (PyPI, checked 2026-11-25).
+
 ---
 
 ## 2. Intuition

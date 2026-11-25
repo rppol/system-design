@@ -203,7 +203,7 @@ from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
 
 # Global settings (avoids passing to every component)
-Settings.llm = OpenAI(model="gpt-4o", temperature=0)
+Settings.llm = OpenAI(model="gpt-6.2-sol", temperature=0)
 Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
 Settings.chunk_size = 512
 Settings.chunk_overlap = 64
@@ -372,7 +372,7 @@ customer_tool = FunctionTool.from_defaults(fn=lookup_customer)
 # Build agent. Workflow agents are async — drive them with `await agent.run(...)`.
 agent = FunctionAgent(
     tools=[kb_tool, customer_tool],
-    llm=OpenAI(model="gpt-4o"),
+    llm=OpenAI(model="gpt-6.2-sol"),
     system_prompt="You are a support assistant. Cite the policy you used.",
 )
 
@@ -504,7 +504,7 @@ query_engine = index.as_query_engine(
 ```
 
 **Pitfall 6: SubQuestion engine cost explosion**
-SubQuestionQueryEngine generates N sub-questions and executes N LLM queries + N retrieval calls. For complex questions: 8 sub-questions × (1 retrieval + 1 synthesis) × GPT-4o = $0.80/query. In production, a customer asked a complex question that generated 12 sub-questions, costing $1.20 for a single query. `from_defaults` has no count argument — the cap lives in the question generator's prompt:
+SubQuestionQueryEngine generates N sub-questions and executes N LLM queries + N retrieval calls. For complex questions: 8 sub-questions × (1 retrieval + 1 synthesis) on a frontier model = $0.80/query. In production, a customer asked a complex question that generated 12 sub-questions, costing $1.20 for a single query. `from_defaults` has no count argument — the cap lives in the question generator's prompt:
 
 ```python
 from llama_index.core.question_gen import LLMQuestionGenerator
@@ -697,7 +697,7 @@ flowchart TD
         MF["MetadataFilters<br/>matter_id IN user.matter_ids<br/>(access control)"]
         AMR["AutoMergingRetriever<br/>merges related nodes"]
         CR["CohereRerank(top_n=4)"]
-        SYN["GPT-4o Synthesizer<br/>with citation format"]
+        SYN["gpt-6.2-sol Synthesizer<br/>with citation format"]
         ANS(["Answer + Source Citations<br/>file, page, section"])
         Q --> MF --> AMR --> CR --> SYN --> ANS
     end

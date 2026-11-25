@@ -555,8 +555,8 @@ A trusted server's published package is compromised, or an impostor package impe
 Slightly, but not entirely. Local stdio servers run as user; can read local files, run any process the user can. They're not network-exposed (smaller attack surface) but malicious code still runs locally. Remote HTTP servers add network risk but are typically more sandboxed (isolated cloud workloads). Both warrant trust review.
 
 **Q: How do you handle MCP server-issued sampling requests securely?**
-**Short:** Show the sampling prompt to the user for approval, rate-limit and cost-cap it per server, and sanitize the prompt content.
-Sampling lets a server ask the client to call its LLM. Risk: server's prompt could exfiltrate data or trigger expensive calls. Defense: (1) display the prompt to user for approval (or at least notify), (2) rate-limit sampling per server, (3) cost-cap sampling, (4) sanitize the prompt content for obvious injection.
+**Short:** Prefer not supporting it, since 2026-07-28 deprecated Sampling; if you must, show the prompt for approval, rate-limit and cost-cap it per server, and sanitize it.
+Sampling lets a server ask the client to call its LLM. Risk: the server's prompt could exfiltrate data or trigger expensive calls. The `2026-07-28` revision deprecated Sampling, so the strongest defense for a new client is not declaring the capability at all. A client that keeps it for older servers should (1) display the prompt to the user for approval (or at least notify), (2) rate-limit sampling per server, (3) cost-cap sampling, (4) sanitize the prompt content for obvious injection.
 
 **Q: What's the role of OAuth scope in MCP security?**
 **Short:** Fine-grained scopes like `tools.read` versus `tools.execute` limit what a compromised token or an over-broad client request can actually do.
@@ -582,7 +582,7 @@ The 2026 roadmap puts enterprise security work (audit trails, SSO-integrated aut
 6. Audit every tool call with logs to SIEM; alert on anomalies.
 7. Rotate tokens regularly; access tokens 1h TTL, refresh tokens per-use rotation.
 8. Pin server versions; review changelogs before upgrading.
-9. For sampling-enabled servers, display sampling prompts to user before forwarding to LLM.
+9. Do not declare the deprecated Sampling capability unless an older server needs it; if you do, display sampling prompts to the user before forwarding to the LLM.
 10. Have an incident response runbook for MCP server compromise.
 
 ---

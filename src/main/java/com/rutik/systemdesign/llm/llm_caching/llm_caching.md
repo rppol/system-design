@@ -62,8 +62,8 @@ application but architecturally more powerful.
 workload-specific. Too tight: low hit rate, no savings. Too loose: semantically different queries
 get the same answer (quality regression). Tune on production query logs, not synthetic data.
 
-**Separate cache by model and prompt version.** A cache entry valid for gpt-4o is not valid for
-gpt-4o-mini. A response cached for prompt_v1 must be invalidated when prompt_v2 deploys. Make
+**Separate cache by model and prompt version.** A cache entry valid for gpt-6.2-sol is not valid for
+gpt-6-luna. A response cached for prompt_v1 must be invalidated when prompt_v2 deploys. Make
 model name + version + prompt version part of the cache key.
 
 **Never cache outputs that should not be reused.** Do not cache: responses containing timestamps
@@ -408,7 +408,7 @@ _cache  = redis.Redis(host="localhost", port=6379, db=0)
 
 def cached_completion(
     messages: list[dict],
-    model: str = "gpt-4o",
+    model: str = "gpt-6.2-sol",
     ttl_seconds: int = 3_600,
     no_cache: bool = False,
 ) -> str:
@@ -785,14 +785,14 @@ than a duplicate generation.
 ## 12. Interview Questions with Answers
 
 **Q: What are the five layers of LLM caching and what does each optimize?**
-**Short:** Exact-match response cache, semantic cache, provider KV prompt caching, self-hosted KV-prefix caching, and embedding cache each target a different repeat pattern.
+**Short:** Exact-match response cache, semantic cache, provider KV prompt caching, self-hosted KV-prefix caching and embedding cache each target a different kind of repeat.
 (1) Exact-match response cache: returns a stored response when the exact input repeats; maximizes
 savings for identical queries. (2) Semantic cache: returns a cached response when the input is
 semantically similar above a cosine threshold; handles paraphrased queries. (3) Provider prompt
 caching (Anthropic cache_control, OpenAI automatic): caches KV-attention tensors for a stable
 context prefix; cache reads bill at 0.1x the base input rate on most Anthropic models and on gpt-5.x
-and gpt-6 (0.05x on Claude Opus 5.5, Sonnet 5.5 and gpt-6.1-sol; 0.025x on Claude Fable 5.1 and
-Mythos 5.1; 0.5x on the legacy gpt-4o tier), so shared system prompts get 50-97.5% off their cached tokens. (4) Self-hosted
+and gpt-6 (0.05x on Claude Opus 5.5 and Sonnet 5.5 and on gpt-6.1-sol, gpt-6.1-terra, gpt-6.2-sol
+and gpt-6.2-astra; 0.025x on Claude Fable 5.x and Mythos 5.x; 0.5x on the deprecated gpt-4o tier), so shared system prompts get 50-97.5% off their cached tokens. (4) Self-hosted
 KV-prefix caching (vLLM APC, SGLang RadixAttention): GPU-resident LRU cache of KV tensors;
 reduces time-to-first-token for requests sharing a prefix. (5) Embedding cache: avoids re-embedding
 unchanged documents; critical for RAG performance.
@@ -848,7 +848,7 @@ for endpoints where output diversity is part of the product. Prompt (KV) caching
 problem — it reuses input computation while the model still samples fresh output.
 
 **Q: How does Anthropic prompt caching work and how do you maximize hit rate?**
-**Short:** It caches KV tensors for `cache_control`-marked blocks above a per-model minimum prefix, with a 5-minute default TTL, billing reads at 0.025-0.1x the input price by model.
+**Short:** It caches KV tensors for `cache_control`-marked blocks above a per-model minimum prefix, with a 5-minute default TTL, and bills reads at 0.025-0.1x the input price by model.
 Anthropic caches the KV-attention tensors for any content block marked with
 `cache_control: {"type": "ephemeral"}`. The minimum cacheable prefix is per-model and non-monotonic
 (512 tokens on Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5 and Fable 5; 1,024 on Sonnet 5 and
@@ -858,8 +858,8 @@ blocks at the front of every request; ensure these blocks are byte-identical acr
 timestamps, user IDs, or dynamic content; track `cache_read_input_tokens` vs
 `cache_creation_input_tokens` in usage metadata. Cache reads bill at 0.1x the base input price
 on most models ($2.00 to $0.20/1M on Sonnet 5, $0.10 to $0.01/1M on Haiku 5.5), 0.05x on Opus 5.5
-and Sonnet 5.5 ($2.00 to $0.10/1M on Sonnet 5.5), and 0.025x on Claude Fable 5.1 and Mythos 5.1
-($10.00 to $0.25/1M). A prefix under the minimum fails silently: both usage
+and Sonnet 5.5 ($2.00 to $0.10/1M on Sonnet 5.5), and 0.025x on Claude Fable 5.2, Fable 5.1,
+Mythos 5.2 and Mythos 5.1 ($8.00 to $0.20/1M on Fable 5.2). A prefix under the minimum fails silently: both usage
 counters come back 0 and you are billed full price with no error.
 
 **Q: How does vLLM automatic prefix caching (APC) work?**

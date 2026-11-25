@@ -4,7 +4,7 @@
 
 Coding agents are LLM agents specialized for software engineering tasks: reading and understanding codebases, writing new code, editing existing code, running tests, debugging, generating patches, and submitting PRs. They differ from generic agents in tool design (file editors, bash shells, test runners, language servers), evaluation frameworks (SWE-bench, HumanEval, LiveCodeBench), and the central engineering challenge of operating reliably on large, real-world codebases where ground truth is "tests pass and humans approve".
 
-The landscape spans IDE-integrated and terminal agents (Cursor Composer, Claude Code, OpenAI Codex CLI, Gemini CLI, Continue, Cline), cloud and autonomous platforms (Codex cloud, Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). Frontier models now clear 85-95% on SWE-bench Verified (95.0% for Claude Fable 5, 88.6% for Opus 4.8, 85.2% for Sonnet 5), which means the benchmark is close to saturated and its remaining spread says more about contamination than capability. The discriminating benchmark is now **SWE-bench Pro** (1,865 tasks over 41 actively maintained Python/Go/TypeScript/JavaScript repos, including private startup codebases, and copyleft-licensed to resist training-set leakage), where the best public-set score is around 60% and the field average is far lower. The frontier of the *product* is multi-hour autonomous tasks (Cursor Background Agents, Devin sessions, Claude Code subagents) spanning dozens of files.
+The landscape spans IDE-integrated and terminal agents (Cursor Composer, Claude Code, OpenAI Codex CLI, Gemini CLI, Continue, Cline), cloud and autonomous platforms (Codex cloud, Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). SWE-bench Verified, the 500-task benchmark the field quoted for two years, was retired as a frontier metric on 2026-02-23 when OpenAI stopped reporting it: its state of the art had crept to 80.9%, many of its hard tasks had flawed tests, and frontier models could reproduce its gold patches from training. The benchmark to quote now is **SWE-bench Pro** (1,865 tasks over 41 actively maintained repos, including private startup codebases, with the public set copyleft-licensed to resist training-set leakage), where top models scored about 23% on the public set at release. The frontier of the *product* is multi-hour autonomous tasks (Cursor Background Agents, Devin sessions, Claude Code subagents) spanning dozens of files.
 
 ---
 
@@ -343,8 +343,8 @@ uv run harbor run -d terminal-bench/terminal-bench@latest \
 **Do not memorize a per-scaffold SWE-bench number.** Scaffold scores now track the backing frontier
 model far more than the scaffold: swap the model under any of these and the score moves tens of
 points, which is why published per-agent figures go stale within a release cycle. Quote the model's
-score and the benchmark generation instead — 85-95% on SWE-bench Verified for current frontier
-models, versus roughly 60% at the top of SWE-bench Pro's public set — and treat the scaffold
+score on SWE-bench Pro and Terminal-Bench from the current model card instead, never a remembered
+SWE-bench Verified number (retired in February 2026 as contaminated), and treat the scaffold
 comparison as being about autonomy, ACI quality, and operational fit.
 
 ---
@@ -472,9 +472,9 @@ The instruction file is context: under a long session or a conflicting user requ
 **Short:** Claude Code's subagent dispatch splits explore, implement, and review into isolated-context subagents, running 2-3x faster on multi-file tasks.
 Parent CLI agent spawns subagents with focused tools and isolated context. Explore subagent does navigation (read-only); Implementation subagent does edits (write tools); Review subagent verifies. Each subagent's context stays lean (doesn't see other subagents' work); parent synthesizes results. Wall-clock 2-3× faster than monolithic agent on multi-file tasks.
 
-**Q: What is SWE-bench and why is it the standard benchmark?**
-**Short:** SWE-bench's real GitHub issues scored by passing tests became the standard because it uses real-world distribution and ground-truth tests, not judges.
-SWE-bench (Princeton, 2024): 2294 real GitHub issues from 12 popular Python repos; agent must produce a patch that passes the issue's test cases. SWE-bench Verified: 500-issue human-validated subset. It became standard because of real-world distribution (not synthetic), tests as ground truth (no LLM judges), and coverage across repos and patterns. It is now near-saturated at the frontier, so pair it with SWE-bench Pro — 1,865 tasks across 41 repos in Python, Go, TypeScript and JavaScript, copyleft-licensed and partly private specifically to resist contamination.
+**Q: What is SWE-bench, and which variant should you quote today?**
+**Short:** Real GitHub issues scored by whether the agent's patch passes the tests; quote SWE-bench Pro today, because OpenAI retired the Verified subset in February 2026 as contaminated.
+SWE-bench (Princeton, 2024): 2,294 real GitHub issues from 12 popular Python repos; the agent must produce a patch that makes the issue's failing tests pass without breaking the rest. It became the standard because of real-world distribution (not synthetic), tests as ground truth (no LLM judges), and coverage across repos and patterns. Its 500-issue human-validated subset, SWE-bench Verified, was the headline number until 2026-02-23, when OpenAI stopped reporting it: at least 59.4% of an audited set of hard tasks had flawed tests, and frontier models could reproduce gold patches from training, so late gains (to an 80.9% state of the art) measured exposure more than skill. Quote SWE-bench Pro instead — 1,865 tasks across 41 actively maintained repos, copyleft-licensed or private specifically to resist contamination, with top models near 23% on the public set at release.
 
 **Q: What does Terminal-Bench measure that SWE-bench does not?**
 **Short:** Terminal-Bench scores whole terminal workflows (build, configure, debug, recover an environment) by checking the final container state, not just whether a code patch passes tests.
@@ -1032,7 +1032,6 @@ def cost_aware_config() -> dict[str, object]:
 | Avg cost per issue (LLM) | — | $1.12 |
 | Avg iterations to solution | — | 18 |
 | Engineer time freed/week | — | ~28 person-hours |
-| SWE-bench Verified (claude-sonnet-5) | N/A | 85.2% (public benchmark) |
 
 **Put simply.** "The $1.12 is what an *attempt* costs, not what a *fix* costs — and since only about
 half of attempts succeed, the real price of a merged patch is roughly double the headline number."
@@ -1091,7 +1090,7 @@ plus 45 minutes of review is 59 minutes, against a 3.5-day (5,040-minute) manual
 **Interview Q&As:**
 
 **Q: What is SWE-bench and why is it the key benchmark for coding agents?**
-SWE-bench (Software Engineering Benchmark) tests coding agents on real GitHub issues from popular open-source Python repositories (Django, Scikit-learn, etc.). Each task gives the agent a repository and an issue description; the agent must produce a patch that makes the test suite pass. SWE-bench Verified is a curated subset of 500 tasks confirmed reproducible and correctly specified. It became the industry standard because the tasks are real-world (not toy problems) and the evaluation is objective (tests either pass or fail). Frontier models now score 85-95% on it (Claude Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), which is close enough to saturation that the remaining spread is confounded by training-data contamination — the same models drop 30-40 points on SWE-bench Pro's harder, copyleft-licensed task set. The senior answer names both: cite Verified for historical comparability and Pro for a current capability signal.
+SWE-bench (Software Engineering Benchmark) tests coding agents on real GitHub issues from popular open-source Python repositories (Django, Scikit-learn, etc.). Each task gives the agent a repository and an issue description; the agent must produce a patch that makes the test suite pass. SWE-bench Verified is a curated subset of 500 tasks confirmed reproducible and correctly specified. It became the industry standard because the tasks are real-world (not toy problems) and the evaluation is objective (tests either pass or fail). OpenAI stopped reporting Verified on 2026-02-23, at an 80.9% state of the art, after finding flawed tests on many hard tasks and evidence that frontier models had trained on its gold patches. The senior answer names both: Verified for historical comparability and as the contamination lesson, SWE-bench Pro (top models near 23% on its public set at release) for a current capability signal.
 
 **Q: Why is the Agent-Computer Interface (ACI) design as important as model choice for coding agents?**
 The ACI defines how the LLM interacts with the codebase — what commands are available, how file content is presented, how errors are formatted. A poorly designed interface forces the agent to parse complex bash output, guess file locations, and hold large file contents in context. SWE-agent showed that domain-specific commands (`goto`, `scroll_down`, `edit start:end`) achieve 12% higher SWE-bench solve rates than raw bash with GPT-4 — the same model, different interface. Good ACI: small precise commands, windowed file views, structured error feedback.

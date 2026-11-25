@@ -700,16 +700,16 @@ A: CoT asks the model to reason step-by-step before giving a final answer (eithe
 **Short:** Few-shot includes demonstration pairs and wins when the output format is unusual or the task is subtle, while zero-shot works when the model already covers the task.
 A: Zero-shot: give the model instructions without examples and expect it to generalize. Few-shot: include 3-8 demonstration (input, output) pairs before the actual query. Few-shot excels when the output format is unusual, the task is subtle, or you need consistent formatting. Zero-shot is simpler and works when the model's pre-training/fine-tuning already covers the task.
 
-**Q: What is prompt injection and how do you defend against it?**
-**Short:** Prompt injection overrides intended behavior via malicious input text, defended with clear delimiters, duplicated safety instructions, and an injection-detection classifier.
-A: Prompt injection is when malicious user input contains instructions that override the system's intended behavior (e.g., "Ignore previous instructions and..."). Defenses: (1) Use clear delimiters to separate system and user content; (2) Put critical safety instructions at both the beginning AND end of the system prompt; (3) Add explicit anti-injection instructions; (4) Validate user input before sending to LLM; (5) Use a separate classifier to detect injection attempts.
+**Q: What can prompt design itself do against prompt injection, and where does it stop?**
+**Short:** Delimit untrusted input, repeat safety instructions at both ends of the system prompt and validate input, but prompt design only lowers the odds; classifiers and least privilege do the rest.
+A: Prompt injection is when malicious user input contains instructions that override the system's intended behavior (e.g., "Ignore previous instructions and..."). Defenses: (1) Use clear delimiters to separate system and user content; (2) Put critical safety instructions at both the beginning AND end of the system prompt; (3) Add explicit anti-injection instructions; (4) Validate user input before sending to LLM; (5) Use a separate classifier to detect injection attempts. Treat the prompt-level defenses as risk reduction, not a guarantee: no wording reliably stops injection, so pair them with the classifier and least-privilege tool access, covered in [Guardrails and Content Safety](../guardrails_and_content_safety/guardrails_and_content_safety.md).
 
 **Q: When would you use self-consistency?**
 **Short:** Self-consistency samples multiple reasoning chains and takes the majority vote, worth its 5-10x cost only for high-stakes, verifiable problems like math.
 A: Self-consistency generates multiple reasoning chains and takes the majority vote. Use it for: high-stakes decisions where accuracy justifies 5-10× higher cost, math/logic problems with verifiable answers, situations where a single chain might "go off the rails." Don't use for: real-time applications (too slow), creative tasks (no single "correct" answer), or when cost is a major concern.
 
-**Q: What is the "lost in the middle" problem?**
-**Short:** LLMs attend less to information in the middle of a long context than at the start or end, so critical instructions should sit at the end or be duplicated at both ends.
+**Q: How does the "lost in the middle" effect change where you put instructions in a long prompt?**
+**Short:** Put critical instructions at the end of a long prompt, or at both ends, because models attend less to the middle of a long context than to its start or end.
 A: LLMs pay less attention to information in the middle of a long context compared to the beginning and end. If you have a 50,000-token prompt with critical instructions, putting them in the middle (around token 25,000) leads to worse adherence than placing them at the start or end. For long prompts with retrieved context, place instructions at the END for recency effect, or duplicate key instructions at both start and end.
 
 **Q: Why doesn't temperature=0 guarantee identical outputs across calls?**

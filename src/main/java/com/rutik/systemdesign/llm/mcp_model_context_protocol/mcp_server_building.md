@@ -23,13 +23,13 @@ This deep-dive covers building MCP servers from scratch: the three server primit
 
 ## 3. Core Principles
 
-- **Three server primitives**: Resources (data), Tools (actions), Prompts (templates). Servers may also call back into three *client* features — Sampling (server-requested LLM call), Roots (which directories/URIs it may touch) and Elicitation (ask the user for more input) — each only if the client declared it at initialize.
+- **Three server primitives**: Resources (data), Tools (actions), Prompts (templates). Servers may also ask for three *client* features — Elicitation (ask the user for more input), and the deprecated Sampling (server-requested LLM call) and Roots (which directories/URIs it may touch) — each only if the client declared that capability.
 - **JSON-RPC 2.0**: protocol message format (request, response, notification) — wire-level detail in [MCP Transports & JSON-RPC](mcp_transports_and_jsonrpc.md).
-- **Capability negotiation**: server declares what it supports at initialize.
+- **Capability negotiation**: under the current `2026-07-28` revision the server advertises what it supports through `server/discover` (which it MUST implement), and the client sends its capabilities in every request's `_meta`; `2025-11-25` exchanged both once at `initialize`.
 - **Strongly typed schemas**: tool input_schema with JSON Schema; LLM uses it for arg construction.
 - **Idempotent reads, side-effecting writes**: Resources should be safe to re-read; Tools may have effects.
 - **Clear error semantics**: distinguish protocol errors (4xx/5xx-like) from tool errors (returned in result).
-- **Lifecycle correct**: initialize → ready → operate → transport close. MCP has no `shutdown` message; a stdio server exits on stdin EOF.
+- **Lifecycle correct**: under `2026-07-28` there is no handshake or session: answer `server/discover`, serve self-contained requests, exit on transport close. MCP has no `shutdown` message; a stdio server exits on stdin EOF.
 
 ---
 
@@ -510,20 +510,20 @@ is withholding the information that determines whether the retry succeeds.
 ## 12. Interview Questions with Answers
 
 **Q: What are the MCP primitives and how do they differ?**
-**Short:** Servers expose Resources (readable data), Tools (callable actions), and Prompts (templates); clients expose Sampling, Roots, and Elicitation.
-Servers offer three — Resources (URI-addressable read-only data such as files and records), Tools (callable functions with potential side effects), and Prompts (reusable templates clients can invoke). Clients offer three back to servers: Sampling (the server asks the client to run an LLM call on its behalf), Roots (the server asks which URI or filesystem boundaries it may operate in), and Elicitation (the server asks the user for extra input mid-task). Resources are for "show me X"; Tools are for "do X". A common mistake is calling Sampling a fourth *server* primitive — it runs the other way, and the server may only use it if the client declared the capability at initialize.
+**Short:** Servers expose Resources (readable data), Tools (callable actions) and Prompts (templates); clients offer Elicitation, plus the deprecated Sampling and Roots.
+Servers offer three — Resources (URI-addressable read-only data such as files and records), Tools (callable functions with potential side effects), and Prompts (reusable templates clients can invoke). Clients offer features back to servers: Elicitation (the server asks the user for extra input mid-task) is the live one in the current `2026-07-28` revision, while Sampling (the server asks the client to run an LLM call) and Roots (the server asks which URI or filesystem boundaries it may operate in) are deprecated there and should not be adopted by new servers. Resources are for "show me X"; Tools are for "do X". A common mistake is calling Sampling a fourth *server* primitive — it runs the other way, and the server may only use it if the client declared the capability.
 
 **Q: What's the difference between FastMCP and the bare Python SDK?**
 **Short:** FastMCP offers a decorator-based, FastAPI-like ergonomics layer, while the bare SDK gives direct handler access at the cost of more code.
 FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resource()`) — closer to FastAPI ergonomics. Bare SDK gives you direct access to request handlers (more code, more control). FastMCP is recommended for most server implementations.
 
-**Q: How does capability negotiation work at initialize?**
-**Short:** Client and server exchange their supported features, and list-changed notifications only fire if the recipient declared support for them.
-Client sends `initialize` with protocolVersion and its capabilities (e.g., sampling support). Server responds with its capabilities (resources/tools/prompts available). Both parties know what the other supports. Notifications about list changes (e.g., `notifications/tools/list_changed`) are only sent if the recipient supports them.
+**Q: How does capability negotiation work for an MCP server?**
+**Short:** The server advertises its capabilities via `server/discover`, reads the client's from each request's `_meta`, and sends list-changed notifications only to clients that opted in.
+Under the current `2026-07-28` revision there is no `initialize`. The server MUST implement `server/discover`, which returns its supported protocol versions, capabilities (`tools`, `resources`, `prompts`, `completions`, `extensions`) and identity. Each request carries the client's capabilities in `_meta` (`io.modelcontextprotocol/clientCapabilities`), so the server checks them per request; if it needs one the client did not declare, it returns `MissingRequiredClientCapability`. Notifications about list changes (e.g., `notifications/tools/list_changed`) go only to clients that opened a `subscriptions/listen` stream and opted in to that type. Under `2025-11-25` the same information was exchanged once in the `initialize` handshake.
 
 **Q: Why use stdio vs HTTP transport?**
-**Short:** stdio is the simplest, most secure choice for a locally spawned server; Streamable HTTP is required for remote or multi-client deployments.
-Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools — the spec says clients should support stdio whenever possible. HTTP (Streamable HTTP): server runs as an HTTP service on a single MCP endpoint that serves both POST and GET; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
+**Short:** stdio is the simplest and most secure choice for a locally spawned server; Streamable HTTP is required for remote or multi-client deployments.
+Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools — the spec says clients should support stdio whenever possible. HTTP (Streamable HTTP): server runs as an HTTP service on a single MCP endpoint that takes POSTs (the `2026-07-28` revision dropped the separate GET stream); multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
 
 **Q: What's the right way to describe a tool?**
 **Short:** State what it does, when the LLM should call it, and what it returns, since a vague description causes missed or wrong tool calls.
@@ -549,13 +549,13 @@ Yes — server is a long-running process; you can hold state in memory or extern
 **Short:** Return a task ID immediately with a status-polling tool, or use progress notifications, ideally standardized through the Tasks utility.
 Per MCP spec, senders should set request timeouts and cancel with a `notifications/cancelled` when they lapse, so tools should return within a reasonable window. For longer operations (>30s): (1) submit the operation and return a task_id immediately; (2) provide a separate tool to poll status; (3) send progress notifications, which may reset the caller's timeout clock. The `2025-11-25` revision added an experimental **Tasks** utility that standardizes exactly this — a tool declares `execution.taskSupport`, and the client polls for the deferred result instead of you inventing your own task_id convention. The current `2026-07-28` revision moved Tasks out of core into an official extension (`io.modelcontextprotocol/tasks`), replacing the blocking `tasks/result` with polling via `tasks/get` and adding `tasks/update` for client-to-server input.
 
-**Q: What's prompt sampling and when do servers use it?**
-**Short:** It lets a server ask the client to run an LLM call on its behalf, so the server can use AI capability without bundling its own API keys.
-Sampling lets the server ask the client to make an LLM call on its behalf. Example: a Git MCP server might ask the client's LLM to summarize a diff (using the client's model + auth). Lets servers use AI capabilities without bundling their own API keys.
+**Q: What's prompt sampling, and should a new server use it?**
+**Short:** It lets a server borrow the client's LLM, but the 2026-07-28 revision deprecated it, so a new server calls an LLM provider API directly.
+Sampling lets the server ask the client to make an LLM call on its behalf. Example: a Git MCP server asks the client's LLM to summarize a diff, using the client's model and auth, so the server bundles no API keys. The `2026-07-28` revision deprecated Sampling (with Roots and Logging) on a deprecation window of at least twelve months, and its suggested migration is to integrate directly with an LLM provider API. Many clients never implemented it, either. Practical guidance: a new server that needs a model owns that call itself; keep Sampling only for compatibility with existing clients.
 
-**Q: When may a server call `roots/list` or `elicitation/create`?**
-**Short:** Only allowed if the client declared that capability at initialize, otherwise the call fails with a method-or-params error.
-Only when the client declared that capability at initialize — otherwise `roots/list` returns `-32601` Method not found. The same gate is per-mode for elicitation: a client that declared only `form` answers a `mode: "url"` request with `-32602` Invalid params. Roots come back as `{uri, name}` records whose `uri` MUST be a `file://` URI, and if the client declared `roots.listChanged` you cache the list and refresh on `notifications/roots/list_changed` rather than re-listing on every tool call. Practical guidance: treat both as optional enrichment — a server that hard-depends on roots or elicitation simply does not work in Claude Desktop-class clients that have not shipped the capability.
+**Q: When may a server ask the client for roots or elicitation?**
+**Short:** Only if the client declared that capability; under 2026-07-28 the ask is an `inputRequests` entry in an `input_required` result, and Roots is deprecated.
+Only when the client declared that capability — in each request's `_meta` under the current `2026-07-28` revision. The ask is no longer a server-initiated request: the server returns an `InputRequiredResult` whose `inputRequests` carry the elicitation (or roots) request, and the client retries with `inputResponses`. The gate is per-mode for elicitation: a client that declared only `form` cannot be sent a `mode: "url"` request. Roots is deprecated in that revision, and `notifications/roots/list_changed` was removed, so pass directories through tool parameters, resource URIs or server configuration instead. Under `2025-11-25` these were direct requests, and an undeclared `roots/list` returned `-32601`. Practical guidance: treat elicitation as optional enrichment — a server that hard-depends on it does not work in clients that have not shipped the capability.
 
 **Q: Why must a server never request an API key through form-mode elicitation?**
 **Short:** Form data flows back into the LLM's context, so the spec forbids secrets there and requires out-of-band URL mode instead.

@@ -623,6 +623,28 @@ Fix: For best quality after training: load the BF16 base model, apply the LoRA a
 With 4 examples per batch (limited by memory) and no gradient accumulation, optimizer updates are very noisy.
 Fix: Use gradient_accumulation_steps=8 or more to achieve an effective batch size of 32+. Total effective batch size = per_device_batch_size × num_gpus × accumulation_steps.
 
+**Pitfalls 2 and 3 in code — set the QLoRA recipe explicitly:**
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+# BROKEN: relies on defaults, so it trains on FP4 with no double quantization
+bnb_config = BitsAndBytesConfig(load_in_4bit=True)
+
+# FIX: NF4, double quantization and a BF16 compute dtype, plus gradient checkpointing
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.1-8B", quantization_config=bnb_config, device_map="auto"
+)
+model.gradient_checkpointing_enable()
+```
+
 ---
 
 ## 11. Technologies & Tools

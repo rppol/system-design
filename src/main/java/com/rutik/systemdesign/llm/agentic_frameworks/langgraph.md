@@ -257,7 +257,7 @@ tools = [get_weather]
 tools_by_name = {t.name: t for t in tools}
 
 # 3. Bind tools to model
-model = ChatOpenAI(model="gpt-4o").bind_tools(tools)
+model = ChatOpenAI(model="gpt-6.2-sol").bind_tools(tools)
 
 # 4. Define nodes
 def agent_node(state: AgentState) -> dict:

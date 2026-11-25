@@ -8,6 +8,8 @@ LiteLLM (BerriAI, open-source 2023, Y Combinator W23) is a unified interface to 
 
 In agent stacks, LiteLLM occupies the "API gateway" role — sitting between your agents and the provider APIs, abstracting provider details, enforcing budgets, providing reliability. Many production agent deployments use LiteLLM Proxy as a hard requirement before deploying to multiple teams.
 
+**Current version**: litellm 1.111.0 (PyPI, checked 2026-11-25). Model IDs in the examples below are current as of that date: `claude-sonnet-5-5` and `gpt-6.2-sol`.
+
 For running a gateway such as LiteLLM as a production service with its own config, release process, and on-call, see [AI Gateway Operations](../../mlops/ai_gateway_operations/ai_gateway_operations.md).
 
 ---
@@ -48,7 +50,7 @@ Deploy as Docker container; apps call `http://proxy:4000/v1/chat/completions`. P
 
 ### 4.3 Model Aliases
 
-Map friendly names to specific deployments: `gpt-4o` → `azure/my-deployment-east`, fallback to `azure/my-deployment-west`.
+Map friendly names to specific deployments: `gpt-6.2-sol` → `azure/my-deployment-east`, fallback to `azure/my-deployment-west`.
 
 ### 4.4 Load Balancing Strategies
 
@@ -111,7 +113,7 @@ flowchart TD
     RTR["Router\nprimary = anthropic-direct"]
     A1["Attempt 1\nanthropic-direct"]
     A2["Attempt 2\nbedrock-claude (same model)"]
-    A3["Attempt 3\nazure-gpt-4o (last resort)"]
+    A3["Attempt 3\nazure-gpt-6.2-sol (last resort)"]
     OK["Return response"]
     ERR["Return 503 to client"]
 
@@ -185,9 +187,9 @@ tune first.
 ```
 Virtual key sk-team-billing-abc123:
   - max_budget: $500/month
-  - models: [claude-sonnet-5-5, gpt-4o]
+  - models: [claude-sonnet-5-5, gpt-6.2-sol]
   - tpm: 100,000 | rpm: 1,000
-  - team_id: billing | expires: 2025-12-31
+  - team_id: billing | expires: 2027-06-30
 
 Every call: deduct cost from running tally
 If budget exceeded → 429 returned to client
@@ -203,39 +205,44 @@ If budget exceeded → 429 returned to client
 model_list:
   - model_name: claude-sonnet-5-5
     litellm_params:
-      model: anthropic/claude-sonnet-4-20250514
+      model: anthropic/claude-sonnet-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
       rpm: 1000
       tpm: 100000
   
   - model_name: claude-sonnet-5-5   # Same alias, different deployment
     litellm_params:
-      model: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+      model: bedrock/anthropic.claude-sonnet-5-5
       aws_region_name: us-east-1
       rpm: 500
       tpm: 50000
   
-  - model_name: gpt-4o
+  - model_name: gpt-6.2-sol
     litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-6.2-sol
       api_key: os.environ/OPENAI_API_KEY
       rpm: 5000
   
-  - model_name: gpt-4o
+  - model_name: gpt-6.2-sol
     litellm_params:
-      model: azure/my-gpt-4o-deployment
+      model: azure/my-gpt-6-2-sol-deployment
       api_base: os.environ/AZURE_API_BASE
       api_key: os.environ/AZURE_API_KEY
       api_version: "2024-08-01-preview"
+
+  - model_name: llama-3.3-70b       # self-hosted, 128K context window
+    litellm_params:
+      model: hosted_vllm/meta-llama/Llama-3.3-70B-Instruct
+      api_base: os.environ/VLLM_API_BASE
 
 router_settings:
   routing_strategy: usage-based-routing  # Distribute across deployments by usage
   num_retries: 3
   timeout: 60
   fallbacks:
-    - claude-sonnet-5-5: [gpt-4o]  # If all claude fail, try gpt-4o
+    - claude-sonnet-5-5: [gpt-6.2-sol]  # If all claude fail, try gpt-6.2-sol
   context_window_fallbacks:
-    - gpt-4o: [claude-sonnet-5-5]  # 128K window too small: move to a 1M window
+    - llama-3.3-70b: [claude-sonnet-5-5]  # 128K window too small: move to a 1M window
 
 litellm_settings:
   cache: true
@@ -278,7 +285,7 @@ resp = httpx.post(
     headers={"Authorization": f"Bearer {MASTER_KEY}"},
     json={
         "team_id": "billing",
-        "models": ["claude-sonnet-5-5", "gpt-4o"],
+        "models": ["claude-sonnet-5-5", "gpt-6.2-sol"],
         "max_budget": 500,
         "duration": "30d",
         "tpm_limit": 100_000,
@@ -303,7 +310,7 @@ response = client.chat.completions.create(
     model="claude-sonnet-5-5",  # LiteLLM routes to actual deployment
     messages=[{"role": "user", "content": "Hello"}],
 )
-# Same code works for Claude, GPT-4o, Gemini — just change model
+# Same code works for Claude, GPT-6.2 Sol, Gemini — just change model
 ```
 
 ---
@@ -312,7 +319,7 @@ response = client.chat.completions.create(
 
 **Enterprise multi-team LLM deployments** at companies with 10+ teams using LLMs — LiteLLM Proxy provides governance and cost attribution.
 
-**SaaS providers** offering LLM features use LiteLLM internally for provider failover (Claude primary → GPT-4o fallback during Anthropic outage).
+**SaaS providers** offering LLM features use LiteLLM internally for provider failover (Claude primary → GPT-6.2 Sol fallback during Anthropic outage).
 
 **Internal AI platform teams** at large companies expose LiteLLM Proxy as the only sanctioned LLM gateway — security policy.
 
@@ -360,19 +367,19 @@ response = client.chat.completions.create(
 model_list:
   - model_name: claude-sonnet-5-5
     litellm_params:
-      model: anthropic/claude-sonnet-4-20250514
+      model: anthropic/claude-sonnet-5-5
 ```
 
 ```yaml
 # FIXED: multiple deployments + fallback
 model_list:
   - model_name: claude-sonnet-5-5
-    litellm_params: {model: anthropic/claude-sonnet-4-20250514}
+    litellm_params: {model: anthropic/claude-sonnet-5-5}
   - model_name: claude-sonnet-5-5
-    litellm_params: {model: bedrock/anthropic.claude-sonnet-4-...}
+    litellm_params: {model: bedrock/anthropic.claude-sonnet-5-5}
 router_settings:
   fallbacks:
-    - claude-sonnet-5-5: [gpt-4o]  # Cross-provider fallback
+    - claude-sonnet-5-5: [gpt-6.2-sol]  # Cross-provider fallback
 ```
 
 ### Pitfall 2: Semantic cache similarity threshold too low
@@ -420,8 +427,8 @@ SDK is a Python library — `import litellm; litellm.completion(model=..., ...)`
 Config specifies multiple deployments per model_name (e.g., Anthropic direct + Bedrock for same model). Router config has `num_retries` and `fallbacks` map. On 5xx or rate_limit error from primary deployment, router tries other deployments under same model_name; if all fail, tries `fallbacks` (different model). All within one client request.
 
 **Q: What is the difference between `fallbacks` and `context_window_fallbacks`?**
-**Short:** `fallbacks` fire on request errors after retries; `context_window_fallbacks` trigger only on overflow and route to a larger-window model.
-`fallbacks` fire on errors — 5xx, rate limits, timeouts — after retries across same-name deployments are exhausted; `context_window_fallbacks` fire only on context-window-exceeded errors and route to a larger-window model (e.g., `gpt-4o: [claude-sonnet-5-5]` in the config above, 128K to 1M tokens). The trap: with only `fallbacks` configured, an over-long prompt fails every deployment identically — each retry resends the same too-long prompt — burning all retries with zero chance of success. Configure both, and make sure context-window fallbacks point at models with genuinely larger windows, not just different providers.
+**Short:** `fallbacks` fire on request errors once retries are exhausted; `context_window_fallbacks` fire only on context overflow and route to a larger-window model.
+`fallbacks` fire on errors — 5xx, rate limits, timeouts — after retries across same-name deployments are exhausted; `context_window_fallbacks` fire only on context-window-exceeded errors and route to a larger-window model (e.g., `llama-3.3-70b: [claude-sonnet-5-5]` in the config above, 128K to 1M tokens). The trap: with only `fallbacks` configured, an over-long prompt fails every deployment identically — each retry resends the same too-long prompt — burning all retries with zero chance of success. Configure both, and make sure context-window fallbacks point at models with genuinely larger windows, not just different providers.
 
 **Q: Can a team actually exceed its virtual key `max_budget`, and why?**
 **Short:** Yes, briefly -- budget checks happen before a call's real cost is known, so concurrent in-flight calls can all pass the check at once.
@@ -484,7 +491,7 @@ OpenRouter (managed service, no self-hosting), Cloudflare AI Gateway (free, basi
 ## 13. Best Practices
 
 1. Use LiteLLM Proxy for any multi-team deployment — virtual keys + budgets are non-negotiable for governance.
-2. Configure cross-provider fallback (e.g., Claude → GPT-4o) for true resilience to single-provider outages.
+2. Configure cross-provider fallback (e.g., Claude → GPT-6.2 Sol) for true resilience to single-provider outages.
 3. Set semantic cache threshold ≥ 0.95 to prevent wrong-answer cache hits.
 4. Namespace caches per user/tenant for SaaS deployments — prevents cross-tenant data leaks.
 5. Monitor cache hit rate AND answer correctness — high hit rate with degraded quality is worse than no cache.
@@ -508,12 +515,12 @@ OpenRouter (managed service, no self-hosting), Cloudflare AI Gateway (free, basi
 - Postgres (RDS) for spend tracking + audit
 - Langfuse for LLM tracing
 - Virtual keys per team with $X/month budgets; Slack alerts at 80% budget
-- Cross-provider fallback: Claude (Anthropic) → Claude (Bedrock) → GPT-4o (OpenAI fallback)
+- Cross-provider fallback: Claude (Anthropic) → Claude (Bedrock) → GPT-6.2 Sol (OpenAI fallback)
 - Semantic cache enabled with namespace per team (cache_params.namespace from virtual_key.team_id)
 
 **Results**:
 - API keys removed from app code; only proxy holds them (rotated quarterly)
-- Anthropic outage in month 3: zero customer impact (auto-failed-over to GPT-4o for 47 min)
+- Anthropic outage in month 3: zero customer impact (auto-failed-over to GPT-6.2 Sol for 47 min)
 - Cost visibility: per-team dashboards exposed cost overruns (one team using GPT-4 for what could've been Haiku)
 - Semantic cache saved $4.2K/month (12% of total spend)
 - Average request added latency: 8ms
@@ -561,6 +568,6 @@ expensive one.
 
 **Lessons**:
 1. Virtual key budget alerts caught one team's runaway agent loop within 2 hours (alert → investigate → fix).
-2. Fallback to GPT-4o during Anthropic outage required prompt tuning (Claude prompts didn't always work as well on GPT-4o); mitigation: maintain alternate prompts per fallback chain.
+2. Fallback to GPT-6.2 Sol during Anthropic outage required prompt tuning (Claude prompts didn't always work as well on GPT-6.2 Sol); mitigation: maintain alternate prompts per fallback chain.
 3. Cache namespace by team prevented a near-incident where Team A's data could have shown in Team B's response.
 4. Langfuse traces showed 40% of agent runs spent >50% of time waiting on slow tools — actionable observability LiteLLM enabled.

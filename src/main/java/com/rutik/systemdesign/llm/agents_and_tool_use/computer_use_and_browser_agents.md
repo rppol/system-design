@@ -590,6 +590,30 @@ the task, the model returns a `computer_call` output item with an ordered
 
 6. **Storing credentials in prompts**: injecting usernames/passwords into the LLM prompt leaks credentials to the model provider. Use environment variables or a credential vault; inject credentials only into the Playwright `page.fill()` call, not the LLM message.
 
+**Pitfalls 1 and 3 in code — act, then verify the state you expected:**
+
+```python
+from playwright.sync_api import Page
+
+
+# BROKEN: click immediately and assume success
+def submit_form(page: Page) -> str:
+    page.click("text=Submit")  # may hit a still-loading or disabled button
+    return "submitted"         # nothing checked that the submission happened
+
+
+# FIX: wait until the target is actionable, act, then wait for the success state
+def submit_form(page: Page) -> str:
+    button = page.get_by_role("button", name="Submit")
+    button.wait_for(state="visible", timeout=10_000)
+    button.click()
+    page.get_by_text("Thank you for your submission").wait_for(timeout=10_000)
+    return "submitted"
+```
+
+The fixed version fails loudly with a timeout when the page did not reach the expected state, so
+the agent can retry or escalate instead of reporting a success that never happened.
+
 ---
 
 ## 11. Technologies & Tools

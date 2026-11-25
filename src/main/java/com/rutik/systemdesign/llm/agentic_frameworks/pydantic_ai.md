@@ -8,6 +8,8 @@ PydanticAI is a type-safe agent framework from Samuel Colvin (creator of Pydanti
 
 PydanticAI targets production systems where reliability and developer ergonomics matter more than provider neutrality. It supports OpenAI, Anthropic, Google, Groq, Mistral, and others through a unified `Model` abstraction — swap models with one line. The framework is opinionated: typed Agent[Deps, Result] generic, dependency injection via RunContext, eval harness built-in, async-first.
 
+**Current version**: pydantic-ai 2.74.0 (PyPI, checked 2026-11-25). V1 shipped in September 2025 and the stable V2.0 on 2026-06-23; under the project's version policy, minor releases make no intentional breaking changes and deprecated functionality is removed only at the next major version.
+
 ---
 
 ## 2. Intuition
@@ -388,7 +390,7 @@ Default 3. Configurable via `Agent(retries=N)`. On each retry, the validation er
 6. Use `Pydantic.Field(description=...)` for non-obvious parameters; descriptions improve LLM tool use.
 7. Stream structured outputs for any user-facing slow agent.
 8. Enable Logfire (or your OTEL backend) for production observability.
-9. Pin Pydantic-AI version in production (pre-1.0; API still evolving).
+9. Pin Pydantic-AI to a major version in production (e.g. `pydantic-ai>=2.74,<3`): minor releases make no intentional breaking changes, but they may change OpenTelemetry span attributes and add message-part types, so read the release notes for "compatibility impact" warnings.
 10. For multi-provider testing, write tests against TestModel; integration tests against real models in nightly CI.
 
 ---

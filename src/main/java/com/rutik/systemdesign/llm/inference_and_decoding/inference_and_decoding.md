@@ -1352,6 +1352,30 @@ Production gotchas:
 4. **Wrong batch size**: Very small batches (1-2) waste GPU utilization. Very large batches increase latency. Find the sweet spot.
 5. **Beam search in production**: Beam search (k=5) uses 5× KV cache memory. Only use for offline batch jobs.
 
+**Pitfall 2 in code — stream instead of buffering:**
+
+```python
+from collections.abc import Iterator
+
+from openai import OpenAI
+
+client = OpenAI()
+
+
+# BROKEN: the user sees nothing until the last token is generated
+def answer(prompt: str) -> str:
+    resp = client.responses.create(model="gpt-6.2-sol", input=prompt)
+    return resp.output_text
+
+
+# FIX: yield text deltas as they arrive, so perceived latency is TTFT, not total generation time
+def answer_stream(prompt: str) -> Iterator[str]:
+    stream = client.responses.create(model="gpt-6.2-sol", input=prompt, stream=True)
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            yield event.delta
+```
+
 ---
 
 ## 11. Technologies & Tools

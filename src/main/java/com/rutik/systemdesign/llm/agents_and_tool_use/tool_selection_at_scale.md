@@ -768,15 +768,15 @@ reduction     = 1 - (cost_after / cost_before)
 |--------|------------|
 | `N x S` | The tool block. 340 schemas before, k=12 after |
 | `fixed_overhead` | System prompt, history, user message. Retrieval never touches these |
-| `price_per_token` | $2.50 per 1M input tokens for GPT-4o, i.e. $0.0000025 per token |
+| `price_per_token` | $2 per 1M input tokens for gpt-6.2-sol, i.e. $0.000002 per token |
 | `reduction` | The headline percentage, always measured against the total, not the tool block |
 
 **Walk one example.** Work backwards from the two figures:
 
 ```
   upper bound on schema size (treat the whole $0.18 as tool tokens):
-  $0.18 / ($2.50 per 1,000,000 tokens) = 72,000 input tokens per call
-  72,000 / 340 tools                   =    211.8 tokens per schema at most
+  $0.18 / ($2.00 per 1,000,000 tokens) = 90,000 input tokens per call
+  90,000 / 340 tools                   =    264.7 tokens per schema at most
 
   -> these schemas are under the 300-token average used elsewhere
      in this file. Schema size is a design choice, not a constant.
@@ -820,16 +820,16 @@ dollars_call = tool_tokens x price_per_token
 |--------|------------|
 | `k_effective` | Schemas that actually reach the model. 500 naive, ~10 for RAG, ~8 for hybrid |
 | `S` | 300 tokens per schema, the working assumption behind the N=500 column |
-| `price_per_token` | $0.0000025 for GPT-4o input ($2.50 per 1M) |
+| `price_per_token` | $0.000002 for gpt-6.2-sol input ($2 per 1M) |
 | Recall @10 | A separate axis entirely. See the Recall@k decoder in Section 4.2 |
 
 **Walk one example.** Reproduce three rows of the table above at N = 500:
 
 ```
-                     k_eff    tool tokens          $ / call (GPT-4o input)
-  Naive               500     500 x 300 = 150,000        0.3750
-  RAG-over-tools       10      10 x 300 =   3,000        0.0075
-  Hybrid                8       8 x 300 =   2,400        0.0060
+                     k_eff    tool tokens          $ / call (gpt-6.2-sol input)
+  Naive               500     500 x 300 = 150,000        0.3000
+  RAG-over-tools       10      10 x 300 =   3,000        0.0060
+  Hybrid                8       8 x 300 =   2,400        0.0048
 
   Naive -> RAG:  150,000 - 3,000 = 147,000 tokens saved = 98.0% of the block
 ```
@@ -896,7 +896,7 @@ ALL_TOOLS = load_all_tools()  # 100 tools, ~300 tokens each = 30,000 tokens
 
 def call_agent(user_message: str) -> str:
     response = openai.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-6.2-sol",
         messages=[
             {"role": "system", "content": "You are a helpful agent."},
             {"role": "user", "content": user_message},
@@ -907,7 +907,7 @@ def call_agent(user_message: str) -> str:
     return response.choices[0].message.content
 
 # Problems:
-# 1. $0.075 per call in input tokens (GPT-4o at $2.50/1M input tokens)
+# 1. $0.06 per call in input tokens (gpt-6.2-sol at $2/1M input tokens)
 # 2. Measurable accuracy drop vs 10 relevant tools (size is catalogue-specific)
 # 3. Context window pressure forces shorter conversation history
 # 4. Model attends to early tools more than late tools (position bias)
@@ -932,7 +932,7 @@ def call_agent(user_message: str) -> str:
     )
 
     response = openai.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-6.2-sol",
         messages=[
             {"role": "system", "content": "You are a helpful agent."},
             {"role": "user", "content": user_message},
@@ -1142,7 +1142,7 @@ flowchart TD
     CatMonitoring --> Filter
     Filter --> Retrieve["FAISS Retrieval<br/>k=12, 8ms"]
     Retrieve --> Schemas["12 relevant tool schemas<br/>(~3360 tokens)"]
-    Schemas --> Agent["GPT-4o Agent"]
+    Schemas --> Agent["gpt-6.2-sol Agent"]
     Agent --> Call1["tool call:<br/>github_create_pr"]
     Agent --> Call2["tool call:<br/>datadog_create_monitor"]
     Call1 --> GH["GitHub API -> PR created"]

@@ -39,17 +39,25 @@ The 2023-2025 period was characterized by: the open-source revolution (LLaMA dem
 ### 4.1 OpenAI
 
 ```
-GPT-6 family (September 2026; OpenAI's recommended production line):
-  gpt-6-astra   top tier;   input $10.00/1M, output $50.00/1M
+GPT-6.2 family (OpenAI's flagship line; prices as of 2026-11-25):
+  gpt-6.2-astra flagship;   input  $8.00/1M, output $40.00/1M
+  gpt-6.2-sol   balanced;   input  $2.00/1M, output $10.00/1M
+  1.05M context, 128K max output; reasoning effort low to max
+  Use: hardest reasoning and coding (Astra); everyday agents at scale (Sol)
+
+GPT-6 / 6.1 family (September 2026):
+  gpt-6-astra   previous flagship; input $10.00/1M, output $50.00/1M
                 no custom temperature/top_p, no logprobs
   gpt-6.1-sol   mid tier;   input  $2.00/1M, output $10.00/1M
+  gpt-6.1-terra efficient;  input  $1.00/1M, output  $5.00/1M
   gpt-6-sol     mid tier;   input  $2.00/1M, output $10.00/1M
-  gpt-6-luna    efficient;  input  $0.10/1M, output  $0.50/1M
-  Use: complex reasoning, vision, agentic and general-purpose work
+  gpt-6-luna    cheapest;   input  $0.10/1M, output  $0.50/1M
+  Use: Luna for cost-sensitive, high-volume work; the named replacement
+  for GPT-4o, GPT-4o mini and GPT-4.1, which shut down 2027-01-14
+  (gpt-5, gpt-5-mini, o3 and o3-pro shut down 2026-12-11)
 
 GPT-5.6 family (July 2026):
   gpt-5.6-sol   input $4.00/1M, output $20.00/1M
-                (promotional rate, at least through 2026-11-21)
   gpt-5.6-terra input $2.00/1M, output $12.00/1M
   gpt-5.6-luna  input $0.20/1M, output  $1.20/1M
 
@@ -77,9 +85,9 @@ gpt-transcribe (speech-to-text):
 ### 4.2 Anthropic
 
 ```
-Claude Fable 5.1 (highest capability tier):
+Claude Fable 5.2 (highest capability tier):
   Demanding reasoning and long-horizon agentic work; 1M context, 128K max output
-  Cost: input $10/1M, output $50/1M
+  Cost: input $8/1M, output $40/1M (Fable 5.1, the previous tier: $10/$50)
   Thinking is always on
 
 Claude Opus 5.5 (Anthropic's default recommendation for most workloads):
@@ -95,7 +103,7 @@ Claude Haiku 5.5 (efficient):
   Classification, extraction, routing; 1M context, 128K max output
   Cost: input $0.10/1M, output $0.50/1M for prompts up to 100K tokens
         input $0.50/1M, output $2.50/1M for prompts over 100K tokens
-  (prices as of 2026-10-19)
+  (prices as of 2026-11-25)
 
 Adaptive thinking (GA):
   Claude decides when and how much to think; depth is controlled by
@@ -107,10 +115,24 @@ Adaptive thinking (GA):
 ### 4.3 Google
 
 ```
-Gemini 4 Argon (frontier, GA 2026-10-13):
-  Complex coding, agentic, math and science tasks
+Gemini 4 Carbon (strongest reasoning model, GA 2026-11-10):
+  Complex software engineering, multimodal knowledge work, science, cyber defense
   Cost: $2/1M input, $10/1M output through 2026-11-30
         $4/1M input, $20/1M output from 2026-12-01
+
+Gemini 4 Neon (GA 2026-11-18):
+  Frontier-level intelligence with fast end-to-end task completion
+  Cost: $3/1M input, $15/1M output
+
+Gemini 4 Hydrogen (GA 2026-11-12; also on the free tier):
+  Speed and efficiency for everyday coding and agentic workflows
+  Cost: $1.50/1M input, $7.50/1M output
+
+Gemini 4 Argon (efficient frontier reasoning, GA 2026-10-13):
+  Faster responses and lower token spend per turn than Carbon
+  Cost: $2/1M input, $10/1M output through 2026-11-30
+        $4/1M input, $20/1M output from 2026-12-01
+  All four: 1M context, text/image/audio/video/PDF input
 
 Gemini 3.1 Pro (previous frontier tier):
   1M context window; multimodal (text, image, audio, video)
@@ -286,10 +308,11 @@ quadrantChart
     quadrant-2 Best value
     quadrant-3 Budget
     quadrant-4 Overpriced
-    "Claude Fable 5.1": [0.93, 0.97]
-    "gpt-6-astra": [0.88, 0.95]
+    "Claude Fable 5.2": [0.89, 0.97]
+    "gpt-6.2-astra": [0.87, 0.95]
     "Claude Opus 5.5": [0.70, 0.94]
-    "Gemini 4 Argon": [0.47, 0.92]
+    "Gemini 4 Carbon": [0.48, 0.94]
+    "Gemini 4 Argon": [0.46, 0.92]
     "Claude Sonnet 5.5": [0.45, 0.88]
     "DeepSeek V4 self-hosted": [0.22, 0.84]
     "Mistral Large 3 self-hosted": [0.19, 0.78]
@@ -300,7 +323,7 @@ quadrantChart
     "Gemini 3.5 Flash-Lite": [0.15, 0.47]
 ```
 
-The upper-left quadrant (high quality, low cost) is where self-hosted open-weight models sit — DeepSeek V4, Mistral Large 3 and Llama 4 buy most of the quality axis for infrastructure cost alone; frontier API models buy the top of that axis at 10-70x the cost per 1M tokens, and that multiple has not closed. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these anchors (input price per 1M tokens, matching the Section 6 table): far left = free/self-hosted (infra cost only), ~0.10 = $0.10 (gpt-6-luna, Claude Haiku 5.5 under 100K prompt tokens), ~0.15 = $0.20-$0.30 (gpt-5.4-nano, Gemini Flash-Lite), ~0.45 = $2 (Sonnet 5.5, Gemini 4 Argon at its rate through 2026-11-30), ~0.70 = $4 (Opus 5.5), far right = $10 (Fable 5.1, gpt-6-astra). Gemini 4 Argon moves to ~0.70 when its input price doubles to $4 on 2026-12-01.
+The upper-left quadrant (high quality, low cost) is where self-hosted open-weight models sit — DeepSeek V4, Mistral Large 3 and Llama 4 buy most of the quality axis for infrastructure cost alone; frontier API models buy the top of that axis at 10-70x the cost per 1M tokens, and that multiple has not closed. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these anchors (input price per 1M tokens, matching the Section 6 table): far left = free/self-hosted (infra cost only), ~0.10 = $0.10 (gpt-6-luna, Claude Haiku 5.5 under 100K prompt tokens), ~0.15 = $0.20-$0.30 (gpt-5.4-nano, Gemini Flash-Lite), ~0.45 = $2 (Sonnet 5.5, gpt-6.2-sol, Gemini 4 Carbon and Argon at their rate through 2026-11-30), ~0.70 = $4 (Opus 5.5), ~0.88 = $8 (Fable 5.2, gpt-6.2-astra), far right = $10 (Fable 5.1, gpt-6-astra). Gemini 4 Carbon and Argon move to ~0.70 when their input price doubles to $4 on 2026-12-01.
 
 ### LLM Timeline (Key Milestones)
 
@@ -338,7 +361,7 @@ flowchart TD
     Privacy -- YES --> SelfHost["Self-host required\nLlama 4 / DeepSeek V4\nMistral Large 3\n(per use case)"]
     Privacy -- NO --> Volume{"Volume >\n10M tokens/day?"}
     Volume -- YES --> CostOpt["Cost-optimize\nTiered routing:\ncheap model first\nescalate on failure"]
-    Volume -- NO --> Quality["Quality-first\nGPT-6 / Claude Opus 5.5\nGemini 4 Argon"]
+    Volume -- NO --> Quality["Quality-first\nGPT-6.2 / Claude Opus 5.5\nGemini 4 Carbon"]
 
     classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
     classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
@@ -356,11 +379,11 @@ flowchart TD
 
 ### Cost Analysis: API vs. Self-Hosted
 
-Prices as of 2026-10-19.
+Prices as of 2026-11-25.
 
 | Provider | Model | Input $/1M | Output $/1M | Context |
 |----------|-------|-----------|------------|---------|
-| OpenAI | gpt-6-luna | $0.10 | $0.50 | — |
+| OpenAI | gpt-6-luna | $0.10 | $0.50 | 1.05M |
 | Anthropic | claude-haiku-5-5 (<=100K prompt) | $0.10 | $0.50 | 1M |
 | DeepSeek | deepseek-v4-flash | $0.14 | $0.28 | 1M |
 | OpenAI | gpt-5.4-nano | $0.20 | $1.25 | — |
@@ -369,26 +392,31 @@ Prices as of 2026-10-19.
 | DeepSeek | deepseek-v4-pro | $0.44 | $0.87 | 1M |
 | Google | gemini-3.8-flash / gemini-3.6-flash | $0.75 | $3.75 | — |
 | OpenAI | gpt-5.4-mini | $0.75 | $4.50 | — |
+| OpenAI | gpt-6.1-terra | $1 | $5 | 1.05M |
+| Google | gemini-4-hydrogen | $1.50 | $7.50 | 1M |
 | Anthropic | claude-sonnet-5-5 | $2 | $10 | 1M |
+| OpenAI | gpt-6.2-sol | $2 | $10 | 1.05M |
 | OpenAI | gpt-6-sol / gpt-6.1-sol | $2 | $10 | — |
-| Google | gemini-4-argon | $2 | $10 | — |
+| Google | gemini-4-carbon / gemini-4-argon | $2 | $10 | 1M |
 | Google | gemini-3.1-pro (<=200K) | $2 | $12 | 1M |
 | OpenAI | gpt-5.6-terra | $2 | $12 | — |
 | OpenAI | gpt-5.4 | $2.50 | $15 | — |
+| Google | gemini-4-neon | $3 | $15 | 1M |
 | Anthropic | claude-opus-5-5 | $4 | $20 | 1M |
 | OpenAI | gpt-5.6-sol | $4 | $20 | — |
 | OpenAI | gpt-5.5 | $5 | $30 | 1M |
-| Anthropic | claude-fable-5-1 | $10 | $50 | 1M |
-| OpenAI | gpt-6-astra | $10 | $50 | — |
+| Anthropic | claude-fable-5-2 | $8 | $40 | 1M |
+| OpenAI | gpt-6.2-astra | $8 | $40 | 1.05M |
+| Anthropic | claude-fable-5-1 (previous tier) | $10 | $50 | 1M |
+| OpenAI | gpt-6-astra (previous flagship) | $10 | $50 | — |
 | Serverless open-weight | Llama 3.1 70B | ~$0.88 | ~$0.88 | 128K |
 | Self-hosted 2x H100 | Llama 3.1 70B | ~$0.20 | ~$0.80 | 128K |
 
 A dash in the Context column means the provider does not publish a single headline
 number for that tier; check the provider's model page before sizing a prompt against it.
-Three rows carry dated prices. The Gemini Flash row runs through 2026-12-31 and doubles
-to $1.50 / $7.50 on 2027-01-01; `gemini-4-argon` doubles to $4 / $20 on 2026-12-01; the
-`gpt-5.6-sol` row is a promotional rate that OpenAI holds at least through 2026-11-21. An
-annualised forecast built on the current column is wrong for most of its horizon.
+Two rows carry dated prices. The Gemini Flash row runs through 2026-12-31 and doubles
+to $1.50 / $7.50 on 2027-01-01; `gemini-4-carbon` and `gemini-4-argon` double to $4 / $20 on
+2026-12-01. An annualised forecast built on the current column is wrong for most of its horizon.
 `claude-haiku-5-5` bills $0.50 / $2.50 when a prompt exceeds 100K tokens.
 Serverless open-weight rates move constantly and vary by provider — Llama 3.1/3.3 70B
 is listed between roughly $0.79 and $1.04 per 1M tokens across Groq, Fireworks and
@@ -420,23 +448,23 @@ though the table is identical.
     gpt-5.4-nano       1.0 x  $0.20 + 0.2 x  $1.25 =  $0.450
     claude-sonnet-5-5  1.0 x  $2.00 + 0.2 x $10.00 =  $4.000
     claude-opus-5-5    1.0 x  $4.00 + 0.2 x $20.00 =  $8.000
-    gpt-6-astra        1.0 x $10.00 + 0.2 x $50.00 = $20.000
-    claude-fable-5-1   1.0 x $10.00 + 0.2 x $50.00 = $20.000
+    gpt-6.2-astra      1.0 x  $8.00 + 0.2 x $40.00 = $16.000
+    claude-fable-5-2   1.0 x  $8.00 + 0.2 x $40.00 = $16.000
 
   SPREAD ACROSS THE TABLE
-    claude-fable-5-1 / deepseek-v4-flash = $20.00 / $0.196 = 102x
+    claude-fable-5-2 / deepseek-v4-flash = $16.00 / $0.196 = 82x
 
   SAME SPREAD, SCALED TO A REAL MONTH (1B input + 200M output tokens)
     deepseek-v4-flash    $196/month
     claude-opus-5-5    $8,000/month
-    gpt-6-astra       $20,000/month
+    gpt-6.2-astra     $16,000/month
 ```
 
-A ~100x spread across a single table is the practical meaning of "cost commoditization" — the same
-task can cost $196 or $20,000 a month depending only on model choice. That is why this module
+An ~80x spread across a single table is the practical meaning of "cost commoditization" — the same
+task can cost $196 or $16,000 a month depending only on model choice. That is why this module
 insists on **cost-tier routing rather than fixed model choices**: routing even 80% of traffic from
-gpt-6-astra down to gpt-6-luna on the queries that do not need frontier reasoning takes the bill from
-$20,000 to roughly `0.2 x $20,000 + 0.8 x $200 = $4,160`, a 79% cut with no change to the hard
+gpt-6.2-astra down to gpt-6-luna on the queries that do not need frontier reasoning takes the bill from
+$16,000 to roughly `0.2 x $16,000 + 0.8 x $200 = $3,360`, a 79% cut with no change to the hard
 queries. Note also the context column: deepseek-v4-flash ($0.196 in this walk-through) and
 claude-haiku-5-5 ($0.10 input under 100K prompt tokens) both offer a 1M window at the bottom of the
 table, so "cheap" and "small context" have fully decoupled, an assumption from 2023 that no longer
@@ -541,7 +569,7 @@ billed spend, which is exactly the error that produces an idle GPU cluster and a
 2025-2026 reality:
   Open models are within 10-20% of closed models for most tasks
   For the hardest reasoning and long-horizon agentic work, closed
-    frontier models (GPT-6, Claude Opus 5.5 / Fable 5.1, Gemini 4 Argon) still lead
+    frontier models (GPT-6.2, Claude Opus 5.5 / Fable 5.2, Gemini 4 Carbon) still lead
   Frontier-class weights now ship under genuinely permissive licenses:
     Mistral Large 3 and Gemma 4 (Apache 2.0), DeepSeek V4 (MIT)
   Self-hosting open models is now standard for privacy-sensitive orgs
@@ -581,15 +609,15 @@ Start with:
   Cost budget (input rate):
     <$1/1M tokens: gpt-6-luna, claude-haiku-5-5, deepseek-v4-flash,
                    gpt-5.4-nano, gemini flash / flash-lite, local 8B
-    $1-5/1M tokens: claude-sonnet-5-5, gpt-6-sol, gemini-4-argon,
+    $1-5/1M tokens: claude-sonnet-5-5, gpt-6.2-sol, gemini-4-carbon,
                     gemini-3.1-pro, claude-opus-5-5
-    >$5/1M tokens: claude-fable-5-1, gpt-6-astra
+    >$5/1M tokens: claude-fable-5-2, gpt-6.2-astra
 
   Quality requirements:
     Basic task: local 8B, gpt-6-luna or claude-haiku-5-5
     High quality: claude-sonnet-5-5, gpt-6-sol
-    Expert reasoning: claude-opus-5-5, claude-fable-5-1, gpt-6-astra,
-                      gemini-4-argon, DeepSeek-V4
+    Expert reasoning: claude-opus-5-5, claude-fable-5-2, gpt-6.2-astra,
+                      gemini-4-carbon, DeepSeek-V4
 
   Privacy:
     Can use cloud API: any vendor
@@ -599,7 +627,7 @@ Start with:
     <128K: any model
     128K: Llama 3.x
     262K: Qwen 3.6, Qwen3.8-2.4T-A95B (native)
-    1M: Claude Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5, GPT-5.5,
+    1M: Claude Fable 5.2 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5, GPT-5.5,
         Gemini 3.1 Pro, DeepSeek V4
     10M (advertised): Llama 4 Scout
 
@@ -610,8 +638,8 @@ Start with:
     Audio: OpenAI realtime models, gpt-transcribe
 
   Use case:
-    Coding: Claude Opus 5.5, GPT-6, Gemini 4 Argon, DeepSeek-V4
-    Reasoning/Math: Claude Fable 5.1, gpt-6-astra, Gemini 4 Argon, DeepSeek-V4
+    Coding: Claude Opus 5.5, GPT-6.2, Gemini 4 Carbon, DeepSeek-V4
+    Reasoning/Math: Claude Fable 5.2, gpt-6.2-astra, Gemini 4 Carbon, DeepSeek-V4
     RAG/Documents: Claude Sonnet 5.5, Gemini 3.1 Pro
     Multilingual: Gemini, Qwen 3.6, Mistral Large 3
     Edge/On-device: Phi-4 mini, Llama 3.2 1B, Gemma 4 E2B / E4B
@@ -662,7 +690,7 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 
 | Factor | API Models (GPT-5.x, Claude) | Self-Hosted Open Models |
 |--------|----------------------------|------------------------|
-| Quality ceiling | Best available (GPT-6, Claude Opus 5.5 / Fable 5.1, Gemini 4 Argon) | Very good (DeepSeek V4/V4.1, Kimi K3, Qwen3.8, Mistral Large 3, Llama 4) |
+| Quality ceiling | Best available (GPT-6.2, Claude Opus 5.5 / Fable 5.2, Gemini 4 Carbon) | Very good (DeepSeek V4/V4.1, Kimi K3, Qwen3.8, Mistral Large 3, Llama 4) |
 | Data privacy | Data leaves premises | Full on-premise control |
 | Cost at low volume | Cheap (pay per token) | Expensive (idle GPU cost) |
 | Cost at high volume | High and linear | Lower (amortized fixed infra) |
@@ -748,8 +776,8 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 Decide on five factors — volume, privacy, quality ceiling, latency predictability and shipping speed. In detail: (1) Volume — above 10M tokens/day, self-hosting becomes cost-competitive; (2) Privacy — regulated industries (HIPAA, GDPR) require self-hosting or verified vendor BAA; (3) Quality requirements — if frontier API quality cannot be matched by open models for your specific task, use API; (4) Latency — self-hosted is more predictable; (5) Development speed — API ships faster. Start with API, evaluate quality and cost, migrate specific workloads to self-hosted as volume grows. Use LiteLLM from the start so the migration is a config change.
 
 **Q: When should you reach for a reasoning model instead of a standard chat model?**
-**Short:** Reasoning models are worth their extra latency and cost only for genuine multi-step deduction tasks, so route routine traffic to a cheaper standard model instead.
-Use a reasoning model only when the task requires multi-step deduction that standard models get wrong — competition math, hard coding, scientific problem solving, complex planning. Reasoning models spend hidden "thinking" tokens before answering, which is why a frontier reasoning tier such as claude-fable-5-1 ($10/$50 per 1M input/output tokens) costs 40-50x gpt-5.4-nano and can take 10-60 seconds per response. For the majority of production traffic — classification, extraction, summarization, routine chat — they are pure waste: slower, more expensive, and no more accurate. The right pattern is routing: send hard/low-confidence queries to a reasoning model and everything else to a cheaper model, and note that open reasoning models (DeepSeek-R1 and its six distilled checkpoints at 1.5B, 7B, 8B, 14B, 32B and 70B) now let you self-host this capability instead of paying frontier rates.
+**Short:** Reasoning models earn their extra latency and cost only on genuine multi-step deduction tasks, so route routine traffic to a cheaper standard model instead.
+Use a reasoning model only when the task requires multi-step deduction that standard models get wrong — competition math, hard coding, scientific problem solving, complex planning. Reasoning models spend hidden "thinking" tokens before answering, which is why a frontier reasoning tier such as claude-fable-5-2 ($8/$40 per 1M input/output tokens) costs 32-40x gpt-5.4-nano and can take 10-60 seconds per response. For the majority of production traffic — classification, extraction, summarization, routine chat — they are pure waste: slower, more expensive, and no more accurate. The right pattern is routing: send hard/low-confidence queries to a reasoning model and everything else to a cheaper model, and note that open reasoning models (DeepSeek-R1 and its six distilled checkpoints at 1.5B, 7B, 8B, 14B, 32B and 70B) now let you self-host this capability instead of paying frontier rates.
 
 **Q: How does benchmark contamination distort public leaderboards, and what do you do about it?**
 **Short:** Benchmark contamination inflates public scores through training-data leakage, so a private domain evaluation set is the only trustworthy signal for model selection.
@@ -804,8 +832,8 @@ API cost is variable and zero-fixed: you pay per token with no infrastructure co
 Public benchmarks measure performance on standardized academic tasks (MMLU covers 57 subjects, HumanEval covers Python function completion) which do not match the distribution of any specific production use case. Two studies illustrate this: (1) a legal AI company found that a model ranked 4th on MMLU outperformed the #1 ranked model by 15% on their contract clause classification task because it was trained on more legal text; (2) a customer support team found that a smaller, cheaper model outperformed a frontier model on their routing classification task because the frontier model was over-calibrated to follow instructions rather than classify quickly. Selecting a model from benchmarks without domain validation routinely results in paying 5-10x more for worse task-specific performance. The minimum viable domain evaluation is 100-200 labeled examples from your production distribution, run against every serious candidate model before any commitment.
 
 **Q: What is prompt caching and how much can it cut cost for repeated prefixes?**
-**Short:** Prompt caching skips reprocessing a stable prefix on repeated calls, billing cached tokens at 2.5-10% of base input on Claude 5.x, gpt-5.x and gpt-6 models, so stable content goes first.
-Prompt caching lets a provider store the model's internal state for a stable prompt prefix so repeated requests skip reprocessing it, billed at a steep discount. Anthropic bills cache reads at 10% of base input (5% on Opus 5.5 and Sonnet 5.5, 2.5% on Fable 5.1) via `cache_control` breakpoints. OpenAI caches automatically and bills cached input at 10% of base on gpt-5.x and gpt-6 models and 5% on gpt-6.1-sol; only legacy gpt-4o and gpt-4o-mini stay at 50%. The prime candidates are large, unchanging prefixes reused across many calls: system prompts, few-shot example blocks, tool schemas, and long RAG context shared within a session. Because savings apply only to the cached prefix and only after the first (cache-writing) call, the architectural implication is to keep the stable content at the front of the prompt and put per-request text at the end — the opposite ordering silently defeats caching. For a workload with a 2,000-token shared system prompt, caching commonly cuts total input cost by half or more.
+**Short:** Prompt caching skips reprocessing a stable prefix on repeated calls and bills cached tokens at 2.5-10% of base input on current Claude and GPT models, so stable content goes first.
+Prompt caching lets a provider store the model's internal state for a stable prompt prefix so repeated requests skip reprocessing it, billed at a steep discount. Anthropic bills cache reads at 10% of base input on most models (5% on Opus 5.5 and Sonnet 5.5, 2.5% on Fable 5.2 and 5.1) via `cache_control` breakpoints. OpenAI caches automatically and bills cached input at 10% of base on most gpt-5.x and gpt-6 models and 5% on gpt-6.1-sol, gpt-6.1-terra, gpt-6.2-sol and gpt-6.2-astra; only the deprecated gpt-4o and gpt-4o-mini (shut down 2027-01-14) stay at 50%. The prime candidates are large, unchanging prefixes reused across many calls: system prompts, few-shot example blocks, tool schemas, and long RAG context shared within a session. Because savings apply only to the cached prefix and only after the first (cache-writing) call, the architectural implication is to keep the stable content at the front of the prompt and put per-request text at the end — the opposite ordering silently defeats caching. For a workload with a 2,000-token shared system prompt, caching commonly cuts total input cost by half or more.
 
 ---
 
@@ -939,7 +967,7 @@ A startup selected the largest available frontier model for an e-commerce produc
 # BROKEN: model selection based on quality only — no latency or cost benchmarking
 def select_model_naive(task: str) -> str:
     # "The flagship is the best model, use it for everything"
-    return "gpt-6-astra"
+    return "gpt-6.2-astra"
 
 # FIX: structured model selection with latency, cost, and quality benchmarking
 import time
@@ -980,7 +1008,7 @@ def benchmark_model(
     }
 
 # Run for all candidate models before committing
-models = ["gpt-6-astra", "gpt-6-luna", "claude-sonnet-5-5", "claude-haiku-5-5"]
+models = ["gpt-6.2-astra", "gpt-6-luna", "claude-sonnet-5-5", "claude-haiku-5-5"]
 results = [benchmark_model(m, test_prompts, quality_eval_fn) for m in models]
 ```
 
@@ -996,7 +1024,7 @@ results = [benchmark_model(m, test_prompts, quality_eval_fn) for m in models]
 
 | Selection criterion | Favors | Against |
 |---|---|---|
-| P95 latency < 2 seconds | gpt-6-luna, Claude Haiku 5.5, Gemini Flash-Lite | Frontier tiers (gpt-6-astra, Claude Opus 5.5 / Fable 5.1) at high input token count |
-| Best-in-class quality for complex reasoning | Claude Opus 5.5 / Fable 5.1, gpt-6-astra, Gemini 4 Argon | Smaller models regardless of prompt engineering |
-| Cost < $0.001 per 1k tokens (combined I/O) | gpt-6-luna, Claude Haiku 5.5, deepseek-v4-flash, gpt-5.4-nano, Gemini Flash-Lite | All frontier models (gpt-6-astra, Claude Opus 5.5, Gemini 4 Argon) |
+| P95 latency < 2 seconds | gpt-6-luna, Claude Haiku 5.5, Gemini Flash-Lite | Frontier tiers (gpt-6.2-astra, Claude Opus 5.5 / Fable 5.2) at high input token count |
+| Best-in-class quality for complex reasoning | Claude Opus 5.5 / Fable 5.2, gpt-6.2-astra, Gemini 4 Carbon | Smaller models regardless of prompt engineering |
+| Cost < $0.001 per 1k tokens (combined I/O) | gpt-6-luna, Claude Haiku 5.5, deepseek-v4-flash, gpt-5.4-nano, Gemini Flash-Lite | All frontier models (gpt-6.2-astra, Claude Opus 5.5, Gemini 4 Carbon) |
 | HIPAA / data residency compliance | Azure OpenAI, self-hosted open-source | OpenAI API, Anthropic API (standard tier) |

@@ -45,12 +45,27 @@ For upgrading, tuning, and benchmarking vLLM in production, see [Inference Engin
 
 ## 1. Architecture Overview
 
-> **Version this document targets: vLLM v0.27.1** (released 2026-08-11). Every flag, default and
-> signature below was checked against the v0.27.1 source. vLLM's CLI and Python API move fast, so
-> re-check against your installed release before copying anything into production — and treat any
-> flag you find in a tutorial as unverified until `vllm serve --help` confirms it.
+> **Version this document targets: vLLM v0.34.0** (released 2026-11-16; v0.33.0 shipped only as
+> release candidates). The mechanics were first checked against the v0.27.1 source; the changes
+> below, through v0.34.0, are folded into the sections they touch, and a number tagged with an
+> older version (for example "in v0.27.1") is the value verified at that version. vLLM's CLI and
+> Python API move fast, so re-check against your installed release before copying anything into
+> production — and treat any flag you find in a tutorial as unverified until `vllm serve --help`
+> confirms it.
 >
-> **Releases after the v0.27.1 pin change these things this document touches:**
+> **What changed between v0.27.1 and the v0.34.0 target:**
+> - v0.34.0 (2026-11-16) changes two defaults every capacity calculation depends on. `--block-size`
+>   defaults to **64** (was 16; ROCm paged attention still uses 16). The KV cache is
+>   **extensible** by default: vLLM sizes it from memory actually free after CUDA-graph capture and
+>   warmup, and `--gpu-memory-utilization` defaults to **1.0** (was 0.92), so most configs should
+>   stop setting it — set it only to share a GPU with another process, or opt out with
+>   `--no-enable-extensible-kv-cache`. The release notes report a bigger cache and higher
+>   throughput, at a cost of 6-18% higher TPOT on some H200 models at concurrency 128. The worked
+>   examples in §2 and §5 pass `--block-size 16` and an explicit `--gpu-memory-utilization`, so
+>   their arithmetic stays checkable.
+> - v0.34.0 removes Model Runner V1: Model Runner V2 is the only GPU runner, and
+>   `VLLM_USE_V2_MODEL_RUNNER=0` now fails at startup. It also requires `huggingface_hub >= 2.0.0`,
+>   drops `fp_quant` checkpoints, and replaces Marlin W4A8 with `--quantization humming` (§9).
 > - v0.28.0 (2026-08-26) moved `bitsandbytes` out of tree. `--quantization bitsandbytes` and
 >   `--load-format bitsandbytes` require `vllm-bnb-plugin` installed alongside vLLM; without it
 >   the model load fails. §11's quantization table calls this out.
@@ -74,7 +89,7 @@ For upgrading, tuning, and benchmarking vLLM in production, see [Inference Engin
 >   `part.type="reasoning_text"` instead of `response.reasoning_part.added/done`. It also removes
 >   cascade attention; `--disable-cascade-attn` still parses but only warns.
 >
-> The pin stays at v0.27.1 so every other number in this document is the one that was verified.
+> Any number not tied to a release above was checked at v0.27.1; confirm it against your installed release before relying on it.
 
 vLLM separates concerns into three layers:
 
@@ -125,7 +140,7 @@ flowchart TD
 - **`EngineCore`** — the scheduling + model-execution loop, run in its own process so tokenization, detokenization and streaming overlap with it
 - **`Scheduler`** (`v1/core/sched/scheduler.py`) — decides which requests run each step; keeps `waiting` and `running` queues (there is no SWAPPED queue in V1)
 - **`KVCacheManager` / `BlockPool`** (`v1/core/`) — allocate KV cache blocks and map logical → physical blocks
-- **`GPUModelRunner`** (`v1/worker/gpu_model_runner.py`): executes the forward pass with paged attention kernels. From v0.29.0, Model Runner V2 replaces it as the default
+- **Model runner**: executes the forward pass with paged attention kernels. Model Runner V2 became the default in v0.29.0 and is the only GPU runner from v0.34.0, which removed the V1 `GPUModelRunner` (`v1/worker/gpu_model_runner.py`)
 - **`Sampler`** (`v1/sample/sampler.py`) — applies sampling parameters (temperature, top-p, top-k, min-p, penalties) to logits
 
 ---
@@ -147,7 +162,7 @@ Problems:
 
 ### PagedAttention Solution
 
-Divide KV cache into fixed-size **pages** (called blocks in vLLM, default 16 tokens each):
+Divide KV cache into fixed-size **pages** (called blocks in vLLM; 16 tokens each in this document's examples, 64 by default from v0.34.0):
 
 ```
 Physical GPU Memory (KV Cache Pool)
@@ -197,7 +212,7 @@ generated instead of what it might eventually generate.
 | `num_kv_heads` | Heads that own K/V. GQA sets this **below** the query-head count |
 | `head_dim` | Width of one head's vector. 128 across the whole LLaMA 3 family |
 | `bytes_per_element` | 2 for FP16/BF16, 1 for FP8 KV cache, 0.5 for INT4 |
-| `block_size` | Tokens per physical block. vLLM default 16, `--block-size` |
+| `block_size` | Tokens per physical block, `--block-size`. Default 64 from v0.34.0 (16 before, and still 16 for ROCm paged attention); the examples here use 16 |
 | `num_blocks` | How many blocks the pool holds. vLLM computes this at startup, not you |
 | block table | Per-sequence array: logical block index -> physical block index |
 
@@ -234,7 +249,7 @@ Contiguous allocation reserves for the worst case; paged allocation reserves for
 ```
 contiguous waste per seq = max_model_len - tokens_actually_used
 paged waste per seq      = (block_size x ceil(used / block_size)) - used
-                           bounded by block_size - 1, i.e. at most 15 tokens
+                           bounded by block_size - 1: 15 tokens at 16, 63 at the v0.34.0 default 64
 ```
 
 **Stated plainly.** "A contiguous cache has to bet on the longest answer the model
@@ -526,10 +541,10 @@ When prefix caching is active and two sequences share a physical block, writing 
 ### `gpu_memory_utilization`
 
 ```bash
---gpu-memory-utilization 0.9  # use 90% of GPU memory for model + KV cache (default is 0.92)
+--gpu-memory-utilization 0.9  # cap at 90% of GPU memory; default 1.0 from v0.34.0 (0.92 before)
 ```
 
-vLLM profiles actual model weight memory, then allocates all remaining GPU memory (up to this fraction) for KV cache blocks. More blocks = more concurrent requests = higher throughput.
+vLLM profiles actual model weight memory, then allocates all remaining GPU memory (up to this fraction) for KV cache blocks. More blocks = more concurrent requests = higher throughput. From v0.34.0 the extensible KV cache measures free memory after CUDA-graph capture and warmup instead of estimating it, and the flag defaults to 1.0, so set it only when the GPU is shared or extensible KV cache is off; the formula below is what the explicit setting does.
 
 ```
 kv_pool_bytes = (vram_total x gpu_memory_utilization) - weight_bytes - overhead_bytes
@@ -549,7 +564,7 @@ and it takes that headroom from CUDA graphs and NCCL buffers that still need it.
 | Symbol | What it is |
 |--------|------------|
 | `vram_total` | Physical capacity. 80 GB on an A100 80GB — before the driver's cut |
-| `gpu_memory_utilization` | Fraction of the card vLLM may claim. Default 0.92 (`CacheConfig`) |
+| `gpu_memory_utilization` | Fraction of the card vLLM may claim. Default 1.0 from v0.34.0 with extensible KV cache (0.92 before) |
 | `weight_bytes` | `P × bytes_per_element`, divided by TP if sharded. Measured, not guessed |
 | `overhead_bytes` | Activations, CUDA graphs, NCCL buffers. 2-5 GB, grows with TP |
 | `max_num_seqs` | Concurrency cap. The knob that decides whether you preempt |
@@ -971,7 +986,8 @@ vLLM supports multiple quantization formats, affecting memory, throughput, and q
 `compressed-tensors`, `bitsandbytes`, `quark`, `torchao`, `moe_wna16`, `experts_int8` and several
 online-quantization shorthands (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`,
 `nvfp4_per_token`, `mxfp8`, among others). `fbgemm_fp8` and `fp_quant` are present but listed in
-`DEPRECATED_QUANTIZATION_METHODS` — accepted for now, not the value to reach for in new configs.
+`DEPRECATED_QUANTIZATION_METHODS` there, and v0.34.0 removed `fp_quant` outright (its checkpoints no
+longer load) along with Marlin W4A8, whose replacement is `--quantization humming`.
 That enum is the whole contract: a value outside it fails argument validation at
 startup. GGUF is served through an out-of-tree plugin rather than a `--quantization` value.
 
@@ -1843,7 +1859,7 @@ vllm serve \
   --dtype bfloat16                  # default: auto
 
 # Memory & Context
-  --gpu-memory-utilization 0.9      # fraction of GPU memory for model + KV cache; DEFAULT 0.92
+  --gpu-memory-utilization 0.9      # cap on GPU memory for model + KV cache; DEFAULT 1.0 from v0.34.0 (0.92 before) - set only to share a GPU
   --max-model-len 8192              # max context length (prompt + output)
   --max-num-seqs 256                # max concurrent sequences; DEFAULT 256 (A100 or <70 GiB GPU), 1024 (70 GiB+ non-A100)
   --max-num-batched-tokens 32768    # max tokens per scheduler step; DEFAULT 2048 (A100 or <70 GiB), 8192 (70 GiB+ non-A100)
@@ -1861,7 +1877,7 @@ vllm serve \
 # Performance Features
   --enable-prefix-caching          # Automatic Prefix Caching; DEFAULT ON (--no-... to disable)
   --enable-chunked-prefill         # interleave prefill and decode; DEFAULT ON
-  --block-size 16                  # KV cache block size in tokens; DEFAULT 16
+  --block-size 16                  # KV cache block size in tokens; DEFAULT 64 from v0.34.0 (16 before; ROCm still 16)
   --prefix-caching-hash-algo sha256  # DEFAULT sha256; also sha256_cbor, xxhash, xxhash_cbor
 
 # Quantization
@@ -2125,9 +2141,9 @@ Tensor parallelism (TP) splits each weight matrix across N GPUs. Each GPU holds 
 The draft model generates K candidate tokens cheaply. The target model verifies all K in one forward pass (parallel, not sequential). For each token, if the draft's proposal matches the target's distribution (up to a rejection threshold), it's accepted. If rejected at position i, tokens 0..i-1 are accepted and a corrected token at i is sampled from the target. The modified rejection sampling algorithm guarantees the accepted tokens are distributed exactly as if the target model had generated them autoregressively — the distribution is unchanged, only the latency is reduced.
 
 **Q7: What is the tradeoff between gpu_memory_utilization and throughput?**
-**Short:** Raising gpu_memory_utilization grows the whole VRAM cap, not just the KV pool, so it can starve CUDA graph and NCCL buffers.
+**Short:** It caps the whole card, not the KV pool, so raising it can starve CUDA graphs and NCCL; from v0.34.0 it defaults to 1.0 and is best left unset unless the GPU is shared.
 
-Higher `gpu_memory_utilization` allocates more GPU RAM for KV cache blocks after model weights are loaded. The default is 0.92. More blocks means more concurrent sequences and higher throughput, up to a point. The trap is that the flag caps the *whole card*, not the KV pool: raising it from 0.90 to 0.95 does not add 5% of KV capacity, it adds 5% of total VRAM to a pool that may only be 60% of the card, and it takes that headroom from CUDA graphs and NCCL buffers that still need it. Too high risks allocation failure under a traffic spike rather than at steady state; too low leaves throughput on the table. Practical approach: keep it at or slightly below the default, then raise it only while `vllm:num_preemptions_total` stays at zero.
+Higher `gpu_memory_utilization` allocates more GPU RAM for KV cache blocks after model weights are loaded. From v0.34.0 the default is 1.0 with the extensible KV cache, which sizes the pool from memory measured free after CUDA-graph capture and warmup; the release notes advise leaving it unset in most configs and setting it (for example 0.9) only to share the GPU or when extensible KV cache is disabled. Before v0.34.0 the default was 0.92. More blocks means more concurrent sequences and higher throughput, up to a point. The trap is that the flag caps the *whole card*, not the KV pool: raising it from 0.90 to 0.95 does not add 5% of KV capacity, it adds 5% of total VRAM to a pool that may only be 60% of the card, and it takes that headroom from CUDA graphs and NCCL buffers that still need it. Too high risks allocation failure under a traffic spike rather than at steady state; too low leaves throughput on the table. Practical approach on a pre-v0.34.0 release or with extensible KV cache off: start at or slightly below 0.92, then raise it only while `vllm:num_preemptions_total` stays at zero.
 
 **Q8: When would you use LoRA serving vs separate model deployments?**
 **Short:** LoRA serving suits many small adapters sharing one base model; separate deployments suit differing configs, traffic, or isolation needs.
@@ -2160,9 +2176,9 @@ V0 is gone — it was deleted from the codebase in v0.11.0, so there is no fallb
 When the block allocator cannot give an active sequence another block, the scheduler frees blocks by preempting a running request — and in V1 preemption always means **discard and recompute**, never swap. `Scheduler._preempt_request` frees the request's blocks, resets `num_computed_tokens` to 0, sets its status to `PREEMPTED`, and *prepends* it to the waiting queue so it is retried first. Which request gets chosen depends on policy: under FCFS it is `self.running.pop()`, the most recently admitted request (the one that has generated the fewest tokens), not the oldest; under `--scheduling-policy priority` it is the request with the numerically highest priority value, ties broken by latest arrival. The cost on resume is a full re-prefill of everything the request had generated so far, which is why prefix caching matters here — most of that prefix is usually still in the block pool and the "recompute" collapses into a cache hit. The `vllm:num_preemptions_total` counter is the signal to alert on: sustained rates above a few per minute mean the pool is oversubscribed, and the fix is a lower `--max-num-seqs` or more capacity, not per-preemption tuning. Anyone describing GPU-to-CPU swap-out and swap-in is describing an engine vLLM does not ship.
 
 **Q14: How would you configure tensor parallelism for a LLaMA 70B model on 4 x A100 80GB GPUs?**
-**Short:** TP=4 splits LLaMA 70B's ~140GB of FP16 weights into ~35GB per A100, leaving roughly 35GB of headroom for KV cache.
+**Short:** TP=4 splits LLaMA 70B's ~140GB of FP16 weights into ~35GB per A100, leaving roughly 35GB per card for KV cache after runtime overhead.
 
-With TP=4, each GPU holds one-quarter of every weight matrix. LLaMA 70B in FP16 is approximately 140 GB total (70 billion parameters * 2 bytes), so each GPU holds ~35 GB of weights; against the 0.92 default utilization cap that is ~73.6 GB of budget per card, leaving roughly 35 GB for KV cache once activations, CUDA graphs and NCCL buffers take their few GB. AllReduce between the 4 GPUs runs over NVLink (600 GB/s on A100 SXM), keeping synchronization small relative to compute. An alternative is TP=2 with FP8 weights: that halves the footprint to ~70 GB total, so 2 GPUs each hold ~35 GB with similar per-GPU headroom, freeing the other 2 GPUs for a second replica. One caveat specific to A100: full FP8 W8A8 compute requires compute capability 8.9 or higher (Ada/Hopper), so on Ampere vLLM runs FP8 as weight-only W8A16 through Marlin — you get the VRAM saving and the extra KV capacity, but no FP8 tensor-core speedup. Choose TP=4 in FP16 when you want no quantization risk; choose TP=2 + FP8 when you want two replicas out of the same four cards.
+With TP=4, each GPU holds one-quarter of every weight matrix. LLaMA 70B in FP16 is approximately 140 GB total (70 billion parameters * 2 bytes), so each GPU holds ~35 GB of weights; against a 0.92 utilization cap (the pre-v0.34.0 default; v0.34.0 sizes the cache from measured free memory instead) that is ~73.6 GB of budget per card, leaving roughly 35 GB for KV cache once activations, CUDA graphs and NCCL buffers take their few GB. AllReduce between the 4 GPUs runs over NVLink (600 GB/s on A100 SXM), keeping synchronization small relative to compute. An alternative is TP=2 with FP8 weights: that halves the footprint to ~70 GB total, so 2 GPUs each hold ~35 GB with similar per-GPU headroom, freeing the other 2 GPUs for a second replica. One caveat specific to A100: full FP8 W8A8 compute requires compute capability 8.9 or higher (Ada/Hopper), so on Ampere vLLM runs FP8 as weight-only W8A16 through Marlin — you get the VRAM saving and the extra KV capacity, but no FP8 tensor-core speedup. Choose TP=4 in FP16 when you want no quantization risk; choose TP=2 + FP8 when you want two replicas out of the same four cards.
 
 **Q15: How does PagedAttention compare to TensorRT-LLM's in-flight batching, and when would you choose one over the other?**
 **Short:** Both interleave prefill and decode across requests, and TensorRT-LLM also pages its KV cache by default, unlike the common assumption.
@@ -2284,10 +2300,10 @@ def build_engine() -> AsyncLLMEngine:
         max_model_len=8192,
         max_num_batched_tokens=32768,        # per-step token budget (default 2048)
         max_num_seqs=512,                    # max concurrent sequences (default 128)
-        gpu_memory_utilization=0.92,         # this IS the default
+        gpu_memory_utilization=0.92,         # the pre-v0.34.0 default; v0.34.0 defaults to 1.0
         enable_prefix_caching=True,          # on by default in V1; explicit here
         enable_chunked_prefill=True,         # on by default in V1; explicit here
-        block_size=16,
+        block_size=16,                       # v0.34.0 defaults to 64; 16 kept for this arithmetic
     )
     return AsyncLLMEngine.from_engine_args(args)
 
@@ -2568,7 +2584,7 @@ vLLM's design is a stack of deliberate trades, and the sections above each argue
 
 | Decision | What it buys | What it costs | When the cost dominates |
 |----------|-------------|--------------|------------------------|
-| PagedAttention block allocation over contiguous reservation | Near-zero external fragmentation; waste bounded by `block_size - 1` tokens per sequence (at most 15 with the default 16) | A block table indirection on every attention step, and a custom kernel that must be maintained per attention variant | Never in practice for serving; the fragmentation it removes is far larger than the indirection it adds |
+| PagedAttention block allocation over contiguous reservation | Near-zero external fragmentation; waste bounded by `block_size - 1` tokens per sequence (at most 63 with the v0.34.0 default of 64, 15 at block size 16) | A block table indirection on every attention step, and a custom kernel that must be maintained per attention variant | Never in practice for serving; the fragmentation it removes is far larger than the indirection it adds |
 | Continuous batching over static batching | Each finished sequence frees its slot immediately, so GPU utilisation stays high under mixed sequence lengths | Per-request latency now depends on what else is in the batch, so tail latency is harder to reason about | Strict per-request latency SLOs — a slow neighbour is visible in your p99 |
 | Recompute on preemption over swapping KV to host memory | Nothing is held while a request waits, and the recompute usually lands on prefix-cache hits | The preempted request repeats work it already did | Very long prompts with a cold prefix cache, where the re-prefill is a full cold start |
 | KV offload to CPU or disk tiers over recompute | A prefix evicted from HBM comes back by copy instead of re-prefill | Host RAM or disk for the tier, and PCIe bandwidth on every load | Short prefixes or a fast prefill, where recomputing is cheaper than the copy; offload wins on long, reused prefixes (multi-turn chat, agents) on a large model |

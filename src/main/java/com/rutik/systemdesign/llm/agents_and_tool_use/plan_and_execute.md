@@ -604,6 +604,38 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 
 5. **Synthesis step underspecified**: Many implementations plan well but have a vague "synthesize results" final step. The synthesis step should specify format, required sections, and quality criteria explicitly.
 
+**Pitfalls 1 and 4 in code — replan on failure, but cap the replans:**
+
+```python
+MAX_REPLANS = 2
+
+
+# BROKEN: the plan runs to the end even after step 1 returned nothing useful
+def run(goal: str) -> str:
+    plan = planner(goal)
+    results = [executor(step) for step in plan]
+    return synthesize(goal, results)
+
+
+# FIX: check every step, replan on failure, and stop replanning after MAX_REPLANS
+def run(goal: str) -> str:
+    plan, results, replans = planner(goal), [], 0
+    while plan:
+        step = plan.pop(0)
+        result = executor(step)
+        if not result.ok:
+            if replans == MAX_REPLANS:
+                return synthesize(goal, results, partial=True)
+            replans += 1
+            plan = replanner(goal, done=results, failed=step, error=result.error)
+            continue
+        results.append(result)
+    return synthesize(goal, results)
+```
+
+`planner`, `executor`, `replanner` and `synthesize` are your LLM-backed components; `result.ok`
+is the step check (non-empty output, schema valid, tool did not error).
+
 ---
 
 ## 11. Technologies & Tools

@@ -169,7 +169,7 @@ Termination: is_termination_msg returns True for "APPROVE"
 import autogen
 
 llm_config = {
-    "model": "gpt-4o",
+    "model": "gpt-6.2-sol",
     "api_key": os.environ["OPENAI_API_KEY"],
     "temperature": 0,
 }
@@ -237,7 +237,7 @@ user_proxy = autogen.UserProxyAgent(
 ```python
 import autogen
 
-llm_config = {"model": "gpt-4o", "api_key": os.environ["OPENAI_API_KEY"]}
+llm_config = {"model": "gpt-6.2-sol", "api_key": os.environ["OPENAI_API_KEY"]}
 
 # Specialist agents
 planner = autogen.AssistantAgent(
@@ -318,7 +318,7 @@ from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.teams import RoundRobinGroupChat
 from autogen_ext.models import OpenAIChatCompletionClient
 
-model_client = OpenAIChatCompletionClient(model="gpt-4o")
+model_client = OpenAIChatCompletionClient(model="gpt-6.2-sol")
 
 assistant = AssistantAgent(
     name="assistant",
@@ -428,7 +428,7 @@ Production incident: AutoGen agent with `use_docker=False` and `human_input_mode
 Without `max_consecutive_auto_reply` and `is_termination_msg`, agents can loop until API limits or context window is hit. Set both: `max_consecutive_auto_reply=10` as a hard cap, `is_termination_msg` for graceful termination. Default max_consecutive_auto_reply in AutoGen is also 10 but confirm this for your version.
 
 **Pitfall 3: Context window exhaustion in long conversations**
-Each message is appended to history. After 20 rounds of 500-token messages: 10K tokens of history in every LLM call. After 50 rounds: 25K tokens. With GPT-4o's 128K context: potentially unlimited, but costs grow linearly. Set `max_turns` or `max_consecutive_auto_reply` to cap this. For long-running automation: summarize conversation history at checkpoints.
+Each message is appended to history. After 20 rounds of 500-token messages: 10K tokens of history in every LLM call. After 50 rounds: 25K tokens. With a 1M-token context window (gpt-6.2-sol: 1.05M): effectively unlimited, but costs grow linearly. Set `max_turns` or `max_consecutive_auto_reply` to cap this. For long-running automation: summarize conversation history at checkpoints.
 
 **What this actually says.** "History size grows linearly with rounds, but the money you spend on it grows quadratically, because every round re-sends every earlier round."
 
@@ -442,24 +442,24 @@ That distinction is the one the sentence above glosses. "Costs grow linearly" is
 | `sum r x t` | Tokens paid across the whole conversation, roughly `t x r^2 / 2` |
 | `max_consecutive_auto_reply` | The cap that bounds `r`, and therefore bounds the square |
 
-**Walk one example.** Per-call history against cumulative spend, at GPT-4o's $5/M input:
+**Walk one example.** Per-call history against cumulative spend, at gpt-6.2-sol's $2/M input:
 
 ```
   rounds r    history r x 500    cost of that call    cumulative history cost
-     10           5,000 tok         $0.025                 $0.14
-     20          10,000 tok         $0.050                 $0.53
-     50          25,000 tok         $0.125                 $3.19
+     10           5,000 tok         $0.010                 $0.055
+     20          10,000 tok         $0.020                 $0.21
+     50          25,000 tok         $0.050                 $1.28
 
   ratio 50 rounds vs 20 rounds
-    per-call    0.125 / 0.050   =  2.5x     (linear, as the text says)
-    cumulative  3.19  / 0.53    =  6.0x     (quadratic, what you are billed)
+    per-call    0.050 / 0.020   =  2.5x     (linear, as the text says)
+    cumulative  1.28  / 0.21    =  6.1x     (quadratic, what you are billed)
 ```
 
 Going from 20 rounds to 50 is 2.5× the messages but 6× the money. This is why
 `max_consecutive_auto_reply=10` is a cost control and not merely a safety rail: halving the
 cap cuts total spend roughly fourfold, not twofold.
 
-**Why the 128K context window is a trap here.** A large window removes the *error* that
+**Why a 1M-token context window is a trap here.** A large window removes the *error* that
 would otherwise stop a runaway conversation, so nothing fails — the loop just keeps going
 and the invoice keeps squaring. Before long context windows, context exhaustion was a crude
 but effective circuit breaker. Now the only circuit breaker is the one you configure.
@@ -531,8 +531,8 @@ AutoGen supports three execution contexts: (1) `use_docker=True` — code runs i
 When `UserProxyAgent` executes code that raises an exception, it captures the full stderr output and sends it back to `AssistantAgent` as a message: "Error: ModuleNotFoundError: No module named 'pandas'". The assistant sees this and typically: (1) diagnoses the error, (2) proposes a fix (install the dependency, fix the logic error), (3) writes corrected code. This feedback loop runs until the code works or `max_consecutive_auto_reply` is reached. For non-code errors (LLM generates a nonsensical response): the user_proxy receives the message and forwards it to the assistant, which typically self-corrects.
 
 **Q: How do you control conversation costs in AutoGen?**
-**Short:** Cap `max_consecutive_auto_reply`, cap `GroupChat` turns, add a custom termination check, and track token usage against a dollar budget.
-Four levers: (1) `max_consecutive_auto_reply` — hard cap on auto-replies; set to 10-15 for most tasks; (2) `max_turns` in GroupChat — total turns across all agents; (3) Custom `is_termination_msg` — stop immediately when task is complete; (4) Token counting: track `llm_output["usage"]` from each LLM call; terminate when budget exceeded. Concrete: GPT-4o at $5/1M input + $15/1M output; a 20-turn code generation conversation with 1K tokens/turn costs ~$0.20-0.40. Set a $1 per run hard limit via budget tracking.
+**Short:** Cap `max_consecutive_auto_reply` and `GroupChat` turns, add a custom termination check, and stop the run when tracked token spend hits a dollar budget.
+Four levers: (1) `max_consecutive_auto_reply` — hard cap on auto-replies; set to 10-15 for most tasks; (2) `max_turns` in GroupChat — total turns across all agents; (3) Custom `is_termination_msg` — stop immediately when task is complete; (4) Token counting: track `llm_output["usage"]` from each LLM call; terminate when budget exceeded. Concrete: at gpt-6.2-sol's $2/1M input and $10/1M output, a 20-turn code generation conversation with 1K tokens/turn costs about $0.60 — $0.20 of output plus about $0.42 for the ~210K tokens of history re-sent as input. Set a $1 per run hard limit via budget tracking.
 
 **Q: What are nested chats and when do you use them?**
 **Short:** A nested chat lets one agent spawn an encapsulated sub-conversation between another agent pair to handle a complex sub-task.
@@ -613,7 +613,7 @@ import autogen
 import os
 
 llm_config = {
-    "model": "gpt-4o",
+    "model": "gpt-6.2-sol",
     "api_key": os.environ["OPENAI_API_KEY"],
     "temperature": 0,
     "seed": 42,  # for reproducibility in testing

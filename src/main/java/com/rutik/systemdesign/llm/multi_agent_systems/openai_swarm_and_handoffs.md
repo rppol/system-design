@@ -788,16 +788,16 @@ Use a routine when the workflow is linear, steps share the same domain context, 
 **Short:** max_turns caps total LLM calls per run so a pair of agents handing off to each other can't loop forever.
 max_turns is a parameter to Runner.run (default 10) that limits the total number of LLM calls per run, counting tool calls and handoffs. Without it, a pair of agents that hand off to each other could loop indefinitely, consuming unbounded tokens and cost. After max_turns is exceeded, the SDK raises MaxTurnsExceeded.
 
-**Q: How do input and output guardrails differ?**
-**Short:** Input guardrails inspect the message before the LLM sees it; output guardrails inspect the response after it's produced.
+**Q: Swarm had no guardrails. What do the Agents SDK's input and output guardrails add when you migrate a Swarm system?**
+**Short:** A pre-LLM check on the first agent's input and a post-LLM check on the final output, each able to abort the run, which Swarm handoff code had to hand-roll.
 Input guardrails run before the LLM receives the user message; they can inspect and block PII, prompt injection, or policy violations. Output guardrails run after the LLM produces its response; they can block toxic, off-topic, or malformed outputs. Both return GuardrailFunctionOutput; setting tripwire_triggered=True aborts the run by raising InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered — two distinct exception classes, so catch both.
 
 **Q: Can a guardrail call another LLM?**
 **Short:** Avoid calling Runner.run inside a guardrail since it nests runs recursively; use a direct cheap-model call instead.
 You should avoid calling Runner.run inside a guardrail because it causes nested runs and can trigger guardrails recursively. Instead, use a direct openai.chat.completions.create call with a fast, cheap model (e.g., gpt-5.4-nano), a regex heuristic, or a local classifier. The latency budget for a guardrail is typically under 200ms.
 
-**Q: How does streaming work in the Agents SDK?**
-**Short:** run_streamed returns immediately and is iterated with async for, emitting raw token, agent-change, and run-item events.
+**Q: How does streaming change when you migrate a Swarm handoff system to the Agents SDK?**
+**Short:** Swarm's stream=True generator yielded message chunks; the SDK's run_streamed returns immediately and is iterated with async for, adding agent-change events that make each handoff visible.
 Runner.run_streamed is a synchronous call that immediately returns a RunResultStreaming object, which you then iterate with `async for event in result.stream_events()`. It is neither awaited nor used as an async context manager. There are three event types: raw_response_event (raw Responses API deltas, for token-level output), agent_updated_stream_event (the active agent changed, i.e. a handoff), and run_item_stream_event (a higher-level item finished — message_output_item, tool_call_item, tool_call_output_item, handoff_output_item). The caller can display tokens in real time while the runner continues processing.
 
 **Q: What happens to conversation history when a handoff occurs?**

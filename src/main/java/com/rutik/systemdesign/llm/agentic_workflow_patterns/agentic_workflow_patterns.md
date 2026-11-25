@@ -604,7 +604,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["Input"]
-    CLS["Classifier\n(claude-haiku / gpt-4o-mini)"]
+    CLS["Classifier\n(claude-haiku-5-5 / gpt-6-luna)"]
     RA["Route A\ncheap model"]
     RB["Route B\nmid model"]
     RC["Route C\nexpensive model"]
@@ -1063,7 +1063,7 @@ Use when:
 - Cost increase is justified by downstream error cost
 
 Do NOT use when:
-- Task is deterministic (temperature=0 single call will give same result N times)
+- Task has one correct output and a deterministic checker (a test, schema or exact-match rule): run one call and verify it, rather than voting. Do not count on temperature=0 to make N calls agree — greedy decoding is not reproducible across batches and hardware, and current Claude models (Opus 5.5, Sonnet 5.5, Haiku 5.5) reject a temperature setting altogether
 - N votes agree with each other but are all wrong (systematic bias — voting does not fix this)
 - Budget is constrained
 
@@ -1099,6 +1099,7 @@ Do NOT use when:
 **Broken code** — infinite loop risk:
 
 ```python
+# BROKEN
 def broken_evaluator_optimizer(task: str) -> str:
     output = generate(task)
     while True:  # No termination condition
@@ -1112,6 +1113,7 @@ def broken_evaluator_optimizer(task: str) -> str:
 **Fixed code** — hard cap on rounds:
 
 ```python
+# FIX
 def fixed_evaluator_optimizer(task: str, max_rounds: int = 4) -> str:
     output = generate(task)
     for _ in range(max_rounds):
@@ -1131,6 +1133,7 @@ Incident pattern (illustrative composite, not a published incident): a content m
 **Broken code** — misclassification raises an exception instead of degrading gracefully:
 
 ```python
+# BROKEN
 def broken_router(query: str) -> str:
     label = classify_query(query)  # Returns "UNKNOWN" on ambiguous input
     handlers = {
@@ -1143,6 +1146,7 @@ def broken_router(query: str) -> str:
 **Fixed code** — safe default route:
 
 ```python
+# FIX
 def fixed_router(query: str) -> str:
     label = classify_query(query)
     handlers = {
@@ -1162,6 +1166,7 @@ Incident pattern (illustrative composite, not a published incident): a classifie
 **Broken code** — results collected in completion order, not input order. Note the failure mode precisely: `list.append` *is* atomic in CPython (it compiles to a single bytecode executed under the GIL, and remains thread-safe in the free-threaded builds), so the list itself is never corrupted. What breaks is the mapping from chunk index to result, which silently scrambles any downstream merge that assumes positional order:
 
 ```python
+# BROKEN
 results = []  # Shared mutable list
 
 def broken_parallel(chunks: list[str]) -> list[str]:
@@ -1183,6 +1188,7 @@ def broken_parallel(chunks: list[str]) -> list[str]:
 **Fixed code** — index-keyed results dict or ThreadPoolExecutor with futures:
 
 ```python
+# FIX
 from concurrent.futures import ThreadPoolExecutor
 
 def fixed_parallel(chunks: list[str]) -> list[str]:
@@ -1203,6 +1209,7 @@ def fixed_parallel(chunks: list[str]) -> list[str]:
 **Broken code** — malformed step-1 output silently corrupts step 2:
 
 ```python
+# BROKEN
 def broken_chain(document: str) -> str:
     entities_json = extract_entities(document)  # May return malformed JSON
     summary = summarize_entities(entities_json)  # Receives "{error: ...}" as input
@@ -1212,6 +1219,7 @@ def broken_chain(document: str) -> str:
 **Fixed code** — gate between every step:
 
 ```python
+# FIX
 def fixed_chain(document: str) -> str | None:
     entities_json = extract_entities(document)
     entities = gate_json_array(entities_json)

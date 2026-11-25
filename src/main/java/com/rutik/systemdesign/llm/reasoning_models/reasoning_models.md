@@ -34,7 +34,7 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ### 4.1 OpenAI GPT-6 and GPT-5.6 Reasoning Series
 
-OpenAI's reasoning line is the GPT-6 family: `gpt-6-astra` (2026-09-03, $10/$50 per 1M), `gpt-6-sol` and `gpt-6-luna` (2026-09-22; $2/$10 and $0.10/$0.50), and `gpt-6.1-sol` (2026-09-29, $2/$10). The GPT-5.6 series is still served: `gpt-5.6-sol` ($4/$20, a promotional price through at least 2026-11-21), `gpt-5.6-terra` ($2/$12) and `gpt-5.6-luna` ($0.20/$1.20). Each runs a hidden "thinking" phase before responding, and you set depth with `reasoning.effort` rather than a raw token budget. GPT-6 models take `low`, `medium`, `high`, `xhigh` and `max`; `gpt-6-sol` and `gpt-6-luna` also take `none` (their default is `medium`), and `gpt-6-astra` does not, so every Astra call pays for some reasoning. `gpt-6-astra` adds three controls for long-running work: effort can change mid-conversation while the cached prompt prefix survives, async tool calling lets the model keep working while your application runs a tool, and mid-turn steering accepts extra instructions over WebSockets while a response is in progress. The benchmark figures quoted below and in Section 7 come from the o1/o3 generation that first demonstrated test-time-compute scaling; they are the published record of that result, while the tiers above are what you build on.
+OpenAI's reasoning line is the GPT-6 family: `gpt-6-astra` (2026-09-03, $10/$50 per 1M), `gpt-6-sol` and `gpt-6-luna` (2026-09-22; $2/$10 and $0.10/$0.50), and `gpt-6.1-sol` (2026-09-29, $2/$10). The GPT-5.6 series is still served: `gpt-5.6-sol` ($4/$20, a promotional price through at least 2026-11-21), `gpt-5.6-terra` ($2/$12) and `gpt-5.6-luna` ($0.20/$1.20). Each runs a hidden "thinking" phase before responding, and you set depth with `reasoning.effort` rather than a raw token budget. GPT-6 models take `low`, `medium`, `high`, `xhigh` and `max`; `gpt-6-sol` and `gpt-6-luna` also take `none` (their default is `medium`), and `gpt-6-astra` does not, so every Astra call pays for some reasoning. `gpt-6-astra` adds three controls for long-running work: effort can change mid-conversation while the cached prompt prefix survives, async tool calling lets the model keep working while your application runs a tool, and mid-turn steering accepts extra instructions over WebSockets while a response is in progress. The benchmark figures quoted below and in Section 7 come from the o1/o3 generation that first demonstrated test-time-compute scaling; they are the published record of that result, while the tiers above are what you build on. The o-series itself is leaving the API: `o1` and `o3-mini` shut down on 2026-10-23, and `o3` and `o3-pro` shut down on 2026-12-11, with `gpt-6.1-sol` as the named replacement.
 
 ```
 User: Prove that √2 is irrational.
@@ -1276,13 +1276,16 @@ Score based on:
 Return only a number between 0.0 and 1.0."""
 
     response = await client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=10,
+        model="claude-haiku-5-5",
+        max_tokens=1024,                   # headroom: adaptive thinking shares this budget
+        output_config={"effort": "low"},   # a scoring call needs little reasoning
         messages=[{"role": "user", "content": prompt}],
     )
     try:
-        return float(response.content[0].text.strip())
-    except (ValueError, IndexError):
+        # thinking blocks can come first, so pick the text block by type
+        text = next(b.text for b in response.content if b.type == "text")
+        return float(text.strip())
+    except (ValueError, StopIteration):
         return 0.5
 ```
 

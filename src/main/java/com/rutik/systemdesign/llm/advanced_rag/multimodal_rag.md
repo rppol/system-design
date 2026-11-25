@@ -506,12 +506,12 @@ The bill is storage, exactly as with ColBERT. A page is 1,024 patch vectors of 1
 Image tokens bill as ordinary input tokens on every major provider, so the "cost" column is the
 input-token price. List prices move often — re-check the vendor pricing page before budgeting.
 
-| Vision Model | Quality | Input-token cost (per 1M, as of 2026-09-04) | Latency |
+| Vision Model | Quality | Input-token cost (per 1M, as of 2026-11-25) | Latency |
 |-------------|---------|------|---------|
-| OpenAI GPT-5.6 (sol / terra / luna tiers) | Excellent | $5.00 / $2.50 / $1.00 | provider-dependent; measure per model |
-| GPT-4o (2024 tier, still served but off OpenAI's headline price table) | Very good | $2.50 | provider-dependent; measure per model |
-| Claude Sonnet 5 | Excellent | $2.00 | provider-dependent; measure per model |
-| Gemini 3.5 Flash | Good/Excellent | $1.50 | provider-dependent; measure per model |
+| OpenAI GPT-6.2 Sol / GPT-6.1 Terra / GPT-6 Luna | Excellent (Sol); measure Terra and Luna on your own images | $2.00 / $1.00 / $0.10 | provider-dependent; measure per model |
+| GPT-4o (deprecated 2026-10-14; shuts down 2027-01-14) | Very good | $2.50 | provider-dependent; measure per model |
+| Claude Sonnet 5.5 | Excellent | $2.00 | provider-dependent; measure per model |
+| Gemini 3.8 Flash | Good/Excellent | $0.75 (through 2026-12-31, then $1.50) | provider-dependent; measure per model |
 | Open-weight VLM (self-hosted) | Good | GPU cost only | usually lowest, if the GPU is warm |
 
 **One caveat before you reuse the arithmetic below.** Every image-token calculation in this file
@@ -812,7 +812,7 @@ def classify_and_describe_image(
         # High-detail processing for technical diagrams
         description = vision_llm_describe(
             image_path, context,
-            model="gpt-4o",
+            model="gpt-6.2-sol",
             detail="high",
             prompt_suffix=(
                 "Extract ALL part numbers, torque specifications, "
@@ -824,7 +824,7 @@ def classify_and_describe_image(
     elif predicted_type == "troubleshooting flowchart":
         description = vision_llm_describe(
             image_path, context,
-            model="gpt-4o",
+            model="gpt-6.2-sol",
             detail="high",
             prompt_suffix=(
                 "Transcribe the flowchart: list each decision point, "
@@ -833,11 +833,12 @@ def classify_and_describe_image(
         )
     else:
         # Standard processing for equipment photos. Same model, cheap detail
-        # setting: gpt-4o at detail="low" is a flat 85 image tokens. Switching
-        # to gpt-4o-mini here would COST more per image (2,833 base tokens).
+        # setting. Do not assume a cheaper tier is cheaper per image: the
+        # image-token schedule is per model (GPT-4o billed 85 base tokens at
+        # detail="low", GPT-4o-mini 2,833), so check it before downgrading.
         description = vision_llm_describe(
             image_path, context,
-            model="gpt-4o",
+            model="gpt-6.2-sol",
             detail="low",
             prompt_suffix=(
                 "Describe the equipment component shown, "

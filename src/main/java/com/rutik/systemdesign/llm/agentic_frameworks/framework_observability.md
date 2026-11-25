@@ -136,9 +136,9 @@ flowchart TD
 Each LLM call becomes a span carrying the GenAI semantic-convention attributes, propagated through the same OTLP pipeline as the rest of your traces:
 
 ```
-Span attributes (GenAI semantic conventions, all still Development-status):
+Span attributes (GenAI semantic conventions, semantic-conventions-genai v0.1.0):
   gen_ai.provider.name: "openai"          # renamed from gen_ai.system
-  gen_ai.request.model: "gpt-4o"
+  gen_ai.request.model: "gpt-6.2-sol"
   gen_ai.request.max_tokens: 1024
   gen_ai.usage.input_tokens: 523
   gen_ai.usage.output_tokens: 128
@@ -247,11 +247,11 @@ def answer_question(question: str) -> str:
     # Manual LLM span with token tracking
     with langfuse.start_as_current_generation(
         name="synthesis",
-        model="gpt-4o",
+        model="gpt-6.2-sol",
         input={"messages": [{"role": "user", "content": question}]},
     ) as generation:
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-6.2-sol",
             messages=[{"role": "user", "content": question}]
         )
         generation.end(
@@ -304,7 +304,7 @@ Traceloop.init(
 
 # No other code changes needed — all OpenAI/Anthropic calls auto-traced
 response = openai_client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-6.2-sol",
     messages=[{"role": "user", "content": "What is RAG?"}]
 )
 # → span with gen_ai.* attributes sent to your OTEL backend
@@ -587,8 +587,8 @@ LangSmith and Langfuse both support async tracing. For LangChain: async callback
 Correlate by attaching business identifiers to traces: `user_id`, `session_id`, `order_id`, `feature_flag_variant`. Then join trace data with business data in your data warehouse. Example: LLM support agent traces with `ticket_id` → join with Zendesk data on `ticket_id` → compute resolution rate per agent version. LangSmith metadata dict and Langfuse tags both support arbitrary key-value pairs. For A/B testing: tag traces with experiment variant; compute quality metrics per variant from trace data.
 
 **Q: What is the LLM semantic conventions specification in OpenTelemetry, and how stable is it?**
-**Short:** Standard `gen_ai.*` span attribute names shared across tools, but every one still carries a Development stability badge, not Stable.
-OpenTelemetry's GenAI semantic conventions define standard attribute names for LLM spans: `gen_ai.provider.name` (openai, anthropic, etc. — renamed from `gen_ai.system`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` (a string array, since a single response can have multiple finish reasons). These conventions enable interoperability: OpenLLMetry, Datadog, and other tools all use the same attribute names, so dashboards and queries work across implementations. Status: the conventions moved out of the main OpenTelemetry spec repo into their own `open-telemetry/semantic-conventions-genai` repository (semconv v1.42.0, 2026-06-12), and every `gen_ai.*` attribute, span, metric, and event in the registry still carries a **Development** badge — none are Stable, so names can still change between releases. Using standard attributes still future-proofs your observability setup relative to a fully custom schema, but pin the semconv version you build against and expect the occasional rename (as `gen_ai.system` just underwent). See [OpenTelemetry for LLM Applications](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md) for the full attribute list and propagation mechanics.
+**Short:** Standard `gen_ai.*` span names shared across tools, now versioned in their own repo (first release v0.1.0, 2026-11-21), and still changing: v0.1.0 itself shipped breaking renames.
+OpenTelemetry's GenAI semantic conventions define standard attribute names for LLM spans: `gen_ai.provider.name` (openai, anthropic, etc. — renamed from `gen_ai.system`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` (a string array, since a single response can have multiple finish reasons). These conventions enable interoperability: OpenLLMetry, Datadog, and other tools all use the same attribute names, so dashboards and queries work across implementations. Status: the conventions moved out of the main OpenTelemetry spec repo into their own `open-telemetry/semantic-conventions-genai` repository, which cut its first standalone release, **v0.1.0, on 2026-11-21** (it depends on semantic-conventions v1.45.0). It is a 0.x line and it already broke names: the `invoke_workflow` span is merged into `gen_ai.invoke_agent.internal` and `gen_ai.workflow.name` is replaced by `gen_ai.agent.name`; `gen_ai.request.top_k` becomes an integer scoped to top-k sampling, with retrieval spans moving to the new `gen_ai.retrieval.top_k`; the `gen_ai.client.token.usage` histogram is replaced by `gen_ai.client.inference.operation.input_tokens` and `...output_tokens`; and `gen_ai.usage.cache_creation.input_tokens` is renamed `gen_ai.usage.cache_write.input_tokens`. Using standard attributes still future-proofs your observability setup relative to a fully custom schema, but pin the conventions release you build against (v0.1.0 today) and budget for renames like these when you upgrade. See [OpenTelemetry for LLM Applications](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md) for the full attribute list and propagation mechanics.
 
 **Q: How do you debug a production agent that is returning incorrect answers?**
 **Short:** Walk the trace tree to isolate whether retrieval, prompt construction, or the model's own output caused the incorrect answer.

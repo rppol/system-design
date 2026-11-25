@@ -399,8 +399,8 @@ Persistent memory store for agents — exposes tools to read/write knowledge acr
 No automatic self-update mechanism per spec. Updates happen via the package manager (`npm update`, `pip install --upgrade`). Some clients (Smithery) help facilitate. Manual config edits do not auto-update.
 
 **Q: What's the lifecycle of an MCP server you've installed?**
-**Short:** Spawned or connected at session start, initialized, used for calls, then terminated or closed at shutdown -- typically one session long.
-(1) Spawned by client at session start (stdio) or connected to (HTTP). (2) Initialize handshake. (3) Used for tool/resource calls. (4) On client shutdown, stdio servers terminate; HTTP sessions close. Per-server: typically lives for one client session. This describes the still-widely-deployed `2025-11-25` revision; under the current `2026-07-28` revision step (2) disappears — there is no handshake or protocol-level session, and each request carries its own version and capabilities.
+**Short:** Spawned or connected when the client starts, optionally probed with `server/discover`, used for self-contained calls, then terminated or disconnected at client shutdown.
+(1) Spawned by the client at startup (stdio) or connected to (HTTP). (2) Optionally probed with `server/discover` for its protocol versions and capabilities. (3) Used for tool/resource calls, each carrying its own protocol version and client capabilities in `_meta`. (4) On client shutdown, stdio servers terminate; HTTP clients stop sending requests. A stdio server typically lives as long as one client process. That is the current `2026-07-28` revision; servers still on `2025-11-25` add an `initialize` handshake at step (2) and a protocol-level session that ends at step (4).
 
 **Q: How are MCP server bugs typically reported and fixed?**
 **Short:** Filed as GitHub issues against the server's repo, with security-critical bugs triaged and fixed faster than the long tail.

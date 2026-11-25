@@ -8,6 +8,8 @@ Smolagents (HuggingFace, 2024) is a minimalist agent framework — roughly 1000 
 
 The framework offers two agent types: `CodeAgent` (LLM writes Python; executed in sandbox) and `ToolCallingAgent` (traditional JSON tool calls). CodeAgent is more powerful — a single LLM response can call 5 tools, loop, filter results, compute aggregates — but requires proper sandboxing to be safe. Smolagents integrates with E2B, has a built-in `LocalPythonExecutor` with import controls, and supports any HuggingFace model, OpenAI, Anthropic, and MCP tool servers.
 
+**Current version**: smolagents 1.26.0 (PyPI, checked 2026-11-25).
+
 ---
 
 ## 2. Intuition

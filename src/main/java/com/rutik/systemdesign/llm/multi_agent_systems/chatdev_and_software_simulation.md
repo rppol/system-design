@@ -184,7 +184,7 @@ class Agent:
     role: str
     system_prompt: str
     client: OpenAI
-    model: str = "gpt-4o"
+    model: str = "gpt-6.2-sol"
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         full_messages = [{"role": "system", "content": self.system_prompt}] + messages
@@ -445,7 +445,7 @@ class BugReportList(BaseModel):
 # --- SOP Agent base class ---
 
 class SOPAgent:
-    def __init__(self, role: str, system_prompt: str, client: OpenAI, model: str = "gpt-4o"):
+    def __init__(self, role: str, system_prompt: str, client: OpenAI, model: str = "gpt-6.2-sol"):
         self.role = role
         self.system_prompt = system_prompt
         self.client = client
@@ -916,12 +916,13 @@ next_agent.run(design)
 
 - **Devin** — Cognition AI, proprietary. Uses a computer-use interface (browser, terminal, editor) as external memory. Agent sees screen state rather than file text. Not open source.
 
-- **SWE-agent** — Princeton NLP; academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Scores on Verified with current frontier models are far higher and move every few months, so cite the leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/coding_agents.md).
+- **SWE-agent** — Princeton NLP; academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Verified itself was retired as a frontier metric in February 2026 as contaminated; current coding-agent comparisons use SWE-bench Pro, so cite its leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/coding_agents.md).
 
-**Model options** (rates verified July 2026; re-check before budgeting):
-- gpt-4o: $2.50/1M input, $10/1M output — still served by the API, but no longer OpenAI's flagship
-- gpt-4o-mini: $0.15/1M input, $0.60/1M output — roughly **16x cheaper on both sides**, suitable for QA and review phases where output is structured JSON
-- Claude Sonnet 5: current mid-tier Claude, $3/1M input and $15/1M output (introductory $2/$10 through 2026-08-31), 1M-token context — the context is what makes large repo snapshots viable
+**Model options** (list prices checked 2026-11-25; re-check before budgeting):
+- gpt-6.2-sol: $2/1M input, $10/1M output, 1.05M-token context — the default in this file's code
+- gpt-6-luna: $0.10/1M input, $0.50/1M output — **20x cheaper on both sides**, suitable for QA and review phases where output is structured JSON
+- Claude Sonnet 5.5: $2/1M input and $10/1M output, 1M-token context — the context is what makes large repo snapshots viable
+- GPT-4o and GPT-4o mini, which the original ChatDev-era pipelines used, were deprecated 2026-10-14 and shut down 2027-01-14
 - Local models (Llama-family 70B via Ollama): zero API cost but far slower and lower code quality
 
 **Orchestration frameworks:** [LangGraph](../agentic_frameworks/langgraph.md) (for stateful graph-based agent coordination), [CrewAI](../agentic_frameworks/crewai.md) (role-based multi-agent), [AutoGen](../agentic_frameworks/autogen.md) (Microsoft, dialogue-based multi-agent). All support ChatDev-like patterns with varying levels of built-in structure.
@@ -1006,7 +1007,7 @@ Three changes are required: (1) the code repository is initialized with the exis
 
 **Track token usage per phase and enforce budgets.** Log input and output token counts for every agent call, keyed by phase name. Set hard budget limits (e.g., 300,000 tokens for a simple app) and surface warnings at 75% of the budget. This prevents a single runaway repair loop from generating a $50 API bill.
 
-**Use cheaper models for structured-output-only phases.** QA agents, project manager agents, and reviewer agents produce structured JSON outputs (bug reports, task lists, review summaries). GPT-4o mini or Claude Haiku performs near GPT-4o quality for these tasks at 10x lower cost. Reserve GPT-4o or Claude Sonnet for code generation phases where output quality directly impacts executability.
+**Use cheaper models for structured-output-only phases.** QA agents, project manager agents, and reviewer agents produce structured JSON outputs (bug reports, task lists, review summaries). A small tier such as gpt-6-luna or Claude Haiku 5.5 is usually close enough for these tasks at about 20x lower cost; confirm on your own QA set. Reserve gpt-6.2-sol or Claude Sonnet 5.5 for code generation phases where output quality directly impacts executability.
 
 **Implement a two-pass file collection before repository write.** Collect all files produced in a coding phase, resolve cross-references across all of them simultaneously, then write. Single-pass writing risks writing `user_service.py` (which imports from `database_layer.py`) before `database_layer.py` is written, causing false-positive import validation failures.
 

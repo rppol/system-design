@@ -74,11 +74,11 @@ distinct names, not that the model can choose among them.
 ## 3. Core Principles
 
 - **ClientSession per server**: each server gets its own session.
-- **Initialize once**: handshake at connection; never re-initialize without disconnect. One exception on HTTP: if a server returns 404 for your `MCP-Session-Id`, the session is gone and you must re-initialize without one.
+- **Discover, then send self-describing requests**: under the current `2026-07-28` revision there is no handshake; call `server/discover` once if you need version selection, then put protocol version and client capabilities in every request's `_meta`. Keep the `2025-11-25` `initialize` path only as the fallback for older servers (where a 404 on `MCP-Session-Id` means re-initialize without one).
 - **List capabilities + cache**: `list_tools`/`list_resources` called once at startup; refresh on `notifications/*/list_changed`.
 - **Prefix tools by server**: avoid name collisions in multi-server setups.
 - **Handle reconnection**: servers may restart; clients must detect and reconnect.
-- **Sampling roundtrip**: if server supports sampling, client must handle `sampling/createMessage` requests by calling the LLM and returning the result.
+- **Answer input-required results**: under `2026-07-28` a server that needs more input returns `resultType: "input_required"` with `inputRequests`; the client gathers the answers (usually an elicitation) and retries the original call with `inputResponses`. Sampling and Roots requests can still appear there but are deprecated.
 - **Timeout per call**: defaults differ by SDK — the TypeScript SDK applies `DEFAULT_REQUEST_TIMEOUT_MSEC = 60000`, while the Python SDK's `ClientSession(read_timeout_seconds=...)` defaults to `None`, i.e. **no timeout at all** unless you pass one. The spec mandates no value, only that senders set timeouts and issue `notifications/cancelled` when they lapse.
 
 ---
@@ -465,41 +465,41 @@ except (asyncio.TimeoutError, ConnectionError):
 
 ## 12. Interview Questions with Answers
 
-**Q: Why does an MCP client need to call `initialize` first?**
-**Short:** It negotiates protocol version and capabilities, and calling an undeclared capability's method afterward is a protocol violation.
-The initialize handshake negotiates the protocol version and both sides' capabilities, and the spec says neither side SHOULD send anything but `ping` (plus `logging` from the server) before it completes. Both sides learn what the other supports — does the client offer sampling, roots, elicitation? does the server offer tools, resources, prompts, and do its lists emit `listChanged`? Calling a method whose capability was never declared is a protocol violation, not just bad manners. On HTTP the handshake also fixes the value you must send in the `MCP-Protocol-Version` header on every later request.
+**Q: What replaced the `initialize` handshake in the 2026-07-28 revision?**
+**Short:** Per-request `_meta`: every request carries protocol version and client capabilities, and an optional `server/discover` call returns the server's versions and capabilities.
+The `2026-07-28` revision made MCP stateless and removed `initialize`/`notifications/initialized`. Every request now carries `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in `_meta` (and SHOULD carry `io.modelcontextprotocol/clientInfo`); on Streamable HTTP the version also travels in the `MCP-Protocol-Version` header. Every server MUST implement `server/discover`, which returns its supported protocol versions, capabilities and identity; a client MAY call it first to pick a version, or use it as a backward-compatibility probe on stdio. A version the server does not support returns `UnsupportedProtocolVersionError`, and a request missing a client capability the server needs returns `MissingRequiredClientCapability`. Calling a method whose server capability was never advertised is still a protocol violation. Keep `initialize` only as the fallback path for servers on `2025-11-25`, where it negotiated the same things once per session.
 
 **Q: How do you avoid tool name collisions across multiple MCP servers?**
 **Short:** Prefix each tool with its server's logical name, like `github_create_issue`, and route calls by parsing that prefix.
 Prefix each tool name with the server's logical name: `github_create_issue` from GitHub server, `gitlab_create_issue` from GitLab server. Routes calls by parsing the prefix. Standard pattern in Claude Desktop, Cursor.
 
 **Q: When should the client re-list tools?**
-**Short:** Cache the list once at session start and refresh only when the server sends a `tools/list_changed` notification.
-Once at session start (cache the list). Refresh when the server sends `notifications/tools/list_changed`. Some servers add tools dynamically (e.g., a database server adds a tool per available stored procedure).
+**Short:** Cache the list for the `ttlMs` the server returns, and refresh early when a `notifications/tools/list_changed` arrives on your listen stream.
+Cache the list on first use. Under `2026-07-28`, `tools/list` results carry `ttlMs` and `cacheScope`, so re-list when the TTL expires, and open a `subscriptions/listen` stream with `toolsListChanged: true` to get `notifications/tools/list_changed` as soon as the catalogue moves. Some servers add tools dynamically (e.g., a database server adds a tool per available stored procedure).
 
 **Q: Where does a `list_changed` notification actually arrive in the client?**
 **Short:** It lands in the session's `message_handler` callback, not as a return value, so an unset handler leaves your cached list silently stale.
 In the session's `message_handler` callback — no return value from `call_tool()` or `list_tools()` ever tells you the catalogue moved. That is why "refresh on `notifications/tools/list_changed`" is a wiring task and not a policy: if you never pass a `message_handler`, the notification is delivered to a no-op default and your cached tool list silently ages out. The visible symptom is a server that added a tool at runtime — a database server exposing one tool per stored procedure is the classic case — staying invisible to the model until the next client restart, which reads like "the model refuses to use the new tool." Practical guidance: clear the cached catalogue in the handler and re-list lazily on the next request, rather than re-listing inside the notification path.
 
 **Q: What happens if you omit `elicitation_callback` when constructing a `ClientSession`?**
-**Short:** The client simply declares no elicitation capability at initialize, so the server silently takes its no-input fallback path instead.
-The client declares no `elicitation` capability at initialize, so a spec-compliant server never sends `elicitation/create` and nothing anywhere reports an error. The Python SDK infers the declared client capabilities from which callbacks you actually passed — `sampling_callback`, `elicitation_callback` and `list_roots_callback` each switch their capability on — so a missing callback is indistinguishable from a deliberate "we do not support this." The failure is silent on both sides: the server takes the capability-gated branch and returns something like "the user did not supply a value," and the client never sees a request to log. Practical guidance: register all three callbacks up front even if two of them return a decline, so a capability gap is a visible decline rather than an absence.
+**Short:** The client then declares no elicitation capability, so the server silently takes its no-input fallback path and nothing reports an error.
+The client declares no `elicitation` capability, so a spec-compliant server never asks it for elicitation input and nothing anywhere reports an error. The Python SDK infers the declared client capabilities from which callbacks you actually passed — `sampling_callback`, `elicitation_callback` and `list_roots_callback` each switch their capability on — so a missing callback is indistinguishable from a deliberate "we do not support this." The failure is silent on both sides: the server takes the capability-gated branch and returns something like "the user did not supply a value," and the client never sees a request to log. Practical guidance: register all three callbacks up front even if two of them return a decline, so a capability gap is a visible decline rather than an absence.
 
-**Q: What's sampling and how does the client handle it?**
-**Short:** A server-initiated request for the client to run an LLM call on its behalf, letting the server use AI without bundling its own model access.
-Sampling lets a server request the client to make an LLM call on its behalf. The server sends `sampling/createMessage` with a prompt; the client calls its LLM; returns the result to the server. Useful when the server needs AI capability without bundling its own model access.
+**Q: What's sampling and how should a client handle it today?**
+**Short:** A server asking the client's LLM to generate text; deprecated in 2026-07-28, so support it only for older servers and gate every request on user approval.
+Sampling lets a server ask the client to make an LLM call on its behalf with `sampling/createMessage`; the client calls its LLM and returns the result. The `2026-07-28` revision deprecated Sampling (with Roots and Logging) and suggests servers integrate directly with an LLM provider API instead. During the deprecation window a client may still support it: under `2026-07-28` the request arrives inside an `InputRequiredResult` and the answer goes back as an `inputResponses` entry on the retried call, while `2025-11-25` servers send it as a server-initiated request. Either way, show the prompt to the user, cap cost per server, and treat the prompt as untrusted input.
 
 **Q: How do clients handle long-running server operations?**
 **Short:** The server either returns a task ID with a status-polling tool, or streams progress notifications during the call.
 Per spec, tool calls should return within a reasonable timeout. For long ops, two patterns: (1) server returns a task_id quickly + provides a polling tool to check status; (2) server supports progress notifications during the call.
 
 **Q: What's the right timeout for tool calls?**
-**Short:** The spec sets no number but requires you pick one explicitly, keep a hard cap regardless of progress resets, and cancel on giving up.
-The TypeScript SDK defaults to 60s, but the Python SDK ships no default at all, so set one explicitly. The spec sets no number, it only requires that you set one. For known long operations, increase, or use the experimental Tasks utility added in 2025-11-25. For interactive UIs, 5-10s with progress indication is common. Always keep a hard cap even when progress notifications reset the clock, so a misbehaving server cannot hang you forever, and send `notifications/cancelled` when you give up.
+**Short:** The spec sets no number but requires a timeout: pick one explicitly, keep a hard cap even when progress resets the clock, and cancel when you give up.
+The TypeScript SDK defaults to 60s, but the Python SDK ships no default at all, so set one explicitly. The spec sets no number, it only requires that you set one. For known long operations, increase it, or use the official `io.modelcontextprotocol/tasks` extension (moved out of the core protocol in `2026-07-28`), where the client polls with `tasks/get`. For interactive UIs, 5-10s with progress indication is common. Always keep a hard cap even when progress notifications reset the clock, so a misbehaving server cannot hang you forever, and send `notifications/cancelled` when you give up.
 
 **Q: How do you handle a server that crashes?**
-**Short:** Detect it via a timeout or connection error, restart or reconnect, re-initialize, and back off to avoid a restart loop.
-Detect via timeout or connection error on call. Restart the server subprocess (for stdio) or reconnect (for HTTP). Re-initialize. Optionally re-list tools (the new server instance may have different version). Implement backoff to avoid restart loops.
+**Short:** Detect it via a timeout or connection error, restart or reconnect, re-issue the in-flight request, and back off to avoid a restart loop.
+Detect via timeout or connection error on call. Restart the server subprocess (for stdio) or reconnect (for HTTP). Under `2026-07-28` there is no session to rebuild: re-issue the lost request as a new request with a new id (against a `2025-11-25` server, re-initialize first). Optionally re-list tools (the new server instance may have different version). Implement backoff to avoid restart loops.
 
 **Q: Can one client connect to both stdio and HTTP servers?**
 **Short:** Yes -- both use the same `ClientSession` API after connecting, so a client can mix local stdio and remote HTTP servers freely.
@@ -543,7 +543,7 @@ The MCP spec sets no size limit, so you get whatever the transport supports (HTT
 4. Cache `list_tools`/`list_resources` results; refresh on change notifications.
 5. Implement reconnect logic for production — servers do crash.
 6. Truncate tool outputs to 50KB before passing to LLM context.
-7. For sampling-enabled servers, validate the prompts before forwarding to your LLM (they could contain prompt injection).
+7. If you still support the deprecated Sampling feature for older servers, validate the prompts before forwarding to your LLM (they could contain prompt injection).
 8. Log every MCP call with server name, tool, latency for observability.
 9. Test against Claude Desktop or MCP Inspector before custom client testing.
 10. Pin MCP SDK version; the protocol is still evolving.

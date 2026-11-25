@@ -167,7 +167,7 @@ Multi-hop reasoning lets DSPy iteratively retrieve and generate — each hop nar
 import dspy
 
 # 1. Configure the LM
-lm = dspy.LM("openai/gpt-4o", api_key=os.environ["OPENAI_API_KEY"])
+lm = dspy.LM("openai/gpt-6.2-sol", api_key=os.environ["OPENAI_API_KEY"])
 dspy.configure(lm=lm)
 
 # 2. Define a signature (input → output)
@@ -196,7 +196,7 @@ from dspy.retrieve.chromadb_rm import ChromadbRM
 
 # Configure retrieval model
 retriever = ChromadbRM(collection_name="docs", persist_directory="./chroma_db")
-dspy.configure(lm=dspy.LM("openai/gpt-4o"), rm=retriever)
+dspy.configure(lm=dspy.LM("openai/gpt-6.2-sol"), rm=retriever)
 
 class GenerateAnswer(dspy.Signature):
     """Answer the question based on context. Be concise."""
@@ -606,7 +606,7 @@ Alternatives: (1) Promptfoo / PromptLayer — prompt testing frameworks; easier 
 4. **Use `ChainOfThought` by default** — it almost always outperforms `Predict` and adds minimal cost.
 5. **Compile offline, load in production** — never run the optimizer in your application startup.
 6. **Version compiled JSON files in git** — treat them as artifacts alongside code.
-7. **Re-optimize when the LLM changes** — GPT-4o prompts do not transfer to Llama-3 without re-running the optimizer.
+7. **Re-optimize when the LLM changes** — a program compiled against gpt-6.2-sol does not transfer to a Llama model without re-running the optimizer.
 8. **Inspect the generated prompts** — run `dspy.settings.lm.history[-1]` to see what DSPy is sending; surprises are common.
 9. **Use `dspy.Evaluate` with `num_threads`** — parallelizes evaluation, cuts eval time significantly.
 10. **Use LLM-as-judge for subjective tasks** — string match metrics miss semantic correctness; invest in a good judge prompt.

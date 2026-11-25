@@ -308,10 +308,11 @@ Human programmers: ~95%
 
 Note: HumanEval is saturated and no longer discriminates between current models; its one
 legitimate remaining use is a sanity floor for a new small or open-weight model. The
-benchmarks that now discriminate: SWE-bench Verified (real, multi-file GitHub issues),
-SWE-bench Pro (1,865 tasks across 41 actively maintained repos, copyleft-licensed to
-resist training-set leakage), LiveCodeBench (continuously refreshed with post-cutoff
-contest problems), and Terminal-Bench (autonomous shell tasks)
+benchmarks that now discriminate: SWE-bench Pro (1,865 tasks across 41 actively maintained
+repos, copyleft-licensed or private to resist training-set leakage), LiveCodeBench
+(continuously refreshed with post-cutoff contest problems), and Terminal-Bench (autonomous
+shell tasks). SWE-bench Verified (500 human-validated GitHub issues) was retired as a
+frontier metric in February 2026: OpenAI found it contaminated and stopped reporting it
 ```
 
 **Read it like this.** "Let the model try `k` times and count the problem solved if *any* attempt
@@ -367,12 +368,12 @@ Metric: % resolved
 ```mermaid
 xychart-beta
     title "SWE-bench resolve rate progression"
-    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 (2024)", "o3 (2025)", "Claude Opus 5 (2026)"]
+    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 (2024)", "o3 (2025)", "SOTA (Feb 2026)"]
     y-axis "% issues resolved" 0 --> 100
-    bar [1.7, 12, 13.8, 49, 71.7, 96.0]
+    bar [1.7, 12, 13.8, 49, 71.7, 80.9]
 ```
 
-From 1.7% (raw GPT-4, 2023) to 96.0% (Claude Opus 5, 2026, on SWE-bench Verified) in three years. The jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. SWE-bench Verified is saturated and contaminated: the top three 2026 models (Opus 5, Mythos 5, Fable 5) sat within 1.0 point of each other, OpenAI stopped reporting it in February 2026, and the Claude Opus 5.5 launch (2026-09-22) reports no SWE-bench score at all. Treat the chart as history. To compare coding agents, use SWE-bench Pro (1,865 tasks across 41 actively maintained repos, best public-set score around 60%) and the agentic suites frontier launches now report, such as Terminal-Bench 4.0, where Opus 5.5 scores 66.4% against GPT-6 Astra's 57.9%. See [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md).
+From 1.7% (raw GPT-4, 2023) to 80.9% (the SWE-bench Verified state of the art OpenAI cited in February 2026) in three years. The jumps come from agent scaffolding and tool use as much as base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim. Treat the chart as history, and the last bar as the end of it: on 2026-02-23 OpenAI stopped reporting SWE-bench Verified, because at least 59.4% of an audited set of hard problems had flawed tests that reject correct fixes, and every frontier model it tested could reproduce gold patches or problem statements from training. Gains past that point measure exposure to the benchmark more than coding skill. To compare coding agents, use SWE-bench Pro (1,865 tasks across 41 actively maintained repos; top models scored about 23% on its public set at release, against 70%+ on Verified) and Terminal-Bench, plus an eval set built from your own repositories. See [Agent Evaluation and Benchmarking](../agents_and_tool_use/agent_evaluation_and_benchmarking.md).
 
 **MBPP** (Mostly Basic Python Problems):
 - 500 simple Python functions from crowdsourcing
@@ -430,31 +431,29 @@ Copilot's approach:
 - Optimized for AWS SDK and infrastructure-as-code usage
 
 ### Open-Weight Coding Models
-- The open tier splits three ways: DeepSeek V4 Pro leads raw SWE-bench Verified among open models at 80.6% (DeepSeek V4 Flash close behind at 79.0%, much cheaper to run); GLM-5.2 tops the open-weights Intelligence Index and is the pick for long-running engineering agents; Kimi K3 leads the Frontend Code Arena
-- Qwen3-Coder is the standard local/self-hosted pick; the Qwen 3.6-27B variant scores 77.2% on SWE-bench Verified for smaller self-hosted deployments. MiniMax M3 is the choice for low-cost, high-throughput serving
+- The open tier splits three ways: DeepSeek V4 Pro is the strongest general open coding model (DeepSeek V4 Flash is much cheaper to run); GLM-5.2 tops the open-weights Intelligence Index and is the pick for long-running engineering agents; Kimi K3 leads the Frontend Code Arena
+- Qwen3-Coder is the standard local/self-hosted pick; the Qwen 3.6-27B variant serves smaller self-hosted deployments. MiniMax M3 is the choice for low-cost, high-throughput serving
 - FIM training remains standard across this tier for completion scenarios — the recipe DeepSeek-Coder popularized (2T code tokens + 400B text tokens) is still how these models learn to fill a hole in a file, not just append to it
 
 ---
 
 ## 8. Tradeoffs
 
-| Model | SWE-bench Verified | Latency | Cost (in/out per 1M tokens) | Context |
-|-------|-----------|---------|------|---------|
-| Claude Opus 5 | 96.0% | 2-5s | $5/$25 | 1M |
-| Claude Fable 5 | 95.0% | 2-5s | $10/$50 | 1M |
-| Claude Opus 4.8 | 88.6% | 2-5s | $5/$25 | previous Opus generation |
-| Claude Sonnet 5 | 85.2% | 1-3s | $2/$10 | 1M |
-| DeepSeek V4 Pro (open) | 80.6% | 1-2s | Free/self-host | Self-hosted (deployment-dependent) |
-| Qwen 3.6-27B (self-hosted) | 77.2% | <1s | Free/self-host | Self-hosted (deployment-dependent) |
+| Model | Latency | Cost (in/out per 1M tokens, 2026-11-25) | Context |
+|-------|---------|------|---------|
+| Claude Fable 5.2 | 2-5s | $8/$40 | 1M |
+| Claude Opus 5.5 | 2-5s | $4/$20 | 1M |
+| Claude Sonnet 5.5 | 1-3s | $2/$10 | 1M |
+| GPT-6.2 Sol | measure | $2/$10 | 1.05M |
+| DeepSeek V4 Pro (open) | 1-2s | Free/self-host | Self-hosted (deployment-dependent) |
+| Qwen 3.6-27B (self-hosted) | <1s | Free/self-host | Self-hosted (deployment-dependent) |
 
-Opus 5 leads at **96.0%**, with Mythos 5 (95.5%, Project Glasswing) and Fable 5 (95.0%) inside a single point of it. Opus 4.8 and Opus 5 are kept as separate rows rather than collapsed so each benchmark number stays attached to the model that actually earned it: **88.6% belongs to Opus 4.8, not to Opus 5** — quoting it for Opus 5 understates the current model by more than seven points. Opus 4.8 bills at the same $5/$25 standard rate as Opus 5. Check the current model card before quoting any of these in an interview — attaching last generation's benchmark to this generation's model is the single most common way a candidate gets caught.
-
-HumanEval no longer appears in this table: frontier models score 96-98% pass@1, which no longer discriminates between them. SWE-bench Verified is itself approaching saturation at the top of this list — the leaders are clustered within 1.0 point, so a ranking between them is noise. SWE-bench Pro (harder, contamination-resistant) is the benchmark to reach for once every candidate model clears ~85% here.
+There is no benchmark column, on purpose. HumanEval no longer discriminates (frontier models score 96-98% pass@1), and SWE-bench Verified stopped being evidence when OpenAI retired it on 2026-02-23 as contaminated: its last widely cited state of the art was 80.9%, and Verified scores published after that mostly measure how much of the benchmark a model saw in training. Rank candidates on SWE-bench Pro and Terminal-Bench, read each figure from the current model card rather than memory, and decide on an eval built from your own repositories. Attaching last generation's benchmark to this generation's model is the most common way a candidate gets caught.
 
 | Task | Best Approach |
 |------|---------------|
 | Single-line completion | Small fast model (Qwen3-Coder, a local FIM-tuned model) |
-| Function generation | Mid-size model (Claude Sonnet 5, Qwen 3.6-27B) |
+| Function generation | Mid-size model (Claude Sonnet 5.5, Qwen 3.6-27B) |
 | Complex algorithms | Reasoning-heavy frontier model (Claude Opus 5, Claude Fable 5, DeepSeek V4 Pro) |
 | Bug fixing | Agent loop (Claude Code, SWE-agent) |
 | Full feature implementation | Agent (Cursor, Claude Code) |
@@ -518,8 +517,8 @@ HumanEval no longer appears in this table: frontier models score 96-98% pass@1, 
 | **Tabby** | Self-hosted Copilot | Open source; privacy; multiple models |
 | **Claude Code (Anthropic)** | Terminal agent | Autonomous coding; file editing |
 | **StarCoder2** | Open code model | HuggingFace; strong base model |
-| **DeepSeek V4 Pro/Flash** | Open code model | Leads open-model SWE-bench Verified: Pro 80.6%, Flash 79.0% cheaper |
-| **Qwen3-Coder** | Open code model | Standard local/self-hosted pick; Qwen 3.6-27B scores 77.2% SWE-bench Verified |
+| **DeepSeek V4 Pro/Flash** | Open code model | Strongest open coding family; Flash is the cheaper tier |
+| **Qwen3-Coder** | Open code model | Standard local/self-hosted pick; Qwen 3.6-27B for smaller deployments |
 | **SWE-agent** | Autonomous bug fixing | Princeton; SWE-bench |
 | **aider** | Terminal AI coding | Open source; Claude/GPT backend |
 
@@ -540,8 +539,8 @@ A: The two architectures sit on opposite sides of four axes, and picking the wro
 A: Copilot collects: (1) current file with cursor position; (2) other open tabs, ranked by recency and relevance; (3) import statements and symbol definitions from the language server; (4) recently viewed files; (5) optionally, repository-indexed snippets similar to current code (enterprise). It assembles this into a FIM-formatted prompt, sending prefix + suffix + adjacent code snippets. The challenge is fitting everything into the context window while prioritizing the most relevant code.
 
 **Q: What is SWE-bench and why is it a better benchmark than HumanEval?**
-**Short:** SWE-bench uses 2,294 real multi-file GitHub issues scored by test suites, unlike HumanEval's saturated single-function toy problems.
-A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is saturated (96-98% pass@1 across frontier models, so it no longer discriminates between them); SWE-bench Verified is itself now close to saturated (85-96% for frontier models — Claude Opus 5 96.0%, Mythos 5 95.5%, Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), which is why SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, copyleft-licensed to resist training-set leakage, best public-set score around 60% — is the benchmark that now actually discriminates between top models.
+**Short:** SWE-bench scores patches for 2,294 real multi-file GitHub issues with test suites, unlike HumanEval's saturated toy functions; today use its Pro variant, not retired Verified.
+A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is saturated (96-98% pass@1 across frontier models, so it no longer discriminates between them). The 500-task SWE-bench Verified subset then went the same way: OpenAI stopped reporting it on 2026-02-23, at a state of the art of 80.9%, because many of its hard tasks had flawed tests and frontier models had seen its gold patches in training. SWE-bench Pro — 1,865 tasks across 41 actively maintained repos, copyleft-licensed or private to resist training-set leakage, with top models near 23% on the public set at release — is the variant to use now.
 
 **Q: How is pass@k actually computed, and what is the common mistake?**
 **Short:** pass@k is an unbiased estimator over n>k samples per problem, and the common mistake of generating only k samples overestimates the score.
@@ -556,8 +555,8 @@ A: Contamination means the benchmark problems (or near-duplicates) appeared in t
 A: (1) Injection vulnerabilities: LLMs learn SQL injection, XSS, command injection patterns from insecure training code; (2) Hard-coded secrets: models suggest API keys, passwords found in training data; (3) Insecure cryptography: models may suggest outdated algorithms (MD5, DES); (4) Path traversal: models may suggest file operations without input validation; (5) Copyright: models may reproduce licensed code verbatim. Mitigations: static analysis (Semgrep, CodeQL) on generated code; secret detection; security-focused post-processing.
 
 **Q: How does SWE-bench scoring work and what does a 20% pass rate mean in practice?**
-**Short:** A SWE-bench resolve rate is the share of real GitHub issues whose generated patch passes the full test suite, with 20% meaning 1 in 5 fixed unaided.
-A: SWE-bench presents the model with a real GitHub issue description and the full repository state at the time the issue was filed. The model must produce a patch (git diff). Scoring: an automated test suite runs the patched codebase; "resolved" means all relevant tests now pass that were previously failing. A 20% resolve rate means 1 in 5 real GitHub issues is automatically fixed correctly without human intervention. For context: GPT-4 (2023) was at 1.7%; by 2026, frontier models clear 85-96% on SWE-bench Verified (Claude Opus 5 96.0%, Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), close enough to saturation that SWE-bench Pro is now used to separate top models. The benchmark is deliberately hard — it requires understanding codebase structure, bug reproduction, and generating targeted patches, not toy algorithms.
+**Short:** A SWE-bench resolve rate is the share of real GitHub issues whose generated patch passes the fail-to-pass and regression tests, so 20% means 1 in 5 fixed unaided.
+A: SWE-bench presents the model with a real GitHub issue description and the full repository state at the time the issue was filed. The model must produce a patch (git diff). Scoring: an automated test suite runs the patched codebase; "resolved" means all relevant tests now pass that were previously failing. A 20% resolve rate means 1 in 5 real GitHub issues is automatically fixed correctly without human intervention. For context: GPT-4 (2023) was at 1.7%; the SWE-bench Verified state of the art reached 80.9% by February 2026, when OpenAI stopped reporting Verified as contaminated. On the harder SWE-bench Pro, top models scored about 23% on the public set at release, so a 20% rate there is a frontier-level result, not a weak one. The benchmark is deliberately hard — it requires understanding codebase structure, bug reproduction, and generating targeted patches, not toy algorithms.
 
 **Q: What are hallucinated APIs in code generation and how do you detect them?**
 **Short:** Hallucinated APIs are syntactically plausible but nonexistent calls, caught by import resolution, AST analysis, or sandboxed execution errors.
@@ -738,8 +737,6 @@ those two lines is load-bearing.
 
 **Additional interview Q&As:**
 
-**What is Fill-in-Middle (FIM) and why does it outperform left-to-right generation for code completions?** FIM trains the model to predict a middle span given prefix and suffix context, which maps directly to IDE completions where the cursor is in the middle of a file. Left-to-right generation lacks suffix context, causing completions that contradict code written below the cursor (e.g., returning the wrong type). FIM models on HumanEval-Infilling benchmarks show 12-18% accuracy improvement over autoregressive-only baselines.
-
 **How do you measure the quality of code completions in production without running every suggestion through tests?** Use acceptance rate as a leading indicator (target >30%) and post-acceptance edit distance as a lagging quality metric. A completion accepted and immediately deleted within 5 seconds has near-zero value; a completion accepted and left unmodified for 60+ seconds is a high-quality signal. Segment by language, file type, and trigger context (line-end vs mid-line) to find quality gaps.
 
 **What is the latency budget for an IDE inline completion, and how do you hit it?** Users perceive latency above 200ms as sluggish for inline completions. The budget is: network RTT (20-50ms) + tokenization (2ms) + model inference (100-140ms at FP8 on A100 with speculative decoding) + decode + streaming first token (10ms). Speculative decoding with a small draft model (e.g., 200M parameter model drafting 4 tokens per step) reduces wall-clock inference from 180ms to 110ms at the cost of 40% more GPU FLOPS.
@@ -772,8 +769,6 @@ async def complete_and_validate(prompt: str, language: str) -> str | None:
             return None              # decline to suggest broken code
 ```
 
-**How does Fill-in-the-Middle (FIM) differ from left-to-right completion for code?** Standard left-to-right completion predicts tokens after the cursor — useful for appending code. FIM allows the model to see both the code before AND after the cursor, generating the missing middle section. This is essential for completing a function body when the return statement already exists, or filling a gap between two code blocks. Models trained with FIM use special tokens (`<PRE>`, `<SUF>`, `<MID>`) to signal the prefix, suffix, and generation target. GitHub Copilot's Tab completion is FIM; the quality improvement over left-to-right is 15-25% on HumanEval for in-function completions.
-
 **What is the role of a reranker in code generation candidate selection?** Code generation models typically sample N=5-20 candidates (temperature > 0) then rank them. A reranker scores each candidate on: (1) syntactic validity (AST parse passes); (2) type consistency with surrounding code (via language server); (3) test-case pass rate if a unit test oracle is available; (4) CodeBLEU similarity to existing patterns in the codebase. The highest-ranked candidate is shown. This reranking pipeline is why GitHub Copilot's `pass@1` accuracy is significantly higher than raw model `pass@1` — the reranker acts as a cheap verifier.
 
 ---
@@ -800,8 +795,6 @@ async def complete_and_validate(prompt: str, language: str) -> str | None:
 
 **Interview Q&A supplement:**
 
-**How do you measure the real-world impact of a code generation feature beyond pass@k?** Track production metrics: (1) acceptance rate — what fraction of shown completions are accepted by developers (industry baseline: 25-35%); (2) retention rate — of accepted completions, how many survive the next commit without modification (high quality = > 70%); (3) time-to-completion — does the developer ship features faster? Measure via A/B test: feature team vs. control team, track story-point velocity over 8 weeks. These business metrics matter more than HumanEval pass@1 for evaluating real impact.
-
 **What is test-driven development integration for code generation agents?** An agentic code generation loop: (1) generate code from the spec; (2) run tests against it; (3) feed failing test output back to the model as context; (4) iterate until tests pass or N retries exceeded. SWE-agent and OpenHands use this pattern and achieve 20-35% solve rate on SWE-bench — dramatically higher than single-shot generation (~2%). The key engineering challenge: sandboxing (tests must run in an isolated environment that can't damage the host), test timeout enforcement (infinite loops in generated code must be killed), and retry budget management (each iteration costs tokens + time).
 
 **Key metric targets for production LLM systems:**
@@ -814,4 +807,3 @@ async def complete_and_validate(prompt: str, language: str) -> str | None:
 | Context utilization | > 60% of max context used | Avg tokens / max_context |
 | Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |
 
-**What is repository-level context and why does it outperform file-level completion?** File-level completion sees only the current file. Repository-level systems (Copilot, Cursor) index the entire codebase, retrieve relevant files (similar functions, imported modules, type definitions), and include them in the LLM context. This enables completions that match the project's conventions (variable naming, error handling patterns, custom types). Empirically, repository-level context improves acceptance rate by 8-15% and reduces generated code that references undefined symbols by 60%. The engineering cost: a local embedding index of the codebase (updated on save), a retrieval step per completion request, and careful context budget management to stay within the model's context limit.

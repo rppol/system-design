@@ -12,8 +12,8 @@ version control, environment promotion, A/B testing, eval-gated continuous integ
 capability. Just as code without version control is unthinkable today, shipping prompts
 without a management layer is now considered an engineering anti-pattern.
 
-**Scale of impact:** A 200-token system prompt served to 1 million requests per day at GPT-4o
-(legacy, still served) pricing costs $500/day in input tokens. Removing a redundant instruction, fixing a format that
+**Scale of impact:** A 200-token system prompt served to 1 million requests per day at gpt-6.2-sol
+pricing ($2/1M input, uncached) costs $400/day in input tokens. Removing a redundant instruction, fixing a format that
 causes parsing failures downstream, or switching model targets are changes that need tracked,
 tested, and reversible deployment — not ad-hoc edits in a config file.
 
@@ -208,7 +208,7 @@ THRESHOLD = 0.85
 def judge_response(question: str, expected: str, actual: str) -> float:
     """Returns 0.0-1.0 quality score via LLM-as-judge."""
     verdict = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[{
             "role": "user",
             "content": (
@@ -228,7 +228,7 @@ def evaluate_prompt_version(prompt_content: str, dataset_path: str) -> float:
     scores = []
     for example in dataset:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-6.2-sol",
             messages=[
                 {"role": "system", "content": prompt_content},
                 {"role": "user",   "content": example["question"]}
@@ -443,8 +443,8 @@ org-wide policy (no PII in prompts, usage cost tracking). Fix: org-wide registry
 services are tenants, not owners.
 
 **Pitfall 6 — Prompt bloat.** System prompts grow to 2,000+ tokens because nothing is ever
-removed. At 1M requests/day, 1,000 extra tokens is 1B extra input tokens per day — ~$2,500/day
-(~$912K/year) at GPT-4o's (legacy, still served) $2.50/1M input pricing. Fix: quarterly prompt audits, token-count tracking in the registry, remove any
+removed. At 1M requests/day, 1,000 extra tokens is 1B extra input tokens per day — ~$2,000/day
+(~$730K/year) at gpt-6.2-sol's $2/1M uncached input pricing. Fix: quarterly prompt audits, token-count tracking in the registry, remove any
 instruction without a corresponding golden-dataset test.
 
 **Pitfall 7: Treating a vendor-hosted registry as the only copy.** OpenAI announced on 2026-06-03
@@ -575,10 +575,10 @@ staging → canary → stable pipeline as prompt content changes. Never upgrade 
 model name and version in the registry row alongside the prompt content.
 
 **Q: What is prompt bloat and how do you manage it?**
-**Short:** Prompt bloat is system prompts accumulating instructions without pruning until they reach thousands of tokens, driving real cost and diluting instruction-following.
+**Short:** Prompt bloat is a system prompt accumulating unpruned instructions until it reaches thousands of tokens, costing real money and diluting instruction-following.
 Prompt bloat occurs when system prompts accumulate instructions over time without any being
-removed — eventually reaching 2,000+ tokens. At 1 million daily requests and GPT-4o's
-(legacy, still served) pricing ($2.50/1M input), 1,000 extra tokens means 1B extra tokens/day — $2,500/day, roughly $912K/year.
+removed — eventually reaching 2,000+ tokens. At 1 million daily requests and gpt-6.2-sol's
+uncached input price ($2/1M), 1,000 extra tokens means 1B extra tokens/day — $2,000/day, roughly $730K/year.
 Beyond cost, longer prompts reduce
 instruction-following reliability because attention is diluted. Manage it by: requiring every
 instruction to have a corresponding eval test; running quarterly prompt audits with token-count
@@ -685,7 +685,7 @@ DSPy's optimizers and how automatic optimization differs from single-shot meta-p
 A 20-person product team building an enterprise customer support chatbot experiences quality
 regression every two weeks. The on-call engineer spends 3-4 hours per incident reconstructing
 what changed. All prompts are Python constants in the application code, with model name as a
-commented line (`# model = "gpt-4o"  # changed last week`).
+commented line (`# model = "gpt-6.2-sol"  # changed last week`).
 
 **Architecture Overview**
 

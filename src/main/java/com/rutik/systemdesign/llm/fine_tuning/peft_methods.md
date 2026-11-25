@@ -711,6 +711,29 @@ Fix: Match PEFT method and rank/bottleneck size to task complexity. Start with L
 Stacking a language adapter, a domain adapter, and a task adapter — without evaluating whether they compose coherently — can produce interference rather than complementary effects.
 Fix: Evaluate each adapter independently before stacking. Check that adapter combinations produce better results than any single adapter alone.
 
+**Pitfall 3 in code — initialize the soft prompt from task words:**
+
+```python
+from peft import PromptTuningConfig, PromptTuningInit, TaskType, get_peft_model
+
+# BROKEN: random soft-prompt init learns slowly and can stall
+config = PromptTuningConfig(
+    task_type=TaskType.SEQ_CLS,
+    num_virtual_tokens=20,
+    prompt_tuning_init=PromptTuningInit.RANDOM,
+)
+
+# FIX: initialize the virtual tokens from text that names the task and its classes
+config = PromptTuningConfig(
+    task_type=TaskType.SEQ_CLS,
+    num_virtual_tokens=20,
+    prompt_tuning_init=PromptTuningInit.TEXT,
+    prompt_tuning_init_text="Classify the review as positive or negative:",
+    tokenizer_name_or_path="meta-llama/Llama-3.1-8B",
+)
+model = get_peft_model(base_model, config)
+```
+
 ---
 
 ## 11. Technologies & Tools

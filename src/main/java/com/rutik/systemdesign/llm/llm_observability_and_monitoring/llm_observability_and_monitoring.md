@@ -86,15 +86,16 @@ Token-based pricing requires granular cost tracking:
 | **Per-user** | How much does this user cost per month? | Aggregate by user_id |
 | **Per-team** | Which team is consuming the most budget? | Aggregate by team/department tag |
 | **Per-feature** | Is the summarization feature or the chat feature more expensive? | Aggregate by feature/endpoint tag |
-| **Per-model** | What would it cost to switch from GPT-4o to Claude Sonnet 5.5? | Track model per request, compare costs |
+| **Per-model** | What would it cost to switch from gpt-6.2-sol to Claude Sonnet 5.5? | Track model per request, compare costs |
 
 Cost calculation at the gateway layer:
 
 ```python
-# Per-model pricing table, per 1M tokens (list prices on 2026-10-19 --
+# Per-model pricing table, per 1M tokens (list prices on 2026-11-25 --
 # treat this table as configuration, not a constant: providers reprice often)
 PRICING = {
-    "gpt-6-astra":         {"input": 10.00, "output": 50.00},
+    "gpt-6.2-astra":       {"input": 8.00, "output": 40.00},
+    "gpt-6.2-sol":         {"input": 2.00, "output": 10.00},
     "gpt-6.1-sol":         {"input": 2.00, "output": 10.00},
     "gpt-6-luna":          {"input": 0.10, "output": 0.50},
     "gpt-4o":              {"input": 2.50, "output": 10.00},   # snapshots shut down 2027-01-14
@@ -113,7 +114,7 @@ def calculate_cost(model, input_tokens, output_tokens):
 rate, then divide by a million because the price list is quoted per million tokens."
 
 The `/ 1_000_000` is the only part that trips people, and it is pure unit conversion — the pricing
-table says "$2.50 per 1M input tokens," so multiplying raw token counts by 2.50 gives you dollars
+table says "$2.00 per 1M input tokens," so multiplying raw token counts by 2.00 gives you dollars
 scaled up a millionfold. The genuinely important detail is that input and output have *separate*
 rates, and output is always the expensive one.
 
@@ -121,35 +122,35 @@ rates, and output is always the expensive one.
 |--------|------------|
 | `input_tokens` | Everything you sent: system prompt, retrieved context, conversation history, user message |
 | `output_tokens` | Only what the model generated. Usually a small fraction of the input on RAG workloads |
-| `prices["input"]` | Dollars per 1M input tokens. $2.50 for gpt-4o |
-| `prices["output"]` | Dollars per 1M output tokens. $10.00 for gpt-4o — 4x the input rate |
+| `prices["input"]` | Dollars per 1M input tokens. $2.00 for gpt-6.2-sol |
+| `prices["output"]` | Dollars per 1M output tokens. $10.00 for gpt-6.2-sol — 5x the input rate |
 | `/ 1_000_000` | Unit conversion from "per million tokens" back to "per token" |
 
-**Walk one example.** Use the exact LLM Generation span from the RAG trace above — gpt-4o with
+**Walk one example.** Use the exact LLM Generation span from the RAG trace above — gpt-6.2-sol with
 2,177 input tokens and 245 output tokens:
 
 ```
-  input  side: 2,177 x $2.50 = $5,442.50   (per-million units)
+  input  side: 2,177 x $2.00 = $4,354.00   (per-million units)
   output side:   245 x $10.00 = $2,450.00   (per-million units)
                               -----------
-  subtotal                    = $7,892.50
-  divide by 1,000,000         = $0.0078925  -> the $0.0079 logged on the span
+  subtotal                    = $6,804.00
+  divide by 1,000,000         = $0.006804  -> the $0.0068 logged on the span
 
   WHERE THE MONEY ACTUALLY GOES
     output is  245 / (2,177 + 245) = 10.1% of the tokens
-    output is  2,450 / 7,892.50    = 31.0% of the cost
+    output is  2,450 / 6,804.00    = 36.0% of the cost
 
-  SAME REQUEST ON gpt-4o-mini ($0.15 / $0.60)
-    2,177 x 0.15 + 245 x 0.60 = 326.55 + 147.00 = 473.55
-    / 1,000,000               = $0.00047355
-    ratio                     = 7,892.50 / 473.55 = 16.7x cheaper
+  SAME REQUEST ON gpt-6-luna ($0.10 / $0.50)
+    2,177 x 0.10 + 245 x 0.50 = 217.70 + 122.50 = 340.20
+    / 1,000,000               = $0.0003402
+    ratio                     = 6,804.00 / 340.20 = 20.0x cheaper
 ```
 
-That 10% of tokens costing 31% of the money is the single most useful fact this formula encodes.
-Teams instinctively attack prompt bloat because the input is visibly huge, but on a 4x output
+That 10% of tokens costing 36% of the money is the single most useful fact this formula encodes.
+Teams instinctively attack prompt bloat because the input is visibly huge, but on a 5x output
 multiplier a capped `max_tokens` or a "be concise" instruction often moves the bill faster than
-trimming retrieved context. And at 100K calls/day the same request costs `100,000 x $0.0078925 =
-$789/day`, or roughly $288,000/year — which is why per-request cost attribution earns its place in
+trimming retrieved context. And at 100K calls/day the same request costs `100,000 x $0.006804 =
+$680/day`, or roughly $248,000/year — which is why per-request cost attribution earns its place in
 the trace rather than being computed monthly from an invoice.
 
 ### 4.4 Latency Monitoring
@@ -277,16 +278,16 @@ Trace: "user asks about refund policy"
 |   |   total_input_tokens=2177
 |   |
 |   +-- [Span: LLM Generation] latency=1890ms
-|   |   model="gpt-4o", temperature=0.1
+|   |   model="gpt-6.2-sol", temperature=0.1
 |   |   input_tokens=2177, output_tokens=245
-|   |   cost=$0.0079, finish_reason="stop"
+|   |   cost=$0.0068, finish_reason="stop"
 |   |   ttft=340ms, tokens_per_second=42
 |   |
 |   +-- [Span: Response Validation] latency=5ms
 |   |   safety_check="pass", format_check="pass"
 |   |
 |   +-- [Span: Quality Eval (async)] latency=1200ms
-|       model="gpt-4o-mini", eval_type="groundedness"
+|       model="gpt-6-luna", eval_type="groundedness"
 |       groundedness_score=0.92, relevance_score=0.88
 |       cost=$0.00015
 ```
@@ -342,7 +343,7 @@ from opentelemetry import trace
 # matching the attribute keys your spans actually carry.
 tracer = trace.get_tracer("llm-app")
 
-def call_llm(prompt, model="gpt-4o", temperature=0.1):
+def call_llm(prompt, model="gpt-6.2-sol", temperature=0.1):
     with tracer.start_as_current_span("llm.generation") as span:
         # Set LLM-specific attributes before the call
         span.set_attribute("gen_ai.provider.name", "openai")
@@ -768,16 +769,16 @@ Implement a gateway layer that every LLM request must pass through. The gateway 
 Full prompt/response logging turns the observability store into a second PII database subject to the same GDPR/CCPA obligations as the primary system. Users paste names, account numbers, and health details into chat boxes. Mitigations: run PII redaction (regex + NER) before text reaches the trace store; sample text logging at 10-20% to shrink the exposure surface while still logging 100% of metadata, which contains no content; set retention lifecycle policies (raw text deleted or moved to restricted cold storage after ~30 days); and apply RBAC so trace text is visible to far fewer people than trace metadata. In regulated industries, prefer self-hosted backends (Langfuse, Phoenix) so prompts never leave your cloud account. Deletion requests must propagate to traces -- index stored text by user_id so a GDPR erasure request can actually find it.
 
 **Q: How do you detect hallucination rate trends in production?**
-**Short:** Hallucination trend detection scores sampled responses for groundedness against retrieved context, then alerts when the daily rate exceeds two standard deviations.
-Implement a two-stage detection pipeline. Stage 1 (real-time, 10% sample): for RAG applications, run a lightweight groundedness check that compares claims in the LLM response against the retrieved context using an NLI model or a cheap LLM judge (GPT-4o-mini, ~$0.0003 per eval). Score each response as grounded (all claims supported), partially grounded, or ungrounded. Stage 2 (batch, daily): aggregate groundedness scores into a daily hallucination rate. Apply statistical process control -- calculate a 7-day rolling mean and standard deviation, alert when the daily rate exceeds the mean by 2 standard deviations for 2 consecutive days. Common causes of hallucination spikes: prompt template changes that weaken grounding instructions, retrieval quality degradation (index staleness, embedding model change), or model version updates by the provider. Always correlate hallucination rate changes with recent deployments (prompt version, model version, retrieval config).
+**Short:** Score a sample of responses for groundedness against the retrieved context, then alert when the daily hallucination rate exceeds its rolling mean by two standard deviations.
+Implement a two-stage detection pipeline. Stage 1 (real-time, 10% sample): for RAG applications, run a lightweight groundedness check that compares claims in the LLM response against the retrieved context using an NLI model or a cheap LLM judge (gpt-6-luna, ~$0.0002 per eval). Score each response as grounded (all claims supported), partially grounded, or ungrounded. Stage 2 (batch, daily): aggregate groundedness scores into a daily hallucination rate. Apply statistical process control -- calculate a 7-day rolling mean and standard deviation, alert when the daily rate exceeds the mean by 2 standard deviations for 2 consecutive days. Common causes of hallucination spikes: prompt template changes that weaken grounding instructions, retrieval quality degradation (index staleness, embedding model change), or model version updates by the provider. Always correlate hallucination rate changes with recent deployments (prompt version, model version, retrieval config).
 
 **Q: What is the difference between LLM tracing and traditional distributed tracing?**
 **Short:** LLM traces carry token counts, cost, and prompt text as a branching tree of many calls, making them 10-100x larger per trace than a linear microservice trace.
 Traditional distributed tracing (Jaeger, Zipkin) captures request flow across microservices with spans representing HTTP calls, database queries, and cache lookups. LLM tracing extends this with LLM-specific semantics: spans for generation calls carry token counts, model identifiers, cost, temperature, and finish reason; spans for embedding calls carry dimensions and batch size; spans for retrieval carry top_k, similarity scores, and document IDs. The trace structure also differs: a traditional trace is typically a linear chain of 3-5 service hops, while an LLM agent trace is a tree with 3-15 LLM calls nested under iteration loops with tool call branches. LLM traces also need to carry the actual prompt and response text (potentially large payloads) for debugging, whereas traditional traces only carry metadata. This means LLM trace storage is 10-100x larger per trace than traditional traces.
 
 **Q: How do you handle the cost of quality evaluation at scale?**
-**Short:** Tiered sampling across a free safety classifier, a mid-cost judge on a small sample, and an expensive rubric on a tiny sample cuts evaluation cost roughly 5x.
-Three strategies cut evaluation cost by roughly 5x: tiered sampling, batch pricing, and a self-hosted judge. First, tiered sampling: evaluate 100% of responses with a free/cheap safety classifier (self-hosted Llama Guard, ~$0.00002/call), 10% with a mid-cost judge model (GPT-4o-mini, ~$0.0003/call), and 1% with an expensive comprehensive rubric (GPT-4o, ~$0.003/call). At 100K calls/day, this costs ~$63/day vs. ~$300/day for 100% GPT-4o-mini scoring. Second, batch API pricing: providers like OpenAI offer 50% discounts for batch API calls -- run your daily batch evaluation through the batch API. Third, self-host a small judge model: fine-tune a 7B model on your evaluation rubric and run it on a single GPU. After initial fine-tuning cost (~$200), ongoing cost is ~$0.00005/eval -- 6x cheaper than GPT-4o-mini with 85-90% agreement on your specific evaluation criteria.
+**Short:** Tiered sampling (a free classifier on every response, a cheap judge on 10%, a strong rubric on 1%), batch pricing and a self-hosted judge cut evaluation cost several-fold.
+Three strategies cut evaluation cost several-fold: tiered sampling, batch pricing, and a self-hosted judge. First, tiered sampling: evaluate 100% of responses with a free/cheap safety classifier (self-hosted Llama Guard, ~$0.00002/call), 10% with a cheap judge model (gpt-6-luna, ~$0.0002/call), and 1% with an expensive comprehensive rubric (gpt-6.2-sol, ~$0.003/call). At 100K calls/day this costs about $7/day ($2 + $2 + $3), against about $20/day for scoring everything with gpt-6-luna and about $300/day with gpt-6.2-sol. Second, batch API pricing: providers like OpenAI offer 50% discounts for batch API calls -- run your daily batch evaluation through the batch API. Third, self-host a small judge model: fine-tune a 7B model on your evaluation rubric and run it on a single GPU. After initial fine-tuning cost (~$200), ongoing cost is ~$0.00005/eval -- 4x cheaper than gpt-6-luna with 85-90% agreement on your specific evaluation criteria.
 
 **Q: How do you validate that your LLM-as-judge scores are trustworthy -- who watches the watcher?**
 **Short:** An LLM judge is trustworthy only after calibrating its scores against human labels above about 80-85% agreement, with the judge version pinned to avoid silent shifts.
@@ -852,7 +853,7 @@ TTFT is measured at the client side -- the time from sending the request to rece
 flowchart TD
     Cust(["Customers<br/>10K conv/day"]) --> Frontend["Chat Frontend<br/>session_id, user_id tags"]
     Frontend --> Gateway["LLM Gateway<br/>token counting - cost calc<br/>budget enforcement - trace ID<br/>prompt version tag"]
-    Gateway --> Embed["Embedding API<br/>text-embedding-3-small"] & VDB2[("Vector DB<br/>Pinecone")] & Rerank2["Rerank API<br/>Cohere"] & LLMProv2["LLM Provider<br/>GPT-4o-mini"]
+    Gateway --> Embed["Embedding API<br/>text-embedding-3-small"] & VDB2[("Vector DB<br/>Pinecone")] & Rerank2["Rerank API<br/>Cohere"] & LLMProv2["LLM Provider<br/>gpt-6-luna"]
     Embed & VDB2 & Rerank2 & LLMProv2 -- telemetry --> TraceCollector["Trace Collector<br/>Langfuse - self-hosted"]
     Embed & VDB2 & Rerank2 & LLMProv2 -- telemetry --> QualEval2["Quality Eval Workers - async<br/>groundedness, safety"]
     TraceCollector --> pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
@@ -881,7 +882,7 @@ flowchart TD
 
 3. **Tiered quality evaluation:**
    - 100% of responses: safety classifier (self-hosted Llama Guard 4 on a g5.xlarge GPU, $0.00003/eval, ~80ms)
-   - 15% of responses: groundedness scoring via GPT-4o-mini as judge (~$0.0002/eval, ~400ms async)
+   - 15% of responses: groundedness scoring via gpt-6-luna as judge (~$0.0002/eval, ~400ms async)
    - 100% of responses with user feedback: full rubric evaluation triggered by any thumbs-down
    - Monthly cost of quality evaluation: ~$380
 
@@ -920,7 +921,7 @@ flowchart TD
 
 - Mean time to debug a customer complaint: reduced from 2.5 hours to 15 minutes (trace-based debugging)
 - Identified and fixed a retrieval quality regression caused by stale Pinecone index (groundedness alert fired within 6 hours of regression start)
-- Discovered that 30% of conversations could use GPT-4o-mini instead of GPT-4o (quality scores were equivalent for simple billing inquiries), saving $2,400/month
+- Discovered that 30% of conversations could use gpt-6-luna instead of gpt-6.2-sol (quality scores were equivalent for simple billing inquiries), saving $2,400/month
 - Caught a prompt injection attempt within 8 minutes via safety trigger spike alert
 - Total observability cost: $630/month (Langfuse infra $250 + GPU for safety classifier $200 + quality eval LLM calls $180), which is 7.9% of the $8K/month LLM spend
 
@@ -938,7 +939,7 @@ client = OpenAI()  # BUG: no tracing, no cost attribution, no rate limiting
 
 def generate_text(prompt: str) -> str:
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-6.2-sol",
         messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content

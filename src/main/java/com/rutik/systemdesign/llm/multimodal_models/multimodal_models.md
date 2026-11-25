@@ -4,7 +4,7 @@
 
 Multimodal models process and generate multiple types of data — text, images, audio, video, and code — within a single unified model. The most commercially important modality combination is vision + language (Vision Language Models, or VLMs), which enables applications like medical image analysis, document understanding, visual Q&A, and chart interpretation.
 
-The trend from 2023-2025: all frontier LLMs have become multimodal. GPT-4o, Claude 3.5, Gemini 1.5 Pro, and LLaMA 3.2 all support image input natively. The question is no longer "can LLMs see?" but "how well do they reason about visual information?"
+The trend from 2023-2025: all frontier LLMs became multimodal, starting with GPT-4o, Claude 3.5, Gemini 1.5 Pro and LLaMA 3.2 taking image input natively. Every current frontier line does: OpenAI's GPT-6.2 models and Anthropic's Claude 5.5 models take text and image input and return text, and Google's Gemini 4 models take text, image, audio, video and PDF input. The question is no longer "can LLMs see?" but "how well do they reason about visual information?"
 
 ---
 

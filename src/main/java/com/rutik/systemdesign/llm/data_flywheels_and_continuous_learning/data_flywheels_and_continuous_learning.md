@@ -676,11 +676,12 @@ The trainer samples several responses per production prompt, the grader scores e
 pushes the policy toward the higher-scoring ones. Amazon Bedrock RFT runs exactly this loop on
 uploaded data or existing API invocation logs, with the reward written as an AWS Lambda function or
 a model-as-judge, for Nova 2 Lite, gpt-oss-20B and Qwen3 32B; AWS reports accuracy gains of up to
-66% on average over base models and recommends starting with 100-200 examples. OpenAI's RFT
-supports o4-mini with `string_check`, `text_similarity`, `score_model`, `python` and `multi`
-graders, but OpenAI's self-serve fine-tuning closed to organizations without prior fine-tuning on
-2026-05-07 and stops accepting new jobs from existing customers on 2027-01-06. Self-hosted, TRL's
-`GRPOTrainer` takes the same grader as a reward function.
+66% on average over base models and recommends starting with 100-200 examples. OpenAI is not a
+place to start a new flywheel: its RFT ran on o4-mini, which shut down on 2026-10-23, and its
+self-serve fine-tuning closed to organizations that had never fine-tuned on 2026-05-07, to those
+with no fine-tuned-model inference in the previous 60 days on 2026-07-02, and accepts no new jobs
+from anyone from 2026-12-15 (existing fine-tuned models keep serving until their base model is
+retired). Self-hosted, TRL's `GRPOTrainer` takes the same grader as a reward function.
 
 ```python
 import json
@@ -711,8 +712,8 @@ user, and fine-tune a small model on them. The serving cost then falls to the st
 the slice it handles, and a router (see [LLM Routing](../llm_routing_and_model_selection/llm_routing_and_model_selection.md))
 keeps the frontier model for the rest. Three constraints: logs must be retained long enough to
 build the set (OpenAI's Responses API stores responses for 30 days by default), the student needs a
-training platform that will still exist (for OpenAI students, not after 2027-01-06; open-weight
-students via TRL or Bedrock avoid that), and provider terms restrict using outputs to build
+training platform that will still exist (OpenAI self-serve fine-tuning takes no new jobs from
+2026-12-15; open-weight students trained with TRL, Unsloth or Bedrock avoid that), and provider terms restrict using outputs to build
 competing models, so check them before distilling. Mechanics of the student training itself are in
 [Knowledge Distillation](../knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md).
 
@@ -851,7 +852,6 @@ A team implemented daily fine-tuning on the previous day's feedback. After three
 | Annotation platform | Prodigy | Spacy-integrated annotation tool with built-in active learning | Efficient for NLP tasks; recipes for text classification, NER, ranking |
 | Prompt optimization | DSPy `GEPA`, `MIPROv2` | Optimize prompts and demos from traces and a metric | GEPA reads text feedback from the metric; needs the `gepa` package |
 | Reinforcement fine-tuning | Amazon Bedrock RFT | GRPO on uploaded data or API invocation logs with Lambda or model-judge rewards | Nova 2 Lite, gpt-oss-20B, Qwen3 32B |
-| Reinforcement fine-tuning | OpenAI RFT | Grader-based RL on o4-mini | Closed to new orgs since 2026-05-07; no new jobs after 2027-01-06 |
 | Reinforcement fine-tuning | TRL `GRPOTrainer` | Self-hosted GRPO with any Python reward function | Same grader code as the hosted options |
 
 ### Annotation Workflow Design
@@ -885,8 +885,8 @@ A: Classify the failures before choosing the loop. Wrong or stale facts belong i
 A: Supervised fine-tuning needs the correct answer for every example; RFT needs a function that can score any answer. Production prompts (Bedrock RFT can read API invocation logs directly) are replayed, the model samples a group of responses, a grader (code in a Lambda or Python function, or a model judge) scores them, and GRPO uses the group-relative scores as advantages. Screen before training: if baseline reward is near 0 the model needs SFT first, and if it is above 0.95 RFT has nothing to teach. The grader becomes the attack surface, so test it against known-wrong outputs and watch for rewards that rise while held-out evals stay flat.
 
 **Q: What are the constraints on distilling a small model from logged frontier-model completions?**
-**Short:** Log retention, eval-filtering of the teacher outputs, a training platform that will still exist, and provider terms that restrict using outputs to build competing models.
-A: The recipe is simple: log frontier completions with metadata, keep those that passed evals or user acceptance, fine-tune a student, and route the stable slice to it. The constraints are where it fails. Logs must be retained long enough to collect the set (OpenAI's Responses API keeps responses 30 days by default). Unfiltered teacher outputs copy the teacher's errors into the student. OpenAI's self-serve fine-tuning closed to new organizations on 2026-05-07 and takes no new jobs after 2027-01-06, so a student trained there has no retraining path; open-weight students trained with TRL or Bedrock do. And provider terms limit using outputs to develop competing models, so legal review comes before the first training run.
+**Short:** Log retention, eval-filtering of teacher outputs, a training platform that will still exist (not OpenAI self-serve after 2026-12-15), and provider terms on building competing models.
+A: The recipe is simple: log frontier completions with metadata, keep those that passed evals or user acceptance, fine-tune a student, and route the stable slice to it. The constraints are where it fails. Logs must be retained long enough to collect the set (OpenAI's Responses API keeps responses 30 days by default). Unfiltered teacher outputs copy the teacher's errors into the student. OpenAI's self-serve fine-tuning closed to new organizations on 2026-05-07 and accepts no new jobs from anyone from 2026-12-15, so a student trained there has no retraining path; open-weight students trained with TRL, Unsloth or Bedrock do. And provider terms limit using outputs to develop competing models, so legal review comes before the first training run.
 
 **Q: What is the difference between implicit and explicit feedback, and when would you rely on each?**
 **Short:** Implicit feedback like regeneration clicks is high-volume but noisy, while explicit feedback like thumbs-down is lower-volume but higher-signal.

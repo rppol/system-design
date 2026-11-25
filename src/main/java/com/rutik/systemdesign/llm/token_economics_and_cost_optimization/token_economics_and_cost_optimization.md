@@ -11,13 +11,16 @@ Understanding the full cost picture — API pricing tiers, prompt caching discou
 savings, and the break-even math for self-hosting — enables engineering teams to achieve 5-10x cost
 reduction without meaningful quality loss.
 
-**Reference list prices, as of 2026-10-19 (per 1M tokens; always re-check the provider's pricing page
+**Reference list prices, as of 2026-11-25 (per 1M tokens; always re-check the provider's pricing page
 before putting a number in a spreadsheet — these move several times a year):**
 
 | Model | Input ($/1M tokens) | Output ($/1M tokens) |
 |---|---|---|
-| gpt-6-astra (OpenAI flagship) | $10.00 | $50.00 |
+| gpt-6.2-astra (OpenAI flagship) | $8.00 | $40.00 |
+| gpt-6.2-sol | $2.00 | $10.00 |
+| gpt-6-astra (previous flagship) | $10.00 | $50.00 |
 | gpt-6.1-sol | $2.00 | $10.00 |
+| gpt-6.1-terra | $1.00 | $5.00 |
 | gpt-6-sol | $2.00 | $10.00 |
 | gpt-6-luna | $0.10 | $0.50 |
 | gpt-5.6-sol (previous generation; promo price through at least 2026-11-21) | $4.00 | $20.00 |
@@ -25,9 +28,9 @@ before putting a number in a spreadsheet — these move several times a year):**
 | gpt-5.6-luna (previous generation) | $0.20 | $1.20 |
 | gpt-5.4-mini | $0.75 | $4.50 |
 | gpt-5.4-nano | $0.20 | $1.25 |
-| GPT-4o (legacy, still served) | $2.50 | $10.00 |
+| GPT-4o (deprecated 2026-10-14; shuts down 2027-01-14) | $2.50 | $10.00 |
 | GPT-4o cached input (50% off) | $1.25 | $10.00 |
-| GPT-4o-mini (legacy, still served) | $0.15 | $0.60 |
+| GPT-4o-mini (deprecated 2026-10-14; shuts down 2027-01-14) | $0.15 | $0.60 |
 | Claude Opus 5.5 | $4.00 | $20.00 |
 | Claude Sonnet 5.5 (this module's anchor) | $2.00 | $10.00 |
 | Claude Sonnet 5.5 cache read (0.05x input) | $0.10 | $10.00 |
@@ -50,9 +53,11 @@ the caching numbers differ between the two. The GPT-6 models (Astra 2026-09-03, 
 all — a self-hosted per-token cost is an *output* of the TCO and utilization model
 in Section 4, not an input, which is exactly the mistake that section exists to prevent.
 
-The worked examples below are priced on GPT-4o / GPT-4o-mini. Those are legacy models, but they are
-still served at the rates above, and holding one rate pair fixed keeps every derived number in this
-file checkable. Substitute your own model's two rates; the arithmetic is identical.
+The worked examples below are priced on GPT-4o / GPT-4o-mini. OpenAI deprecated both on 2026-10-14
+and shuts them down on 2027-01-14 (named replacement: `gpt-6-luna`), so do not copy those model IDs
+into new code; the examples keep that one rate pair fixed because it keeps every derived number in
+this file checkable. Substitute your own model's two rates; the arithmetic is identical. The code
+samples use current IDs (`gpt-6.2-sol`, `gpt-6-luna`).
 
 The gap between expensive frontier models and cheap small models, combined with caching and routing
 strategies, is where most cost optimization opportunity lives.
@@ -560,7 +565,7 @@ tokens = enc.encode("Hello, how are you today?")
 print(len(tokens))  # 7 tokens
 
 # Count tokens in a full chat completion request
-def count_chat_tokens(messages: list[dict], model: str = "gpt-4o") -> int:
+def count_chat_tokens(messages: list[dict], model: str = "gpt-6.2-sol") -> int:
     enc = tiktoken.encoding_for_model(model)
     tokens_per_message = 3  # <|start|>, role, <|end|>
     tokens_per_name = 1
@@ -720,7 +725,7 @@ requests = [
         "method": "POST",
         "url": "/v1/chat/completions",
         "body": {
-            "model": "gpt-4o",
+            "model": "gpt-6.2-sol",
             "messages": [{"role": "user", "content": doc}],
             "max_tokens": 500
         }
@@ -838,9 +843,9 @@ SIMPLE_THRESHOLD = 0.75  # confidence above which simple model is used
 
 def classify_query_complexity(query: str) -> float:
     """Returns probability that query is simple (0=complex, 1=simple)."""
-    # Use a cheap classifier — local model, GPT-4o-mini, or rule-based heuristics
+    # Use a cheap classifier — local model, gpt-6-luna, or rule-based heuristics
     response = openai.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": "Rate query complexity 0.0 (complex, needs reasoning) to 1.0 (simple, factual). Respond with a float only."},
             {"role": "user", "content": query}
@@ -852,9 +857,9 @@ def classify_query_complexity(query: str) -> float:
 def route_and_call(query: str) -> str:
     simplicity = classify_query_complexity(query)
     if simplicity >= SIMPLE_THRESHOLD:
-        model = "gpt-4o-mini"   # ~17x cheaper output than GPT-4o
+        model = "gpt-6-luna"   # 20x cheaper output than gpt-6.2-sol ($0.50 vs $10 per 1M)
     else:
-        model = "gpt-4o"
+        model = "gpt-6.2-sol"
     response = openai.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": query}],
@@ -945,11 +950,12 @@ def llm_call_with_cost_logging(messages, model, feature_name, user_id):
     usage = response.usage
 
     # Calculate cost
-    pricing = {"gpt-4o": (2.50, 10.00), "gpt-4o-mini": (0.15, 0.60)}
-    input_rate, output_rate = pricing.get(model, (0, 0))
+    # (input, output, cached input) per 1M tokens, 2026-11-25 list prices
+    pricing = {"gpt-6.2-sol": (2.00, 10.00, 0.10), "gpt-6-luna": (0.10, 0.50, 0.01)}
+    input_rate, output_rate, cached_rate = pricing.get(model, (0, 0, 0))
     input_cost = (usage.prompt_tokens / 1_000_000) * input_rate
     output_cost = (usage.completion_tokens / 1_000_000) * output_rate
-    cached_discount = ((usage.prompt_tokens_details.cached_tokens or 0) / 1_000_000) * (input_rate * 0.5)
+    cached_discount = ((usage.prompt_tokens_details.cached_tokens or 0) / 1_000_000) * (input_rate - cached_rate)
     total_cost = input_cost + output_cost - cached_discount
 
     logging.info({
@@ -1587,8 +1593,8 @@ import openai, redis, hashlib, json, time, logging
 from functools import lru_cache
 
 PRICING = {
-    "gpt-4o":       {"input": 2.50, "output": 10.00, "cached_input": 1.25},
-    "gpt-4o-mini":  {"input": 0.15, "output": 0.60,  "cached_input": 0.075},
+    "gpt-6.2-sol":  {"input": 2.00, "output": 10.00, "cached_input": 0.10},
+    "gpt-6-luna":   {"input": 0.10, "output": 0.50,  "cached_input": 0.01},
 }
 
 r = redis.Redis(decode_responses=True)
@@ -1601,7 +1607,7 @@ def call_llm(
     messages: list,
     feature: str,
     user_id: str,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-6-luna",
     max_tokens: int = 1000,
     use_cache: bool = True
 ) -> str:

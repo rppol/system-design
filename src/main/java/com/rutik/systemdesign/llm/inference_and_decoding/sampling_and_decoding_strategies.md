@@ -964,6 +964,25 @@ not a sampler issue.
 7. **min_p set too low (e.g., 0.01) on already-low-entropy outputs effectively becomes top-1**, silently removing all diversity — tune relative to your *typical* distribution shape, not in isolation.
 8. **Mirostat's feedback loop can oscillate on short generations.** Its control loop needs several tokens to converge toward the target perplexity; on very short outputs (a few tokens), behavior is closer to its initial `k` than to its steady-state target — don't expect Mirostat's benefits on single-sentence completions.
 
+**Pitfall 6 in code — test the contract, not bit-exact equality:**
+
+```python
+# BROKEN: treats seed + temperature=0 as a reproducibility guarantee, so CI flakes
+def test_summary_is_stable(client) -> None:
+    a = generate(client, PROMPT, temperature=0, seed=42)
+    b = generate(client, PROMPT, temperature=0, seed=42)
+    assert a == b  # batch-dependent float rounding can flip the argmax on a near-tie
+
+
+# FIX: assert the property every sample must satisfy; replay stored outputs when bit-exact matters
+def test_summary_meets_contract(client) -> None:
+    outputs = [generate(client, PROMPT, temperature=0, seed=42) for _ in range(5)]
+    assert all(meets_rubric(o) for o in outputs)
+```
+
+`generate` wraps whichever API you call; current Claude models reject `temperature` and `seed` is
+best-effort on the APIs that accept it, so neither can carry a bit-exact guarantee.
+
 ---
 
 ## 11. Technologies & Tools

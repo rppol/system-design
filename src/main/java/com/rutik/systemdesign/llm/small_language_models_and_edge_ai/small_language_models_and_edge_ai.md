@@ -897,6 +897,30 @@ On-device models that process external data (emails, documents, web pages) are v
 
 A developer builds an on-device writing assistant that continuously generates suggestions as the user types. Continuous inference draws ~2-4W on mobile, draining 15-25% battery per hour on flagship phones. After 3-5 minutes of sustained inference, the SoC hits thermal limits and the NPU clockspeed drops 20-40%, causing visible latency degradation that users perceive as "the app is getting slow." Fix: implement power-aware inference scheduling — batch keystrokes into inference requests every 2-3 seconds instead of per-keystroke, use a "low-power mode" that switches to a smaller model (1B) or INT4 quantization under thermal pressure, and monitor SoC temperature via platform APIs to proactively reduce inference intensity. Rule of thumb: if a task requires more than 10 seconds of continuous on-device inference, consider offloading to the cloud or splitting the work into smaller chunks with cooling intervals.
 
+**Pitfall 6 in code — cap the context the model sees on-device:**
+
+```python
+MAX_CONTEXT_TOKENS = 4096  # ~402 MB of KV cache for Phi-3 Mini, per the numbers above
+
+
+# BROKEN: the whole conversation is re-fed every turn, so the KV cache grows until the OS kills the app
+def build_prompt(history: list[str], user_msg: str) -> str:
+    return "\n".join([*history, user_msg])
+
+
+# FIX: keep the newest turns that fit the budget and fold the rest into a running summary
+def build_prompt(history: list[str], user_msg: str, summary: str) -> str:
+    kept: list[str] = []
+    budget = MAX_CONTEXT_TOKENS - count_tokens(summary) - count_tokens(user_msg)
+    for turn in reversed(history):
+        cost = count_tokens(turn)
+        if cost > budget:
+            break
+        kept.insert(0, turn)
+        budget -= cost
+    return "\n".join([f"Earlier conversation: {summary}", *kept, user_msg])
+```
+
 ---
 
 ## 11. Technologies & Tools

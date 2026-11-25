@@ -5,6 +5,7 @@
 | File | Topic |
 |------|-------|
 | [privacy_and_data_governance.md](privacy_and_data_governance.md) | Memorization & extraction attacks, membership inference, PII pipelines, DP-SGD, machine unlearning, deletion requests, retention & residency |
+| [agent_identity_and_authorization.md](agent_identity_and_authorization.md) | How an agent authenticates and is authorized: workload identity, delegated user authority, token exchange and scoping across MCP, A2A and tool calls |
 
 ---
 

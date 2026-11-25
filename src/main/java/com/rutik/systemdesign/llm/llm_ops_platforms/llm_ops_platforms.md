@@ -603,7 +603,7 @@ CI pipeline: any PR that modifies a `.yaml` prompt file triggers eval against th
 
 **LangChain ecosystem**: LangSmith is the official observability platform for LangChain and LangGraph applications. Thousands of companies running LangChain agents in production use LangSmith to trace agent loops, debug tool call failures, and run eval pipelines. The LangSmith Hub also serves as a public prompt registry where teams share and version prompt templates.
 
-**Anthropic customers**: LangFuse and Braintrust are frequently used by teams calling the Claude API. LangFuse's open-source model makes it attractive for companies with strict data privacy requirements who cannot send traces to a hosted vendor. Braintrust is used for systematic A/B testing of Claude model versions (e.g., claude-3-5-sonnet vs. claude-3-7-sonnet) with human annotation workflows.
+**Anthropic customers**: LangFuse and Braintrust are frequently used by teams calling the Claude API. LangFuse's open-source model makes it attractive for companies with strict data privacy requirements who cannot send traces to a hosted vendor. Braintrust is used for systematic A/B testing of Claude model versions (e.g., `claude-sonnet-5` vs. `claude-sonnet-5-5`) with human annotation workflows.
 
 **Stripe**: uses internal experiment tracking infrastructure with MLflow-compatible APIs. Stripe's fraud detection teams run thousands of model variants and rely on lineage tracking to audit which model version made a specific fraud decision — a regulatory requirement.
 

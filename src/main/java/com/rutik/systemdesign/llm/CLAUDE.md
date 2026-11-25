@@ -108,7 +108,7 @@ cosmetic in the reader only.
 ## Learning Paths (Full + Senior + Principal)
 
 `README.md` documents the **Full Path** (all 55 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (32 modules) and **Principal** (31). They are
+plus two curated tiers: **Senior** (35 modules) and **Principal** (31). They are
 different cuts, not nested depths — senior is the craft (ship the pipeline, debug the
 eval that lies), principal is the judgment (which architecture at what token cost, what
 failure domains, what you tell a team *not* to do), so the two lists overlap only partly
@@ -143,9 +143,16 @@ The following are gaps for senior AI engineer coverage, identified by the 2026-0
 
 ## Case Studies — 30 Total
 
-`case_studies/` directory — all use the 11-section principal template.
+`case_studies/` directory. The 11-section principal template is the standard for every case study,
+but it is **not yet met by all 30**: the 2026-11-25 audit found 14 off-template — all 13 Wave-1
+studies plus `design_gpu_inference_platform` (7 numbered sections, no Real-World Implementations,
+Technologies & Tools or Common Pitfalls, 8 interview Q&As). Re-templating them is tracked work; do
+not describe the set as conformant until it is done.
 
-Reference: `case_studies/design_gpu_inference_platform.md`
+Reference: `case_studies/design_gpu_inference_platform.md` is the named reference, but until it is
+re-templated it does not itself follow the 11-section layout. Copy the section structure from a
+conforming study instead — `case_studies/design_agent_platform.md` or
+`case_studies/design_llm_eval_platform.md`.
 Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study)
 
 **Wave 1 (original 13):** design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot, design_ai_content_moderation, design_llm_fine_tuning_platform, design_notion_ai, design_ai_data_analyst, design_ai_code_review, design_real_time_translation
@@ -160,9 +167,10 @@ Learning-path index: `case_studies/case_studies.md` (mandatory; update with ever
 
 ---
 
-## Cross-Cutting Sub-Files — 9 Files
+## Cross-Cutting Sub-Files — 9 Files + Index
 
-`case_studies/cross_cutting/` — all use the 14-section template:
+`case_studies/cross_cutting/` — 9 content files, all on the 14-section template, plus the
+`cross_cutting.md` index (which is why root `CLAUDE.md` and `README.md` count "10 cross-cutting"):
 
 llm_eval_harness_in_production, opentelemetry_for_llm_apps, multi_region_llm_topology, red_team_eval_harness, gpu_pool_economics, tenant_isolation_patterns, streaming_at_scale, agent_durability_patterns, training_loop_internals
 

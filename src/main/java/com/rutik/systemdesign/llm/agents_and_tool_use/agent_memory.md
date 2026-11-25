@@ -585,6 +585,28 @@ Recency-Weighted:
 
 6. **Memory store that only grows**: Each session appends what it learned, and no step ever reads the store as a whole. After a few hundred sessions retrieval returns three versions of the same preference, two of which contradict the third. Write-time dedup only compares a new fact with its neighbours, so it misses these. Schedule offline consolidation (your own batch job, or a provider job such as Anthropic's Dreams) that writes a cleaned store, review it, and then swap the agent onto it.
 
+**Pitfall 2 in code — FIFO eviction versus pinned context:**
+
+```python
+# BROKEN: FIFO eviction drops the oldest turns first, and those hold the task and the constraints
+def trim_history(messages: list[dict], max_tokens: int) -> list[dict]:
+    while count_tokens(messages) > max_tokens:
+        messages.pop(0)  # the system prompt and the original request are the first to go
+    return messages
+
+
+# FIX: pin the system prompt and first user turn, summarize the middle, keep recent turns verbatim
+def trim_history(messages: list[dict], max_tokens: int, keep_recent: int = 6) -> list[dict]:
+    if count_tokens(messages) <= max_tokens or len(messages) <= keep_recent + 2:
+        return messages
+    pinned, middle, recent = messages[:2], messages[2:-keep_recent], messages[-keep_recent:]
+    summary = {"role": "user", "content": "Summary of earlier turns: " + summarize(middle)}
+    return pinned + [summary] + recent
+```
+
+`count_tokens` and `summarize` stand for your tokenizer and one cheap summarization call. The fix
+keeps the two messages that define the task, which are exactly the ones FIFO evicts first.
+
 ---
 
 ## 11. Technologies & Tools

@@ -580,6 +580,31 @@ T = N x L
 
 5. **Self-consistency on factual tasks**: If the underlying fact is wrong in training data, sampling N chains from the same model just gives N wrong answers — majority vote does not help. Self-consistency helps with reasoning errors, not knowledge gaps.
 
+**Pitfall 2 in code — the model must never write its own Observation:**
+
+```python
+from collections.abc import Callable
+
+
+# BROKEN: the completion runs past the Action line, so the model can invent the Observation
+def react_step(llm, prompt: str) -> str:
+    return llm.complete(prompt)  # may contain "Observation: 42 results found" that no tool produced
+
+
+# FIX: stop at the Observation marker and append the real tool output yourself
+def react_step(llm, prompt: str, tools: dict[str, Callable[[str], str]]) -> str:
+    text = llm.complete(prompt, stop=["\nObservation:"])
+    action, arg = parse_action(text)
+    try:
+        observation = tools[action](arg)
+    except Exception as exc:  # a failed tool is reported, never invented
+        observation = f"ERROR: {type(exc).__name__}: {exc}"
+    return f"{text}\nObservation: {observation}\n"
+```
+
+With native function calling the same rule holds: the tool result block is written by your code,
+and an unknown tool name or a raised exception becomes an explicit error result.
+
 ---
 
 ## 11. Technologies & Tools

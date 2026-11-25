@@ -500,7 +500,7 @@ Long context (200K tokens):
 ```
 
 **Cross-reference → see [Inference & Decoding](../inference_and_decoding/inference_and_decoding.md) §3.8 and §3.9 for full details on:**
-- Anthropic prompt caching (explicit breakpoints, ~10% cost for cached reads)
+- Anthropic prompt caching (explicit breakpoints; cached reads at 0.1x input on most models, 0.05x on Opus/Sonnet 5.5, 0.025x on Fable 5.x)
 - SGLang RadixAttention (automatic tree-indexed prefix reuse)
 
 **Key insight for long-context system design:**
@@ -1138,14 +1138,6 @@ def needle_in_haystack_test(model, tokenizer, target_depth: float = 0.8) -> floa
     return retrieval_accuracy
 ```
 
-**Additional interview Q&As:**
-
-**What is the difference between RoPE, ALiBi, and YaRN for positional encoding, and which should you use for 128k context?** RoPE (Rotary Position Embedding) encodes position by rotating query/key vectors in attention; it generalizes to longer sequences but degrades without fine-tuning at extended lengths. ALiBi adds a linear position bias to attention scores (no learned parameters) and extrapolates better than RoPE without retraining, but is less expressive for complex positional patterns. YaRN (Yet Another RoPE extensioN) applies non-uniform scaling across RoPE frequency dimensions and achieves better retrieval accuracy at extended lengths than linear interpolation without requiring full pretraining. For 128k context deployment, YaRN with fine-tuning on long documents is the current best practice.
-
-**What is the "lost in the middle" problem and how do you design around it?** Studies show that LLMs with long context reliably retrieve information near the beginning and end of the context window but miss information buried in the middle (Liu et al. 2023 measured a 22-point drop for GPT-3.5-Turbo — 75.8% to 53.8% — moving the answer document from first to middle of 20; the magnitude is model-specific and must be measured on your own model, not assumed). Design mitigations: RAG to surface relevant chunks to the beginning of context (structural position), document summarization + structured extraction for critical middle sections, and needle-in-haystack evaluation across depths before production deployment. Do not assume 128k context provides uniform recall across all positions.
-
-**When should you use long context vs RAG for a document analysis application?** Use long context when: the document is small enough to fit (<50% of context window), the task requires synthesizing information across the entire document (holistic analysis), and latency allows (a 100k-token request costs 10x a 10k-token request). Use RAG when: documents exceed context limits, queries target specific sections (retrieval precision outperforms exhaustive attention), or cost per query is a constraint. Hybrid: use RAG to select top-k chunks, then place them in a structured long-context prompt to allow cross-chunk reasoning.
-
 **Quick-reference table:**
 
 | Approach | Best for | Trade-off |
@@ -1178,10 +1170,6 @@ def review_contract_rag(contract_path: str, question: str) -> str:
     # Retrieval moves the clause to the front of a short context, so recall
     # approaches the start-of-context number instead of the middle one.
 ```
-
-**What is the "lost in the middle" problem and which architectures suffer most?** Research shows that LLMs with standard attention consistently have lower accuracy on relevant information placed in the middle of long contexts versus the beginning or end. This is attributable to attention sink (high attention weight on the first few tokens) and recency bias (high weight on the last few tokens). Models with ALiBi positional encoding tend to have stronger recency bias; RoPE-based models (LLaMA, Mistral) show the same U-shaped recall curve. Mitigation: use RAG to place relevant chunks near the end of the prompt, chunk and retrieve rather than stuff full documents, or use models explicitly trained for long-context recall (the current 1M-window Claude and Gemini Pro generations).
-
-**When should you choose a 128k-token context window over a RAG pipeline?** Use a long context window when: the entire document must be coherent (a 50-page report where questions span multiple sections), retrieval recall is unacceptably low (< 80%) for the document type, or latency for chunk retrieval adds unacceptable delay. Use RAG when: documents exceed any context window, you need the freshest information (real-time web search), you need source attribution per sentence, or the cost of processing 128k tokens per query is prohibitive ($0.26 at Claude Sonnet 5.5's $2/1M, $0.51 at Opus 5.5's $4/1M, versus ~$0.01 with RAG on a retrieved 4k context).
 
 ---
 

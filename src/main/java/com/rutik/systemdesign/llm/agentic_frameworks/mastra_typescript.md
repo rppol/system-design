@@ -8,6 +8,8 @@ Mastra is a TypeScript-first agent framework (2024, MIT licensed) designed for f
 
 Mastra's primary abstractions are `Agent` (LLM + tools + memory + instructions), `Workflow` (typed DAG of steps with branching, looping, parallelism), `Tool` (Zod-validated input/output), `Memory` (LibSQL or Postgres vector store), and `MastraMCPClient` (connect to MCP servers). It deploys naturally to Vercel Edge, Cloudflare Workers, AWS Lambda, or any Node server. For Next.js / React stacks, it eliminates the impedance mismatch of bridging Python LLM code to a JS frontend.
 
+**Current version**: `@mastra/core` 1.86.0 (npm, checked 2026-11-25). Mastra is past 1.0 and ships minor releases at a fast cadence.
+
 ---
 
 ## 2. Intuition
@@ -408,7 +410,7 @@ You mostly shouldn't — edge runtimes cap execution (Cloudflare Workers allows 
 3. Test on your target deployment runtime (Vercel Edge has different API surface than Node).
 4. Use Memory's `semanticRecall` for long conversations to retrieve relevant past context.
 5. Use `mastra dev` CLI during development — UI reveals workflow state visually.
-6. Pin Mastra version; pre-1.0 framework so API still evolves.
+6. Pin `@mastra/core` with a lockfile and upgrade deliberately: it is past 1.0 but ships minor releases at a fast cadence, so run the agent eval suite before each bump.
 7. Pair Mastra workflows with Inngest/Temporal for production durability beyond in-memory state.
 8. Use `.parallel()` for independent steps to maximize throughput.
 9. Stream outputs to client via Vercel AI SDK's `streamText` integration for smooth UX.

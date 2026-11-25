@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Voice agents are LLM agents that interact via real-time speech — listening to a human, responding with synthesized speech, handling interruptions, managing turn-taking, and calling tools mid-conversation. They power AI phone assistants, voice-driven customer support, in-car assistants, and conversational interfaces in headsets and smart speakers. The 2024-2025 wave of native audio models (OpenAI Realtime API, Gemini Live, Anthropic forthcoming) collapsed the previous three-stage pipeline (Speech-to-Text → LLM → Text-to-Speech) into a single end-to-end audio model with dramatically lower latency and richer prosody/emotion handling.
+Voice agents are LLM agents that interact via real-time speech — listening to a human, responding with synthesized speech, handling interruptions, managing turn-taking, and calling tools mid-conversation. They power AI phone assistants, voice-driven customer support, in-car assistants, and conversational interfaces in headsets and smart speakers. The 2024-2025 wave of native audio models (OpenAI's Realtime API, now served by `gpt-realtime-2.1` and the full-duplex GPT-Live-1.1, and Google's Gemini Live, now Gemini 3.8 Live) collapsed the previous three-stage pipeline (Speech-to-Text → LLM → Text-to-Speech) into a single end-to-end audio model with dramatically lower latency and richer prosody/emotion handling.
 
 Voice agents have stricter latency budgets than text agents (sub-800ms first audio byte for premium UX) and unique UX challenges (barge-in handling, turn detection, partial output interrupts). The architecture choice — pipeline vs end-to-end — drives almost every other decision in the system.
 
@@ -314,7 +314,7 @@ async def run_voice_agent():
     transport = FastAPIWebsocketTransport(...)
     
     stt = DeepgramFluxSTTService(api_key=DEEPGRAM_API_KEY)
-    llm = OpenAILLMService(api_key=OPENAI_API_KEY, model="gpt-4o-mini")
+    llm = OpenAILLMService(api_key=OPENAI_API_KEY, model="gpt-6-luna")
     tts = ElevenLabsTTSService(
         api_key=ELEVENLABS_API_KEY,
         voice_id="cgSgspJ2msm6clMCkdW9",

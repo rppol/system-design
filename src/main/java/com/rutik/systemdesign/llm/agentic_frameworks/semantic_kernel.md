@@ -155,16 +155,16 @@ kernel = sk.Kernel()
 # Register AI services (can register multiple)
 kernel.add_service(
     OpenAIChatCompletion(
-        service_id="gpt-4o",
-        ai_model_id="gpt-4o",
+        service_id="gpt-6.2-sol",
+        ai_model_id="gpt-6.2-sol",
         api_key=os.environ["OPENAI_API_KEY"]
     )
 )
 
 kernel.add_service(
     OpenAIChatCompletion(
-        service_id="gpt-4o-mini",  # cheaper model for simple tasks
-        ai_model_id="gpt-4o-mini",
+        service_id="gpt-6-luna",  # cheaper model for simple tasks
+        ai_model_id="gpt-6-luna",
         api_key=os.environ["OPENAI_API_KEY"]
     )
 )
@@ -335,12 +335,12 @@ async def chat(user_message: str) -> str:
     chat_history.add_user_message(user_message)
 
     settings = OpenAIChatPromptExecutionSettings(
-        service_id="gpt-4o",
+        service_id="gpt-6.2-sol",
         temperature=0.2,
         max_tokens=1000
     )
 
-    result = await kernel.get_service("gpt-4o").get_chat_message_content(
+    result = await kernel.get_service("gpt-6.2-sol").get_chat_message_content(
         chat_history=chat_history,
         settings=settings,
         kernel=kernel
@@ -393,7 +393,7 @@ using Microsoft.SemanticKernel.Connectors.OpenAI;
 
 // Dependency injection setup (ASP.NET Core)
 builder.Services.AddKernel()
-    .AddOpenAIChatCompletion("gpt-4o", Environment.GetEnvironmentVariable("OPENAI_API_KEY"))
+    .AddOpenAIChatCompletion("gpt-6.2-sol", Environment.GetEnvironmentVariable("OPENAI_API_KEY"))
     .Plugins.AddFromType<DatabasePlugin>("Database")
     .Plugins.AddFromType<EmailPlugin>("Email");
 
@@ -599,25 +599,25 @@ Use `OpenApiKernelPluginFactory.create_kernel_plugin_from_openapi()` with the pa
 Semantic Memory stores text and vector embeddings for semantic search. Add memories: `kernel.memory.save_information(collection="knowledge_base", id="doc1", text="...")` — this embeds the text and stores it. Query memories: `results = await kernel.memory.search("knowledge_base", "what is the return policy?", limit=3)` — embeds the query, retrieves nearest neighbors. Memory backends: `VolatileMemoryStore` (in-memory, dev only), `AzureAISearchMemoryStore` (production Azure), `ChromaMemoryStore`, `SqliteMemoryStore`. The memory system is simpler than LlamaIndex's advanced RAG — sufficient for most enterprise Q&A but lacks advanced retrieval strategies.
 
 **Q: How does multi-model support work in Semantic Kernel?**
-**Short:** Register multiple AI services under distinct service IDs so each function or chat call can route to a cheap or expensive model by task.
+**Short:** Register several AI services under distinct service IDs, such as gpt-6-luna and gpt-6.2-sol, so each function or chat call routes to a cheap or strong model by task.
 Register multiple AI services with different `service_id`s:
 ```python
-kernel.add_service(OpenAIChatCompletion(service_id="gpt-4o", ...))
-kernel.add_service(OpenAIChatCompletion(service_id="gpt-4o-mini", ...))
+kernel.add_service(OpenAIChatCompletion(service_id="gpt-6.2-sol", ...))
+kernel.add_service(OpenAIChatCompletion(service_id="gpt-6-luna", ...))
 ```
-Semantic functions specify which service to use in `config.json` or execution settings, and an auto function-calling loop runs on whichever service its execution settings name. Use cheap models for classification and routing; expensive models for complex reasoning. Multi-model support enables: cost optimization (GPT-4o-mini for simple tasks), fallback (if primary fails, use secondary), and model routing by capability.
+Semantic functions specify which service to use in `config.json` or execution settings, and an auto function-calling loop runs on whichever service its execution settings name. Use cheap models for classification and routing; expensive models for complex reasoning. Multi-model support enables: cost optimization (gpt-6-luna for simple tasks), fallback (if primary fails, use secondary), and model routing by capability.
 
 **Q: How do you build a multi-tenant AI application with Semantic Kernel?**
 **Short:** Isolate tenants via per-tenant Kernel instances, tenant-tagged `KernelArguments`, or tenant-prefixed memory collections enforced by filters.
 Multi-tenancy in SK: (1) Per-tenant Kernel instances — create a `Kernel` per tenant with tenant-specific plugins, API keys, and settings; this provides strong isolation but higher memory usage; (2) Shared Kernel with per-request context — use `KernelArguments` to pass tenant ID; Kernel filters route to tenant-specific configurations; (3) Per-tenant memory collections — prefix memory collection names with tenant ID; ensures data isolation. Kernel filters are critical for multi-tenancy: enforce that tenant A cannot access tenant B's data, log all cross-tenant operations, and implement tenant-level rate limits.
 
 **Q: What is the Copilot Stack and where does Semantic Kernel fit?**
-**Short:** Microsoft's AI application architecture, where Semantic Kernel sits in the orchestration layer between foundation models and Copilot extensions.
-The Copilot Stack is Microsoft's architecture for building AI-powered applications within the Microsoft ecosystem. Layers: Foundation Models (Azure OpenAI, GPT-4o), AI Orchestration (Semantic Kernel), Copilot Extensions (plugins), and Copilot Experience (M365, GitHub, Bing). SK sits in the AI Orchestration layer — it connects foundation models to application logic through plugins and automatic function calling. Building on SK means your application can potentially integrate with M365 Copilot as a plugin, though this requires additional Copilot Studio configuration.
+**Short:** Microsoft's layered AI application architecture, with Semantic Kernel in the orchestration layer between foundation models and Copilot extensions.
+The Copilot Stack is Microsoft's architecture for building AI-powered applications within the Microsoft ecosystem. Layers: Foundation Models (Azure OpenAI models), AI Orchestration (Semantic Kernel), Copilot Extensions (plugins), and Copilot Experience (M365, GitHub, Bing). SK sits in the AI Orchestration layer — it connects foundation models to application logic through plugins and automatic function calling. Building on SK means your application can potentially integrate with M365 Copilot as a plugin, though this requires additional Copilot Studio configuration.
 
 **Q: How do you test a Semantic Kernel application?**
-**Short:** Unit test native functions as plain code, mock the chat completion service for semantic functions, and integration-test with a cheap model.
-Testing approach: (1) Unit test native plugins as plain C#/Python functions — no SK dependency; (2) Unit test semantic functions by mocking the `IChatCompletionService` in C# or patching the OpenAI client in Python; (3) Integration test with a cheap model (GPT-4o-mini) and `max_tokens=200` to keep tests fast and cheap; (4) Function-calling tests: provide a mock function catalog and assert, through a filter that records invocations, which functions the model calls and with what arguments. In C#: use `IKernelBuilder` with test doubles. Key: test the logic of what SK should do, not SK's internal behavior.
+**Short:** Unit test native functions as plain code, mock the chat completion service for semantic functions, and run integration tests on a cheap model with a token cap.
+Testing approach: (1) Unit test native plugins as plain C#/Python functions — no SK dependency; (2) Unit test semantic functions by mocking the `IChatCompletionService` in C# or patching the OpenAI client in Python; (3) Integration test with a cheap model (gpt-6-luna) and `max_tokens=200` to keep tests fast and cheap; (4) Function-calling tests: provide a mock function catalog and assert, through a filter that records invocations, which functions the model calls and with what arguments. In C#: use `IKernelBuilder` with test doubles. Key: test the logic of what SK should do, not SK's internal behavior.
 
 **Q: How does SK's C# SDK differ from the Python SDK?**
 **Short:** The C# SDK is more mature with .NET DI and reflection-based plugin loading, while the Python SDK is newer but conceptually consistent.
@@ -656,7 +656,7 @@ Four concrete breaks: (1) Orchestration moves to Workflows: model-driven call ch
 3. **Write specific plugin descriptions** — vague descriptions cause wrong function calls; every function description must be unique and precise.
 4. **Use native functions for deterministic operations** — reserve semantic functions for tasks requiring LLM reasoning.
 5. **Use persistent memory stores in production** — `VolatileMemoryStore` is for testing only.
-6. **Register multiple AI services** — use GPT-4o-mini for simple tasks, GPT-4o for complex ones; configure per semantic function.
+6. **Register multiple AI services** — use gpt-6-luna for simple tasks, gpt-6.2-sol for complex ones; configure per semantic function.
 7. **Import OpenAPI specs instead of writing wrappers** — any REST API becomes a plugin in minutes.
 8. **Use direct `kernel.invoke()` for known tasks** — only enable automatic function calling when task structure is genuinely unknown.
 9. **Isolate plugin side effects** — plugins that write to databases or send emails must be clearly documented; filter-based confirmation for destructive operations.
@@ -694,7 +694,7 @@ Step 2: PolicyPlugin.SearchPolicies(query="PTO request procedure")
   |
   v
 Step 3: SynthesisPlugin.GenerateResponse(pto_data, policy_text)
-  → GPT-4o semantic function
+  → gpt-6.2-sol semantic function
   → returns: "You have 8 vacation days remaining. To request time off, log in to Workday..."
   |
   v
@@ -709,7 +709,7 @@ Employee receives answer
 ```csharp
 // Startup.cs
 builder.Services.AddKernel()
-    .AddAzureOpenAIChatCompletion("gpt-4o", azureEndpoint, apiKey)
+    .AddAzureOpenAIChatCompletion("gpt-6.2-sol", azureEndpoint, apiKey)
     .Plugins.AddFromType<WorkdayPlugin>("Workday")
     .Plugins.AddFromType<PolicyPlugin>("Policy")
     .Plugins.AddFromType<ServiceNowPlugin>("HelpDesk");
