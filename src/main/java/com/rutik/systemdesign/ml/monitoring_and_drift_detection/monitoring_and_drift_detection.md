@@ -61,7 +61,7 @@ Key insight: In production, you cannot assume the test set distribution persists
 - P(X) changes but P(Y|X) is *assumed* stable — the named assumption, not merely an observation. Data drift is the measurement; covariate shift is the claim about what caused it. You cannot confirm covariate shift from input statistics alone, because ruling out a P(Y|X) change requires labels
 - The model can still be accurate under covariate shift if it generalizes
 - Example: training on users 18–35; deployment audience shifts to include 55+ users with similar purchase behavior but different feature values
-- Response: importance weighting, domain adaptation, or targeted retraining on new demographic
+- Response: importance weighting, domain adaptation, or targeted retraining on new demographic (recipes: [Transfer Learning and Domain Adaptation](../transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md))
 
 ### Feature Drift
 - Individual features drift independently; root cause analysis needed to identify which features changed

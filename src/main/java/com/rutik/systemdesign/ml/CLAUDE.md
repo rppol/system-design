@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 47 Modules
+## Module List — 48 Modules
 
 | Module Directory | Phase | Key Concepts | Sub-files |
 |-----------------|-------|-------------|-----------|
@@ -56,6 +56,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `speech_and_audio_ml/` | 4 | Spectrograms/MFCC, ASR (CTC/RNN-T/Whisper/wav2vec2), speaker ID/diarization, TTS, WER, SpecAugment | — |
 | `meta_learning_and_few_shot/` | 7 | N-way K-shot, Prototypical Networks, MAML/Reptile, episodic training, metric vs optimization-based | — |
 | `fairness_and_responsible_ai/` | 7 | Fairness definitions + impossibility, disparate impact, pre/in/post mitigation, proxies, model cards, EU AI Act | — |
+| `transfer_learning_and_domain_adaptation/` | 7 | Pretrain-then-adapt ladder, covariate/label/concept shift, importance weighting, DANN, MMD, BatchNorm adaptation, test-time adaptation, self-training, negative transfer | — |
 
 ---
 
@@ -80,8 +81,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 47 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (28 modules) and **Principal** (16). They are
+`README.md` documents the **Full Path** (all 48 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (29 modules) and **Principal** (17). They are
 different cuts, not nested depths — senior is the craft (train it, debug the leakage,
 ship the serving path), principal is the judgment (which modelling approach at what cost,
 what failure modes, what you tell a team *not* to do), so principal is the smaller list
@@ -113,6 +114,15 @@ on explicit request (each needs the full "Adding a New ML Module" procedure + ST
 | Meta-learning / few-shot | DONE (2026-07-07) | Built as `meta_learning_and_few_shot/` |
 | Fairness / Responsible AI | DONE (2026-07-07) | Built as `fairness_and_responsible_ai/` (standalone) |
 | Information retrieval / search | DONE (2026-07-07) | Built as `information_retrieval_and_search/` (standalone) |
+| Transfer learning & domain adaptation | DONE (2026-11-25) | Built as `transfer_learning_and_domain_adaptation/` |
+| JAX and XLA | P1 (2026-11-25 gap analysis; dropped, not built) | Planned as `jax_and_xla/` (not `_deep_dive`, which marks technology product pages): tracing and jaxprs, jit/grad/vmap, pytrees, `jax.sharding` and `shard_map`, XLA HLO and fusion, Pallas, recompilation pitfalls |
+| Continual learning | P1 (2026-11-25; dropped, not built) | Planned as `continual_learning/`: stability-plasticity, EWC/SI, replay, LwF, class- vs task-incremental, forgetting and backward-transfer metrics |
+| ML interview formats and rounds | P1 (2026-11-25; dropped, not built) | Planned as `ml_interview_patterns/ml_interview_formats_and_rounds.md`: ML coding from scratch, breadth, ML design, project deep dive |
+| Video understanding | P1 (2026-11-25; dropped, not built) | Planned as `computer_vision/video_understanding.md`: 3D CNN, two-stream, TimeSformer/VideoMAE, temporal action localization, frame-sampling cost |
+| 3D vision and neural rendering | P1 (2026-11-25; dropped, not built) | Planned as `computer_vision/three_d_vision_and_neural_rendering.md`: depth, PointNet, BEV, NeRF, 3D Gaussian Splatting |
+| Case study: notification ranking | P1 (2026-11-25; dropped, not built) | `case_studies/design_notification_ranking.md`: volume optimization, fatigue, multi-objective, holdouts |
+| Case study: people you may know | P1 (2026-11-25; dropped, not built) | `case_studies/design_people_you_may_know.md`: graph candidate generation, GNN ranking, privacy |
+| Case study: visual search | P1 (2026-11-25; dropped, not built) | `case_studies/design_visual_search.md`: image embedding retrieval, product matching, cold start |
 
 ---
 

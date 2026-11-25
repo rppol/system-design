@@ -902,6 +902,8 @@ After each optimizer step the target encoder is updated by EMA exactly as in BYO
 
 **NLP-specific:** always use a pretrained LLM rather than training SSL from scratch. Pretraining cost is prohibitive. Fine-tuning is the standard.
 
+See also: [Transfer Learning and Domain Adaptation](../transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md) for how to adapt a pretrained SSL backbone to a shifted target domain.
+
 ---
 
 ## 10. Common Pitfalls

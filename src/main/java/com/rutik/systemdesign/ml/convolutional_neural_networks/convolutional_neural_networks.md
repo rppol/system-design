@@ -439,6 +439,8 @@ def get_optimizer(model: nn.Module, head_lr: float = 1e-3) -> torch.optim.Optimi
     ])
 ```
 
+See also: [Transfer Learning and Domain Adaptation](../transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md) for the full adaptation ladder, BatchNorm handling on a new domain and negative transfer.
+
 ### Depthwise Separable Convolution
 
 ```python

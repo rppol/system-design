@@ -147,6 +147,8 @@ The statistics behind each detector are in the `ml/monitoring_and_drift_detectio
 monitoring decision is which drift types an artifact is exposed to, which detector reads them,
 and what action a sustained shift starts.
 
+See also: [Transfer Learning and Domain Adaptation](../../ml/transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md) for what to do once a shift is diagnosed (importance weighting, domain-adversarial training, test-time adaptation).
+
 ### 4.3 Monitoring plan by artifact type
 
 | Artifact | Earliest trustworthy signal | Ground truth | Drift to watch | Owner of the response |

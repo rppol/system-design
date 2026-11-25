@@ -833,3 +833,4 @@ loss, coverage = fixmatch_step(model, x_lab, y_lab, u_weak, u_strong, tau=0.95)
 - [computer_vision/self_supervised_vision](../computer_vision/self_supervised_vision.md) — the pretraining alternative to joint SSL
 - [self_supervised_and_contrastive_learning](../self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md) — SimCLR/BYOL warm starts and the SSL-vs-self-supervised contrast
 - [uncertainty_quantification_and_conformal_prediction](../uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md) — calibration for reliable confidence thresholds
+- [transfer_learning_and_domain_adaptation](../transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md) — self-training under domain shift and test-time adaptation

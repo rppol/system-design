@@ -48,6 +48,8 @@ Why it matters: a model that was 0.88 AUC at deployment and is now 0.71 AUC in p
 | Gradual drift | Slow shift over weeks/months | Gradual AUC decay | Weekly PSI trending |
 | Recurring drift | Seasonal patterns that repeat | Predictable seasonal performance drop | Calendar-based monitoring |
 
+See also: [Transfer Learning and Domain Adaptation](../../transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md) for adaptation recipes once the drift type is known (covariate vs label vs concept shift).
+
 ### 4.2 Retraining Strategies
 
 | Strategy | Trigger | Data used for retrain | Pros | Cons |

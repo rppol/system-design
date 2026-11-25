@@ -79,7 +79,9 @@ Re-warm and re-decay are both load-bearing: skip the warm-up and steps are too s
 | Replay buffer (5-10% original pre-training data) | Good | Original data often unavailable | Substitute C4 / The Pile |
 | EWC (Fisher-weighted anchoring) | Comparable to mixing | ~48GB extra resident memory on an 8B model | Theoretically sound, practically skipped |
 
-**Orthogonal: tokenizer adaptation.** Independent of every choice above, decide whether to extend the vocabulary. Measure fertility first — tokens emitted per source word — and extend only when it sits well above 1.1, because base tokenizers already cover most medical and legal vocabulary and a non-standard tokenizer costs deployment complexity for the rest of the model's life. When you do extend, initialize new embeddings from the average of their sub-token embeddings rather than randomly.
+**Orthogonal: tokenizer adaptation.** Independent of every choice above, decide whether to extend the vocabulary. Measure fertility first — tokens emitted per source word — and extend only when it sits well above 1.1, because base tokenizers already cover most medical and legal vocabulary and a non-standard tokenizer costs deployment complexity for the rest of the model's life. when you do extend, initialize new embeddings from the average of their sub-token embeddings rather than randomly.
+
+See also: [Transfer Learning and Domain Adaptation](../../ml/transfer_learning_and_domain_adaptation/transfer_learning_and_domain_adaptation.md) for the classical-ML view (covariate, label and concept shift, importance weighting, test-time adaptation).
 
 ---
 
