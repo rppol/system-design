@@ -901,3 +901,4 @@ FIXED:  consumer read buf[0] = 'FRESH'
 - [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) — the GIL, and what free-threaded CPython 3.14 (`python3.14t`, PEP 779, not yet the default build) changes about Python's relationship to this module.
 - [`computer_architecture_and_memory_hierarchy`](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — the store buffer, MESI cache coherence, and the cache line these reorderings physically execute inside.
 - [`rust/channels_atomics_and_shared_state`](../../rust/channels_atomics_and_shared_state/channels_atomics_and_shared_state.md): the Rust atomics API
+- [`lld/concurrency_patterns/ConcurrencyProblemsToolkit.md`](../../lld/concurrency_patterns/ConcurrencyProblemsToolkit.md) — concurrent hash map, lock-free Bloom filter and ordering puzzles in Java, where these happens-before rules decide whether the code is correct.

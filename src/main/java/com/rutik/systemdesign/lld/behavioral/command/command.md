@@ -734,6 +734,8 @@ A: The macro is left partially applied unless it explicitly rolls back, so `Macr
 - **Saga pattern** — Distributed transactions use Command with compensating commands for rollback. Each saga step is a Command; on failure, compensating Commands (the undo stack) restore consistency across services.
 - **Audit log / event sourcing** — Event sourcing stores the complete history of Commands applied to an entity. Replaying the command log from any point reconstructs current state — Command as immutable persistent record.
 
+**Worked in an LLD problem:** [Payment Processor](../../system_design_problems/PaymentProcessor.md) models each partial refund as a `RefundCommand` with its own id, and a command log runs each id at most once, so a retried refund is never paid twice.
+
 ---
 
 ## 17. Best Practices

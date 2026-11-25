@@ -303,6 +303,8 @@ Within one machine and one process, `HasMoneyState.selectProduct()` checking sto
 6. **Network-connected machine**: Remote monitoring of stock levels via Observer
 7. **Discount codes**: Strategy pattern for pricing (regular, discount, loyalty)
 
+**Related LLD problem:** [Connect Four](ConnectFour.md) makes the opposite call: its states carry no behavior of their own, so a plain enum beats one class per state.
+
 ---
 
 ## Sample Output

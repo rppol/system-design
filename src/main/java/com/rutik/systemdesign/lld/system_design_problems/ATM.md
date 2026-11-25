@@ -336,6 +336,8 @@ Every `Ctx->>St` call is dispatched to whichever `ATMStateHandler` is currently 
 - **Singleton** on `ATMContext` (one ATM machine per JVM process).
 - **Template Method** in an abstract `AbstractTransaction` to enforce execute-then-receipt boilerplate.
 
+**Related LLD problems:** [Payment Processor](PaymentProcessor.md) takes the same transaction-integrity concern to card and wallet payments: idempotency keys, ordered per-account locks and a balanced ledger. [Connect Four](ConnectFour.md) explains when a game keeps a plain enum instead of State classes, the opposite call to this page.
+
 ---
 
 ## Interview Questions with Answers

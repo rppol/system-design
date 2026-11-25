@@ -6,7 +6,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 
 | Section | Coverage | Sub-CLAUDE |
 |---------|---------|-----------|
-| **LLD** | Design patterns (GoF), SOLID, anti-patterns, architecture patterns — 13 modules, 18 design problems | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
+| **LLD** | Design patterns (GoF), SOLID, anti-patterns, architecture patterns — 13 modules, 30 design problems | [lld/CLAUDE.md](src/main/java/com/rutik/systemdesign/lld/CLAUDE.md) |
 | **HLD** | Distributed system concepts (CAP, caching, queues, sharding) — 32 modules, 37 case studies | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
 | **Backend** | Networking, API design, performance engineering, resilience, security, microservices — 50 modules, 10 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
 | **Database** | Relational, NoSQL, distributed DB, production ops — 34 modules, 11 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |

@@ -31,6 +31,8 @@ protecting, and [`hld/microservices`](../../hld/microservices/microservices.md) 
 same dependency-direction question applied to service boundaries instead of class
 boundaries.
 
+**See also:** Separation of Concerns, the principle these architectures grow from, is covered in [Principles Beyond SOLID](../design_principles/PrinciplesBeyondSolid.md).
+
 ---
 
 ## 2. Intuition

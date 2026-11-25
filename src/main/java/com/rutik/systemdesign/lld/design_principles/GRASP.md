@@ -20,6 +20,8 @@ Who should own this method? GRASP gives nine named answers, and connascence meas
 
 **Connascence** (Meilir Page-Jones, "Comparing Techniques by Means of Encapsulation and Connascence", *Communications of the ACM*, September 1992; expanded in *What Every Programmer Should Know About Object-Oriented Design*, 1995) is the vocabulary for measuring coupling. Two elements are connascent if a change to one requires a change to the other for the system to stay correct. GRASP says "keep coupling low"; connascence says which coupling is cheap, which is expensive, and how to refactor from one to the other.
 
+**See also:** [Principles Beyond SOLID](PrinciplesBeyondSolid.md) covers Tell-Don't-Ask, the behavioral side of Information Expert, plus Command-Query Separation, Fail-Fast and Parse Don't Validate.
+
 ---
 
 ## 2. Intuition

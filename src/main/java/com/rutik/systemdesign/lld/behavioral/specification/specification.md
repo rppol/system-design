@@ -454,6 +454,8 @@ A: Specifications describe WHERE clauses: which rows match. "Top 10 customers by
 - **Policy engines**: authorization rules as composable predicates evaluated by a central engine (OPA/Rego, Cedar) are specifications at service scale; see [Policy as Code](../../../devops/policy_as_code_and_compliance/policy_as_code_and_compliance.md).
 - **Query pushdown**: translating a predicate tree to run where the data lives is the same move a query engine makes when it pushes filters to storage.
 
+**Worked in an LLD problem:** [Payment Processor](../../system_design_problems/PaymentProcessor.md) proposes one `Specification` per KYC tier (daily limit, per-transaction limit), checked before a payment is authorized.
+
 ---
 
 ## 17. Best Practices

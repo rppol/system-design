@@ -333,6 +333,8 @@ X wins on the main diagonal `(0,0)-(1,1)-(2,2)`. This run shows a "fork": X's mo
 
 5. **Persistent move history / replay** — append each validated move to a log (file or DB table); replaying the log from an empty board reconstructs any historical game state, enabling spectator mode and post-game analysis.
 
+**Related LLD problem:** [Connect Four](ConnectFour.md) is this problem with gravity: a disc falls to the top of its column, and a line of four can be completed from its middle, so the win check counts in both directions.
+
 ---
 
 ## Interview Questions with Answers

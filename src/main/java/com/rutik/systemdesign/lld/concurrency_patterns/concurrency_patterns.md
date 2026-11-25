@@ -13,6 +13,7 @@ Low-level design patterns that address coordination between threads sharing a JV
 | Read-Write Lock | [ReadWriteLock.md](ReadWriteLock.md) | Allow concurrent reads, exclusive writes | `ReentrantReadWriteLock`, `StampedLock` |
 | Thread Pool | [ThreadPool.md](ThreadPool.md) | Reuse worker threads across many tasks | `ExecutorService`, `ThreadPoolExecutor` |
 | Monitor Object, Guarded Suspension, Balking, Two-Phase Termination, Active Object, Reactor, Proactor, Actor | [CoordinationPatterns.md](CoordinationPatterns.md) | Wait, refuse, stop, hand off work, or serve many connections on few threads | `Condition`, `compareAndSet`, `shutdown()`, `Selector`, Netty, Pekko |
+| Bounded blocking queue, TTL cache, concurrent hash map, Bloom filter, ordering puzzles, parallel merge sort | [ConcurrencyProblemsToolkit.md](ConcurrencyProblemsToolkit.md) | The concurrency coding problems interviews ask you to build by hand | `Condition`, lock striping, `AtomicLongArray` CAS, `Semaphore`, `ForkJoinPool` |
 
 ---
 

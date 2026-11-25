@@ -17,6 +17,8 @@ The named concurrency patterns beyond producer-consumer and thread pools: how a 
 | Proactor | POSA2 | Same, but the OS performs the I/O and reports completion | `AsynchronousSocketChannel` + `CompletionHandler`, Windows IOCP, Linux io_uring |
 | Actor | Hewitt et al. 1973 | Concurrency with no shared state, only messages | Akka / Apache Pekko, Erlang/OTP processes |
 
+**See also:** [Concurrency Problems Toolkit](ConcurrencyProblemsToolkit.md) applies Monitor Object and Guarded Suspension to the blocking queue, TTL cache and thread-ordering puzzles that interviews ask you to build by hand.
+
 ---
 
 ## 2. Intuition

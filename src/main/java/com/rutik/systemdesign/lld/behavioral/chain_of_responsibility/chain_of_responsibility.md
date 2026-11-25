@@ -613,6 +613,8 @@ A: Observer broadcasts a fact — order among listeners is unspecified, no liste
 - **Exception handling in distributed systems** — Retry → circuit breaker → fallback → dead-letter queue is a chain: each handler attempts to recover from failure; if it can't, it passes to the next recovery mechanism.
 - **IAM authorization** — AWS IAM evaluates policy statements as a chain: explicit Deny → SCPs → resource policies → identity policies → session policies. Each layer gets a chance to deny or allow before the final decision.
 
+**Worked in an LLD problem:** [URL Shortener](../../system_design_problems/UrlShortener.md) validates each long URL with a list of rules (length, scheme, no self-redirect, blocklist) where every handler runs and any one can reject, with the cheap checks first.
+
 ---
 
 ## 17. Best Practices

@@ -14,7 +14,7 @@ LLD describes how individual components are implemented — class relationships,
 | File/Directory | Topic |
 |----------------|-------|
 | `oop_and_uml_foundations/` | Objects, association vs aggregation vs composition, UML class and sequence diagrams |
-| `design_principles/` | DRY, KISS, YAGNI, Composition over Inheritance, Program to Interface, Law of Demeter, GRASP and connascence (`GRASP.md`) |
+| `design_principles/` | DRY, KISS, YAGNI, Composition over Inheritance, Program to Interface, Law of Demeter, GRASP and connascence (`GRASP.md`), Tell-Don't-Ask, CQS, Least Astonishment, Postel's Law, Separation of Concerns, Fail-Fast and Parse Don't Validate (`PrinciplesBeyondSolid.md`) |
 | `architecture_patterns/` | Layered, hexagonal, clean and onion architecture; the dependency rule |
 | `solid_principles/` | SRP, OCP, LSP, ISP, DIP — with violation examples and fixes |
 | `dependency_injection_and_testability/` | Constructor injection, seams, test doubles, designing for substitution without a framework |
@@ -70,10 +70,11 @@ LLD describes how individual components are implemented — class relationships,
 | `concurrency_patterns/ThreadSafeSingleton.md`, `ProducerConsumer.md`, `ReadWriteLock.md`, `ThreadPool.md` | The four classic patterns, each with a runnable `.java` companion |
 | `concurrency_patterns/modern_java_concurrency.md` | Virtual threads, structured concurrency, scoped values |
 | `concurrency_patterns/CoordinationPatterns.md` | Monitor Object, Guarded Suspension, Balking, Two-Phase Termination, Active Object, Reactor, Proactor, Actor |
+| `concurrency_patterns/ConcurrencyProblemsToolkit.md` | Concurrency interview problems built by hand: blocking queue, TTL cache, concurrent hash map, Bloom filter, thread-ordering puzzles, parallel merge sort; runnable `.java` companion |
 
 ### LLD Interview Problems
 
-22 problems, each with a `<Name>.md` (problem statement, Mermaid `classDiagram`, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`. **Every `<Name>.md` must link its `<Name>.java` and say what the code demonstrates** — the implementations are longer than the pages that present them and were invisible until 2026-08-25. The same rule holds for the four `concurrency_patterns/<Name>.java` companions.
+30 problems, each with a `<Name>.md` (problem statement, Mermaid `classDiagram`, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`. **Every `<Name>.md` must link its `<Name>.java` and say what the code demonstrates** — the implementations are longer than the pages that present them and were invisible until 2026-08-25. The same rule holds for the five `concurrency_patterns/<Name>.java` companions.
 
 | Problem | Key Patterns | File |
 |---------|-------------|------|
@@ -99,6 +100,26 @@ LLD describes how individual components are implemented — class relationships,
 | Design a pub-sub / message queue | Observer (pull-based), Strategy (partitioner), Mediator (consumer group) | [PubSub](system_design_problems/PubSub.md) |
 | Design an in-memory file system | Composite, Iterator, Visitor | [FileSystem](system_design_problems/FileSystem.md) |
 | Design a meeting room scheduler | Strategy (room selection), Observer | [MeetingScheduler](system_design_problems/MeetingScheduler.md) |
+| Design a payment processor / digital wallet | State (enum transition table), Strategy, Command, Observer, Adapter | [PaymentProcessor](system_design_problems/PaymentProcessor.md) |
+| Design a cache manager (pluggable eviction, TTL, thread-safe) | Strategy (eviction policy), Factory, Builder, Observer, lock striping | [CacheManager](system_design_problems/CacheManager.md) |
+| Design a URL shortener (LLD angle) | Strategy (code generator), Decorator, Chain of Responsibility, Observer | [UrlShortener](system_design_problems/UrlShortener.md) |
+| Design a car rental system | Decorator (pricing), Builder, State | [CarRental](system_design_problems/CarRental.md) |
+| Design an online auction | Strategy, State, Observer, Facade | [OnlineAuction](system_design_problems/OnlineAuction.md) |
+| Design Connect Four | Strategy, enum state, lightweight Command, Observer | [ConnectFour](system_design_problems/ConnectFour.md) |
+| Design a feed generator | Strategy (ranking), Decorator, filter chain, Facade | [FeedGenerator](system_design_problems/FeedGenerator.md) |
+| Design an online stock brokerage | State, Adapter (venue), Observer, Facade | [OnlineStockBrokerage](system_design_problems/OnlineStockBrokerage.md) |
+
+### Ownership: the three LRU treatments
+
+The repo teaches LRU three times, at three levels. Each page owns one level and links the other two instead of repeating them:
+
+| Level | Owner | Owns |
+|-------|-------|------|
+| Data structure | `../cs_fundamentals/case_studies/design_lru_cache.md` | HashMap plus doubly-linked list, O(1) get/put, brute force to optimal, complexity proofs |
+| Class design | `system_design_problems/LRUCache.md` (exact LRU, LFU variant, Decorator for thread safety) and `system_design_problems/CacheManager.md` (pluggable eviction, TTL, lock striping, many named caches) | Classes, patterns, interfaces and in-process concurrency. `CacheManager.md` starts where `LRUCache.md` stops and must not repeat its pointer surgery |
+| Distributed | `../hld/caching/caching.md` (and the case study `../hld/case_studies/design_distributed_cache.md`) | Sampled LRU in Redis, cache-aside, invalidation, stampede defenses across a fleet |
+
+An lld page that needs the linked-list mechanics links the cs_fundamentals case study; one that needs fleet-scale eviction links `hld/caching`.
 
 ---
 
@@ -118,7 +139,14 @@ LLD describes how individual components are implemented — class relationships,
 | `concurrency_patterns/` | `../../java/java_memory_model/` — happens-before, volatile semantics, DCL correctness |
 | `system_design_problems/` | `../../hld/microservices/` — Parking Lot / Elevator at distributed system scale |
 | `system_design_problems/RateLimiter.md` | `../../hld/rate_limiting/` — single-JVM token bucket/sliding window here vs. Redis-backed distributed rate limiting at HLD scale |
-| `system_design_problems/LRUCache.md` | `../../hld/caching/`, `../../database/database_caching_patterns/` — exact in-process LRU here vs. approximated/sampled LRU eviction in Redis/Memcached at scale |
+| `system_design_problems/LRUCache.md` | `../../hld/caching/`, `../../database/database_caching_patterns/` — exact in-process LRU here vs. approximated/sampled LRU eviction in Redis/Memcached at scale. See "Ownership: the three LRU treatments" above |
+| `system_design_problems/CacheManager.md` | `../../cs_fundamentals/case_studies/design_lru_cache.md` (data structure), `../../hld/caching/` and `../../hld/case_studies/design_distributed_cache.md` (distributed tier) |
+| `system_design_problems/PaymentProcessor.md` | `../../hld/case_studies/design_payment_system.md`, `../../hld/case_studies/design_digital_wallet.md`, `../../fintech/idempotency_and_exactly_once_money_movement/` |
+| `system_design_problems/UrlShortener.md` | `../../hld/case_studies/design_url_shortener.md`, `../../hld/case_studies/design_distributed_unique_id.md` |
+| `system_design_problems/OnlineAuction.md` | `../../hld/case_studies/design_online_auction.md` — one lock per auction here vs. one owner per auction across servers |
+| `system_design_problems/FeedGenerator.md` | `../../hld/case_studies/design_twitter.md`, `../../backend/case_studies/design_feed_service/` |
+| `system_design_problems/OnlineStockBrokerage.md` | `../../fintech/case_studies/design_a_broker_order_management_system.md`, `../../hld/case_studies/design_stock_exchange.md`. Broker side; `OrderMatchingEngine.md` is the venue side |
+| `concurrency_patterns/ConcurrencyProblemsToolkit.md` | `../../cs_fundamentals/deadlocks_and_synchronization/`, `../../cs_fundamentals/memory_models_and_concurrency_theory/` |
 | `system_design_problems/OrderMatchingEngine.md` | `../fintech/order_books_and_matching_engines/`: pro-rata, auctions, self-trade prevention and array price ladders. This page stays the price-time baseline |
 
 ---

@@ -340,6 +340,8 @@ ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
 - **Database connection pools** — HikariCP connection pools are Thread Pools for database connections: a fixed set of connections (workers) handles database requests (tasks); callers block when the pool is full — exactly the `corePoolSize` / `workQueue` dynamic.
 - **Kubernetes pod scaling** — Horizontal Pod Autoscaler scales the number of pods (threads) based on CPU utilization or queue depth. The pod resource request is the `corePoolSize`; the HPA max replicas is the `maximumPoolSize`; pod startup time is the thread creation overhead.
 
+**Interview problem built on it:** [Concurrency Problems Toolkit](ConcurrencyProblemsToolkit.md) sorts 1,000,000 integers on a fork/join pool with a sequential cutoff, the task-granularity question this pattern raises.
+
 ---
 
 ## Interview Questions

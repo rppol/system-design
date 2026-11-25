@@ -352,6 +352,8 @@ Replace the in-process `GameObserver` fan-out with a message published to each c
 ### Replay and undo
 Since every state-changing event already flows through `GameObserver`, a `ReplayRecordingObserver` that appends `(player, roll, from, to)` tuples to a list gives replay for free; undo would additionally require `Player.position` to be restorable, which argues for wrapping each turn's mutation in a small Command object the way [`ATM.md`](ATM.md)'s `Transaction` does for rollback.
 
+**Related LLD problem:** [Connect Four](ConnectFour.md) is the other game-rules warm-up interviewers pair with this one: gravity per column and a win check that can complete from the middle of a line.
+
 ---
 
 ## Interview Questions with Answers

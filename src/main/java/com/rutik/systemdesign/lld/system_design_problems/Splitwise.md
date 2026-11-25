@@ -385,6 +385,8 @@ Updated net balances after settlement:
 
 6. **Audit log / expense edit history** — store an immutable list of `ExpenseRevision`s whenever an `Expense` is edited or deleted, and reverse the original `BalanceSheet` updates before applying the new ones — critical for trust in a shared-money app.
 
+**Related LLD problem:** [Payment Processor](PaymentProcessor.md) turns this pairwise balance sheet into a double-entry journal that must sum to zero, and points back here for the remainder-allocation problem in split payments.
+
 ---
 
 ## Interview Questions with Answers

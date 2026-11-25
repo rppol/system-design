@@ -381,6 +381,8 @@ CREATE TABLE booking_seats (
 5. **Multi-city rollout**: Tenant-aware sharding by city
 6. **Corporate bookings**: Bulk booking with invoice generation
 
+**Related LLD problems:** [Car Rental](CarRental.md) books a resource over time intervals instead of a fixed show, and the resource moves between branches. [URL Shortener](UrlShortener.md) reuses the seat-hold shape for a short-TTL hold on a vanity alias.
+
 ---
 
 ## Interview Questions with Answers

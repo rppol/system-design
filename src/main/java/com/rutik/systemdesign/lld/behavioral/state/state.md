@@ -648,6 +648,8 @@ A: Once the machine is long-running and durable rather than in-memory and short-
 - **Connection state machines** — TCP connections, WebSocket sessions, and database connections each have state machines. The protocol behavior is entirely determined by the current state — exactly the State pattern motivation.
 - **Workflow engines** — Temporal, Apache Airflow, and AWS Step Functions execute workflow definitions as state machines. Each step is a state; transitions are triggered by task completion, timeout, or failure events.
 
+**Worked in LLD problems:** [Payment Processor](../../system_design_problems/PaymentProcessor.md) uses the enum-with-transition-table variant, the right size when states carry no behavior of their own. [Principles Beyond SOLID](../../design_principles/PrinciplesBeyondSolid.md) shows the type-level cousin: a sealed hierarchy where each state holds only the fields that exist in it, so an illegal state cannot be built.
+
 ---
 
 ## 17. Best Practices

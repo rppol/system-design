@@ -316,6 +316,7 @@ The `ThreadSafeLRUCache` block submits four tasks to a four-thread pool, so its 
 - **Cache-aside / read-through patterns** — The `get`-miss-then-`put` pattern in this LLD maps directly to the cache-aside pattern at HLD scale: application checks cache, on miss reads from the database and populates the cache. See `../../database/database_caching_patterns/database_caching_patterns.md` for read-through, write-through, and write-back variants applied to database-backed caches.
 - **CDN edge-cache eviction** — CDN edge nodes run LRU/LFU-style eviction on cached assets (images, video segments) with capacity measured in disk space rather than entry count — the same "evict least-valuable item to make room" logic, just with variable-sized entries instead of fixed-size nodes.
 - **Cache stampede / thundering herd** — A related production concern: when a hot key is evicted (or expires) under high concurrent load, many requests simultaneously miss the cache and hit the backing store at once, potentially overwhelming it. Mitigations (request coalescing, probabilistic early expiration, locks on cache-fill) are covered in `../../hld/caching/caching.md`.
+- **Three LRU treatments in this repo** — this page and [`CacheManager.md`](CacheManager.md) own the class design; [`cs_fundamentals/case_studies/design_lru_cache.md`](../../cs_fundamentals/case_studies/design_lru_cache.md) owns the data structure (brute force to O(1), complexity); [`hld/caching`](../../hld/caching/caching.md) and [`hld/case_studies/design_distributed_cache.md`](../../hld/case_studies/design_distributed_cache.md) own the distributed tier.
 
 ---
 
@@ -330,6 +331,8 @@ The `ThreadSafeLRUCache` block submits four tasks to a four-thread pool, so its 
 4. **Write-back vs write-through cache** — write-through writes to the backing store synchronously on every `put` (simple, consistent, slower); write-back buffers writes in the cache and flushes to the backing store asynchronously or on eviction (faster, risk of data loss on crash) — the `CacheEventListener.onEviction` hook is exactly where a write-back flush would be triggered.
 
 5. **Distributed LRU cache coordination** — when the cache is sharded across multiple nodes (consistent hashing to pick the shard per key), each shard runs its own local LRU independently. Global LRU ordering across shards is generally not maintained — instead, each shard's capacity is sized proportionally, and cross-node consistency (if needed) is handled via invalidation messages (pub/sub) rather than a shared linked list.
+
+**Next problem:** [Cache Manager](CacheManager.md) starts where this page stops: an eviction policy that is pluggable without leaking the node type, per-entry TTL, lock striping and many named caches. [Feed Generator](FeedGenerator.md) reuses this LRU mechanism for its snapshot cache.
 
 ---
 

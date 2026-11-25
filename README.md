@@ -73,10 +73,10 @@ Patterns that deal with communication between objects, defining how objects inte
 | [Anti-Patterns](src/main/java/com/rutik/systemdesign/lld/anti_patterns/anti_patterns.md) | Common design mistakes and how to avoid them |
 | [Refactoring](src/main/java/com/rutik/systemdesign/lld/refactoring/refactoring.md) | Code smells, the refactoring catalogue, and changing a design safely under test |
 | [Pattern Comparisons](src/main/java/com/rutik/systemdesign/lld/pattern_comparisons/pattern_comparisons.md) | Head-to-head comparisons of similar patterns |
-| [Design Principles](src/main/java/com/rutik/systemdesign/lld/design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
+| [Design Principles](src/main/java/com/rutik/systemdesign/lld/design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface, GRASP, principles beyond SOLID (Tell-Don't-Ask, CQS, Fail-Fast, Parse Don't Validate) |
 | [OOP and UML Foundations](src/main/java/com/rutik/systemdesign/lld/oop_and_uml_foundations/oop_and_uml_foundations.md) | Encapsulation, composition vs inheritance, and reading/writing the UML an interview actually uses |
-| [Concurrency Patterns](src/main/java/com/rutik/systemdesign/lld/concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
-| [System Design Problems](src/main/java/com/rutik/systemdesign/lld/system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
+| [Concurrency Patterns](src/main/java/com/rutik/systemdesign/lld/concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool, coordination patterns, concurrency interview problems (blocking queue, TTL cache, ordering puzzles) |
+| [System Design Problems](src/main/java/com/rutik/systemdesign/lld/system_design_problems/system_design_problems.md) | 30 problems, including Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Cache Manager, Rate Limiter, Tic-Tac-Toe, Connect Four, Splitwise, Payment Processor, URL Shortener, Car Rental, Online Auction, Feed Generator, Online Stock Brokerage |
 
 ---
 

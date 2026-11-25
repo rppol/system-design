@@ -599,6 +599,8 @@ A: You make the decorator the bean that everyone else receives and pass it the r
 - **Repository caching** — A `CachingRepository` decorator wraps the real repository, checking a cache layer before delegating to the database. The service layer depends only on the `Repository` interface and is unaware of the caching layer.
 - **Feature flag injection** — A `FeatureFlagDecorator` wraps a service and routes calls to either the old or new implementation based on a feature flag — adding behavior toggleability without modifying the wrapped service.
 
+**Worked in LLD problems:** [Car Rental](../../system_design_problems/CarRental.md) builds a price from decorator line items and fixes their order with a builder, because a percentage discount gives a different total depending on where it sits in the chain. [URL Shortener](../../system_design_problems/UrlShortener.md) wraps its repository in a caching decorator, the repository-caching bullet above in one class.
+
 ---
 
 ## 17. Best Practices

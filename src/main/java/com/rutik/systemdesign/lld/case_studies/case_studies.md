@@ -35,6 +35,7 @@ Problems grouped by the dominant engineering concern they exercise:
 | Elevator System | Complex FSM + scheduling algorithm | [ElevatorSystem.md](../system_design_problems/ElevatorSystem.md) | State, Observer (floor requests), Strategy (SCAN/FCFS) |
 | Ride Sharing | Ride lifecycle FSM with rejected-transition handling | [RideSharing.md](../system_design_problems/RideSharing.md) | State (ride lifecycle), Strategy (fare), Observer (status), Factory (vehicle) |
 | Food Delivery | Three-party order lifecycle; cancellation illegal once picked up | [FoodDelivery.md](../system_design_problems/FoodDelivery.md) | State (order lifecycle), Strategy (fee, partner assignment), Decorator (pricing chain), Observer |
+| Payment Processor | Payment lifecycle FSM plus idempotent, ledger-balanced money movement | [PaymentProcessor.md](../system_design_problems/PaymentProcessor.md) | State (enum transition table), Strategy (payment method), Command (refunds), Observer, Adapter (gateway) |
 
 ### Group B — Concurrency + Resource Management
 
@@ -43,6 +44,8 @@ Problems grouped by the dominant engineering concern they exercise:
 | Parking Lot | Concurrent spot allocation, pricing strategy | [ParkingLot.md](../system_design_problems/ParkingLot.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Factory (vehicle) |
 | Online Booking System | Double-booking prevention, seat reservation | [OnlineBookingSystem.md](../system_design_problems/OnlineBookingSystem.md) | Strategy (pricing), Observer (notifications), Builder (Movie/Show) |
 | Meeting Scheduler | Half-open interval conflicts across rooms and attendees | [MeetingScheduler.md](../system_design_problems/MeetingScheduler.md) | Strategy (room selection), Observer (notifications) |
+| Car Rental | Interval bookings on a resource that moves between branches; ordered price rules | [CarRental.md](../system_design_problems/CarRental.md) | Decorator (price components), Builder (pricing order), State (reservation lifecycle) |
+| Online Auction | Many bidders racing on one auction; proxy bidding; what happens at the end time | [OnlineAuction.md](../system_design_problems/OnlineAuction.md) | Strategy (increments, end policy, clock), State (auction lifecycle), Observer, Facade |
 
 ### Group C — Domain Modeling
 
@@ -51,6 +54,7 @@ Problems grouped by the dominant engineering concern they exercise:
 | Library Management | Borrow/return lifecycle, overdue notifications | [LibraryManagement.md](../system_design_problems/LibraryManagement.md) | Builder (Book), Iterator (catalog search), Observer (overdue) |
 | Chess Game | Move validation, undo/redo, game phases | [ChessGame.md](../system_design_problems/ChessGame.md) | Command (move + undo), Observer (game events), Singleton (board) |
 | Splitwise | Expense-sharing ledger, debt-graph simplification | [Splitwise.md](../system_design_problems/Splitwise.md) | Strategy (split type), Factory (split-strategy selection) |
+| Online Stock Brokerage | Buying power reserved at accept, released on venue evidence; settlement | [OnlineStockBrokerage.md](../system_design_problems/OnlineStockBrokerage.md) | State (order status guards), Adapter (venue), Observer (execution reports), Facade |
 
 ### Group D — Algorithms & Data Structures
 
@@ -62,6 +66,8 @@ Problems grouped by the dominant engineering concern they exercise:
 | Snake and Ladder | Turn loop with a validated jump table; one jump per landing | [SnakeAndLadder.md](../system_design_problems/SnakeAndLadder.md) | Strategy (dice, win rule), Observer (game events), Factory (board) |
 | Order Matching Engine | Price-time priority order book; cancel by id without a scan | [OrderMatchingEngine.md](../system_design_problems/OrderMatchingEngine.md) | State (order lifecycle), Strategy (time-in-force) |
 | File System | Path resolution over a part/whole tree; recursive size | [FileSystem.md](../system_design_problems/FileSystem.md) | Composite (files and directories), Iterator (find), Visitor |
+| Connect Four | O(1) gravity per column; a win completed from the middle of a line | [ConnectFour.md](../system_design_problems/ConnectFour.md) | Strategy (move source), enum game state, lightweight Command (undo), Observer |
+| Feed Generator | Hybrid push/pull fan-out, pluggable ranking, pagination that stays stable while posts arrive | [FeedGenerator.md](../system_design_problems/FeedGenerator.md) | Strategy (ranking), Decorator (affinity boost), filter chain, Facade |
 
 ### Group E - Infrastructure Components
 
@@ -72,6 +78,8 @@ Problems grouped by the dominant engineering concern they exercise:
 | Task Scheduler | Delay queue with no lost wakeup under concurrent submission | [TaskScheduler.md](../system_design_problems/TaskScheduler.md) | Command (task), Strategy (retry policy), Producer-Consumer (delay queue), Observer |
 | Key-Value Store | Nested transactions as a layer stack; TTL expiry | [KeyValueStore.md](../system_design_problems/KeyValueStore.md) | Unit of Work, Memento-like layer stack, Strategy (clock) |
 | Pub-Sub | Log-based broker; per-partition order; at-least-once delivery | [PubSub.md](../system_design_problems/PubSub.md) | Observer (pull-based), Strategy (partitioner), Mediator (consumer group) |
+| Cache Manager | Pluggable eviction, per-entry TTL, many named caches safe for many threads | [CacheManager.md](../system_design_problems/CacheManager.md) | Strategy (eviction policy), Factory, Builder, Observer (removal listener), lock striping |
+| URL Shortener | Where code uniqueness comes from: generator vs atomic insert-if-absent | [UrlShortener.md](../system_design_problems/UrlShortener.md) | Strategy (code generator), Decorator (caching repository), Chain of Responsibility (validation), Observer |
 
 ---
 
@@ -139,6 +147,9 @@ flowchart TD
     ES --> SW["Splitwise<br/>Strategy splits + Factory<br/>+ debt-graph simplification"]
     RS --> FD["Food Delivery<br/>three-party lifecycle<br/>+ Decorator pricing"]
     OBS --> MS["Meeting Scheduler<br/>interval conflicts<br/>+ room Strategy"]
+    ATM --> PP["Payment Processor<br/>idempotency + ledger<br/>+ payment FSM"]
+    OBS --> CR["Car Rental<br/>interval calendar<br/>+ Decorator pricing"]
+    OBS --> AUC["Online Auction<br/>one lock per auction<br/>+ proxy bidding"]
 
     subgraph SA["Standalone — Algorithms and Data Structures (any order)"]
         LRU["LRU Cache<br/>DLL + HashMap, O(1)"]
@@ -147,6 +158,8 @@ flowchart TD
         SNL["Snake and Ladder<br/>jump table + Strategy dice"]
         OME["Order Matching Engine<br/>price-time order book"]
         FS["File System<br/>Composite tree"]
+        C4["Connect Four<br/>gravity + 4-way win check"]
+        FG["Feed Generator<br/>fan-out + keyset paging"]
     end
 
     subgraph INF["Standalone: Infrastructure Components (any order)"]
@@ -155,14 +168,20 @@ flowchart TD
         TS["Task Scheduler<br/>delay queue, no lost wakeup"]
         KV["Key-Value Store<br/>transaction layers + TTL"]
         PS["Pub-Sub<br/>partitioned log + groups"]
+        CM["Cache Manager<br/>pluggable eviction + TTL"]
+        URL["URL Shortener<br/>code uniqueness + cache"]
     end
 
+    TTT --> C4
+    LRU --> CM
+    OME --> OSB["Online Stock Brokerage<br/>buying power + settlement"]
+
     class F base
-    class VM,ATM,PL,ES train
-    class OBS,RS,FD,MS req
-    class CG,LM,SW frozen
-    class LRU,RL,TTT,SNL,OME,FS mathOp
-    class LOG,NS,TS,KV,PS io
+    class VM,ATM,PL,ES,PP train
+    class OBS,RS,FD,MS,CR,AUC req
+    class CG,LM,SW,OSB frozen
+    class LRU,RL,TTT,SNL,OME,FS,C4,FG mathOp
+    class LOG,NS,TS,KV,PS,CM,URL io
 ```
 
 **Why this order**: Vending Machine's clean 5-state FSM is the template you'll reuse in every
@@ -178,6 +197,15 @@ parties, and Meeting Scheduler reuses Online Booking's double-booking check on i
 Infrastructure Components group (Logging Framework, Notification Service, Task Scheduler, Key-Value
 Store, Pub-Sub) leans on concurrency and delivery guarantees; study it after
 [Concurrency Patterns](../concurrency_patterns/concurrency_patterns.md).
+
+The eight later additions slot into the same tree. Payment Processor extends ATM's
+transaction-integrity concern to idempotency keys and a balanced ledger. Car Rental and Online
+Auction build on Online Booking: Car Rental books intervals on a resource that moves, and Online
+Auction puts many writers on one piece of state with a deadline. Connect Four is Tic-Tac-Toe with
+gravity. Cache Manager starts exactly where LRU Cache stops (pluggable eviction, TTL, lock
+striping) and URL Shortener joins it in the infrastructure group. Feed Generator is a standalone
+fan-out and pagination problem. Online Stock Brokerage is the broker side of the venue that Order
+Matching Engine models, so read the matching engine first.
 
 ---
 
@@ -210,6 +238,14 @@ Store, Pub-Sub) leans on concurrency and delivery guarantees; study it after
 | Design a message queue / Kafka-like pub-sub | Pub-Sub | Direct match: partitions, consumer groups, offsets |
 | Design an in-memory file system | File System | Direct match: Composite tree, path resolution |
 | Design a meeting room scheduler / calendar | Meeting Scheduler | Direct match: interval conflict check, room Strategy |
+| Design a payment processor / digital wallet | Payment Processor | Direct match: idempotency keys, double-entry ledger, payment FSM |
+| Design a cache with pluggable eviction and TTL (LRU follow-up) | Cache Manager | Direct match: eviction Strategy, TTL, lock striping, single-flight load |
+| Design a URL shortener (class-design angle) | URL Shortener | Direct match: generator Strategy, atomic insert-if-absent, caching Decorator |
+| Design a car rental system | Car Rental | Direct match: interval calendar per vehicle, ordered pricing Decorators |
+| Design an online auction (eBay) | Online Auction | Direct match: proxy bidding, one lock per auction, soft close |
+| Design Connect Four / a gravity board game | Connect Four | Direct match: per-column height, four-direction win check |
+| Design a news feed / timeline (class-design angle) | Feed Generator | Direct match: hybrid fan-out, ranking Strategy, keyset pagination |
+| Design an online stock brokerage / trading app | Online Stock Brokerage | Direct match: buying-power reservation, execution-report dedup, settlement |
 
 ### 30-Minute Interview Time Box
 
@@ -255,3 +291,5 @@ for the class diagram. Timebox requirements to 5 minutes maximum.
 | Distributed scale of these problems | [../../hld/microservices/](../../hld/microservices/microservices.md) |
 | Decorator (LRU Cache thread safety) | [../structural/decorator/](../structural/decorator/decorator.md) |
 | Rate limiting at distributed scale | [../../hld/rate_limiting/](../../hld/rate_limiting/rate_limiting.md) |
+| LRU as a data structure, a class design, and a distributed tier | [design_lru_cache](../../cs_fundamentals/case_studies/design_lru_cache.md) (data structure), [LRUCache](../system_design_problems/LRUCache.md) and [CacheManager](../system_design_problems/CacheManager.md) (class design), [../../hld/caching/](../../hld/caching/caching.md) (distributed) |
+| Payments and trading at distributed scale | [design_payment_system](../../hld/case_studies/design_payment_system.md), [design_stock_exchange](../../hld/case_studies/design_stock_exchange.md) |

@@ -306,6 +306,7 @@ A record cannot extend a class and cannot be extended (JLS 8.10), so no subclass
 - *Agile Software Development: Principles, Patterns, and Practices* — Robert C. Martin
 - *Design Patterns: Elements of Reusable Object-Oriented Software* — Gang of Four
 - *Growing Object-Oriented Software Guided by Tests* — Freeman & Pryce
+- [Principles Beyond SOLID](../design_principles/PrinciplesBeyondSolid.md): Tell-Don't-Ask, Command-Query Separation, Least Astonishment, Postel's Law, Separation of Concerns, Fail-Fast and Parse Don't Validate, the principles interviewers ask about after SOLID
 
 ---
 

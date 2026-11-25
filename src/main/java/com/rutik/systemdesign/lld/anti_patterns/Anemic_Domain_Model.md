@@ -390,6 +390,8 @@ sequenceDiagram
 - **Tight inter-service coupling** — Anemic services that expose raw data force consuming services to implement business rules about that data. Service A must understand Order's invariants to work with Order Service's raw data — coupling that proper domain modeling would eliminate.
 - **Event sourcing mismatch** — Event sourcing requires entities that know how to apply events and validate transitions. Anemic entities can't enforce invariants before emitting events — invalid state changes leak into the event log, corrupting the system history.
 
+**The principle that prevents it:** Tell-Don't-Ask in [Principles Beyond SOLID](../design_principles/PrinciplesBeyondSolid.md) moves each decision into the object that holds the data, the direct cure for an anemic model.
+
 ---
 
 ## Interview Questions with Answers

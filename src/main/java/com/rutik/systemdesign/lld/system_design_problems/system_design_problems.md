@@ -37,6 +37,14 @@ Method. The concurrency column describes the reference implementation, not the p
 | Pub-Sub / Message Queue | [PubSub.md](PubSub.md) | Strategy (partitioner), Mediator (consumer group assignment), pull-based Observer | No | Yes, a monitor per partition log and per consumer group |
 | In-Memory File System | [FileSystem.md](FileSystem.md) | Composite (sealed `FsNode`), Iterator (stack-based `find`) | No | Yes, one `ReentrantReadWriteLock` over the tree |
 | Meeting Scheduler | [MeetingScheduler.md](MeetingScheduler.md) | Strategy (room selection), Observer (invites and cancellations) | No | `synchronized` book and cancel across room and attendee calendars |
+| Payment Processor | [PaymentProcessor.md](PaymentProcessor.md) | State (enum transition table), Strategy (payment method), Command (refunds), Observer, Adapter (gateway) | Yes (payment lifecycle) | Yes, per-account `ReentrantLock` taken in account-id order; `ConcurrentHashMap` idempotency claims |
+| Cache Manager | [CacheManager.md](CacheManager.md) | Strategy (eviction policy), enum Factory (policy per segment), Builder (config), Observer (removal listener), Registry/Facade | No | Yes, lock striping (one `ReentrantLock` per segment); listeners run after the lock is released |
+| URL Shortener | [UrlShortener.md](UrlShortener.md) | Strategy (code generator), Decorator (caching repository), Chain of Responsibility (validation rules), Observer (redirects) | No | Yes, atomic `saveIfAbsent` plus `AtomicLong` id-block allocation |
+| Car Rental | [CarRental.md](CarRental.md) | Decorator (price components), Builder (pricing pipeline order), State (reservation lifecycle) | Yes (reservation) | Yes, `synchronized` check-and-insert on each vehicle's calendar |
+| Online Auction | [OnlineAuction.md](OnlineAuction.md) | Strategy (increments, end policy, clock), State (auction lifecycle), Observer, Facade | Yes (auction) | Yes, one `ReentrantLock` per auction around the whole bid path |
+| Connect Four | [ConnectFour.md](ConnectFour.md) | Strategy (move source), enum game state, lightweight Command (undo stack), Observer | Yes (game state) | `synchronized` moves with a move-number token |
+| Feed Generator | [FeedGenerator.md](FeedGenerator.md) | Strategy (ranking), Decorator (affinity boost), filter chain, Facade | No | Yes, per-user inbox monitors and concurrent maps; readers copy before ranking |
+| Online Stock Brokerage | [OnlineStockBrokerage.md](OnlineStockBrokerage.md) | State (order status guards), Adapter (venue), Observer (execution reports), Facade | Yes (order) | Yes, one `ReentrantLock` per account; dedup on execution id |
 
 ---
 
@@ -380,13 +388,13 @@ stateDiagram-v2
 
 | Pattern | See Also |
 |---------|---------|
-| State (Vending Machine, ATM, Elevator, Ride Sharing, Tic-Tac-Toe) | `../behavioral/state/` |
+| State (Vending Machine, ATM, Elevator, Ride Sharing, Tic-Tac-Toe, Payment Processor, Car Rental, Online Auction, Online Stock Brokerage) | `../behavioral/state/` |
 | Command (Chess undo) | `../behavioral/command/` |
 | Observer (Library overdue, Booking confirmation, Ride Sharing status, LRU Cache eviction) | `../behavioral/observer/` |
 | Factory (Spot types, ticket types, vehicle types, split strategies) | `../creational/factory_method/` |
-| Concurrency (Parking Lot, Elevator, Booking, Rate Limiter, LRU Cache) | `../concurrency_patterns/` |
+| Concurrency (Parking Lot, Elevator, Booking, Rate Limiter, LRU Cache, Cache Manager, Payment Processor, Online Auction) | `../concurrency_patterns/` |
 | Strategy (pricing, search, payment, fare calculation, rate-limiting algorithms, expense splits) | `../behavioral/strategy/` |
-| Decorator (LRU Cache thread-safe wrapper) | `../structural/decorator/` |
+| Decorator (LRU Cache thread-safe wrapper, Car Rental pricing, URL Shortener caching repository) | `../structural/decorator/` |
 
 ---
 

@@ -266,6 +266,7 @@ Look for:
 - **Information Expert (GRASP):** Assign responsibility to the class that has the information needed to fulfill it — the same insight from the GRASP pattern language.
 - **Encapsulation:** LoD is a practical enforcement of encapsulation at the object graph level.
 - **Demeter Principle violations and testing:** if setting up a test requires deep nested mock chains, the Law of Demeter is being violated in the production code.
+- **Principles Beyond SOLID:** Tell-Don't-Ask and Command-Query Separation in full, with the Anemic Domain Model they prevent: [PrinciplesBeyondSolid.md](PrinciplesBeyondSolid.md).
 
 ---
 

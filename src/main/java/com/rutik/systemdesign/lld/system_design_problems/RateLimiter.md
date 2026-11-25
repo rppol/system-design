@@ -434,6 +434,8 @@ Note: exact decimal values for Token Bucket vary slightly between runs because r
 
 5. **Leaky Bucket as a queueing variant** — Token Bucket rejects immediately when empty; Leaky Bucket instead enqueues the request and processes it at a fixed output rate (like a FIFO queue with a constant drain rate), smoothing bursts into a steady stream rather than dropping them. Useful when the downstream system can tolerate queued work but not a burst (e.g., writing to a slow database) — implement with a bounded `BlockingQueue` plus a single consumer thread draining at the configured rate.
 
+**Related LLD problem:** [URL Shortener](UrlShortener.md) puts a per-user rate limit in front of `shorten`, either as a decorator around the service or as a filter in front of it.
+
 ---
 
 ## Interview Questions with Answers

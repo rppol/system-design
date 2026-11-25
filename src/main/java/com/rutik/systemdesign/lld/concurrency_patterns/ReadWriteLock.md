@@ -249,6 +249,8 @@ Each thread holds a read lock the other needs before it can upgrade — a circul
 - **Leader-follower replication** — The leader holds the "write lock" at the cluster level; followers are read-only replicas. Raft and Paxos elect exactly one leader — distributed exclusivity for writes with concurrent reads from followers.
 - **Distributed caches** — Redis Cluster and Memcached serve many concurrent reads; cache invalidation (write) requires coordination to maintain consistency. The read-write asymmetry justifies a read-optimized topology (many cache nodes) with centralized write coordination.
 
+**Where it does not help:** [Cache Manager](../system_design_problems/CacheManager.md) uses lock striping instead, because an LRU `get` reorders the recency list and is therefore a write. [Concurrency Problems Toolkit](ConcurrencyProblemsToolkit.md) applies this pattern to the read-heavy caches that interviews ask you to build.
+
 ---
 
 ## Interview Questions
