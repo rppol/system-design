@@ -37,6 +37,8 @@ flowchart LR
 
 This builds on [`../secrets_management/secrets_management.md`](../secrets_management/secrets_management.md) (the concept module) and [`../kubernetes_security/kubernetes_security.md`](../kubernetes_security/kubernetes_security.md) (workload identity).
 
+See also: [certificate_and_pki_lifecycle](../certificate_and_pki_lifecycle/certificate_and_pki_lifecycle.md) for cert-manager, ACME, the private CA hierarchy and certificate expiry as an incident class.
+
 ---
 
 ## 1. Requirements Clarification

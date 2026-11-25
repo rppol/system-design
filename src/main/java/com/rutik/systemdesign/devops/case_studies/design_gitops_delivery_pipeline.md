@@ -82,6 +82,8 @@ flowchart TD
 
 Why this system exists: at 50 clusters × 500 apps, no human can `kubectl apply` reliably, no human can detect drift across 25,000 live objects, and no human can babysit every one of the ~300 daily deployments. The pipeline must be **declarative** (auditable in Git), **convergent** (self-healing), and **safe-by-default** (metric-gated promotion with automatic rollback). This file designs exactly that, building on [`../gitops_argocd_flux/gitops_argocd_flux.md`](../gitops_argocd_flux/gitops_argocd_flux.md) and [`../deployment_strategies/deployment_strategies.md`](../deployment_strategies/deployment_strategies.md).
 
+See also: [Design a Kubernetes Fleet Upgrade Program](design_kubernetes_fleet_upgrade_program.md) for running upgrade waves across 200 clusters on top of this delivery pipeline.
+
 ---
 
 ## 1. Requirements Clarification

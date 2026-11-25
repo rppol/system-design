@@ -76,6 +76,8 @@ A substrate-level cluster build that uses Kueue and DRA is
 [Design a GPU Training and Inference Cluster](../../devops/case_studies/design_gpu_training_and_inference_cluster.md).
 Generic tenant isolation patterns are in
 [Multi-Tenancy and Isolation](../../backend/multi_tenancy_and_isolation/multi_tenancy_and_isolation.md).
+Namespace-level ResourceQuota, PriorityClass and cloud service quotas are in
+[Capacity and Quota Management](../../devops/capacity_and_quota_management/capacity_and_quota_management.md).
 Running the jobs that this page admits (checkpoints, NCCL failures, restarts) is
 [Training Infrastructure Operations](../training_infrastructure_operations/training_infrastructure_operations.md).
 Scaling inference replicas against load is

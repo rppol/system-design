@@ -21,6 +21,8 @@ The platform answer is a **fleet**: a small number of well-run, homogeneous clus
 
 This case study assumes familiarity with the control-plane internals in [../kubernetes_architecture/kubernetes_architecture.md](../kubernetes_architecture/kubernetes_architecture.md), the RBAC/PSA model in [../kubernetes_security/kubernetes_security.md](../kubernetes_security/kubernetes_security.md), and the GitOps reconciliation loop in [../gitops_argocd_flux/gitops_argocd_flux.md](../gitops_argocd_flux/gitops_argocd_flux.md).
 
+See also: [multi_cluster_and_fleet_management](../multi_cluster_and_fleet_management/multi_cluster_and_fleet_management.md) for the fleet platform's placement and Cluster API mechanics, and [Design a Kubernetes Fleet Upgrade Program](design_kubernetes_fleet_upgrade_program.md) for upgrading 200 clusters across clouds.
+
 ---
 
 ## 1. Requirements Clarification

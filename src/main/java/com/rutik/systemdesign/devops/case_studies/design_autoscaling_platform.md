@@ -58,6 +58,8 @@ The inner loop decides *how many pods*. The outer loop decides *how much hardwar
 
 **Why this system exists.** We run 4000 microservices on Kubernetes. Traffic is bursty — a marketing push or a regional morning peak can drive 10x in 60 seconds. If every team statically provisions for peak, the fleet sits at ~30% average utilization and we pay for 3x the hardware we use. A central autoscaling platform lets teams declare *intent* (latency target, queue depth target, min/max replicas) and lets the platform translate that into the cheapest correct capacity — spot where safe, on-demand where not, scaled to zero when idle.
 
+See also: [capacity_and_quota_management](../capacity_and_quota_management/capacity_and_quota_management.md) for ResourceQuota, PriorityClass, headroom math and cloud service quotas.
+
 ---
 
 ## 1. Requirements Clarification

@@ -28,6 +28,8 @@ Three facts shape every answer:
 
 Per-team GPU quotas, queues, and gang scheduling are covered in [GPU Cluster Scheduling and Quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
 
+See also: [capacity_and_quota_management](../capacity_and_quota_management/capacity_and_quota_management.md) for the generic quota, priority and headroom mechanics this cluster builds on.
+
 ---
 
 ## 1. Requirements Clarification

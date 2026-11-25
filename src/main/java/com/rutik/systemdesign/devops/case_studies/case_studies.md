@@ -1,10 +1,10 @@
 # DevOps Case Studies — Learning Path
 
-15 principal-grade case studies + 8 cross-cutting infrastructure deep-dives.
+16 principal-grade case studies + 8 cross-cutting infrastructure deep-dives.
 
 Each case study follows the 11-section principal template (reference: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md)): requirements clarification, scale estimation, Mermaid architecture diagrams, executable-shaped YAML/HCL/Bash/Go, real-world implementations at named companies, an operational playbook (eval/observability/runbooks), quantified war stories, capacity planning, and 10+ design-rationale interview Q&As. Each cross-cutting file runs roughly 460–610 lines covering one infrastructure primitive that recurs across many platforms.
 
-> **Build status**: complete. All 15 case studies and 8 cross-cutting files are written. See the [Build Status & Implementation Tracker](../README.md#8-build-status--implementation-tracker) in the master index for the per-file record.
+> **Build status**: complete. All 16 case studies and 8 cross-cutting files are written. See the [Build Status & Implementation Tracker](../README.md#8-build-status--implementation-tracker) in the master index for the per-file record.
 
 ---
 
@@ -33,6 +33,7 @@ Case studies are grouped by the primary engineering concern they teach, not by p
 | File | Primary Engineering Concern | What It Teaches |
 |------|-----------------------------|-----------------|
 | [design_kubernetes_platform.md](./design_kubernetes_platform.md) | Multi-tenant cluster operation | Control-plane scaling, namespace/tenant isolation, admission policy, Karpenter node autoscaling, operator-based self-service |
+| [design_kubernetes_fleet_upgrade_program.md](./design_kubernetes_fleet_upgrade_program.md) | Upgrading a fleet on a schedule | A quarterly upgrade program for 200 clusters across EKS, GKE, AKS and Cluster API: gates, waves, version skew, the add-on compatibility matrix, node-pool strategy, rollback limits, and upgrade SLOs |
 | [design_autoscaling_platform.md](./design_autoscaling_platform.md) | Cost-aware elasticity | HPA/VPA/KEDA event-driven scaling, Karpenter consolidation, scale-to-zero, the requests/limits/QoS tradeoff at scale |
 | [design_internal_developer_platform.md](./design_internal_developer_platform.md) | Developer self-service | Backstage golden paths, Crossplane infra abstraction, paved-road vs flexibility tradeoff |
 | [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) | Tenant isolation as a ladder | Namespace / node-pool / vCluster / cluster-per-tenant as four rungs with nameable guarantees and nameable costs; NetworkPolicy, Pod Security Admission, gVisor and Kata as the rung-by-rung enforcement; routing each tenant to the cheapest rung its threat model allows |
@@ -79,7 +80,7 @@ These eight files live in `cross_cutting/` and are referenced by multiple case s
 | Phase A | [kubernetes_production_hardening.md](./cross_cutting/kubernetes_production_hardening.md) | Resource limits/QoS, PodDisruptionBudgets, probe design, security context, multi-tenant isolation |
 | Phase E | [gpu_node_lifecycle.md](./cross_cutting/gpu_node_lifecycle.md) | GPU node bring-up (driver/toolkit/device-plugin), readiness gating via startup taints, DCGM health fencing, Spot interruption + checkpoint, graceful drain, decommission |
 | Phase E | [dra_and_device_plugins.md](./cross_cutting/dra_and_device_plugins.md) | How a GPU/FPGA/SmartNIC becomes schedulable at all: the device-plugin gRPC contract, the wall it hits (an opaque integer count), and Dynamic Resource Allocation's typed device catalogue — the layer directly beneath `gpu_node_lifecycle.md` |
-| Phase A | [multi_cluster_networking.md](./cross_cutting/multi_cluster_networking.md) | Cluster mesh, cross-cluster service discovery, global load balancing, failover routing |
+| Phase A | [multi_cluster_networking.md](./cross_cutting/multi_cluster_networking.md) | Cluster mesh, cross-cluster service discovery, global load balancing, failover routing; also referenced by `design_kubernetes_fleet_upgrade_program` |
 | Phase B | [terraform_state_at_scale.md](./cross_cutting/terraform_state_at_scale.md) | Remote state, locking, workspace strategy, state splitting, blast-radius containment |
 | Phase B | [supply_chain_security_pipeline.md](./cross_cutting/supply_chain_security_pipeline.md) | Build → SBOM → scan → sign → attest → admission gate end-to-end; SLSA Build-track provenance |
 | Phase C | [prometheus_cardinality_and_scale.md](./cross_cutting/prometheus_cardinality_and_scale.md) | Label hygiene, recording rules, series-count budgeting, long-term storage sizing |
@@ -114,6 +115,7 @@ flowchart LR
     MIGRATION(design_zero_downtime_infra_migration)
     MLPLATFORM(design_ml_platform_infrastructure)
     TENANT(design_multi_tenant_platform)
+    FLEET(design_kubernetes_fleet_upgrade_program)
     GPUCLUSTER(design_gpu_training_and_inference_cluster)
 
     K8S -->|"cost-aware<br/>elasticity"| AUTO
@@ -126,11 +128,13 @@ flowchart LR
     DR -->|"traffic-shifting<br/>+ cutover"| MIGRATION
     AUTO -->|"GPU scheduling +<br/>Spot autoscaling"| MLPLATFORM
     K8S -->|"isolation ladder<br/>expanded"| TENANT
+    K8S -->|"fleet upgrade<br/>program"| FLEET
+    GITOPS -->|"waves and<br/>promotion rails"| FLEET
     MLPLATFORM -->|"deeper, more current<br/>GPU treatment"| GPUCLUSTER
 
     class K8S,CICD,OBS base
     class DR frozen
-    class AUTO,IDP,GITOPS,REGISTRY,LOGS,INCIDENT,MIGRATION,TENANT train
+    class AUTO,IDP,GITOPS,REGISTRY,LOGS,INCIDENT,MIGRATION,TENANT,FLEET train
     class MLPLATFORM,GPUCLUSTER mathOp
 ```
 
@@ -158,3 +162,5 @@ Gold marks the foundation platforms (Kubernetes, CI/CD, observability) that ever
 | "Design a GPU training and inference cluster" | [design_gpu_training_and_inference_cluster.md](./design_gpu_training_and_inference_cluster.md) |
 | "How do you isolate tenants on a shared cluster?" | [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) |
 | "When would you give a tenant their own cluster?" | [design_multi_tenant_platform.md](./design_multi_tenant_platform.md) |
+| "Design the Kubernetes upgrade program for a 200-cluster, multi-cloud fleet." | [design_kubernetes_fleet_upgrade_program.md](./design_kubernetes_fleet_upgrade_program.md) |
+| "How do you upgrade many clusters safely (waves, skew, rollback)?" | [design_kubernetes_fleet_upgrade_program.md](./design_kubernetes_fleet_upgrade_program.md) + [cross_cutting/multi_cluster_networking.md](./cross_cutting/multi_cluster_networking.md) |

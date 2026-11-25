@@ -29,6 +29,8 @@ Isolation strength  ------------------------------------------------------>
 
 This case study assumes the control-plane and admission mechanics in [../kubernetes_architecture/kubernetes_architecture.md](../kubernetes_architecture/kubernetes_architecture.md) and [../kubernetes_security/kubernetes_security.md](../kubernetes_security/kubernetes_security.md), and builds directly on the fleet-and-onboarding design in [design_kubernetes_platform.md](design_kubernetes_platform.md) — that case study answers "how do 50 clusters serve 200 tenants"; this one answers "which of the four isolation rungs does any one tenant belong on, and why."
 
+See also: [capacity_and_quota_management](../capacity_and_quota_management/capacity_and_quota_management.md) for the per-tenant ResourceQuota, LimitRange and PriorityClass mechanics behind the quota rungs.
+
 ---
 
 ## 1. Requirements Clarification

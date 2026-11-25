@@ -642,7 +642,7 @@ network policy. It can enrich its events with the same Kubernetes identity metad
 has its own CRDs (`TracingPolicy`), its own agent, and its own release cadence; a
 `CiliumNetworkPolicy` has no effect on what Tetragon enforces and vice versa. Scope this
 correctly in any design discussion: "we run Cilium" says nothing about whether Tetragon is
-also deployed.
+also deployed. See also [runtime_security_and_ebpf_observability](../../devops/runtime_security_and_ebpf_observability/runtime_security_and_ebpf_observability.md) for Tetragon, Falco, seccomp and AppArmor as one runtime-security layer.
 
 ### 6.12 Performance: XDP, Maglev and DSR
 

@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
-> **Version anchor (2026-11-25).** Kubernetes **1.37** is the current minor (1.37.0 "Garhwal" on 2026-08-26; latest patch 1.37.2, released 2026-10-13 per kubernetes.io/releases; 1.38 is planned for 2026-12-16). In 1.37, `SELinuxMount`/`SELinuxChangePolicy` are stable, the PVC `Unused` condition (`PersistentVolumeClaimUnusedSinceTime`) is beta and on by default, and `StorageCapacityScoring` and `VolumeLimitScaling` are beta. Older features this page relies on: non-graceful node shutdown (`node.kubernetes.io/out-of-service` taint) GA in 1.28, `fsGroupChangePolicy` GA in 1.23, StatefulSet `persistentVolumeClaimRetentionPolicy` GA in 1.32, and `VolumeAttributesClass` (`storage.k8s.io/v1`) GA in 1.34 with its gate locked on in 1.36. Tools named on this page: **external-snapshotter v8.7.1** (2026-11-23, the VolumeSnapshot CRDs and controller), **Velero v1.19.0** (2026-11-23), **Rook v1.21.3** (2026-11-24), **Longhorn v1.13.0** (2026-09-29) and **CloudNativePG v1.30.2** (2026-11-17).
+> **Version anchor (2026-11-25).** Kubernetes **1.37** is the current minor (1.37.0 "Garhwal" on 2026-08-26; latest patch 1.37.2, released 2026-10-13 per kubernetes.io/releases; 1.38 is planned for 2026-12-16). In 1.37, `SELinuxMount` is stable (`SELinuxChangePolicy` has been stable since 1.36), the PVC `Unused` condition (`PersistentVolumeClaimUnusedSinceTime`) is beta and on by default, and `StorageCapacityScoring` and `VolumeLimitScaling` are beta. Older features this page relies on: non-graceful node shutdown (`node.kubernetes.io/out-of-service` taint) GA in 1.28, `fsGroupChangePolicy` GA in 1.23, StatefulSet `persistentVolumeClaimRetentionPolicy` GA in 1.32, and `VolumeAttributesClass` (`storage.k8s.io/v1`) GA in 1.34 with its gate locked on in 1.36. Tools named on this page: **external-snapshotter v8.7.1** (2026-11-23, the VolumeSnapshot CRDs and controller), **Velero v1.19.0** (2026-11-23), **Rook v1.21.3** (2026-11-24), **Longhorn v1.13.0** (2026-09-29) and **CloudNativePG v1.30.2** (2026-11-17).
 
 Containers are ephemeral; their writable layer vanishes on restart. Running stateful workloads (databases, queues, caches) on Kubernetes requires durable storage that survives Pod rescheduling. The abstractions — Volumes, PersistentVolumes (PV), PersistentVolumeClaims (PVC), StorageClasses, and the CSI driver model — decouple "I need 100 GiB of fast SSD" from the specifics of EBS, GCE PD, or Ceph.
 
@@ -150,9 +150,66 @@ flowchart LR
 
 Because EBS volumes are zone-locked, `db-0` can only reschedule to another node still inside `us-east-1a` — the PVC↔PV binding is what lets `vol-1` follow it there with no data loss.
 
+**CSI driver deployment: controller plugin and node plugin**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    api(["API server<br/>PVC, VolumeAttachment,<br/>VolumeSnapshotContent"])
+
+    subgraph ctrl["Controller plugin (Deployment, leader election)"]
+        direction LR
+        sc1("external-provisioner<br/>external-attacher<br/>external-resizer<br/>external-snapshotter") -->|"UNIX socket<br/>on emptyDir"| drvC("CSI driver<br/>Controller service")
+    end
+
+    subgraph node["Node plugin (DaemonSet, every node)"]
+        direction LR
+        reg("node-driver-registrar") --> drvN("CSI driver<br/>Node service")
+    end
+
+    cloud(["Storage backend<br/>EBS / PD / Ceph API"])
+    kubelet(["kubelet"])
+
+    api -->|"watch"| sc1
+    drvC -->|"CreateVolume,<br/>ControllerPublish,<br/>CreateSnapshot"| cloud
+    kubelet -->|"NodeStage / NodePublish<br/>via hostPath socket"| drvN
+    reg -.->|"registers driver"| kubelet
+
+    class api,kubelet io
+    class sc1,reg req
+    class drvC,drvN mathOp
+    class cloud base
+```
+
+*The controller plugin talks to the Kubernetes API through sidecars and to the storage backend through the driver; the node plugin is driven by the kubelet, not by watching the API server. The kubelet calls the node plugin directly, which is why a dead node plugin strands Pods on one node while a dead controller plugin stalls provisioning cluster-wide.*
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
+
+### CSI driver anatomy: controller plugin, node plugin and sidecars
+
+A CSI driver is deployed as two components. The **controller plugin** (a Deployment or StatefulSet, anywhere in the cluster) runs the driver's CSI Controller service next to the controller sidecars; it needs no host access because it works through the Kubernetes API and the storage backend's API (the EBS or GCE control plane). Several replicas can run for HA, with leader election so only one is active. The **node plugin** (a DaemonSet, one Pod per node) runs the CSI Node service and the registrar sidecar, and needs host access to create block devices and mounts. The sidecars are standard images from the Kubernetes Storage community that hold all the Kubernetes-specific watching code, so a driver author implements only the CSI gRPC services. Sidecars talk to the driver over a UNIX domain socket on a shared `emptyDir`; the kubelet talks to the node plugin over a socket on a `hostPath`.
+
+| Sidecar | Runs in | Watches | Calls on the driver |
+|---------|---------|---------|---------------------|
+| `external-provisioner` | Controller | PVCs whose StorageClass `provisioner` matches the driver name | `CreateVolume`; on PVC delete with `Delete` reclaim, `DeleteVolume`. It then creates or removes the PV, and passes a snapshot or PVC `dataSource` into `CreateVolume` |
+| `external-attacher` | Controller | `VolumeAttachment` objects | `ControllerPublishVolume` / `ControllerUnpublishVolume`; only for drivers that advertise `PUBLISH_UNPUBLISH_VOLUME` |
+| `external-resizer` | Controller | PVC edits that raise the size (and VAC changes, see above) | `ControllerExpandVolume`; for drivers that advertise the `VolumeExpansion` capability |
+| `external-snapshotter` (`csi-snapshotter`) | Controller | `VolumeSnapshotContent` objects | `CreateSnapshot`, `DeleteSnapshot`, `ListSnapshots`; with `--enable-volume-group-snapshots`, the group variants |
+| `node-driver-registrar` | Node (each node) | none; it registers the driver with the kubelet through the kubelet plugin-registration mechanism, using `NodeGetInfo` | `NodeGetInfo` |
+| `livenessprobe` | Controller and node Pods | the driver's health | exposes a Pod liveness endpoint so Kubernetes restarts a wedged driver |
+
+The kubelet itself, not a sidecar, issues `NodeStageVolume` and `NodePublishVolume` to the node plugin. That is why the node plugin must mount its `/var/lib/kubelet/pods` hostPath with `mountPropagation: Bidirectional`: the mounts it creates have to be visible to the kubelet on the host. Drivers can skip the attach step by setting `attachRequired: false` on the `CSIDriver` object (attach is on by default), and the older `cluster-driver-registrar` sidecar is deprecated in favour of creating the `CSIDriver` object directly.
+
+The first reflex when a Pod is stuck in `ContainerCreating` on one node is to check that this node's plugin Pod is running and that the driver appears in that node's `CSINode` object; when a PVC stays `Pending` everywhere, check the controller Pod and the `external-provisioner` logs.
 
 ### StorageClass + PVC (dynamic provisioning)
 
@@ -196,6 +253,29 @@ spec:
   source: {persistentVolumeClaimName: data-db-0}
 # Restore: create a new PVC with dataSource referencing this snapshot.
 ```
+
+```yaml
+# Restore into a new PVC (same namespace as the VolumeSnapshot)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: data-db-restore}
+spec:
+  storageClassName: gp3
+  dataSource: {name: db-snap-2026-06-05, kind: VolumeSnapshot, apiGroup: snapshot.storage.k8s.io}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 100Gi}}
+```
+
+Snapshots have more moving parts than the other storage objects, and the usual failure is a missing piece, not a bad YAML:
+
+- `VolumeSnapshot` (namespaced, the request), `VolumeSnapshotContent` (cluster-scoped, the real snapshot, like a PV) and `VolumeSnapshotClass` (driver and parameters, like a StorageClass) are **CRDs, not part of the core API**, and they work only with CSI drivers that implement snapshots.
+- Two controllers split the work. The **snapshot controller** runs in the control plane, watches `VolumeSnapshot` and `VolumeSnapshotContent`, and creates and binds the content objects (the binding is one to one). The **`csi-snapshotter` sidecar** runs with the driver and turns `VolumeSnapshotContent` into `CreateSnapshot` and `DeleteSnapshot` calls. A validating webhook adds stricter checks.
+- **Installing the CRDs, the snapshot controller and the webhook is the Kubernetes distribution's job, not the CSI driver's.** A cluster built from scratch has the driver but no snapshot CRDs, and `kubectl apply` of a `VolumeSnapshot` then fails. Managed offerings differ, so check before you rely on it.
+- A snapshot is **dynamic** (a `VolumeSnapshot` naming a PVC is turned into a `VolumeSnapshotContent` by the controller) or **pre-provisioned** (an admin creates the `VolumeSnapshotContent` from an existing `snapshotHandle` on the storage system and a `VolumeSnapshot` binds to it).
+- `deletionPolicy` on the class or content is `Delete` or `Retain`. Deleting the `VolumeSnapshot` under `Delete` also deletes the storage snapshot; under `Retain` both the storage snapshot and the content object stay. Use `Retain` for backup snapshots you cannot recreate.
+- A PVC being snapshotted is protected: deleting it is postponed until the snapshot is `readyToUse` or aborted.
+- A snapshot copies the volume at a point in time and knows nothing about the application on it. For a database, flush or quiesce at the application level first if you need an application-consistent copy.
+- Volume **group** snapshots (several PVCs in one point in time) are a separate API, enabled with `--enable-volume-group-snapshots` on the sidecar.
 
 ### emptyDir vs persistent (the data-loss trap)
 
@@ -297,6 +377,7 @@ Two StatefulSet settings decide what happens to volumes outside the failure path
 
 - **`persistentVolumeClaimRetentionPolicy`** (GA in 1.32) has two fields, `whenDeleted` and `whenScaled`, each `Retain` (default) or `Delete`. With `Delete` the controller puts owner references on the PVCs (the StatefulSet for `whenDeleted`, the condemned Pod for `whenScaled`) and the garbage collector deletes them after the Pod is gone, so the volume unmounts first. A Pod replaced after a node failure keeps its PVC under either policy; the policy applies only to delete and scale-down.
 - **`fsGroupChangePolicy`** (GA in 1.23) in the Pod `securityContext`. With `fsGroup` set, the default `Always` makes the kubelet walk the whole volume and `chown`/`chmod` every file on each mount. `OnRootMismatch` checks only the volume root and skips the walk when it already matches. The setting has no effect on `secret`, `configMap` and `emptyDir`, or when the CSI driver applies `fsGroup` itself through the `VOLUME_MOUNT_GROUP` capability.
+- **`CSIDriver.spec.fsGroupPolicy`** (GA in 1.23) decides whether `fsGroup` is applied to a CSI volume at all. `ReadWriteOnceWithFSType` is the default: the volume is examined and changed only when the PV defines an `fsType` and its access modes include `ReadWriteOnce`. `File` applies `fsGroup` regardless of `fsType` or access mode, and `None` mounts the volume untouched. So a RWX share (NFS-style) under a default-policy driver silently ignores `fsGroup`, and the Pod runs as a non-root user that cannot write; the fix belongs to the driver (`File`), to the share's own ownership, or to `runAsUser` matching it.
 
 ```yaml
 spec:
@@ -327,7 +408,7 @@ The timestamp is when the controller observed no Pods, not when the volume unmou
 
 ### SELinux volume labels: mount option instead of recursive relabel
 
-On an SELinux node the container runtime used to relabel every file on a volume to the Pod's SELinux context before start. That walk grows with the file count and ran on every Pod start, so a volume with millions of files delayed every start. In 1.37 `SELinuxMount` and `SELinuxChangePolicy` are stable: when the CSI driver opts in with `spec.seLinuxMount: true` on its `CSIDriver` object, the kubelet mounts the volume with `-o context=<label>` and skips the walk. A mount carries one context, so two Pods with different SELinux labels that share a volume on one node, which worked under relabeling, can now fail to start. Set `spec.securityContext.seLinuxChangePolicy: Recursive` on those Pods to keep the old behavior. Clusters without SELinux see no change.
+On an SELinux node the container runtime used to relabel every file on a volume to the Pod's SELinux context before start. That walk grows with the file count and ran on every Pod start, so a volume with millions of files delayed every start. In 1.37 `SELinuxMount` is stable (and `SELinuxChangePolicy` has been since 1.36): when the CSI driver opts in with `spec.seLinuxMount: true` on its `CSIDriver` object, the kubelet mounts the volume with `-o context=<label>` and skips the walk. A driver may set it only when every volume is independent from the kernel's point of view, such as one block device per volume or one NFS export per volume; a driver that can serve two volumes as subdirectories of one NFS export must leave it `false`. A mount carries one context, so two Pods with different SELinux labels that share a volume on one node, which worked under relabeling, can now fail to start. Set `spec.securityContext.seLinuxChangePolicy: Recursive` on those Pods to keep the old behavior. Clusters without SELinux see no change.
 
 ### Capacity and attach limits in scheduling
 
@@ -357,6 +438,8 @@ On an SELinux node the container runtime used to relabel every file on a volume 
 | Binding mode | WaitForFirstConsumer (topology-aware) | Immediate | Multi-AZ correctness vs speed |
 | Scratch | emptyDir (fast, ephemeral) | PVC (durable) | Loss-tolerant vs durable |
 | Snapshots | CSI snapshots (fast, cloud-native) | App-level dumps (portable) | Speed vs portability/consistency |
+| Snapshot `deletionPolicy` | `Delete` (storage snapshot goes with the object) | `Retain` (survives deleting the VolumeSnapshot) | Tidy cleanup vs protecting backups from an accidental delete |
+| `fsGroup` on large volumes | `fsGroupChangePolicy: Always` (default, full walk) | `OnRootMismatch` (root check only) | Always-correct ownership vs restart time on volumes with millions of files |
 
 ---
 
@@ -434,7 +517,9 @@ The two green outcomes — `WaitForFirstConsumer` and `Retain` — are exactly t
 |------|---------|
 | EBS / GCE PD / Azure Disk CSI | Block storage (RWO) |
 | EFS / Filestore / Azure Files CSI | Shared filesystems (RWX) |
-| CSI snapshot controller | Volume snapshots/restore |
+| CSI snapshot controller | Volume snapshots/restore (control-plane controller plus the snapshot CRDs and webhook, installed by the distribution) |
+| CSI sidecars (`external-provisioner`, `external-attacher`, `external-resizer`, `external-snapshotter`, `node-driver-registrar`, `livenessprobe`) | Standard containers shipped with a CSI driver; they watch the API and call the driver's gRPC services |
+| `kubectl get csidrivers,csinodes` | Which drivers are installed and which are registered on each node |
 | Velero | PVC + object backup/restore, DR |
 | OpenEBS / Rook-Ceph / Longhorn | Software-defined storage in-cluster |
 | `kubectl get pv,pvc,sc` | Inspect storage bindings |
@@ -530,6 +615,26 @@ Deleting a Deployment, a StatefulSet, or a Helm release does not delete its PVCs
 **Short:** Topology spread only guarantees where Pods land, not that data is replicated between them, so real stateful HA needs database-level replication too.
 Each replica's PVC is still a single zonal RWO volume, and topologySpreadConstraints only guarantees where the *Pods* land, not that the *data* is replicated between them. Losing the AZ holding the primary's volume still loses that replica's data if nothing has copied it elsewhere, so real HA requires the application or database layer to replicate data across the spread replicas — Postgres streaming replication, or an operator like CloudNativePG — so a failover promotes a replica that already has the data. Combine topology spread for placement with DB-level replication for actual failover; one without the other leaves a gap.
 
+**Q: What runs in a CSI driver deployment, and which sidecar is responsible for provisioning, attaching, resizing and snapshotting?**
+**Short:** A controller plugin (Deployment) with external-provisioner, -attacher, -resizer and -snapshotter, plus a per-node DaemonSet with the driver and node-driver-registrar; the kubelet calls the node service directly.
+A driver ships as two parts. The controller plugin runs the CSI Controller service next to the controller sidecars, which hold the Kubernetes-specific logic: `external-provisioner` watches PVCs and calls `CreateVolume`/`DeleteVolume`, then manages the PV; `external-attacher` watches `VolumeAttachment` objects and calls `ControllerPublishVolume`/`ControllerUnpublishVolume`; `external-resizer` calls `ControllerExpandVolume` when a PVC's size is raised; `external-snapshotter` watches `VolumeSnapshotContent` and calls `CreateSnapshot`/`DeleteSnapshot`. The node plugin is a DaemonSet running the CSI Node service plus `node-driver-registrar`, which registers the driver with the kubelet; the kubelet itself then calls `NodeStageVolume` and `NodePublishVolume` over a hostPath socket, so the plugin needs privileged host access and `Bidirectional` mount propagation. `livenessprobe` runs in both so a wedged driver is restarted. Sidecars are optional per capability: a driver without attach support skips `external-attacher`.
+
+**Q: A Pod is stuck in `ContainerCreating` on one node while the same PVC mounts fine elsewhere. Where do you look in the CSI stack?**
+**Short:** At that node's plugin: the driver DaemonSet Pod, its node-driver-registrar registration with the kubelet, and the driver's entry in that node's CSINode object; the controller is not the problem.
+Mount is the node-side half of the work, performed by the kubelet calling the driver's Node service. If the volume attaches (a `VolumeAttachment` is `attached`) but the mount hangs only on one node, check that the node-plugin Pod is running there, that its `node-driver-registrar` registered the driver (the driver should appear in that node's `CSINode` object), that the plugin's hostPath mounts and `Bidirectional` mount propagation are intact, and the plugin's logs for the `NodeStageVolume` or `NodePublishVolume` error. A restarted kubelet or a crashed plugin Pod on that node is the usual cause, and `livenessprobe` should have restarted a wedged driver. If every node fails, or the PVC is `Pending`, look at the controller Pod and the `external-provisioner` or `external-attacher` logs instead. Splitting the symptom by "one node versus all nodes" tells you which plugin to open.
+
+**Q: You create a `VolumeSnapshot` and nothing happens: no `VolumeSnapshotContent` and `readyToUse` never turns true. What can be missing?**
+**Short:** The snapshot CRDs, the control-plane snapshot controller, a `VolumeSnapshotClass` for the driver, or the driver's `csi-snapshotter` sidecar; the distribution installs the first two, not the driver.
+`VolumeSnapshot`, `VolumeSnapshotContent` and `VolumeSnapshotClass` are CRDs outside the core API, and the CRDs, the snapshot controller and the validating webhook are installed by the Kubernetes distribution, not by the CSI driver, so a hand-built cluster can have a perfectly good driver and no snapshot support. Dynamic snapshots then need a `VolumeSnapshotClass` whose `driver` matches the PVC's CSI driver (or a default class), a driver that implements snapshots, and its `csi-snapshotter` sidecar to turn the `VolumeSnapshotContent` into a `CreateSnapshot` call. The snapshot controller creates and binds the content object, the sidecar calls the storage backend, and either missing half leaves the snapshot pending. Check `kubectl get crd | grep snapshot`, the controller Pod, then the class and sidecar logs.
+
+**Q: What happens to the underlying storage snapshot when you delete a `VolumeSnapshot`, and what protects the source PVC?**
+**Short:** The `deletionPolicy` decides: `Delete` removes the storage snapshot with the `VolumeSnapshotContent`, `Retain` keeps both; a PVC in use as a snapshot source cannot be deleted until the snapshot is ready.
+Deleting a `VolumeSnapshot` triggers the `deletionPolicy` set on the `VolumeSnapshotClass` and copied to the `VolumeSnapshotContent`. With `Delete` the storage-side snapshot is removed along with the content object, so an accidental `kubectl delete volumesnapshot` or a deleted namespace destroys the backup. With `Retain` both stay, and an admin can later bind a new `VolumeSnapshot` to the retained content as a pre-provisioned snapshot using its `snapshotHandle`. Separately, a PVC being snapshotted is protected: if it is deleted while the snapshot is in progress, removal waits until the snapshot is `readyToUse` or aborted. Use `Retain` for snapshots you cannot recreate, and remember that a snapshot of the volume does not know about the application on it, so quiesce or flush the database first when you need an application-consistent copy.
+
+**Q: `fsGroup: 2000` is set, but the files on a mounted volume keep their old owner and the non-root container cannot write. What is going on?**
+**Short:** The driver's `CSIDriver.fsGroupPolicy` may exclude the volume: the default `ReadWriteOnceWithFSType` changes ownership only for RWO volumes with an `fsType`, and `None` never does.
+`fsGroup` is applied by the kubelet only if the CSI driver permits it. `fsGroupPolicy` on the `CSIDriver` object defaults to `ReadWriteOnceWithFSType`, which examines and changes the volume only when the PV defines an `fsType` and its access modes include `ReadWriteOnce`; an RWX filesystem such as a shared NFS-style export is skipped silently. `File` applies `fsGroup` regardless of `fsType` or access mode, and `None` mounts the volume untouched, for drivers that cannot change ownership. If a driver supports the `VOLUME_MOUNT_GROUP` capability it applies the group itself during the mount, and `fsGroupChangePolicy` then has no effect. On volumes where `fsGroup` is applied, `fsGroupChangePolicy: OnRootMismatch` avoids the slow recursive walk on every start. Read the `CSIDriver` object with `kubectl get csidriver NAME -o yaml`, then fix ownership at the share or match `runAsUser` to it.
+
 ---
 
 ## 13. Best Practices
@@ -542,6 +647,8 @@ Each replica's PVC is still a single zonal RWO volume, and topologySpreadConstra
 - Write a runbook for powered-off nodes: verify power state, apply `node.kubernetes.io/out-of-service`, remove it after repair.
 - Set `persistentVolumeClaimRetentionPolicy` explicitly on every StatefulSet, and `fsGroupChangePolicy: OnRootMismatch` on Pods that use `fsGroup` with large volumes.
 - Take **CSI snapshots + Velero backups**; test restores regularly.
+- Confirm the snapshot CRDs, snapshot controller and a `VolumeSnapshotClass` exist before relying on snapshots, and use `deletionPolicy: Retain` for backup snapshots.
+- Alert on the CSI controller and node plugin Pods like any other critical system component; a dead node plugin strands Pods on that node and a dead controller stalls every provision, resize and snapshot.
 - Review PVCs whose `Unused` condition has been `True` for longer than your longest job interval (1.37+); delete or snapshot-and-delete them, since a `Retain` volume with no Pod is pure cost.
 - Spread stateful replicas across AZs with anti-affinity; add PodDisruptionBudgets.
 - Strongly prefer **managed databases** unless you have a clear reason to self-host.

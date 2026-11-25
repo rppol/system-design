@@ -2,7 +2,7 @@
 
 Section root: `src/main/java/com/rutik/systemdesign/devops/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
-Build manifest / status tracker: `README.md` §8 — per-file status table. The build is complete through Chunk 11 and no NEXT UP pointer remains.
+Build manifest / status tracker: `README.md` §8 — per-file status table. The build is complete through Chunk 12 and no NEXT UP pointer remains.
 
 ## Scope — unparked 2026-08-04; the factual audit is COMPLETE
 
@@ -10,7 +10,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 
 | Work | State |
 |------|-------|
-| Factual audit | **DONE — all 41 modules**, ~1,560 claims verified against upstream docs, ~215 corrections. Commits `7f98bf4`, `9462731`, `ecd9414` |
+| Factual audit | **DONE — all 41 original modules** (the four modules added 2026-11-25 — `capacity_and_quota_management`, `runtime_security_and_ebpf_observability`, `multi_cluster_and_fleet_management`, `certificate_and_pki_lifecycle` — carry dated version anchors and were not part of it), ~1,560 claims verified against upstream docs, ~215 corrections. Commits `7f98bf4`, `9462731`, `ecd9414` |
 | `**Short:**` MCQ summaries | **DONE — 650 of 650**, run after the audit as the ordering below requires. Commit `6ce35a6` |
 | Case studies | **AUDITED.** All 20 files — first pass in `863f8f71`, `7980271c`, `bf10f92d`, `250c05b6`, `e44fbe3b`; re-audited 2026-08-05, which still found the Terraform DynamoDB lock documented under the wrong key (`-md5` is the CHECKSUM item, not the lock), Kyverno field shapes deprecated in 1.13, GCR named as a live registry after its 2025 shutdown, and a log-pipeline cost line 3x its own stated rate |
 
@@ -58,16 +58,16 @@ CD 3.x has not removed ApplicationSet fasttemplate** (`goTemplate: true` remains
 
 ---
 
-## Module List — 41 Modules (8 Phases)
+## Module List — 45 Modules (8 Phases)
 
 AWS is the default cloud in worked examples; GCP/Azure appear in comparison tables. This section deliberately **cross-references** `backend/`, `database/`, and `hld/` instead of duplicating them — see the non-overlap boundary in `README.md` §2.
 
 | Phase | Modules |
 |-------|---------|
 | 1 — Foundations | linux_and_os_fundamentals, shell_scripting_and_automation, networking_for_devops, version_control_and_git_workflows |
-| 2 — Containers & Kubernetes | containers_and_docker, container_runtimes_and_oci, kubernetes_architecture, kubernetes_workloads_and_objects, kubernetes_networking, kubernetes_storage_and_state, kubernetes_scheduling_and_autoscaling, kubernetes_security, helm_and_package_management, kubernetes_operators_and_crds |
+| 2 — Containers & Kubernetes | containers_and_docker, container_runtimes_and_oci, kubernetes_architecture, kubernetes_workloads_and_objects, kubernetes_networking, kubernetes_storage_and_state, kubernetes_scheduling_and_autoscaling, capacity_and_quota_management, kubernetes_security, runtime_security_and_ebpf_observability, helm_and_package_management, kubernetes_operators_and_crds, multi_cluster_and_fleet_management |
 | 3 — CI/CD & GitOps | ci_cd_fundamentals, ci_cd_platforms, deployment_strategies, gitops_argocd_flux, artifact_and_registry_management |
-| 4 — IaC & Config | infrastructure_as_code_terraform, terraform_advanced_and_alternatives, configuration_management, secrets_management |
+| 4 — IaC & Config | infrastructure_as_code_terraform, terraform_advanced_and_alternatives, configuration_management, secrets_management, certificate_and_pki_lifecycle |
 | 5 — Cloud (AWS-primary) | cloud_fundamentals_and_aws, gcp_and_azure_essentials, serverless_and_faas, cloud_networking_and_cdn, cloud_cost_optimization_finops |
 | 6 — Observability & SRE | observability_metrics_prometheus, observability_logging, observability_tracing_and_otel, visualization_and_alerting, sre_principles_and_slos, incident_management_and_oncall |
 | 7 — DevSecOps & Reliability | devsecops_and_supply_chain_security, policy_as_code_and_compliance, disaster_recovery_and_resilience, platform_engineering_and_idp |
@@ -105,8 +105,8 @@ Backfill status (2026-07-16): the floor backlog is fully cleared — every modul
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 41 modules = "8-Phase Learning Path") plus
-two curated tiers: **Senior** (27 modules) and **Principal** (3 modules —
+`README.md` documents the **Full Path** (all 45 modules = "8-Phase Learning Path") plus
+two curated tiers: **Senior** (31 modules) and **Principal** (3 modules —
 `cloud_cost_optimization_finops`, `platform_engineering_and_idp`,
 `ml_platform_and_gpu_infrastructure`, each with its deep-dive sub-file, plus the
 `design_gpu_training_and_inference_cluster` case study). The Principal cut is small on
@@ -124,20 +124,21 @@ boot. The Senior and Principal tables in `README.md` sit between
 `<!-- study-path-table senior -->` / `<!-- study-path-table principal -->` and their
 closing `<!-- /study-path-table -->` markers, and are **generated** — regenerate with
 `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
-`extract.py --strict` and the Pages deploy. Of the 15 case studies only
-`design_gpu_training_and_inference_cluster` carries a tier marker (`senior, principal`);
-the Case Studies tab shows all 15 with no Level filter. The README also carries a
+`extract.py --strict` and the Pages deploy. Of the 16 case studies,
+`design_gpu_training_and_inference_cluster` carries `senior, principal` and
+`design_kubernetes_fleet_upgrade_program` carries `principal`;
+the Case Studies tab shows all 16 (Level filter: the two marked ones only). The README also carries a
 Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 15 Total
+## Case Studies — 16 Total
 
 `case_studies/` — all use the 11-section principal template.
 Reference: `../llm/case_studies/design_gpu_inference_platform.md`
 Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
-design_ci_cd_platform, design_kubernetes_platform, design_observability_platform, design_gitops_delivery_pipeline, design_secrets_management_platform, design_multi_region_dr_architecture, design_autoscaling_platform, design_log_aggregation_pipeline, design_internal_developer_platform, design_incident_response_system, design_container_registry, design_zero_downtime_infra_migration, design_ml_platform_infrastructure, design_multi_tenant_platform, design_gpu_training_and_inference_cluster
+design_ci_cd_platform, design_kubernetes_platform, design_observability_platform, design_gitops_delivery_pipeline, design_secrets_management_platform, design_multi_region_dr_architecture, design_autoscaling_platform, design_log_aggregation_pipeline, design_internal_developer_platform, design_incident_response_system, design_container_registry, design_zero_downtime_infra_migration, design_ml_platform_infrastructure, design_multi_tenant_platform, design_gpu_training_and_inference_cluster, design_kubernetes_fleet_upgrade_program
 
 ---
 
@@ -166,7 +167,7 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 | `observability_tracing_and_otel/` | `../../backend/observability_and_monitoring/` — Micrometer, MDC; `../../spring/observability_and_tracing/` |
 | `event_streaming_operations/` | `../../backend/kafka_deep_dive/` — Kafka internals; `../../backend/event_driven_fundamentals/` |
 | `ml_platform_and_gpu_infrastructure/` | `../../ml/gpu_and_hardware_optimization/` — CUDA profiling; `../../ml/mlops_and_ci_cd/` |
-| `ml_platform_and_gpu_infrastructure/`, `kubernetes_scheduling_and_autoscaling/`, `deployment_strategies/` | `../../mlops/` owns **GPU schedulers and quota policy** (Kueue, Volcano, KAI Scheduler: selection, cohorts, borrowing, fair sharing, preemption) in `gpu_cluster_scheduling_and_quotas/`, **inference autoscaling** (which engine signal, thresholds, warm and scheduled floors, capacity planning) in `inference_autoscaling_and_capacity_planning/`, model-server progressive delivery, and GPU fleet health. This section keeps the device plugin, DRA, MIG, MPS and time-slicing **mechanism**, the gang-admission and topology **placement primitive** (one minimal Kueue `v1beta2` example is allowed to make it visible), **generic** HPA/VPA/KEDA/Karpenter autoscaling, and the generic deployment strategies. A devops page that needs scheduler policy or inference-autoscaling policy links the mlops page instead of teaching it (owner decision 2026-11-25) |
+| `ml_platform_and_gpu_infrastructure/`, `kubernetes_scheduling_and_autoscaling/`, `capacity_and_quota_management/`, `deployment_strategies/` | `../../mlops/` owns **GPU schedulers and quota policy** (Kueue, Volcano, KAI Scheduler: selection, cohorts, borrowing, fair sharing, preemption) in `gpu_cluster_scheduling_and_quotas/`, **inference autoscaling** (which engine signal, thresholds, warm and scheduled floors, capacity planning) in `inference_autoscaling_and_capacity_planning/`, model-server progressive delivery, and GPU fleet health. This section keeps the device plugin, DRA, MIG, MPS and time-slicing **mechanism**, the gang-admission and topology **placement primitive** (one minimal Kueue `v1beta2` example is allowed to make it visible), **generic** HPA/VPA/KEDA/Karpenter autoscaling, and the generic deployment strategies. A devops page that needs scheduler policy or inference-autoscaling policy links the mlops page instead of teaching it (owner decision 2026-11-25) |
 | `observability_tracing_and_otel/opentelemetry_deep_dive.md`, `devsecops_and_supply_chain_security/` | `../../rust/`: `observability_tracing_and_opentelemetry/` (the `tracing` crate and its OTel bridge), `build_deployment_and_supply_chain/` (cargo-deny, cargo-audit, cargo-vet, cargo-auditable). This section keeps the OTel concepts, OTLP, the collector, the per-language status, SLSA, Sigstore and SBOM formats |
 
 ---

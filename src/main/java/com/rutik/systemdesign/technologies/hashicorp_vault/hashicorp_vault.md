@@ -747,6 +747,8 @@ Use static roles for: an account that appears in grants, audit rules or third-pa
 
 ### 6.7 The PKI engine — a real CA, with real obligations
 
+See also [certificate_and_pki_lifecycle](../../devops/certificate_and_pki_lifecycle/certificate_and_pki_lifecycle.md) for the CA hierarchy, cert-manager and expiry as an incident class.
+
 ```bash
 vault secrets enable -path=pki_int pki
 vault secrets tune -max-lease-ttl=43800h pki_int      # 5 years, for the intermediate itself

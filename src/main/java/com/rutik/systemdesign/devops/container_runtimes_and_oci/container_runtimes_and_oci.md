@@ -486,6 +486,6 @@ spec:
 
 ---
 
-**Cross-references:** [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (namespaces/cgroups/capabilities runc uses), [containers_and_docker](../containers_and_docker/containers_and_docker.md) (the OCI images runtimes execute), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (kubelet → CRI), [kubernetes_security](../kubernetes_security/kubernetes_security.md) (seccomp, RuntimeClass, multi-tenant isolation).
+**Cross-references:** [runtime_security_and_ebpf_observability](../runtime_security_and_ebpf_observability/runtime_security_and_ebpf_observability.md) (AppArmor, seccomp profiles and runtime detection), [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (namespaces/cgroups/capabilities runc uses), [containers_and_docker](../containers_and_docker/containers_and_docker.md) (the OCI images runtimes execute), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (kubelet → CRI), [kubernetes_security](../kubernetes_security/kubernetes_security.md) (seccomp, RuntimeClass, multi-tenant isolation).
 
 **From first principles:** [cs_fundamentals/virtualization_and_containers_from_first_principles](../../cs_fundamentals/virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) (trap-and-emulate, hardware virtualization, and the isolation gap that gVisor and Kata close).

@@ -1081,6 +1081,8 @@ Header **case** is the other one: HTTP/2 mandates lowercase header names, so an 
 
 ### 6.15 TLS, SDS and certificate rotation
 
+See also [certificate_and_pki_lifecycle](../../devops/certificate_and_pki_lifecycle/certificate_and_pki_lifecycle.md) for fleet-wide mTLS rotation and certificate lifetimes.
+
 TLS is a **transport socket**, configured symmetrically on both sides.
 
 ```yaml

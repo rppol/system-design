@@ -1177,7 +1177,7 @@ See the [MLOps Master Index](src/main/java/com/rutik/systemdesign/mlops/README.m
 
 ### DevOps, Cloud & Platform Engineering — Senior Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 41 modules across 8 phases + 15 principal case studies + 10 deep-dive sub-files. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
+A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 45 modules across 8 phases + 16 principal case studies + 12 deep-dive sub-files. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -1197,9 +1197,12 @@ A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platfo
 | [Kubernetes Networking](src/main/java/com/rutik/systemdesign/devops/kubernetes_networking/kubernetes_networking.md) | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress, Gateway API, NetworkPolicy, CoreDNS |
 | [Kubernetes Storage & State](src/main/java/com/rutik/systemdesign/devops/kubernetes_storage_and_state/kubernetes_storage_and_state.md) | PV/PVC, StorageClass, CSI, StatefulSet storage, volume snapshots |
 | [Kubernetes Scheduling & Autoscaling](src/main/java/com/rutik/systemdesign/devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB |
+| [Capacity & Quota Management](src/main/java/com/rutik/systemdesign/devops/capacity_and_quota_management/capacity_and_quota_management.md) | ResourceQuota, LimitRange, PriorityClass and preemption ordering, cloud service quotas, quota exhaustion as an incident class, headroom math |
 | [Kubernetes Security](src/main/java/com/rutik/systemdesign/devops/kubernetes_security/kubernetes_security.md) | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy |
+| [Runtime Security & eBPF Observability](src/main/java/com/rutik/systemdesign/devops/runtime_security_and_ebpf_observability/runtime_security_and_ebpf_observability.md) | Falco, Tetragon, seccomp, AppArmor, eBPF-for-security, runtime detection and enforcement |
 | [Helm & Package Management](src/main/java/com/rutik/systemdesign/devops/helm_and_package_management/helm_and_package_management.md) | Helm charts/templating/releases, Kustomize overlays, repositories |
 | [Kubernetes Operators & CRDs](src/main/java/com/rutik/systemdesign/devops/kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) | CRDs, custom controllers, operator pattern, Operator SDK, reconcile loop |
+| [Multi-Cluster & Fleet Management](src/main/java/com/rutik/systemdesign/devops/multi_cluster_and_fleet_management/multi_cluster_and_fleet_management.md) | Cluster API, Karmada, Open Cluster Management, placement policy, fleet-wide GitOps, blast-radius control |
 
 #### Phase 3 — CI/CD & GitOps
 | Module | Key Concepts |
@@ -1217,6 +1220,7 @@ A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platfo
 | [Terraform Advanced & Alternatives](src/main/java/com/rutik/systemdesign/devops/terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md) | Terragrunt, Pulumi, CloudFormation/CDK, OpenTofu, Terratest, policy (Sentinel/OPA) |
 | [Configuration Management](src/main/java/com/rutik/systemdesign/devops/configuration_management/configuration_management.md) | Ansible/Chef/Puppet/Salt, idempotency, push vs pull, immutable infra, Packer |
 | [Secrets Management](src/main/java/com/rutik/systemdesign/devops/secrets_management/secrets_management.md) | HashiCorp Vault, dynamic secrets, AWS/GCP secret managers, External Secrets Operator, SOPS, rotation |
+| [Certificate & PKI Lifecycle](src/main/java/com/rutik/systemdesign/devops/certificate_and_pki_lifecycle/certificate_and_pki_lifecycle.md) | cert-manager, ACME and DNS-01, private CA hierarchy, mTLS rotation at fleet scale, certificate expiry as an incident class |
 
 #### Phase 5 — Cloud Platforms (AWS-primary)
 | Module | Key Concepts |
@@ -1257,6 +1261,7 @@ A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platfo
 |------------|--------------|
 | [Design a CI/CD Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_ci_cd_platform.md) | Multi-tenant CI/CD at scale, ephemeral runners, distributed artifact caching, pipeline isolation |
 | [Design a Kubernetes Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_kubernetes_platform.md) | Multi-cluster, multi-tenant K8s platform, control-plane scaling, admission policy, Karpenter |
+| [Design a Kubernetes Fleet Upgrade Program](src/main/java/com/rutik/systemdesign/devops/case_studies/design_kubernetes_fleet_upgrade_program.md) | Quarterly upgrades for 200 clusters across EKS, GKE, AKS and Cluster API: gates, waves, version skew, add-on matrix, node-pool strategy, rollback limits, SLOs |
 | [Design an Observability Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_observability_platform.md) | Metrics+logs+traces at scale (Prometheus/Thanos + Loki + Tempo), cardinality, retention tiers |
 | [Design a GitOps Delivery Pipeline](src/main/java/com/rutik/systemdesign/devops/case_studies/design_gitops_delivery_pipeline.md) | ArgoCD app-of-apps, canary via Argo Rollouts, metric-gated promotion, automated rollback |
 | [Design a Secrets Management Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_secrets_management_platform.md) | Vault dynamic secrets, External Secrets Operator, rotation, lease/revocation, audit |

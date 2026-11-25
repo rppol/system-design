@@ -463,6 +463,32 @@ This is the same ratio shape as HPA — KEDA is in fact an HPA driving an extern
 
 The last row is the one to design around. At `maxReplicaCount: 50` and 20 messages per replica, the deepest backlog the pool holds at target is `50 x 20 = 1000` messages. Past that, the formula's answer is discarded and queue age starts climbing without any autoscaler event to alert on — so alert on **message age**, not replica count. Raising `maxReplicaCount` is only safe if whatever the workers write to can absorb 50 concurrent writers.
 
+### In-place Pod resize (stable since 1.35)
+
+Container CPU and memory `requests` and `limits` can be changed on a running Pod without recreating it. `spec.containers[*].resources` is the desired state and `status.containerStatuses[*].resources` is what the kubelet has actually configured. The change goes through the Pod's `resize` subresource, which needs `kubectl` 1.32 or later:
+
+```bash
+# raise CPU from 700m to 800m on a running Pod, no restart (CPU resizePolicy is NotRequired)
+kubectl patch pod resize-demo --subresource resize --patch \
+  '{"spec":{"containers":[{"name":"pause","resources":{"requests":{"cpu":"800m"},"limits":{"cpu":"800m"}}}]}}'
+```
+
+```yaml
+resizePolicy:
+- resourceName: cpu
+  restartPolicy: NotRequired        # default: apply to the running container
+- resourceName: memory
+  restartPolicy: RestartContainer   # many runtimes cannot grow or shrink heap live
+```
+
+- **Restart behaviour is per resource.** Changing only CPU resizes in place; changing memory restarts that container (not the Pod) under `RestartContainer`; changing both restarts it. A Pod with `restartPolicy: Never` can set only `NotRequired`.
+- **The kubelet reports progress in Pod conditions.** `PodResizePending` with reason `Infeasible` (cannot fit on this node, ever) or `Deferred` (cannot fit now, the kubelet retries when capacity frees up), and `PodResizeInProgress` while it is being applied. Deferred resizes are retried by Pod priority first, then Guaranteed before Burstable, then longest waiting. Scheduler-driven preemption to make room for a deferred resize is alpha in 1.37 behind `InPlacePodVerticalScalingSchedulerPreemption`.
+- **The scheduler plans for the worst case.** While a resize is pending or incomplete, it uses the maximum of the desired, allocated and actual requests, so a Pod mid-resize can make a node look fuller than it is.
+- **Limits.** Only CPU and memory. The QoS class set at creation cannot change (a Guaranteed Pod keeps `requests == limits` for both resources; a Burstable Pod cannot become Guaranteed). Requests and limits cannot be removed once set. Ephemeral containers cannot be resized; sidecars and running non-restartable init containers can. Windows Pods, Pods under the static CPU or Memory manager policies, and swap-backed memory resizes (unless the memory policy is `RestartContainer`) are excluded.
+- **Memory decreases are best effort.** With a `NotRequired` memory policy the kubelet skips the decrease when current usage is above the new limit and leaves the resize in progress, but a usage spike right after the check can still OOM-kill the container.
+
+This is what makes VPA's `InPlaceOrRecreate` mode useful, and it is also a manual tool: raise a database Pod's CPU during a backfill and lower it afterwards, with no failover.
+
 ### PodDisruptionBudget (survive drains)
 
 ```yaml
@@ -668,6 +694,10 @@ The Deployment requested a full CPU and 2Gi of memory per Pod while actually usi
 **Short:** DRA replaces an opaque integer count with a `ResourceClaim` matched against real device attributes via a `DeviceClass`, so requests can express memory, topology, and sharing.
 An extended resource is just an integer the scheduler subtracts from node allocatable — it can say "this node has 2 GPUs left" but not which GPUs, how much memory they have, or whether two Pods can share one safely. DRA replaces that with a claims model: a `DeviceClass` defines a device category with CEL selection criteria, a Pod requests one via a `ResourceClaim` (usually generated per-Pod from a `ResourceClaimTemplate`), and the scheduler matches the claim against `ResourceSlice` objects that the device driver publishes per node, writing the winning devices into the claim's status as it binds the Pod. That lets a claim say "an NVIDIA GPU with at least 40GB," filter on NVLink topology, or request a fractional partition of a device — none of which an extended-resource count can express. Reach for DRA instead of extended resources whenever device selection depends on more than a bare count, which for GPU-serving workloads is nearly always.
 
+**Q: How do you give a running Pod more CPU without restarting it, and what can still force a restart or block the change?**
+**Short:** Patch the Pod's `resize` subresource; CPU resizes in place by default, a memory change restarts the container when its `resizePolicy` is `RestartContainer`, and a node without room leaves the resize Deferred.
+In-place Pod resize (stable since 1.35) changes `requests` and `limits` on a live Pod through `kubectl patch pod NAME --subresource resize`, which needs `kubectl` 1.32 or later. Each resource has a `resizePolicy`: `NotRequired` (the default) applies the change to the running container, and `RestartContainer` restarts that container (not the Pod), which is the right setting for memory because many runtimes cannot resize their heap live. Changing CPU alone is in place, memory alone restarts, and both together restart. The kubelet reports `PodResizePending` (`Infeasible` if the node can never fit it, `Deferred` if it cannot fit yet and will be retried) or `PodResizeInProgress`. The QoS class fixed at creation cannot change, requests and limits cannot be removed, Windows Pods and Pods under static CPU or Memory manager policies cannot resize, and a memory decrease below current usage is skipped. Use it for CPU bursts on stateful Pods, and plan a restart window for memory changes.
+
 ---
 
 ## 13. Best Practices
@@ -805,4 +835,4 @@ CPU binds in both columns, so CPU requests alone set the density: dropping `1000
 
 ---
 
-**Cross-references:** [kubernetes_workloads_and_objects](../kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) (requests/limits/QoS, PDB), [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (cgroup throttling/OOM behind limits), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (spot, rightsizing, consolidation), [kubernetes_storage_and_state](../kubernetes_storage_and_state/kubernetes_storage_and_state.md) (volume topology constraints), [`case_studies/cross_cutting/kubernetes_production_hardening.md`](../case_studies/cross_cutting/kubernetes_production_hardening.md).
+**Cross-references:** [capacity_and_quota_management](../capacity_and_quota_management/capacity_and_quota_management.md) (ResourceQuota, PriorityClass, headroom, cloud quotas), [kubernetes_workloads_and_objects](../kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) (requests/limits/QoS, PDB), [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (cgroup throttling/OOM behind limits), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (spot, rightsizing, consolidation), [kubernetes_storage_and_state](../kubernetes_storage_and_state/kubernetes_storage_and_state.md) (volume topology constraints), [`case_studies/cross_cutting/kubernetes_production_hardening.md`](../case_studies/cross_cutting/kubernetes_production_hardening.md).

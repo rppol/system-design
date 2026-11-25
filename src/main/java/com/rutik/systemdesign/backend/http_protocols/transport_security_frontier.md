@@ -63,6 +63,8 @@ Key exchange only needs the two parties in *this* handshake to support the new a
 
 ### 4.5 Certificate lifetime compression — the schedule
 
+See also [certificate_and_pki_lifecycle](../../devops/certificate_and_pki_lifecycle/certificate_and_pki_lifecycle.md) for automating issuance and renewal under these lifetimes.
+
 CA/Browser Forum **Ballot SC-081v3** passed April 2025 (29 in favor, 0 opposed; sponsored by Apple and Sectigo, all four major browser vendors voting yes) and sets a phased reduction of maximum public TLS certificate validity:
 
 | Effective date | Max certificate validity | Max domain-validation (DCV) reuse |

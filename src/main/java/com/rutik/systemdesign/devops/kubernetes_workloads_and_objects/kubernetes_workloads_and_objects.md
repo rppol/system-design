@@ -426,6 +426,15 @@ spec:
 
 A PDB limits **voluntary** disruptions that go through the Eviction API: `kubectl drain`, cluster-autoscaler and Karpenter scale-down, managed node-pool upgrades. It does nothing for a node crash. `ALLOWED DISRUPTIONS = current healthy - required healthy`. For the 3-replica `web` Deployment, `maxUnavailable: 1` allows 1 eviction when all 3 are healthy and 0 while one is already down; `maxUnavailable: 30%` rounds up to 1 as well. Two settings block every drain: `maxUnavailable: 0` and `minAvailable` equal to the replica count. A 1-replica Deployment with `minAvailable: 1` is the most common way a node upgrade hangs for hours. Prefer `maxUnavailable`, because it follows the replica count when the Deployment scales.
 
+A second drain-blocker is a Pod that is `Running` but never becomes Ready, for example one stuck in `CrashLoopBackOff`. By default (`unhealthyPodEvictionPolicy: IfHealthyBudget`) the Eviction API refuses to evict such a Pod while the application is already below its budget, so one broken replica can hold the whole node. Setting `unhealthyPodEvictionPolicy: AlwaysAllow` (stable since 1.31) lets Running-but-unhealthy Pods be evicted regardless of the budget; Pods in `Pending`, `Succeeded` or `Failed` are always evictable. Use it on stateless services where a broken replica should never veto a node upgrade, and keep the default for quorum systems where replacing an unready replica too early can cost the quorum.
+
+```yaml
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow   # an unready Running Pod cannot block a drain
+  selector: {matchLabels: {app: web}}
+```
+
 ### `externalTrafficPolicy: Local`
 
 ```yaml
@@ -646,6 +655,10 @@ The Downward API exposes fields of the Pod itself to its containers: `fieldRef` 
 **Q: How does a plain Job differ from a CronJob, and what does `backoffLimit` control?**
 **Short:** A Job runs Pods to completion once, a CronJob schedules new Jobs on a cron, and `backoffLimit` caps retries before the Job itself is marked Failed.
 A Job runs Pods to completion a single time when created, while a CronJob is a scheduled wrapper that creates a new Job on a cron schedule. `backoffLimit` caps how many times a failed Pod is retried before the Job itself is marked Failed — the module's backup CronJob sets `backoffLimit: 3`, so a flaky backup gets three attempts before it's treated as a real failure instead of retrying forever. `restartPolicy` on the Pod template must be `Never` or `OnFailure`, never the Deployment default `Always`, since a run-to-completion Pod that restarted forever would never let the Job finish. Jobs are the right primitive for one-off work like a CI/CD database migration that must run exactly once to completion before the app Deployment rolls out, so set `backoffLimit` deliberately rather than leaving it unbounded.
+
+**Q: A PDB shows `ALLOWED DISRUPTIONS 1`, yet a drain still hangs on a Pod that is stuck in `CrashLoopBackOff`. What setting fixes it?**
+**Short:** Set `unhealthyPodEvictionPolicy: AlwaysAllow` on the PDB; the default `IfHealthyBudget` refuses to evict a Running but unready Pod while the application is already below its budget.
+The PDB guards the healthy count. With the default `IfHealthyBudget`, a Running Pod that is not Ready can be evicted only if `currentHealthy` is at least `desiredHealthy`, so when the application is already short (the crashlooping replica is one of the missing ones) the broken Pod itself is protected from eviction and the drain waits forever. `AlwaysAllow` (stable since 1.31) treats such Pods as already disrupted and evicts them whatever the budget says; Pods that are `Pending`, `Succeeded` or `Failed` are always evictable. Use `AlwaysAllow` for stateless services so one misconfigured replica cannot hold a node upgrade hostage, and keep the default where evicting an unready replica early could break a quorum.
 
 ---
 

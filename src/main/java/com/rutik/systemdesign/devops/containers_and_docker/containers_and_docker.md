@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
-> **Version anchor (2026-11-25).** **Node.js 26 ("Lithium") became the active LTS line on 2026-10-28** (v26.13.0; latest v26.13.1, 2026-11-10), so every example here uses `node:26-slim` and `gcr.io/distroless/nodejs26-debian13`, which the distroless README lists next to the Node 22 and 24 images. Docker Hub sizes for the amd64 images on the same day: `node:26` about 445 MB compressed, `node:26-slim` about 86 MB compressed. **Docker Hardened Images** are free under Apache 2.0 in the Community tier; FIPS/STIG variants and SLA-backed CVE fixes are in the paid Select and Enterprise tiers. Dockerfile `HEALTHCHECK` defaults (interval 30s, timeout 30s, start-period 0s, start-interval 5s, retries 3) and the ENTRYPOINT/CMD table are from the Dockerfile reference; Compose `depends_on.condition: service_healthy` and `profiles` from the Compose file reference.
+> **Version anchor (2026-11-25).** **Node.js 26 ("Lithium") became the active LTS line on 2026-10-28** (v26.13.0; latest v26.13.1, 2026-11-10), so every example here uses `node:26-slim` and `gcr.io/distroless/nodejs26-debian13`, which the distroless README lists next to the Node 22 and 24 images. Docker Hub sizes for the amd64 images on the same day: `node:26` about 445 MB compressed, `node:26-slim` about 86 MB compressed. **Docker Hardened Images** are free under Apache 2.0 in the Community tier; FIPS/STIG variants and SLA-backed CVE fixes are in the paid Select and Enterprise tiers. Dockerfile `HEALTHCHECK` defaults (interval 30s, timeout 30s, start-period 0s, start-interval 5s, retries 3) and the ENTRYPOINT/CMD table are from the Dockerfile reference; Compose `depends_on.condition: service_healthy` and `profiles` from the Compose file reference. `--start-interval` needs Docker Engine 25.0 or later. Port publishing, bridge, host, overlay and macvlan behaviour is from the Docker Engine networking docs; the Amazon ECS health-check rules are from the ECS developer guide.
 
 Containers package an application with its dependencies into a portable, immutable image that runs identically on a laptop, in CI, and in production. Docker popularized the workflow, but the value is in understanding what an image *is* (layered, content-addressed), how builds cache, and how to produce small, secure, reproducible images — the artifacts every Kubernetes pod ultimately runs.
 
@@ -92,10 +92,32 @@ Two rules fall out of it. A shell-form `ENTRYPOINT` swallows `CMD` and any `dock
 | `bridge` (default network) | Private IP on `docker0`, NAT to the host; containers reach each other **by IP only** | Quick single containers |
 | User-defined `bridge` | Same, plus **automatic DNS by container name or alias** and isolation from unrelated containers | Every multi-container app; what Compose creates per project |
 | `host` | The host's network namespace directly; no port mapping, no isolation | Network-heavy agents that need the host stack |
-| `none` | Loopback only | Batch jobs that must have no network |
-| `overlay` | A network spanning several Docker hosts (Swarm) | Multi-host Swarm services |
+| `none` | Loopback only; not available for Swarm services | Batch jobs that must have no network |
+| `overlay` | A network spanning several Docker hosts; hosts must be in a Swarm, even for standalone containers (`--attachable`). Needs `2377/tcp`, `4789/udp`, `7946/tcp` and `7946/udp` open between hosts | Multi-host Swarm services |
+| `macvlan` | Its own MAC address per container, so it looks like a physical host on the LAN. Linux only, no rootless, usually blocked by cloud providers; needs a NIC and switch that accept several MACs (promiscuous mode) | Legacy apps that expect to sit directly on the physical network |
+| `ipvlan` | Like macvlan, but every container shares the parent interface's MAC address | Switch ports that cap the number of MAC addresses |
 
 The default `bridge` network has no name resolution, so `web` cannot reach `db` by name there; a user-defined bridge resolves names through Docker's embedded DNS. Kubernetes does not use any of these drivers: Pod networking comes from the CNI plugin (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)).
+
+Four details decide most real incidents:
+
+- **Published ports are open to the world by default.** `-p 8080:80` binds every host address. Only `-p 127.0.0.1:8080:80` limits the port to the Docker host. Docker diverts published-port traffic in the `nat` table before it reaches the `INPUT` chain that `ufw` manages, so a `ufw deny` rule does not protect a published port. Unpublished ports are blocked from outside the host.
+- **Containers on one user-defined bridge reach each other on every port**, published or not. Publishing is only for traffic that crosses a network boundary.
+- **`host` mode ignores `-p`.** The container has no IP of its own and Docker prints `WARNING: Published ports are discarded when using host network mode`. It skips NAT and the per-port userland proxy, which is why it suits large port ranges, but two containers cannot bind the same port on one host.
+- **A macvlan container cannot talk to its own host.** This is a Linux kernel restriction; attach the container to a bridge as well, or give the host a macvlan interface on the same parent.
+
+Docker creates no firewall rules for `host`, `macvlan` or `ipvlan` networks; only bridge networks get them.
+
+### Storage mounts and restart policies
+
+| Mount | Lifetime | Use |
+|-------|----------|-----|
+| Writable container layer | Dies with the container | Scratch only; data cannot be moved easily |
+| Volume | Survives container removal; managed by the daemon | Databases, anything that must persist |
+| Bind mount | The host path; host processes and the container can both modify it | Source code in dev, host config files |
+| `tmpfs` | RAM only; lost on stop or reboot | Secrets and scratch that must never touch disk |
+
+A restart policy (`no` default, `on-failure[:max-retries]`, `always`, `unless-stopped`) only applies after a container has been up for at least 10 seconds, which stops a container that cannot start from looping. A container you stopped by hand stays stopped until the daemon restarts or you restart it; with `unless-stopped` it also stays stopped across a daemon restart. By default a container has no memory limit, so one runaway container can trigger the host's OOM killer; set `--memory` (minimum `6m`) on every container you run outside an orchestrator.
 
 ---
 
@@ -158,6 +180,34 @@ flowchart LR
 ```
 
 *Multi-stage build: the builder's 900 MB toolchain and source are discarded when the stage ends — only `dist/` and `node_modules` cross into the ~80 MB runtime image that actually ships.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["starting<br/>container just started"]) -->|"first pass<br/>any time"| healthy(["healthy"])
+    start -->|"failure inside<br/>start-period: not counted"| start
+    healthy -->|"retries consecutive<br/>failures (3)"| unhealthy(["unhealthy"])
+    unhealthy -->|"one pass"| healthy
+    healthy --> compose(["Compose<br/>service_healthy"])
+    healthy -.->|"not read"| k8s(["Kubernetes kubelet<br/>uses Pod probes only"])
+    healthy -.->|"not read unless<br/>in task definition"| ecs(["Amazon ECS<br/>task definition only"])
+
+    class start base
+    class healthy train
+    class unhealthy lossN
+    class compose req
+    class k8s frozen
+    class ecs frozen
+```
+
+*Docker's health status is a three-state machine; only Docker itself and Compose read the image's `HEALTHCHECK`. Kubernetes never reads it and ECS reads only a health check written into the task definition.*
 
 ---
 
@@ -255,7 +305,15 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
   CMD ["node", "dist/healthcheck.js"]
 ```
 
-`docker ps` then shows `healthy` or `unhealthy`, and Docker Compose can gate start order on it. Two things it does not do: plain Docker never restarts an unhealthy container because of it (a restart policy reacts to the process exiting), and **Kubernetes ignores `HEALTHCHECK` entirely** — the kubelet only runs the Pod's `livenessProbe`, `readinessProbe` and `startupProbe`. Distroless images have no shell or `curl`, so the check must be an exec-form command the image already contains, like the small Node script above.
+`docker ps` then shows `healthy` or `unhealthy`, and Docker Compose can gate start order on it. The mechanics, from the Dockerfile reference:
+
+- **States.** A container with a healthcheck starts as `starting`, becomes `healthy` the moment any check passes, and becomes `unhealthy` after `retries` consecutive failures. One later pass flips it back to `healthy`.
+- **Timing.** The first check runs `interval` after start, then `interval` after each previous check *completes*. A check that runs longer than `timeout` counts as a failure and is killed with SIGKILL.
+- **Start period.** During `start-period` checks run every `start-interval` (default 5s, needs Docker Engine 25.0 or later) and failures are not counted toward `retries`. The first success ends the grace period, and every failure after that counts. With the defaults and `start-period=0s`, a service that needs 120 s to boot fails the checks at about 30 s, 60 s and 90 s and is marked `unhealthy` at about 90 s (3 retries, 30 s interval, checks that fail fast), before it ever served a request. Size `start-period` to the slowest realistic boot.
+- **Exit codes.** `0` is healthy, `1` is unhealthy, and `2` is reserved (do not use it). The first 4096 bytes of stdout and stderr are kept for `docker inspect`, and each status change emits a `health_status` event.
+- **Inheritance.** Only the last `HEALTHCHECK` in a Dockerfile counts, and `HEALTHCHECK NONE` disables one inherited from the base image.
+
+Two things it does not do: plain Docker never restarts an unhealthy container because of it (a restart policy reacts to the process exiting), and **Kubernetes ignores `HEALTHCHECK` entirely** — the kubelet only runs the Pod's `livenessProbe`, `readinessProbe` and `startupProbe`. Amazon ECS also ignores a `HEALTHCHECK` that exists only in the image; it monitors only the `healthCheck` written into the task definition, which overrides the image's. When an essential container there turns `UNHEALTHY` the service replaces the task, after the service's own `healthCheckGracePeriodSeconds` (a separate setting from the health check's `startPeriod`). Distroless images have no shell or `curl`, so the check must be an exec-form command the image already contains, like the small Node script above.
 
 ### Docker Compose for a local stack
 
@@ -288,6 +346,41 @@ volumes:
 
 Compose puts every service of a project on one user-defined network, so `api` reaches `db` by name. Plain `depends_on: [db]` waits only for the `db` container to *start*; Postgres then needs several more seconds before it accepts connections, and an API that connects at boot crashes in that window. `condition: service_healthy` waits for the healthcheck to pass. Compose is a local-development and single-host tool; production orchestration on Kubernetes expresses the same intent with readiness probes and retries in the client.
 
+**`depends_on` conditions.** The long form takes `service_started` (the short-form behaviour), `service_healthy` (the dependency's healthcheck has passed) and `service_completed_successfully` (a one-shot service, such as a migration job, has exited 0). `restart: true` restarts the dependent when Compose updates the dependency (Compose 2.17+), and `required: false` downgrades a missing dependency to a warning (2.20+). Compose also removes services in reverse dependency order.
+
+**Networks.** One default network, named `<project>_default`, is created per project, and each service is reachable by its service name. Container IPs change on every recreate, so always use the name. To segment, declare several networks and attach each service only to the ones it needs:
+
+```yaml
+services:
+  proxy: {build: ./proxy, networks: [frontend]}
+  api:   {build: ./api,   networks: [frontend, backend]}
+  db:    {image: postgres:17, networks: [backend]}
+networks:
+  frontend: {}
+  backend:
+    internal: true     # no gateway: db cannot reach the internet
+```
+
+`proxy` cannot see `db`, and `internal: true` removes the external gateway (a service that is also on a non-internal network can still reach the internet through that one). `network_mode: host` has no service-name DNS and ignores `ports`. `external: true` attaches to a network you created with `docker network create`, which is how two Compose projects talk to each other; the network must exist before `up`.
+
+**Volumes.** A top-level named volume outlives `docker compose down` (only `down -v` removes it). Bind-mount source code in development, never in production, so the code stays inside the image.
+
+**Override files.** Compose reads `compose.yaml` and, if present, `compose.override.yaml` automatically; `-f a.yaml -f b.yaml` or `COMPOSE_FILE` merges explicit files in order. The merge rules:
+
+| Attribute type | Rule |
+|----------------|------|
+| Single values (`image`, `mem_limit`) | Later file replaces |
+| `command`, `entrypoint`, `healthcheck.test` | Later file replaces, never appended |
+| `ports`, `expose`, `dns`, `tmpfs` | Concatenated |
+| `environment`, `labels` | Merged by key, later wins |
+| `volumes`, `secrets`, `configs` | Merged by container `target` path |
+
+Paths in every file resolve relative to the first (base) file. `docker compose config` prints the merged result, so check it before trusting an override. The `!reset` tag clears an inherited value, and the top-level `include:` element loads another Compose application as a unit, warning on name conflicts instead of merging them. Put production differences in `compose.production.yaml`: no source bind mounts, a `restart` policy, different host ports.
+
+**Process hygiene.** `init: true` runs a small init as PID 1 that forwards signals and reaps zombies. `stop_grace_period` is the time Compose waits after SIGTERM before SIGKILL, default 10 s, which is shorter than Kubernetes' 30 s; raise it for slow-draining services. `restart: unless-stopped` gives single-host auto-recovery.
+
+**Compose or Kubernetes.** Compose runs one project on one Docker host: no scheduling across nodes, no rolling updates with traffic gating, no autoscaling, no self-healing when the host dies. It fits laptops, CI integration tests, and small single-server deployments (Docker documents running it against a remote host through `DOCKER_HOST`, or on Swarm to scale out). Move to Kubernetes when you need multi-node scheduling, zero-downtime rollouts, autoscaling, or policy. The service definitions translate almost one to one: a Compose service becomes a Deployment plus Service, `healthcheck` becomes a probe, a named volume becomes a PersistentVolumeClaim, and `depends_on` has no Kubernetes equivalent (clients retry and readiness gates traffic).
+
 ---
 
 ## 7. Real-World Examples
@@ -311,6 +404,10 @@ Compose puts every service of a project on one user-defined network, so `api` re
 | Process model | One process/container | Multiple (supervisor) | Orchestration vs legacy apps |
 | Container network | Default `bridge` (IP only) | User-defined bridge (DNS by name, isolated) | Any multi-container setup wants the user-defined network |
 | Start ordering | `depends_on` (start order only) | `depends_on.condition: service_healthy` | Whether the dependency must be ready, not just running |
+| Multi-container runtime | Compose (one host, no scheduler, no rollouts) | Kubernetes (scheduling, rollouts, autoscaling) | Single host and dev/CI versus a fleet that must survive node loss |
+| Persistent data | Named volume (daemon-managed, survives container removal) | Bind mount (host path, editable from both sides) | Production data versus dev source code |
+| LAN presence | Bridge plus published ports (NAT) | macvlan or ipvlan (own address on the LAN) | Legacy apps that need a real LAN address, at the cost of switch and kernel constraints |
+| Published port scope | `-p 5432:5432` (every host address) | `-p 127.0.0.1:5432:5432` or no publish | Whether anything outside the host needs to connect |
 
 ---
 
@@ -394,6 +491,22 @@ depends_on:
 
 The same lesson applies in Kubernetes, where there is no `depends_on` at all: make the client retry with backoff and gate traffic with a readiness probe, rather than relying on start order.
 
+**Pitfall 5 — A published database port that `ufw` does not protect.** A developer runs Postgres with `-p 5432:5432` on a cloud VM and adds `ufw deny 5432`. Docker routes published-port traffic through the `nat` table before it reaches the `INPUT` chain that `ufw` manages, so the deny rule never sees the packets and the database answers anyone who can reach the host's address on that port.
+
+```bash
+# BROKEN: binds 0.0.0.0, and ufw cannot block it
+docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=app postgres:17
+```
+
+```bash
+# FIX 1: bind to loopback so only the Docker host can connect
+docker run -d --name pg -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD=app postgres:17
+# FIX 2 (better): do not publish at all; put the app and db on one user-defined
+# network and reach the db by name. Unpublished ports are blocked from outside the host.
+docker network create app
+docker run -d --name pg --network app -e POSTGRES_PASSWORD=app postgres:17
+```
+
 ---
 
 ## 11. Technologies & Tools
@@ -401,7 +514,8 @@ The same lesson applies in Kubernetes, where there is no `depends_on` at all: ma
 | Tool | Purpose |
 |------|---------|
 | Docker / `buildx` | Build/run; BuildKit, multi-arch, registry cache export |
-| Docker Compose | Multi-container local stacks: shared network with DNS, `depends_on` health conditions, profiles |
+| Docker Compose | Multi-container local stacks: shared network with DNS, `depends_on` health conditions, profiles, override files; `docker compose config` prints the merged model |
+| `docker network` / `docker inspect` | Create bridge, overlay, macvlan and ipvlan networks; `docker inspect` shows health status and the last health-check output |
 | Podman / Buildah | Daemonless, rootless builds |
 | `dive` | Inspect layers, find wasted space |
 | Trivy / Grype / Docker Scout | Image CVE scanning; Docker Scout builds an SBOM and matches it against a vulnerability database from the Docker CLI or Hub (see [devsecops](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)) |
@@ -490,6 +604,30 @@ A cache mount persists a directory like `/root/.npm` across builds without ever 
 **Short:** `docker history` lists each layer's size and creating instruction, while `dive` interactively surfaces wasted space like a file added then deleted in a later layer that still costs space.
 Run `docker history` to list each layer's size and the instruction that created it, or `dive` for an interactive explorer that also flags wasted space. `dive myimg:latest` surfaces cases the size number alone hides, like a file added in one layer and deleted in a later one — it still costs space permanently because layers are immutable and additive. This turns "why is my image 1.2 GB" from guesswork into a targeted fix: reorder an instruction, add a `.dockerignore` entry, or move a step into the discarded stage of a multi-stage build. Run `dive` before optimizing an image so you fix the layer that's actually heavy instead of guessing.
 
+**Q: A service takes 2 minutes to boot but its `HEALTHCHECK` marks it `unhealthy` after about 90 seconds. How do `interval`, `retries` and `start-period` interact, and how do you fix it?**
+**Short:** Failures count toward `retries` from the first check unless `start-period` covers the boot; set `start-period` to the slowest boot so early failures are ignored and the first pass ends the grace period.
+A container starts in `starting` and becomes `unhealthy` after `retries` consecutive failed checks. With the defaults (30 s interval, 3 retries, `start-period` 0 s) checks at about 30, 60 and 90 s fail while the app is still booting, so the status flips before it ever served traffic. During `start-period` failures are not counted toward `retries`, and checks run every `start-interval` (5 s default, Docker Engine 25.0+) so a fast boot is noticed quickly; the first success ends the grace period, and every failure after that counts. A check slower than `timeout` is killed with SIGKILL and counts as a failure, so keep the check cheap and local. Set `start-period` to the slowest realistic boot (here 120 s or more), keep `retries` at 3 or higher to ride out one slow response, and remember that nothing in plain Docker restarts the container on `unhealthy`.
+
+**Q: Your image has a `HEALTHCHECK` and you deploy it to Amazon ECS. Does ECS act on it?**
+**Short:** No; ECS monitors only a `healthCheck` defined in the task definition, which overrides the image's, and a service replaces a task when an essential container turns UNHEALTHY.
+The ECS agent does not monitor a Docker health check that is embedded in the image but absent from the container definition, so the image's `HEALTHCHECK` is silently ignored. A `healthCheck` in the task definition (command, interval, timeout, retries, `startPeriod`) overrides it. If an essential container becomes `UNHEALTHY`, a task in a service is replaced; standalone tasks are not stopped. The service has its own `healthCheckGracePeriodSeconds`, separate from the container's `startPeriod`, during which the service ignores health checks. The command runs inside the container, so the binary it needs must be in the image. Kubernetes behaves the same way: it ignores `HEALTHCHECK` and uses only Pod probes. Treat the Dockerfile check as a local and Compose convenience, and declare health in each orchestrator's own spec.
+
+**Q: How does Compose merge `compose.yaml` with `compose.override.yaml`, and which attributes replace instead of append?**
+**Short:** Single values and `command`, `entrypoint` and `healthcheck.test` are replaced, `ports` and `expose` are concatenated, and `environment`, `labels` and `volumes` merge by key or container path.
+Compose automatically reads `compose.yaml` plus an optional `compose.override.yaml`; `-f` flags or `COMPOSE_FILE` select other files and merge them in order. Mappings merge key by key. Single-value options (`image`, `mem_limit`) are replaced. `command`, `entrypoint` and `healthcheck.test` are replaced by the last file and never appended, so an override cannot add one argument to an inherited command. `ports`, `expose`, `dns` and `tmpfs` are concatenated, which is how an override accidentally publishes an extra host port. `environment` and `labels` merge by variable or label name; `volumes`, `secrets` and `configs` merge by container `target` path, so `./local:/bar` replaces `./original:/bar`. Paths resolve relative to the first file. Run `docker compose config` to see the merged result, use `!reset` to drop an inherited value, and use `include:` to pull in another Compose application without merging.
+
+**Q: When is Docker Compose enough, and when must you move to Kubernetes?**
+**Short:** Compose suffices for dev, CI and a single host; move to Kubernetes when you need multi-node scheduling, zero-downtime rollouts, autoscaling or self-healing after node loss.
+Compose manages one project on one Docker host: it creates the network, volumes and containers, orders startup with `depends_on`, and restarts crashed containers with a restart policy. It has no scheduler across machines, no rolling update that gates traffic on readiness, no autoscaler, and nothing that reschedules containers when the host dies. That is fine for laptops, CI integration tests and small single-server deployments (Docker documents `compose.production.yaml` overrides and running against a remote host with `DOCKER_HOST`). Kubernetes becomes the right tool when availability must survive node failure, deployments must roll without downtime, or capacity must scale with load. The model carries over: a service becomes a Deployment plus Service, `healthcheck` becomes probes, a named volume becomes a PersistentVolumeClaim, and `depends_on` disappears in favour of client retries and readiness gates. Start with Compose and move when one of those requirements appears, not before.
+
+**Q: When would you use `macvlan` or `ipvlan` instead of a bridge, and what are the traps?**
+**Short:** Use macvlan or ipvlan when a container must appear as its own host on the physical LAN; traps are no host-to-container traffic, switch MAC limits, and cloud providers that block it.
+A bridge NATs containers behind the host's address and exposes them only through published ports. `macvlan` gives each container its own MAC and LAN address, which suits legacy software or network monitors that expect to sit directly on the physical network. Traps: it works only on Linux hosts (not Docker Desktop, not rootless mode), most cloud providers block it, and the switch must tolerate several MAC addresses on one port. Too many MACs can cause "VLAN spread" and IP exhaustion. A macvlan container cannot reach its own Docker host, a Linux kernel restriction; attach it to a bridge as well or add a host-side macvlan interface. `ipvlan` in L2 mode avoids the MAC problem because containers share the parent's MAC address, at the cost of every container looking like the host at layer 2. If a bridge on one host or an overlay across hosts works, prefer them. Docker creates no firewall rules for macvlan or ipvlan networks.
+
+**Q: You published a database with `-p 5432:5432` and denied the port in `ufw`, yet it is reachable from the internet. Why?**
+**Short:** Docker routes published-port traffic through the `nat` table before `ufw`'s INPUT chain sees it, so ufw rules are bypassed; bind to 127.0.0.1 or do not publish the port.
+`-p 5432:5432` binds every host address and Docker adds NAT and forwarding rules to the firewall. Those packets are rewritten and forwarded before they reach the `INPUT` and `OUTPUT` chains that `ufw` manages, so the Docker documentation notes the traffic effectively ignores the ufw configuration. Unpublished ports are blocked from outside the host by default, and containers on one user-defined bridge reach each other on every port without publishing. So the fix is to not publish a port that no outside client needs, or to bind it to loopback with `-p 127.0.0.1:5432:5432` (note: in Docker releases older than 28.0.0, hosts on the same L2 segment could still reach ports published to localhost). Do not disable Docker's iptables handling to "fix" this; that breaks container egress while leaving container ports reachable on the LAN.
+
 ---
 
 ## 13. Best Practices
@@ -506,6 +644,10 @@ Run `docker history` to list each layer's size and the instruction that created 
 - Put multi-container local stacks on a **user-defined network** (Compose does this) and gate start order on `condition: service_healthy`.
 - Treat `HEALTHCHECK` as a Docker/Compose feature only; declare **Kubernetes probes** in the Pod spec.
 - Export the BuildKit cache to the registry (`--cache-to type=registry,mode=max`) so ephemeral CI runners start warm.
+- Publish only the ports that outside clients need, and bind databases to `127.0.0.1` or do not publish them; a `ufw` rule does not stop a published port.
+- Set `start-period` on every `HEALTHCHECK` to the slowest realistic boot, and never rely on the image's check for ECS or Kubernetes.
+- Set `--memory` on containers that run outside an orchestrator, and pick a restart policy (`unless-stopped` for single-host services).
+- Run `docker compose config` after adding an override file, and keep production differences in a separate `-f` file.
 
 ---
 
