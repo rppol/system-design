@@ -251,6 +251,16 @@ Each rung down removes one more piece of software machinery from the copy's crit
 first the register, then the per-thread address computation — until, at TMA, a single
 instruction issued by a single thread moves an entire tile and reports its own completion.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD | LDS, per-XCD L2, Infinity Cache | MI300X: 64 KiB LDS per CU, 4 MiB L2 per XCD, 256 MiB Infinity Cache shared by all 8 XCDs | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| Apple | `threadgroup` and `device` address spaces, unified memory | 32 KB threadgroup memory per threadgroup; CPU and GPU share one DRAM pool, so there is no host-to-device copy | [Apple Silicon GPU Architecture](../apple_silicon_gpu_architecture/apple_silicon_gpu_architecture.md) |
+| Vulkan | `shared` (Workgroup storage), storage buffers, memory types and heaps | `maxComputeSharedMemorySize` minimum 16,384 B in core, 32,768 B under Roadmap 2026 | [Vulkan Compute Fundamentals](../vulkan_compute_fundamentals/vulkan_compute_fundamentals.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

@@ -193,6 +193,17 @@ windows are no longer isolated islands — together they form one flat **distrib
 memory (DSMEM)** address space that any block in the cluster can address into, not just its
 own slice.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD CDNA 3 | LDS (Local Data Share) | 64 KiB per CU, 32 banks (MI300X, MI325X) | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| AMD CDNA 4 | LDS | 160 KiB per CU, 64 banks (MI350X, MI355X): a swizzle derived for 32 banks must be re-derived | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| Apple | threadgroup memory | 32 KB per threadgroup; Apple documents no bank layout | [Metal Compute Programming](../metal_compute_programming/metal_compute_programming.md) |
+| Vulkan | shared memory | Most drivers report 32,768 B or 49,152 B; banks are not exposed | [Vulkan Compute Fundamentals](../vulkan_compute_fundamentals/vulkan_compute_fundamentals.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

@@ -58,6 +58,16 @@ This module covers: why 32 is the magic number, how the warp scheduler hides mem
 - **Warp-vote-guided compaction** — use `__ballot_sync`/`__activemask()` to detect at runtime whether a warp is actually uniform for a given predicate, and skip the divergent path entirely when it is (see [Warp-Level Primitives & Cooperative Groups](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md)).
 - **Persistent-thread / work-queue kernels** — launch exactly as many warps as there are physical resident slots and have each pull uniform-sized work items from a queue, decoupling "how much work" from "how divergent the control flow is."
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD | wavefront (HIP still says warp) | 64 lanes on CDNA (`gfx9`), 32 on RDNA under HIP; `warpSize` is a runtime value | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| Apple | SIMD-group | 32 lanes on all Apple GPUs (`threadExecutionWidth`) | [Apple Silicon GPU Architecture](../apple_silicon_gpu_architecture/apple_silicon_gpu_architecture.md) |
+| Vulkan | subgroup | Power of two; drivers report 1 to 128, with 32 (4,461 reports) and 64 (2,395) the most common | [Vulkan Compute Advanced and Ecosystem](../vulkan_compute_advanced_and_ecosystem/vulkan_compute_advanced_and_ecosystem.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

@@ -21,7 +21,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **MLOps** | MLOps & ML Infra: every artifact an AI feature ships (weights, adapters, prompts, MCP servers, vector indexes, eval sets, decision schemas) as a versioned, gated, rolled-out release input, plus the serving, GPU compute and operations platform that runs them. Link-only to `ml/`, `llm/`, `devops/`; owns KServe, llm-d, Kueue, Volcano and KAI Scheduler - 32 modules, 8 case studies, 4 deep-dive sub-files, 1 cross-cutting file | [mlops/CLAUDE.md](src/main/java/com/rutik/systemdesign/mlops/CLAUDE.md) |
 | **LLM** | LLM engineering guide: 55 modules, 30 case studies, 90 deep-dive sub-files (80 module + 10 cross-cutting) | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 15 case studies, 10 deep-dive sub-files | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
-| **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 8 case studies, 4 deep-dive sub-files | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
+| **CUDA** | GPGPU Programming — CUDA, ROCm, Metal, Vulkan — 36 modules, 11 case studies, 4 deep-dive sub-files, 6 cross-cutting files | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 27 modules, 6 case studies + DSA pattern playbooks sub-section (26-pattern recognition engine, interview execution playbook, AI-assisted round playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Technologies** | Per-technology deep dives (Apache Airflow, Temporal, NVIDIA Triton Inference Server, Intel OpenVINO, Envoy Proxy, HashiCorp Vault, Debezium, Apache Iceberg, Apache Flink, Trino, Cilium) — 11 modules | [technologies/CLAUDE.md](src/main/java/com/rutik/systemdesign/technologies/CLAUDE.md) |
 | **Soft Skills** | Behavioural interviewing, leadership, influence, communication, and four professional **vocabularies** (precise-technical, business/finance, leadership/org, hedging and disagreement) — 27 modules, 8 case studies. Template-adapted: §4 "Types / Levels / Modes", §5 "Models & Frameworks Diagrammed", §11 **"Frameworks, Books & Further Reading"** (the §11 retitle is load-bearing — see below) | [soft_skills/CLAUDE.md](src/main/java/com/rutik/systemdesign/soft_skills/CLAUDE.md) |
@@ -52,7 +52,7 @@ src/main/java/com/rutik/systemdesign/
 ├── mlops/            ← MLOps & ML Infra guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md
-├── cuda/             ← GPGPU / CUDA programming guide + CLAUDE.md
+├── cuda/             ← GPGPU Programming guide (CUDA, ROCm, Metal, Vulkan) + CLAUDE.md
 ├── cs_fundamentals/  ← CS Fundamentals guide + CLAUDE.md
 ├── typescript/       ← TypeScript language guide + CLAUDE.md
 ├── frontend_platform/← Browser, network-from-client, build, quality + CLAUDE.md

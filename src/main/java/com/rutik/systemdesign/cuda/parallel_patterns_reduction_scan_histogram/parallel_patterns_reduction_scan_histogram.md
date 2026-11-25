@@ -898,7 +898,10 @@ production.
   on Blackwell with TMA loads and warp specialization. Every `thrust::inclusive_scan` and `cupy.cumsum` built on that
   CCCL picks it up with no source change, which is the practical case for calling the
   library instead of keeping a hand-rolled decoupled-lookback scan in sync with each
-  architecture.
+  architecture. CCCL 3.5 (CUDA 13.5) then added run-to-run reproducibility for
+  floating-point summation in `cub::DeviceScan` through
+  `cuda::execution::determinism::run_to_run`: the same input, GPU and build give the
+  same bits, which a hand-rolled decoupled-lookback scan does not promise.
 - **cuDNN/TensorRT INT8 calibration** builds a per-channel activation histogram to
   choose a quantization threshold (percentile clipping) — a direct instance of the
   privatized-histogram pattern at calibration time, not inference time.

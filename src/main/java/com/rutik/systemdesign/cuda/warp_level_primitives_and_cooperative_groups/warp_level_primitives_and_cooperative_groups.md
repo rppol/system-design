@@ -200,6 +200,16 @@ This is the decomposition view — start from the whole kernel launch and zoom i
 tier at a time to a single lane; §5's sync-cost ladder below walks the same tiers in the
 opposite direction, from cheapest (tile) to most expensive (grid) to synchronize.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD (HIP) | `__shfl_down`, `__ballot` | Ballot returns a 64-bit mask; `_sync` variants take a 64-bit mask (ROCm 7.0+); cooperative launch via `hipLaunchCooperativeKernel` | [HIP Programming and Porting](../hip_programming_and_porting/hip_programming_and_porting.md) |
+| Apple (Metal) | `simd_shuffle_down`, `simd_sum`, `simd_ballot` | 32-lane SIMD-group; `simd_vote` has 64-bit storage; no cooperative grid launch | [Metal Compute Programming](../metal_compute_programming/metal_compute_programming.md) |
+| Vulkan | `subgroupShuffleDown`, `subgroupAdd`, `subgroupBallot` | Ballot returns `uvec4` (128 bits); subgroup width is device-defined | [Vulkan Compute Advanced and Ecosystem](../vulkan_compute_advanced_and_ecosystem/vulkan_compute_advanced_and_ecosystem.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

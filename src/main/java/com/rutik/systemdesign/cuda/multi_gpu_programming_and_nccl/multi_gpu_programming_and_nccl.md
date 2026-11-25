@@ -282,6 +282,15 @@ The collectives are identical, but the traffic pattern and latency sensitivity d
 
 This is why inference engines (vLLM, TensorRT-LLM) are far more sensitive to NVLink/NVSwitch topology than training jobs of similar GPU count — a tensor-parallel forward pass pays the all-reduce's *latency*, not just its bandwidth, on every single token.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD | RCCL over xGMI (Infinity Fabric) links | RCCL 2.32.3 keeps the NCCL API; MI300X has 7 peer links at 64 GB/s per direction (128 GB/s bidirectional), 448 GB/s per direction in an 8-GPU collective | [Multi-GPU on AMD: RCCL and xGMI](../multi_gpu_on_amd_rccl_and_xgmi/multi_gpu_on_amd_rccl_and_xgmi.md) |
+| Apple | one integrated GPU per chip | No multi-GPU fabric and no NCCL counterpart in Metal; scale-up is a bigger chip (M5 Ultra: up to 80 GPU cores, 1.2 TB/s) | [Apple Silicon GPU Architecture](../apple_silicon_gpu_architecture/apple_silicon_gpu_architecture.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

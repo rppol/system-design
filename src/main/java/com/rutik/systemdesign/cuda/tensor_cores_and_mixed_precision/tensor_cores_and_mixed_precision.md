@@ -154,6 +154,16 @@ Three alignment levels are easy to conflate — what the library *requires*, wha
 | LLM training at very large scale (H100+) | FP8 via Transformer Engine (mixed E4M3/E5M2 per-tensor) | Automatic per-layer precision/scale selection; 2x throughput over BF16 with comparable convergence |
 | Numerically sensitive reductions (softmax, layernorm, loss) | FP32 (kept out of autocast) | These ops are cheap in FLOPs but precision-sensitive; `torch.autocast` already excludes them by default |
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD | Matrix Cores, `v_mfma_*` (MFMA) instructions | MI300X: 1,216 Matrix Cores, 1,307.4 TFLOPS dense FP16; MI355X: 2.5 PF dense FP16 plus MXFP8, MXFP6 and MXFP4 | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| Apple | `simdgroup_matrix`, Metal 4 `tensor_ops::matmul2d` | 8x8 tiles per SIMD-group in `half`, `bfloat` (MSL 3.1+) or `float`; Apple publishes no FLOPS figure | [Metal Compute Programming](../metal_compute_programming/metal_compute_programming.md) |
+| Vulkan | cooperative matrix (`VK_KHR_cooperative_matrix`) | Supported shapes and types are reported per device; required by the Roadmap 2026 milestone | [Vulkan Compute Advanced and Ecosystem](../vulkan_compute_advanced_and_ecosystem/vulkan_compute_advanced_and_ecosystem.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

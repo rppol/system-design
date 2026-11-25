@@ -183,6 +183,17 @@ simultaneously — see the worked math in §6:
 | Shared memory | configurable carveout of the unified L1/shared pool: 164 KB/SM on A100 (8.0), 228 KB/SM on H100 (9.0) and B200 (10.0) | `__shared__` arrays, tile buffers for GEMM/reduction |
 | Thread/block count | 2048 resident threads/SM and 32 resident blocks/SM on 8.0/9.0/10.0 (1536 threads and 16-24 blocks on 8.6/8.9/12.x), 1024 threads/block everywhere | Grid/block launch configuration |
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD CDNA 3 | Compute Unit (CU), grouped into 8 XCD chiplets | MI300X: 304 CUs of 4 SIMDs x 16 lanes; 4 MiB L2 per XCD; 256 MiB Infinity Cache; 192 GB HBM3 at 5.3 TB/s | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| AMD CDNA 4 | Compute Unit (CU) | MI355X: 256 CUs; 160 KiB LDS per CU; 288 GB HBM3E at 8 TB/s | [AMD GPU Architecture](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) |
+| Apple | GPU core (integrated in the SoC) | M5 Max: up to 40 GPU cores and 614 GB/s unified memory; Apple publishes no per-core ALU, register-file or cache size | [Apple Silicon GPU Architecture](../apple_silicon_gpu_architecture/apple_silicon_gpu_architecture.md) |
+| Vulkan | physical device | No core compute-unit count; the kernel author reads `VkPhysicalDeviceLimits` instead | [Vulkan Compute Fundamentals](../vulkan_compute_fundamentals/vulkan_compute_fundamentals.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

@@ -19,7 +19,7 @@ function deckLen() {
 const estMinutes = (n) => Math.max(1, Math.round(n * 0.5));   // ~30s/question, matches the original 10q/~5min ratio
 const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
-  cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud", fintech: "Payments & Trading",
+  cs_fundamentals: "CS Fundamentals", cuda: "GPGPU Programming", database: "Databases", devops: "DevOps & Cloud", fintech: "Payments & Trading",
   go: "Go", hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", mlops: "MLOps & ML Infra", python: "Python", rust: "Rust", fastapi: "FastAPI", spring: "Spring",
   technologies: "Technologies", soft_skills: "Soft Skills & Leadership",
@@ -136,6 +136,8 @@ const ACRONYMS = new Map(Object.entries({
   rlhf: "RLHF", dnn: "DNN", faas: "FaaS", iac: "IaC", oauth: "OAuth",
   owasp: "OWASP", otel: "OTel", quic: "QUIC", sse: "SSE", stomp: "STOMP",
   sycl: "SYCL", hip: "HIP", vllm: "vLLM", dsa: "DSA", dsls: "DSLs",
+  rocm: "ROCm", msl: "MSL", mlx: "MLX", lds: "LDS", mfma: "MFMA", spirv: "SPIR-V",
+  xgmi: "xGMI", rccl: "RCCL", cdna: "CDNA", rdna: "RDNA",
   junit: "JUnit", mysql: "MySQL", oci: "OCI", idp: "IdP", crds: "CRDs",
   url: "URL", uri: "URI", os: "OS", io: "I/O", id: "ID", ids: "IDs",
   lcel: "LCEL", ab: "A/B", saas: "SaaS", paas: "PaaS", iaas: "IaaS",
@@ -353,7 +355,11 @@ const STUDY_ORDER = {
     "cuda/memory_coalescing_and_access_patterns","cuda/shared_memory_and_bank_conflicts","cuda/occupancy_and_launch_configuration","cuda/synchronization_and_atomics","cuda/parallel_patterns_reduction_scan_histogram","cuda/warp_level_primitives_and_cooperative_groups",
     "cuda/streams_events_and_concurrency","cuda/cuda_graphs","cuda/multi_gpu_programming_and_nccl","cuda/dynamic_parallelism_and_advanced_kernels",
     "cuda/tensor_cores_and_mixed_precision","cuda/cuda_math_and_dnn_libraries","cuda/python_gpu_ecosystem","cuda/triton_and_kernel_dsls",
-    "cuda/profiling_and_performance_analysis","cuda/debugging_correctness_and_numerics","cuda/gpu_portability_hip_sycl_and_beyond",
+    "cuda/profiling_and_performance_analysis","cuda/debugging_correctness_and_numerics",
+    "cuda/amd_gpu_architecture_cdna_and_rdna","cuda/hip_programming_and_porting","cuda/rocm_libraries_and_kernel_dsls","cuda/rocm_profiling_and_debugging","cuda/multi_gpu_on_amd_rccl_and_xgmi",
+    "cuda/apple_silicon_gpu_architecture","cuda/metal_compute_programming","cuda/metal_performance_shaders_mlx_and_pytorch_mps","cuda/metal_profiling_and_debugging",
+    "cuda/vulkan_compute_fundamentals","cuda/vulkan_compute_advanced_and_ecosystem",
+    "cuda/cross_vendor_gpu_concept_map","cuda/gpu_portability_hip_sycl_and_beyond",
   ],
   database: [
     "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
@@ -6090,6 +6096,7 @@ const LANG_ALIAS = {
   jsonc: "json", docker: "dockerfile", props: "properties",
   cuda: "cpp", cu: "cpp", cuh: "cpp", c: "cpp", cc: "cpp", cxx: "cpp",
   "c++": "cpp", h: "cpp", hpp: "cpp", ptx: "cpp",
+  hip: "cpp", metal: "cpp", msl: "cpp", glsl: "cpp", hlsl: "cpp", slang: "cpp",
 };
 const langKey = (t) => { const k = (t || "").trim().toLowerCase(); return LANG_ALIAS[k] || k; };
 const isHighlightable = (t) => !!LANG_DEFS[langKey(t)];

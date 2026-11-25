@@ -6,7 +6,7 @@ Every kernel, memory-hierarchy rule, and performance-engineering trick in this s
 
 This module surveys that layer from the CUDA programmer's vantage point: **HIP** (AMD's near-1:1 CUDA clone, translated mechanically by `hipify`), **SYCL/oneAPI** (Intel's open, single-source C++ standard targeting CPU/GPU/FPGA), **Metal** (Apple's proprietary shading language and compute API), **WebGPU/WGSL** (the browser's portable GPU API), and **OpenCL** (the aging, verbose, but still-portable ancestor of all of them). It closes with the honest tradeoff every portability decision reduces to: a portability layer *usually* leaves some fraction of peak performance on the table and lags CUDA's newest hardware features by a generation or more — so the real engineering question is never "which API is most portable" but "how much peak am I willing to trade for how much reach, and can I keep a fast path for the vendor that matters most."
 
-This is the **one** cross-vendor module in the CUDA section (see [`../README.md`](../README.md) §3) — everywhere else in this section, "GPU" implicitly means "NVIDIA GPU." Foundational hardware concepts this module assumes: [GPU Hardware Architecture](../gpu_hardware_architecture/gpu_hardware_architecture.md), [CUDA Programming Model & Kernels](../cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md), and [Warps & SIMT Execution](../warps_and_simt_execution/warps_and_simt_execution.md) (whose warp-vs-wavefront distinction is central to §10's BROKEN→FIX).
+This is the cross-vendor **survey** module of the section. Each major non-NVIDIA stack now has its own phase: AMD ROCm and HIP (Phase 7), Apple Silicon and Metal (Phase 8) and Vulkan compute (Phase 9), with one shared vocabulary in the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md) (Phase 10, read it before this module). This module stays at the survey level: SYCL, OpenCL, WebGPU, CUDA-without-translation tools, and the judgment of how much peak to trade for reach. Foundational hardware concepts this module assumes: [GPU Hardware Architecture](../gpu_hardware_architecture/gpu_hardware_architecture.md), [CUDA Programming Model & Kernels](../cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md), and [Warps & SIMT Execution](../warps_and_simt_execution/warps_and_simt_execution.md) (whose warp-vs-wavefront distinction is central to §10's BROKEN→FIX).
 
 ---
 
@@ -64,44 +64,7 @@ each arrived later specifically to close a reach gap CUDA never had to solve.
 
 ### 4.1 HIP / ROCm (AMD) — the CUDA clone
 
-AMD's **ROCm** (Radeon Open Compute) platform — currently ROCm 7.14.0, built on AMD's "TheRock" modular release system — is the CUDA-equivalent software stack; **HIP** (Heterogeneous-computing Interface for Portability) is its C++ programming model, engineered to mirror CUDA's runtime API almost function-for-function. `hipMalloc`/`hipMemcpy`/`hipFree` mirror `cudaMalloc`/`cudaMemcpy`/`cudaFree`; kernel launch uses `hipLaunchKernelGGL(kernel, gridDim, blockDim, sharedMem, stream, args...)` as the portable equivalent of CUDA's `<<<grid, block>>>` syntax (HIP also supports the triple-chevron syntax directly when compiled with `hipcc`). Because the mapping is so direct, **HIP source compiles on NVIDIA GPUs too** (HIP's NVIDIA backend is a thin wrapper over the CUDA runtime) — so a single HIP codebase can target both vendors from one source tree, which is the opposite direction of `hipify` (CUDA → HIP) but equally real.
-
-`hipify-perl` and `hipify-clang` mechanically translate CUDA source into HIP source: `cudaMalloc` becomes `hipMalloc`, `cudaMemcpyDeviceToHost` becomes `hipMemcpyDeviceToHost`, `<<<...>>>` launches are rewritten (optionally into the `hipLaunchKernelGGL` macro form), and most straightforward CUDA C++ kernels port with a >90% automated translation rate — the remainder needs hand-fixing for CUDA-only library calls (cuBLAS/cuDNN calls need their rocBLAS/MIOpen equivalents) or intrinsics without a direct HIP mapping.
-
-**The idea behind it.** `manual_lines = total_lines x (1 - automation_rate)` says: "a translation rate is a claim about the *residue*, and the residue is what your engineers actually spend the quarter on."
-
-A 90% rate sounds like the job is nearly done. Inverted, it says one line in ten still needs a human — and because the residue is concentrated in library calls and intrinsics rather than spread evenly, those lines are the hardest ones in the file, not average ones.
-
-| Symbol | What it is |
-|--------|------------|
-| `total_lines` | Size of the CUDA codebase being ported |
-| `automation_rate` | Fraction `hipify` rewrites unaided — **>90%** for straightforward kernels, lower for library-heavy code |
-| `1 - automation_rate` | The residue fraction. What the headline number hides |
-| `manual_lines` | Lines needing hand-porting: cuBLAS/cuDNN -> rocBLAS/MIOpen, unmapped intrinsics, hardcoded warp constants |
-| *(not in the formula)* | **Tuning.** `hipify` reports translation, never performance — §14's 31%-of-peak result was 100% translated |
-
-**Walk one example.** Apply it to a 10,000-line CUDA kernel library, and watch the residue move:
-
-```
-  automation      residue        manual lines     roughly
-  rate            fraction       (of 10,000)      equivalent to
-  ----------      --------       ------------     ---------------------------
-    90%             10%             1,000         a full rewrite of 1 in 10 lines
-    95%              5%               500         half that
-    99%              1%               100         a day or two of cleanup
-
-  Going 90% -> 95% halves the manual work; 95% -> 99% cuts it by another 5x.
-  This is why hipify-clang (real AST parsing) is worth preferring over
-  hipify-perl (text patterns): the difference between the tools shows up
-  entirely in this residue, not in the headline rate.
-
-  And the number the formula does NOT produce:
-    manual lines to make it CORRECT   =  1,000   (hipify's residue)
-    additional work to make it FAST   =  §14's "~1 additional week"
-                                          -- 0 lines of which hipify measures
-```
-
-That last contrast is the honest reading of any translation-rate claim. `hipify` optimizes for "compiles and runs," and it is genuinely excellent at that — §14's port needed **zero** manual edits to compile. The rate says nothing whatsoever about the 31%-of-peak throughput that same port delivered, because performance is not a translation property.
+AMD's **ROCm** platform — currently ROCm Core SDK 10.2.0 (released 2026-11-18, shipping HIP 7.17.0) — is the CUDA-equivalent software stack, and **HIP** (Heterogeneous-computing Interface for Portability) is its C++ programming model, built to mirror CUDA's runtime API almost function-for-function (`hipMalloc`/`hipMemcpy`, `hipLaunchKernelGGL` or the triple-chevron launch). That is why `hipify-clang` and `hipify-perl` rewrite most straightforward CUDA kernels mechanically, at a >90% automated-translation rate on simple code; the residue that still needs a human sits in library calls (cuBLAS/cuDNN to hipBLAS/rocBLAS/MIOpen) and unmapped intrinsics, so it is the hardest 10%, not an average 10%. HIP also builds for NVIDIA GPUs through a thin wrapper over the CUDA runtime, so one HIP source tree can serve both vendors. What `hipify` never measures is tuning: §14's port needed zero manual edits to compile and still ran at 31% of peak. The AMD material now has its own phase: the hardware constants (wave64 on CDNA, LDS size and banks, MFMA, XCDs) in [AMD GPU Architecture: CDNA and RDNA](../amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md); the API map, hipify and the wave64 porting traps in [HIP Programming and Porting](../hip_programming_and_porting/hip_programming_and_porting.md); libraries, Composable Kernel and Triton on AMD in [ROCm Libraries and Kernel DSLs](../rocm_libraries_and_kernel_dsls/rocm_libraries_and_kernel_dsls.md); the profiler loop in [ROCm Profiling and Debugging](../rocm_profiling_and_debugging/rocm_profiling_and_debugging.md); and RCCL over xGMI in [Multi-GPU on AMD: RCCL and xGMI](../multi_gpu_on_amd_rccl_and_xgmi/multi_gpu_on_amd_rccl_and_xgmi.md).
 
 ### 4.2 SYCL / oneAPI (Intel, open standard) — single-source, multi-backend C++
 
@@ -113,7 +76,7 @@ Intel also ships a **migration tool** for the CUDA-to-SYCL direction — the **D
 
 ### 4.3 Metal (Apple) — proprietary, ecosystem-scoped
 
-**Metal** is Apple's low-level graphics-and-compute API, with **MSL** (Metal Shading Language, a C++14-based kernel language) as its device-code language. It targets exactly one ecosystem — macOS, iOS, iPadOS — but every GPU Apple ships is programmable through it, including the M-series unified-memory architecture where CPU and GPU share the same physical memory pool (no explicit host↔device copy is needed the way CUDA/HIP require, which is a genuine architectural advantage for certain workloads, not just an API difference). Metal is not portable to any non-Apple hardware; frameworks that need to "reach" macOS/iOS (PyTorch's MPS backend, ONNX Runtime's CoreML/Metal execution providers) implement a Metal backend specifically for that purpose.
+**Metal** is Apple's graphics-and-compute API, with **MSL** (Metal Shading Language) as its kernel language. It targets only Apple platforms, but every GPU Apple ships is programmable through it, including the M-series unified-memory design where CPU and GPU share one physical memory pool, so there is no explicit host-to-device copy the way CUDA and HIP require. Metal does not run on non-Apple hardware; frameworks that need Apple reach (PyTorch's MPS backend, MLX, ONNX Runtime's Core ML provider) implement a Metal backend for it. Apple now has its own phase: [Apple Silicon GPU Architecture](../apple_silicon_gpu_architecture/apple_silicon_gpu_architecture.md) for SIMD-groups, threadgroup memory and unified memory; [Metal Compute Programming](../metal_compute_programming/metal_compute_programming.md) for MSL, command buffers and `simdgroup_matrix`; [Metal Performance Shaders, MLX and PyTorch MPS](../metal_performance_shaders_mlx_and_pytorch_mps/metal_performance_shaders_mlx_and_pytorch_mps.md) for the library layer; and [Metal Profiling and Debugging](../metal_profiling_and_debugging/metal_profiling_and_debugging.md) for Xcode's GPU tools. Vulkan compute, the cross-vendor native API this survey does not cover, has its own phase starting at [Vulkan Compute Fundamentals](../vulkan_compute_fundamentals/vulkan_compute_fundamentals.md).
 
 ### 4.4 WebGPU / WGSL — the browser's portable GPU API
 
@@ -605,7 +568,7 @@ The `__kernel`/`__global` qualifiers and `get_global_id(0)` indexing are directl
 
 ### Concrete numbers to memorize
 
-- **CUDA warp width: 32.** **AMD wavefront width: 64** on CDNA (data-center: MI200/MI300/MI350 series — MI210, MI300X, MI300A, MI325X, MI350X, MI355X); RDNA (consumer) supports both wave64 and wave32 modes. This single constant is the root cause of §10's BROKEN→FIX.
+- **CUDA warp width: 32.** **AMD wavefront width: 64** on CDNA (data-center: MI200/MI300/MI350 series — MI210, MI300X, MI300A, MI325X, MI350X, MI355X); RDNA (consumer) hardware supports both wave64 and wave32 modes, and HIP runs RDNA as wave32. This single constant is the root cause of §10's BROKEN→FIX.
 - **`hipify-clang` automated translation rate: commonly >90%** for straightforward CUDA C++ kernels; library calls (cuBLAS/cuDNN → rocBLAS/MIOpen) and CUDA-only intrinsics are the typical remainder needing manual porting.
 - **Portability tax vs. a hand-tuned native kernel: commonly cited in the 5-20% range, sometimes more** for SYCL/OpenCL against a hand-tuned CUDA or native HIP kernel on the same hardware — the exact number is workload- and kernel-dependent, not a fixed constant.
 - **Feature lag: roughly one hardware generation.** Portable layers typically gain support for a new vendor feature (e.g. a new Tensor-Core instruction shape, TMA-style async copy) only after CUDA has already shipped and stabilized it, because the abstraction has to work across every supported backend, not just the newest one.

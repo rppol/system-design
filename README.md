@@ -1239,9 +1239,9 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 
 ---
 
-### GPGPU & CUDA Programming — Senior Engineer & Interview Prep Guide
+### GPGPU Programming — CUDA, ROCm, Metal, Vulkan
 
-A comprehensive, senior-engineer-level guide to **general-purpose GPU programming with CUDA**, from the **kernel author's** viewpoint — from the SIMT execution model and GPU hardware architecture through the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews (coalescing, shared-memory tiling, occupancy, warp primitives), advanced execution (streams, CUDA graphs, multi-GPU/NCCL), the library and Tensor-Core ecosystem, and the profiling/debugging/portability toolchain. 24 modules across 6 phases + 8 principal case studies + 4 deep-dive sub-files. Code is dual CUDA C++ + Python (CuPy/Numba/Triton/PyTorch). Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, and `devops/`.
+A comprehensive, senior-engineer-level guide to **general-purpose GPU programming**, from the **kernel author's** viewpoint — NVIDIA CUDA as the core path (the SIMT execution model and GPU hardware architecture, the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews, advanced execution, the library and Tensor-Core ecosystem, profiling and debugging), then AMD ROCm/HIP, Apple Silicon and Metal, and Vulkan compute at the same altitude, joined by a cross-vendor concept map and portability survey. 36 modules across 10 phases + 11 principal case studies + 4 deep-dive sub-files + 6 cross-cutting files. Code is CUDA C++ + Python (CuPy/Numba/Triton/PyTorch) in Phases 1-6, HIP C++ in Phase 7, MSL + Swift/MLX in Phase 8, GLSL/Slang in Phase 9. Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, `mlops/` and `devops/`.
 
 #### Phase 1 — GPU Foundations
 | Module | Key Concepts |
@@ -1284,12 +1284,40 @@ A comprehensive, senior-engineer-level guide to **general-purpose GPU programmin
 | [Python GPU Ecosystem](src/main/java/com/rutik/systemdesign/cuda/python_gpu_ecosystem/python_gpu_ecosystem.md) | CuPy, Numba CUDA, PyCUDA, PyTorch custom CUDA/C++ extensions, `torch.compile`/Inductor, DLPack |
 | [Triton & Kernel DSLs](src/main/java/com/rutik/systemdesign/cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md) | Triton programming model, block-level abstraction, autotuning, Triton vs CUDA C++, where Triton wins/loses |
 
-#### Phase 6 — Profiling, Correctness & Portability
+#### Phase 6 — Profiling & Correctness
 | Module | Key Concepts |
 |--------|-------------|
 | [Profiling & Performance Analysis](src/main/java/com/rutik/systemdesign/cuda/profiling_and_performance_analysis/profiling_and_performance_analysis.md) | Nsight Systems vs Compute, roofline, achieved occupancy, DRAM throughput, warp-stall reasons, guided analysis |
 | [Debugging, Correctness & Numerics](src/main/java/com/rutik/systemdesign/cuda/debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) | cuda-gdb, compute-sanitizer (memcheck/racecheck/synccheck/initcheck), error macros, FP/FMA, determinism, fast-math |
-| [GPU Portability: HIP, SYCL & Beyond](src/main/java/com/rutik/systemdesign/cuda/gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md) | HIP/ROCm, SYCL/oneAPI, Metal, WebGPU, legacy OpenCL, `hipify`, portability-vs-peak-performance tradeoff |
+
+#### Phase 7 — AMD ROCm & HIP
+| Module | Key Concepts |
+|--------|-------------|
+| [AMD GPU Architecture: CDNA and RDNA](src/main/java/com/rutik/systemdesign/cuda/amd_gpu_architecture_cdna_and_rdna/amd_gpu_architecture_cdna_and_rdna.md) | MI300X/MI325X/MI355X, RDNA 4, XCD chiplets, wave64 vs wave32, CU/SIMD layout, LDS, MFMA, Infinity Cache, `gfx` targets |
+| [HIP Programming and Porting](src/main/java/com/rutik/systemdesign/cuda/hip_programming_and_porting/hip_programming_and_porting.md) | HIP runtime API, `amdclang++`/hipcc, hipify-clang vs hipify-perl, `warpSize`-64 traps, 64-bit ballots, `--offload-arch`, HIP on NVIDIA |
+| [ROCm Libraries and Kernel DSLs](src/main/java/com/rutik/systemdesign/cuda/rocm_libraries_and_kernel_dsls/rocm_libraries_and_kernel_dsls.md) | hipBLASLt, rocBLAS, MIOpen, rocPRIM/hipCUB, rocWMMA, Composable Kernel, AITER, Triton on AMD, PyTorch on ROCm |
+| [ROCm Profiling and Debugging](src/main/java/com/rutik/systemdesign/cuda/rocm_profiling_and_debugging/rocm_profiling_and_debugging.md) | rocprofv3, rocprof-compute roofline, ROCm Systems Profiler, rocgdb, amd-smi, counters vs Nsight |
+| [Multi-GPU on AMD: RCCL and xGMI](src/main/java/com/rutik/systemdesign/cuda/multi_gpu_on_amd_rccl_and_xgmi/multi_gpu_on_amd_rccl_and_xgmi.md) | RCCL, xGMI full mesh, per-direction link bandwidth, rocSHMEM, peer access, partition modes |
+
+#### Phase 8 — Apple Silicon & Metal
+| Module | Key Concepts |
+|--------|-------------|
+| [Apple Silicon GPU Architecture](src/main/java/com/rutik/systemdesign/cuda/apple_silicon_gpu_architecture/apple_silicon_gpu_architecture.md) | Unified memory, TBDR, 32-wide SIMD-groups, threadgroup memory, Dynamic Caching, GPU vs Neural Engine |
+| [Metal Compute Programming](src/main/java/com/rutik/systemdesign/cuda/metal_compute_programming/metal_compute_programming.md) | MSL, command queues/buffers/encoders, pipelines, SIMD-group functions, `simdgroup_matrix`, Metal 4 tensors, storage modes |
+| [Metal Performance Shaders, MLX and PyTorch MPS](src/main/java/com/rutik/systemdesign/cuda/metal_performance_shaders_mlx_and_pytorch_mps/metal_performance_shaders_mlx_and_pytorch_mps.md) | MPS, MPSGraph, MLX and `mx.fast.metal_kernel`, PyTorch MPS backend, Core ML hand-off |
+| [Metal Profiling and Debugging](src/main/java/com/rutik/systemdesign/cuda/metal_profiling_and_debugging/metal_profiling_and_debugging.md) | Xcode GPU capture, Metal System Trace, shader profiler and cost graph, API and shader validation |
+
+#### Phase 9 — Vulkan Compute
+| Module | Key Concepts |
+|--------|-------------|
+| [Vulkan Compute Fundamentals](src/main/java/com/rutik/systemdesign/cuda/vulkan_compute_fundamentals/vulkan_compute_fundamentals.md) | Devices and queues, compute pipelines, descriptor sets, push constants, memory types, barriers, timeline semaphores, SPIR-V |
+| [Vulkan Compute Advanced and Ecosystem](src/main/java/com/rutik/systemdesign/cuda/vulkan_compute_advanced_and_ecosystem/vulkan_compute_advanced_and_ecosystem.md) | Subgroups, cooperative matrix, integer dot product, buffer device address, MoltenVK, llama.cpp/IREE/ncnn, RenderDoc |
+
+#### Phase 10 — Cross-Vendor
+| Module | Key Concepts |
+|--------|-------------|
+| [Cross-Vendor GPU Concept Map](src/main/java/com/rutik/systemdesign/cuda/cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md) | warp / wavefront / SIMD-group / subgroup; shared / LDS / threadgroup / workgroup memory; matrix units; queues; scopes |
+| [GPU Portability: HIP, SYCL & Beyond](src/main/java/com/rutik/systemdesign/cuda/gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md) | Portability survey: SYCL/oneAPI, OpenCL, WebGPU, ZLUDA/SCALE/chipStar, `hipify`, portability-vs-peak-performance tradeoff |
 
 #### CUDA Case Studies
 | Case Study | What It Covers |
@@ -1302,8 +1330,11 @@ A comprehensive, senior-engineer-level guide to **general-purpose GPU programmin
 | [Optimize LLM Inference Kernels](src/main/java/com/rutik/systemdesign/cuda/case_studies/optimize_llm_inference_kernels.md) | GEMV/attention/KV-cache kernels, INT8/FP8 matmul, fusion — the kernel-level twin of the LLM inference platform |
 | [Write a Blackwell GEMM with the CuTe DSL](src/main/java/com/rutik/systemdesign/cuda/case_studies/write_a_blackwell_gemm_with_cute_dsl.md) | TMA descriptors, `tcgen05` and TMEM, the producer/consumer warp split, why a naive Hopper port leaves the machine idle |
 | [Optimize MoE Expert-Parallel Dispatch](src/main/java/com/rutik/systemdesign/cuda/case_studies/optimize_moe_expert_parallel_dispatch.md) | All-to-all as the bottleneck under dynamic routing, token permutation kernels, capacity-factor padding, overlapping dispatch with expert compute |
+| [Port an LLM Kernel to AMD MI300X](src/main/java/com/rutik/systemdesign/cuda/case_studies/port_an_llm_kernel_to_amd_mi300.md) | hipify, the wave64 retune, the 64 KB LDS budget, MFMA via Composable Kernel or Triton, the rocprof-compute loop |
+| [Run LLM Inference on Apple Silicon](src/main/java/com/rutik/systemdesign/cuda/case_studies/run_llm_inference_on_apple_silicon.md) | MLX and a custom Metal kernel on M-series: the unified-memory budget, 4-bit quantized matmul, the SIMD-group matrix path |
+| [Ship One Kernel Across NVIDIA, AMD and Apple](src/main/java/com/rutik/systemdesign/cuda/case_studies/ship_one_kernel_across_nvidia_amd_and_apple.md) | One fused kernel via Triton, HIP and MSL; a per-vendor correctness and performance matrix; multi-vendor CI |
 
-See the [CUDA Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md) for the full 6-phase learning path, the Full/Interview learning paths, the GPU architecture & compute-capability reference, the cross-reference map, and the build-status tracker.
+See the [GPGPU Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md) for the full 10-phase learning path, the Full/Interview learning paths, the GPU architecture & compute-capability reference, the cross-reference map, and the build-status tracker.
 
 ---
 

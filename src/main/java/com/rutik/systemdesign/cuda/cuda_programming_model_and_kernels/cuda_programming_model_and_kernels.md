@@ -163,6 +163,16 @@ helpers are reachable only from other device code, and `__host__ __device__`
 compiles once per side so one source serves both the CPU reference path and
 the kernel.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD (HIP) | grid / block / thread | Same `<<<grid, block>>>` launch (or `hipLaunchKernelGGL`); typically 1024 threads per block | [HIP Programming and Porting](../hip_programming_and_porting/hip_programming_and_porting.md) |
+| Apple (Metal) | grid / threadgroup / thread | 1024 threads per threadgroup on Apple4 and later; the pipeline's own limit can be lower | [Metal Compute Programming](../metal_compute_programming/metal_compute_programming.md) |
+| Vulkan | dispatch / workgroup / invocation | `vkCmdDispatch`; required minimum 128 invocations per workgroup in core, 256 under Vulkan 1.4 / Roadmap 2022 | [Vulkan Compute Fundamentals](../vulkan_compute_fundamentals/vulkan_compute_fundamentals.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

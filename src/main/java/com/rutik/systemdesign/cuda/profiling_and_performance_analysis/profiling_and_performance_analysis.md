@@ -181,6 +181,16 @@ warp-stall diagnosis, not more coalescing and not Tensor Cores.
   — wrapping an existing binary or Python entry point rather than instrumenting source, useful
   for a first pass over an unfamiliar codebase.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD | `rocprofv3`, `rocprof-compute`, ROCm Systems Profiler | ROCm 10.2.0 ships ROCprofiler-SDK 1.4.2, ROCm Compute Profiler 3.10.0 (the Nsight Compute role) and ROCm Systems Profiler 1.10.0 (the Nsight Systems role) | [ROCm Profiling and Debugging](../rocm_profiling_and_debugging/rocm_profiling_and_debugging.md) |
+| Apple | Xcode Metal debugger, Instruments Metal System Trace | The shader cost graph and heat maps need an M3 or A17 Pro GPU or later | [Metal Profiling and Debugging](../metal_profiling_and_debugging/metal_profiling_and_debugging.md) |
+| Vulkan | RenderDoc capture plus vendor profilers | RenderDoc v1.47; Radeon GPU Profiler v2.7.1; Nsight Graphics on NVIDIA | [Vulkan Compute Advanced and Ecosystem](../vulkan_compute_advanced_and_ecosystem/vulkan_compute_advanced_and_ecosystem.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams

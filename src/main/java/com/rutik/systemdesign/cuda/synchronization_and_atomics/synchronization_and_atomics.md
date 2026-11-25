@@ -170,6 +170,16 @@ warp-aggregation) beats a faster atomic every time.
   correct under contention, but every failed CAS is wasted work, so this is
   still subject to the same contention cost as any other atomic.
 
+### On other vendors
+
+| Vendor | Term | Key number | Read next |
+|---|---|---|---|
+| AMD (HIP) | `__syncthreads()`, `__threadfence*()`, `atomicAdd_system` | Same barrier and fence names as CUDA, including a system scope | [HIP Programming and Porting](../hip_programming_and_porting/hip_programming_and_porting.md) |
+| Apple (Metal) | `threadgroup_barrier`, `atomic_*_explicit` | Acquire/release orders on atomics from MSL 4.1; the widest scope is device, with no system scope | [Metal Compute Programming](../metal_compute_programming/metal_compute_programming.md) |
+| Vulkan | `barrier()` + `memoryBarrierShared()`, scoped atomics | Vulkan memory model core since 1.2; no grid-wide sync in core, so split the work into two dispatches | [Vulkan Compute Fundamentals](../vulkan_compute_fundamentals/vulkan_compute_fundamentals.md) |
+
+The full vocabulary and numbers table across all four stacks is the [Cross-Vendor GPU Concept Map](../cross_vendor_gpu_concept_map/cross_vendor_gpu_concept_map.md).
+
 ---
 
 ## 5. Architecture Diagrams
