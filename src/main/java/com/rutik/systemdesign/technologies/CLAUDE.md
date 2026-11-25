@@ -121,6 +121,10 @@ say so on first mention.
    render "Debezium **Cdc**" in the reader nav, the command palette, `fileLabel()` and the
    Study tree. Do NOT fix that by adding `cdc` to `ACRONYMS` — that edits game code to
    rescue a naming choice and title-cases `cdc` in every unrelated file label.
+   `ray_distributed_computing` (2026-11-25) applies the same mechanic: Anyscale is the
+   corporate sponsor, not the engineering name, and a bare `ray` is a single coined token
+   (the repo, docs domain and package are all `ray`) that would also be the section's first
+   one-token slug.
 
 ---
 
@@ -128,7 +132,9 @@ say so on first mention.
 
 Listed in `STUDY_ORDER.technologies` order, which groups modules by domain:
 
-1. **Orchestration pair** - `apache_airflow`, `temporal_durable_execution`.
+1. **Orchestration group** - `apache_airflow`, `temporal_durable_execution`, `ray_distributed_computing`.
+   The first two are the contrast pair; Ray is the compute runtime they launch, placed after
+   them so its §1 and §9 can draw the line against both.
 2. **Serving pair** - `nvidia_triton_inference_server`, `intel_openvino`.
 3. **Traffic and data-plane pair** - `envoy_proxy`, `cilium`. Both earlier pairs *run your
    workload*; these two *move traffic to* it. Cilium sits next to Envoy because its L7
@@ -146,6 +152,7 @@ A new module goes into the group it belongs to, not at the end. Do not append bl
 |-----|----------|-------------|-----------------|
 | [`apache_airflow/`](apache_airflow/apache_airflow.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.2 |
 | [`temporal_durable_execution/`](temporal_durable_execution/temporal_durable_execution.md) | Durable execution | Two-plane split (Service never runs your code), event history + replay determinism, activities and the four timeouts, signals/queries/updates, Continue-As-New and the 51,200-event limit, versioning via patching vs Pinned Worker Deployments, shard immutability | Temporal Server 1.32.1 |
+| [`ray_distributed_computing/`](ray_distributed_computing/ray_distributed_computing.md) | Distributed Python compute / AI runtime | Tasks/actors/objects and ownership, GCS and its fault tolerance, object store and spilling, placement groups, KubeRay, Ray Data/Train/Serve/LLM, autoscaler, token auth | Ray 2.60.1, KubeRay v1.7.3 |
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
 | [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.4.1 |
 | [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.40.0 |
@@ -565,6 +572,19 @@ existing `STUDY_ORDER` position by directory - **no `STUDY_ORDER` change is need
 when adding a sub-file, only when adding a new top-level module directory. Add each new
 sub-file to this table and to the `README.md` `<!-- study-paths -->` block in the same
 commit.
+
+---
+
+## Planned / Missing Topics (not yet created)
+
+Gaps from the 2026-11-25 AI/infra gap analysis, dropped by the owner the same day before any
+file was written. Roadmap, not a queue: build only on explicit request, following "How to Add
+a Technology".
+
+| Technology | Planned slug | Group | Priority | Note |
+|------------|--------------|-------|----------|------|
+| Keycloak | `keycloak_identity_and_access_management` | Credential layer, beside `hashicorp_vault` | P1 | No owner today (cited in spring, hld, backend, llm). Realms, flows, token exchange, Organizations, Operator, HA with Infinispan, agent/workload identity. A bare `keycloak` breaks the two-token shape (precedent 5) |
+| Apache Spark | `apache_spark` | Data run, beside `apache_flink` | P1 | `ml/data_pipelines_and_processing` teaches the pattern with PySpark; this page would teach the engine: Catalyst, AQE, shuffle, Spark Connect, Spark 4.x |
 
 ---
 

@@ -572,7 +572,7 @@ The broken version cost 12 × $3.43/hr ≈ $41/hr; the fix runs the same 12 repl
 | Kueue | Job queueing | Quotas, fair-share, gang admission; integrates with Kubeflow Trainer, RayJob, and plain Jobs |
 | Volcano | Batch scheduler | Gang scheduling, fair-share, GPU topology awareness |
 | Kubeflow | ML platform | Pipelines, Trainer (`TrainJob`), Katib |
-| Ray / KubeRay | Distributed compute | Ray Train/Serve/Tune/Data; elastic Ray clusters on K8s |
+| Ray / KubeRay | Distributed compute | Ray Train/Serve/Tune/Data; elastic Ray clusters on K8s; see [Ray](../../technologies/ray_distributed_computing/ray_distributed_computing.md) |
 | NVIDIA Triton | Inference server | Multi-model, dynamic batching, max GPU throughput |
 | KServe | Model serving | CRD-based, scale-to-zero, canary; a standalone CNCF project, no longer a Kubeflow component |
 

@@ -220,7 +220,7 @@ The `game/` directory is an application, not study content — see
   declare no markers at all and are absent from `paths.json` — both are still bank
   sections with `STUDY_ORDER` entries, they just show no tier tabs. `book` has no
   interview subset to cut from chapter summaries (and its 3-segment ids would fail the
-  2-segment tier check outright); `technologies` has ELEVEN modules and has
+  2-segment tier check outright); `technologies` has TWELVE modules and has
   therefore passed the ">= 4 modules" threshold that was supposed to trigger tiering —
   it stays untiered by a live deferral recorded in `technologies/CLAUDE.md`, not because
   it is too small. The section has deep-dive sub-files, so its two tiers

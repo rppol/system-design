@@ -726,7 +726,7 @@ dedicated, where isolation and latency matter.
 |---|---|---|
 | KServe | Kubernetes model serving platform | v0.21.0. `InferenceService` (v1beta1) and `LLMInferenceService` (v1alpha2); CNCF incubating |
 | Ray Serve | Python serving framework on Ray actors | Ray 2.60.1 (Serve LLM on vLLM 0.29.0). Serve LLM GA since 2.59.0, multiplexing, `BackpressureConfig` for 429 or 503 |
-| KubeRay | Ray clusters on Kubernetes | `RayService` deploys a Serve application |
+| KubeRay | Ray clusters on Kubernetes | `RayService` deploys a Serve application; see [Ray](../../technologies/ray_distributed_computing/ray_distributed_computing.md) |
 | BentoML | Python service packaging and serving | v1.4.40 (2026-10-23); Bento artifacts build to OCI images |
 | Seldon Core | Multi-model scheduling on Kubernetes | v2.10.2; Business Source License 1.1; `Model`, `Server`, `Pipeline`, `Experiment` |
 | MLServer | Python inference server, Open Inference Protocol | 1.7.1 (2025-06-06); server for Seldon Core 2 and a KServe runtime |

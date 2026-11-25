@@ -667,7 +667,7 @@ Every trigger resolves its inputs to snapshot ids before the run starts and writ
 | ZenML | Portable pipeline layer over stacks | Default step caching |
 | SageMaker Pipelines | Managed DAG on AWS | `CacheConfig` with ISO 8601 `expire_after` |
 | Temporal | Durable execution | See [Temporal Durable Execution](../../technologies/temporal_durable_execution/temporal_durable_execution.md) |
-| Ray Data LLM | Streaming batch inference through vLLM engine actors | Ray 2.60.1; `vLLMEngineProcessorConfig`, `build_processor` |
+| Ray Data LLM | Streaming batch inference through vLLM engine actors | Ray 2.60.1; `vLLMEngineProcessorConfig`, `build_processor`; see [Ray](../../technologies/ray_distributed_computing/ray_distributed_computing.md) |
 | vLLM | Offline `LLM` class, `vllm run-batch` for batch JSONL | v0.34.0 |
 | OpenAI Batch API, Anthropic Message Batches | Discounted asynchronous inference | 24 h window; pricing in the token economics page |
 | Kueue | Queueing and quota admission for batch jobs | v0.20.7; see GPU Cluster Scheduling and Quotas |

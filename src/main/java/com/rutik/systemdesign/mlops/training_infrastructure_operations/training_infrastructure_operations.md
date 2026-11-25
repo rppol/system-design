@@ -745,7 +745,7 @@ Size the pool from the replacement rate. With about 3 failures a day and a 24-ho
 | JobSet | Group of Jobs with one failure policy | `failurePolicy.rules` with `RestartJobSet`, `FailJobSet` and related actions |
 | Kueue | Queues, quota, gang admission for TrainJob | v0.20.7 serves `v1beta2` only; v0.21.0 is at rc |
 | Volcano | Batch scheduler with gang scheduling | Alternative to Kueue for TrainJob |
-| Ray Train | Distributed training on Ray | Ray 2.60.1; `FailureConfig`, `get_checkpoint()` |
+| Ray Train | Distributed training on Ray | Ray 2.60.1; `FailureConfig`, `get_checkpoint()`; see [Ray](../../technologies/ray_distributed_computing/ray_distributed_computing.md) |
 | torchrun | PyTorch elastic launcher | `--nnodes=MIN:MAX`, `--max-restarts`, c10d rendezvous |
 | Slinky | Slurm on Kubernetes | slurm-operator v1.3.0 |
 | SkyPilot | Multi-cloud job launcher with managed spot recovery | Fits small teams without a cluster |

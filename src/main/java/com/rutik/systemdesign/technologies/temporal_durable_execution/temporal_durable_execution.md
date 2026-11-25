@@ -1740,6 +1740,8 @@ Docker Compose (via the `auto-setup` images) is the usual team dev cluster, and 
 - **DAG schedulers:** **Airflow**, **Dagster**, **Prefect**, **Argo Workflows** — the batch/data-pipeline neighbours, scheduling pipelines over calendar time rather than running one execution per business entity.
 - **Agent orchestration:** **LangGraph** — graph-structured agent control flow with checkpointing, increasingly deployed *on* Temporal rather than instead of it, with the graph as the workflow and each tool call as an activity.
 
+See also: [Ray](../ray_distributed_computing/ray_distributed_computing.md), the compute runtime that a Temporal activity can launch and wait on; Ray itself does not persist job progress.
+
 Related reading: [Apache Airflow](../apache_airflow/apache_airflow.md), [distributed transactions and consistency](../../backend/distributed_transactions_and_consistency/distributed_transactions_and_consistency.md), [saga theory](../../hld/distributed_transactions/distributed_transactions.md), [event sourcing and CQRS](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md), [durable long-running agents](../../llm/agents_and_tool_use/durable_long_running_agents.md), [Kubernetes workloads](../../devops/kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md), [DDIA ch.11 stream processing](../../book/designing_data_intensive_applications/11_stream_processing/11_stream_processing.md).
 
 ---

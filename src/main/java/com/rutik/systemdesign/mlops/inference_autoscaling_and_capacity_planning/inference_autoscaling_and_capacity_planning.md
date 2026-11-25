@@ -793,7 +793,7 @@ replica for interactive routes, scale to zero only for batch or async routes, an
 | Kubernetes HPA | Replica controller | `autoscaling/v2`; `behavior` for scale-up and scale-down rates |
 | KServe | Model serving platform | v0.21.0; `LLMInferenceService` `spec.scaling.keda` and `spec.scaling.wva` |
 | Knative Serving | Request-driven autoscaling | KPA: 60 s stable window, panic at 200% of target |
-| Ray Serve | Python serving framework | Ray 2.60.1; `autoscaling_config`, custom policies |
+| Ray Serve | Python serving framework | Ray 2.60.1; `autoscaling_config`, custom policies; see [Ray](../../technologies/ray_distributed_computing/ray_distributed_computing.md) |
 | llm-d | Kubernetes-native distributed inference | v1.0.0; KEDA blueprints in `llm-d-autoscaling` v1.0.0; flow control under `flowControl` sheds load before the autoscaler reacts |
 | AIBrix | vLLM control plane | v0.8.0; `PodAutoscaler` KPA, APA, HPA; `spec.schedules`, `spec.predictive` |
 | vLLM | Inference engine | v0.34.0; queue, KV, TTFT metrics; `--max-num-queued-tokens`; extensible KV cache on by default |

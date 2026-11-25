@@ -748,7 +748,7 @@ quarterly.
 | Kueue | quota and gang admission | v0.20.7; serves `v1beta2`; MultiKueue for multi-cluster |
 | KAI Scheduler | GPU scheduler | v0.19.0; open-source core of NVIDIA Run:ai |
 | llm-d | distributed LLM serving on Kubernetes | v1.0.0; CNCF Sandbox; router, flow control, `DisaggregatedSet` |
-| Ray | Python-native distributed runtime | 2.60.1; Train, Data, Serve, Serve LLM |
+| Ray | Python-native distributed runtime | 2.60.1; Train, Data, Serve, Serve LLM; see [Ray](../../technologies/ray_distributed_computing/ray_distributed_computing.md) |
 | KubeRay | Ray on Kubernetes | runs Ray clusters as Kubernetes resources |
 | Anyscale | managed Ray | buy-managed-upstream option for Ray stacks |
 | AWS SageMaker | managed ML platform on AWS | product name is Amazon SageMaker AI since 2024-12-03 |

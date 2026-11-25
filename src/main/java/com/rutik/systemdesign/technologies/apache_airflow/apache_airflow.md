@@ -1022,6 +1022,8 @@ The tell that you have outgrown cron and need Airflow: your jobs have **dependen
 - **Managed:** **Amazon MWAA**, **Google Cloud Composer**, **Astronomer Astro** — run Airflow as a service.
 - **Plugins & extension points:** custom operators/hooks (subclass `BaseOperator`/`BaseHook`), timetables (`Timetable`), listeners (`hookimpl`), Notifier classes, and XCom/secrets/executor backends — Airflow is extensible at every layer.
 
+See also: [Ray](../ray_distributed_computing/ray_distributed_computing.md), the distributed Python runtime that Airflow tasks commonly launch as a job for the heavy compute step.
+
 Related reading: [ML data pipelines](../../ml/data_pipelines_and_processing/data_pipelines_and_processing.md), [MLOps & CI/CD](../../ml/mlops_and_ci_cd/mlops_and_ci_cd.md), [Kubernetes workloads](../../devops/kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md), [event streaming ops](../../devops/event_streaming_operations/event_streaming_operations.md), [messaging patterns](../../backend/messaging_patterns/messaging_patterns.md), [DDIA ch.10 batch processing](../../book/designing_data_intensive_applications/10_batch_processing/10_batch_processing.md).
 
 ---
