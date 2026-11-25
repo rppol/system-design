@@ -1,11 +1,14 @@
 # Edge and On-Device Deployment
 
-> **Version anchor (2026-10-18).** **llama.cpp** stable **v0.7.0** (2026-10-15) and rolling
-> build **b11719** (2026-10-18, pre-release): `llama-server` defaults to auto slots (`-np -1`),
+> **Version anchor (2026-11-25).** **llama.cpp** stable **v1.0.0** (2026-11-13) and rolling
+> build **b12722** (2026-11-25, pre-release): `llama-server` defaults to auto slots (`-np -1`),
 > continuous batching on, `/metrics` only with `--metrics`, and port 9931 (8080 before v0.7.0).
-> **Ollama v0.40.6** (2026-10-16), with the MLX runner for Apple silicon in the v0.40.4 notes
-> (2026-10-12). **ExecuTorch v1.5.1** (2026-09-23); its release page lists a C++ SDK inside the
-> Python wheels, multi-method export, and schema-version checks for `.pte` and `.ptd` files. Facts
+> **Ollama v0.40.18** (2026-11-24), with the MLX runner for Apple silicon in the v0.40.4 notes
+> (2026-10-12). **ExecuTorch v1.6.0** (2026-11-12): Python 3.11 to 3.15 only (3.10 dropped), a
+> torch-free Python runtime for `.pte` files, Qualcomm Flexible Context Binary export (one artifact
+> for several Snapdragon SoCs), and the MediaTek backend temporarily unsupported. The v1.5.x line
+> added a C++ SDK inside the Python wheels, multi-method export, and schema-version checks for
+> `.pte` and `.ptd` files. Facts
 > read from primary docs on 2026-10-18: Google Play size limits (base module 500 MB, one asset
 > pack 1.5 GB, install-time total 4 GB, fast-follow plus on-demand total 30 GB, all compressed);
 > Apple Background Assets (managed asset packs, Apple-hosted or self-hosted); Apple Foundation
@@ -148,10 +151,11 @@ that manifest.
 | ONNX Runtime GenAI | ONNX graph plus `genai_config.json` | Windows, Linux, macOS, Android, iOS | Generation loop around ONNX Runtime; DirectML, CUDA, QNN execution providers |
 | MLC LLM, WebLLM | compiled model library plus sharded weights | iOS, Android, browser (WebGPU) | One compiler path for phone GPUs and the browser |
 | OpenVINO | IR (`.xml` plus `.bin`) | Intel CPU, GPU, NPU | Intel edge boxes and laptops |
-| Qualcomm QNN | context binary compiled for one Hexagon NPU generation | Snapdragon Android and Windows on Arm | Direct Hexagon NPU access; one binary per SoC family |
+| Qualcomm QNN | context binary compiled for one Hexagon NPU generation | Snapdragon Android and Windows on Arm | Direct Hexagon NPU access; one binary per SoC family, or one Flexible Context Binary for several SoCs from ExecuTorch v1.6.0 |
 
 The trap in the right-hand column is **per-target compilation**. A GGUF file runs on every
-llama.cpp build that knows its tensor types. A QNN context binary runs on one NPU generation, a
+llama.cpp build that knows its tensor types. A QNN context binary runs on one NPU generation (an
+ExecuTorch v1.6.0 Flexible Context Binary covers several, but only the SoCs it was built for), a
 Core ML model loads only on an OS that supports its spec version, and a `.pte` is tied to the
 ExecuTorch runtime version and the delegate set linked into the app. The more hardware-specific
 the artifact, the more variants the manifest must carry.
@@ -760,10 +764,10 @@ path (local or cloud) and evaluate both paths on the same eval suite before each
 
 | Tool | Role | Notes |
 |---|---|---|
-| llama.cpp | LLM runtime and `llama-server` | v0.7.0 stable, b11719 rolling; GGUF single-file models; Metal, CUDA, Vulkan, CPU |
-| Ollama | Local model manager and server | v0.40.6; pulls models by digest; MLX runner next to the GGUF engine; port 11434 |
+| llama.cpp | LLM runtime and `llama-server` | v1.0.0 stable, b12722 rolling; GGUF single-file models; Metal, CUDA, Vulkan, CPU |
+| Ollama | Local model manager and server | v0.40.18; pulls models by digest; MLX runner next to the GGUF engine; port 11434 |
 | MLX | Array framework for Apple silicon | `mlx-lm` for LLMs; unified memory |
-| ExecuTorch | PyTorch on-device runtime | v1.5.1; `.pte` and `.ptd`; XNNPACK, Core ML, MLX, Vulkan, QNN, Arm delegates |
+| ExecuTorch | PyTorch on-device runtime | v1.6.0; `.pte` and `.ptd`; XNNPACK, Core ML, MLX, Vulkan, QNN, Arm delegates; MediaTek temporarily unsupported |
 | LiteRT | On-device runtime for `.tflite` models | GPU and NPU delegates; microcontroller build |
 | Core ML | Apple model runtime | `.mlpackage` compiled to `.mlmodelc`; Neural Engine |
 | ONNX Runtime GenAI | Generation loop on ONNX Runtime | `genai_config.json`; DirectML, CUDA, QNN execution providers |
@@ -796,7 +800,7 @@ change with the code, under about 50 MB.
 **Short:** The export needs a newer runtime ABI than older app versions link, and the manifest did not gate the variant by runtime and app version.
 
 The runtime is compiled into the app; the model arrives later. A newer exporter, a new GGUF quant
-type, or a new ExecuTorch delegate op can produce a file older runtimes reject. ExecuTorch v1.5.1
+type, or a new ExecuTorch delegate op can produce a file older runtimes reject. ExecuTorch (since v1.5)
 checks `.pte` and `.ptd` schema versions so the failure is a clear error, but it is still a failure. Put
 `runtime_abi_min` and `app_version_min` in the manifest, resolve the variant server-side from what
 the app reports, keep the old variant alive for old app ranges, and map every load error to the

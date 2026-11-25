@@ -1,11 +1,11 @@
 # Statistics of Release Gates
 
-> **Version anchor (2026-10-18).** The methods on this page do not depend on a tool version.
+> **Version anchor (2026-11-25).** The methods on this page do not depend on a tool version.
 > Code uses the Python standard library (`math`, `random`, `statistics.NormalDist`); statsmodels
-> and SciPy are named without a version. Gate results are recorded with **MLflow 3.17.1**
-> (2026-10-13) or **Langfuse v4.63.0** (2026-10-16), as on the parent page. Decision-model judge
-> cost uses the **OpenAI Decisions API** row checked 2026-10-18: public beta, `POST /v1/decisions`,
-> input $0.10 per 1M tokens, no output charge.
+> and SciPy are named without a version. Gate results are recorded with **MLflow 3.18.0**
+> (2026-11-04) or **Langfuse v4.86.0** (2026-11-24), as on the parent page. Decision-model judge
+> cost uses the **OpenAI Decisions API** row checked 2026-11-25: generally available,
+> `POST /v1/decisions`, uncached input $0.10 per 1M tokens, cached input $0.01, no output charge.
 >
 > **On simulated numbers.** Figures marked "simulated" come from Monte Carlo runs of 20,000
 > trials under the assumptions stated next to them. They show a mechanism, not a vendor's data.
@@ -42,6 +42,9 @@ item, are in
 [Experimentation for Generative Features](../ai_release_engineering/experimentation_for_generative_features.md).
 Decision-model judges, whose probabilities feed the thresholds discussed in §6.5, are in
 [Decision Models](../decision_models/decision_models.md).
+The online counterpart, where a canary's error rate or latency is judged against the stable
+version during a rollout, is in
+[Progressive Delivery for Model Servers](../progressive_delivery_for_model_servers/progressive_delivery_for_model_servers.md).
 
 **Not here.** General hypothesis testing, distributions and the central limit theorem are in
 [Probability and Statistics](../../ml/probability_and_statistics/probability_and_statistics.md).
@@ -700,9 +703,9 @@ compute the standard error from the run's own b and c, and record psi with every
 | statsmodels | `proportion_confint(method="wilson")`, `mcnemar(table, exact=True)`, `multipletests(method="holm")` | Covers sections 6.1, 6.3 and 6.4 in a few calls |
 | SciPy | `scipy.stats.binomtest`, `scipy.stats.false_discovery_control`, `scipy.stats.bootstrap` with `paired=True` | `false_discovery_control` implements Benjamini-Hochberg |
 | NumPy | Vectorised paired bootstrap and A/A simulation | Simulate the gate before trusting it |
-| MLflow | 3.17.1: store b, c, n, psi, bounds and the decision with the gate run | Recompute decisions from stored counts |
-| Langfuse | v4.63.0: dataset runs with per-item scores for both arms | Per-item scores are what pairing needs |
-| OpenAI Decisions API | Decision-model judge with no sampling noise | Lowers judge-induced discordance; $0.10 per 1M input tokens (checked 2026-10-18) |
+| MLflow | 3.18.0: store b, c, n, psi, bounds and the decision with the gate run | Recompute decisions from stored counts |
+| Langfuse | v4.86.0: dataset runs with per-item scores for both arms | Per-item scores are what pairing needs |
+| OpenAI Decisions API | Decision-model judge with no sampling noise | Lowers judge-induced discordance; $0.10 per 1M uncached input tokens (checked 2026-11-25) |
 
 ---
 

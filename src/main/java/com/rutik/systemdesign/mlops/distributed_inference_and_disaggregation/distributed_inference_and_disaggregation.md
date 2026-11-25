@@ -1,14 +1,17 @@
 # Distributed Inference and Disaggregation
 
-> **Version anchor (2026-10-18).** vLLM v0.32.0 (2026-10-18). SGLang v0.5.21 (2026-10-02).
+> **Version anchor (2026-11-25).** vLLM v0.34.0 (2026-11-16): extensible KV cache on by default,
+> default KV `--block-size` 64 (was 16), Model Runner V1 removed. SGLang v0.5.23 (2026-11-02).
 > LeaderWorkerSet v1.0.0 (2026-10-16), which reworks DisaggregatedSet rollouts and adds
 > independently scaled sub-roles. Gateway API Inference Extension (GIE) v1.6.2 (2026-09-17); in
 > v1.6.0 the Endpoint Picker (EPP), Body-Based Routing (BBR), `InferenceObjective` and
 > `InferenceModelRewrite` moved to llm-d, and `InferencePool` plus the conformance suite stayed.
-> llm-d v0.10.0 (2026-09-29), CNCF Sandbox since 2026-03-12. NVIDIA Dynamo v1.5.1 (2026-10-07);
-> the v1.5.0 notes deprecate KVBM with removal targeted for v1.7.0. AIBrix v0.8.0 (2026-10-13).
-> NIXL v1.5.0 (2026-09-30). Mooncake v0.3.13.post1 (2026-08-31). LMCache publishes only nightly
-> pre-releases, so it is named without a version. Every version claim below is checked against
+> llm-d v1.0.0 (2026-10-20), CNCF Sandbox since 2026-03-12; §6.10 lists what 1.0 changed. NVIDIA
+> Dynamo v1.7.0 (2026-11-24); the v1.5.0 notes deprecated KVBM, and v1.7.0 no longer builds or
+> ships it. AIBrix v0.8.0 (2026-10-13).
+> NIXL v1.5.2 (2026-10-29). Mooncake v0.3.14 (2026-11-03). LMCache publishes only nightly
+> pre-releases, so it is named without a version. NVLink bandwidths are per direction (NVIDIA
+> quotes bidirectional totals, twice as large). Every version claim below is checked against
 > this anchor.
 
 A model that does not fit on one GPU, or a fleet that cannot meet a first-token SLO and a
@@ -106,8 +109,9 @@ and loses.
 ## 3. Core Principles
 
 1. **Match the parallelism to the link.** TP inside the NVLink domain, PP or EP across nodes,
-   DP everywhere. The bandwidth gap is about 18x: 900 GB/s NVLink per H100 against 50 GB/s for
-   one 400 Gb/s NIC.
+   DP everywhere. The bandwidth gap is about 9x: 450 GB/s NVLink per H100 in each direction against
+   50 GB/s for one 400 Gb/s NIC (NVIDIA's 900 GB/s figure is the bidirectional total; comparing it
+   with a one-direction NIC rate gives a false 18x).
 2. **A multi-pod replica is one failure unit.** If one rank of an 8 x 2 TP/PP group dies, the
    other 15 ranks hang in a collective. The controller must restart the group, not the pod.
 3. **Prefill and decode scale on different signals.** Prefill load is prompt tokens per second
@@ -168,7 +172,7 @@ design on 12 H100 nodes in May 2025 (section 7).
 ### Parallelism placement on two 8-GPU nodes
 
 ```
-            node A (NVSwitch, 900 GB/s per GPU)       node B (NVSwitch, 900 GB/s per GPU)
+            node A (NVSwitch, 450 GB/s per GPU)       node B (NVSwitch, 450 GB/s per GPU)
             +---+---+---+---+---+---+---+---+          +---+---+---+---+---+---+---+---+
 GPU         | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |          | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
             +---+---+---+---+---+---+---+---+          +---+---+---+---+---+---+---+---+
@@ -180,7 +184,7 @@ EP16 + DP   |   experts 0-127, 16 per GPU   |<- a2a -> |    experts 128-255, 16/
 ```
 
 Llama 3.1 405B has 126 layers. TP16 puts 252 all-reduces per forward pass on the 50 GB/s
-per-GPU IB path instead of the 900 GB/s NVLink path. TP8 x PP2 keeps every all-reduce inside a
+per-GPU IB path instead of the 450 GB/s NVLink path (both per direction). TP8 x PP2 keeps every all-reduce inside a
 node and sends one activation tensor across the link per stage boundary.
 
 ### Disaggregated request path
@@ -267,9 +271,9 @@ which moves the pain to TTFT. Disaggregation removes prefill from the decode GPU
 ```mermaid
 xychart-beta
     title "2.68 GB of BF16 KV, transfer time at line rate (ms)"
-    x-axis ["NVLink 900 GB/s", "4 x 400G RDMA", "1 x 400G RDMA", "100G TCP, 8 GB/s"]
+    x-axis ["NVLink 450 GB/s", "4 x 400G RDMA", "1 x 400G RDMA", "100G TCP, 8 GB/s"]
     y-axis "ms" 0 --> 360
-    bar [3, 13, 54, 335]
+    bar [6, 13, 54, 335]
 ```
 
 At 320 KiB per token, 8,192 tokens is 2.68 GB. Over one TCP path the transfer costs 335 ms,
@@ -524,7 +528,7 @@ A minimal scorer shows the shape:
 ```python
 import hashlib
 
-BLOCK = 16
+BLOCK = 64  # must equal the engine's --block-size (vLLM v0.34.0 default 64; 16 before)
 
 
 def block_hashes(tokens: list[int]) -> list[str]:
@@ -554,10 +558,10 @@ def pick(tokens: list[int], pods: dict[str, dict], w_prefix=2.0, w_queue=1.0, w_
     return max(pods, key=lambda name: score(pods[name]))
 
 
-toks = list(range(64))
+toks = list(range(256))
 pods = {
     "a": {"cached": set(block_hashes(toks)), "queue": 30, "kv_util": 0.95},
-    "b": {"cached": set(block_hashes(toks[:32])), "queue": 2, "kv_util": 0.40},
+    "b": {"cached": set(block_hashes(toks[:128])), "queue": 2, "kv_util": 0.40},
     "c": {"cached": set(), "queue": 0, "kv_util": 0.10},
 }
 assert pick(toks, pods) == "b"
@@ -566,7 +570,8 @@ assert pick(toks, pods) == "b"
 Pod `a` holds the whole prefix but is near full; pod `b` holds half of it with an empty queue
 and wins. Hashes chain on the parent block, so a match must be a prefix, which is how engine
 prefix caches key their blocks. The block size must equal the engine's KV block size or every
-hash misses.
+hash misses, so a router written for 16-token blocks silently loses every prefix hit when the
+engine moves to vLLM v0.34.0's default of 64 unless --block-size is pinned.
 
 ### 6.8 Wide EP for MoE decode
 
@@ -609,6 +614,56 @@ Reload cost check: a 4,096-token prefix on 70B is 1.34 GB. Host to GPU over PCIe
 about 50 GB/s effective, split over 4 TP ranks, is about 7 ms against about 320 ms to
 recompute. DeepSeek's on-disk KV cache (section 7) rests on the same reload-versus-recompute
 ratio.
+
+### 6.10 What llm-d v1.0.0 changed for operators
+
+llm-d v1.0.0 (2026-10-20) is the first release with every component version-aligned at 1.0.0.
+The changes that alter how a fleet is run:
+
+| Area | Before v1.0.0 | v1.0.0 | What to do |
+|---|---|---|---|
+| Router configuration API | Pre-`v1` | Graduates to `v1` | Re-validate scorer and profile configs against the `v1` schema before the upgrade |
+| Overload | Queueing and scoring only | Priority- and fairness-aware flow control with controlled load shedding, configured under `flowControl` | Give latency-sensitive and batch traffic different priorities instead of separate pools |
+| Router availability | One EPP replica per pool | Router HA with a hot standby and safe rolling updates | Run the standby; an EPP restart no longer drops scheduling for the pool |
+| Disaggregated rollouts | LWS DisaggregatedSet | `DisaggregatedSet` managed as one logical unit: coordinated rollouts, lockstep upgrades, readiness gated on a Pod snapshot, native revision routing | Roll prefill and decode through it, never as two Deployments (§10) |
+| Component images | Mixed versions | `llm-d-router-endpoint-picker`, `llm-d-router-disagg-sidecar`, `llm-d-router-coordinator` at v1.0.0; the `llm-d-kv-cache` library moved into `llm-d-router` | Pin the three router images and the GIE CRDs as one set |
+| Engine images | llm-d built its own (`llm-d-cuda`, `llm-d-rocm`) | Building its own inference images is deprecated, `llm-d-rocm` is deprecated, and the 1.0 guides use upstream vLLM (v0.31.0, varying by accelerator) | Move to the upstream vLLM or SGLang image you qualify (see [Inference Engine Operations and Benchmarking](../inference_engine_operations_and_benchmarking/inference_engine_operations_and_benchmarking.md)) |
+| Weight loading | Per-pod download | `ai-dynamo/modelexpress` integrated for P2P weight loading; vLLM v0.34.0 lists a `modelexpress` load format | See [Model Storage, Loading and Cold Start](../model_storage_loading_and_cold_start/model_storage_loading_and_cold_start.md) |
+
+A platform that runs llm-d through KServe does not get these by upgrading llm-d. KServe v0.21.0's
+`LLMInferenceService` templates (`config/llmisvcconfig` at the v0.21.0 tag) still pin the engine to
+`ghcr.io/llm-d/llm-d-cuda:v0.9.0`, the scheduler to `llm-d-router-endpoint-picker:v0.10.0` and the
+decode sidecar to `llm-d-router-disagg-sidecar:v0.10.0`.
+
+```yaml
+# BROKEN: the team "upgraded llm-d to 1.0" in its Helm values, but the LLMInferenceService
+# still renders KServe v0.21.0's default template, so pods keep the v0.10.0 router and v0.9.0 engine.
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata: {name: chat-70b}
+spec:
+  model: {uri: "hf://meta-llama/Llama-3.3-70B-Instruct"}
+```
+
+```yaml
+# FIX: pin the engine image and the router images explicitly in the resource the platform owns,
+# and record them in the release bundle so a rollback restores the same set.
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata: {name: chat-70b}
+spec:
+  model: {uri: "hf://meta-llama/Llama-3.3-70B-Instruct"}
+  template:
+    containers:
+    - name: main
+      image: docker.io/vllm/vllm-openai@sha256:<qualified-v0.34.0-digest>
+  router:
+    scheduler:
+      template:
+        containers:
+        - name: main
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0
+```
 
 ---
 
@@ -717,20 +772,20 @@ and alert on the ratio of prefill queue time to decode KV utilization.
 
 | Tool | Role | Notes |
 |---|---|---|
-| vLLM | Inference engine | v0.32.0; TP, PP, DP, EP flags; KV connectors via `--kv-transfer-config` |
-| SGLang | Inference engine | v0.5.21; `--disaggregation-mode`, DP attention, `sglang_router` |
-| TensorRT-LLM | NVIDIA inference engine | Stable v1.2.1; disaggregated serving in `trtllm-serve` and through Dynamo |
+| vLLM | Inference engine | v0.34.0; TP, PP, DP, EP flags; KV connectors via `--kv-transfer-config` |
+| SGLang | Inference engine | v0.5.23; `--disaggregation-mode`, DP attention, `sglang_router` |
+| TensorRT-LLM | NVIDIA inference engine | Stable v1.3.0; disaggregated serving in `trtllm-serve` and through Dynamo |
 | LeaderWorkerSet | Kubernetes API for multi-pod replicas | v1.0.0; group restart, DisaggregatedSet with sub-roles |
 | Gateway API Inference Extension | `InferencePool` API and conformance | v1.6.2; EPP and BBR released by llm-d since v1.6.0 |
-| llm-d | Kubernetes-native distributed inference | v0.10.0; router EPP, disagg sidecar, wide-EP guides; CNCF Sandbox |
-| NVIDIA Dynamo | Distributed serving framework | v1.5.1; KV router, Grove, NIXL; KVBM deprecated in v1.5.0 |
+| llm-d | Kubernetes-native distributed inference | v1.0.0; router EPP with `flowControl` and hot standby, disagg sidecar, coordinator, wide-EP guides; CNCF Sandbox |
+| NVIDIA Dynamo | Distributed serving framework | v1.7.0; KV router, Grove, NIXL; KVBM deprecated in v1.5.0 and no longer built or shipped from v1.7.0 |
 | AIBrix | vLLM control plane | v0.8.0; StormService, gateway with PD score policy |
-| NIXL | KV and tensor transfer library | v1.5.0; UCX, LIBFABRIC, POSIX, GDS, object-store and Mooncake backends |
-| Mooncake | Transfer Engine and KV store | v0.3.13.post1; DRAM and SSD tiers, used by SGLang PD and HiCache |
+| NIXL | KV and tensor transfer library | v1.5.2; UCX, LIBFABRIC, POSIX, GDS, object-store and Mooncake backends |
+| Mooncake | Transfer Engine and KV store | v0.3.14; DRAM and SSD tiers, used by SGLang PD and HiCache |
 | LMCache | KV cache layer for vLLM | Nightly pre-releases only; CPU, disk and remote tiers |
 | DeepEP | MoE all-to-all kernels | Backs vLLM `deepep_high_throughput` and `deepep_low_latency` |
 | NCCL | Collectives for TP and PP | All-reduce and send/recv between ranks |
-| Ray | Multi-node executor | 2.59.0; vLLM `--distributed-executor-backend ray` |
+| Ray | Multi-node executor | 2.60.1; vLLM `--distributed-executor-backend ray` |
 | KServe | Platform API | `LLMInferenceService` composes with llm-d |
 
 ---
@@ -738,11 +793,11 @@ and alert on the ratio of prefill queue time to decode KV utilization.
 ## 12. Interview Questions with Answers
 
 **Q: Why is TP16 across two 8-GPU nodes slower than TP8 x PP2 for the same model?**
-**Short:** TP does two all-reduces per layer, so TP16 pushes hundreds of collectives per token over 50 GB/s IB instead of 900 GB/s NVLink.
+**Short:** TP does two all-reduces per layer, so TP16 pushes hundreds of collectives per token over 50 GB/s IB instead of 450 GB/s NVLink, both per direction.
 
 Tensor parallelism splits every weight matrix and reduces the partial results after the
 attention and MLP blocks, two all-reduces per layer. For Llama 3.1 405B that is 252 per forward
-pass. Within a node they ride NVSwitch at 900 GB/s per GPU; across nodes each one waits on a
+pass. Within a node they ride NVSwitch at 450 GB/s per GPU per direction; across nodes each one waits on a
 400 Gb/s NIC and its latency. PP2 sends one activation tensor across the link per stage, once
 per forward pass. Keep TP inside the NVLink domain and use PP or EP to cross nodes.
 
@@ -873,7 +928,7 @@ the gateway without the scorer it had. Test and pin both together, and read both
 
 llm-d builds on GIE `InferencePool`, LWS and vLLM, and is a CNCF Sandbox project, so it fits
 teams that want Kubernetes-native APIs. Dynamo brings its own runtime, KV router and Grove
-operator and is the path for TensorRT-LLM; it changes quickly (KVBM deprecated in v1.5.0).
+operator and is the path for TensorRT-LLM; it changes quickly (KVBM was deprecated in v1.5.0 and is no longer shipped from v1.7.0).
 AIBrix adds StormService and a gateway on top of vLLM. SGLang's router and Mooncake or NIXL
 backends need no extra control plane. Run the same goodput benchmark on each shortlisted stack,
 since components in all four move between releases.

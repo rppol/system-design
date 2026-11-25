@@ -1,11 +1,13 @@
 # Model Serving Platforms
 
-> **Version anchor (2026-10-18).** KServe v0.21.0 (2026-09-25). Ray 2.59.0 (2026-10-02), the release
-> that ships Serve LLM and Ray Data LLM. AIBrix v0.8.0 (2026-10-13). Triton Inference Server 2.73.0,
-> NGC container 26.09 (2026-09-30). BentoML v1.4.39 (2026-05-07), with no later release as of
-> 2026-10-18. Seldon Core 2 v2.10.2 (2025-12-19), whose `LICENSE` is a Business Source License
-> naming "Seldon Core v2" as the Licensed Work. Engines behind these platforms: vLLM v0.32.0
-> (2026-10-18), SGLang v0.5.21 (2026-10-02), TensorRT-LLM stable v1.2.1 (2026-04-20). NVIDIA NIM has
+> **Version anchor (2026-11-25).** KServe v0.21.0 (2026-09-25), still the newest release. Ray 2.60.1
+> (2026-11-23); Ray Serve LLM and Ray Data LLM are GA since 2.59.0, and Ray 2.60.0 (2026-11-04)
+> upgraded Ray LLM to vLLM 0.29.0 (#65756). AIBrix v0.8.0 (2026-10-13). Triton Inference Server
+> 2.75.0, NGC container 26.11 (2026-11-17). BentoML v1.4.40 (2026-10-23), the first release after
+> v1.4.39 (2026-05-07). Seldon Core 2 v2.10.2 (2025-12-19), whose `LICENSE` is a Business Source License
+> naming "Seldon Core v2" as the Licensed Work. Engines behind these platforms: vLLM v0.34.0
+> (2026-11-16), SGLang v0.5.23 (2026-11-02), TensorRT-LLM stable v1.3.0 (2026-11-20). llm-d v1.0.0
+> (2026-10-20). NVIDIA NIM has
 > no pin in this section and is described without a version.
 
 ## 1. Concept Overview
@@ -103,8 +105,8 @@ endpoint in five minutes) usually discovers its real requirements in production:
 router, a second engine, scale-to-zero for 200 small models, a license review, or an engine release
 the platform has not adopted yet.
 
-**Key insight:** the platform sets your engine upgrade speed. Ray 2.59.0 ships Ray Serve LLM pinned
-to vLLM 0.27.0 (Ray release notes, #65351), while upstream vLLM reached v0.32.0 on 2026-10-18. Any
+**Key insight:** the platform sets your engine upgrade speed. Ray 2.60.x ships Ray Serve LLM pinned
+to vLLM 0.29.0 (Ray 2.60.0 release notes, #65756), while upstream vLLM reached v0.34.0 on 2026-11-16. Any
 feature that landed in vLLM between those versions, including `POST /v1/systemone`, is not available
 through the bundled path until the platform catches up.
 
@@ -198,7 +200,7 @@ production:
 
 Ray Serve LLM (`ray.serve.llm`) became generally available in Ray 2.59.0. `LLMConfig` plus
 `build_openai_app` produces an OpenAI-compatible app over vLLM; `build_pd_openai_app` builds a
-prefill/decode app. Ray 2.59.0 bundles vLLM 0.27.0. On Kubernetes, Ray clusters run through
+prefill/decode app. Ray 2.59.0 bundled vLLM 0.27.0 and Ray 2.60.0 moved to vLLM 0.29.0. On Kubernetes, Ray clusters run through
 KubeRay's `RayService`.
 
 ### 4.4 BentoML
@@ -208,8 +210,8 @@ into a "Bento", which builds into an OCI image. It suits teams that want one art
 pre-processing, model and post-processing, deployed to BentoCloud or their own Kubernetes.
 `@bentoml.api(batchable=True, max_batch_size=64, max_latency_ms=20)` turns a method into an
 adaptively batched endpoint, and `bentoml containerize` builds the image. Its newest GitHub release
-is v1.4.39 of 2026-05-07; no release followed in the five months to 2026-10-18, although the
-default branch still received commits (the newest dated 2026-09-07). Treat that as a dated fact to re-check
+is v1.4.40 of 2026-10-23, whose notes open with a security item; it followed v1.4.39 of
+2026-05-07 after a gap of more than five months. Treat release cadence as a dated fact to re-check
 before adoption, not as a statement about the project's future.
 
 ### 4.5 Seldon Core 2 and MLServer
@@ -227,7 +229,7 @@ Protocol (V2), has its newest release at 1.7.1 (2025-06-06).
 
 ### 4.6 NVIDIA Triton and NIM
 
-Triton (2.73.0, NGC 26.09) hosts many models of many frameworks in one process: TensorRT, ONNX
+Triton (2.75.0, NGC 26.11) hosts many models of many frameworks in one process: TensorRT, ONNX
 Runtime, PyTorch, Python, FIL for tree models, a vLLM backend and a TensorRT-LLM backend. It batches
 per model and can load and unload models through its model-control API. Triton is a server, not a
 fleet manager: on Kubernetes it runs under KServe (`kserve-tritonserver`), Seldon Core 2, or a plain
@@ -269,7 +271,7 @@ or you build into a container, and GPU capacity is subject to regional quotas.
 |---|---|---|---|---|
 | KServe `InferenceService` | `kserve-vllmserver` and `kserve-huggingfaceserver` runtimes | Custom `ServingRuntime` | Through `kserve-tritonserver` | sklearn, XGBoost, LightGBM, PMML, ONNX, TensorFlow, MLServer, OpenVINO |
 | KServe `LLMInferenceService` | Default template image `ghcr.io/llm-d/llm-d-cuda:v0.9.0` | Override `template` image and args | Not supported as a first-class path | Not applicable |
-| Ray Serve | Ray Serve LLM (vLLM 0.27.0 in Ray 2.59.0), or a hand-written deployment | Hand-written deployment | Hand-written deployment | Any Python model |
+| Ray Serve | Ray Serve LLM (vLLM 0.29.0 in Ray 2.60.x), or a hand-written deployment | Hand-written deployment | Hand-written deployment | Any Python model |
 | BentoML | Service class calling the engine | Service class calling the engine | Service class calling the engine | Any Python model |
 | Seldon Core 2 | Custom server | Custom server | Through Triton server | MLServer and Triton |
 | Triton | vLLM backend | No backend | TensorRT-LLM backend | TensorRT, ONNX Runtime, PyTorch, FIL |
@@ -291,7 +293,7 @@ expose them on new paths: vLLM v0.32.0 added `POST /v1/systemone`, and SGLang v0
   `/v1/responses` and `/v1/messages` through the `InferencePool` and the endpoint picker. Every
   other path falls to a catch-all rule that goes straight to the workload `Service`, bypassing the
   scheduler. A decision route works, but loses prefix-aware placement.
-- Ray Serve LLM in Ray 2.59.0 runs vLLM 0.27.0, which predates `/v1/systemone`.
+- Ray Serve LLM in Ray 2.60.x runs vLLM 0.29.0, which predates `/v1/systemone` (added in v0.32.0).
 - A plain Deployment plus `HTTPRoute` passes any path the engine serves.
 
 The model side (schemas, calibration, evaluation) is in [Decision
@@ -353,6 +355,12 @@ metric that stops arriving, or a route the controller did not generate.
  2026-10-18       v0.32.0              llm-d-cuda:v0.9.0      vLLM 0.27.0          image you pin
                   /v1/systemone        override `template`    upgrade means a      override chart
                   added                image to move          new Ray release      values to move
+ 2026-11-01       v0.33.0
+ 2026-11-04                                                   vLLM 0.29.0
+                                                              (Ray 2.60.0)
+ 2026-11-16       v0.34.0              llm-d-cuda:v0.9.0
+                  extensible KV        (KServe v0.21.0
+                  cache default        unchanged)
 ```
 
 The left column moves every two weeks. The other columns move when the platform ships or when you
@@ -461,7 +469,7 @@ spec:
   template:
     containers:
       - name: main
-        image: ghcr.io/llm-d/llm-d-cuda@sha256:<qualified-digest>
+        image: docker.io/vllm/vllm-openai@sha256:<qualified-digest>
         resources:
           limits: {nvidia.com/gpu: "2"}
 ```
@@ -469,7 +477,8 @@ spec:
 `router.scheduler: {}` deploys the llm-d endpoint picker and an `InferencePool`; `route: {}` and
 `gateway: {}` generate the managed `HTTPRoute` on the cluster gateway. Setting `replicas` together
 with `scaling` is rejected by a CEL rule ("replicas and scaling are mutually exclusive"). The image
-is pinned by digest; the default template would otherwise run `llm-d-cuda:v0.9.0`.
+is the upstream vLLM image, the one llm-d v1.0.0's guides use now that llm-d is deprecating its own
+engine images, pinned by digest; the default template would otherwise run `llm-d-cuda:v0.9.0`.
 
 ### 6.3 Ray Serve LLM with bounded queues (broken, then fixed)
 
@@ -716,19 +725,19 @@ dedicated, where isolation and latency matter.
 | Tool | Role | Notes |
 |---|---|---|
 | KServe | Kubernetes model serving platform | v0.21.0. `InferenceService` (v1beta1) and `LLMInferenceService` (v1alpha2); CNCF incubating |
-| Ray Serve | Python serving framework on Ray actors | Ray 2.59.0. Serve LLM GA, multiplexing, `BackpressureConfig` for 429 or 503 |
+| Ray Serve | Python serving framework on Ray actors | Ray 2.60.1 (Serve LLM on vLLM 0.29.0). Serve LLM GA since 2.59.0, multiplexing, `BackpressureConfig` for 429 or 503 |
 | KubeRay | Ray clusters on Kubernetes | `RayService` deploys a Serve application |
-| BentoML | Python service packaging and serving | v1.4.39 (2026-05-07); Bento artifacts build to OCI images |
+| BentoML | Python service packaging and serving | v1.4.40 (2026-10-23); Bento artifacts build to OCI images |
 | Seldon Core | Multi-model scheduling on Kubernetes | v2.10.2; Business Source License 1.1; `Model`, `Server`, `Pipeline`, `Experiment` |
 | MLServer | Python inference server, Open Inference Protocol | 1.7.1 (2025-06-06); server for Seldon Core 2 and a KServe runtime |
-| NVIDIA Triton | Multi-framework inference server | 2.73.0 (NGC 26.09); vLLM and TensorRT-LLM backends |
+| NVIDIA Triton | Multi-framework inference server | 2.75.0 (NGC 26.11); vLLM and TensorRT-LLM backends |
 | NVIDIA NIM | Packaged model microservices | No pinned version in this section; NVIDIA AI Enterprise license for production |
 | AIBrix | vLLM control plane on Kubernetes | v0.8.0; gateway routing, `ModelAdapter`, `StormService`, predictive autoscaling APIs |
 | vLLM production-stack | Helm reference stack for vLLM | Chart `vllm-stack-0.1.13` (2026-09-29); router plus LMCache |
-| llm-d | Distributed LLM serving on Kubernetes | v0.10.0; scheduler and images used by KServe `LLMInferenceService` |
-| vLLM | LLM inference engine | v0.32.0; `POST /v1/systemone` added in this release |
-| SGLang | LLM inference engine | v0.5.21; `/v1/decisions` and `/v1/systemone` |
-| TensorRT-LLM | NVIDIA LLM inference engine | Stable v1.2.1; v1.4.0rc0 pre-release |
+| llm-d | Distributed LLM serving on Kubernetes | v1.0.0; KServe v0.21.0 default templates still deploy its v0.10.0 scheduler and `llm-d-cuda:v0.9.0` |
+| vLLM | LLM inference engine | v0.34.0; `POST /v1/systemone` since v0.32.0; extensible KV cache default since v0.34.0 |
+| SGLang | LLM inference engine | v0.5.23; `/v1/decisions` and `/v1/systemone` since v0.5.21 |
+| TensorRT-LLM | NVIDIA LLM inference engine | Stable v1.3.0 (2026-11-20); v1.4.0rc4 pre-release |
 | AWS SageMaker | Managed real-time and async endpoints | Inference components pack several models per endpoint |
 | Vertex AI | Managed prediction endpoints | Traffic split across deployed models on one endpoint |
 
@@ -762,10 +771,10 @@ default rejection status is 503. Remember the bound is per caller, so the cluste
 bound times the number of proxies.
 
 **Q: Why might a feature from the newest vLLM release be unavailable on your serving platform?**
-**Short:** Platforms that bundle the engine adopt engine releases on their own schedule; Ray 2.59.0 ships Serve LLM on vLLM 0.27.0 while upstream vLLM is at v0.32.0.
+**Short:** Platforms that bundle the engine adopt engine releases on their own schedule; Ray 2.60.x ships Serve LLM on vLLM 0.29.0 while upstream vLLM is at v0.34.0.
 
 An engine reached through the platform's Python layer is a dependency of the platform release. vLLM
-shipped v0.30.0, v0.31.0 and v0.32.0 between 2026-09-22 and 2026-10-18, roughly every two weeks; a
+shipped v0.30.0 through v0.34.0 between 2026-09-22 and 2026-11-16, roughly every two weeks; a
 platform that releases monthly or quarterly is always behind. Platforms that run the engine's own
 container image (KServe `LLMInferenceService`, AIBrix, production-stack) let you override the image,
 at the cost of qualifying the combination yourself. Ask "how do I move the engine without moving the
@@ -800,11 +809,11 @@ Triton or MLServer multi-model runtimes under KServe, Ray Serve multiplexing, Se
 license fits, or AIBrix's experimental `ModelClaim` for LLMs. Existing ModelMesh users should plan a
 migration before the next Kubernetes upgrade forces it.
 
-**Q: BentoML's newest release is from May 2026. What do you do with that fact?**
+**Q: BentoML shipped no release for more than five months in 2026. What do you do with that fact?**
 **Short:** Record it with a date, check repository activity and your support path, and decide based on your exposure; do not infer ownership or end of life from it.
 
-v1.4.39 shipped on 2026-05-07 and no release followed by 2026-10-18, though commits continued on the
-default branch (the newest dated 2026-09-07). A five-month gap matters for a platform that wraps fast-moving engines and Python
+v1.4.39 shipped on 2026-05-07 and the next release, v1.4.40, came on 2026-10-23 with a security
+fix at the top of its notes; commits continued on the default branch in between. A five-month gap matters for a platform that wraps fast-moving engines and Python
 dependencies with CVEs. Mitigations: pin and scan the dependency tree yourself, keep the service
 code portable (it is plain Python around the model), and re-check the cadence at each quarterly
 review. Do not repeat unconfirmed claims about the company.
@@ -871,7 +880,7 @@ your traffic before paying for the convenience.
 
 Production-stack gives a router, LMCache and dashboards with little else. AIBrix (v0.8.0) adds
 `ModelAdapter`, `StormService`, a distributed KV cache, batch inference, predictive autoscaling APIs
-and engine-aware routing, and serves SGLang and TensorRT-LLM as well as vLLM behind its gateway. llm-d (v0.10.0, CNCF Sandbox) provides the
+and engine-aware routing, and serves SGLang and TensorRT-LLM as well as vLLM behind its gateway. llm-d (v1.0.0, CNCF Sandbox) provides the
 endpoint picker and well-lit paths for prefill/decode and wide expert parallelism, and KServe's
 `LLMInferenceService` deploys it. Pick by what you will operate: a chart, a full stack, or scheduler
 components under an existing platform.
@@ -888,7 +897,7 @@ Economics](../ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_uni
 **Q: How do you pin an engine version under a platform so that rollbacks are real?**
 **Short:** Reference the engine image by digest in the runtime or template, change it only through a reviewed commit with a qualification report, and record the digest in the release bundle.
 
-Tags such as `latest` or `v0.32.0` resolve at pull time and can move. A digest cannot. Put the
+Tags such as `latest` or `v0.34.0` resolve at pull time and can move. A digest cannot. Put the
 digest in the `ServingRuntime`, the `LLMInferenceService` template or the Helm values, add an
 admission policy that rejects tagged images for serving namespaces, and store the digest with the
 model version so that a rollback restores both together. The same applies to platform-bundled

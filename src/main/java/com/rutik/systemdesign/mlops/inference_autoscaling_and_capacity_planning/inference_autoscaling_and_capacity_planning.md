@@ -1,12 +1,14 @@
 # Inference Autoscaling and Capacity Planning
 
-> **Version anchor (2026-10-18).** vLLM v0.32.0 (2026-10-18); the metric names below were read
-> from `vllm/v1/metrics/loggers.py` at the v0.32.0 tag, and the `--max-num-queued-reqs` and
-> `--max-num-queued-tokens` semantics from `vllm/config/scheduler.py` at the same tag. KEDA v2.21.0
-> (2026-09-23). KServe v0.21.0 (2026-09-25), which adds direct KEDA scaling to
-> `LLMInferenceService` (`spec.scaling.keda`) and accepts `idleReplicaCount: 0`. Ray 2.59.0
-> (2026-10-02); Ray Serve autoscaling defaults read from the Ray Serve docs on 2026-10-18. llm-d
-> v0.10.0 (2026-09-29). `llm-d/llm-d-autoscaling` v1.0.0 (2026-10-13, read from its release page)
+> **Version anchor (2026-11-25).** vLLM v0.34.0 (2026-11-16); the metric names below and the
+> `--max-num-queued-reqs` and `--max-num-queued-tokens` semantics were read from
+> `vllm/v1/metrics/loggers.py` and `vllm/config/scheduler.py` at the v0.32.0 tag and re-checked at
+> the v0.34.0 tag. v0.34.0 also turns on the extensible KV cache by default (`gpu_memory_utilization`
+> defaults to 1.0, §6.1) and adds `vllm:admission_rejections`. KEDA v2.21.1
+> (2026-11-15). KServe v0.21.0 (2026-09-25), which adds direct KEDA scaling to
+> `LLMInferenceService` (`spec.scaling.keda`) and accepts `idleReplicaCount: 0`. Ray 2.60.1
+> (2026-11-23); Ray Serve autoscaling defaults read from the Ray Serve docs on 2026-10-18. llm-d
+> v1.0.0 (2026-10-20). `llm-d/llm-d-autoscaling` v1.0.0 (2026-10-13, read from its release page)
 > made the repository KEDA-first and deprecated the Workload Variant Autoscaler (WVA); the last
 > supported WVA release is v0.9.0. AIBrix v0.8.0 (2026-10-13) adds scheduled replica bounds
 > (`spec.schedules`) and a predictive autoscaling API (`spec.predictive`) to `PodAutoscaler`; in
@@ -39,7 +41,7 @@ one replica serves while meeting the latency SLO (for example p95 time to first 
 not from a peak-throughput number.
 
 The second question is where most production incidents start. A vLLM replica at batch 4 and at
-batch 120 both read close to 100% on `DCGM_FI_DEV_GPU_UTIL`, and its CPU sits near 10% while
+batch 120 both read close to 1.0 (100%) on `DCGM_FI_DEV_GPU_UTIL_RATIO`, and its CPU sits near 10% while
 requests queue. The signals that track load are the engine's own: in-flight requests (running
 plus waiting), the waiting count, `vllm:kv_cache_usage_perc` and TTFT.
 
@@ -131,7 +133,7 @@ it says nothing about how many replicas the current load needs.
 
 ### 4.1 Scale signals for an LLM server
 
-| Signal | Source (vLLM v0.32.0 unless noted) | Bounded? | Leads or lags | Verdict |
+| Signal | Source (vLLM v0.34.0 unless noted) | Bounded? | Leads or lags | Verdict |
 |---|---|---|---|---|
 | In-flight requests | `vllm:num_requests_running` + `vllm:num_requests_waiting` | No | Coincident, then leads | Primary sizing trigger, target = L at goodput |
 | Waiting requests | `vllm:num_requests_waiting` | No | Leads | Saturation alert; zero at steady state, so not a sizing trigger alone |
@@ -142,7 +144,7 @@ it says nothing about how many replicas the current load needs.
 | Prompt token rate | `rate(vllm:prompt_tokens_total[1m])` | No | Coincident | Capacity planning, prefill pool trigger |
 | Admission rejections | `vllm:admission_rejections_total{reason=...}` | No | Leads | Overflow routing, alert |
 | Running requests alone | `vllm:num_requests_running` | Yes, at `--max-num-seqs` | Coincident | Not a scale trigger |
-| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` from dcgm-exporter | Yes, at 100% | Coincident | Not a scale trigger |
+| GPU utilization | `DCGM_FI_DEV_GPU_UTIL_RATIO` from dcgm-exporter 4.9.0 (`DCGM_FI_DEV_GPU_UTIL` in percent before 4.9.0) | Yes, at 1.0 | Coincident | Not a scale trigger |
 | CPU utilization | cAdvisor | Yes | Misleading | Not a scale trigger |
 | Requests per second | Gateway | No | Coincident | Valid only for fixed-cost classic models (a 30 ms XGBoost call) |
 
@@ -352,9 +354,20 @@ requests = arrival rate x time in system. With p50 TTFT 0.4 s, mean output 260 t
 35 ms, W = 0.4 + 260 x 0.035 = 9.5 s. At 7 req/s per replica, L = 66.5 sequences in flight. With
 a mean of 2,360 tokens per sequence (2,100 in, 260 out), that is about 157,000 tokens of KV cache.
 Llama 3.x 70B with an FP8 KV cache uses 160 KiB per token (80 layers x 8 KV heads x 128 dims x 2
-x 1 byte), and a TP=2 replica on H100 80 GB at `--gpu-memory-utilization 0.9` has room for about
-410,000 tokens after weights and activation memory. KV fill is 0.38, so the replica is bound by compute, not
+x 1 byte). On a TP=2 replica on H100 80 GB with an explicit `--gpu-memory-utilization 0.9`, the
+fixed-fraction sizing vLLM used before v0.34.0, the KV pool holds about 410,000 tokens
+after weights and activation memory. KV fill is 0.38, so the replica is bound by compute, not
 memory, and `--max-num-seqs` must be above 67 with room for bursts.
+
+vLLM v0.34.0 turns the extensible KV cache on by default: it sizes the pool from the memory
+actually free after CUDA graph capture and warmup, and `gpu_memory_utilization` defaults to 1.0.
+The 10% margin the 0.9 setting held back is 16 GB across two 80 GB GPUs, about 98,000 more tokens
+at 160 KiB each, minus whatever other processes on the GPU use. Do not plan from either estimate:
+read the token count the engine logs at startup (also exported as `vllm:cache_config_info`) and
+put that number into the plan. KV fill drops to about 0.3, which leaves the conclusion unchanged.
+Keep an explicit `--gpu-memory-utilization 0.9` only where the GPU is shared with another process;
+the v0.34.0 notes report TPOT up 6 to 18% on some H200 models at concurrency 128 with the larger
+cache, so a latency-bound pool should benchmark both settings.
 
 **Tokens, not requests.** If the length mix shifts (a new feature sends 8,000-token prompts),
 the 7 req/s goodput is wrong the same day. Track prompt tokens/s and output tokens/s per replica
@@ -376,7 +389,7 @@ import math
 
 def plan(peak_rps, burst, ramp_per_min, lag_min, goodput, gpus, zones=3,
          gpus_per_node=8, ttft_s=0.4, tpot_s=0.035, in_tok=2100, out_tok=260,
-         kv_tokens=410_000):
+         kv_tokens=410_000):   # KV pool from the engine's startup log, not an estimate
     n = math.ceil((peak_rps * burst + ramp_per_min * lag_min) / goodput)
     n_zone = math.ceil(n * zones / (zones - 1))          # survive one zone loss
     nodes = math.ceil(n_zone / (gpus_per_node // gpus))
@@ -522,7 +535,7 @@ metrics"): a metrics outage must hold or raise replicas, never lower them.
 
 ### 6.4 Admission limits: the bound the autoscaler needs
 
-vLLM v0.32.0 has two frontend admission limits. When either is hit, new requests get HTTP 503 and
+vLLM v0.34.0 has two frontend admission limits (both present since v0.32.0). When either is hit, new requests get HTTP 503 and
 `vllm:admission_rejections_total{reason=...}` counts them.
 
 | Flag | Limits | Sizing rule from the vLLM docstring |
@@ -752,14 +765,14 @@ scale-up rate limit of 1-2 pods per minute.
 
 | Tool | Role | Notes |
 |---|---|---|
-| KEDA | Event-driven autoscaler over the HPA | v2.21.0; Prometheus and cron scalers, `idleReplicaCount: 0`, `fallback` |
+| KEDA | Event-driven autoscaler over the HPA | v2.21.1; Prometheus and cron scalers, `idleReplicaCount: 0`, `fallback` |
 | Kubernetes HPA | Replica controller | `autoscaling/v2`; `behavior` for scale-up and scale-down rates |
 | KServe | Model serving platform | v0.21.0; `LLMInferenceService` `spec.scaling.keda` and `spec.scaling.wva` |
 | Knative Serving | Request-driven autoscaling | KPA: 60 s stable window, panic at 200% of target |
-| Ray Serve | Python serving framework | Ray 2.59.0; `autoscaling_config`, custom policies |
-| llm-d | Kubernetes-native distributed inference | v0.10.0; KEDA blueprints in `llm-d-autoscaling` v1.0.0 |
+| Ray Serve | Python serving framework | Ray 2.60.1; `autoscaling_config`, custom policies |
+| llm-d | Kubernetes-native distributed inference | v1.0.0; KEDA blueprints in `llm-d-autoscaling` v1.0.0; flow control under `flowControl` sheds load before the autoscaler reacts |
 | AIBrix | vLLM control plane | v0.8.0; `PodAutoscaler` KPA, APA, HPA; `spec.schedules`, `spec.predictive` |
-| vLLM | Inference engine | v0.32.0; queue, KV, TTFT metrics; `--max-num-queued-tokens` |
+| vLLM | Inference engine | v0.34.0; queue, KV, TTFT metrics; `--max-num-queued-tokens`; extensible KV cache on by default |
 | Prometheus | Metrics store | Source for every KEDA trigger above |
 | dcgm-exporter | GPU metrics exporter | Fleet health; not a scale signal |
 | Karpenter | Node provisioner | GPU node pools, capacity reservations |
@@ -771,7 +784,7 @@ scale-up rate limit of 1-2 pods per minute.
 **Q: Why is GPU utilization a bad autoscaling signal for an LLM server?**
 **Short:** Continuous batching keeps a kernel running on every step, so a replica at batch 4 and one at batch 120 both read near 100%, and the metric cannot say how many replicas are missing.
 
-`DCGM_FI_DEV_GPU_UTIL` measures whether a kernel was active during the sample period, not how
+`DCGM_FI_DEV_GPU_UTIL_RATIO` measures whether a kernel was active during the sample period, not how
 full the SMs were. Continuous batching keeps a decode kernel running on every step, so the metric
 saturates long before the replica misses its SLO. Even past saturation it stays at 100% whether the
 fleet is 10% or 300% short. Use it for fleet health. Size on in-flight requests per replica and
@@ -793,8 +806,10 @@ running plus waiting requests per replica, with a target near L at goodput (abou
 Goodput comes from an open-loop SLO sweep on the real length mix: the highest rate where p95 TTFT
 and TPOT still meet target, minus a margin. Example: 54 req/s x 1.25 / 7 = 9.64; lag headroom
 0.47 req/s per minute x 8 min / 7 = 0.54; ceil gives 11. Then L = lambda x W = 7 x 9.5 s = 66.5
-sequences per replica, which needs about 157,000 KV tokens against 410,000 available. If KV fill
-were above about 0.8, memory would bind before compute and the goodput number would be wrong.
+sequences per replica, which needs about 157,000 KV tokens against the 410,000 the engine reported
+at `--gpu-memory-utilization 0.9` (vLLM v0.34.0's extensible KV cache reports more; use the logged
+figure). If KV fill were above about 0.8, memory would bind before compute and the goodput number
+would be wrong.
 
 **Q: Why do you need headroom at all if the autoscaler reacts to load?**
 **Short:** New capacity takes 2-10 minutes to serve, so demand that rises during that lag must already fit in the running fleet.
@@ -835,7 +850,7 @@ first caller can wait that long.
 **Q: What does `--max-num-queued-tokens` do, and why does it help autoscaling?**
 **Short:** It rejects new requests with 503 once queued prefill tokens exceed a bound, which caps TTFT and turns overload into fast rejects a router can retry elsewhere.
 
-The vLLM v0.32.0 docstring sizes it as target TTFT x prefill throughput: 0.8 s x 12,000 tokens/s
+The vLLM docstring (unchanged from v0.32.0 to v0.34.0) sizes it as target TTFT x prefill throughput: 0.8 s x 12,000 tokens/s
 gives 9,600. Without a bound, every request admitted during the scale-up lag waits behind a growing
 prefill backlog and all of them miss TTFT. With it, the replica serves admitted requests on time
 and rejected ones go to another replica or the overflow route. `vllm:admission_rejections_total`

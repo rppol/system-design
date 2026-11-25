@@ -1,12 +1,12 @@
 # Case Study: Design an AI Release Pipeline
 
-> **Version anchor (2026-10-18).** **KServe v0.21.0** (2026-09-25) serves the self-hosted
-> features and carries their traffic weights. **MLflow 3.17.1** (2026-10-13) holds the model and
-> prompt registry and runs the judges; 3.17.1 adds Decision API support to `make_judge()`.
-> **Langfuse v4.63.0** (2026-10-16) stores the traces and scores that the online gates read.
-> **Argo Rollouts v1.10.1** (2026-10-12) drives the self-hosted canary steps. The OpenAI
-> Decisions API price (input $0.10 per 1M tokens, no output charge, model `gpt-6-luna`, public
-> beta) was read on 2026-10-18. OpenFeature and Temporal are named without a version. Every other
+> **Version anchor (2026-11-25).** **KServe v0.21.0** (2026-09-25) serves the self-hosted
+> features and carries their traffic weights. **MLflow 3.18.0** (2026-11-04) holds the model and
+> prompt registry and runs the judges; `make_judge()` supports the Decision API since 3.17.1.
+> **Langfuse v4.86.0** (2026-11-24) stores the traces and scores that the online gates read.
+> **Argo Rollouts v1.10.2** (2026-11-04) drives the self-hosted canary steps. The OpenAI
+> Decisions API (generally available, model `gpt-6-luna`, uncached input $0.10 per 1M tokens, cached
+> $0.01, no output charge) was checked on 2026-11-25. OpenFeature and Temporal are named without a version. Every other
 > price on this page is a planning input, labeled as such, not a quote.
 
 ## Intuition
@@ -130,7 +130,7 @@ Judging:            2 rubric checks per generation = 9,000 judge calls,
 
 Planning rates (inputs, not quotes):  $3 per 1M input tokens, $15 per 1M output tokens
 Decision-model judge:                 $0.10 per 1M input, no output charge (OpenAI Decisions API,
-                                      read 2026-10-18)
+                                      uncached rate, checked 2026-11-25)
 
 Candidate generations:   13.5M in x $3  + 2.25M out x $15         = $74.25
 Generative judges:       36M in x $3    + 1.35M out x $15         = $128.25
@@ -802,11 +802,11 @@ ships fast, and it needs a canary because a validator can be wrong.
 | Release workflow | Temporal | Named without a version | One durable workflow per release, rung timers, signals for breaches |
 | Flags | OpenFeature API with a streaming provider | Named without a version | Lanes, revocation list, kill switches; the gateway evaluates them |
 | Self-hosted serving | KServe | v0.21.0 (2026-09-25), CNCF incubating | Candidate and champion pools; traffic weights set by the controller |
-| Self-hosted canary steps | Argo Rollouts | v1.10.1 (2026-10-12) | Actuator for pod-level traffic steps on self-hosted features |
-| Registry | MLflow | 3.17.1 (2026-10-13) | Model and prompt versions referenced by bundle manifests |
-| Judges | MLflow `make_judge()` | 3.17.1 adds Decision API support | Generative and decision-model rubric checks |
-| Decision-model judge backend | OpenAI Decisions API | Public beta, `gpt-6-luna`, $0.10 per 1M input, read 2026-10-18 | 80% of rubric checks in the gate |
-| Traces and online scores | Langfuse | v4.63.0 (2026-10-16) | Spans tagged with `bundle_digest`, online judge scores per trace |
+| Self-hosted canary steps | Argo Rollouts | v1.10.2 (2026-11-04) | Actuator for pod-level traffic steps on self-hosted features |
+| Registry | MLflow | 3.18.0 (2026-11-04) | Model and prompt versions referenced by bundle manifests |
+| Judges | MLflow `make_judge()` | 3.18.0; Decision API support since 3.17.1 | Generative and decision-model rubric checks |
+| Decision-model judge backend | OpenAI Decisions API | GA, `gpt-6-luna`, $0.10 per 1M uncached input, $0.01 cached, checked 2026-11-25 | 80% of rubric checks in the gate |
+| Traces and online scores | Langfuse | v4.86.0 (2026-11-24) | Spans tagged with `bundle_digest`, online judge scores per trace |
 | Metrics and alerts | Prometheus | Named without a version | Per-digest counters, burn-rate alerts |
 | Ledger | PostgreSQL | Named without a version | `release_events`, champion row with conditional update |
 

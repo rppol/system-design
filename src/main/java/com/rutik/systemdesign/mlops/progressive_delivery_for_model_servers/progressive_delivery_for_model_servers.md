@@ -1,13 +1,14 @@
 # Progressive Delivery for Model Servers
 
-> **Version anchor (2026-10-18).** KServe v0.21.0 (2026-09-25): the `InferenceService`
+> **Version anchor (2026-11-25).** KServe v0.21.0 (2026-09-25): the `InferenceService`
 > `spec.canary` list, its Standard-mode-only validation and the `LLMInferenceService`
 > `rolloutStrategy`, route `group` and `weight` fields were read from the v0.21.0 source.
 > Gateway API Inference Extension v1.6.2 (2026-09-17) supplies `InferencePool`.
 > LeaderWorkerSet v1.0.0 (2026-10-16): `rolloutStrategy` and `partition` were read from the
-> v1.0.0 API types. Kubernetes 1.37 (1.37.1, 2026-09-15). Argo Rollouts v1.10.1
-> (2026-10-12) and Flagger v1.45.0 (2026-09-01) run the analysis steps. Metric names are from
-> vLLM v0.32.0 (2026-10-18). Gateway API's `RequestMirror` `percent` field was read from the
+> v1.0.0 API types. Kubernetes 1.37 (1.37.2, 2026-10-13). Argo Rollouts v1.10.2
+> (2026-11-04) and Flagger v1.45.0 (2026-09-01) run the analysis steps. Metric names are from
+> vLLM v0.32.0 (2026-10-18) and are unchanged in `vllm/v1/metrics/loggers.py` at v0.34.0
+> (2026-11-16). Gateway API's `RequestMirror` `percent` field was read from the
 > standard `v1` types. Istio and Envoy have no pin in this section and are described without a
 > version.
 
@@ -787,11 +788,11 @@ a real generation across the group, so the group is not ready until all ranks an
 | Gateway API Inference Extension | `InferencePool` as an HTTPRoute backend | v1.6.2. Weighted `backendRefs` across pools split traffic by version |
 | Gateway API | `HTTPRoute` weights and the `RequestMirror` filter | `percent` or `fraction` on the mirror; standard `v1` types |
 | LeaderWorkerSet | Multi-host replicas with group rolling updates | v1.0.0. `partition`, `maxUnavailable` 1 and `maxSurge` 0 by default |
-| Argo Rollouts | Canary and blue-green controller with analysis | v1.10.1. `setCanaryScale`, `AnalysisTemplate`, Gateway API traffic-routing plugin |
+| Argo Rollouts | Canary and blue-green controller with analysis | v1.10.2. `setCanaryScale`, `AnalysisTemplate`, Gateway API traffic-routing plugin |
 | Flagger | Progressive delivery around an existing Deployment | v1.45.0. Mirroring on Istio and Gateway API; `sessionAffinity` cookie |
 | Istio | Service mesh routing, weights and mirroring | `VirtualService` `mirror` and `mirrorPercentage`; header match routes for version pinning |
 | Envoy | Data-plane proxy under most Gateway API implementations | `request_mirror_policies`; mirrored `Host` gets a `-shadow` suffix |
-| vLLM | Model server whose metrics drive the gates | v0.32.0. `vllm:time_to_first_token_seconds`, `vllm:num_requests_running`, `vllm:prefix_cache_hits` |
+| vLLM | Model server whose metrics drive the gates | v0.34.0. `vllm:time_to_first_token_seconds`, `vllm:num_requests_running`, `vllm:prefix_cache_hits` |
 | Prometheus | Metric store queried by AnalysisRuns and MetricTemplates | Needs the version or pod template hash as a label |
 | Kubernetes | Deployment strategies, probes, grace periods | 1.37. `Recreate`, `RollingUpdate`, `minReadySeconds`, `progressDeadlineSeconds` |
 

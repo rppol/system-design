@@ -1,13 +1,14 @@
 # Evaluation Gates and Eval Sets
 
-> **Version anchor (2026-10-18).** **MLflow 3.17.1** (2026-10-13) ships `mlflow.genai.evaluate()`
-> and `make_judge()`, and 3.17.1 adds Decision API support to `make_judge()`; **MLflow 3.17.0**
-> (2026-10-07) added TypeSafe judges. **Langfuse v4.63.0** (2026-10-16) ships datasets, dataset
+> **Version anchor (2026-11-25).** **MLflow 3.18.0** (2026-11-04) ships `mlflow.genai.evaluate()`
+> and `make_judge()`; 3.17.1 (2026-10-13) added Decision API support to `make_judge()`; **MLflow 3.17.0**
+> (2026-10-07) added TypeSafe judges. **Langfuse v4.86.0** (2026-11-24) ships datasets, dataset
 > runs and LLM-as-judge evaluators; OpenAI decision-model evaluators arrived in v4.55.0
 > (2026-10-08) and decision-model evaluators graduated in v4.57.0 (2026-10-12). Langfuse is part
 > of ClickHouse since the acquisition announced 2026-01-16. **OpenAI Decisions API** (checked
-> 2026-10-18): public beta, `POST /v1/decisions`, model `gpt-6-luna`, input $0.10 per 1M tokens,
-> no output charge. promptfoo is MIT-licensed; OpenAI agreed to acquire it, announced 2026-03-09.
+> 2026-11-25): generally available, `POST /v1/decisions`, model `gpt-6-luna`, uncached input
+> $0.10 per 1M tokens, cached input $0.01, cache writes $0.125, no output charge, 1 to 400
+> questions per request. promptfoo is MIT-licensed; OpenAI agreed to acquire it, announced 2026-03-09.
 > DeepEval, Ragas, Inspect AI, lm-evaluation-harness and Braintrust are named without a version.
 >
 > **On prices.** Generative-judge prices on this page are stated assumptions, written as
@@ -510,7 +511,7 @@ resolves_issue = make_judge(
 )
 ```
 
-In MLflow 3.17.1, `model_api=ModelAPI.DECISIONS` sends a `bool` judge to the OpenAI Decisions
+Since MLflow 3.17.1, `model_api=ModelAPI.DECISIONS` sends a `bool` judge to the OpenAI Decisions
 API as a `predicate` question; without it, an `openai:/` model uses the chat route. A
 `typesafe:/` model (3.17.0) takes the decision route by default and asks a `noul` question. Both
 return True when the probability is 0.5 or above, store the probability in the assessment
@@ -524,8 +525,9 @@ A decision model answers a typed question (`predicate`, `choice`, `score` on the
 API; `choice`, `noul`, `score` on `/v1/systemone`) with probabilities from one prefill pass instead
 of sampled text. For a gate this changes three things:
 
-- **Cost.** At $0.10 per 1M input tokens and no output charge (checked 2026-10-18), 2,400 items
-  times 3 criteria times 1,500 tokens is 10.8M tokens, or $1.08 per full gate run.
+- **Cost.** At $0.10 per 1M uncached input tokens and no output charge (checked 2026-11-25), 2,400
+  items times 3 criteria times 1,500 tokens is 10.8M tokens, or $1.08 per full gate run. A shared
+  rubric prefix of 1,024 tokens or more can be cached and then bills at $0.01 per 1M.
 - **Noise.** No sampling, so run-to-run variance from the judge mostly disappears. The remaining
   risk is the threshold: a probability is not a calibrated chance of being right unless you have
   measured it, and the SGLang docs say its values are not calibrated probabilities of correctness.
@@ -791,15 +793,15 @@ week of publication.
 
 | Tool | Role | Notes |
 |---|---|---|
-| MLflow | 3.17.1: `mlflow.genai.evaluate()` with built-in and custom scorers, `make_judge()` judges | 3.17.0 added TypeSafe judges; 3.17.1 added Decision API support in `make_judge()` |
-| Langfuse | v4.63.0: datasets, dataset runs, LLM-as-judge and decision-model evaluators | Decision-model evaluators graduated in v4.57.0; a refusal fails the run with no scores. Part of ClickHouse since the acquisition announced 2026-01-16 |
+| MLflow | 3.18.0: `mlflow.genai.evaluate()` with built-in and custom scorers, `make_judge()` judges | 3.17.0 added TypeSafe judges; 3.17.1 added Decision API support in `make_judge()` |
+| Langfuse | v4.86.0: datasets, dataset runs, LLM-as-judge and decision-model evaluators | Decision-model evaluators graduated in v4.57.0; a refusal fails the run with no scores. Part of ClickHouse since the acquisition announced 2026-01-16 |
 | promptfoo | CLI eval harness with YAML test cases and assertions (`is-json`, `llm-rubric`, `cost`, `latency`) | MIT license; OpenAI agreed to acquire it, announced 2026-03-09 |
 | DeepEval | pytest-style LLM tests (`assert_test`, `GEval`, RAG metrics) run with `deepeval test run` | Fits teams that want eval failures as test failures |
 | Ragas | RAG metrics: faithfulness, context recall, context precision, answer relevancy | Metric definitions depend on a judge model; pin it |
 | Inspect AI | Task, solver and scorer framework for capability and safety evals | From the UK AI Security Institute; strong on agent and sandboxed evals |
 | lm-evaluation-harness | EleutherAI harness for standard benchmarks on open weights | Used by the Open LLM Leaderboard; good for forgetting checks after fine-tuning |
 | Braintrust | Hosted eval platform with experiments, datasets and scorers | Commercial; experiment comparison UI |
-| OpenAI Decisions API | Decision-model judge backend, `POST /v1/decisions` | Public beta, `gpt-6-luna`, $0.10 per 1M input tokens, no output charge (checked 2026-10-18) |
+| OpenAI Decisions API | Decision-model judge backend, `POST /v1/decisions` | GA, `gpt-6-luna`, $0.10 per 1M uncached input tokens, $0.01 cached, no output charge (checked 2026-11-25) |
 | GitHub Actions | Runs the tiered gates and posts results; any CI runner works | Store gate results with the bundle digest, not only in CI logs |
 
 Benchmark suites and leaderboard methodology are in
@@ -926,7 +928,7 @@ each new attack class within a week of its publication.
 **Short:** For binary or few-class rubrics at volume, where cost and run-to-run noise matter and a rationale is not needed for every item.
 
 A decision model answers a typed question with probabilities from one prefill pass, so it costs
-input tokens only on the OpenAI Decisions API ($0.10 per 1M, checked 2026-10-18) and has no
+input tokens only on the OpenAI Decisions API ($0.10 per 1M uncached, checked 2026-11-25) and has no
 sampling noise. A 2,400-item, 3-criterion gate run costs about $1 instead of about $49 with an
 assumed generative judge. It gives no rationale, and its probabilities are not calibrated chances
 of being right until you measure them. Use it for the bulk, set thresholds per slice from human

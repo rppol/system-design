@@ -1,6 +1,6 @@
 # AI Gateway Operations
 
-> **Version anchor (2026-10-18).** LiteLLM v1.106.0 (2026-10-18) disables stdio MCP servers by default (PR #44066); only `LITELLM_ENABLE_MCP_STDIO=true` in the proxy's process environment turns them back on. Agent Router v1.2.0 (2026-10-07) is the first release under the project's new name (formerly Envoy AI Gateway); the API group `aigateway.envoyproxy.io` and the CRD kinds (`AIGatewayRoute`, `AIServiceBackend`, `BackendSecurityPolicy`, `GatewayConfig`, `MCPRoute`) are unchanged. vLLM Semantic Router v0.4.0 (2026-09-27) routes by signal-driven decisions; its Router Replay plugin has shipped since v0.2.0. Checked 2026-10-18 from vendor docs: the Azure API Management `llm-token-limit` policy, and Amazon Bedrock cross-Region inference, where AWS lists global profiles at approximately 10% below geographic pricing. Every version-tagged claim on this page is checked against these rows.
+> **Version anchor (2026-11-25).** LiteLLM v1.111.0 (2026-11-25); since v1.106.0 (2026-10-18) it disables stdio MCP servers by default (PR #44066), and only `LITELLM_ENABLE_MCP_STDIO=true` in the proxy's process environment turns them back on. Agent Router v1.3.0 (2026-11-18), repo `theagentrouter/agent-router` (`envoyproxy/ai-gateway` redirects to it). v1.2.0 (2026-10-07) was the first release under the project's new name (formerly Envoy AI Gateway); the API group `aigateway.envoyproxy.io` and the CRD kinds (`AIGatewayRoute`, `AIServiceBackend`, `BackendSecurityPolicy`, `GatewayConfig`, `MCPRoute`, `QuotaPolicy`) are unchanged. v1.3.0 makes `QuotaPolicy` a token-budget system (§6.2), passes the OpenAI Decisions and Files APIs through, and moves to Envoy Gateway v1.10.0 with Envoy Proxy v1.40.2. vLLM Semantic Router v0.4.0 (2026-09-27) routes by signal-driven decisions; its Router Replay plugin has shipped since v0.2.0. Checked 2026-10-18 from vendor docs: the Azure API Management `llm-token-limit` policy, and Amazon Bedrock cross-Region inference, where AWS lists global profiles at approximately 10% below geographic pricing. Every version-tagged claim on this page is checked against these rows.
 
 ---
 
@@ -88,7 +88,7 @@ The vLLM Semantic Router term "decision" means a routing rule: a priority, a boo
 | TPM | prompt plus completion tokens per minute | provider TPM limits, one key starving others | reserve at admission, settle after response |
 | Concurrency | in-flight requests | long streams holding capacity | at admission, released at stream close |
 | Dollar budget | USD per period (`max_budget`, `budget_duration`) | cost overrun | settled after response; checked at admission |
-| Token quota | tokens per hour, day, month (APIM `token-quota`) | monthly allocation per subscription | settled after response |
+| Token quota | tokens per hour, day, month (APIM `token-quota`; Agent Router `QuotaPolicy` with `1h` to `1y` windows) | monthly allocation per subscription or backend | settled after response |
 
 A key needs at least RPM, TPM and a dollar budget. Concurrency matters for agents and long streams, where a few requests hold a deployment for minutes.
 
@@ -97,7 +97,7 @@ A key needs at least RPM, TPM and a dollar budget. Concurrency matters for agent
 | Product | Type | Notable operational features |
 |---|---|---|
 | LiteLLM Proxy | open-source proxy | virtual keys, budgets per key, team, user and model; fallbacks; cooldowns; MCP gateway |
-| Agent Router | Envoy-based, Kubernetes CRDs | `llmRequestCosts` into Envoy rate-limit buckets; backend priority and weight; `streamIdleTimeout`; `MCPRoute` |
+| Agent Router | Envoy-based, Kubernetes CRDs | `llmRequestCosts` into Envoy rate-limit buckets; `QuotaPolicy` token budgets per backend and model; backend priority and weight; `streamIdleTimeout`; `MCPRoute` |
 | vLLM Semantic Router | signal-driven router | decisions with priorities, selection algorithms, plugins such as `router_replay` and `shadow_dispatch` |
 | Portkey | open-source gateway plus hosted service | fallbacks, load balancing, conditional routing, simple and semantic cache, budget and rate limits |
 | Kong AI Gateway | plugins on Kong | AI Rate Limiting Advanced (cost-based limits), AI Semantic Cache, AI Prompt Guard, AI Sanitizer (PII) |
@@ -412,6 +412,24 @@ spec:
 
 `number: 0` on the request side means admission only checks that the bucket is not empty; the response side charges the real tokens. This is the charge-after-response model with a coarse guard, so it relies on the hour-long window to absorb bursts. For tight per-minute limits, add a request-count limit alongside it.
 
+**Agent Router `QuotaPolicy` as a token budget (v1.3.0).** The `llmRequestCosts` rule above is a
+rate limit per client. `QuotaPolicy` (API version `v1alpha1`) is a budget per backend and model,
+and v1.3.0 (2026-11-18) made it complete enough to replace hand-built buckets:
+
+| v1.3.0 behavior | What it means for budgets |
+|---|---|
+| Admission charges zero; only the token cost reported at the end of the response or stream is deducted | Budgets match provider bills. Before v1.3.0 every admitted request was charged one extra unit, so a 28-token request deducted 29 |
+| Policy create, update and delete apply in seconds through a hash annotation (`aigateway.envoyproxy.io/quota-policy-hash`) on the generated HTTPRoute | A budget change no longer needs a controller and Envoy restart, so it can ship through the same config pipeline as aliases (§6.11) |
+| `QuotaValue.fromMetadata` (`namespace`, `key`) reads `requests_per_unit` and `unit` that an earlier filter, usually `ext_authz`, writes to dynamic metadata; `limit` and `duration` stay required as the fallback, and a value of `0` suspends the tenant | One policy serves many tenants with per-tenant limits held in the auth service |
+| `duration` accepts `1w`, `1mo` and `1y` as well as `1s`, `1m`, `1h` and `1d` | Weekly team budgets and monthly caps, but as Envoy rate-limit windows, not calendar months: a "monthly" window does not reset on the 1st |
+| `targetRefs[].namespace` with a ReferenceGrant from `QuotaPolicy` to `AIServiceBackend` | The platform team keeps budgets in its own namespace while backends stay with the teams that own them; an ungranted target reports `RefNotPermitted` |
+| Quota-aware backend failover (preview) | A route with prioritized backends skips one whose quota is exhausted and returns 429 only when every group is exhausted. It needs an Envoy build with `host_allowlist`, which Envoy v1.40.2 in Envoy Gateway v1.10.0 does not include |
+
+Choose by the question the limit answers. A LiteLLM `max_budget` answers "how many dollars may this
+key spend"; a `QuotaPolicy` answers "how many tokens may this backend and model serve in this
+window". A platform on Agent Router usually needs both: the quota protects shared provider
+capacity, and the dollar budget, computed from cost tags (§6.9), protects the invoice.
+
 ### 6.3 Fallback chains and equivalence maps
 
 A fallback chain says what to call when the primary fails. An equivalence map says which models are allowed to stand in for an alias, and what evidence supports that. The chain should only contain models from the map.
@@ -633,11 +651,11 @@ The hold-back adds latency equal to about 32 characters of output, a few tokens.
 
 Agents reach tool servers through the gateway for the same reason applications reach models through it: one place for credentials, allowlists, audit and limits. The tool lifecycle (pins, listing digests, trajectory gates) is in [Agent, Tool and MCP Server Lifecycle](../agent_tool_and_mcp_server_lifecycle/agent_tool_and_mcp_server_lifecycle.md). The gateway's part:
 
-- **Authentication.** The agent authenticates to the gateway with its own identity. The gateway holds, or exchanges, the credential for the tool server. Agent Router v1.2.0 adds `authorizationServerMetadataUrl` for OAuth on `MCPRoute`, and `injectionPolicy: IfNotPresent` for caller-supplied credentials; it also requires tokens to match `oauth.issuer` exactly, including a trailing slash, or they get a 401.
+- **Authentication.** The agent authenticates to the gateway with its own identity. The gateway holds, or exchanges, the credential for the tool server. Agent Router v1.2.0 added `authorizationServerMetadataUrl` for OAuth on `MCPRoute`, and `injectionPolicy: IfNotPresent` for caller-supplied credentials; it also requires tokens to match `oauth.issuer` exactly, including a trailing slash, or they get a 401.
 - **Allowlists.** A key or team sees only the servers and tools granted to it. LiteLLM servers can be marked `allow_all_keys` or scoped through `access_groups`; anything else is granted per key, team or organization.
 - **Name prefixing.** LiteLLM prefixes each tool name with its server name (`github_mcp_server_create_issue`), with `mcp_aliases` to shorten the prefix. Agent Router's `prefixMode: Never` turns prefixing off, which brings back collisions when two servers expose the same tool name. Pick one convention and keep it, because renaming tools is a behavior change for every agent.
 - **Transports.** LiteLLM v1.106.0 disables stdio MCP servers by default. Disabled stdio servers stay registered but never start, are skipped in tool listings, return 403 on calls and health checks. Creating one returns 422, and an update is rejected unless it switches the server to a remote transport. Only `LITELLM_ENABLE_MCP_STDIO=true` in the process environment (or a `.env` file beside the proxy) re-enables them; the flag is ignored in `config.yaml` and in database-stored environment variables. The stated reason is that stdio servers run local commands on the proxy host.
-- **Session state.** Agent Router v1.2.0's chart no longer defaults to a fixed MCP session seed, so the upgrade ends active MCP sessions. Long-running agents need to reconnect cleanly or the upgrade is an outage.
+- **Session state.** Agent Router v1.2.0's chart no longer defaults to a fixed MCP session seed, so that upgrade ended active MCP sessions. v1.3.0 adds `controller.mcp.sessionEncryption.fallback.existingSecret`, so the seed can live in a Secret you manage and survive upgrades. Long-running agents still need to reconnect cleanly, or an upgrade is an outage.
 
 ### 6.9 Cost tags per request
 
@@ -816,8 +834,8 @@ The scenarios below are composites of common incident patterns unless a source i
 
 | Tool | Role | Notes |
 |---|---|---|
-| LiteLLM | open-source proxy and SDK router | v1.106.0; virtual keys, budgets, fallbacks, cooldowns, MCP gateway; stdio MCP off by default |
-| Agent Router | Envoy-based AI gateway with Kubernetes CRDs | v1.2.0, renamed from Envoy AI Gateway; `AIGatewayRoute`, `MCPRoute`, `llmRequestCosts` |
+| LiteLLM | open-source proxy and SDK router | v1.111.0; virtual keys, budgets, fallbacks, cooldowns, MCP gateway; stdio MCP off by default |
+| Agent Router | Envoy-based AI gateway with Kubernetes CRDs | v1.3.0 (renamed from Envoy AI Gateway at v1.2.0); `AIGatewayRoute`, `MCPRoute`, `llmRequestCosts`, `QuotaPolicy` token budgets |
 | Envoy Gateway | Gateway API implementation under Agent Router | `BackendTrafficPolicy` global rate limits consume token cost metadata |
 | vLLM Semantic Router | signal-driven routing | v0.4.0; decisions with priorities, algorithms and plugins; `router_replay`, `shadow_dispatch` |
 | Portkey | gateway with open-source core | fallbacks, load balancing, conditional routing, caching, budget and rate limits |
@@ -849,6 +867,11 @@ At admission the gateway does not know the completion length. A limiter that onl
 **Short:** Without a database the global budget fails open, a missing `budget_duration` makes the cap lifetime, and a key created without `max_budget` defaults to null, which is never checked.
 
 Three documented behaviors cause most of these incidents. Without a database, LiteLLM's global `litellm_settings.max_budget` fails open, and key, team and user budgets cannot apply because virtual keys resolve from the database. `max_budget` defaults to `null`, and a null budget is not checked, so any key minted by a script that omits the field is uncapped. Without `budget_duration` the budget never resets, which looks fine until it locks everyone out in month two. Guard all three: fail readiness when the budget store is down, reject keys without both fields in a config check, and alert at 80% of any budget.
+
+**Q: An Agent Router `QuotaPolicy` with a `1mo` duration was expected to reset on the first of each month. Why did a team run out on the 20th?**
+**Short:** The `1w`, `1mo` and `1y` durations added in Agent Router v1.3.0 are Envoy rate-limit windows, not calendar-aligned billing periods, so they do not reset on the 1st.
+
+v1.3.0 extended `QuotaValue.duration` from `1s` to `1d` with `1w`, `1mo` and `1y`, and its notes say these are Envoy rate-limit windows rather than calendar periods; the rate-limit service image must also support the `WEEK`, `MONTH` and `YEAR` units. A team that spends heavily at the end of one window and the start of the next can hit the limit mid-month by calendar. If finance needs calendar months, keep the `QuotaPolicy` as a capacity guard and enforce the monthly dollar cap from cost records keyed by calendar month. Before v1.3.0, budgets also drifted high because admission charged one extra unit per request; v1.3.0 charges only the token cost reported at the end of the response.
 
 **Q: Your APIM `llm-token-limit` is 100,000 TPM per subscription, and you add two regional gateways. What happens to the limit?**
 **Short:** It roughly triples, because the policy counts tokens separately at each gateway and does not aggregate across regional gateways in a multi-region deployment.
@@ -965,6 +988,26 @@ EU enterprise customers (31% of revenue) have a contractual commitment that prom
 | Config | git repository, CI static checks, 24-hour routing replay, canary on 1 of 6 replicas | config changes behave like releases |
 
 **Migration.** Services moved in four waves over six weeks, lowest risk first (internal tools, then batch jobs, then search, then the support assistant). Each wave ran with the gateway in shadow for 48 hours: services called the provider directly while mirroring requests to the gateway with a `dry_run` header, and the team compared resolved models, token counts and denials before switching. Two problems surfaced in shadow: a batch job that sent 12,000-token prompts with short outputs and no `max_tokens`, so the default 4,096 ceiling reserved about 16,100 tokens per request against about 12,200 used and would have cut its admitted rate by about a quarter, and a service whose Azure deployment name did not match the alias map.
+
+**The $27,000 weekend, broken then fixed.** The eval job had borrowed the support bot's production
+credential, so neither a separate cap nor an owner existed for its spend.
+
+```bash
+# BROKEN: the eval run authenticates with the production key and spends from production's cap
+export OPENAI_BASE_URL="https://ai-gateway.internal/v1"
+export OPENAI_API_KEY="${SUPPORT_BOT_PROD_KEY}"
+python run_evals.py --suite support-v14 --model chat-large
+```
+
+```bash
+# FIX: a key per service per environment with its own 30-day budget, TPM and RPM. A runaway
+# eval now stops at $3,000 with a budget error, and the key alias names the owner.
+curl -s -X POST https://ai-gateway.internal/key/generate \
+  -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" -H "Content-Type: application/json" \
+  -d '{"key_alias": "support-evals", "team_id": "support", "models": ["chat-large", "chat-small"],
+       "max_budget": 3000, "budget_duration": "30d", "tpm_limit": 200000, "rpm_limit": 300}'
+export OPENAI_API_KEY="${SUPPORT_EVALS_KEY}"   # the key returned above, stored in the CI secret store
+```
 
 **Result after one quarter.**
 

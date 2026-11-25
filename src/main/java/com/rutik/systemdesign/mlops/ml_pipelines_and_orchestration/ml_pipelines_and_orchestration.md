@@ -1,6 +1,6 @@
 # ML Pipelines and Orchestration
 
-> **Version anchor (2026-10-18).** Kubeflow Pipelines 2.17.2 (2026-09-04); Ray 2.59.0 (2026-10-02), which ships Ray Data LLM and Ray Serve LLM; vLLM v0.32.0 (2026-10-18). Airflow 3 details live in [Apache Airflow](../../technologies/apache_airflow/apache_airflow.md), which carries its own version pin.
+> **Version anchor (2026-11-25).** Kubeflow Pipelines 2.18.2 (2026-11-23); Ray 2.60.1 (2026-11-23), which ships Ray Data LLM and Ray Serve LLM; vLLM v0.34.0 (2026-11-16). Airflow 3 details live in [Apache Airflow](../../technologies/apache_airflow/apache_airflow.md), which carries its own version pin.
 
 An AI feature depends on four kinds of batch work that run on a schedule or a trigger, take minutes to days, and often hold GPUs: training and fine-tuning, evaluation, batch inference, and index builds. Each one consumes versioned inputs and produces versioned artifacts that a release bundle later pins. This module covers how those jobs are orchestrated: the orchestrator families, step caching keyed on input digests, GPU steps that survive retries and preemption, dynamic fan-out over thousands of shards, artifacts passed by reference, and the three ways to run LLM batch inference (offline engine, Ray Data LLM, provider Batch API).
 
@@ -656,7 +656,7 @@ Every trigger resolves its inputs to snapshot ids before the run starts and writ
 
 | Tool | Role | Notes |
 |---|---|---|
-| Kubeflow Pipelines | Task DAG on Kubernetes with typed artifacts and execution caching | 2.17.2; `ParallelFor`, `dsl.If`, `set_retry`, accelerator requests per task |
+| Kubeflow Pipelines | Task DAG on Kubernetes with typed artifacts and execution caching | 2.18.2; `ParallelFor`, `dsl.If`, `set_retry`, accelerator requests per task |
 | Vertex AI Pipelines | Managed runner for KFP pipelines | Same IR YAML as open-source KFP |
 | Apache Airflow | Scheduler, backfills, assets | Airflow 3; see [Apache Airflow](../../technologies/apache_airflow/apache_airflow.md) |
 | Argo Workflows | Kubernetes-native workflow CRD, memoization | Execution backend under open-source KFP |
@@ -667,10 +667,10 @@ Every trigger resolves its inputs to snapshot ids before the run starts and writ
 | ZenML | Portable pipeline layer over stacks | Default step caching |
 | SageMaker Pipelines | Managed DAG on AWS | `CacheConfig` with ISO 8601 `expire_after` |
 | Temporal | Durable execution | See [Temporal Durable Execution](../../technologies/temporal_durable_execution/temporal_durable_execution.md) |
-| Ray Data LLM | Streaming batch inference through vLLM engine actors | Ray 2.59.0; `vLLMEngineProcessorConfig`, `build_processor` |
-| vLLM | Offline `LLM` class, `vllm run-batch` for batch JSONL | v0.32.0 |
+| Ray Data LLM | Streaming batch inference through vLLM engine actors | Ray 2.60.1; `vLLMEngineProcessorConfig`, `build_processor` |
+| vLLM | Offline `LLM` class, `vllm run-batch` for batch JSONL | v0.34.0 |
 | OpenAI Batch API, Anthropic Message Batches | Discounted asynchronous inference | 24 h window; pricing in the token economics page |
-| Kueue | Queueing and quota admission for batch jobs | v0.20.2; see GPU Cluster Scheduling and Quotas |
+| Kueue | Queueing and quota admission for batch jobs | v0.20.7; see GPU Cluster Scheduling and Quotas |
 | lakeFS | Commit ids as pipeline inputs | v1.88.0; see Dataset and Label Versioning |
 
 Platform-level choice of orchestrator against the rest of the ML platform is in [ML Platform Architecture and Build vs Buy](../ml_platform_architecture_and_build_vs_buy/ml_platform_architecture_and_build_vs_buy.md).

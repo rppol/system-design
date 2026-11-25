@@ -1,9 +1,9 @@
 # Prompt Lifecycle and Versioning
 
-> **Version anchor (2026-10-18).** **MLflow 3.17.1** (2026-10-13) ships the Prompt Registry
+> **Version anchor (2026-11-25).** **MLflow 3.18.0** (2026-11-04) ships the Prompt Registry
 > used in this page: `mlflow.genai.register_prompt()`, `load_prompt("prompts:/<name>@<alias>")`,
-> mutable aliases over immutable versions, and a per-version `model_config`. **Langfuse v4.63.0**
-> (2026-10-16) ships prompt management with the built-in `production` and `latest` labels and a
+> mutable aliases over immutable versions, and a per-version `model_config`. **Langfuse v4.86.0**
+> (2026-11-24) ships prompt management with the built-in `production` and `latest` labels and a
 > per-version `config` object. LaunchDarkly AI Configs has no public release page; it is
 > described without a version. Provider facts (model ids, retirement dates, cache prices) were
 > read from the Anthropic and OpenAI documentation on 2026-10-18 and carry that date where
@@ -330,7 +330,7 @@ def unit_hash(unit_path: str) -> str:
 The `owner` field is excluded because changing the owning team does not change behavior. The
 eval set and judge are included: a unit gated against a different eval set is a different claim.
 
-Registering in MLflow 3.17.1 stores the template, the model config and the hash as a tag:
+Registering a prompt in MLflow stores the template, the model config and the hash as a tag:
 
 ```python
 import mlflow
@@ -741,8 +741,8 @@ promotion, and prompts with no traffic for 30 days are archived.
 
 | Tool | Role | Notes |
 |---|---|---|
-| MLflow Prompt Registry | Registry with immutable versions and aliases | MLflow 3.17.1. `register_prompt`, `load_prompt("prompts:/name@alias")`, `set_prompt_alias`, version tags, per-version `model_config` (editable), 60 s alias cache default |
-| Langfuse | Prompt management with labels and versioned `config` | v4.63.0. `production` default label, automatic `latest`, protected labels on paid tiers, 60 s SDK cache with stale-while-revalidate. Part of ClickHouse since the acquisition announced 2026-01-16 |
+| MLflow Prompt Registry | Registry with immutable versions and aliases | MLflow 3.18.0. `register_prompt`, `load_prompt("prompts:/name@alias")`, `set_prompt_alias`, version tags, per-version `model_config` (editable), 60 s alias cache default |
+| Langfuse | Prompt management with labels and versioned `config` | v4.86.0. `production` default label, automatic `latest`, protected labels on paid tiers, 60 s SDK cache with stale-while-revalidate. Part of ClickHouse since the acquisition announced 2026-01-16 |
 | LaunchDarkly | AI Configs: prompt and model config served through flag targeting | Completion and agent modes; per-variation metrics |
 | Promptfoo | CLI eval harness for prompt gates in CI | MIT license; OpenAI agreed to acquire it, announced 2026-03-09 |
 | GitHub Actions | Runs contract tests and the eval gate on each prompt PR | Pair with CODEOWNERS so gate files have a different owner than templates |

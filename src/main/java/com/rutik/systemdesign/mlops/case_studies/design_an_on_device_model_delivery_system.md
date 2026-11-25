@@ -1,10 +1,11 @@
 # Case Study: Design an On-Device Model Delivery System
 
-> **Version anchor (2026-10-18).** **ExecuTorch v1.5.1** (2026-09-23); the v1.5.0 notes add
-> schema-version checks for `.pte` and `.ptd` files and multi-method export. **llama.cpp**
-> stable **v0.7.0** (2026-10-15) and rolling build **b11719** (2026-10-18, pre-release).
+> **Version anchor (2026-11-25).** **ExecuTorch v1.6.0** (2026-11-12); the v1.5.0 notes added
+> schema-version checks for `.pte` and `.ptd` files and multi-method export, and v1.6.0 adds QNN
+> Flexible Context Binary export (one artifact for several Snapdragon SoCs). **llama.cpp**
+> stable **v1.0.0** (2026-11-13) and rolling build **b12722** (2026-11-25, pre-release).
 > **model-transparency v1.1.1** (OpenSSF Model Signing, 2025-10-10); v1.1.0 added PKCS#11 signing,
-> private Sigstore instances and BLAKE3 hashing. **vLLM v0.32.0** for the cloud fallback pool.
+> private Sigstore instances and BLAKE3 hashing. **vLLM v0.34.0** (2026-11-16) for the cloud fallback pool.
 > Facts read from primary docs on 2026-10-18: Google Play for On-device AI (beta; AI packs up to
 > 1.5 GB compressed, 4 GB cumulative per app version, device targeting by SoC, RAM, device model
 > and system features); Apple Foundation Models adapter toolkit (one adapter per system model
@@ -300,8 +301,9 @@ One entry in the [model registry](../model_registry_and_packaging/model_registry
 becomes four phone variants plus the cloud twin. The export job runs `torch.export`, lowers to
 each ExecuTorch delegate, and writes the base weights to a separate `.ptd` file so the program
 and weights are versioned apart. The QNN variant compiles a context binary per NPU generation,
-which is why T1 is limited to two Snapdragon generations. CI also converts the base to GGUF and
-runs it with llama.cpp b11719 on CPU, the quick golden-output reference before the farm is free.
+which is why T1 is limited to two Snapdragon generations. ExecuTorch v1.6.0 can pack both into one
+Flexible Context Binary, which cuts a variant from the manifest but not the per-SoC test runs. CI also converts the base to GGUF and
+runs it with llama.cpp b12722 on CPU, the quick golden-output reference before the farm is free.
 
 The device matrix is data, not code. The server uses it to filter variants; the phone still runs
 the live check from
@@ -590,7 +592,7 @@ The router runs per request on the phone. Its order:
 Every request records exactly one reason code. "Not ready" is a normal state during a base wave,
 not an error.
 
-The cloud twin runs the same base and adapter digests on vLLM v0.32.0 with multi-LoRA, at
+The cloud twin runs the same base and adapter digests on vLLM v0.34.0 with multi-LoRA, at
 BF16. Using a larger cloud model would raise quality on old phones and hide local regressions in
 the blended metric. Quality is reported per path, per device class, never blended.
 
@@ -686,7 +688,7 @@ shed order.
 |---|---|---|---|
 | Delivery channel | Self-hosted OTA with signed manifest | Play AI packs and Apple Background Assets | Per-cohort rollout with holdout, per-class kill and one manifest across both OSes; store packs are used only as a fallback channel for the 1B install |
 | Update unit | Frozen base, adapters per feature | Merged and re-quantized full model per change | 1.44 PB against 49 PB per change, rollback slot of 49 MB |
-| Runtime | ExecuTorch v1.5.1 on both OSes, delegates per tier | llama.cpp in the app | One export path from PyTorch, Core ML and QNN delegates, schema-version checks on load |
+| Runtime | ExecuTorch v1.6.0 on both OSes, delegates per tier | llama.cpp in the app | One export path from PyTorch, Core ML and QNN delegates, schema-version checks on load |
 | Cohort | One salt per release, nested stages, 10% holdout | Per-stage random draw | Stable treatment, valid comparison, no re-downloads between stages |
 | Variant choice | Server filters static facts, phone picks on live facts | Allowlist of phone models | RAM variants and thermal state are invisible to a model-name list |
 | Manifest | Pre-signed per (arm, variant set, ABI range) | Sign per request | No private key on the hot path, cacheable, reproducible |
@@ -747,13 +749,13 @@ base change, even when the platform ships the base.
 | Tool | Role in this design | Notes |
 |---|---|---|
 | ExecuTorch | Phone runtime | v1.5.1; `.pte` program and `.ptd` weights; XNNPACK, Core ML, QNN delegates; schema-version checks on load |
-| llama.cpp | CI reference runner for golden outputs | v0.7.0 stable, b11719 rolling; GGUF on CPU |
+| llama.cpp | CI reference runner for golden outputs | v1.0.0 stable, b12722 rolling; GGUF on CPU |
 | Core ML | iOS delegate target | Compiled per OS version |
 | Qualcomm QNN | NPU context binaries for T1 Android | One binary per NPU generation |
 | model-transparency | File signing in the release pipeline | v1.1.1; Sigstore bundle with an in-toto statement of file digests |
 | Ed25519 in an HSM | Manifest signing | Two public keys pinned in the app |
 | CDN plus object storage origin | Immutable chunks named by SHA-256 | Regional egress budget, HTTP range |
-| vLLM | Cloud twin with multi-LoRA | v0.32.0; same base and adapter digests at BF16 |
+| vLLM | Cloud twin with multi-LoRA | v0.34.0; same base and adapter digests at BF16 |
 | Play for On-device AI | Secondary channel for the 1B base on Android | Beta; 1.5 GB per AI pack |
 | Apple Background Assets | Secondary channel on iOS | Managed asset packs |
 | Device farm (own lab plus cloud farms) | Per-class eval and sustained thermal runs | 60 classes, 180 phones |

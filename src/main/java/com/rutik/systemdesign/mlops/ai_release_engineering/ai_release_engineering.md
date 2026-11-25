@@ -1,8 +1,8 @@
 # AI Release Engineering
 
-> **Version anchor (2026-10-18).** **Argo Rollouts v1.10.1** (2026-10-12) and **Flagger v1.45.0**
+> **Version anchor (2026-11-25).** **Argo Rollouts v1.10.2** (2026-11-04) and **Flagger v1.45.0**
 > (2026-09-01) run the analysis steps named on this page. **KServe v0.21.0** (2026-09-25) and
-> **Kubernetes 1.37** are the serving substrate in the examples. **MLflow 3.17.1** (2026-10-13)
+> **Kubernetes 1.37** are the serving substrate in the examples. **MLflow 3.18.0** (2026-11-04)
 > provides the registry aliases that promotion moves. OpenFeature, LaunchDarkly AI Configs,
 > Statsig and Unleash have no pin in this section and are described without a version. Anthropic
 > retirement dates, the 60-day notice policy and the parameter deprecation table were read from the
@@ -717,15 +717,15 @@ recorded in the environment config.
 
 | Tool | Role | Notes |
 |---|---|---|
-| Argo Rollouts | Canary and blue-green controller with analysis steps | v1.10.1. `AnalysisTemplate` queries Prometheus for guardrail and latency checks |
+| Argo Rollouts | Canary and blue-green controller with analysis steps | v1.10.2. `AnalysisTemplate` queries Prometheus for guardrail and latency checks |
 | Flagger | Progressive delivery controller for Istio, Linkerd and Gateway API | v1.45.0. Metric templates gate each step |
 | KServe | Model serving on Kubernetes with canary traffic percent | v0.21.0. CNCF incubating project |
-| MLflow | Registry with immutable versions and mutable aliases | 3.17.1. Aliases are the promotion pointer for models and prompts |
+| MLflow | Registry with immutable versions and mutable aliases | 3.18.0. Aliases are the promotion pointer for models and prompts |
 | OpenFeature | Vendor-neutral feature-flag API and SDKs | CNCF project. Providers, evaluation context, hooks for exposure logging |
 | LaunchDarkly | Feature flags and AI Configs | AI Configs serve prompt and model config as variations |
 | Statsig | Feature gates, dynamic configs and experiments | Built-in experiment analysis |
 | Unleash | Open-source feature-flag server | Activation strategies and variants; self-hostable |
-| Langfuse | Tracing and prompt labels | v4.63.0. Traces carry the bundle digest for post-rollback queries |
+| Langfuse | Tracing and prompt labels | v4.86.0. Traces carry the bundle digest for post-rollback queries |
 | Argo CD | GitOps sync of environment config | Applies the promoted digest from git |
 
 The provider landscape and the model families these bundles pin are in

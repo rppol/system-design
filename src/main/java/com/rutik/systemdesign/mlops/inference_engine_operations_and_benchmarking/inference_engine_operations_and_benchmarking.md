@@ -1,13 +1,18 @@
 # Inference Engine Operations and Benchmarking
 
-> **Version anchor (2026-10-18).** **vLLM v0.32.0** (2026-10-18) follows v0.31.0 (2026-10-05) and
-> v0.30.0 (2026-09-22). **SGLang v0.5.21** (2026-10-02). **TensorRT-LLM** stable is v1.2.1
-> (2026-04-20); v1.4.0rc0 (2026-10-14) is a pre-release, and v1.3.0 shipped only as rc builds.
-> **llama.cpp** stable v0.7.0 (2026-10-15); rolling build b11719 (2026-10-18, pre-release).
-> `llama-server` defaults checked 2026-10-18: `-np/--parallel` is -1 (auto), `-cb/--cont-batching` is
+> **Version anchor (2026-11-25).** **vLLM v0.34.0** (2026-11-16) follows v0.33.0 (tagged
+> 2026-11-01) and v0.32.0 (2026-10-18). v0.34.0 changes defaults a qualification must catch: the
+> extensible KV cache is on and sizes the cache from memory free after warmup
+> (`gpu_memory_utilization` defaults to 1.0, opt out with `--gpu-memory-utilization 0.9` or
+> `--no-enable-extensible-kv-cache`), the default `--block-size` is 64 instead of 16, and Model
+> Runner V1 is removed (`VLLM_USE_V2_MODEL_RUNNER=0` now fails at startup). **SGLang v0.5.23**
+> (2026-11-02). **TensorRT-LLM** stable is v1.3.0 (2026-11-20); v1.4.0rc4 is the newest pre-release.
+> **llama.cpp** stable v1.0.0 (2026-11-13), which removes the deprecated public API including
+> `--defrag-thold`; rolling build b12722 (2026-11-25, pre-release).
+> `llama-server` defaults checked 2026-11-25: `-np/--parallel` is -1 (auto), `-cb/--cont-batching` is
 > enabled, `--kv-unified` is enabled when slots are auto, `/metrics` is served only with `--metrics`,
 > and `--port` defaults to 9931 (was 8080, changed in PR #30159, listed in the v0.7.0 notes).
-> **Ollama v0.40.6** (2026-10-16). **TGI** was archived on 2026-03-21; its README points to vLLM,
+> **Ollama v0.40.18** (2026-11-24). **TGI** was archived on 2026-03-21; its README points to vLLM,
 > SGLang, llama.cpp and MLX. GuideLLM, AIPerf, GenAI-Perf, LLMPerf and lm-evaluation-harness have no
 > pin in this section; their CLI syntax was read from their READMEs on 2026-10-18. MLPerf Inference latency limits were read from the MLCommons
 > `inference_rules.adoc` on 2026-10-18.
@@ -22,8 +27,8 @@ runs, upgrades and pays for. This module covers the three operating jobs around 
    That number is **goodput**, not peak throughput.
 2. **Upgrade qualification.** Decide whether a new engine release (or a new kernel, quantization
    or flag set) may replace the current one. Qualification checks performance, task accuracy,
-   numerics and production flags, and it runs for every minor release. vLLM shipped three minor
-   releases in 26 days in September and October 2026.
+   numerics and production flags, and it runs for every minor release. vLLM shipped five minor
+   releases, v0.30.0 to v0.34.0, in the 55 days from 2026-09-22 to 2026-11-16.
 3. **Day-two operations.** Export the engine's metrics, run `llama-server` with the right slot and
    KV settings, and migrate off an engine that stops being maintained, as TGI did on 2026-03-21.
 
@@ -160,7 +165,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    cand(["Candidate image<br/>vLLM v0.32.0 by digest"])
+    cand(["Candidate image<br/>vLLM v0.34.0 by digest"])
     flags("Flag and default diff<br/>vs champion")
     perf("Goodput sweep<br/>replayed length mix")
     acc("Task accuracy<br/>eval set, CI")
@@ -169,7 +174,7 @@ flowchart LR
     verdict{"All four<br/>within budget?"}
     canary("Canary<br/>progressive delivery")
     reject("Reject or<br/>pin flags")
-    champ[("Champion<br/>vLLM v0.30.0")]
+    champ[("Champion<br/>vLLM v0.32.0")]
 
     cand --> flags --> perf --> acc --> num --> ops --> verdict
     champ -.->|baseline run| perf
@@ -358,8 +363,8 @@ vllm bench serve \
   --num-prompts 4800 --num-warmups 200 \
   --goodput ttft:800 tpot:50 \
   --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,95,99 \
-  --save-result --save-detailed --result-dir results/v0.32.0/rate-8 \
-  --label "v0.32.0 tp2 fp8 rate8"
+  --save-result --save-detailed --result-dir results/v0.34.0/rate-8 \
+  --label "v0.34.0 tp2 fp8 rate8"
 ```
 
 `--burstiness 0.6` draws gaps from a gamma distribution with shape 0.6, burstier than Poisson
@@ -432,6 +437,24 @@ New routes count as an API change. vLLM v0.32.0 added `POST /v1/systemone`; a ga
 forwards every `/v1/*` path now exposes it, and the decision is in
 [Decision Models](../decision_models/decision_models.md).
 
+**What the flag diff catches on vLLM v0.34.0.** Three default changes in one minor release, each
+invisible to a goodput run that copies the champion's command line:
+
+| Change | What breaks if nobody notices | Decision to pin |
+|---|---|---|
+| Extensible KV cache on; `gpu_memory_utilization` defaults to 1.0 | A launch template that still passes `--gpu-memory-utilization 0.9` silently opts out, so the "upgrade" measures the old sizing. A template without it gets a larger cache and, per the release notes, TPOT up 6 to 18% on some H200 models at concurrency 128 | Benchmark both, then keep or drop the flag on purpose |
+| Default `--block-size` 64 (was 16) | Prefix caching reuses whole blocks only, so shared prefixes shorter than 64 tokens stop hitting; an external KV connector configured with `block_size: 16` no longer matches the engine | Pin `--block-size` explicitly and set the connector to the same value |
+| Model Runner V1 removed | A Deployment that sets `VLLM_USE_V2_MODEL_RUNNER=0` fails at startup | Remove the variable before the canary |
+
+```bash
+# BROKEN: candidate started with the champion's arguments; the diff shows "no flag changes"
+vllm serve "$MODEL" --tensor-parallel-size 2 --gpu-memory-utilization 0.9
+# FIX: candidate states every default the release changed, so the comparison is explicit
+vllm serve "$MODEL" --tensor-parallel-size 2 --block-size 16 \
+  --no-enable-extensible-kv-cache --gpu-memory-utilization 0.9   # run A: old sizing
+vllm serve "$MODEL" --tensor-parallel-size 2 --block-size 64     # run B: v0.34.0 defaults
+```
+
 The metrics contract check is a two-line script. Scrape both servers after the soak and diff the
 metric names:
 
@@ -478,7 +501,7 @@ budget with accuracy inside the gate is investigated, not waived: it usually poi
 ### 6.7 llama-server operations
 
 **The belief to correct.** "Edge engines serialize requests" is wrong for `llama-server`. With the
-defaults at v0.7.0 and b11719, `-np/--parallel` is -1, which the server resolves to 4 slots with a unified KV
+defaults at v1.0.0 and b12722, `-np/--parallel` is -1, which the server resolves to 4 slots with a unified KV
 buffer, and continuous batching (`-cb`) is on. Four requests decode in the same step. It is true
 for Ollama's defaults: `OLLAMA_NUM_PARALLEL` defaults to 1 per model, extra requests queue up to
 `OLLAMA_MAX_QUEUE` (default 512), and beyond that Ollama returns 503.
@@ -586,11 +609,11 @@ The autoscaler reads `engine:queue_depth`, not the raw name. GPU-level signals a
 
 | Engine | Recent releases | Cadence implication |
 |---|---|---|
-| vLLM | v0.30.0 2026-09-22, v0.31.0 2026-10-05, v0.32.0 2026-10-18 | A minor every 2 weeks; qualify every minor, deploy every second one |
-| SGLang | v0.5.21 2026-10-02 | Patch-level numbering carries feature changes; qualify each |
-| TensorRT-LLM | stable v1.2.1 2026-04-20; v1.4.0rc0 2026-10-14 | Production on the stable line; rc builds only in a staging lane |
-| llama.cpp | stable v0.7.0 2026-10-15; rolling b11719 2026-10-18 | Rolling builds several times a day; production on a stable release or a pinned build |
-| Ollama | v0.40.6 2026-10-16 | Bundles its own llama.cpp; pin the Ollama version, not the engine |
+| vLLM | v0.30.0 2026-09-22, v0.31.0 2026-10-05, v0.32.0 2026-10-18, v0.33.0 2026-11-01, v0.34.0 2026-11-16 | A minor every 2 weeks; qualify every minor, deploy every second one |
+| SGLang | v0.5.21 2026-10-02, v0.5.23 2026-11-02 | Patch-level numbering carries feature changes; qualify each |
+| TensorRT-LLM | stable v1.2.1 2026-04-20, v1.3.0 2026-11-20 after rc builds up to v1.3.0rc29; v1.4.0rc4 pre-release | Production on the stable line; rc builds only in a staging lane |
+| llama.cpp | stable v0.7.0 2026-10-15, v1.0.0 2026-11-13; rolling b12722 2026-11-25 | Rolling builds several times a day; production on a stable release or a pinned build |
+| Ollama | v0.40.18 2026-10-16 | Bundles its own llama.cpp; pin the Ollama version, not the engine |
 
 A policy that works for a team with one platform engineer on engines:
 
@@ -639,7 +662,9 @@ wider: A-vs-B disagreement between two different engines can be several times th
 - **llama.cpp release lines.** Rolling builds are tagged `bNNNNN` and published as pre-releases
   several times a day; b11717 to b11721 all went out on 2026-10-18. v0.7.0 (2026-10-15)
   is a stable release, and its notes list the `llama-server` default port change from 8080 to 9931
-  (PR #30159); the project's Docker images keep 8080 inside the container. A team that tracks
+  (PR #30159); the project's Docker images keep 8080 inside the container. v1.0.0 (2026-11-13)
+  removed the deprecated public API, including `--defrag-thold`, so a launch script that still
+  passes it fails to start. A team that tracks
   `master` in an internal image can pick up a flag removal (`--draft-max`) or a default change
   without noticing.
 
@@ -741,11 +766,11 @@ histograms.
 
 | Tool | Role | Notes |
 |---|---|---|
-| vLLM | Inference engine and `vllm bench` suite | v0.32.0. `bench serve`, `bench throughput`, `bench startup`, `bench sweep` |
-| SGLang | Inference engine with serving benchmark | v0.5.21. `python -m sglang.benchmark.serving`; old `bench_serving` path is a shim |
-| TensorRT-LLM | NVIDIA engine with `trtllm-bench` and `trtllm-serve` | Stable v1.2.1; v1.4.0rc0 pre-release |
-| llama.cpp | GGUF engine; `llama-server` and `llama-bench` | Stable v0.7.0, rolling b11719. Slots, unified KV, `/slots`, `/metrics` with `--metrics` |
-| Ollama | Local model runner over llama.cpp | v0.40.6. `OLLAMA_NUM_PARALLEL` default 1, `OLLAMA_MAX_QUEUE` default 512 |
+| vLLM | Inference engine and `vllm bench` suite | v0.34.0. `bench serve`, `bench throughput`, `bench startup`, `bench sweep` |
+| SGLang | Inference engine with serving benchmark | v0.5.23. `python -m sglang.benchmark.serving`; old `bench_serving` path is a shim |
+| TensorRT-LLM | NVIDIA engine with `trtllm-bench` and `trtllm-serve` | Stable v1.3.0; v1.4.0rc4 pre-release |
+| llama.cpp | GGUF engine; `llama-server` and `llama-bench` | Stable v1.0.0, rolling b12722. Slots, unified KV, `/slots`, `/metrics` with `--metrics` |
+| Ollama | Local model runner over llama.cpp | v0.40.18. `OLLAMA_NUM_PARALLEL` default 1, `OLLAMA_MAX_QUEUE` default 512 |
 | HuggingFace TGI | Archived inference server | Archived 2026-03-21; 3.3.7 is final |
 | GuideLLM | Engine-neutral load generator | `guidellm run`, profiles synchronous to sweep |
 | AIPerf | NVIDIA load generator, successor to GenAI-Perf | `aiperf profile`, `--goodput` |
@@ -816,7 +841,7 @@ A-vs-B disagreement to that floor, not against zero.
 **Q: Is it true that llama.cpp serves one request at a time?**
 **Short:** Not for llama-server: with defaults it opens 4 slots with a unified KV buffer and continuous batching, so 4 requests decode together; Ollama defaults to 1 parallel request per model.
 
-At v0.7.0 `-np/--parallel` defaults to -1 (auto), which the server resolves to 4 slots, `-cb` is
+At v1.0.0, as since v0.7.0, `-np/--parallel` defaults to -1 (auto), which the server resolves to 4 slots, `-cb` is
 on, and `--kv-unified` is on when slots are auto. Each `llama_decode` call processes every busy
 slot. Raise `-np` for more concurrency, pass `--kv-unified` with it (an explicit `-np` turns the
 unified buffer off), and size `-c` or `--kv-unified-per-slot` for the context those slots need. Ollama is the case where the belief holds: `OLLAMA_NUM_PARALLEL` defaults to 1,
@@ -1006,7 +1031,10 @@ with the TGI replicas kept for 7 days. During the 25% step, one client that pars
   replica at peak. Average GPU count fell from 18 to 14.6.
 - TTFT p95 at peak from 690 ms to 540 ms.
 - The qualification pipeline from this migration now runs on every vLLM minor. v0.31.0 passed and
-  was not deployed; v0.32.0, released 13 days later, is the candidate in the §5 pipeline.
+  was not deployed; v0.32.0 passed and was deployed. v0.34.0 is the candidate in the §5 pipeline,
+  and its flag diff stopped the first run: the launch template still passed
+  `--gpu-memory-utilization 0.9`, so the candidate had opted out of the extensible KV cache and the
+  goodput sweep compared the old sizing against itself (§6.5).
 
 The capacity arithmetic behind the replica count is in
 [Inference Autoscaling and Capacity Planning](../inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md),

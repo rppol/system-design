@@ -1,11 +1,11 @@
 # ML Supply Chain Security
 
-> **Version anchor (2026-10-18).** model-transparency (OpenSSF Model Signing) v1.1.1
+> **Version anchor (2026-11-25).** model-transparency (OpenSSF Model Signing) v1.1.1
 > (2025-10-10), the `model_signing` CLI and library. CycloneDX specification 1.7 (repo tag 1.7.2,
-> 2026-09-17). LiteLLM v1.106.0 (2026-10-18), which disables stdio MCP servers by default
-> (#44066). Kubernetes 1.37 (1.37.1 on 2026-09-15); the OCI image volume source has been GA
-> since 1.36. Scanner, PyTorch, cosign and Kyverno versions in §11 were read from their GitHub
-> release pages on 2026-10-18. Every version claim below is checked against this anchor.
+> 2026-09-17). LiteLLM v1.111.0 (2026-11-25); stdio MCP servers have been disabled by default
+> since v1.106.0 (#44066). Kubernetes 1.37 (1.37.2 on 2026-10-13); the OCI image volume source has been GA
+> since 1.36. Scanner, PyTorch and cosign versions in §11 were read from their GitHub release
+> pages on 2026-10-18; Kyverno v1.20.0 (2026-11-12) was read on 2026-11-25. Every version claim below is checked against this anchor.
 
 An AI feature runs on bytes that nobody on the team wrote: base weights from a hub, adapters from
 a fine-tuning job, a dataset scraped two years ago, a Python dependency tree with 300 packages,
@@ -467,7 +467,7 @@ spec:
 A `ValidatingAdmissionPolicyBinding` with `validationActions: ["Deny"]` scopes it to the
 inference namespaces. Second, the serving engine image and every MCP server image must be
 signed by the platform's release workflow. Kyverno's `ImageValidatingPolicy` does this for
-containers (the legacy `ClusterPolicy` with `verifyImages` is deprecated in Kyverno 1.19):
+containers (Kyverno 1.20 removed the legacy `kyverno.io` policy engine, so a `ClusterPolicy` with `verifyImages` no longer enforces):
 
 ```yaml
 apiVersion: policies.kyverno.io/v1
@@ -638,8 +638,8 @@ postmark-mcp 1.0.16 kept its listing and added a hidden BCC to `phan@giftshop.cl
 
 Build each server from a pinned source commit in your CI, sign the image, and run it from
 `registry.internal/mcp/` under the Kyverno policy in §6.5. Do not let agent configs launch
-stdio servers, which run a binary on the host: LiteLLM v1.106.0 disables stdio MCP servers by
-default (#44066). Earlier, GHSA-v4p8-mg3p-g94g (April 2026, fixed in 1.83.7) reported
+stdio servers, which run a binary on the host: LiteLLM disables stdio MCP servers by default
+since v1.106.0 (#44066). Earlier, GHSA-v4p8-mg3p-g94g (April 2026, fixed in 1.83.7) reported
 authenticated command execution through its MCP stdio test endpoints. Scope each server's credentials to its tools.
 
 ### 6.10 Screening for backdoors
@@ -785,7 +785,7 @@ Fix: adapter provenance records `base_model_digest`, and the loader refuses a mi
 | model-transparency | OpenSSF Model Signing library and CLI | v1.1.1; `model_signing sign` and `verify`; Sigstore, key, certificate, PKCS #11 |
 | Sigstore | Keyless signing infrastructure | Fulcio issues short-lived certs, Rekor logs signatures |
 | cosign | Container and blob signing | v3.1.3 (2026-08-06); v2.6.5 maintained in parallel |
-| Kyverno | Kubernetes policy engine | v1.19.1 (2026-09-10); `ImageValidatingPolicy` with keyless attestors; `ClusterPolicy` deprecated in 1.19 |
+| Kyverno | Kubernetes policy engine | v1.20.0 (2026-11-12); `ImageValidatingPolicy` with keyless attestors; 1.20 removed the legacy `ClusterPolicy` engine and blocks new legacy policies |
 | safetensors | Data-only tensor format | v0.8.0 (2026-06-09); v0.9.0 at rc |
 | PyTorch | Training and loading | `weights_only=True` default since 2.6.0; v2.14.1 (2026-09-30) |
 | picklescan | Pickle opcode scanner | v1.0.5 (2026-07-01) |
@@ -798,7 +798,7 @@ Fix: adapter provenance records `base_model_digest`, and the loader refuses a mi
 | CycloneDX | SBOM and ML-BOM standard | Specification 1.7; `machine-learning-model` and `data` components |
 | SPDX | SBOM standard | 3.0.1 (2024-12-17); AI and Dataset profiles |
 | Kubernetes | Admission and image volumes | ValidatingAdmissionPolicy with CEL; image volumes GA since 1.36 |
-| LiteLLM | AI gateway | v1.106.0; stdio MCP servers off by default |
+| LiteLLM | AI gateway | v1.111.0; stdio MCP servers off by default since v1.106.0 |
 
 ---
 
@@ -987,6 +987,22 @@ Cold start for the 120B model (about 240 GB in BF16) grows by at most 15 seconds
    training controller writes SLSA provenance with base, dataset, code and image digests.
 4. **Adapters.** Accepted only as safetensors; the upload service checks tensor names and shapes
    against the base, records `base_model_digest` and signs. The loader refuses a base mismatch.
+
+   ```python
+   # BROKEN: the shared loader unpickles anything; an adapter_model.bin can run code on load
+   state = torch.load(path, weights_only=False)
+   ```
+
+   ```python
+   # FIX: safetensors only, and the adapter must name the base it was trained on
+   if not path.endswith(".safetensors"):
+       raise ValueError(f"refusing non-safetensors adapter: {path}")
+   with safe_open(path, framework="pt") as f:
+       if f.metadata().get("base_model_digest") != base.digest:
+           raise ValueError("adapter base mismatch")
+       state = {k: f.get_tensor(k) for k in f.keys()}
+   ```
+
 5. **Distribution and admission.** Models are OCI artifacts in `registry.internal/models/`; the
    CEL policy from §6.5 denies non-digest image volumes, and Kyverno verifies engine and MCP
    images against the release workflow's subject.

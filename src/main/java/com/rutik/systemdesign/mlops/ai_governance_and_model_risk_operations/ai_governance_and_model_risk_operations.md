@@ -1,9 +1,9 @@
 # AI Governance and Model Risk Operations
 
-> **Version anchor (2026-10-18).** Tools appear as examples at the mlops pin-table versions:
-> MLflow 3.17.1 (2026-10-13) for registered models, aliases and version tags; Kubeflow Hub
-> v0.3.17 (2026-09-21), renamed from Kubeflow Model Registry at v0.3.9, with MCP and Agents
-> catalogs added in v0.3.14 and v0.3.16; Kubernetes 1.37 (1.37.1 2026-09-15) for admission;
+> **Version anchor (2026-11-25).** Tools appear as examples at the mlops pin-table versions:
+> MLflow 3.18.0 (2026-11-04) for registered models, aliases and version tags; Kubeflow Hub
+> v0.3.18 (2026-10-22), renamed from Kubeflow Model Registry at v0.3.9, with MCP and Agents
+> catalogs added in v0.3.14 and v0.3.16; Kubernetes 1.37 (1.37.2 2026-10-13) for admission;
 > OpenSSF Model Signing (`sigstore/model-transparency`) v1.1.1 (2025-10-10) for signed approvals.
 >
 > **Guidance anchor (fetched 2026-10-18).** SR 26-2 "Revised Guidance on Model Risk Management"
@@ -606,7 +606,7 @@ others) work as the MAP checklist for the generative population.
 
 An agent's risk changes when its tools change. The agent's record carries a tool manifest
 digest (tools, schemas, permission scopes); a new write-scoped tool is a revalidation trigger and
-recomputes the tier. Kubeflow Hub v0.3.17's MCP and Agents catalogs can serve as the registry the
+recomputes the tier. Kubeflow Hub v0.3.18's MCP and Agents catalogs can serve as the registry the
 manifest resolves against; the server lifecycle is in
 [Agent, Tool and MCP Server Lifecycle](../agent_tool_and_mcp_server_lifecycle/agent_tool_and_mcp_server_lifecycle.md).
 
@@ -738,8 +738,8 @@ not the existence of governance.
 
 | Tool | Role | Notes |
 |---|---|---|
-| MLflow | Registered models, version tags, aliases, prompt registry | 3.17.1. Version tags carry `inventory_id` and bundle digest; aliases are resolved to versions before approval |
-| Kubeflow Hub | Model, MCP server and agent catalogs on Kubernetes | v0.3.17. Renamed from Kubeflow Model Registry at v0.3.9 |
+| MLflow | Registered models, version tags, aliases, prompt registry | 3.18.0. Version tags carry `inventory_id` and bundle digest; aliases are resolved to versions before approval |
+| Kubeflow Hub | Model, MCP server and agent catalogs on Kubernetes | v0.3.18. Renamed from Kubeflow Model Registry at v0.3.9 |
 | OPA | Policy engine for release rules in Rego | Same rules in CI and at admission |
 | Conftest | Runs Rego against bundle manifests and approval records in CI | Fast feedback at PR time |
 | Kyverno | Admission policies in CEL (`ValidatingPolicy`, `ImageValidatingPolicy`) | Metadata and attestation checks on `InferenceService` |

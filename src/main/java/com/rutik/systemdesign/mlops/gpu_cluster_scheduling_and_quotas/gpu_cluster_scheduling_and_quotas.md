@@ -1,13 +1,17 @@
 # GPU Cluster Scheduling and Quotas
 
-> **Version anchor (2026-10-18).** Kubernetes 1.37 (1.37.0 2026-08-26, 1.37.1 2026-09-15).
-> Kueue v0.20.2 (2026-10-15); `kueue.x-k8s.io/v1beta1` is no longer served, so manifests use
-> `v1beta2`. Kueue is a Kubernetes SIG project, not a CNCF project. Volcano v1.16.0
-> (2026-10-14). KAI Scheduler v0.18.6 (2026-10-15; v0.16.12 of 2026-10-18 is a backport line),
-> CNCF Sandbox since 2025-12-21, Apache-2.0. LeaderWorkerSet v1.0.0 (2026-10-16). Slinky
-> `slurm-operator` v1.2.3 (tag, 2026-09-30). NVIDIA GPU Operator v26.7.2 (2026-10-14), which
-> manages the NVIDIA DRA Driver v0.5.1 through the `GPUCluster` custom resource. NVIDIA Network
-> Operator v26.7.1 (2026-10-16). AMD GPU Operator v1.5.1 (2026-07-21; chart
+> **Version anchor (2026-11-25).** Kubernetes 1.37 (1.37.0 2026-08-26, 1.37.2 2026-10-13).
+> Kueue v0.20.7 (2026-11-19); `kueue.x-k8s.io/v1beta1` is no longer served, so manifests use
+> `v1beta2`; v0.21.0 is at release candidate (v0.21.0-rc.2, 2026-11-24). Kueue is a Kubernetes
+> SIG project, not a CNCF project. Volcano v1.16.0 (2026-10-14). KAI Scheduler v0.19.0
+> (2026-11-11), now at `kai-scheduler/KAI-Scheduler` (moved from `NVIDIA/KAI-Scheduler`), CNCF
+> Sandbox since 2025-12-21, Apache-2.0; v0.19.0 adds `gpu-memory.limit` and `gpu-fraction.limit`
+> in NvFraction mode and publishes Helm chart OCI tags without the `v` prefix. LeaderWorkerSet
+> v1.0.0 (2026-10-16). Slinky `slurm-operator` v1.3.0 (tag, 2026-11-19). NVIDIA GPU Operator
+> v26.7.3 (2026-11-17); the 26.7 line manages the NVIDIA DRA Driver v0.5.1 through the
+> `GPUCluster` custom resource (read at v26.7.2; the v26.7.3 notes list no DRA change), and
+> v26.7.3 ships dcgm-exporter 4.9.0 with renamed metrics. NVIDIA Network
+> Operator v26.10.0 (2026-11-17). AMD GPU Operator v1.5.1 (2026-07-21; chart
 > `gpu-operator-charts-v1.5.1`). Intel Device Plugins Operator v0.37.1 (2026-10-02; v0.37.0
 > removed the DLB and FPGA plugins). Every version claim below is checked against this anchor.
 
@@ -38,7 +42,7 @@ several processes share one GPU context with per-client memory and thread limits
 Time-slicing advertises one GPU as N replicas with no isolation at all. The mechanism of each
 lives in devops; this page owns which one to buy with a given workload, and what it costs.
 
-**GPU Operator 26.7 and DRA.** NVIDIA GPU Operator v26.7.2 deploys and manages the NVIDIA
+**GPU Operator 26.7 and DRA.** NVIDIA GPU Operator 26.7 (v26.7.3 current) deploys and manages the NVIDIA
 DRA Driver v0.5.1 through its `GPUCluster` custom resource. Do not install a separate
 `dra-driver-nvidia-gpu` Helm release next to it: two controllers would then own the same
 `ResourceSlice` objects.
@@ -47,8 +51,8 @@ DRA Driver v0.5.1 through its `GPUCluster` custom resource. Do not install a sep
 
 | Vendor | Operator | What it installs | DRA path | Version |
 |---|---|---|---|---|
-| NVIDIA | NVIDIA GPU Operator | Driver, container toolkit, device plugin, GPU Feature Discovery, DCGM and dcgm-exporter, MIG manager, validator | DRA Driver v0.5.1, managed by the operator through the `GPUCluster` CR; no separate driver release | v26.7.2 |
-| NVIDIA | NVIDIA Network Operator | DOCA/MOFED driver, RDMA shared and SR-IOV device plugins, Multus, IPAM for secondary networks | Not used for GPU quota; NICs are covered in [AI Networking and Storage Fabric](../ai_networking_and_storage_fabric/ai_networking_and_storage_fabric.md) | v26.7.1 |
+| NVIDIA | NVIDIA GPU Operator | Driver, container toolkit, device plugin, GPU Feature Discovery, DCGM and dcgm-exporter, MIG manager, validator | DRA Driver v0.5.1, managed by the operator through the `GPUCluster` CR; no separate driver release | v26.7.3 |
+| NVIDIA | NVIDIA Network Operator | DOCA/MOFED driver, RDMA shared and SR-IOV device plugins, Multus, IPAM for secondary networks | Not used for GPU quota; NICs are covered in [AI Networking and Storage Fabric](../ai_networking_and_storage_fabric/ai_networking_and_storage_fabric.md) | v26.10.0 |
 | AMD | AMD GPU Operator | amdgpu driver, device plugin, node labeller, metrics exporter | AMD DRA driver v1.0.1 or newer is required from amdgpu 6.19.14 (release 31.40) | v1.5.1 |
 | Intel | Intel Device Plugins Operator | GPU plugin plus the remaining accelerator plugins; DLB and FPGA plugins removed in v0.37.0 | Separate Intel resource drivers project, outside the operator | v0.37.1 |
 
@@ -366,7 +370,7 @@ A job joins the queue with one label, `kueue.x-k8s.io/queue-name: team-a`. Kueue
 job suspended, computes the quota of all its pod sets, and unsuspends it only when the full
 amount fits.
 
-**Broken, then fixed.** A platform team migrated GitOps manifests to Kueue v0.20.2 and the sync
+**Broken, then fixed.** A platform team migrated GitOps manifests to Kueue v0.20.7 and the sync
 failed on every queue object.
 
 ```yaml
@@ -540,7 +544,7 @@ Fair Tree fairshare with `PriorityDecayHalfLife`, and preemption with `PreemptMo
 Backfill starts small jobs in gaps that a large reservation has not yet claimed, which keeps
 utilization high while a 512-GPU job waits for its start time.
 
-Slinky's `slurm-operator` v1.2.3 runs `slurmctld` and `slurmd` (as NodeSets) in Kubernetes
+Slinky's `slurm-operator` v1.3.0 runs `slurmctld` and `slurmd` (as NodeSets) in Kubernetes
 pods, so researchers keep `sbatch` while nodes and the GPU Operator stay Kubernetes-managed.
 Give each GPU pool one quota owner: Slurm or Kueue, never both.
 
@@ -618,7 +622,7 @@ never lends it. Three numbers per queue per hour feed the bill:
 |---|---|---|
 | Nominal quota held | `kueue_cluster_queue_nominal_quota` | Reserved rate, charged whether used or not |
 | Borrowed usage | `kueue_cluster_queue_resource_usage` minus nominal | Spot-like discounted rate |
-| Useful work | DCGM `DCGM_FI_PROF_SM_ACTIVE` per pod | Reported, not billed; drives right-sizing |
+| Useful work | DCGM `DCGM_FI_PROF_SM_UTIL_RATIO` per pod | Reported, not billed; drives right-sizing |
 
 Both Kueue quota metrics are optional. They are exported only when
 `metrics.enableClusterQueueResources` is set in the Kueue manager configuration.
@@ -731,22 +735,22 @@ minutes with async writes, and a pre-reclaim signal at 07:45 triggers a checkpoi
 
 | Tool | Role | Notes |
 |---|---|---|
-| Kueue | Job queueing and quota admission | v0.20.2; `v1beta2` API; cohorts, fair sharing, TAS, MultiKueue; Kubernetes SIG project |
+| Kueue | Job queueing and quota admission | v0.20.7; `v1beta2` API; cohorts, fair sharing, TAS, MultiKueue; Kubernetes SIG project |
 | Volcano | Batch scheduler with queues and gang | v1.16.0; `Queue` and `PodGroup`, hierarchical queues via `parent` |
-| KAI Scheduler | Scheduler with hierarchical queues and GPU sharing | v0.18.6; CNCF Sandbox, Apache-2.0; fractions, DRA, time-based fairshare |
+| KAI Scheduler | Scheduler with hierarchical queues and GPU sharing | v0.19.0 (`kai-scheduler/KAI-Scheduler`); CNCF Sandbox, Apache-2.0; fractions with limits in NvFraction mode, DRA, time-based fairshare |
 | NVIDIA Run:ai | Commercial GPU orchestration platform | Built on the KAI scheduler; projects, departments, reporting |
 | Apache YuniKorn | Scheduler with hierarchical queues | Placeholder-based gang scheduling |
 | Slurm | HPC workload manager | Fair Tree fairshare, QOS, backfill, preemption |
-| Slinky slurm-operator | Runs Slurm on Kubernetes | v1.2.3 tag; NodeSets for `slurmd` |
+| Slinky slurm-operator | Runs Slurm on Kubernetes | v1.3.0 tag; NodeSets for `slurmd` |
 | JobSet | Kubernetes API for groups of Jobs | Multi-slice and driver-worker training; admitted by Kueue |
 | LeaderWorkerSet | Multi-pod replica API | v1.0.0; leader plus workers per inference replica |
-| Kubeflow Trainer | Training job API (`TrainJob`) | v2.3.0; integrates with Kueue and Volcano |
-| NVIDIA GPU Operator | GPU node software lifecycle | v26.7.2; manages DRA Driver v0.5.1 via `GPUCluster` |
-| NVIDIA Network Operator | RDMA and secondary network stack | v26.7.1 |
+| Kubeflow Trainer | Training job API (`TrainJob`) | v2.4.0; integrates with Kueue and Volcano; per-TrainJob `schedulerName` |
+| NVIDIA GPU Operator | GPU node software lifecycle | v26.7.3; manages DRA Driver v0.5.1 via `GPUCluster` |
+| NVIDIA Network Operator | RDMA and secondary network stack | v26.10.0 |
 | AMD GPU Operator | AMD GPU node software lifecycle | v1.5.1; DRA driver v1.0.1+ required from amdgpu 6.19.14 |
 | Intel Device Plugins Operator | Intel accelerator device plugins | v0.37.1; DLB and FPGA plugins removed in v0.37.0 |
 | Kubernetes DRA | Claim-based device allocation | Kubernetes 1.37; partitionable devices Beta |
-| dcgm-exporter | GPU utilization metrics for chargeback | 4.8.4 / DCGM 4.6.1 |
+| dcgm-exporter | GPU utilization metrics for chargeback | 4.9.0 / DCGM 4.7.0; utilization as 0 to 1 ratios (`DCGM_FI_PROF_SM_UTIL_RATIO`) |
 
 ---
 
@@ -856,7 +860,7 @@ KV per token for Llama 3.1 8B is 2 x 32 layers x 8 KV heads x 128 x 2 bytes, 128
 prompts. Then check that 3 of 7 compute slices meet the inter-token latency target under load.
 
 **Q: The NVIDIA GPU Operator 26.7 is installed. Do you also install the NVIDIA DRA driver Helm chart?**
-**Short:** No: GPU Operator v26.7.2 manages DRA Driver v0.5.1 through the GPUCluster custom resource, and a second install would fight it for the same objects.
+**Short:** No: GPU Operator 26.7 (v26.7.3) manages DRA Driver v0.5.1 through the GPUCluster custom resource, and a second install would fight it for the same objects.
 
 Configure DRA through the operator's `GPUCluster` CR so driver, toolkit and DRA driver versions
 move together on upgrade. A separately installed `dra-driver-nvidia-gpu` release would publish
@@ -953,7 +957,7 @@ and serving 384. Measured over 30 days:
 
 **Design.**
 
-1. Kueue v0.20.2 with a root cohort `org`, child cohorts `prod` and `research`, and one
+1. Kueue v0.20.7 with a root cohort `org`, child cohorts `prod` and `research`, and one
    ClusterQueue per team. Manifests in `v1beta2`.
 2. Serving: nominal 384, `lendingLimit: 256`. The other 128 GPUs are never lent.
    Measured peak 40 replicas and trough 8 replicas of 8 GPUs gave the 256 band.
@@ -979,7 +983,32 @@ notebooks first, pretraining last.
 **What broke.** In week three the 08:00 serving ramp reclaimed 256 GPUs from two pretraining
 jobs that had checkpointed hourly before they were moved onto borrowed quota; the reclaim lost
 about 210 GPU-hours. The admission webhook now rejects workloads with the borrowed priority
-class unless they carry a checkpoint-interval annotation of 15 minutes or less.
+class unless they carry a checkpoint-interval annotation of 15 minutes or less. The first
+version of that policy checked only that the annotation existed:
+
+```yaml
+# BROKEN: any value passes, so "60" on a borrowed-priority job is admitted
+validations:
+  - expression: >-
+      has(object.metadata.annotations) &&
+      'ckpt.example.com/interval-minutes' in object.metadata.annotations
+```
+
+```yaml
+# FIX: match the borrowed class, then require a value of 15 minutes or less
+matchConditions:
+  - name: borrowed-priority
+    expression: >-
+      has(object.metadata.labels) &&
+      'kueue.x-k8s.io/priority-class' in object.metadata.labels &&
+      object.metadata.labels['kueue.x-k8s.io/priority-class'] == 'borrowed'
+validations:
+  - expression: >-
+      has(object.metadata.annotations) &&
+      'ckpt.example.com/interval-minutes' in object.metadata.annotations &&
+      int(object.metadata.annotations['ckpt.example.com/interval-minutes']) <= 15
+    message: "borrowed-quota workloads must checkpoint every 15 minutes or less"
+```
 
 **After 60 days.**
 

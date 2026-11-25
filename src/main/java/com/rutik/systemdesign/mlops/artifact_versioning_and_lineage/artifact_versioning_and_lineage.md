@@ -1,6 +1,6 @@
 # Artifact Versioning and Lineage
 
-> **Version anchor (2026-10-18).** MLflow 3.17.1 (2026-10-13); Kubeflow Hub v0.3.17 (2026-09-21), the project renamed from Kubeflow Model Registry at v0.3.9; Kubernetes 1.37 (1.37.1 2026-09-15), with ImageVolume GA since 1.36; OpenSSF Model Signing (`sigstore/model-transparency`) v1.1.1 (2025-10-10); CycloneDX specification 1.7 (repo tag 1.7.2, 2026-09-17).
+> **Version anchor (2026-11-25).** MLflow 3.18.0 (2026-11-04); Kubeflow Hub v0.3.18 (2026-10-22), the project renamed from Kubeflow Model Registry at v0.3.9; Kubernetes 1.37 (1.37.2 2026-10-13), with ImageVolume GA since 1.36; OpenSSF Model Signing (`sigstore/model-transparency`) v1.1.1 (2025-10-10); CycloneDX specification 1.7 (repo tag 1.7.2, 2026-09-17).
 
 An AI system in production is not one artifact. It is base weights, adapters, a tokenizer, a prompt template, an embedding model, a vector index snapshot, tool servers, decoding parameters, a guardrail policy, an eval set and the container that runs them. Each one changes on its own schedule, and several of them change without a deploy. This module covers how each artifact gets an identity that cannot drift, how a release pins a closed set of those identities, and how lineage records which artifact was built from which, so that "what was running at 14:02 on Tuesday" and "which models saw this customer's data" have answers.
 
@@ -358,7 +358,7 @@ decision_schema:
   version: escalate-v3
 runtime:
   image: registry.acme.io/serving@sha256:4410...be
-  engine: vllm v0.32.0
+  engine: vllm v0.34.0
   cuda: "12.9"
   driver: "580.95"
   gpu: H100-SXM-80GB
@@ -684,14 +684,14 @@ The third row is the usual answer: components version independently, and the bun
 
 | Tool | Role in versioning and lineage | Notes |
 |---|---|---|
-| MLflow | `LoggedModel`, dataset digests via `log_input`, trace to model linkage | 3.17.1; model, prompt and trace edges in one store |
+| MLflow | `LoggedModel`, dataset digests via `log_input`, trace to model linkage | 3.18.0; model, prompt and trace edges in one store |
 | MLflow Prompt Registry | Prompt versions and aliases, loaded by `prompts:/name/version` | Version on every save |
 | OpenLineage | Open spec for lineage run events with dataset facets | Integrations for Airflow, Spark, dbt |
 | Marquez | Reference backend for OpenLineage events | Serves the lineage graph over an API |
 | Unity Catalog | Table, column and model lineage on Databricks | Captured, not emitted; system tables for queries |
 | W&B Artifacts | Digest-based artifact versions, edges from `use_artifact` and `log_artifact` | Aliases move, `vN` does not |
 | Metaflow | Content-addressed artifact store per flow step | Lineage from the flow structure |
-| Kubeflow Hub | Model registry and catalogs for Kubernetes platforms | v0.3.17; renamed from Model Registry at v0.3.9 |
+| Kubeflow Hub | Model registry and catalogs for Kubernetes platforms | v0.3.18; renamed from Model Registry at v0.3.9 |
 | Hugging Face | Commit-id revisions, LFS sha256 per large file | Pin `revision` to a commit id |
 | AWS ECR | Digest-addressed image and artifact registry | Set `imageTagMutability` to `IMMUTABLE` |
 | Harbor | Self-hosted OCI registry | Tag immutability rules per project |
@@ -874,6 +874,24 @@ Changes and their numbers:
 | Eval sets as versioned datasets with source snapshot edges | Erasure query lists eval sets automatically |
 | Lineage edge table, about 2.3 million edges after a year | Downstream query for one subject returns in under 200 ms |
 | Retention from the reference graph | No artifact referenced by a live bundle has been deleted since |
+
+The first version of the startup check compared tool names only, and missed the disputes change:
+
+```python
+# BROKEN: the server name and tool names match, so a changed output schema passes
+assert {t.name for t in live_tools} == {t.name for t in bundle.tools}
+```
+
+```python
+# FIX: hash each tool's full schema, as fetched at release time, and compare per tool
+def schema_hash(tool):
+    body = json.dumps({"in": tool.inputSchema, "out": tool.outputSchema}, sort_keys=True)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+drift = [t.name for t in live_tools if schema_hash(t) != bundle.tool_hashes[t.name]]
+if drift:
+    raise SystemExit(f"tool schema drift: {drift}")   # fail readiness, page the owner
+```
 
 **Erasure runbook after the change:**
 

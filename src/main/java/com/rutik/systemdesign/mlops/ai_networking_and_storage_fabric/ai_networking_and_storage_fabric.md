@@ -1,10 +1,12 @@
 # AI Networking and Storage Fabric
 
-> **Version anchor (2026-10-18).** NVIDIA Network Operator v26.7.1 (2026-10-16), whose
+> **Version anchor (2026-11-25).** NVIDIA Network Operator v26.10.0 (2026-11-17), whose
 > `NicClusterPolicy` deploys the DOCA/MOFED driver container, the RDMA shared device plugin, the
-> SR-IOV network device plugin, Multus and NV-IPAM. NVIDIA GPU Operator v26.7.2 (2026-10-14).
+> SR-IOV network device plugin, Multus and NV-IPAM. NVIDIA GPU Operator v26.7.3 (2026-11-17).
 > Ultra Ethernet specification 1.1 (release notes in the PDF date it 2026-10-12). Kubernetes
-> 1.37. Tools outside the section pin table were fetched from their release pages and docs on
+> 1.37. NVLink figures come from NVIDIA's NVLink specifications page (checked 2026-11-25), which
+> quotes per-GPU bandwidth as a bidirectional total; every bandwidth on this page is per direction,
+> the convention NIC line rates use. Tools outside the section pin table were fetched from their release pages and docs on
 > 2026-10-18: NCCL v2.32.3-1 (2026-09-17), where `NCCL_IB_GID_INDEX`, `NCCL_IB_SL` and
 > `NCCL_IB_TC` default to `AUTO` since 2.32; aws-ofi-nccl v1.21.1 (2026-08-20); PyTorch 2.14 docs,
 > where the NCCL process-group timeout defaults to 10 minutes. Cloud limits (FSx for Lustre, EFA,
@@ -25,7 +27,7 @@ failure modes, and most fabric incidents start with traffic on the wrong one.
 
 | Network | Carries | Typical hardware | Per-GPU bandwidth, one direction |
 |---|---|---|---|
-| Scale-up | Tensor-parallel and expert-parallel traffic inside one NVLink domain | NVLink plus NVSwitch (8 GPUs on HGX H100, 72 on GB200 NVL72) | 450 GB/s (NVLink 4), 900 GB/s (NVLink 5) |
+| Scale-up | Tensor-parallel and expert-parallel traffic inside one NVLink domain | NVLink plus NVSwitch (8 GPUs on HGX H100, 72 on GB200 NVL72) | 450 GB/s (NVLink 4), 900 GB/s (NVLink 5); NVIDIA quotes the bidirectional totals, 900 and 1,800 GB/s |
 | Scale-out, or backend | Data-parallel and pipeline collectives between nodes | InfiniBand, RoCEv2 Ethernet, AWS EFA, Google GPUDirect-TCPX | 50 GB/s with one 400 Gb/s NIC per GPU |
 | Frontend | Kubernetes pod network, SSH, image pulls, metrics, often storage | Ordinary data-center Ethernet | A shared 80 to 200 Gb/s per node |
 | Storage | Dataset reads and checkpoint writes | Frontend Ethernet, a dedicated storage network, or the backend fabric | Set by the file system, not the NIC |
@@ -122,10 +124,10 @@ before the job starts and to read the NCCL init log on every run.
 
 ### 4.1 Scale-up domains
 
-| System | GPUs in one NVLink domain | NVLink bandwidth per GPU, both directions | What fits inside |
+| System | GPUs in one NVLink domain | NVLink bandwidth per GPU, one direction | What fits inside |
 |---|---|---|---|
-| HGX H100 or H200 (8 GPUs, NVSwitch) | 8 | 900 GB/s (NVLink 4) | TP up to 8, EP across 8 |
-| GB200 NVL72 | 72 GPUs and 36 Grace CPUs in one rack | 1.8 TB/s (NVLink 5); 130 TB/s across the domain | TP and EP across a rack; large MoE models without cross-node all-to-all |
+| HGX H100 or H200 (8 GPUs, NVSwitch) | 8 | 450 GB/s (NVLink 4; 900 GB/s bidirectional) | TP up to 8, EP across 8 |
+| GB200 NVL72 | 72 GPUs and 36 Grace CPUs in one rack | 900 GB/s (NVLink 5; 1,800 GB/s bidirectional); about 65 TB/s per direction across the domain (NVIDIA's 130 TB/s is the bidirectional aggregate) | TP and EP across a rack; large MoE models without cross-node all-to-all |
 
 The NVL72 changes placement. On HGX, an MoE model with 64 experts spreads expert-parallel
 all-to-all across nodes and pays scale-out bandwidth for it. On NVL72 the same all-to-all stays on
@@ -233,8 +235,10 @@ xychart-beta
     bar [900, 450, 100, 50, 1.25]
 ```
 
-NVLink 4 is 9 times a 400 Gb/s NIC, and the NIC is 40 times a GPU's share of an 80 Gbps frontend
-link. These ratios are why parallelism is mapped to links (TP inside NVLink, DP across NICs) and why
+NVLink 4 is 9 times a 400 Gb/s NIC (450 against 50 GB/s, both one direction), and the NIC is 40
+times a GPU's share of an 80 Gbps frontend link. Comparing NVIDIA's bidirectional 900 GB/s with a
+NIC's one-direction 50 GB/s gives 18x, which overstates the gap by exactly 2x. These ratios are why
+parallelism is mapped to links (TP inside NVLink, DP across NICs) and why
 a socket fallback is a large regression, not a small one.
 
 ### Rail-optimized leaf layer
@@ -553,9 +557,12 @@ print(checkpoint_plan(70, nodes=64, write_budget_s=30, mbps_per_tib=125, stripe_
 
 Read the result three ways:
 
-- **Aggregate.** 980 GB in 30 s needs 32.7 GB/s. On FSx for Lustre PERSISTENT-1000 (1,000 MB/s
-  per TiB of disk throughput) that is about 33 TiB of file system. On PERSISTENT-125 it is 261 TiB,
-  even if the datasets fit in 20 TiB. Throughput, not data, sets the bill.
+- **Aggregate.** 980 GB in 30 s needs 32.7 GB/s. On an FSx for Lustre `PERSISTENT_2` SSD file
+  system with `PerUnitStorageThroughput` 1000 (1,000 MB/s per TiB of storage) that is about 33 TiB
+  of file system. At the 125 MB/s per TiB tier of the same deployment type it is 261 TiB,
+  even if the datasets fit in 20 TiB. Throughput, not data, sets the bill. (`PERSISTENT_2` offers
+  125, 250, 500 and 1,000 MB/s per TiB; tiers checked against the FSx for Lustre guide on
+  2026-11-25.)
 - **Per client.** FSx limits one client to 100 Gbps without EFA, 700 Gbps with EFA and 1,200 Gbps
   with EFA plus GPUDirect Storage. 0.51 GB/s per node is far below all of them.
 - **Per client per storage server.** On a client without EFA, FSx limits traffic between one client
@@ -725,8 +732,8 @@ service, or checkpoint flushes rate-limited below the gap between collectives.
 |---|---|---|
 | NCCL | Collective communication library | v2.32.3-1 (2026-09-17); `NCCL_IB_GID_INDEX`, `NCCL_IB_SL`, `NCCL_IB_TC` default `AUTO` since 2.32 |
 | nccl-tests | Collective bandwidth tests | `all_reduce_perf`, `all_gather_perf`; record `busbw` per node type |
-| NVIDIA Network Operator | NIC drivers and RDMA plumbing on Kubernetes | v26.7.1; one `NicClusterPolicy` named `nic-cluster-policy` |
-| NVIDIA GPU Operator | GPU stack on Kubernetes | v26.7.2; DMA-BUF GPUDirect RDMA, `gds.enabled` for GPUDirect Storage |
+| NVIDIA Network Operator | NIC drivers and RDMA plumbing on Kubernetes | v26.10.0; one `NicClusterPolicy` named `nic-cluster-policy` |
+| NVIDIA GPU Operator | GPU stack on Kubernetes | v26.7.3; DMA-BUF GPUDirect RDMA, `gds.enabled` for GPUDirect Storage |
 | Multus | Secondary pod interfaces | Deployed by the Network Operator `secondaryNetwork` sub-state |
 | SR-IOV Network Device Plugin | Virtual function allocation | One VF per pod for tenant isolation |
 | InfiniBand | Lossless scale-out fabric | NDR 400 Gb/s, Quantum-X800 at 800 Gb/s with SHARP v4 |
@@ -803,11 +810,11 @@ global state is the logical AND of the sub-states, so one failing driver contain
 policy not ready.
 
 **Q: How long does a full checkpoint of a 70B model trained with Adam take to write, and how much Lustre does that imply?**
-**Short:** About 980 GB at 14 bytes per parameter; writing it in 30 s needs 32.7 GB/s, about 33 TiB of FSx PERSISTENT-1000 or 261 TiB of PERSISTENT-125.
+**Short:** About 980 GB at 14 bytes per parameter; writing it in 30 s needs 32.7 GB/s, about 33 TiB of FSx PERSISTENT_2 at 1,000 MB/s per TiB or 261 TiB at 125.
 
 BF16 weights (2 bytes), FP32 master weights (4) and two FP32 Adam moments (8) give 14 bytes per
 parameter. FSx for Lustre sells disk throughput per TiB (125, 250, 500 or 1,000 MB/s per TiB on
-current SSD tiers), so the throughput target sets the capacity. With an asynchronous save, the 30 s
+the `PERSISTENT_2` SSD deployment type), so the throughput target sets the capacity. With an asynchronous save, the 30 s
 budget is the flush window between checkpoints, not a training pause. Check per-client and
 per-server limits next; they often bind before the aggregate does.
 
@@ -821,11 +828,13 @@ Files created in append mode get stripe count 1 whatever the directory layout sa
 `lfs getstripe`.
 
 **Q: What changes for parallelism placement when the NVLink domain grows from 8 GPUs to 72?**
-**Short:** Tensor and expert parallel groups can span a whole NVL72 rack on 1.8 TB/s NVLink, so MoE all-to-all no longer crosses the scale-out fabric.
+**Short:** Tensor and expert parallel groups can span a whole NVL72 rack at 900 GB/s per GPU per direction, so MoE all-to-all no longer crosses the scale-out fabric.
 
-On HGX H100, NVLink covers 8 GPUs at 900 GB/s each and everything else crosses 50 GB/s NICs, so TP
+On HGX H100, NVLink covers 8 GPUs at 450 GB/s each per direction (900 GB/s in NVIDIA's
+bidirectional figure) and everything else crosses 50 GB/s NICs, 9 times slower, so TP
 stops at 8 and expert all-to-all across nodes is a known bottleneck. GB200 NVL72 puts 72 GPUs on
-NVLink 5 with 130 TB/s across the domain. The scale-out fabric then carries only data-parallel and
+NVLink 5 at 900 GB/s per direction, about 65 TB/s per direction across the domain (130 TB/s
+bidirectional). The scale-out fabric then carries only data-parallel and
 pipeline traffic, and the scheduler must place a job's pods within one rack, which makes rack
 fragmentation a capacity problem.
 
@@ -949,8 +958,8 @@ back to plain sockets.
 
 **Setup.** A company builds a 128-node H100 cluster (1,024 GPUs) on RoCEv2: eight 400G ConnectX-7
 NICs per node, a rail-optimized leaf layer, a spine with 1:1 bisection inside a 512-GPU pod and 2:1
-between the two pods. Kubernetes 1.37 with the NVIDIA GPU Operator v26.7.2 and Network Operator
-v26.7.1. Training uses PyTorch FSDP on a 70B model. Checkpoints go to a parallel file system
+between the two pods. Kubernetes 1.37 with the NVIDIA GPU Operator v26.7.3 and Network Operator
+v26.10.0. Training uses PyTorch FSDP on a 70B model. Checkpoints go to a parallel file system
 provisioned at 40 GB/s on a separate storage network.
 
 **Symptom.** Two-node `all_reduce_perf` hits the baseline. A 512-GPU job reaches 41% of the

@@ -1,8 +1,8 @@
 # Case Study: Design a Continuous Training and Champion-Challenger System
 
-> **Version anchor (2026-10-18).** Tools appear at the mlops pin-table versions: MLflow 3.17.1
-> (2026-10-13) for the registry and its `@champion` and `@challenger` aliases, Kubeflow Pipelines
-> 2.17.2 (2026-09-04) for the training and gate pipelines, and lakeFS v1.88.0 (2026-10-01) for
+> **Version anchor (2026-11-25).** Tools appear at the mlops pin-table versions: MLflow 3.18.0
+> (2026-11-04) for the registry and its `@champion` and `@challenger` aliases, Kubeflow Pipelines
+> 2.18.2 (2026-11-23) for the training and gate pipelines, and lakeFS v1.88.0 (2026-10-01) for
 > training-data snapshots. LightGBM, Kafka, Apache Iceberg and PostgreSQL are named without a
 > version.
 >
@@ -857,8 +857,8 @@ superseded SR 11-7 (2011-04-04). Who signs and what evidence a promotion carries
 
 | Concern | Tool in this design | Why | Alternative |
 |---|---|---|---|
-| Registry and aliases | MLflow 3.17.1 | `@champion`, `@previous_champion`, model version tags for policy digest | Kubeflow Hub v0.3.17 |
-| Pipelines | Kubeflow Pipelines 2.17.2 | `dsl.If` on gate output, scheduled gate runs, artifact lineage | Airflow, Temporal |
+| Registry and aliases | MLflow 3.18.0 | `@champion`, `@previous_champion`, model version tags for policy digest | Kubeflow Hub v0.3.18 |
+| Pipelines | Kubeflow Pipelines 2.18.2 | `dsl.If` on gate output, scheduled gate runs, artifact lineage | Airflow, Temporal |
 | Training-data snapshots | lakeFS v1.88.0 | Commit id per training set, zero-copy branch for backfills | Iceberg snapshots, DVC 3.67.1 |
 | Model | LightGBM | GBDT on tabular features, `init_model` for warm start | XGBoost |
 | Logs | Kafka to Iceberg | Feature and decision logs, replayable by transaction id | Any append-only log plus a table format |

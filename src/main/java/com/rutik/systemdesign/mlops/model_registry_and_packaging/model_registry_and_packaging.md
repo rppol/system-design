@@ -1,11 +1,11 @@
 # Model Registry and Packaging
 
-> **Version anchor (2026-10-18).** MLflow 3.17.1 (2026-10-13). Kubeflow Hub v0.3.17
-> (2026-09-21); the project was renamed from Kubeflow Model Registry at v0.3.9 and added an MCP
-> catalog in v0.3.14 and an Agents catalog in v0.3.16. Kubernetes 1.37 (1.37.1 on 2026-09-15);
+> **Version anchor (2026-11-25).** MLflow 3.18.0 (2026-11-04). Kubeflow Hub v0.3.18
+> (2026-10-22); the project was renamed from Kubeflow Model Registry at v0.3.9 and added an MCP
+> catalog in v0.3.14 and an Agents catalog in v0.3.16. Kubernetes 1.37 (1.37.2 on 2026-10-13);
 > the OCI image volume source has been GA since 1.36. ModelPack model-spec v0.0.7 (git tag of
 > 2025-07-21, no GitHub release objects); ModelPack is a CNCF Sandbox project, accepted
-> 2025-05-13. KitOps v1.16.0 (2026-09-29), repo `kitops-ml/kitops`, CNCF Sandbox since
+> 2025-05-13. KitOps v1.17.0 (2026-11-06), repo `kitops-ml/kitops`, CNCF Sandbox since
 > 2025-03-04; its README calls it an implementation of the ModelPack specification, and
 > `kit pack --use-model-pack` writes that format. Every version claim below is checked against
 > this anchor.
@@ -144,7 +144,7 @@ for a regulator's sign-off. Fixed stages cannot express that.
 | SageMaker Model Registry | Model package group, numbered packages | `ModelApprovalStatus` | Approval changes can trigger EventBridge rules that start deployment |
 | Vertex AI Model Registry | Model resource, version ids | Version aliases; a `default` alias | Endpoints deploy a specific model version |
 | W&B Registry | Registry, collection, linked artifact versions | Aliases on linked versions | Artifact versions carry content checksums |
-| Kubeflow Hub v0.3.17 | Registered model, model version, model artifact | Custom properties and states | Self-hosted on Kubernetes; model, MCP and Agents catalogs |
+| Kubeflow Hub v0.3.18 | Registered model, model version, model artifact | Custom properties and states | Self-hosted on Kubernetes; model, MCP and Agents catalogs |
 | Hugging Face Hub | `org/repo` | Commit SHA, branches, tags | Gated repos require accepting terms before download |
 
 Kubeflow Hub's catalogs list approved base models, MCP servers and agents behind one API; versioning
@@ -730,13 +730,13 @@ the digest, not the tag, on the registry version.
 
 | Tool | Role | Notes |
 |---|---|---|
-| MLflow Model Registry | Open-source registry | 3.17.1; aliases, version tags, `LoggedModel` lineage |
+| MLflow Model Registry | Open-source registry | 3.18.0; aliases, version tags, `LoggedModel` lineage |
 | MLflow Models | Package format | `MLmodel` file with flavors, signature, environment |
 | Unity Catalog | Governed registry on Databricks | Three-level names, aliases, catalog permissions |
 | SageMaker Model Registry | AWS registry | Model package groups, `ModelApprovalStatus`, EventBridge events |
 | Vertex AI Model Registry | GCP registry | Model versions and aliases |
 | W&B Artifacts | Versioned artifacts under W&B Registry | Collections, linked versions, aliases |
-| Kubeflow Hub | Self-hosted registry and catalogs | v0.3.17; models, MCP servers and agents |
+| Kubeflow Hub | Self-hosted registry and catalogs | v0.3.18; models, MCP servers and agents |
 | HuggingFace Hub | Public model hosting | Git revisions, gated repos, model cards |
 | safetensors | Tensor format | Data-only, mmap, header limit 100 MB |
 | GGUF | Single-file quantized format | llama.cpp, Ollama |
@@ -744,7 +744,7 @@ the digest, not the tag, on the registry version.
 | torch.export | PyTorch graph export | `.pt2` `ExportedProgram` |
 | AOTInductor | Ahead-of-time compiled PyTorch packages | Tied to GPU arch, CUDA and PyTorch version |
 | ModelPack | OCI model artifact spec | model-spec v0.0.7; `application/vnd.cncf.model.*` media types |
-| KitOps | Packaging CLI | v1.16.0; Kitfile, `kit pack --use-model-pack`, init-container integration |
+| KitOps | Packaging CLI | v1.17.0; Kitfile, `kit pack --use-model-pack`, init-container integration |
 | ORAS | Generic OCI artifact CLI | `oras push`, `oras copy`, referrers |
 | Harbor | Self-hosted OCI registry | Replication, tag immutability, tag retention |
 | Kubernetes | Image volume source | Mounts OCI objects read-only; GA since 1.36, pinned 1.37 |

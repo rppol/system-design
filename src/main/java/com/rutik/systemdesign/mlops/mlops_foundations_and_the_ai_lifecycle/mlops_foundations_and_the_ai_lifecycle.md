@@ -1,12 +1,12 @@
 # MLOps Foundations and the AI Lifecycle
 
-> **Version anchor (2026-10-18).** Tool versions on this page: MLflow 3.17.1 (2026-10-13),
+> **Version anchor (2026-11-25).** Tool versions on this page: MLflow 3.18.0 (2026-11-04),
 > DVC 3.67.1 (2026-03-31, repo `treeverse/dvc`), lakeFS v1.88.0 (2026-10-01), Kubeflow Pipelines
-> 2.17.2 (2026-09-04), Kubeflow Hub v0.3.17 (2026-09-21, renamed from Model Registry at v0.3.9),
-> Langfuse v4.63.0 (2026-10-16), Arize Phoenix v20.23.0 (2026-10-16), Argo Rollouts v1.10.1
-> (2026-10-12), KServe v0.21.0 (2026-09-25), LiteLLM v1.106.0 (2026-10-18), Label Studio 1.23.2
+> 2.18.2 (2026-11-23), Kubeflow Hub v0.3.18 (2026-10-22, renamed from Model Registry at v0.3.9),
+> Langfuse v4.86.0 (2026-11-24), Arize Phoenix v22.0.1 (2026-11-21), Argo Rollouts v1.10.2
+> (2026-11-04), KServe v0.21.0 (2026-09-25), LiteLLM v1.111.0 (2026-11-25), Label Studio 1.23.2
 > (2026-09-29). MCP specification: revision 2026-07-28. Each version comes from the project's
-> GitHub release page or official docs, checked on 2026-10-18.
+> GitHub release page or official docs, checked on 2026-11-25.
 
 ---
 
@@ -712,17 +712,17 @@ rescore production on every new version before comparing.
 
 | Tool | Version (2026-10-18) | Role in the lifecycle |
 |---|---|---|
-| MLflow | 3.17.1 | Experiment tracking, model registry, `LoggedModel` for a bundle, LLM judges via `make_judge()` |
+| MLflow | 3.18.0 | Experiment tracking, model registry, `LoggedModel` for a bundle, LLM judges via `make_judge()` |
 | DVC | 3.67.1 | Data and model versioning in Git; repo is `treeverse/dvc` |
 | lakeFS | v1.88.0 | Git-like branches and commits over object-store data |
 | Label Studio | 1.23.2 | Labeling and label review |
-| Kubeflow Pipelines | 2.17.2 | Pipeline orchestration on Kubernetes |
-| Kubeflow Hub | v0.3.17 | Model, MCP, and agent catalogs on Kubernetes (renamed from Model Registry at v0.3.9) |
+| Kubeflow Pipelines | 2.18.2 | Pipeline orchestration on Kubernetes |
+| Kubeflow Hub | v0.3.18 | Model, MCP, and agent catalogs on Kubernetes (renamed from Model Registry at v0.3.9) |
 | KServe | v0.21.0 | Model serving on Kubernetes; CNCF incubating project |
-| Argo Rollouts | v1.10.1 | Canary and blue/green rollouts with metric analysis |
-| LiteLLM | v1.106.0 | Gateway and proxy across model providers |
-| Langfuse | v4.63.0 | Tracing, prompt management, evals; acquired by ClickHouse (announced 2026-01-16) |
-| Arize Phoenix | v20.23.0 | Tracing and evaluation, OpenTelemetry-based |
+| Argo Rollouts | v1.10.2 | Canary and blue/green rollouts with metric analysis |
+| LiteLLM | v1.111.0 | Gateway and proxy across model providers |
+| Langfuse | v4.86.0 | Tracing, prompt management, evals; acquired by ClickHouse (announced 2026-01-16) |
+| Arize Phoenix | v22.0.1 | Tracing and evaluation, OpenTelemetry-based |
 
 Platform comparisons for experiment tracking and LLM observability are in
 [LLM Ops Platforms](../../llm/llm_ops_platforms/llm_ops_platforms.md). The GPU and cluster layer

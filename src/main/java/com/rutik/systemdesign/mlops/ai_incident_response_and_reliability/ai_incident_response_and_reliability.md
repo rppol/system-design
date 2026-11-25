@@ -1,10 +1,10 @@
 # AI Incident Response and Reliability
 
-> **Version anchor (2026-10-18).** **LiteLLM v1.106.0** (2026-10-18) and **Agent Router v1.2.0**
-> (2026-10-07, the renamed Envoy AI Gateway, CRDs and API group unchanged) are the gateways where
-> the kill switches and spend breakers on this page run. **Langfuse v4.63.0** (2026-10-16) and
-> **Arize Phoenix v20.23.0** (2026-10-16) hold the traces the replay harness reads.
-> **Argo Rollouts v1.10.1** (2026-10-12) runs the automated rollback step. The OTel GenAI
+> **Version anchor (2026-11-25).** **LiteLLM v1.111.0** (2026-11-25) and **Agent Router v1.3.0**
+> (2026-11-18, `theagentrouter/agent-router`, the renamed Envoy AI Gateway, API group unchanged) are the gateways where
+> the kill switches and spend breakers on this page run. **Langfuse v4.86.0** (2026-11-24) and
+> **Arize Phoenix v22.0.1** (2026-11-21) hold the traces the replay harness reads.
+> **Argo Rollouts v1.10.2** (2026-11-04) runs the automated rollback step. The OTel GenAI
 > semantic conventions moved to `open-telemetry/semantic-conventions-genai`, which states no
 > stability level, so this page claims none. PagerDuty, incident.io, OpenFeature and
 > LaunchDarkly have no pin in this section and are named without a version. EU AI Act article
@@ -738,11 +738,11 @@ incident channel template pings the DPO automatically for any output data leak c
 
 | Tool | Role | Notes |
 |---|---|---|
-| LiteLLM | LLM gateway proxy with fallbacks, virtual keys and per-key budgets | v1.106.0. Fallback lists implement the secondary-model mode |
-| Agent Router | Envoy-based AI gateway with routing and rate-limit policies | v1.2.0. Renamed from Envoy AI Gateway; CRDs and API group unchanged |
-| Langfuse | LLM tracing, scores and datasets | v4.63.0. Traces carry the fields the replay harness reads |
-| Arize Phoenix | LLM tracing and evaluation | v20.23.0. Evals on traced spans feed the sampled quality SLI |
-| Argo Rollouts | Progressive delivery with analysis-driven abort | v1.10.1. Aborts a rollout when the quality analysis fails |
+| LiteLLM | LLM gateway proxy with fallbacks, virtual keys and per-key budgets | v1.111.0. Fallback lists implement the secondary-model mode |
+| Agent Router | Envoy-based AI gateway with routing and rate-limit policies | v1.3.0. Renamed from Envoy AI Gateway at v1.2.0; API group unchanged; `QuotaPolicy` charges tokens at end of response |
+| Langfuse | LLM tracing, scores and datasets | v4.86.0. Traces carry the fields the replay harness reads |
+| Arize Phoenix | LLM tracing and evaluation | v22.0.1. Evals on traced spans feed the sampled quality SLI |
+| Argo Rollouts | Progressive delivery with analysis-driven abort | v1.10.2. Aborts a rollout when the quality analysis fails |
 | OpenFeature | Vendor-neutral feature-flag API | CNCF project. Holds the per-feature mode flag |
 | LaunchDarkly | Feature flags and AI Configs | Kill switches with tenant targeting |
 | PagerDuty | Paging and escalation | Routes AI quality pages to the AI on-call rotation |
@@ -967,6 +967,19 @@ was still retrieved, and the wrong-tier chunk ranked above it.
 **Actions.**
 
 - Chunker carries table headers into each row chunk; a unit test on 30 real coverage tables.
+
+```python
+# BROKEN: each table row becomes a chunk on its own; the tier column header is lost
+def chunk_table(table):
+    return [" | ".join(row) for row in table.rows]
+```
+
+```python
+# FIX: repeat the header and the table caption in every row chunk
+def chunk_table(table):
+    head = f"{table.caption}\n{' | '.join(table.header)}"
+    return [f"{head}\n{' | '.join(row)}" for row in table.rows]
+```
 - 220 regression cases added to the eval set (`claims-eval@v19`), including all 140 replayed
   traces and 80 new multi-tier questions; the gate now fails `idx-0912` at 12.4% failing.
 - Index promotion gate adds a groundedness check on the multi-tier slice, not only recall.

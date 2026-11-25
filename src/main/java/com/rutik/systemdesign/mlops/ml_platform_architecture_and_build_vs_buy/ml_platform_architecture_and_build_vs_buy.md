@@ -1,13 +1,13 @@
 # ML Platform Architecture and Build vs Buy
 
-> **Version anchor (2026-10-18).** Kubernetes 1.37 (1.37.0 2026-08-26, 1.37.1 2026-09-15).
-> KServe v0.21.0 (2026-09-25), a CNCF incubating project since 2025-09-29. Kueue v0.20.2
-> (2026-10-15); `kueue.x-k8s.io/v1beta1` is no longer served. Kueue is a Kubernetes SIG project,
-> not a CNCF project. Kubeflow Hub v0.3.17 (2026-09-21; renamed from Model Registry at v0.3.9,
-> MCP and Agents catalogs in v0.3.14 and v0.3.16). Kubeflow Pipelines 2.17.2 (2026-09-04).
-> Kubeflow Trainer v2.3.0 (2026-08-07). Ray 2.59.0 (2026-10-02). llm-d v0.10.0 (2026-09-29),
-> CNCF Sandbox since 2026-03-12. KAI Scheduler v0.18.6 (2026-10-15). MLflow 3.17.1 (2026-10-13).
-> CNCF Kubernetes AI Conformance: per-version directories v1.33 to v1.37 (checked 2026-10-18).
+> **Version anchor (2026-11-25).** Kubernetes 1.37 (1.37.0 2026-08-26, 1.37.2 2026-10-13).
+> KServe v0.21.0 (2026-09-25), a CNCF incubating project since 2025-09-29. Kueue v0.20.7
+> (2026-11-19); `kueue.x-k8s.io/v1beta1` is no longer served. Kueue is a Kubernetes SIG project,
+> not a CNCF project. Kubeflow Hub v0.3.18 (2026-10-22; renamed from Model Registry at v0.3.9,
+> MCP and Agents catalogs in v0.3.14 and v0.3.16). Kubeflow Pipelines 2.18.2 (2026-11-23).
+> Kubeflow Trainer v2.4.0 (2026-11-06). Ray 2.60.1 (2026-11-23). llm-d v1.0.0 (2026-10-20),
+> CNCF Sandbox since 2026-03-12. KAI Scheduler v0.19.0 (2026-11-11), repo `kai-scheduler/KAI-Scheduler`. MLflow 3.18.0 (2026-11-04).
+> CNCF Kubernetes AI Conformance: per-version directories v1.33 to v1.37 (checked 2026-11-25).
 > Every version claim below is checked against this anchor.
 
 An ML platform is the set of shared services and contracts that let product teams train,
@@ -743,12 +743,12 @@ quarterly.
 | Tool | Role | Notes |
 |---|---|---|
 | Kubernetes | substrate for assembled platforms | 1.37; AI Conformance checklist per minor version |
-| Kubeflow | assembled ML platform components | Pipelines 2.17.2, Trainer v2.3.0, Hub v0.3.17 |
+| Kubeflow | assembled ML platform components | Pipelines 2.18.2, Trainer v2.4.0, Hub v0.3.18 |
 | KServe | serving control plane | v0.21.0; CNCF incubating |
-| Kueue | quota and gang admission | v0.20.2; serves `v1beta2`; MultiKueue for multi-cluster |
-| KAI Scheduler | GPU scheduler | v0.18.6; open-source core of NVIDIA Run:ai |
-| llm-d | distributed LLM serving on Kubernetes | v0.10.0; CNCF Sandbox |
-| Ray | Python-native distributed runtime | 2.59.0; Train, Data, Serve, Serve LLM |
+| Kueue | quota and gang admission | v0.20.7; serves `v1beta2`; MultiKueue for multi-cluster |
+| KAI Scheduler | GPU scheduler | v0.19.0; open-source core of NVIDIA Run:ai |
+| llm-d | distributed LLM serving on Kubernetes | v1.0.0; CNCF Sandbox; router, flow control, `DisaggregatedSet` |
+| Ray | Python-native distributed runtime | 2.60.1; Train, Data, Serve, Serve LLM |
 | KubeRay | Ray on Kubernetes | runs Ray clusters as Kubernetes resources |
 | Anyscale | managed Ray | buy-managed-upstream option for Ray stacks |
 | AWS SageMaker | managed ML platform on AWS | product name is Amazon SageMaker AI since 2024-12-03 |
@@ -758,7 +758,7 @@ quarterly.
 | Azure Machine Learning | classic ML training and endpoints on Azure | pairs with Microsoft Foundry for GenAI |
 | NVIDIA Run:ai | commercial GPU control plane | projects, quotas, fractional GPUs |
 | Red Hat OpenShift AI | supported open-source AI platform | names Kubeflow, vLLM and llm-d among components |
-| MLflow | tracking and registry | 3.17.1 |
+| MLflow | tracking and registry | 3.18.0 |
 | Backstage | developer portal for golden paths | hosts templates and the service catalog |
 | SkyPilot | multi-cloud job launcher | runs jobs across clouds and Kubernetes clusters |
 

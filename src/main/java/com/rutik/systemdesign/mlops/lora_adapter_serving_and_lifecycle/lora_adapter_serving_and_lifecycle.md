@@ -1,15 +1,17 @@
 # LoRA Adapter Serving and Lifecycle
 
-> **Version anchor (2026-10-18).** vLLM v0.32.0 (2026-10-18). SGLang v0.5.21 (2026-10-02).
-> AIBrix v0.8.0 (2026-10-13), `ModelAdapter` CRD `model.aibrix.ai/v1alpha1`. llm-d v0.10.0
-> (2026-09-29); its inference scheduler lives in repo `llm-d/llm-d-router` and ships the
-> `lora-affinity-scorer` plugin. llama.cpp stable v0.7.0 (2026-10-15), rolling build b11719
-> (2026-10-18). Ray 2.59.0 (2026-10-02, Serve LLM and model multiplexing). Triton Inference
-> Server 2.73.0 / NGC 26.09 (2026-09-30). LoRAX (`predibase/lorax`) is an archived repo; its
+> **Version anchor (2026-11-25).** vLLM v0.34.0 (2026-11-16). SGLang v0.5.23 (2026-11-02).
+> AIBrix v0.8.0 (2026-10-13), `ModelAdapter` CRD `model.aibrix.ai/v1alpha1`. llm-d v1.0.0
+> (2026-10-20); its inference scheduler lives in repo `llm-d/llm-d-router` (endpoint picker image
+> `llm-d-router-endpoint-picker`) and ships the
+> `lora-affinity-scorer` plugin. llama.cpp stable v1.0.0 (2026-11-13), rolling build b12722
+> (2026-11-25). Ray 2.60.1 (2026-11-23, Serve LLM and model multiplexing). Triton Inference
+> Server 2.75.0 / NGC 26.11 (2026-11-17). LoRAX (`predibase/lorax`) is an archived repo; its
 > last release is lorax-0.4.0 (2025-01-13). The Punica and S-LoRA research repos are archived;
 > vLLM and SGLang carry their kernel designs. The KServe ModelMesh repos (`kserve/modelmesh`,
 > `kserve/modelmesh-serving`) are archived; the last ModelMesh Serving release is v0.12.0
-> (2024-07-09). vLLM flag defaults below come from `vllm/config/lora.py` and the engine-args
+> (2024-07-09). vLLM flag defaults below come from `vllm/config/lora.py` at the v0.34.0 tag
+> (`max_loras` 1, `max_lora_rank` 16, `max_cpu_loras` equal to `max_loras`) and the engine-args
 > docs, checked 2026-10-18.
 
 A LoRA adapter is a few tens of megabytes of low-rank weight deltas that only make sense on top
@@ -198,7 +200,7 @@ privileged path: it reads whatever path it is given.
 ### H100 80 GB memory budget for an 8B base with LoRA slots
 
 ```
-Llama 3.1 8B, BF16, gpu_memory_utilization 0.90 (72 GB usable)
+Llama 3.1 8B, BF16, explicit --gpu-memory-utilization 0.90 (72 GB budget)
 
 max_lora_rank 16, max_loras 16                 max_lora_rank 64, max_loras 16
 +--------------------------------------+       +--------------------------------------+
@@ -215,7 +217,10 @@ max_lora_rank 16, max_loras 16                 max_lora_rank 64, max_loras 16
 One rank-64 adapter on the fleet forces every slot to rank-64 size. The 4.0 GB comes straight
 out of KV cache, which is the memory that sets batch size and therefore throughput. The slot
 sizes assume all seven linear projections are targeted; restricting `--lora-target-modules`
-shrinks them.
+shrinks them. The diagram uses an explicit 0.90 budget so the arithmetic is fixed. vLLM v0.34.0
+defaults `gpu_memory_utilization` to 1.0 and sizes the KV cache from the memory free after
+warmup, so the pool on each side is about 8 GB (about 61k tokens) larger; the 4.0 GB that the
+rank-64 slots take is the same either way, because LoRA slots are allocated before the KV pool.
 
 ### Mixed-adapter batch through a gather kernel
 
@@ -324,9 +329,13 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --max-loras 16 \
   --max-cpu-loras 128 \
   --max-lora-rank 16 \
-  --lora-target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
-  --gpu-memory-utilization 0.90
+  --lora-target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj
 ```
+
+There is no `--gpu-memory-utilization` in the fixed command. In vLLM v0.34.0 the extensible KV
+cache is the default and sizes the pool from memory actually free after LoRA slots, CUDA graphs
+and warmup are allocated; setting the flag turns that sizing back into a fixed fraction. Set it
+(for example `0.90`) only when another process shares the GPU.
 
 `--max-loras 16` comes from the number of distinct adapters active in one scheduling window at
 p95 on this pod, measured from logs, not from the catalog size. `--max-cpu-loras 128` covers
@@ -735,13 +744,13 @@ into CPU cache before a pod reports Ready.
 
 | Tool | Role | Notes |
 |---|---|---|
-| vLLM | Multi-LoRA engine | v0.32.0; `--max-loras` default 1, `--max-lora-rank` default 16, runtime load API, resolver plugins |
-| SGLang | Multi-LoRA engine | v0.5.21; `--max-loras-per-batch` default 8, `csgmv` and `triton` backends, pinned adapters |
-| llama-server | Local and edge LoRA serving | llama.cpp v0.7.0 stable, b11719 rolling; `--lora`, `/lora-adapters`, per-request `lora` scales |
+| vLLM | Multi-LoRA engine | v0.34.0; `--max-loras` default 1, `--max-lora-rank` default 16, runtime load API, resolver plugins |
+| SGLang | Multi-LoRA engine | v0.5.23; `--max-loras-per-batch` default 8, `csgmv` and `triton` backends, pinned adapters |
+| llama-server | Local and edge LoRA serving | llama.cpp v1.0.0 stable, b12722 rolling; `--lora`, `/lora-adapters`, per-request `lora` scales |
 | AIBrix | Kubernetes adapter control plane | v0.8.0; `ModelAdapter` CRD, per-adapter Service, retries and pod failover |
-| llm-d | Inference scheduler | v0.10.0; `lora-affinity-scorer` reads `vllm:lora_requests_info` |
-| Ray Serve | LLM and classic multiplexing | 2.59.0; Serve LLM `lora_config`, `@serve.multiplexed` |
-| Triton Inference Server | Explicit model load and unload | 2.73.0; `--model-control-mode=explicit`, repository API |
+| llm-d | Inference scheduler | v1.0.0 (`llm-d-router-endpoint-picker`); `lora-affinity-scorer` reads `vllm:lora_requests_info` |
+| Ray Serve | LLM and classic multiplexing | 2.60.1; Serve LLM `lora_config`, `@serve.multiplexed` |
+| Triton Inference Server | Explicit model load and unload | 2.75.0; `--model-control-mode=explicit`, repository API |
 | KServe ModelMesh | Multi-model placement and routing | Archived repos, last release v0.12.0 (2024-07-09) |
 | SageMaker inference components | Managed adapter serving | Adapter components on a base component, GPU, CPU and disk tiers |
 | PEFT | Adapter training and format | `adapter_config.json` plus `adapter_model.safetensors` |
@@ -974,6 +983,31 @@ flowchart LR
    about 150 GB for `r16`. NFS was retired.
 6. Hot adapters: the 6 adapters with more than one replica's steady load were merged into
    dedicated deployments. Load and unload endpoints are blocked at the gateway.
+
+**The overwrite that gave two customers two answers, broken then fixed.** The old retrain job
+wrote over the adapter's directory and reused its serving name.
+
+```bash
+# BROKEN: same path, same name. Pods holding the old weights in a GPU slot or the CPU cache keep
+# serving v7; pods that miss read v8 from NFS. One name now means two sets of weights.
+rsync -a --delete ./out/acme/ /adapters/acme/
+curl -s -X POST http://vllm-pod:8000/v1/load_lora_adapter \
+  -H 'Content-Type: application/json' \
+  -d '{"lora_name": "acme", "lora_path": "/adapters/acme"}'
+```
+
+```bash
+# FIX: content-addressed path, a new immutable serving name, and one mapping flip at the gateway.
+# `adapterctl` is the team's internal registry CLI.
+DIGEST=$(sha256sum out/acme/adapter_model.safetensors | cut -c1-16)
+aws s3 cp --recursive ./out/acme/ "s3://tenant-adapters/acme/sha256-${DIGEST}/"
+adapterctl publish --name acme-v8 --uri "s3://tenant-adapters/acme/sha256-${DIGEST}/" \
+  --base-digest "${BASE_DIGEST}" --rank-pool r16
+adapterctl route --customer acme --adapter acme-v8   # acme-v7 stays loadable for 7 days
+```
+
+A name never changes meaning after this, so a pod either has `acme-v8` or loads it; it can never
+serve stale weights under the new name.
 
 **Base upgrade to Qwen3-8B.** Run as a campaign once the registry had base digests. A second
 pool on the new base started with 6 pods. Adapters were retrained in traffic order from stored

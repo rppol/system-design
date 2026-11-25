@@ -1,9 +1,12 @@
 # KServe Deep Dive
 
-> **Version anchor (2026-10-18).** KServe v0.21.0 (2026-09-25), CNCF incubating since 2025-09-29.
-> llm-d v0.10.0 (2026-09-29), CNCF Sandbox since 2026-03. KEDA v2.21.0 (2026-09-23). Gateway API
+> **Version anchor (2026-11-25).** KServe v0.21.0 (2026-09-25), CNCF incubating since 2025-09-29;
+> no later KServe release as of 2026-11-25. llm-d v1.0.0 (2026-10-20), CNCF Sandbox since 2026-03,
+> but KServe v0.21.0's default `LLMInferenceService` templates (`config/llmisvcconfig` at the tag,
+> checked 2026-11-25) still pin the llm-d v0.10.0 router images and the `llm-d-cuda:v0.9.0` engine
+> image. KEDA v2.21.1 (2026-11-15). Gateway API
 > Inference Extension v1.6.2 (2026-09-17); EPP, BBR, InferenceObjective and InferenceModelRewrite
-> moved to llm-d in v1.6.0. Kubernetes 1.37 (1.37.1 on 2026-09-15), with ImageVolume GA since 1.36.
+> moved to llm-d in v1.6.0. Kubernetes 1.37 (1.37.2 on 2026-10-13), with ImageVolume GA since 1.36.
 > Field names on this page were read from the KServe API types at the `v0.21.0` tag.
 
 ## 1. Concept Overview
@@ -169,7 +172,7 @@ flowchart LR
     ctl --> route("HTTPRoute")
     ctl --> lws("LeaderWorkerSet<br/>multi-node")
     ctl --> pool("InferencePool")
-    ctl --> epp("Endpoint picker<br/>llm-d v0.10")
+    ctl --> epp("Endpoint picker<br/>llm-d v0.10 default")
     k8s@{ icon: "logos:kubernetes", form: "square", label: "Kubernetes API", pos: "b", h: 44 }
     ctl -.-> k8s
 
@@ -513,9 +516,13 @@ Read conditions, then generated objects, then storage-initializer logs.
 - **Red Hat and Bloomberg** are named among KServe's major adopters in CNCF's incubation
   announcement (2025-11-11), and Red Hat launched llm-d, whose scheduler and images
   `LLMInferenceService` deploys.
-- **llm-d images in KServe:** the v0.21.0 default templates run the llm-d endpoint picker and
-  disaggregation sidecar at `v0.10.0` and the engine image `ghcr.io/llm-d/llm-d-cuda:v0.9.0`. The
-  scheduler and the engine move on separate version lines.
+- **llm-d images in KServe:** the v0.21.0 default templates run the llm-d endpoint picker
+  (`llm-d-router-endpoint-picker`) and disaggregation sidecar (`llm-d-router-disagg-sidecar`) at
+  `v0.10.0` and the engine image `ghcr.io/llm-d/llm-d-cuda:v0.9.0` (checked at the tag on
+  2026-11-25). llm-d v1.0.0 (2026-10-20) aligned its router components at 1.0.0 and deprecated
+  building its own inference images, so a v0.21.0 install sits one llm-d major behind until a
+  `LLMInferenceServiceConfig` or the resource's own `template` and `router.scheduler.template`
+  override the images. The scheduler and the engine move on separate version lines.
 - **Prefill/decode KV transfer:** the v0.21.0 changelog includes "give P/D engines a NixlConnector
   so KV actually transfers" (#6027). Disaggregated deployments built from earlier default templates
   should be checked for KV transfer, since without it the decode pod recomputes the prefill.
@@ -594,10 +601,10 @@ inside the data boundary, with redaction.
 | Tool | Role | Notes |
 |---|---|---|
 | KServe | Model serving CRDs and controller | v0.21.0; Standard mode default |
-| llm-d | Scheduler, sidecars and images used by `LLMInferenceService` | v0.10.0 endpoint picker; engine image `llm-d-cuda:v0.9.0` in default templates |
+| llm-d | Scheduler, sidecars and images used by `LLMInferenceService` | v1.0.0 current; KServe v0.21.0 default templates pin the v0.10.0 endpoint picker and engine image `llm-d-cuda:v0.9.0` |
 | Gateway API Inference Extension | `InferencePool` API and conformance | v1.6.2; EPP and BBR moved to llm-d in v1.6.0 |
 | LeaderWorkerSet | Multi-node pod groups | Used when `worker` is set; default rollout 1 unavailable, 0 surge |
-| KEDA | Event-driven autoscaling | v2.21.0; `autoscalerClass: keda` and `scaling.keda` |
+| KEDA | Event-driven autoscaling | v2.21.1; `autoscalerClass: keda` and `scaling.keda` |
 | Prometheus Adapter | Exposes Prometheus metrics to the HPA | Required by the WVA HPA actuator |
 | Knative | Serverless serving layer | Needed only for Knative mode |
 | NVIDIA Triton | Runtime for many model formats | `kserve-tritonserver` runtime |

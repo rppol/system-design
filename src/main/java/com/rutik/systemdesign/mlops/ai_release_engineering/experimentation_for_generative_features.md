@@ -1,7 +1,7 @@
 # Experimentation for Generative Features
 
-> **Version anchor (2026-10-18).** **Langfuse v4.63.0** (2026-10-16) stores the per-trace scores
-> and **MLflow 3.17.1** (2026-10-13) runs the judges that score each arm in the examples. The
+> **Version anchor (2026-11-25).** **Langfuse v4.86.0** (2026-11-24) stores the per-trace scores
+> and **MLflow 3.18.0** (2026-11-04) runs the judges that score each arm in the examples. The
 > rule that Claude Opus 4.7 and later models reject a non-default `temperature`, `top_p` or `top_k`
 > was read from the Anthropic model deprecations page on 2026-10-18. Statsig, LaunchDarkly,
 > GrowthBook, Optimizely and OpenFeature have no pin in this section and are named without a
@@ -571,8 +571,8 @@ better. Fix: count discard as a failure in the primary metric.
 | GrowthBook | Open-source flags and warehouse-native experiment analysis | Bayesian and frequentist engines; self-hostable |
 | Optimizely | Experimentation platform | Sequential testing in its stats engine |
 | OpenFeature | Vendor-neutral flag API | Hooks log exposure at evaluation time |
-| Langfuse | Traces and scores | v4.63.0. Judge and user scores attach to traces with the bundle digest |
-| MLflow | GenAI evaluation and judges | 3.17.1. `make_judge()` defines pinned judges for online scoring |
+| Langfuse | Traces and scores | v4.86.0. Judge and user scores attach to traces with the bundle digest |
+| MLflow | GenAI evaluation and judges | 3.18.0. `make_judge()` defines pinned judges for online scoring |
 
 Assignment uses the parent page's flag client, so experiment and release flags agree on the digest.
 

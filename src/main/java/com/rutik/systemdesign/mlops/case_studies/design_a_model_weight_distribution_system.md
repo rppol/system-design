@@ -1,14 +1,14 @@
 # Case Study: Design a Model Weight Distribution System
 
-> **Version anchor (2026-10-18).** vLLM v0.32.0 (2026-10-18), with `--load-format`
+> **Version anchor (2026-11-25).** vLLM v0.34.0 (2026-11-16), with `--load-format`
 > `runai_streamer_sharded` and `sharded_state` for per-rank checkpoints and `ipc_cache` for
-> restarts. Model Streamer 0.17.0 (2026-10-13), repo `dsx-ai-factory/model-streamer`. KServe
+> restarts. Model Streamer 0.17.3 (2026-11-11), repo `dsx-ai-factory/model-streamer`. KServe
 > v0.21.0 (2026-09-25) with `LocalModelCache`. LeaderWorkerSet v1.0.0 (2026-10-16). Kubernetes 1.37
-> (1.37.1 on 2026-09-15); the OCI image volume source has been GA since 1.36. ModelPack model-spec
+> (1.37.2 on 2026-10-13); the OCI image volume source has been GA since 1.36. ModelPack model-spec
 > v0.0.7 (git tag of 2025-07-21). OpenSSF model-transparency v1.1.1 (2025-10-10). Dragonfly v2.5.2
 > (2026-09-14) and Kraken v0.1.32 (2026-10-12), both checked on their release pages on 2026-10-18.
-> KitOps v1.16.0 (2026-09-29), Kueue v0.20.2 (2026-10-15), Mooncake v0.3.13.post1 (2026-08-31) and
-> NIXL v1.5.0 (2026-09-30). Moonshot AI's checkpoint-engine has no GitHub release objects and is
+> KitOps v1.17.0 (2026-11-06), Kueue v0.20.7 (2026-11-19), Mooncake v0.3.14 (2026-11-03) and
+> NIXL v1.5.2 (2026-10-29). Moonshot AI's checkpoint-engine has no GitHub release objects and is
 > named without a version.
 
 ---
@@ -356,7 +356,7 @@ each, plus `config.json` and `tokenizer.json`. The packer writes them as one Mod
 registry.example.com/models/atlas-moe@sha256:9be2...      (manifest digest, pinned in the bundle)
 ├─ artifactType: application/vnd.cncf.model.manifest.v1+json
 ├─ config:       application/vnd.cncf.model.config.v1+json
-│                 layout tp16-ep16, engine vLLM v0.32.0, gpu H200
+│                 layout tp16-ep16, engine vLLM v0.34.0, gpu H200
 └─ layers
    ├─ application/vnd.cncf.model.weight.config.v1.raw   config.json
    ├─ application/vnd.cncf.model.weight.config.v1.raw   tokenizer.json
@@ -674,7 +674,7 @@ after a disk failure misses the pre-seed. So does any node if a hotfix is promot
 **Backend RDMA from live replicas.** Inference nodes in region A share an RDMA fabric. A new
 replica could pull its ranks directly from a live replica's GPU memory: 64.4 GB per GPU at 50 GB/s
 per NIC is about 1.3 s, against 51.5 s for P2P over Ethernet. Moonshot AI's checkpoint-engine and
-Perplexity's RDMA weight transfer do versions of this (§6). This design does not use it for scale-out. It helps only the cold path, since pre-seeded nodes already
+Perplexity's RDMA weight transfer do versions of this (§6), and llm-d v1.0.0 integrates NVIDIA's ModelExpress, which vLLM v0.34.0 exposes as `--load-format modelexpress`. This design does not use it for scale-out. It helps only the cold path, since pre-seeded nodes already
 skip the fetch and the 55 s of fixed stages remain. Region B has no live replica during a
 failover, so the case that most needs speed has no source. And the fleet's RDMA partition for
 batch training is separate from serving; sharing it needs its own isolation review.
@@ -772,7 +772,7 @@ incompatible with multi-GPU code, which rules them out for a 16-GPU MoE replica.
 **NVIDIA Run:ai Model Streamer.** The library behind vLLM's `runai_streamer` and
 `runai_streamer_sharded` formats. vLLM documents it reading from local paths, S3, GCS and Azure
 Blob, with `concurrency` setting the number of reader threads and `memory_limit` bounding the CPU
-buffer. Version 0.17.0 adds GPU streaming through its C API. This design uses it against local
+buffer. Version 0.17.0 added GPU streaming through its C API. This design uses it against local
 NVMe; the same load format can read straight from the bucket, the last-resort path if the agent
 itself is down.
 
@@ -782,19 +782,19 @@ itself is down.
 
 | Tool | Role in this design | Version or status |
 |---|---|---|
-| vLLM | Engine; `runai_streamer_sharded` load format, compile cache, expert parallelism | v0.32.0 |
-| Model Streamer | Parallel streaming reads from NVMe into GPU memory | 0.17.0 |
+| vLLM | Engine; `runai_streamer_sharded` load format, compile cache, expert parallelism | v0.34.0 |
+| Model Streamer | Parallel streaming reads from NVMe into GPU memory | 0.17.3 (GPU streaming since 0.17.0) |
 | ModelPack model-spec | OCI media types for the weights artifact | v0.0.7 |
-| KitOps | Optional packer that writes ModelPack with `kit pack --use-model-pack` | v1.16.0 |
+| KitOps | Optional packer that writes ModelPack with `kit pack --use-model-pack` | v1.17.0 |
 | OCI registry (Harbor or cloud registry) | Origin, backed by the object-store bucket | named without a version |
 | Dragonfly | P2P layer, seed peers, per-zone scheduler | v2.5.2 |
 | Kraken | Alternative P2P registry, evaluated | v0.1.32 |
 | LeaderWorkerSet | Two-pod replica groups, group restart | v1.0.0 |
 | Kubernetes | Image volume source for small models | 1.37 |
 | KServe | `LocalModelCache` for single-node models | v0.21.0 |
-| Kueue | Preempts batch work on failover | v0.20.2 |
+| Kueue | Preempts batch work on failover | v0.20.7 |
 | model-transparency | Signs and verifies the weights manifest | v1.1.1 |
-| checkpoint-engine, Mooncake, NIXL | RDMA weight transfer, evaluated and not used for scale-out | checkpoint-engine without a version; Mooncake v0.3.13.post1; NIXL v1.5.0 |
+| checkpoint-engine, Mooncake, NIXL | RDMA weight transfer, evaluated and not used for scale-out | checkpoint-engine without a version; Mooncake v0.3.14; NIXL v1.5.2 |
 | Prometheus and Grafana | Per-stage time-to-ready, cache and origin metrics | named without a version |
 
 The scheduling side (Kueue cohorts, preemption policy) is in

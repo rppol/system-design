@@ -1,11 +1,11 @@
 # Deployment Targets and Serving Patterns
 
-> **Version anchor (2026-10-18).** **vLLM v0.32.0** (2026-10-18) serves the OpenAI-compatible and
-> `POST /v1/systemone` routes used on this page. **Ray 2.59.0** (2026-10-02) runs the Ray Data LLM
-> batch examples. **llama.cpp** stable **v0.7.0** (2026-10-15) and rolling build **b11719**
-> (2026-10-18): `llama-server` defaults to auto slots (`-np -1`), continuous batching on, one
+> **Version anchor (2026-11-25).** **vLLM v0.34.0** (2026-11-16) serves the OpenAI-compatible and
+> `POST /v1/systemone` routes (`/v1/systemone` since v0.32.0) used on this page. **Ray 2.60.1** (2026-11-23) runs the Ray Data LLM
+> batch examples. **llama.cpp** stable **v1.0.0** (2026-11-13) and rolling build **b12722**
+> (2026-11-25): `llama-server` defaults to auto slots (`-np -1`), continuous batching on, one
 > unified KV buffer when slots are auto, `/metrics` only with `--metrics`, and port 9931 (8080
-> before v0.7.0). **Ollama v0.40.6** (2026-10-16). Facts read from primary docs on 2026-10-18:
+> before v0.7.0). **Ollama v0.40.18** (2026-11-24). Facts read from primary docs on 2026-10-18:
 > OpenAI Batch API (50% discount, 24-hour window, up to 50,000 requests and 200 MB per batch);
 > SageMaker Asynchronous Inference (payloads up to 1 GB, processing up to one hour, scale to
 > zero); Cloud Run GPUs (NVIDIA L4 with 24 GB and RTX PRO 6000 Blackwell with 96 GB, scale to
@@ -186,9 +186,9 @@ a shared cluster) are covered in
 ### 4.5 Decision endpoints as a pattern
 
 A decision model returns probabilities over fixed labels instead of generated text. Self-hosted
-routes: SGLang v0.5.21 `/v1/decisions` and `/v1/systemone`, vLLM v0.32.0 `POST /v1/systemone`,
+routes: SGLang `/v1/decisions` and `/v1/systemone` (since v0.5.21), vLLM `POST /v1/systemone` (since v0.32.0),
 Ollama `/v1/systemone` since v0.35.0. Hosted: the OpenAI Decisions API (`POST /v1/decisions`,
-public beta) and TypeSafe's System One API. A decision call is one prefill pass with no decode,
+generally available) and TypeSafe's System One API. A decision call is one prefill pass with no decode,
 so latency follows input length, and the artifact that ships is a question set plus thresholds,
 not a prompt. Mechanics are in 6.7, the artifact in
 [Decision Models](../decision_models/decision_models.md).
@@ -758,11 +758,11 @@ shown, then hidden. Fix: output log keyed by event id, read before calling the m
 
 | Tool | Role | Notes |
 |---|---|---|
-| vLLM | OpenAI-compatible GPU serving and offline `LLM` class | v0.32.0. `POST /v1/systemone` for decision models |
-| SGLang | GPU serving engine with decision routes | v0.5.21. `/v1/decisions` and `/v1/systemone` |
-| Ray Data | Batch inference over datasets with `build_processor` | Ray 2.59.0. vLLM and SGLang processor configs |
-| llama.cpp | `llama-server` for GGUF on CPU, Apple silicon and consumer GPUs | v0.7.0 stable, b11719 rolling. Default port 9931 |
-| Ollama | Model manager and server for GGUF models | v0.40.6. Decision models via `/v1/systemone` |
+| vLLM | OpenAI-compatible GPU serving and offline `LLM` class | v0.34.0. `POST /v1/systemone` for decision models |
+| SGLang | GPU serving engine with decision routes | v0.5.23. `/v1/decisions` and `/v1/systemone` |
+| Ray Data | Batch inference over datasets with `build_processor` | Ray 2.60.1. vLLM and SGLang processor configs |
+| llama.cpp | `llama-server` for GGUF on CPU, Apple silicon and consumer GPUs | v1.0.0 stable, b12722 rolling. Default port 9931 |
+| Ollama | Model manager and server for GGUF models | v0.40.18. Decision models via `/v1/systemone` |
 | Apache Flink | Stream processor with async I/O for model calls | Default async timeout fails the job |
 | Apache Kafka | Event log for streaming inference inputs, outputs and output logs | Consumer lag is the backpressure signal |
 | Apache Spark | Batch scoring over existing tables | Partition overwrite for idempotent outputs |
@@ -889,8 +889,8 @@ one. Do not put anything with a deadline under 24 hours on it.
 **Short:** It runs one prefill pass and returns probabilities over fixed labels, and its artifact is the question set plus thresholds, so latency, cost and release gating all differ from generation.
 
 A decision call has no decode phase, so latency follows input length and many short inputs batch
-well. On the OpenAI Decisions API only input tokens are billed ($0.10 per 1M for `gpt-6-luna`,
-checked 2026-10-18). The release unit is the question set, model snapshot, thresholds and action
+well. On the OpenAI Decisions API only input tokens are billed ($0.10 per 1M uncached and $0.01 per 1M cached for `gpt-6-luna`,
+checked 2026-11-25). The release unit is the question set, model snapshot, thresholds and action
 mapping, and a change to any of them goes through an eval gate. Log probabilities, not only the
 chosen label, so threshold changes can be replayed.
 

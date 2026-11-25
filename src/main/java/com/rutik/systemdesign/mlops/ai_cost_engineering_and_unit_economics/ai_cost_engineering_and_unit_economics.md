@@ -1,11 +1,15 @@
 # AI Cost Engineering and Unit Economics
 
-> **Version anchor (2026-10-18).** **OpenAI Decisions API** (checked 2026-10-18): public beta,
-> `POST /v1/decisions`, model `gpt-6-luna`, input $0.10 per 1M tokens, no output charge. This is
-> the only provider price on this page taken as a fact. LiteLLM v1.106.0 (2026-10-18). Agent
-> Router v1.2.0 (2026-10-07; renamed from Envoy AI Gateway, CRDs unchanged). vLLM v0.32.0
-> (2026-10-18). Kueue v0.20.2 (2026-10-15). dcgm-exporter 4.8.4 with DCGM 4.6.1 (2026-09-18).
-> Langfuse v4.63.0 (2026-10-16). Every other price is a variable with an example value: API
+> **Version anchor (2026-11-25).** **OpenAI Decisions API** (checked 2026-11-25): generally
+> available, `POST /v1/decisions`, model `gpt-6-luna`, uncached input $0.10 per 1M tokens, cache
+> reads $0.01 and cache writes $0.125 per 1M, no output charge. These are
+> the only provider prices on this page taken as facts. LiteLLM v1.111.0 (2026-11-25). Agent
+> Router v1.3.0 (2026-11-18; renamed from Envoy AI Gateway at v1.2.0, API group unchanged), whose
+> `QuotaPolicy` enforces token budgets per backend and model. vLLM v0.34.0
+> (2026-11-16). Kueue v0.20.7 (2026-11-19). dcgm-exporter 4.9.0 with DCGM 4.7.0 (2026-11-06), which
+> renamed the utilization fields to 0 to 1 ratios (`DCGM_FI_DEV_GPU_UTIL_RATIO`,
+> `DCGM_FI_PROF_SM_UTIL_RATIO`).
+> Langfuse v4.86.0 (2026-11-24). Every other price is a variable with an example value: API
 > rates `P_in`, `P_cached`, `P_out` and the GPU-hour rate `G`. The example `G = $14.24` is the
 > AWS on-demand B200 per-GPU rate that [GPU and AI FinOps](../../devops/cloud_cost_optimization_finops/gpu_and_ai_finops.md)
 > anchors on 2026-08-26; the example API rates ($2.00 input, $0.20 cached input, $10.00 output
@@ -276,8 +280,10 @@ Cost per successful task is 7.8x cost per call. The gap is calls per conversatio
 non-model lines (21% of spend) and the 38% of conversations that cost money and resolved nothing.
 
 **Cost per decision.** A ticket-routing classifier runs on every conversation. With a decision
-model at $0.10 per 1M input and no output charge, a 1,500-token prompt costs
-`1,500 x $0.10 / 1M = $0.00015`. The same question to a generative model at the example rates,
+model at $0.10 per 1M uncached input and no output charge, a 1,500-token prompt costs
+`1,500 x $0.10 / 1M = $0.00015`. If 1,200 of those tokens are a shared, cached `input` prefix
+(the cache needs at least 1,024), the call costs `1,200 x $0.01 / 1M + 300 x $0.10 / 1M = $0.000042`
+after the first write at $0.125 per 1M. The same question to a generative model at the example rates,
 with a 150-token answer, costs `1,500 x $2.00 / 1M + 150 x $10.00 / 1M = $0.0045`, 30x more. At 10M
 decisions a month that is $1,500 against $45,000. The price is only half the metric; a decision has a
 cost of error, and [Decision Models](../decision_models/decision_models.md) sets thresholds from it.
@@ -378,7 +384,7 @@ them.
 `T` and req/s come from an SLO sweep with the production prompt mix, not a peak-throughput run
 ([Inference Engine Operations and Benchmarking](../inference_engine_operations_and_benchmarking/inference_engine_operations_and_benchmarking.md)).
 Goodput utilization is tokens served inside the SLO over tokens the fleet could serve inside it;
-`DCGM_FI_DEV_GPU_UTIL` can read near 100% at small batch sizes and is not this number.
+`DCGM_FI_DEV_GPU_UTIL_RATIO` can read near 1.0 (100%) at small batch sizes and is not this number.
 
 ### 6.4 Self-host break-even as a decision
 
@@ -705,8 +711,8 @@ much further than chat does.
 requests with per-model multipliers, so a request to a more expensive model uses more of the
 allowance, and began enforcing billing in June 2025: a per-user budget in a unit that tracks cost.
 
-**OpenAI Decisions API, 2026.** `gpt-6-luna` at $0.10 per 1M input tokens with no output charge
-(checked 2026-10-18) cuts cost per decision by more than an order of magnitude against a generative
+**OpenAI Decisions API, 2026.** Generally available, `gpt-6-luna` at $0.10 per 1M uncached input
+tokens and $0.01 per 1M cached, with no output charge (checked 2026-11-25), cuts cost per decision by more than an order of magnitude against a generative
 call at frontier rates, which is why decision-model judges are a lever in §6.6.
 
 ---
@@ -775,16 +781,16 @@ it only moves the argument to finance.
 
 | Tool | Role | Notes |
 |---|---|---|
-| LiteLLM | AI gateway | v1.106.0; virtual keys, `max_budget`, `budget_duration`, TPM and RPM per key, team and user; spend logs per key |
-| Agent Router | Envoy-based AI gateway | v1.2.0; `llmRequestCosts` feed token costs into rate-limit buckets |
-| vLLM | Inference engine | v0.32.0; `vllm:prompt_tokens_total`, `vllm:generation_tokens_total`, prefix cache hit and query counters |
-| Kueue | GPU quota and admission | v0.20.2; nominal quota and usage per ClusterQueue for chargeback by allocation |
-| dcgm-exporter | GPU metrics | 4.8.4 with DCGM 4.6.1; `DCGM_FI_PROF_SM_ACTIVE` for reported utilization |
-| Langfuse | LLM tracing and cost per trace | v4.63.0; model price definitions, cost per trace and per user |
+| LiteLLM | AI gateway | v1.111.0; virtual keys, `max_budget`, `budget_duration`, TPM and RPM per key, team and user; spend logs per key |
+| Agent Router | Envoy-based AI gateway | v1.3.0; `llmRequestCosts` feed token costs into rate-limit buckets; `QuotaPolicy` token budgets with weekly, monthly or yearly windows |
+| vLLM | Inference engine | v0.34.0; `vllm:prompt_tokens_total`, `vllm:generation_tokens_total`, prefix cache hit and query counters |
+| Kueue | GPU quota and admission | v0.20.7; nominal quota and usage per ClusterQueue for chargeback by allocation |
+| dcgm-exporter | GPU metrics | 4.9.0 with DCGM 4.7.0; `DCGM_FI_PROF_SM_UTIL_RATIO` for reported utilization |
+| Langfuse | LLM tracing and cost per trace | v4.86.0; model price definitions, cost per trace and per user |
 | OpenCost | Kubernetes cost allocation | Per-namespace and per-pod cost for GPU nodes |
 | Kubecost | Kubernetes cost allocation | Commercial allocation and showback, built on the OpenCost allocation model |
 | Prometheus | Metrics store | Burn-rate rules over the cost counter |
-| OpenAI Decisions API | Typed decision endpoint | Public beta; $0.10 per 1M input tokens, no output charge (2026-10-18) |
+| OpenAI Decisions API | Typed decision endpoint | GA; $0.10 per 1M uncached input tokens, $0.01 cached, $0.125 cache writes, no output charge (2026-11-25) |
 
 ---
 
@@ -836,7 +842,7 @@ The decision usually turns on whether the quality gap can be closed, which the e
 Cost per useful token is the list rate divided by goodput utilization. With a peak-to-mean ratio of
 2.5 and 30% headroom, utilization is 31%, and $0.70 per 1M output tokens becomes $2.26. Measure
 throughput from an SLO sweep with the production prompt mix, not a peak-throughput run, and track
-goodput utilization, not `DCGM_FI_DEV_GPU_UTIL`.
+goodput utilization, not `DCGM_FI_DEV_GPU_UTIL_RATIO`.
 
 **Q: Why should a production key have a soft budget instead of a hard one?**
 **Short:** A hard budget on a production key turns a cost overrun into a customer-facing outage, usually at the end of the billing period when nobody is watching.
@@ -905,7 +911,7 @@ $100,000. Use decision-model judges for binary criteria to cut the per-judgment 
 **Q: When should a decision model replace a generative judge or classifier for cost reasons?**
 **Short:** When the question has a fixed label set and you can calibrate on your own labels; the per-call cost drops about 30x at this page's example rates with no output tokens.
 
-A 1,500-token prompt costs $0.00015 at $0.10 per 1M input with no output charge, against $0.0045
+A 1,500-token prompt costs $0.00015 at $0.10 per 1M uncached input with no output charge, against $0.0045
 for a generative call with a 150-token answer at $2 / $10. At 10M decisions a month that is $1,500
 against $45,000. The saving is wasted if the threshold is wrong, so set it from the cost of each
 error on calibrated probabilities.

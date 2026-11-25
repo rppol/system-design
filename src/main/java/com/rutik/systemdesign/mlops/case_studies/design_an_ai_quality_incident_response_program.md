@@ -1,7 +1,7 @@
 # Case Study: Design an AI Quality Incident Response Program
 
-> **Version anchor (2026-10-18).** **LiteLLM v1.106.0** (2026-10-18) is the gateway that holds
-> route pins, fallbacks and the model-id kill switch. **Langfuse v4.63.0** (2026-10-16) holds the
+> **Version anchor (2026-11-25).** **LiteLLM v1.111.0** (2026-11-25) is the gateway that holds
+> route pins, fallbacks and the model-id kill switch. **Langfuse v4.86.0** (2026-11-24) holds the
 > traces, the online-eval scores and the cohort queries. The OTel GenAI semantic conventions moved
 > to `open-telemetry/semantic-conventions-genai`, which states no stability level, so this page
 > claims none. Azure OpenAI deployment upgrade policies are quoted from Microsoft Learn, checked
@@ -831,8 +831,8 @@ page, because most fingerprint changes do not move quality.
 
 | Tool | Version | Role in this program |
 |---|---|---|
-| LiteLLM proxy | v1.106.0 | Route pins, fallbacks to the qualified alternate, response-model block hook |
-| Langfuse | v4.63.0 | Trace store, online LLM-as-a-judge evaluators on sampled traces, score API for the detector |
+| LiteLLM proxy | v1.111.0 | Route pins, fallbacks to the qualified alternate, response-model block hook |
+| Langfuse | v4.86.0 | Trace store, online LLM-as-a-judge evaluators on sampled traces, score API for the detector |
 | OpenTelemetry GenAI conventions | no stability level stated | `gen_ai.request.model`, `gen_ai.response.model` on every span |
 | OpenFeature | not pinned | Flag API for the kill switch and degradation modes |
 | PagerDuty | not pinned | Paging and escalation for the AI on-call |

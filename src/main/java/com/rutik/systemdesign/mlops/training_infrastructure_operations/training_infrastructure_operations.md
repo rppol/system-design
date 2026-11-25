@@ -1,6 +1,6 @@
 # Training Infrastructure Operations
 
-> **Version anchor (2026-10-18).** Kubeflow Trainer v2.3.0 (2026-08-07): `TrainJob`, `TrainingRuntime` and `ClusterTrainingRuntime` in `trainer.kubeflow.org/v1alpha1`, built on JobSet; v2.3.0 adds the `OptimizationJob` CRD, a runtime snapshot mechanism, and `terminationGracePeriodSeconds` in the TrainJob pod patch, and a cluster on v2.0, v2.1 or v2.2 must upgrade to v2.3 before any later version. Ray 2.59.0 (2026-10-02). vLLM v0.32.0 (2026-10-18): sleep mode releases workspace scratch (up to 4.5 GiB per GPU) and KV-init state (about 4.6 GiB per GPU), outputs carry token-level weight-version spans, `POST /weight_checker` and weight-transfer metrics. SGLang v0.5.21 (2026-10-02): RL weight-update sessions and a fix for `pause_generation` deadlocking against weight updates. Kueue v0.20.2 (2026-10-15) no longer serves `kueue.x-k8s.io/v1beta1`. Slinky slurm-operator v1.2.3 (2026-09-30). Kubernetes 1.37. XID actions follow NVIDIA's Xid catalog and the `TORCH_NCCL_*` variables follow the PyTorch docs, both read on 2026-10-18. JobSet, torchrun, SkyPilot, verl, OpenRLHF and NeMo RL are named without a version.
+> **Version anchor (2026-11-25).** Kubeflow Trainer v2.4.0 (2026-11-06): `TrainJob`, `TrainingRuntime` and `ClusterTrainingRuntime` in `trainer.kubeflow.org/v1alpha1` (API group unchanged at the v2.4.0 tag), built on JobSet. v2.4.0 adds Workload-Aware Scheduling for TrainJob (KEP-3015, phase 1), DRA support for TrainJob (KEP-2782), per-TrainJob `schedulerName` overrides and an `OptimizationJob` controller behind an alpha feature gate, and carries breaking changes listed in §6.2.1. v2.3.0 (2026-08-07) introduced the `OptimizationJob` CRD, a runtime snapshot mechanism and `terminationGracePeriodSeconds` in the TrainJob pod patch, and its notes require a cluster on v2.0, v2.1 or v2.2 to upgrade to v2.3 before any later version. Ray 2.60.1 (2026-11-23). vLLM v0.34.0 (2026-11-16) is current; the RL features below were read at v0.32.0 (2026-10-18): sleep mode releases workspace scratch (up to 4.5 GiB per GPU) and KV-init state (about 4.6 GiB per GPU), outputs carry token-level weight-version spans, `POST /weight_checker` and weight-transfer metrics. SGLang v0.5.23 (2026-11-02); v0.5.21 (2026-10-02) added RL weight-update sessions and a fix for `pause_generation` deadlocking against weight updates. Kueue v0.20.7 (2026-11-19) no longer serves `kueue.x-k8s.io/v1beta1`. Slinky slurm-operator v1.3.0 (2026-11-19). Kubernetes 1.37. XID actions follow NVIDIA's Xid catalog and the `TORCH_NCCL_*` variables follow the PyTorch docs, both read on 2026-10-18. JobSet, torchrun, SkyPilot, verl, OpenRLHF and NeMo RL are named without a version.
 
 A training job on a shared GPU fleet is a long-running distributed program that fails on a schedule set by its size. In Meta's cluster data a 1,024-GPU job sees a failure about every 8 hours, and a 16,384-GPU job is projected to see one about every 2 hours. This page is about keeping such jobs productive: which job API to submit through, how to detect each failure class, how often to checkpoint, how to restart in minutes instead of an hour, and how post-training (RL) changes the shape of the job.
 
@@ -68,7 +68,7 @@ What makes this an operations problem rather than a code problem:
 | JobSet | Group of replicated Jobs with one failure policy | `failurePolicy.maxRestarts` and rules with actions such as `RestartJobSet` and `FailJobSet` | Kueue integration, exclusive topology placement | Custom multi-role jobs, the substrate under TrainJob |
 | Ray Train | Python `Trainer` on a Ray cluster | `FailureConfig(max_failures=...)` restarts workers from the last reported checkpoint (default 0, no retry) | KubeRay plus Kueue for the cluster | Python-first teams, RL frameworks built on Ray |
 | `torchrun` elastic | One launcher per node with a rendezvous | `--max-restarts` restarts all local workers; `--nnodes=MIN:MAX` admits a changed node count | None; relies on the layer above | Inside any of the above, or bare metal |
-| Slurm `sbatch`/`srun` | Batch script | `--requeue`, scripts that resubmit from the last checkpoint | Partitions, QOS, fair-share | HPC-style clusters; on Kubernetes through Slinky slurm-operator v1.2.3 |
+| Slurm `sbatch`/`srun` | Batch script | `--requeue`, scripts that resubmit from the last checkpoint | Partitions, QOS, fair-share | HPC-style clusters; on Kubernetes through Slinky slurm-operator v1.3.0 |
 | SkyPilot managed jobs | YAML task | Relaunches on preemption, across regions and clouds | Its own controller | Teams without a cluster, spot-heavy fine-tunes |
 | Managed training services | Service job spec | Service-specific auto-resume | Service quota | SageMaker HyperPod, Vertex AI custom training |
 
@@ -272,7 +272,7 @@ The failure count does not move. Every point of ETTR came from the three operati
 
 ### 6.2 Submitting through Kubeflow Trainer and Kueue
 
-The platform owns the runtime. The `torch-distributed` runtime that ships with v2.3.0 renders a JobSet with one replicated Job named `node` and a PyTorch image.
+The platform owns the runtime. The `torch-distributed` runtime that ships with v2.3.0 and v2.4.0 renders a JobSet with one replicated Job named `node` and a PyTorch image.
 
 ```yaml
 apiVersion: trainer.kubeflow.org/v1alpha1
@@ -334,6 +334,51 @@ spec: {clusterQueue: gpu-h100}
 ```
 
 The Kueue example in the Kubeflow Trainer v2.3.0 repository still shows a `v1beta1` LocalQueue in a comment. Copying it onto a Kueue v0.20 cluster fails at apply time. Kueue ships a `migrate-to-v1beta2.sh` script for objects already stored as v1beta1.
+
+### 6.2.1 Upgrading Kubeflow Trainer to v2.4.0
+
+Kubeflow Trainer v2.4.0 (2026-11-06) keeps the `trainer.kubeflow.org/v1alpha1` API and the
+`torch-distributed` runtime shape above, but its release notes mark several changes BREAKING:
+
+| v2.4.0 change | What breaks | Before the upgrade |
+|---|---|---|
+| ReplicatedJob names in runtimes limited to 20 characters | Custom `ClusterTrainingRuntime` objects with longer names are rejected | Rename long ReplicatedJobs; `node` and the shipped runtimes are inside the limit |
+| The TrainJob image is set on the MPI launcher and nodes | MPI runtimes (DeepSpeed, MLX) that relied on a separate launcher image now run the TrainJob image | Make sure the training image can act as the launcher |
+| MPI plugin emits `PRTE_MCA_*` variables for Open MPI 5 | Suspended MPI-plugin TrainJobs created before the upgrade fail to resume, because the immutable JobSet cannot take the new variables | Let MPI-based TrainJobs finish, or plan to recreate the suspended ones after the upgrade |
+| CRDs kept on `helm uninstall`; `dataCache.lws.install` honored | A reinstall no longer deletes the CRDs and every TrainJob with them | Stop relying on uninstall to clean CRDs |
+| CertManagement configuration fields renamed to generic names | A values file with the old field names no longer configures certificates | Rename the fields in the Helm values |
+
+v2.4.0 also adds Workload-Aware Scheduling for TrainJob (KEP-3015, phase 1), DRA support for
+TrainJob (KEP-2782), a per-TrainJob `schedulerName` override and an `OptimizationJob` controller
+behind an alpha feature gate. The v2.3.0 rule still applies to older clusters: v2.0, v2.1 and v2.2
+upgrade to v2.3 first.
+
+```yaml
+# BROKEN on Trainer v2.4.0: a platform runtime whose ReplicatedJob name is 22 characters
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: ClusterTrainingRuntime
+metadata: {name: torch-distributed-h100}
+spec:
+  template:
+    spec:
+      replicatedJobs:
+        - name: pytorch-worker-nodes-a     # over the 20-character limit, rejected
+```
+
+```yaml
+# FIX: a short name, and TrainJob runtimePatches that target it updated in the same change
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: ClusterTrainingRuntime
+metadata: {name: torch-distributed-h100}
+spec:
+  template:
+    spec:
+      replicatedJobs:
+        - name: node-a                     # 6 characters
+```
+
+Run the upgrade like an engine upgrade: apply the new runtimes in a staging namespace, submit one
+small TrainJob per runtime, and drain or finish MPI jobs before the controller rolls.
 
 ### 6.3 JobSet failure policy: restart hardware faults, stop on bugs
 
@@ -696,20 +741,20 @@ Size the pool from the replacement rate. With about 3 failures a day and a 24-ho
 
 | Tool | Role | Notes |
 |---|---|---|
-| Kubeflow Trainer | TrainJob and TrainingRuntime APIs over JobSet | v2.3.0; runtimes for torch, DeepSpeed, JAX, MLX and XGBoost |
+| Kubeflow Trainer | TrainJob and TrainingRuntime APIs over JobSet | v2.4.0; KEP-3015 workload-aware scheduling, DRA for TrainJob; runtimes for torch, DeepSpeed, JAX, MLX and XGBoost |
 | JobSet | Group of Jobs with one failure policy | `failurePolicy.rules` with `RestartJobSet`, `FailJobSet` and related actions |
-| Kueue | Queues, quota, gang admission for TrainJob | v0.20.2 serves `v1beta2` only |
+| Kueue | Queues, quota, gang admission for TrainJob | v0.20.7 serves `v1beta2` only; v0.21.0 is at rc |
 | Volcano | Batch scheduler with gang scheduling | Alternative to Kueue for TrainJob |
-| Ray Train | Distributed training on Ray | Ray 2.59.0; `FailureConfig`, `get_checkpoint()` |
+| Ray Train | Distributed training on Ray | Ray 2.60.1; `FailureConfig`, `get_checkpoint()` |
 | torchrun | PyTorch elastic launcher | `--nnodes=MIN:MAX`, `--max-restarts`, c10d rendezvous |
-| Slinky | Slurm on Kubernetes | slurm-operator v1.2.3 |
+| Slinky | Slurm on Kubernetes | slurm-operator v1.3.0 |
 | SkyPilot | Multi-cloud job launcher with managed spot recovery | Fits small teams without a cluster |
 | PyTorch Distributed Checkpoint | Sharded, reshardable, async checkpoints | `dcp.async_save` |
 | torchdata | `StatefulDataLoader` for exact resume | Loader state in the checkpoint |
 | NCCL | Collective communication | Flight recorder via `TORCH_NCCL_*` variables |
 | DCGM | GPU health and diagnostics | XID, ECC, diag levels; see the observability module |
-| vLLM | Rollout engine for RL | v0.32.0; sleep mode, weight-version spans, weight-transfer metrics |
-| SGLang | Rollout engine for RL | v0.5.21; RL weight-update sessions |
+| vLLM | Rollout engine for RL | v0.34.0; sleep mode, weight-version spans, weight-transfer metrics (read at v0.32.0) |
+| SGLang | Rollout engine for RL | v0.5.23; RL weight-update sessions since v0.5.21 |
 | verl | RL post-training framework | Colocated hybrid engine |
 | OpenRLHF | RL post-training framework | Ray-based, disaggregated roles |
 | NeMo RL | NVIDIA RL post-training library | Megatron and vLLM backends |
@@ -829,7 +874,7 @@ A month-long 1,024-GPU job expects about 90 failures, so a small `maxRestarts` s
 
 ## 14. Case Study
 
-**Scenario.** A foundation-model team continues pre-training a 70B dense model on 1,024 H100s (128 nodes) for 30 days, on a Kubernetes cluster shared with fine-tune and eval work. The fleet runs Kueue for quota and Kubeflow Trainer v2.3.0 for job submission.
+**Scenario.** A foundation-model team continues pre-training a 70B dense model on 1,024 H100s (128 nodes) for 30 days, on a Kubernetes cluster shared with fine-tune and eval work. The fleet runs Kueue for quota and Kubeflow Trainer v2.4.0 for job submission.
 
 **Before.**
 - Checkpoints every 2 hours by gathering full state to rank 0 and writing one 980 GB file to a shared filesystem: 6 minutes blocking.
@@ -879,6 +924,24 @@ flowchart LR
 - The JobSet failure policy restarts infrastructure failures without counting them and fails the job on code 42.
 - Four spare nodes hold the image and have passed DCGM diagnostics and an NCCL all-reduce test. They run preemptible eval sweeps while waiting.
 - Checkpoints are `dcp.async_save` every 15 minutes (Young's interval for 10 seconds of blocking at 474 minutes MTTF is about 12.6 minutes), with a commit marker and loader state.
+
+The first rollout of the 5-minute timeout restarted the job in a loop: the barrier after a
+checkpoint load on 1,024 ranks took about 7 minutes, so the watchdog killed every resume.
+
+```python
+# BROKEN: one process group, so the post-load barrier shares the 5-minute training timeout
+dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=5))
+load_checkpoint(step)
+dist.barrier()                                   # 7 min on 1,024 ranks: watchdog fires
+```
+
+```python
+# FIX: the slow barrier gets its own group with a longer timeout
+dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=5))
+load_pg = dist.new_group(backend="gloo", timeout=datetime.timedelta(minutes=20))
+load_checkpoint(step)
+dist.barrier(group=load_pg)                      # training collectives keep the 5-min limit
+```
 
 **Numbers.**
 

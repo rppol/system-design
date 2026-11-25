@@ -1,20 +1,25 @@
 # Decision Models
 
-> **Version anchor (2026-10-18).** **OpenAI Decisions API** (checked 2026-10-18): public beta,
-> `POST /v1/decisions`, model `gpt-6-luna`, input $0.10 per 1M tokens, no output charge; the guide
-> says OpenAI expects GA "in the coming weeks". **TypeSafe System One API** (checked 2026-10-18):
-> `POST /v1/systemone`, model family Jev; the Models page maps alias `jev-latest` to `jev-1.13.0`
-> and `jev-preview` to `jev-1.14.0` (available 2026-10-14), and lists $42 per billion input tokens
-> ($0.042 per 1M) with output tokens free. **SGLang v0.5.21**
-> (2026-10-02) serves `/v1/decisions` and `/v1/systemone` (PR #41208); its decision-model docs
-> (checked 2026-10-18) were validated on Qwen3.8-27B and Qwen3.5-35B-A3B, one H200, BF16.
-> **vLLM v0.32.0** (2026-10-18) added `POST /v1/systemone`. **Ollama v0.40.6** (2026-10-16) serves
+> **Version anchor (2026-11-25).** **OpenAI Decisions API** (checked 2026-11-25): generally
+> available, `POST /v1/decisions`, model
+> `gpt-6-luna` (the only supported model). Uncached input $0.10 per 1M tokens, cache reads $0.01
+> per 1M, cache writes $0.125 per 1M (the standard `gpt-6-luna` caching rates), no output charge;
+> prompt caching needs a reusable `input` prefix of at least 1,024 tokens; 1 to 400 questions per
+> request; `input_json` content parts, hosted image URLs and conversation history are supported.
+> **TypeSafe System One API** (checked 2026-11-25):
+> `POST /v1/systemone`, model family Jev; the Models page lists `jev-1.14.0` (available 2026-10-14,
+> adds Box questions) and `jev-1.13.0`, both $42 per billion input tokens ($0.042 per 1M) with
+> output tokens free, and maps both aliases, `jev-latest` and `jev-preview`, to `jev-1.14.0`
+> (on 2026-10-18 `jev-latest` still pointed to `jev-1.13.0`). **SGLang v0.5.23**
+> (2026-11-02); `/v1/decisions` and `/v1/systemone` since v0.5.21 (PR #41208); its decision-model docs
+> (checked 2026-11-25) were validated on Qwen3.8-27B and Qwen3.5-35B-A3B, one H200, BF16.
+> **vLLM v0.34.0** (2026-11-16); `POST /v1/systemone` since v0.32.0. **Ollama v0.40.18** (2026-11-24) serves
 > decision models on `/v1/systemone` since v0.35.0 (2026-09-28), Clef models since v0.35.1
-> (2026-09-29), CLI and MLX support since v0.40.4 (2026-10-12). **llama.cpp** rolling build b11719
-> (2026-10-18, pre-release; stable v0.7.0 is 2026-10-15); the llama-server README (checked
+> (2026-09-29), CLI and MLX support since v0.40.4 (2026-10-12). **llama.cpp** rolling build b12722
+> (2026-11-25, pre-release; stable v1.0.0 is 2026-11-13); the llama-server README (checked
 > 2026-10-18) marks native decision models with a `decisions` output modality and serves them on
-> `/v1/systemone`. **MLflow 3.17.1** (2026-10-13) adds OpenAI's Decision API to `make_judge()`;
-> 3.17.0 (2026-10-07) added TypeSafe judges. **Langfuse v4.63.0** (2026-10-16); OpenAI decision-model
+> `/v1/systemone`. **MLflow 3.18.0** (2026-11-04); 3.17.1 (2026-10-13) added OpenAI's Decision API
+> to `make_judge()` and 3.17.0 (2026-10-07) added TypeSafe judges. **Langfuse v4.86.0** (2026-11-24); OpenAI decision-model
 > evaluators in v4.55.0 (2026-10-08), graduated in v4.57.0 (2026-10-12). **vLLM Semantic Router
 > v0.4.0** (2026-09-27): its routing "decision" is a namesake, not a decision model.
 >
@@ -105,10 +110,12 @@ the model, the wording or the traffic.
 1. **The decision is the artifact, not the model.** A decision artifact pins the question set,
    model snapshot id, temperature, threshold per question, abstain band and action mapping in one
    versioned file. Any field change goes through an eval gate.
-2. **Pin a versioned model id.** `jev-latest` moves when TypeSafe ships a new Jev release, and the
-   TypeSafe quickstart warns that values can change between releases. TypeSafe's Models page
-   tells users who tuned thresholds to send the versioned id instead of the alias. The artifact
-   names `jev-1.13.0` or the equivalent snapshot id for the vendor you use.
+2. **Pin a versioned model id.** `jev-latest` moves when TypeSafe ships a new Jev release: it
+   pointed to `jev-1.13.0` on 2026-10-18 and to `jev-1.14.0` on 2026-11-25, with no change on the
+   caller's side. The TypeSafe quickstart warns that values can change between releases, and the
+   Models page tells users who tuned thresholds to send the versioned id instead of the alias. The
+   artifact names `jev-1.13.0` (still served) or the equivalent snapshot id for the vendor you use,
+   and moves to `jev-1.14.0` only through a gated release.
 3. **A probability is a score until you measure it.** TypeSafe claims calibrated probabilities from
    a training method it calls RLCD. SGLang and OpenAI make no calibration claim. Your reliability
    diagram on your labels is the only number that counts.
@@ -143,12 +150,12 @@ score split between distant levels.
 
 | Option | What you run | Model choice | Notes |
 |---|---|---|---|
-| OpenAI Decisions API | Nothing | `gpt-6-luna` only (2026-10-18) | Public beta. Input billed at $0.10 per 1M tokens, no output, cache-read or cache-write charge; regional processing premiums and long-context multipliers apply. OpenAI states about 10x faster than the Responses API. ZDR and HIPAA for eligible customers; US and EEA plus Switzerland residency |
-| TypeSafe System One API | Nothing | Jev; pin the versioned id (`jev-1.13.0` behind `jev-latest`, `jev-1.14.0` behind `jev-preview`) | Vendor claims calibrated probabilities (RLCD). $42 per billion input tokens, output tokens free. 64k tokens per request, 32k per question by default |
-| SGLang v0.5.21 | GPU servers | Validated on Qwen3.8-27B and Qwen3.5-35B-A3B; decision checkpoints (PPLX-Decider-v1-27B, Clef) answer on `/v1/systemone` only | Both routes. Refuses decisions with `--enable-mis`, `--dllm-algorithm`, `--skip-tokenizer-init` or a built-in conversation template; a LoRA `base:adapter` model name returns 400 |
-| vLLM v0.32.0 | GPU servers | Decision-capable checkpoints | `POST /v1/systemone` with `choice`, `noul`, `score` |
-| Ollama v0.40.6 | Laptop, workstation, small server | Nimble (Bespoke Labs), Tev1 (Together AI), Clef 27B and Clef Flash 9B (Cloudflare, multimodal) | `ollama show` reports only the `decision` capability, so chat clients do not offer these models |
-| llama.cpp b11719 | CPU or GPU, GGUF | Native decision models only (for example Clef, Granite Switch); option limit set per model, 52 to 255 | `/v1/models` marks them with a `decisions` output modality; served on `/v1/systemone`, which returns 501 for a model that is not a decision model |
+| OpenAI Decisions API | Nothing | `gpt-6-luna` only (2026-11-25) | Generally available. Uncached input $0.10 per 1M tokens, cache reads $0.01 per 1M, cache writes $0.125 per 1M, no output charge; regional processing premiums and long-context multipliers apply. Up to 400 questions per request; prompt caching on a shared `input` prefix of 1,024 tokens or more. OpenAI states about 10x faster than the Responses API. ZDR and HIPAA for eligible customers; US and EEA plus Switzerland regional processing |
+| TypeSafe System One API | Nothing | Jev; pin the versioned id (`jev-1.14.0` and `jev-1.13.0` are served; both `jev-latest` and `jev-preview` point to `jev-1.14.0`) | Vendor claims calibrated probabilities (RLCD). $42 per billion input tokens, output tokens free. 64k tokens per request, 32k per question by default; Box questions need `jev-1.14.0` |
+| SGLang v0.5.23 | GPU servers | Validated on Qwen3.8-27B and Qwen3.5-35B-A3B; decision checkpoints (PPLX-Decider-v1-27B, Clef) answer on `/v1/systemone` only | Both routes since v0.5.21. Refuses decisions with `--enable-mis`, `--dllm-algorithm`, `--skip-tokenizer-init` or a built-in conversation template; a LoRA `base:adapter` model name returns 400 (behavior read at v0.5.21) |
+| vLLM v0.34.0 | GPU servers | Decision-capable checkpoints | `POST /v1/systemone` (since v0.32.0) with `choice`, `noul`, `score` |
+| Ollama v0.40.18 | Laptop, workstation, small server | Nimble (Bespoke Labs), Tev1 (Together AI), Clef 27B and Clef Flash 9B (Cloudflare, multimodal) | `ollama show` reports only the `decision` capability, so chat clients do not offer these models |
+| llama.cpp b12722 | CPU or GPU, GGUF | Native decision models only (for example Clef, Granite Switch); option limit set per model, 52 to 255 | `/v1/models` marks them with a `decisions` output modality; served on `/v1/systemone`, which returns 501 for a model that is not a decision model |
 
 ### 4.3 Classic decision models
 
@@ -624,12 +631,15 @@ Keep shared instructions and options first so they are prefix-cached, and the va
 | Option | Input per decision | Cost per decision | Per 1M decisions |
 |---|---|---|---|
 | OpenAI `gpt-6-luna` | 1,500 tokens | 1,500 x $0.10 / 1M = $0.00015 | $150 |
+| OpenAI `gpt-6-luna`, 1,200-token shared `input` prefix cached, 300 tokens uncached | 1,500 tokens | 1,200 x $0.01 / 1M + 300 x $0.10 / 1M = $0.000042 | $42, plus $0.00015 for each cache write (1,200 x $0.125 / 1M) |
 | TypeSafe Jev | 1,500 tokens | 1,500 x $0.042 / 1M = $0.000063 | $63 |
 | Generative call, assumed $1.00 per 1M in and $4.00 per 1M out, 150 output tokens | 1,500 in, 150 out | $0.0015 + $0.0006 = $0.0021 | $2,100 |
 | Self-hosted H200 at an assumed $3.00 per hour and an assumed 25,000 prefill tokens per second (16 decisions per second) | 1,500 tokens | $3.00 / 57,600 = $0.000052 at 100% load | $52 at 100% load, $208 at 25% |
 
-The self-hosted line is cheaper only at high, steady utilization. Beta prices are not fixed, so
-the cost model reads prices from config. Cost attribution is in
+The self-hosted line is cheaper only at high, steady utilization. The cached OpenAI row needs a
+shared prefix of at least 1,024 tokens in `input`; question text sits outside the reusable prefix,
+so the shared evidence goes in `input` and the per-item text in the questions only when it is
+short. Prices change between checks, so the cost model reads prices from config. Cost attribution is in
 [AI Cost Engineering and Unit Economics](../ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md).
 
 ### 6.9 Monitoring a decision in production
@@ -652,21 +662,22 @@ on one dashboard. Drift statistics are in
 
 ## 7. Real-World Examples
 
-**OpenAI Decisions API.** Public beta (checked 2026-10-18) with one model, `gpt-6-luna`, input-only
-billing and a stated speed of about 10x the Responses API. The guide tells users to set thresholds
+**OpenAI Decisions API.** Generally available (checked 2026-11-25) with one model, `gpt-6-luna`, no output charge, prompt caching at the standard
+`gpt-6-luna` cache rates, up to 400 questions per request, and a stated speed of about 10x the
+Responses API. The guide tells users to set thresholds
 for routing, filtering or review from labeled examples and the cost of false positives and false
 negatives, which is section 6.6 in the vendor's words.
 
 **TypeSafe Jev.** TypeSafe positions Jev as its first public System One Model and claims calibrated
 probabilities from a training method it calls RLCD (Reinforcement Learning for Calibrated
-Decisions). The quickstart uses `jev-latest` in requests and shows `jev-1.13.0` in the response.
-Every response names the versioned id that answered, which is the id to log and pin. `jev-preview`
-points to `jev-1.14.0`. The homepage shows a workflow chart at 0.114 s
+Decisions). The quickstart uses `jev-latest` in requests; on 2026-10-18 the response named
+`jev-1.13.0`, and by 2026-11-25 both `jev-latest` and `jev-preview` pointed to `jev-1.14.0`.
+Every response names the versioned id that answered, which is the id to log and pin. The homepage shows a workflow chart at 0.114 s
 against 8.566 s for an LLM under a "193.6x Faster" headline; the chart's own numbers give about
 75x. The same chart shows $0.000081 against $0.013880, about 171x, under "444.6x Cheaper". Vendor
 multipliers come from vendor workloads. Benchmark on yours.
 
-**SGLang.** The decision-model docs (checked 2026-10-18) document the mechanism, the limits and the
+**SGLang.** The decision-model docs (checked 2026-10-18, validated-model list re-checked 2026-11-25) document the mechanism, the limits and the
 refusing flags: Qwen3.8-27B (with and without NEXTN speculative decoding) and Qwen3.5-35B-A3B validated
 on one H200 in BF16, no calibration claim, and the published cold-vs-cached shifts. Dedicated
 decision checkpoints such as `PPLX-Decider-v1-27B` and Clef answer only through `/v1/systemone`.
@@ -756,14 +767,14 @@ lacks labels.
 
 | Tool | Role | Notes |
 |---|---|---|
-| OpenAI Decisions API | Hosted decision endpoint, `POST /v1/decisions` | Public beta, `gpt-6-luna`, $0.10 per 1M input tokens, no output charge (checked 2026-10-18) |
+| OpenAI Decisions API | Hosted decision endpoint, `POST /v1/decisions` | GA, `gpt-6-luna`; $0.10 per 1M uncached input tokens, $0.01 cached, $0.125 cache writes, no output charge; up to 400 questions per request (checked 2026-11-25) |
 | TypeSafe | Hosted System One API, `POST /v1/systemone`, Jev models | Pin a versioned id such as `jev-1.13.0`; claims calibrated probabilities (RLCD) |
-| SGLang | Self-hosted engine serving `/v1/decisions` and `/v1/systemone` | v0.5.21; validated on Qwen3.8-27B and Qwen3.5-35B-A3B on one H200 |
-| vLLM | Self-hosted engine | v0.32.0 added `POST /v1/systemone` |
-| Ollama | Local model server with decision models | v0.40.6; Nimble, Tev1, Clef 27B, Clef Flash 9B |
-| llama.cpp | GGUF engine with native decision models | b11719; `decisions` output modality in `/v1/models` |
-| MLflow | Decision-model judges through `make_judge()` | 3.17.1; TypeSafe judges since 3.17.0 |
-| Langfuse | Decision-model evaluators | v4.63.0; a refusal fails the whole run |
+| SGLang | Self-hosted engine serving `/v1/decisions` and `/v1/systemone` | v0.5.23 (routes since v0.5.21); validated on Qwen3.8-27B and Qwen3.5-35B-A3B on one H200 |
+| vLLM | Self-hosted engine | v0.34.0; `POST /v1/systemone` since v0.32.0 |
+| Ollama | Local model server with decision models | v0.40.18; Nimble, Tev1, Clef 27B, Clef Flash 9B |
+| llama.cpp | GGUF engine with native decision models | b12722 (stable v1.0.0); `decisions` output modality in `/v1/models` |
+| MLflow | Decision-model judges through `make_judge()` | 3.18.0; Decision API since 3.17.1, TypeSafe judges since 3.17.0 |
+| Langfuse | Decision-model evaluators | v4.86.0; a refusal fails the whole run |
 | scikit-learn | Isotonic and Platt recalibration, Brier score | `IsotonicRegression`, `LogisticRegression`, `brier_score_loss` |
 
 ---
@@ -785,7 +796,8 @@ isotonic or Platt scaling before any cost-based threshold.
 
 Thresholds, the abstain band and the calibrator are all fitted to one model's score distribution.
 TypeSafe's quickstart warns that values can change between Jev releases, and the alias follows the
-release. When it moves, every decision still returns a valid answer, so nothing errors; the
+release. It did exactly that between 2026-10-18 and 2026-11-25, moving from `jev-1.13.0` to
+`jev-1.14.0`. When it moves, every decision still returns a valid answer, so nothing errors; the
 distribution shifts and the error rates move with it. Pin the versioned id the response reports,
 and handle a snapshot change as a release: refit calibration, re-run the gate, roll out with a
 canary.
@@ -877,7 +889,7 @@ the wire, then treat the port as a model change: new calibration, new thresholds
 A generative classifier pays prefill plus decode for every output token, and parsing on top. A
 decision call stops after prefill and reads label probabilities; SGLang reports
 `completion_tokens` 0, and TypeSafe reports some `output_tokens` but does not bill them. OpenAI
-bills `gpt-6-luna` at $0.10 per 1M input tokens with no output charge (checked 2026-10-18), so a 1,500-token ticket costs $0.00015. OpenAI states about 10x faster than
+bills `gpt-6-luna` decisions at $0.10 per 1M uncached input tokens, $0.01 per 1M cached and $0.125 per 1M cache writes, with no output charge (checked 2026-11-25), so an uncached 1,500-token ticket costs $0.00015. OpenAI states about 10x faster than
 the Responses API. Measure both on your inputs before quoting a ratio.
 
 **Q: When is a decision model the wrong tool?**
@@ -962,7 +974,7 @@ inside its own VPC, so hosted APIs were out.
 
 **Design.**
 
-1. Engine: SGLang v0.5.21 serving Qwen3.8-27B in BF16 on H200s, using `/v1/decisions` (12 options
+1. Engine: SGLang v0.5.23 serving Qwen3.8-27B in BF16 on H200s, using `/v1/decisions` (12 options
    fit inside the 26 limit). Decision traffic got its own server profile with none of the refusing
    flags in section 6.8, behind the gateway route described in
    [AI Gateway Operations](../ai_gateway_operations/ai_gateway_operations.md).

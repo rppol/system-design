@@ -1,10 +1,10 @@
 # Case Study: Design an AI Governance and Model Inventory Platform
 
-> **Version anchor (2026-10-18).** **MLflow 3.17.1** (2026-10-13) is the registry for classic
+> **Version anchor (2026-11-25).** **MLflow 3.18.0** (2026-11-04) is the registry for classic
 > models and prompts; version tags carry `inventory_id` and the bundle digest. **Kubeflow Hub
-> v0.3.17** (2026-09-21) holds the self-hosted model, MCP server and agent catalogs on Kubernetes.
-> **Kubernetes 1.37** (1.37.1 2026-09-15) runs the admission layer. **model-transparency v1.1.1**
-> (OpenSSF Model Signing, 2025-10-10) signs weights. **Langfuse v4.63.0** (2026-10-16) stores
+> v0.3.18** (2026-10-22) holds the self-hosted model, MCP server and agent catalogs on Kubernetes.
+> **Kubernetes 1.37** (1.37.2 2026-10-13) runs the admission layer. **model-transparency v1.1.1**
+> (OpenSSF Model Signing, 2025-10-10) signs weights. **Langfuse v4.86.0** (2026-11-24) stores
 > GenAI traces stamped with the bundle digest. Sigstore cosign, OPA, Kyverno, OpenLineage,
 > PostgreSQL and Apache Iceberg are named without a version.
 >
@@ -830,13 +830,13 @@ lineage from a decision back to its data snapshot is evidence, not engineering h
 
 | Role | Tool | Version | Used for |
 |---|---|---|---|
-| Model and prompt registry | MLflow | 3.17.1 (2026-10-13) | Registered model versions, prompt versions, version tags with `inventory_id` |
-| Kubernetes catalogs | Kubeflow Hub | v0.3.17 (2026-09-21) | Self-hosted model, MCP server and agent catalogs |
+| Model and prompt registry | MLflow | 3.18.0 (2026-11-04) | Registered model versions, prompt versions, version tags with `inventory_id` |
+| Kubernetes catalogs | Kubeflow Hub | v0.3.18 (2026-10-22) | Self-hosted model, MCP server and agent catalogs |
 | Admission | Kubernetes, Kyverno | 1.37; Kyverno named without a version | Two `ValidatingWebhookConfiguration` objects by tier; Kyverno for the module's metadata policies |
 | Policy decision point | OPA | Named without a version | Separation-of-duties and expiry rules, sidecar per webhook |
 | Weight signing | model-transparency | v1.1.1 (2025-10-10) | OpenSSF Model Signing of weights and adapters |
 | Approval signing | Sigstore cosign | Named without a version | In-toto approval attestations on the bundle digest |
-| GenAI traces | Langfuse | v4.63.0 (2026-10-16) | Spans with `bundle_digest` and `inventory_id` |
+| GenAI traces | Langfuse | v4.86.0 (2026-11-24) | Spans with `bundle_digest` and `inventory_id` |
 | Lineage events | OpenLineage | Named without a version | Dataset and job edges into the lineage store |
 | Inventory, lineage, approvals | PostgreSQL | Named without a version | Bitemporal versions, exclusion constraints |
 | Decision log | Apache Iceberg on object storage | Named without a version | Day and inventory partitions, bloom filter on `case_id` |

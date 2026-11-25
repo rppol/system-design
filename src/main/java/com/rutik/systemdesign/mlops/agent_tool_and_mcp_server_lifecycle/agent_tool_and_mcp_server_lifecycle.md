@@ -1,6 +1,6 @@
 # Agent, Tool and MCP Server Lifecycle
 
-> **Version anchor (2026-10-18).** The current MCP specification revision is `2026-07-28`: every request carries its protocol version in `_meta`, servers must implement `server/discover`, and the handshake-based revisions are `2025-11-25` and earlier. The MCP Registry is in preview, and its API has been frozen at v0.1 since 2025-10-24. Kubeflow Hub v0.3.17 (2026-09-21) carries MCP and Agents catalogs next to the model catalog; the project was renamed from Kubeflow Model Registry at v0.3.9. LiteLLM v1.106.0 (2026-10-18) disables stdio MCP servers by default (PR #44066). Other versions on this page come from the section pin table.
+> **Version anchor (2026-11-25).** The current MCP specification revision is `2026-07-28`: every request carries its protocol version in `_meta`, servers must implement `server/discover`, and the handshake-based revisions are `2025-11-25` and earlier. The MCP Registry is in preview, and its API has been frozen at v0.1 since 2025-10-24. Kubeflow Hub v0.3.18 (2026-10-22) carries MCP and Agents catalogs next to the model catalog; the project was renamed from Kubeflow Model Registry at v0.3.9. LiteLLM v1.111.0 (2026-11-25) is current; stdio MCP servers have been disabled by default since v1.106.0 (2026-10-18, PR #44066), and the `LITELLM_ENABLE_MCP_STDIO` gate is unchanged at v1.111.0. Other versions on this page come from the section pin table.
 
 ---
 
@@ -91,7 +91,7 @@ The third row is the minimum for any agent that can take an action with money, d
 | Official MCP Registry | `server.json` metadata for public servers | public only | preview; API v0.1 frozen; versions immutable; namespace proven by GitHub, DNS or HTTP |
 | Downstream aggregators | curated copies of registry metadata plus ratings | public | covered in [MCP Registries and Ecosystem](../../llm/mcp_model_context_protocol/mcp_registries_and_ecosystem.md) |
 | Kubeflow Hub MCP catalog and Agents catalog | MCP servers and agents as catalog entries next to models | internal, per cluster | sources configured through a ConfigMap; sits beside the model catalog |
-| Gateway allowlist | which servers a gateway will proxy, and which transports | runtime enforcement | LiteLLM v1.106.0 refuses stdio servers unless `LITELLM_ENABLE_MCP_STDIO=true` |
+| Gateway allowlist | which servers a gateway will proxy, and which transports | runtime enforcement | LiteLLM (since v1.106.0) refuses stdio servers unless `LITELLM_ENABLE_MCP_STDIO=true` |
 | Agent config repo | agent bundles with pins and digests | per team | the source of truth for what runs |
 
 The official registry does not accept private servers and only references packages on public registries (npm, PyPI, NuGet, crates.io, Docker Hub and a short list of OCI registries, and MCPB files on GitHub or GitLab releases). Internal servers need an internal catalog.
@@ -618,16 +618,16 @@ Most teams replay in the per-PR gate and run live nightly.
 | MCP spec | revision `2026-07-28`: per-request versioning, `server/discover`, `tools/list` caching fields | dual-era servers serve legacy and modern clients on one endpoint |
 | Official MCP Registry | public server metadata, namespace proof, immutable versions | preview; API v0.1 frozen 2025-10-24 |
 | mcp-publisher | CLI that writes `server.json`, logs in and publishes to the registry | `init`, `login github`, `publish` |
-| Kubeflow Hub | internal model, MCP and Agents catalogs (v0.3.17) | renamed from Kubeflow Model Registry at v0.3.9 |
-| LiteLLM | gateway that proxies MCP servers with allowlists (v1.106.0) | stdio servers off unless `LITELLM_ENABLE_MCP_STDIO=true` |
+| Kubeflow Hub | internal model, MCP and Agents catalogs (v0.3.18) | renamed from Kubeflow Model Registry at v0.3.9 |
+| LiteLLM | gateway that proxies MCP servers with allowlists (v1.111.0) | stdio servers off unless `LITELLM_ENABLE_MCP_STDIO=true` |
 | MCP Inspector | manual inspection of a server's listing and calls | check a listing by hand before pinning its digest |
 | vcrpy | HTTP record and replay for Python tests | records HTTP clients such as httpx and requests; stdio needs a wrapper like the one in 6.5 |
 | oasdiff | breaking-change detection for OpenAPI specs | for the REST API behind a tool; does not judge descriptions |
 | Inspect AI | agent and tool-call evals in CI | task sets with scorers over full trajectories |
 | DeepEval | agent and tool-call evals in CI | has a tool-correctness metric |
-| MLflow | traces, datasets and evals tied to agent versions (3.17.1) | tag each trace with agent version and tool digests |
-| Langfuse | traces, datasets and evals tied to agent versions (v4.63.0) | acquired by ClickHouse, announced 2026-01-16 |
-| Arize Phoenix | traces and evals for agent runs (v20.23.0) | open source, can be self-hosted |
+| MLflow | traces, datasets and evals tied to agent versions (3.18.0) | tag each trace with agent version and tool digests |
+| Langfuse | traces, datasets and evals tied to agent versions (v4.86.0) | acquired by ClickHouse, announced 2026-01-16 |
+| Arize Phoenix | traces and evals for agent runs (v22.0.1) | open source, can be self-hosted |
 | Open Policy Agent | scope policy evaluation at the gateway | policy files versioned in git |
 | AWS Cedar | scope policy evaluation at the gateway | policy files versioned in git |
 

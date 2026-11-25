@@ -1,6 +1,6 @@
 # AI Release Bundle and Lineage
 
-> **Version anchor (2026-10-18).** MLflow 3.17.1 (2026-10-13); Kubeflow Hub v0.3.17 (2026-09-21), renamed from Kubeflow Model Registry at v0.3.9. The worked manifest also names vLLM v0.32.0 in its `runtime` block, MCP specification revision 2026-07-28 in its `tools` block, and exports to CycloneDX specification 1.7 (released 2025-10-21; repo tag 1.7.2 on 2026-09-17). ORAS and cosign are named without a version.
+> **Version anchor (2026-11-25).** MLflow 3.18.0 (2026-11-04); Kubeflow Hub v0.3.18 (2026-10-22), renamed from Kubeflow Model Registry at v0.3.9. The worked manifest also names vLLM v0.34.0 in its `runtime` block, MCP specification revision 2026-07-28 in its `tools` block, and exports to CycloneDX specification 1.7 (released 2025-10-21; repo tag 1.7.2 on 2026-09-17). ORAS and cosign are named without a version.
 
 ---
 
@@ -317,7 +317,7 @@ eval_set:
 runtime:
   image: registry.acme.io/serving@sha256:4410...be
   engine: vllm
-  engine_version: v0.32.0
+  engine_version: v0.34.0
   gpu: H100-SXM-80GB
 unpinned:
   - name: user memory store
@@ -618,7 +618,7 @@ if __name__ == "__main__":
                      "questions_digest": d("8"), "policy_digest": d("c")},
         "eval_set": {"version": "support-eval/7", "rows": 1840, "digest": d("e")},
         "runtime": {"image": "registry.acme.io/serving@" + d("7"), "engine": "vllm",
-                    "engine_version": "v0.32.0", "gpu": "H100-SXM-80GB"},
+                    "engine_version": "v0.34.0", "gpu": "H100-SXM-80GB"},
         "unpinned": [{"name": "user memory store", "owner": "personalization",
                       "reason": "per-user state", "observed_by": "memory_write_rate"}],
     }
@@ -707,8 +707,8 @@ There are two digests here, and confusing them is a common bug. The **bundle dig
 
 Registry records join the same identity:
 
-- **MLflow 3.17.1**: one `LoggedModel` per bundle, named `support-assistant-<first 12 hex>`, with the bundle digest, prompt URI and index snapshot as params. Traces produced after `mlflow.set_active_model()` carry that model id, so `mlflow.search_traces(model_id=...)` returns every trace a bundle produced. The code is in [Artifact Versioning and Lineage](../../artifact_versioning_and_lineage/artifact_versioning_and_lineage.md) §6.6.
-- **Kubeflow Hub v0.3.17**: a model version per bundle whose custom properties carry the bundle digest and the OCI reference, for platforms already built on Kubeflow and KServe. The Hub stores what you register; it does not compute or verify the digest.
+- **MLflow 3.18.0**: one `LoggedModel` per bundle, named `support-assistant-<first 12 hex>`, with the bundle digest, prompt URI and index snapshot as params. Traces produced after `mlflow.set_active_model()` carry that model id, so `mlflow.search_traces(model_id=...)` returns every trace a bundle produced. The code is in [Artifact Versioning and Lineage](../../artifact_versioning_and_lineage/artifact_versioning_and_lineage.md) §6.6.
+- **Kubeflow Hub v0.3.18**: a model version per bundle whose custom properties carry the bundle digest and the OCI reference, for platforms already built on Kubeflow and KServe. The Hub stores what you register; it does not compute or verify the digest.
 - **CycloneDX 1.7**: an export of the bundle as a BOM with machine-learning model components, for auditors and customers who ask for a standard format. The export is generated from the stored bytes and is never the source of truth.
 
 ### 6.7 Serving: verify, load, stamp
@@ -1019,8 +1019,8 @@ The `deployment` row for a rollback carries `change_ref` pointing at the inciden
 | ORAS | Push the manifest as an OCI artifact, attach referrers, discover them | `--artifact-type`, `oras attach`, `oras discover` |
 | cosign | Sign the bundle's OCI manifest digest | Server verifies the signature before it pulls the blob |
 | Harbor | Self-hosted OCI registry for bundles | Tag immutability per project |
-| MLflow | One `LoggedModel` per bundle; traces linked by model id | 3.17.1 |
-| Kubeflow Hub | Model version per bundle with digest and OCI reference as custom properties | v0.3.17 |
+| MLflow | One `LoggedModel` per bundle; traces linked by model id | 3.18.0 |
+| Kubeflow Hub | Model version per bundle with digest and OCI reference as custom properties | v0.3.18 |
 | PostgreSQL | Lineage tables and range queries | `tstzrange`, `btree_gist` |
 | OpenLineage | Dataset and job edges that join to bundle components | Models as output datasets versioned by digest |
 | OpenTelemetry | Carry the bundle digest on every span | `service.version` resource attribute or a custom span attribute |

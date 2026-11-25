@@ -1,10 +1,10 @@
 # Design an Embedding Model Migration
 
-> **Version anchor (2026-10-18).** From the mlops pin table: **Ray 2.59.0** (2026-10-02) runs
-> the re-embed backfill on Ray Data. **vLLM v0.32.0** serves the new query encoder behind an
-> OpenAI-compatible embeddings endpoint. **Kueue v0.20.2** (2026-10-15) holds the borrowed GPU
-> quota for the backfill. **KEDA v2.21.0** (2026-09-23) scales the dual-write embed workers.
-> **lakeFS v1.88.0** (2026-10-01) holds the corpus snapshot. **MLflow 3.17.1** (2026-10-13)
+> **Version anchor (2026-11-25).** From the mlops pin table: **Ray 2.60.1** (2026-11-23) runs
+> the re-embed backfill on Ray Data. **vLLM v0.34.0** (2026-11-16) serves the new query encoder behind an
+> OpenAI-compatible embeddings endpoint. **Kueue v0.20.7** (2026-11-19) holds the borrowed GPU
+> quota for the backfill. **KEDA v2.21.1** (2026-11-15) scales the dual-write embed workers.
+> **lakeFS v1.88.0** (2026-10-01) holds the corpus snapshot. **MLflow 3.18.0** (2026-11-04)
 > holds the encoder registry alias. OpenAI embedding model facts come from the OpenAI embeddings
 > guide, checked 2026-10-18. Vector databases (Qdrant, Weaviate, Milvus, OpenSearch) are named
 > without a version.
@@ -766,12 +766,12 @@ collection.
 
 | Concern | Tool (pin) | Role here |
 |---|---|---|
-| Backfill compute | Ray Data, Ray 2.59.0 | Actor pool running model B, writes parquet per shard |
-| GPU quota | Kueue v0.20.2 | ClusterQueue with borrowing from the training pool |
-| Query encoder serving | vLLM v0.32.0 | OpenAI-compatible embeddings endpoint for model B |
-| Dual-write scaling | KEDA v2.21.0 | Scales v2 embed workers on Kafka consumer lag |
+| Backfill compute | Ray Data, Ray 2.60.1 | Actor pool running model B, writes parquet per shard |
+| GPU quota | Kueue v0.20.7 | ClusterQueue with borrowing from the training pool |
+| Query encoder serving | vLLM v0.34.0 | OpenAI-compatible embeddings endpoint for model B |
+| Dual-write scaling | KEDA v2.21.1 | Scales v2 embed workers on Kafka consumer lag |
 | Corpus snapshot | lakeFS v1.88.0 | Commit at watermark W, read by the backfill |
-| Encoder registry | MLflow 3.17.1 | Alias `embed-prod` per space, digest in the manifest |
+| Encoder registry | MLflow 3.18.0 | Alias `embed-prod` per space, digest in the manifest |
 | Change log | Kafka (no pin) | CDC with LSN, one consumer group per index |
 | Vector index | Qdrant, Weaviate, Milvus or OpenSearch (no pin) | Two collections, conditional upsert on `source_lsn` |
 | Tombstones and routing | Any key-value store with conditional writes | Tombstone table, tenant routing table |

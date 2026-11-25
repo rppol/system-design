@@ -1,10 +1,10 @@
 # Continuous Training and Refresh Policy
 
-> **Version anchor (2026-10-18).** This page is about policy; tools appear only as examples, at
-> the mlops pin-table versions: MLflow 3.17.1 (2026-10-13) for registry aliases (`@champion`,
-> `@challenger`), Kubeflow Pipelines 2.17.2 (2026-09-04) for scheduled training runs, Ray 2.59.0
-> (2026-10-02) for Ray Data batch re-embedding, lakeFS v1.88.0 (2026-10-01) and DVC 3.67.1
-> (2026-03-31) for training-data snapshots, and Kubeflow Trainer v2.3.0 (2026-08-07) for
+> **Version anchor (2026-11-25).** This page is about policy; tools appear only as examples, at
+> the mlops pin-table versions: MLflow 3.18.0 (2026-11-04) for registry aliases (`@champion`,
+> `@challenger`), Kubeflow Pipelines 2.18.2 (2026-11-23) for scheduled training runs, Ray 2.60.1
+> (2026-11-23) for Ray Data batch re-embedding, lakeFS v1.88.0 (2026-10-01) and DVC 3.67.1
+> (2026-03-31) for training-data snapshots, and Kubeflow Trainer v2.4.0 (2026-11-06) for
 > fine-tune jobs.
 >
 > **On prices.** Every dollar figure on this page is a stated assumption (GPU-hour rate, per-token
@@ -749,10 +749,10 @@ adapter gates passed 18% more candidates than a human spot check supported. Fix:
 
 | Tool | Role | Notes |
 |---|---|---|
-| MLflow | Model registry with aliases for champion, challenger and anchor | 3.17.1. `set_registered_model_alias`, `get_model_version_by_alias`, load by `models:/name@champion`; version tags hold base digest and threshold |
-| Kubeflow Pipelines | Scheduled and event-triggered CT runs | 2.17.2. Recurring runs on a cron; pipeline definition in `ml/mlops_and_ci_cd` §6 |
-| Kubeflow Trainer | Fine-tune and adapter retrain jobs on Kubernetes | v2.3.0. Used for the base-upgrade adapter campaign |
-| Ray | Batch re-embedding and teacher relabeling | 2.59.0. Ray Data batch inference over the corpus or distillation set |
+| MLflow | Model registry with aliases for champion, challenger and anchor | 3.18.0. `set_registered_model_alias`, `get_model_version_by_alias`, load by `models:/name@champion`; version tags hold base digest and threshold |
+| Kubeflow Pipelines | Scheduled and event-triggered CT runs | 2.18.2. Recurring runs on a cron; pipeline definition in `ml/mlops_and_ci_cd` §6 |
+| Kubeflow Trainer | Fine-tune and adapter retrain jobs on Kubernetes | v2.4.0. Used for the base-upgrade adapter campaign |
+| Ray | Batch re-embedding and teacher relabeling | 2.60.1. Ray Data batch inference over the corpus or distillation set |
 | lakeFS | Training-data snapshots with commit ids | v1.88.0. The snapshot id goes in the model version tags |
 | DVC | Dataset versioning in git workflows | 3.67.1. Repo lives under the `treeverse` org |
 | LightGBM | Warm-start boosting via `init_model` | Appends trees on each warm refresh |

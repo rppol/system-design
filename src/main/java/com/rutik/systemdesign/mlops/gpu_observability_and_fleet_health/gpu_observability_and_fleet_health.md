@@ -1,12 +1,18 @@
 # GPU Observability and Fleet Health
 
-> **Version anchor (2026-10-18).** **DCGM 4.6.1** with **dcgm-exporter 4.8.4** (2026-09-18): opt-in
-> fabric health fields, compute-instance-scoped MIG fields under `GPU_CI_ID`, DRA MIG pod
-> attribution with optional `pod_uid`, a restart required after a live Dynamic MIG change, and the
-> retired PCIe throughput fields removed. 4.6.0-4.8.3 (2026-07-15) added DRA ResourceSlice v1
-> support and cumulative XID and clock-event totals, and renamed `Hostname` to `hostname`.
-> **NVIDIA GPU Operator v26.7.2** (2026-10-14) manages DRA Driver v0.5.1 through the `GPUCluster`
-> CR; v26.7.1 ships device plugin v0.20.1 and MIG Manager v0.15.1. **AMD GPU Operator v1.5.1**
+> **Version anchor (2026-11-25).** **DCGM 4.7.0** with **dcgm-exporter 4.9.0** (2026-11-06). 4.9.0
+> renames the 23 default and profiling-preset fields to their DCGM 4.7 names, and 11 of them change
+> unit: utilization from a percentage to a 0 to 1 ratio, GPU memory from MiB to bytes, clocks from
+> MHz to hertz, energy from millijoules to joules, NVLink throughput from MB/s to bytes per second.
+> The driver label becomes `DCGM_FI_SYSTEM_DRIVER_VERSION`, GPU-wide fields under MIG are reported
+> once per physical GPU, and pod labels need a non-empty allowlist. This page uses the 4.9.0 names;
+> §6.3 maps the old ones. 4.8.4 (2026-09-18) added opt-in fabric health fields,
+> compute-instance-scoped MIG fields under `GPU_CI_ID`, DRA MIG pod attribution with optional
+> `pod_uid` and a restart requirement after a live Dynamic MIG change. 4.6.0-4.8.3 (2026-07-15)
+> added cumulative XID and clock-event totals and renamed `Hostname` to `hostname`.
+> **NVIDIA GPU Operator v26.7.3** (2026-11-17) ships dcgm-exporter 4.9.0 and DCGM 4.7.0 and lists
+> the renames as its breaking change; the v26.7.2 notes name DRA Driver v0.5.1 managed through the
+> `GPUCluster` CR, and v26.7.1 shipped device plugin v0.20.1 and MIG Manager v0.15.1. **AMD GPU Operator v1.5.1**
 > (2026-07-21). **Intel Device Plugins Operator v0.37.1** (2026-10-02). AMD Device Metrics Exporter
 > and Intel XPU Manager have no pin row; their metric names, the Xid Catalog actions and the
 > `dcgmi diag` durations were read from vendor docs on 2026-10-18.
@@ -69,9 +75,9 @@ above it:
 | Layer | Question | Signal |
 |---|---|---|
 | Allocated | Is a pod holding the GPU? | `nvidia.com/gpu` requests, DRA claims |
-| Kernel running | Was any kernel resident during the sample? | `DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_PROF_GR_ENGINE_ACTIVE` |
-| SMs busy | What fraction of SM cycles had at least one warp? | `DCGM_FI_PROF_SM_ACTIVE` |
-| Math busy | What fraction of cycles was the tensor pipe issuing? | `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`, MFU |
+| Kernel running | Was any kernel resident during the sample? | `DCGM_FI_DEV_GPU_UTIL_RATIO`, `DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO` |
+| SMs busy | What fraction of SM cycles had at least one warp? | `DCGM_FI_PROF_SM_UTIL_RATIO` |
+| Math busy | What fraction of cycles was the tensor pipe issuing? | `DCGM_FI_PROF_TENSOR_UTIL_RATIO`, MFU |
 
 A fleet can sit at 100% on the first layer, 95% on the second, 40% on the third and 10% on the
 fourth. Each drop has a different owner: the scheduler, the input pipeline, the batch size, the
@@ -97,13 +103,13 @@ The one-kernel case below shows why the second layer lies about the third.
   SM 66- 98  ................................
   SM 99-131  ................................
 
-  nvidia-smi utilization        = time any kernel ran / sample  = 1.00 / 1.00  = 100%
-  DCGM_FI_PROF_GR_ENGINE_ACTIVE = same idea, profiling counter  =               1.00
-  DCGM_FI_PROF_SM_ACTIVE        = mean over SMs of busy cycles  = 4 / 132     = 0.03
+  nvidia-smi utilization            = time any kernel ran / sample  = 1.00 / 1.00  = 100%
+  DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO = same idea, profiling counter  =               1.00
+  DCGM_FI_PROF_SM_UTIL_RATIO        = mean over SMs of busy cycles  = 4 / 132     = 0.03
 ```
 
 Both "100%" readings are true. They answer "was the GPU in use", not "how much of it". Only
-`SM_ACTIVE` and the pipe counters show that 128 SMs did nothing.
+`SM_UTIL_RATIO` and the pipe counters show that 128 SMs did nothing.
 
 ---
 
@@ -112,9 +118,9 @@ Both "100%" readings are true. They answer "was the GPU in use", not "how much o
 1. **Utilization is a stack, not a number.** Report allocated, kernel-active, SM-active and
    tensor-active separately. A single "GPU util" panel hides which layer lost the time.
 2. **Turn on the fields you will alert on.** The dcgm-exporter `default-counters.csv` ships with
-   `DCGM_FI_PROF_SM_ACTIVE`, `SM_OCCUPANCY` and every ECC volatile and aggregate counter commented
+   `DCGM_FI_PROF_SM_UTIL_RATIO`, `SM_OCCUPANCY_RATIO` and every ECC volatile and aggregate counter commented
    out. A fleet with no ECC alerts may simply have no ECC series.
-3. **Alert on counters, not on last-value gauges.** `DCGM_FI_DEV_XID_ERRORS` holds the value of the
+3. **Alert on counters, not on last-value gauges.** `DCGM_FI_DEV_XID_ERROR` holds the value of the
    last XID seen. A later XID overwrites an earlier one between scrapes. Use the cumulative
    `DCGM_EXP_XID_ERRORS_TOTAL` with its `xid` label.
 4. **Every health signal maps to an action.** NVIDIA's Xid Catalog gives one per code
@@ -137,21 +143,21 @@ Both "100%" readings are true. They answer "was the GPU in use", not "how much o
 
 | Family | NVIDIA DCGM fields | Default in `default-counters.csv` | Use |
 |---|---|---|---|
-| Coarse activity | `DEV_GPU_UTIL`, `DEV_MEM_COPY_UTIL` | On | Allocated vs idle only |
-| Profiling (DCP) | `PROF_GR_ENGINE_ACTIVE`, `PROF_PIPE_TENSOR_ACTIVE`, `PROF_DRAM_ACTIVE` | On | Efficiency |
-| Profiling (DCP) | `PROF_SM_ACTIVE`, `PROF_SM_OCCUPANCY`, `PROF_PIPE_FP16/FP32/FP64_ACTIVE` | Off | Efficiency, kernel shape |
-| Memory | `DEV_FB_USED`, `DEV_FB_FREE`, `DEV_FB_RESERVED` | On | KV-cache headroom, leaks |
-| Clocks and power | `DEV_SM_CLOCK`, `DEV_POWER_USAGE`, `DEV_CLOCKS_EVENT_REASONS` | Clocks and power on, reasons off | Throttling |
-| Thermals | `DEV_GPU_TEMP`, `DEV_MEMORY_TEMP` | On | Cooling, HBM wear |
+| Coarse activity | `DEV_GPU_UTIL_RATIO`, `DEV_MEMORY_UTIL_RATIO` (0 to 1) | On | Allocated vs idle only |
+| Profiling (DCP) | `PROF_GR_ENGINE_UTIL_RATIO`, `PROF_TENSOR_UTIL_RATIO`, `PROF_DRAM_UTIL_RATIO` | On | Efficiency |
+| Profiling (DCP) | `PROF_SM_UTIL_RATIO`, `PROF_SM_OCCUPANCY_RATIO`, `PROF_FP16/FP32/FP64_UTIL_RATIO` | Off | Efficiency, kernel shape |
+| Memory | `DEV_FB_USED_BYTES`, `DEV_FB_FREE_BYTES`, `DEV_FB_RESERVED_BYTES`, `DEV_FB_CAPACITY_BYTES` | On | KV-cache headroom, leaks |
+| Clocks and power | `DEV_SM_CLOCK_HERTZ`, `DEV_BOARD_POWER_WATTS`, `DEV_GPU_ENERGY_JOULES_TOTAL` | On | Throttling; the reasons come from `DCGM_EXP_CLOCK_EVENTS_TOTAL` |
+| Thermals | `DEV_GPU_TEMP_CELSIUS`, `DEV_MEMORY_TEMP_CELSIUS` | On | Cooling, HBM wear |
 | ECC | `DEV_ECC_SBE_VOL_TOTAL`, `DEV_ECC_DBE_VOL_TOTAL`, `_AGG_` variants | Off | Memory health |
-| Row remap | `DEV_CORRECTABLE_REMAPPED_ROWS`, `DEV_UNCORRECTABLE_REMAPPED_ROWS`, `DEV_ROW_REMAP_FAILURE` | On | RMA decision |
-| XID | `DEV_XID_ERRORS` (last value) | On | Do not alert on it alone |
+| Row remap | `DEV_ROW_REMAP_CORRECTABLE_TOTAL`, `DEV_ROW_REMAP_UNCORRECTABLE_TOTAL`, `DEV_ROW_REMAP_FAILED` | On | RMA decision |
+| XID | `DEV_XID_ERROR` (last value) | On | Do not alert on it alone |
 | Exporter totals | `DCGM_EXP_XID_ERRORS_TOTAL`, `DCGM_EXP_CLOCK_EVENTS_TOTAL`, `DCGM_EXP_GPU_HEALTH_STATUS` | Off | Alerting |
-| Fabric | `DEV_FABRIC_HEALTH_SUMMARY`, `DEV_FABRIC_HEALTH_MASK`, NVLink error totals | Off | NVLink domains |
-| PCIe | `DEV_PCIE_REPLAY_COUNTER`, `PROF_PCIE_TX_BYTES`, `PROF_PCIE_RX_BYTES` | On | Riser and slot faults, host-to-device stalls |
+| Fabric | `DEV_FABRIC_HEALTH_SUMMARY`, `DEV_FABRIC_MANAGER_STATUS`, NVLink error totals | Off | NVLink domains |
+| PCIe | `DEV_PCIE_REPLAY_TOTAL`, `PROF_PCIE_TX_BYTES`, `PROF_PCIE_RX_BYTES` | On | Riser and slot faults, host-to-device stalls |
 
-Field names drop the `DCGM_FI_` prefix in the table. The exporter's own derived metrics start with
-`DCGM_EXP_`.
+Field names drop the `DCGM_FI_` prefix in the table and use the dcgm-exporter 4.9.0 names; §6.3
+maps the 4.8.x names. The exporter's own derived metrics start with `DCGM_EXP_`.
 
 ### 4.2 Health check tiers
 
@@ -172,7 +178,7 @@ test below them.
 
 | Vendor | Operator | Exporter | Utilization fields | Health path |
 |---|---|---|---|---|
-| NVIDIA | GPU Operator v26.7.2 (`ClusterPolicy` or `GPUCluster`) | dcgm-exporter 4.8.4 on DCGM 4.6.1 | `DCGM_FI_PROF_*` | XID, ECC, row remap, `dcgmi diag`, `DCGM_EXP_GPU_HEALTH_STATUS` |
+| NVIDIA | GPU Operator v26.7.3 (`ClusterPolicy` or `GPUCluster`) | dcgm-exporter 4.9.0 on DCGM 4.7.0 | `DCGM_FI_PROF_*_RATIO` | XID, ECC, row remap, `dcgmi diag`, `DCGM_EXP_GPU_HEALTH_STATUS` |
 | AMD | AMD GPU Operator v1.5.1 | Device Metrics Exporter | `GPU_GFX_ACTIVITY`, `GPU_UMC_ACTIVITY`; profiler `GPU_PROF_SM_ACTIVE`, `GPU_PROF_TENSOR_ACTIVE_PERCENT` (off by default) | `GPU_HEALTH`, `GPU_ECC_UNCORRECT_TOTAL`, test runner, NPD integration |
 | Intel | Intel Device Plugins Operator v0.37.1 | Intel XPU Manager (`xpum_` prefix) | XPU Manager metrics | xpumd health domains, `-xpumd-unhealthy-severity` |
 
@@ -186,8 +192,8 @@ DaemonSet can open every GPU device file on the node while other pods use the GP
 | Metric | Formula | Good for | Misleads when |
 |---|---|---|---|
 | Allocation ratio | GPUs bound to pods / GPUs in fleet | Scheduler and quota health | Pods hold GPUs and idle |
-| Active ratio | mean `GR_ENGINE_ACTIVE` over allocated GPUs | Idle-allocation hunting | One tiny kernel reads as 1.0 |
-| SM active | mean `SM_ACTIVE` | Batch size, launch overhead | Memory-bound decode at full speed reads low |
+| Active ratio | mean `GR_ENGINE_UTIL_RATIO` over allocated GPUs | Idle-allocation hunting | One tiny kernel reads as 1.0 |
+| SM active | mean `SM_UTIL_RATIO` | Batch size, launch overhead | Memory-bound decode at full speed reads low |
 | MFU | achieved model FLOP/s / peak FLOP/s | Training efficiency, cross-cluster comparison | Applied to decode-heavy inference |
 | HFU | MFU plus recomputed FLOPs | Kernel efficiency | Compared with someone else's MFU |
 | MBU | bytes moved per step / step time / peak bandwidth | Decode efficiency | Prefill-heavy traffic |
@@ -244,15 +250,15 @@ diagnostic runs while the other seven GPUs keep serving, and a pass lifts the ta
 ```mermaid
 xychart-beta
     title "One H100 in a TP=4 vLLM replica, 70B FP8, steady chat traffic"
-    x-axis ["GPU_UTIL", "GR_ENGINE", "SM_ACTIVE", "DRAM_ACTIVE", "TENSOR", "MFU"]
+    x-axis ["GPU_UTIL", "GR_ENGINE", "SM_UTIL", "DRAM_UTIL", "TENSOR", "MFU"]
     y-axis "Percent" 0 --> 100
     bar [98, 97, 46, 61, 11, 7]
 ```
 
-`nvidia-smi` and `GR_ENGINE_ACTIVE` say the GPU is full. `DRAM_ACTIVE` at 61% says decode is
-bound by HBM reads, which is expected. `TENSOR` at 11% and MFU at 7% are normal for decode and
-are the wrong numbers to chase on this workload; MBU and tokens per GPU-second at the SLO are the
-right ones (§6.6).
+`nvidia-smi` and `GR_ENGINE_UTIL_RATIO` (0.97) say the GPU is full. `DRAM_UTIL_RATIO` at 0.61 says
+decode is bound by HBM reads, which is expected. `TENSOR_UTIL_RATIO` at 0.11 and MFU at 7% are
+normal for decode and are the wrong numbers to chase on this workload; MBU and tokens per
+GPU-second at the SLO are the right ones (§6.6). The chart plots the 0 to 1 ratios as percent.
 
 ### GPU health states
 
@@ -279,20 +285,21 @@ RMA outcomes each quarter.
 
 ### 6.1 What `nvidia-smi` utilization measures
 
-`nvidia-smi` "GPU-Util" and `DCGM_FI_DEV_GPU_UTIL` report the percentage of the sample period
-during which one or more kernels were executing. The sample period depends on the product and is
-between 1/6 s and 1 s. It does not look at how many SMs the kernel used or which pipes it issued
-to.
+`nvidia-smi` "GPU-Util" reports the percentage of the sample period during which one or more
+kernels were executing, and `DCGM_FI_DEV_GPU_UTIL_RATIO` reports the same quantity as a 0 to 1
+ratio (dcgm-exporter 4.8.x exported it as `DCGM_FI_DEV_GPU_UTIL` in percent). The sample period
+depends on the product and is between 1/6 s and 1 s. It does not look at how many SMs the kernel
+used or which pipes it issued to.
 
 Three workloads that all read 100%:
 
-| Workload | GPU_UTIL | SM_ACTIVE | TENSOR_ACTIVE | What is wrong |
+| Workload | GPU_UTIL_RATIO | SM_UTIL_RATIO | TENSOR_UTIL_RATIO | What is wrong |
 |---|---|---|---|---|
-| Embedding model, batch 1, one request at a time | 100 | 0.06 | 0.01 | Batch too small to fill 132 SMs |
-| Training step with a spin-waiting NCCL kernel during a straggler wait | 100 | 0.95 | 0.02 | SMs are busy polling, not computing |
-| 70B training, well tuned | 100 | 0.92 | 0.55 | Nothing, this is the target |
+| Embedding model, batch 1, one request at a time | 1.00 | 0.06 | 0.01 | Batch too small to fill 132 SMs |
+| Training step with a spin-waiting NCCL kernel during a straggler wait | 1.00 | 0.95 | 0.02 | SMs are busy polling, not computing |
+| 70B training, well tuned | 1.00 | 0.92 | 0.55 | Nothing, this is the target |
 
-The second row is the reason `SM_ACTIVE` alone is also not enough: NCCL kernels occupy SMs while
+The second row is the reason `SM_UTIL_RATIO` alone is also not enough: NCCL kernels occupy SMs while
 they wait on the network. Tensor-pipe activity and MFU separate waiting from working.
 
 ### 6.2 DCGM profiling fields
@@ -302,14 +309,14 @@ center GPUs from Volta onward.
 
 | Field | Definition | H100 reading for a healthy 70B training step |
 |---|---|---|
-| `DCGM_FI_PROF_GR_ENGINE_ACTIVE` | Ratio of time the graphics engine is active | 0.98 |
-| `DCGM_FI_PROF_SM_ACTIVE` | Ratio of cycles an SM has at least one warp assigned, averaged over all SMs | 0.90 |
-| `DCGM_FI_PROF_SM_OCCUPANCY` | Ratio of resident warps to the SM maximum, averaged over all SMs | 0.25 to 0.40 |
-| `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` | Ratio of cycles the tensor (HMMA) pipe is active | 0.45 to 0.60 |
-| `DCGM_FI_PROF_DRAM_ACTIVE` | Ratio of cycles the device memory interface is sending or receiving | 0.30 to 0.50 |
+| `DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO` | Ratio of time the graphics engine is active | 0.98 |
+| `DCGM_FI_PROF_SM_UTIL_RATIO` | Ratio of cycles an SM has at least one warp assigned, averaged over all SMs | 0.90 |
+| `DCGM_FI_PROF_SM_OCCUPANCY_RATIO` | Ratio of resident warps to the SM maximum, averaged over all SMs | 0.25 to 0.40 |
+| `DCGM_FI_PROF_TENSOR_UTIL_RATIO` | Ratio of cycles the tensor (HMMA) pipe is active | 0.45 to 0.60 |
+| `DCGM_FI_PROF_DRAM_UTIL_RATIO` | Ratio of cycles the device memory interface is sending or receiving | 0.30 to 0.50 |
 | `DCGM_FI_PROF_PCIE_TX_BYTES`, `_RX_BYTES` | PCIe bytes per second including protocol headers | Spikes at checkpoint and data load |
 
-Low `SM_OCCUPANCY` is not a fault. Large GEMM kernels use many registers and much shared memory
+Low `SM_OCCUPANCY_RATIO` is not a fault. Large GEMM kernels use many registers and much shared memory
 per thread block and run with few resident warps on purpose. Use occupancy to compare two
 builds of the same job, not as a target.
 
@@ -319,9 +326,9 @@ Two operating rules for DCP fields:
   profiler on a GPU while dcgm-exporter collects DCP fields fails or returns errors. Pause DCGM
   profiling first with `dcgmi profile --pause`, then `--resume` after the session.
 - **Not every combination of DCP fields is read in one pass.** DCGM multiplexes some groups, so
-  adding every `PIPE_*` field lowers the accuracy of each. Collect `GR_ENGINE_ACTIVE`,
-  `SM_ACTIVE`, `PIPE_TENSOR_ACTIVE` and `DRAM_ACTIVE` fleet-wide, and turn on the rest per node
-  during an investigation.
+  adding every pipe field (`FP16_UTIL_RATIO`, `FP32_UTIL_RATIO`, `FP64_UTIL_RATIO`) lowers the
+  accuracy of each. Collect `GR_ENGINE_UTIL_RATIO`, `SM_UTIL_RATIO`, `TENSOR_UTIL_RATIO` and
+  `DRAM_UTIL_RATIO` fleet-wide, and turn on the rest per node during an investigation.
 
 ### 6.3 dcgm-exporter configuration: broken, then fixed
 
@@ -341,48 +348,53 @@ serviceMonitor:
 
 What this produces:
 
-- No `DCGM_FI_PROF_SM_ACTIVE`, no ECC counters, no clock-event reasons. Alerts written against
+- No `DCGM_FI_PROF_SM_UTIL_RATIO`, no ECC counters, no clock-event reasons. Alerts written against
   them evaluate against an empty vector and never fire.
 - The exporter attaches `pod="vllm-70b-7c9f"` to each GPU series, and Prometheus adds its own
   target label `pod="nvidia-dcgm-exporter-x2k4p"`. With `honorLabels: false` the workload label is
   renamed `exported_pod`, and every join on `pod` silently matches the exporter, not the model.
-- Alerts on `DCGM_FI_DEV_XID_ERRORS == 79` miss a fall-off-the-bus event if any other XID, or a
+- Alerts on `DCGM_FI_DEV_XID_ERROR == 79` miss a fall-off-the-bus event if any other XID, or a
   reset to 0, lands before the next scrape.
 
 Fixed: a custom field list and label handling that keeps the workload's identity.
 
 ```text
-# gpu-fleet-counters.csv (DCGM FIELD, Prometheus type, help)
-DCGM_FI_PROF_GR_ENGINE_ACTIVE,         gauge,   Graphics engine active ratio.
-DCGM_FI_PROF_SM_ACTIVE,                gauge,   SM active ratio.
-DCGM_FI_PROF_PIPE_TENSOR_ACTIVE,       gauge,   Tensor pipe active ratio.
-DCGM_FI_PROF_DRAM_ACTIVE,              gauge,   DRAM interface active ratio.
-DCGM_FI_DEV_FB_USED,                   gauge,   Framebuffer used (MiB).
-DCGM_FI_DEV_SM_CLOCK,                  gauge,   SM clock (MHz).
-DCGM_FI_DEV_POWER_USAGE,               gauge,   Power draw (W).
-DCGM_FI_DEV_ENFORCED_POWER_LIMIT,      gauge,   Enforced power limit (W).
-DCGM_FI_DEV_GPU_TEMP,                  gauge,   GPU temperature (C).
-DCGM_FI_DEV_MEMORY_TEMP,               gauge,   HBM temperature (C).
-DCGM_FI_DEV_ECC_SBE_VOL_TOTAL,         counter, Volatile single-bit ECC errors.
-DCGM_FI_DEV_ECC_DBE_VOL_TOTAL,         counter, Volatile double-bit ECC errors.
-DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS, counter, Rows remapped for correctable errors.
-DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS, counter, Rows remapped for uncorrectable errors.
-DCGM_FI_DEV_ROW_REMAP_FAILURE,         gauge,   Row remapping failed.
-DCGM_FI_DEV_PCIE_REPLAY_COUNTER,       counter, PCIe retries.
-DCGM_EXP_XID_ERRORS_TOTAL,             counter, XID errors since exporter start.
-DCGM_EXP_CLOCK_EVENTS_TOTAL,           counter, Clock events since exporter start.
-DCGM_EXP_GPU_HEALTH_STATUS,            gauge,   DCGM health status.
-DCGM_FI_DRIVER_VERSION,                label,   Driver version.
+# gpu-fleet-counters.csv (DCGM FIELD, Prometheus type, help), dcgm-exporter 4.9.0 names
+DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO,            gauge,   Graphics engine active ratio.
+DCGM_FI_PROF_SM_UTIL_RATIO,                   gauge,   SM active ratio.
+DCGM_FI_PROF_TENSOR_UTIL_RATIO,               gauge,   Tensor pipe active ratio.
+DCGM_FI_PROF_DRAM_UTIL_RATIO,                 gauge,   DRAM interface active ratio.
+DCGM_FI_DEV_FB_USED_BYTES,                    gauge,   Framebuffer used (bytes).
+DCGM_FI_DEV_FB_CAPACITY_BYTES,                gauge,   Framebuffer capacity (bytes).
+DCGM_FI_DEV_SM_CLOCK_HERTZ,                   gauge,   SM clock (Hz).
+DCGM_FI_DEV_BOARD_POWER_WATTS,                gauge,   Power draw (W).
+DCGM_FI_DEV_BOARD_POWER_LIMIT_ENFORCED_WATTS, gauge,   Enforced power limit (W).
+DCGM_FI_DEV_GPU_TEMP_CELSIUS,                 gauge,   GPU temperature (C).
+DCGM_FI_DEV_MEMORY_TEMP_CELSIUS,              gauge,   HBM temperature (C).
+DCGM_FI_DEV_ECC_SBE_VOL_TOTAL,                counter, Volatile single-bit ECC errors.
+DCGM_FI_DEV_ECC_DBE_VOL_TOTAL,                counter, Volatile double-bit ECC errors.
+DCGM_FI_DEV_ROW_REMAP_CORRECTABLE_TOTAL,      counter, Rows remapped for correctable errors.
+DCGM_FI_DEV_ROW_REMAP_UNCORRECTABLE_TOTAL,    counter, Rows remapped for uncorrectable errors.
+DCGM_FI_DEV_ROW_REMAP_FAILED,                 gauge,   Row remapping failed.
+DCGM_FI_DEV_PCIE_REPLAY_TOTAL,                counter, PCIe retries.
+DCGM_EXP_XID_ERRORS_TOTAL,                    counter, XID errors since the counter was last reset.
+DCGM_EXP_CLOCK_EVENTS_TOTAL,                  counter, Clock events since the counter was last reset.
+DCGM_EXP_GPU_HEALTH_STATUS,                   gauge,   DCGM health status.
+DCGM_FI_SYSTEM_DRIVER_VERSION,                label,   Driver version.
 ```
 
 ```yaml
 customMetrics: |              # replaces the default list, not additive
-  DCGM_FI_PROF_GR_ENGINE_ACTIVE, gauge, Graphics engine active ratio.
-  DCGM_FI_PROF_SM_ACTIVE,        gauge, SM active ratio.
+  DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO, gauge, Graphics engine active ratio.
+  DCGM_FI_PROF_SM_UTIL_RATIO,        gauge, SM active ratio.
   # every other row of gpu-fleet-counters.csv
 serviceMonitor:
   honorLabels: true           # keep the workload's pod, namespace, container
 ```
+
+If pod labels are copied onto GPU series, 4.9.0 needs a non-empty pod-label allowlist; in 4.8.4 an
+empty allowlist meant "all labels". List the labels you join on (`app`, `model`), or `.*` to keep
+the old behavior.
 
 ```yaml
 # Prometheus alert rules
@@ -396,10 +408,10 @@ serviceMonitor:
   expr: increase(DCGM_EXP_XID_ERRORS_TOTAL{xid="48"}[10m]) > 0
   labels: {severity: page, action: WORKFLOW_XID_48}
 - alert: GPURowRemapFailed
-  expr: DCGM_FI_DEV_ROW_REMAP_FAILURE == 1
+  expr: DCGM_FI_DEV_ROW_REMAP_FAILED == 1
   labels: {severity: ticket, action: RMA}
 - alert: GPUSeriesMissing
-  expr: count by (hostname) (DCGM_FI_DEV_GPU_TEMP) < 8
+  expr: count by (hostname) (DCGM_FI_DEV_GPU_TEMP_CELSIUS) < 8
   for: 10m
   labels: {severity: ticket}
 ```
@@ -408,6 +420,63 @@ The last rule catches a GPU that vanished from the exporter, which happens after
 can no longer see the card. Its series stops instead of reporting an error. `hostname` is the
 label name from dcgm-exporter 4.8.3 on; dashboards built on `Hostname` went blank after that
 upgrade.
+
+### 6.3.1 Upgrading dcgm-exporter 4.8.x to 4.9.0: broken, then fixed
+
+dcgm-exporter 4.9.0 (shipped by GPU Operator v26.7.3) renames the 23 default and
+profiling-preset fields to DCGM 4.7 names, and 11 of them change unit. A rule that references an
+old name evaluates against an empty vector and never fires; a rule that kept the name but not the
+unit compares a ratio against a percentage threshold.
+
+| 4.8.x name | 4.9.0 name | Unit change |
+|---|---|---|
+| `DCGM_FI_DEV_GPU_UTIL` | `DCGM_FI_DEV_GPU_UTIL_RATIO` | percent to 0 to 1 |
+| `DCGM_FI_DEV_MEM_COPY_UTIL` | `DCGM_FI_DEV_MEMORY_UTIL_RATIO` | percent to 0 to 1 |
+| `DCGM_FI_DEV_FB_USED`, `_FREE`, `_RESERVED` | `DCGM_FI_DEV_FB_USED_BYTES`, `_FREE_BYTES`, `_RESERVED_BYTES` | MiB to bytes |
+| `DCGM_FI_DEV_SM_CLOCK`, `DCGM_FI_DEV_MEM_CLOCK` | `DCGM_FI_DEV_SM_CLOCK_HERTZ`, `DCGM_FI_DEV_MEMORY_CLOCK_HERTZ` | MHz to Hz |
+| `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION` | `DCGM_FI_DEV_GPU_ENERGY_JOULES_TOTAL` | mJ to J |
+| `DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL` | `DCGM_FI_DEV_NVLINK_THROUGHPUT_BYTES_PER_SECOND` | MB/s to bytes/s |
+| `DCGM_FI_DEV_GPU_TEMP`, `DCGM_FI_DEV_MEMORY_TEMP` | `DCGM_FI_DEV_GPU_TEMP_CELSIUS`, `DCGM_FI_DEV_MEMORY_TEMP_CELSIUS` | none |
+| `DCGM_FI_DEV_POWER_USAGE` | `DCGM_FI_DEV_BOARD_POWER_WATTS` | none |
+| `DCGM_FI_DEV_XID_ERRORS` | `DCGM_FI_DEV_XID_ERROR` | none |
+| `DCGM_FI_DEV_PCIE_REPLAY_COUNTER` | `DCGM_FI_DEV_PCIE_REPLAY_TOTAL` | none |
+| `DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS`, `DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS`, `DCGM_FI_DEV_ROW_REMAP_FAILURE` | `DCGM_FI_DEV_ROW_REMAP_UNCORRECTABLE_TOTAL`, `DCGM_FI_DEV_ROW_REMAP_CORRECTABLE_TOTAL`, `DCGM_FI_DEV_ROW_REMAP_FAILED` | none |
+| `DCGM_FI_PROF_GR_ENGINE_ACTIVE`, `DCGM_FI_PROF_SM_ACTIVE`, `DCGM_FI_PROF_SM_OCCUPANCY` | `DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO`, `DCGM_FI_PROF_SM_UTIL_RATIO`, `DCGM_FI_PROF_SM_OCCUPANCY_RATIO` | none (already ratios) |
+| `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`, `DCGM_FI_PROF_DRAM_ACTIVE` | `DCGM_FI_PROF_TENSOR_UTIL_RATIO`, `DCGM_FI_PROF_DRAM_UTIL_RATIO` | none (already ratios) |
+| label `DCGM_FI_DRIVER_VERSION` | label `DCGM_FI_SYSTEM_DRIVER_VERSION` | n/a |
+
+`DCGM_FI_PROF_PCIE_TX_BYTES` and `_RX_BYTES` keep their names. For Kubernetes pods, 4.9.0 exports
+per-pod utilization and memory under both the old and the new names, so a pod-level dashboard
+can look healthy while the node-level rules are already dark.
+
+```yaml
+# BROKEN: rules written for 4.8.4, still loaded after the GPU Operator v26.7.3 upgrade
+- alert: GPUHotAndBusy
+  expr: DCGM_FI_DEV_GPU_UTIL > 95 and DCGM_FI_DEV_GPU_TEMP > 85     # both series are gone
+- alert: GPUMemoryNearlyFull
+  expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.97
+- record: gpu:util:avg5m
+  expr: avg_over_time(DCGM_FI_DEV_GPU_UTIL_RATIO[5m]) > 95           # renamed, unit missed: never true
+```
+
+```yaml
+# FIX: new names and new units, plus a rule that pages when a rule's input disappears
+- alert: GPUHotAndBusy
+  expr: DCGM_FI_DEV_GPU_UTIL_RATIO > 0.95 and DCGM_FI_DEV_GPU_TEMP_CELSIUS > 85
+- alert: GPUMemoryNearlyFull
+  expr: DCGM_FI_DEV_FB_USED_BYTES / DCGM_FI_DEV_FB_CAPACITY_BYTES > 0.97
+- record: gpu:util:avg5m
+  expr: avg_over_time(DCGM_FI_DEV_GPU_UTIL_RATIO[5m])
+- alert: GPUTelemetryInputMissing
+  expr: absent(DCGM_FI_DEV_GPU_UTIL_RATIO) or absent(DCGM_FI_DEV_FB_USED_BYTES)
+  for: 15m
+  labels: {severity: ticket}
+```
+
+Upgrade order: load the renamed rules beside the old ones, upgrade one node pool, confirm both
+sets agree on the old pool and the new rules fire on the new pool, then delete the old rules.
+Byte thresholds that were written in MiB need a factor of 1,048,576; clock thresholds written in
+MHz need a factor of 1,000,000.
 
 ### 6.4 XID triage
 
@@ -446,10 +515,10 @@ Each memory bank has a small number of spare rows.
 
 | Signal | Meaning | Action |
 |---|---|---|
-| `CORRECTABLE_REMAPPED_ROWS` rising slowly | Normal wear across a large fleet | Track per GPU, no page |
-| `UNCORRECTABLE_REMAPPED_ROWS` > 0 | An uncorrectable error happened; a row was retired | Reset the GPU at the next drain |
+| `ROW_REMAP_CORRECTABLE_TOTAL` rising slowly | Normal wear across a large fleet | Track per GPU, no page |
+| `ROW_REMAP_UNCORRECTABLE_TOTAL` > 0 | An uncorrectable error happened; a row was retired | Reset the GPU at the next drain |
 | Remap pending (`nvidia-smi -q -d ROW_REMAPPER`) | Remap recorded, waiting for reset | Drain and reset |
-| `ROW_REMAP_FAILURE` = 1 | No spare row was left in the bank | Take out of service, RMA |
+| `ROW_REMAP_FAILED` = 1 | No spare row was left in the bank | Take out of service, RMA |
 | `ECC_DBE_VOL_TOTAL` increase | Double-bit error since last driver load | Treat with XID 48 workflow |
 | `ECC_SBE_VOL_TOTAL` rate rising | Memory cells degrading | Mark Suspect; XID 92 may follow |
 
@@ -462,9 +531,10 @@ clock; a node held at 1,410 MHz by `hw_power_brake` runs every kernel about 29% 
 # Per-node throttle panel
 sum by (hostname, clock_event) (increase(DCGM_EXP_CLOCK_EVENTS_TOTAL{clock_event!="gpu_idle"}[1h]))
 
-# SM clock vs fleet median for the same GPU model
-avg by (hostname) (DCGM_FI_DEV_SM_CLOCK)
-  / scalar(quantile(0.5, avg by (hostname) (DCGM_FI_DEV_SM_CLOCK{modelName="NVIDIA H100 80GB HBM3"})))
+# SM clock vs fleet median for the same GPU model (a unitless ratio, so the 4.9.0 change
+# from MHz to Hz does not affect it; an absolute threshold such as 1.5e9 Hz would)
+avg by (hostname) (DCGM_FI_DEV_SM_CLOCK_HERTZ)
+  / scalar(quantile(0.5, avg by (hostname) (DCGM_FI_DEV_SM_CLOCK_HERTZ{modelName="NVIDIA H100 80GB HBM3"})))
 ```
 
 `hw_power_brake` is an external signal, usually from the rack power system. It is a facilities
@@ -513,9 +583,9 @@ groups:
 - name: gpu-fleet
   rules:
   - record: pod:gpus:count
-    expr: count by (namespace, pod) (DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!="gpu-operator"})
+    expr: count by (namespace, pod) (DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO{namespace!="gpu-operator"})
   - record: pod:sm_active:avg
-    expr: avg by (namespace, pod) (DCGM_FI_PROF_SM_ACTIVE{namespace!="gpu-operator"})
+    expr: avg by (namespace, pod) (DCGM_FI_PROF_SM_UTIL_RATIO{namespace!="gpu-operator"})
   - record: pod:output_tokens_per_gpu_second:rate5m
     expr: |
       sum by (namespace, pod) (rate(vllm:generation_tokens_total[5m]))
@@ -523,7 +593,7 @@ groups:
   - record: namespace:gpus_allocated_idle:count
     expr: |
       count by (namespace) (
-        avg_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!="gpu-operator"}[1h]) < 0.05
+        avg_over_time(DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO{namespace!="gpu-operator"}[1h]) < 0.05
       )
 ```
 
@@ -539,14 +609,14 @@ Join gotchas:
 - A GPU with no workload has no scraped `pod` or `namespace` label to keep, so with
   `honorLabels: true` it takes the exporter pod's own target labels. Filter the exporter's
   namespace (`gpu-operator` here) out of per-pod rules, and report fleet idle capacity as
-  `count(DCGM_FI_DEV_GPU_TEMP{namespace="gpu-operator"})`.
+  `count(DCGM_FI_DEV_GPU_TEMP_CELSIUS{namespace="gpu-operator"})`.
 
 ### 6.8 Cardinality control
 
 Series count for a 512-node, 4,096-GPU H100 fleet:
 
 ```text
-series per GPU            40  (19 fields from §6.3, plus one series per xid,
+series per GPU            40  (20 fields from §6.3, plus one series per xid,
                               clock_event and health_watch value)
 GPUs                      4,096
 base series               163,840
@@ -611,7 +681,7 @@ is `failed` and the GPU runs the old layout, or someone changed the layout by ha
 kube_node_labels{label_nvidia_com_mig_config_state!="success", label_nvidia_com_mig_config!=""}
 
 # Actual instance count per GPU from dcgm-exporter vs the expected count for the profile
-count by (hostname, gpu) (DCGM_FI_DEV_FB_USED{GPU_I_PROFILE="1g.10gb"}) != 7
+count by (hostname, gpu) (DCGM_FI_DEV_FB_USED_BYTES{GPU_I_PROFILE="1g.10gb"}) != 7
 ```
 
 kube-state-metrics exports no node labels unless they are listed in
@@ -649,7 +719,7 @@ that flag the first query returns nothing and looks like a clean fleet.
 
 | Option | Series cost | Accuracy | Fits |
 |---|---|---|---|
-| Default CSV | Lowest | No ECC, no `SM_ACTIVE` | Nothing beyond a demo |
+| Default CSV | Lowest | No ECC, no `SM_UTIL_RATIO` | Nothing beyond a demo |
 | Core DCP fields plus health fields fleet-wide | About 40 per GPU | Good | Every production fleet |
 | All DCP pipes and per-process metrics fleet-wide | Several times higher | Lower, from multiplexing | Never |
 | Core fleet-wide, full set per node on demand | Core plus a short burst | Good | Investigations |
@@ -697,7 +767,7 @@ CSV, so the alert had evaluated an empty vector since day one. Fix: a custom CSV
 `absent()` rule for every field an alert depends on.
 
 **XID 79 hidden by a later XID.** A GPU fell off the bus, logged XID 79, and the driver then
-logged XID 45 for the cleanup. Within one 30 s scrape interval `DCGM_FI_DEV_XID_ERRORS` moved from
+logged XID 45 for the cleanup. Within one 30 s scrape interval `DCGM_FI_DEV_XID_ERROR` moved from
 79 to 45, and the alert on `== 79` never saw it. The job hung in an NCCL all-reduce for 40
 minutes before the training watchdog killed it. Fix: alert on
 `increase(DCGM_EXP_XID_ERRORS_TOTAL{xid="79"}[10m]) > 0`, and on the GPU's series disappearing.
@@ -735,10 +805,10 @@ stack, and idle-allocation by namespace every week. The cost side of this gap is
 
 | Tool | Role | Notes |
 |---|---|---|
-| NVIDIA DCGM | GPU telemetry, health watches, diagnostics | 4.6.1. `dcgmi diag -r 1..4`, `dcgmi health`, `dcgmi profile --pause` |
-| dcgm-exporter | Prometheus exporter for DCGM fields | 4.8.4. Custom CSV, `DCGM_EXP_*` totals, pod and DRA attribution |
-| NVIDIA GPU Operator | Driver, toolkit, device plugin, DCGM, MIG manager, DRA driver | v26.7.2. `ClusterPolicy` or `GPUCluster`, not both |
-| NVIDIA MIG Manager | Applies MIG layouts from node labels | v0.15.1 in GPU Operator v26.7.1. `nvidia.com/mig.config.state` |
+| NVIDIA DCGM | GPU telemetry, health watches, diagnostics | 4.7.0. `dcgmi diag -r 1..4`, `dcgmi health`, `dcgmi profile --pause` |
+| dcgm-exporter | Prometheus exporter for DCGM fields | 4.9.0. DCGM 4.7 field names and units, custom CSV, `DCGM_EXP_*` totals, pod and DRA attribution |
+| NVIDIA GPU Operator | Driver, toolkit, device plugin, DCGM, MIG manager, DRA driver | v26.7.3. `ClusterPolicy` or `GPUCluster`, not both |
+| NVIDIA MIG Manager | Applies MIG layouts from node labels | v0.15.2 in GPU Operator v26.7.3. `nvidia.com/mig.config.state` |
 | NVIDIA DRA Driver | Publishes GPUs as `ResourceSlice` objects | v0.5.1, managed by `GPUCluster` |
 | AMD GPU Operator | AMD driver, device plugin, metrics exporter, test runner, DRA driver | v1.5.1 |
 | AMD Device Metrics Exporter | Prometheus exporter for AMD Instinct and Radeon GPUs | `GPU_GFX_ACTIVITY`, `GPU_HEALTH`, `GPU_PROF_*` profiler fields |
@@ -761,17 +831,17 @@ Training hardware tuning: [GPU and Hardware Optimization](../../ml/gpu_and_hardw
 **Q: Why can `nvidia-smi` report 100% GPU utilization while the GPU does very little work?**
 **Short:** It reports the fraction of time any kernel was running, not how many SMs or math units that kernel used, so one tiny kernel reads 100%.
 
-`nvidia-smi` GPU-Util and `DCGM_FI_DEV_GPU_UTIL` measure the share of the sample period during
+`nvidia-smi` GPU-Util and `DCGM_FI_DEV_GPU_UTIL_RATIO` measure the share of the sample period during
 which one or more kernels executed. A kernel with 4 thread blocks on a 132-SM H100 keeps that at
 100% while 128 SMs sit idle. NCCL kernels spin-waiting on a slow peer also count as busy. Use
-`DCGM_FI_PROF_SM_ACTIVE` for how much of the chip was used and `PIPE_TENSOR_ACTIVE` or MFU for
+`DCGM_FI_PROF_SM_UTIL_RATIO` for how much of the chip was used and `TENSOR_UTIL_RATIO` or MFU for
 how much math was done. Keep `nvidia-smi` utilization for one question only: is anything running
 at all.
 
-**Q: An alert on `DCGM_FI_DEV_XID_ERRORS == 79` never fired, but a GPU fell off the bus. Why?**
-**Short:** `DCGM_FI_DEV_XID_ERRORS` holds only the last XID value, so a later XID or a reset overwrites 79 before the scrape; alert on the cumulative XID total counter with its xid label.
+**Q: An alert on `DCGM_FI_DEV_XID_ERROR == 79` never fired, but a GPU fell off the bus. Why?**
+**Short:** `DCGM_FI_DEV_XID_ERROR` holds only the last XID value, so a later XID or a reset overwrites 79 before the scrape; alert on the cumulative XID total counter with its xid label.
 
-`DCGM_FI_DEV_XID_ERRORS` is a gauge with the code of the most recent XID. After XID 79 the driver
+`DCGM_FI_DEV_XID_ERROR` is a gauge with the code of the most recent XID. After XID 79 the driver
 often logs XID 45 for cleanup, and the gauge moves to 45 inside one 30 s scrape interval. The
 GPU's series can also disappear entirely when NVML loses the card. dcgm-exporter provides
 `DCGM_EXP_XID_ERRORS_TOTAL` (opt-in) with an `xid` label; alert on
@@ -781,11 +851,23 @@ the card that vanished without a clean error.
 **Q: Your fleet has never recorded a double-bit ECC error in a year. Should you believe it?**
 **Short:** Not until you check the exporter's field list; the default dcgm-exporter CSV ships ECC counters commented out, so the alert may be reading an empty vector.
 
-In `default-counters.csv` every `DCGM_FI_DEV_ECC_*` line, `SM_ACTIVE`, `SM_OCCUPANCY` and the
-clock-event reasons are commented out. An alert on a series that does not exist returns nothing,
+In `default-counters.csv` every `DCGM_FI_DEV_ECC_*` line, `SM_UTIL_RATIO`, `SM_OCCUPANCY_RATIO`
+and the `DCGM_EXP_CLOCK_EVENTS_*` totals are commented out. An alert on a series that does not exist returns nothing,
 which is indistinguishable from "no errors" on a dashboard. Check with
 `count(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL)`: it should equal the GPU count. Ship a custom CSV and add
 an `absent()` rule for every field an alert depends on.
+
+**Q: After a GPU Operator upgrade to v26.7.3, the GPU utilization and memory alerts stopped firing. What changed?**
+**Short:** dcgm-exporter 4.9.0 renamed 23 default fields and changed 11 units, so old names now match nothing and percent thresholds no longer fit ratio metrics.
+
+GPU Operator v26.7.3 ships dcgm-exporter 4.9.0 on DCGM 4.7.0, and its release notes list the
+rename as a breaking change. `DCGM_FI_DEV_GPU_UTIL` (percent) became `DCGM_FI_DEV_GPU_UTIL_RATIO`
+(0 to 1), `DCGM_FI_DEV_FB_USED` (MiB) became `DCGM_FI_DEV_FB_USED_BYTES`, clocks moved from MHz to
+hertz, and the driver label became `DCGM_FI_SYSTEM_DRIVER_VERSION`. A rule on an old name
+evaluates an empty vector; a rule renamed without its unit (`> 95` on a ratio) can never be
+true. Per-pod series keep both names, which hides the problem on pod dashboards. Rewrite rules
+with the new names and units, keep `absent()` guards on every input, and run old and new rule
+sets side by side on one node pool before the fleet upgrade.
 
 **Q: GPU series from dcgm-exporter show `exported_pod` instead of `pod`. What happened and why does it matter?**
 **Short:** With honorLabels false, Prometheus keeps its own target label pod (the exporter pod) and renames the workload's pod label, which breaks every join to engine metrics.
@@ -827,13 +909,13 @@ the MIG manager could not apply the layout. Confirm the fix with a test pod that
 operation, not by allocatable alone.
 
 **Q: What do row remapping counters tell you, and when does a GPU go back to the vendor?**
-**Short:** Remapped rows show HBM rows retired after errors; uncorrectable remaps need a GPU reset, and ROW_REMAP_FAILURE means no spare rows are left, so the card is an RMA.
+**Short:** Remapped rows show HBM rows retired after errors; uncorrectable remaps need a GPU reset, and ROW_REMAP_FAILED means no spare rows are left, so the card is an RMA.
 
 On A100, H100 and later, a memory error on an HBM row schedules that row to be replaced by a spare
 at the next GPU reset. Correctable remaps rise slowly across a large fleet and need tracking, not
 paging. An uncorrectable remap means data was lost once; drain and reset the GPU so the remap
 takes effect. XID 63 is the remap event and the catalog says ignore it. XID 64 and
-`DCGM_FI_DEV_ROW_REMAP_FAILURE = 1` mean the bank ran out of spare rows: reset, then contact
+`DCGM_FI_DEV_ROW_REMAP_FAILED = 1` mean the bank ran out of spare rows: reset, then contact
 support for replacement.
 
 **Q: Which XIDs should fence a GPU and which should not?**
@@ -848,11 +930,11 @@ repeat of 13 or 31 on one GPU across different workloads as a hardware sign.
 **Q: Throughput dropped 20% on a few nodes with no errors in any counter. Where do you look?**
 **Short:** At SM clocks and clock-event reasons: power cap, power brake or thermal slowdown cuts clocks without raising any error.
 
-Compare each node's `DCGM_FI_DEV_SM_CLOCK` with the fleet median for the same GPU model. An H100
+Compare each node's `DCGM_FI_DEV_SM_CLOCK_HERTZ` with the fleet median for the same GPU model. An H100
 SXM boosts to 1,980 MHz; held at 1,410 MHz it runs kernels about 29% slower. Read the reason from
 `DCGM_EXP_CLOCK_EVENTS_TOTAL` by `clock_event`. `hw_power_brake` is an external signal from rack
 power and goes to facilities. `hw_thermal` on one GPU in a node points at a fan or cold plate.
-`power_cap` with `DCGM_FI_DEV_ENFORCED_POWER_LIMIT` below the default means someone lowered the
+`power_cap` with `DCGM_FI_DEV_BOARD_POWER_LIMIT_ENFORCED_WATTS` below the default means someone lowered the
 limit.
 
 **Q: What do `dcgmi diag` levels 1 to 4 test, and when do you run each?**
@@ -873,12 +955,12 @@ TFLOP/s BF16 dense, MFU is 4.05e17 / 1.01e18 = 0.40. PaLM's definition adds an a
 that recomputes everything reads a third higher on HFU while training no faster. Always state the
 peak used (dense, not sparse) and whether attention FLOPs are included.
 
-**Q: What is the difference between `SM_ACTIVE`, `SM_OCCUPANCY` and `PIPE_TENSOR_ACTIVE`?**
-**Short:** SM_ACTIVE is the share of cycles an SM has any warp, SM_OCCUPANCY is how many warps are resident relative to the maximum, and PIPE_TENSOR_ACTIVE is how often the tensor pipe issues.
+**Q: What is the difference between `SM_UTIL_RATIO`, `SM_OCCUPANCY_RATIO` and `TENSOR_UTIL_RATIO`?**
+**Short:** SM_UTIL_RATIO is the share of cycles an SM has any warp, SM_OCCUPANCY_RATIO is resident warps relative to the maximum, and TENSOR_UTIL_RATIO is how often the tensor pipe issues.
 
-All three average over every SM on the GPU. `SM_ACTIVE` near 0.9 says the kernels fill the chip.
-`SM_OCCUPANCY` of 0.25 to 0.40 is normal for large GEMMs that use many registers per block, so a
-low value is not a fault by itself. `PIPE_TENSOR_ACTIVE` is the closest per-GPU proxy for matmul
+All three average over every SM on the GPU and are named `DCGM_FI_PROF_*` in dcgm-exporter 4.9.0 (4.8.x called them `SM_ACTIVE`, `SM_OCCUPANCY` and `PIPE_TENSOR_ACTIVE`). `SM_UTIL_RATIO` near 0.9 says the kernels fill the chip.
+`SM_OCCUPANCY_RATIO` of 0.25 to 0.40 is normal for large GEMMs that use many registers per block, so a
+low value is not a fault by itself. `TENSOR_UTIL_RATIO` is the closest per-GPU proxy for matmul
 work and tracks MFU in training. Read them together: high active, low tensor means the SMs are
 waiting, often on NCCL or memory.
 
@@ -886,7 +968,7 @@ waiting, often on NCCL or memory.
 **Short:** Join on namespace and pod: count GPUs per pod from dcgm-exporter, then divide the pod's token rate by that count in a recording rule.
 
 dcgm-exporter labels each GPU series with the pod that holds it, and a `PodMonitor` gives engine
-metrics the same labels. `count by (namespace, pod) (DCGM_FI_PROF_GR_ENGINE_ACTIVE)` gives GPUs
+metrics the same labels. `count by (namespace, pod) (DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO)` gives GPUs
 per pod, and `rate(vllm:generation_tokens_total[5m])` divided by it on `(namespace, pod)` gives
 tokens per GPU-second. For a multi-node replica, aggregate by the replica group label instead of
 `pod`. The join needs `honorLabels: true`, or the workload label becomes `exported_pod`.
@@ -908,7 +990,7 @@ to `nvidia.com/mig.config.state`. A failed apply leaves the old layout in place;
 `nvidia-smi mig` change leaves the label wrong. kube-state-metrics exports these labels only when
 they are in `--metric-labels-allowlist`. dcgm-exporter series carry `GPU_I_PROFILE` and
 `GPU_I_ID`, so `count by (hostname, gpu)` of a 1g.10gb series should equal 7 on an all-1g H100.
-Restart the exporter after a live Dynamic MIG change, which 4.8.4 requires.
+Restart the exporter after a live Dynamic MIG change, as the 4.8.4 notes require. From 4.9.0, GPU-wide fields such as power and temperature are reported once per physical GPU without MIG instance labels, so summing them across instances no longer double counts.
 
 **Q: A DRA ResourceClaim stays Pending and the node has GPUs. What do you check?**
 **Short:** Check that a ResourceSlice exists for the node, which needs the DRA kubelet plugin running, then check the claim's device selectors and any device taints.
@@ -950,7 +1032,7 @@ health rules per vendor and per platform.
 ### Recovering 120 GPUs from a 512-GPU inference fleet that read 93% utilized
 
 **Context.** A company served a 70B chat model and an embedding model on 64 nodes of 8 x H100 SXM
-(512 GPUs) with vLLM v0.32.0. The fleet dashboard showed `DCGM_FI_DEV_GPU_UTIL` at 93% averaged
+(512 GPUs) with vLLM v0.34.0. The fleet dashboard showed `DCGM_FI_DEV_GPU_UTIL_RATIO` at 93% averaged
 over the week, and the platform team asked for 128 more GPUs ahead of a product launch. Finance
 asked for one number: output tokens per GPU-second. Nobody had it.
 
@@ -960,9 +1042,9 @@ custom CSV from §6.3 and set `honorLabels: true`. Within a day the new series s
 | Layer | Fleet value |
 |---|---|
 | Allocated | 100% |
-| `GR_ENGINE_ACTIVE` | 0.92 |
-| `SM_ACTIVE` | 0.38 |
-| `PIPE_TENSOR_ACTIVE` | 0.09 |
+| `GR_ENGINE_UTIL_RATIO` | 0.92 |
+| `SM_UTIL_RATIO` | 0.38 |
+| `TENSOR_UTIL_RATIO` | 0.09 |
 | Output tokens per GPU-second (chat pool) | 410 |
 
 The engine benchmark had put the chat pool's knee at 1,150 output tokens per GPU-second at the
@@ -985,15 +1067,15 @@ SLO (p95 TTFT 800 ms). The fleet produced 36% of that.
   1,410 MHz since a maintenance window. Facilities restored the rack power limit. Those 72 GPUs
   went from 300 to 420 tokens per GPU-second, worth 20 across the 416-GPU chat pool.
 - **Batch cap.** The chat deployment had `--max-num-seqs 16` from an early latency experiment.
-  `DRAM_ACTIVE` sat at 0.31 and `vllm:num_requests_waiting` was nonzero at peak. Raising it to 64
+  `DRAM_UTIL_RATIO` sat at 0.31 and `vllm:num_requests_waiting` was nonzero at peak. Raising it to 64
   kept p95 TTFT at 610 ms and lifted decode MBU from 0.29 to 0.64.
 - **MIG drift.** 12 nodes meant for 1g.10gb embedding slices had `mig.config.state=failed` after a
   driver upgrade without a reboot, with XID 119 in the logs. The embedding service ran one pod per
-  whole H100 at 0.06 `SM_ACTIVE`. After a reboot and reapply, embeddings fit on 2 nodes of MIG
+  whole H100 at 0.06 `SM_UTIL_RATIO`. After a reboot and reapply, embeddings fit on 2 nodes of MIG
   slices and 80 GPUs left the embedding pool.
 
 **Step 3: health.** The new ECC and row remap series found 3 GPUs with
-`UNCORRECTABLE_REMAPPED_ROWS > 0` and pending remaps, and 1 with `ROW_REMAP_FAILURE = 1`. The
+`ROW_REMAP_UNCORRECTABLE_TOTAL > 0` and pending remaps, and 1 with `ROW_REMAP_FAILED = 1`. The
 first three were reset during a drain; the fourth was fenced with a device taint and sent for RMA.
 Before the change, that card had been the cause of a weekly "random" NaN in one replica.
 

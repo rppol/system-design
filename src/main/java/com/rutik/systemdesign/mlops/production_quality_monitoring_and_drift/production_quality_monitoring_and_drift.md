@@ -1,17 +1,18 @@
 # Production Quality Monitoring and Drift
 
-> **Version anchor (2026-10-18).** Tools appear at the mlops pin-table versions: Arize Phoenix
-> v20.23.0 (2026-10-16); Langfuse v4.63.0 (2026-10-16), with OpenAI decision-model evaluators
+> **Version anchor (2026-11-25).** Tools appear at the mlops pin-table versions: Arize Phoenix
+> v22.0.1 (2026-11-21); Langfuse v4.86.0 (2026-11-24), with OpenAI decision-model evaluators
 > from v4.55.0 (2026-10-08) and decision-model evaluators graduated in v4.57.0 (2026-10-12);
-> MLflow 3.17.1 (2026-10-13), which adds the Decision API to `make_judge()`, on top of the
-> TypeSafe judges added in 3.17.0 (2026-10-07); SGLang v0.5.21 (2026-10-02) for `label_mass`
-> on `/v1/decisions`. The OpenTelemetry GenAI semantic conventions moved to the
-> `open-telemetry/semantic-conventions-genai` repository (checked 2026-10-18); this page claims
+> MLflow 3.18.0 (2026-11-04), with the Decision API in `make_judge()` since 3.17.1 (2026-10-13)
+> and TypeSafe judges since 3.17.0 (2026-10-07); SGLang v0.5.23 (2026-11-02), which still returns
+> `label_mass` on `/v1/decisions`. The OpenTelemetry GenAI semantic conventions moved to the
+> `open-telemetry/semantic-conventions-genai` repository (checked 2026-11-25); this page claims
 > no stability level for them. Evidently, NannyML, Fiddler and Datadog LLM Observability have
 > no pin-table row and are named without a version.
 >
-> **On prices.** The OpenAI Decisions API input price ($0.10 per 1M tokens, no output charge,
-> public beta) was checked on 2026-10-18. Every other dollar figure is a stated assumption.
+> **On prices.** The OpenAI Decisions API prices (generally available; $0.10 per 1M uncached
+> input tokens, $0.01 cached, $0.125 for cache writes, no output charge) were checked on
+> 2026-11-25. Every other dollar figure is a stated assumption.
 > Replace it with what your account pays; the formulas do not change.
 
 ## 1. Concept Overview
@@ -432,7 +433,7 @@ rubric), the input is 36M tokens a day.
 | Judge | Input cost | Output cost | Per day | Per 30 days |
 |---|---|---|---|---|
 | Generative judge, assumed $2.50 per 1M input and $10 per 1M output, 250 output tokens | $90 | $50 | $140 | $4,200 |
-| OpenAI Decisions API (`gpt-6-luna`), $0.10 per 1M input, no output charge (checked 2026-10-18) | $3.60 | $0 | $3.60 | $108 |
+| OpenAI Decisions API (`gpt-6-luna`), $0.10 per 1M uncached input, no output charge (checked 2026-11-25) | $3.60 | $0 | $3.60 | $108 |
 
 The decision-model judge answers a `predicate` or `choice` question and returns a probability,
 not a rationale. That is enough for a pass rate and for routing to a queue. It is not enough for
@@ -775,16 +776,16 @@ abandoned in a month. Fix: dedupe by cluster, cap per day, prioritize by SLO bur
 
 | Tool | Role | Notes |
 |---|---|---|
-| Arize Phoenix | Open-source tracing, online and offline evals, datasets | v20.23.0. OTel-based ingestion; runs self-hosted |
-| Langfuse | Tracing, LLM-as-judge and decision-model evaluators on live traces, datasets, scores | v4.63.0. Acquired by ClickHouse (announced 2026-01-16). An OpenAI decision-model refusal fails the run with no scores written |
-| MLflow | GenAI judges through `make_judge()`, including TypeSafe and Decision API judges | 3.17.1. `feedback_value_type=bool` returns True at probability 0.5 or above |
+| Arize Phoenix | Open-source tracing, online and offline evals, datasets | v22.0.1. OTel-based ingestion; runs self-hosted |
+| Langfuse | Tracing, LLM-as-judge and decision-model evaluators on live traces, datasets, scores | v4.86.0. Acquired by ClickHouse (announced 2026-01-16). An OpenAI decision-model refusal fails the run with no scores written |
+| MLflow | GenAI judges through `make_judge()`, including TypeSafe and Decision API judges | 3.18.0. `feedback_value_type=bool` returns True at probability 0.5 or above |
 | OpenTelemetry | Trace and event model; GenAI conventions for model, usage and evaluation fields | Conventions in `open-telemetry/semantic-conventions-genai`; no stability level claimed here |
 | Evidently | Open-source drift and data-quality reports and test suites | No pin; used in batch pipelines |
 | NannyML | Performance estimation without labels (CBPE, DLE), drift detection | No pin; CBPE assumes no concept drift |
 | Fiddler | Commercial model and LLM monitoring, explainability | No pin |
 | Datadog LLM Observability | LLM traces, evaluations and alerts inside Datadog APM | No pin |
-| OpenAI Decisions API | Low-cost decision-model judge backend | Public beta, `gpt-6-luna`, $0.10 per 1M input tokens (checked 2026-10-18) |
-| SGLang | Self-hosted decision-model serving with `label_mass` in responses | v0.5.21. `/v1/decisions` and `/v1/systemone` |
+| OpenAI Decisions API | Low-cost decision-model judge backend | GA, `gpt-6-luna`, $0.10 per 1M uncached input tokens, $0.01 cached (checked 2026-11-25) |
+| SGLang | Self-hosted decision-model serving with `label_mass` in responses | v0.5.23. `/v1/decisions` and `/v1/systemone` |
 
 Decision-model serving and calibration are compared in
 [Decision Models](../decision_models/decision_models.md); the gateway that emits per-request
@@ -982,6 +983,21 @@ the retrieval canary's German hit rate fell from 0.93 to 0.79 and blocked the sn
 tool-server release took its tool-error rate from 0.4% to 7% in the first canary hour and rolled
 back. A new judge snapshot ran beside the pinned one for a week, raised kappa on the canary set from
 0.71 to 0.76, and the switch was annotated on every SLO chart.
+
+The `response_model` alert worked only after a fix. The first rule grouped by the model the app
+requests, which is the alias, so it stayed silent when the provider moved the alias:
+
+```promql
+# BROKEN: the request model is the alias the app sends; it never changes on a provider move
+count by (gen_ai_request_model) (rate(gen_ai_client_token_usage_count[1h]) > 0)
+  unless count by (gen_ai_request_model) (rate(gen_ai_client_token_usage_count[7d] offset 1h) > 0)
+```
+
+```promql
+# FIX: group by the model the provider reports; a new snapshot id is a series unseen for 7 days
+count by (gen_ai_response_model) (rate(gen_ai_client_token_usage_count[1h]) > 0)
+  unless count by (gen_ai_response_model) (rate(gen_ai_client_token_usage_count[7d] offset 1h) > 0)
+```
 
 **Results after two quarters.**
 

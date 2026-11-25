@@ -1,8 +1,8 @@
 # Case Study: Design a Multi-Tenant LoRA Serving Platform
 
-> **Version anchor (2026-10-18).** vLLM v0.32.0 (2026-10-18). llm-d v0.10.0 (2026-09-29),
-> inference scheduler with the `lora-affinity-scorer` plugin. AIBrix v0.8.0 (2026-10-13),
-> `ModelAdapter` CRD `model.aibrix.ai/v1alpha1`. Kueue v0.20.2 (2026-10-15). GPU prices in
+> **Version anchor (2026-11-25).** vLLM v0.34.0 (2026-11-16). llm-d v1.0.0 (2026-10-20), router
+> endpoint picker (`llm-d-router-endpoint-picker`) with the `lora-affinity-scorer` plugin. AIBrix v0.8.0 (2026-10-13),
+> `ModelAdapter` CRD `model.aibrix.ai/v1alpha1`. Kueue v0.20.7 (2026-11-19). GPU prices in
 > this study are a planning rate (`P_GPU = $2.50` per H100-hour), not a quote. Throughput per
 > replica is an assumption for this workload shape; measure your own before sizing.
 
@@ -804,10 +804,10 @@ why this platform does not run a custom engine.
 
 | Tool | Role here | Notes |
 |---|---|---|
-| vLLM v0.32.0 | Engine on every pool | `--enable-lora`, `--max-loras 16`, `--max-cpu-loras 128`, `--max-lora-rank` per pool, `lora_filesystem_resolver` |
-| llm-d v0.10.0 | Inference scheduler | `lora-affinity-scorer` reads `vllm:lora_requests_info`; `queue-scorer` for load; custom tie-break scorer |
+| vLLM v0.34.0 | Engine on every pool | `--enable-lora`, `--max-loras 16`, `--max-cpu-loras 128`, `--max-lora-rank` per pool, `lora_filesystem_resolver` |
+| llm-d v1.0.0 | Router endpoint picker (`llm-d-router-endpoint-picker`) | `lora-affinity-scorer` reads `vllm:lora_requests_info`; `queue-scorer` for load; custom tie-break scorer |
 | AIBrix v0.8.0 | Contract-tier placement | `ModelAdapter` with `replicas` set; controller calls the internal load API |
-| Kueue v0.20.2 | Campaign GPU quota | `ClusterQueue` with a borrowing limit for retrain jobs |
+| Kueue v0.20.7 | Campaign GPU quota | `ClusterQueue` with a borrowing limit for retrain jobs |
 | PEFT and safetensors | Adapter format | `adapter_config.json` plus `adapter_model.safetensors`; pickle refused at upload |
 | PostgreSQL | Adapter registry | 125,000 version rows, alias table with revisions, campaign state |
 | Object store (S3 or equivalent) | Adapter and training snapshot storage | Content-addressed by digest, per-tenant encryption keys |

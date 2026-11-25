@@ -1,12 +1,12 @@
 # Multi-Region and Multi-Tenant Serving
 
-> **Version anchor (2026-10-18).** **vLLM v0.32.0** (2026-10-18) serves the per-tenant LoRA
-> examples. **llm-d v0.10.0** (2026-09-29) and **Gateway API Inference Extension v1.6.2**
+> **Version anchor (2026-11-25).** **vLLM v0.34.0** (2026-11-16) serves the per-tenant LoRA
+> examples. **llm-d v1.0.0** (2026-10-20) and **Gateway API Inference Extension v1.6.2**
 > (2026-09-17; EPP, BBR, InferenceObjective and InferenceModelRewrite moved to llm-d in v1.6.0)
-> route requests inside a region. **KServe v0.21.0** (2026-09-25), **Kueue v0.20.2**
-> (2026-10-15) and **Kubernetes 1.37** host dedicated tenant deployments and their quotas.
-> **Agent Router v1.2.0** (envoyproxy/ai-gateway, 2026-10-07) and **LiteLLM v1.106.0**
-> (2026-10-18) are the gateway options in the examples. Provider facts read from primary docs on
+> route requests inside a region. **KServe v0.21.0** (2026-09-25), **Kueue v0.20.7**
+> (2026-11-19) and **Kubernetes 1.37** host dedicated tenant deployments and their quotas.
+> **Agent Router v1.3.0** (`theagentrouter/agent-router`, 2026-11-18) and **LiteLLM v1.111.0**
+> (2026-11-25) are the gateway options in the examples. Provider facts read from primary docs on
 > 2026-10-18: Amazon Bedrock cross-Region inference (geographic profiles route within a geography
 > such as US or EU at standard pricing; global profiles route to any supported commercial Region
 > at about 10% lower cost; CloudTrail records the processing Region in
@@ -561,16 +561,16 @@ with the eval gate run on site, and a support window on how old a site may fall 
 
 | Tool | Role | Notes |
 |---|---|---|
-| Agent Router | Envoy-based AI gateway for per-tenant routing and limits | v1.2.0, renamed from Envoy AI Gateway |
-| LiteLLM | Gateway with virtual keys, budgets and provider routing | v1.106.0 |
-| llm-d | In-region inference scheduling and routing | v0.10.0. CNCF Sandbox project |
+| Agent Router | Envoy-based AI gateway for per-tenant routing and limits | v1.3.0, renamed from Envoy AI Gateway at v1.2.0; `QuotaPolicy` for per-tenant token budgets |
+| LiteLLM | Gateway with virtual keys, budgets and provider routing | v1.111.0 |
+| llm-d | In-region inference scheduling and routing | v1.0.0. CNCF Sandbox project |
 | Gateway API Inference Extension | InferencePool and conformance for model-aware routing | v1.6.2 |
-| vLLM | Engine with multi-LoRA serving for per-tenant adapters | v0.32.0. `--enable-lora`, `--max-loras` |
+| vLLM | Engine with multi-LoRA serving for per-tenant adapters | v0.34.0. `--enable-lora`, `--max-loras` |
 | KServe | Per-tenant InferenceService deployments | v0.21.0. CNCF incubating project |
-| Kueue | Quotas that keep dedicated deployments from taking shared capacity | v0.20.2 |
+| Kueue | Quotas that keep dedicated deployments from taking shared capacity | v0.20.7 |
 | Amazon Bedrock | Managed models with geographic and global cross-Region inference | Processing Region in CloudTrail |
 | Microsoft Foundry | Managed models with Global, Data Zone and geography deployment types | EU Data Zone follows the EU Data Boundary |
-| llama.cpp | `llama-server` for small air-gapped sites | v0.7.0 stable |
+| llama.cpp | `llama-server` for small air-gapped sites | v1.0.0 stable |
 
 The general gateway features (virtual keys, budgets, provider fallback) are compared in
 [AI Gateway Operations](../ai_gateway_operations/ai_gateway_operations.md). Legal requirements for
@@ -761,6 +761,27 @@ with the most free capacity. Three problems surfaced in one quarter:
 | EU headroom | Two EU regions at a 42.5% ceiling was too costly, so shed on failover | Free-tier and batch traffic queued during failover; protected share sized at 85% ceiling |
 | Noisy neighbor | Token-based admission plus a dedicated tier | Per-tenant in-flight token caps, weighted fair queues; legal-tech tenant moved to a dedicated deployment of 8 GPUs under a Kueue quota |
 | Air-gapped prospect | Dedicated-cluster tier with quarterly import bundles | vLLM on 8 on-site GPUs, internal registry, eval gate run on site |
+
+The residency fix was one rule in the gateway's fallback, shown here as the team's own policy
+schema:
+
+```yaml
+# BROKEN: fallback picks the region with the most free capacity, in any geography
+fallback:
+  strategy: most_free_capacity
+  candidates: [eu-west, eu-central, us-east]
+```
+
+```yaml
+# FIX: the tenant's residency filter runs first; with no eligible region, queue, never cross
+tenant_policy:
+  residency: eu
+  allowed_regions: [eu-west, eu-central]
+fallback:
+  strategy: most_free_capacity
+  candidates: allowed_regions
+  on_empty: queue                 # counted in residency_blocked
+```
 
 The EU capacity plan: EU interactive load needed 60 GPUs at the 85% ceiling, of which 40% was
 free tier and batch. With free tier and batch shed on failover, one surviving region had to carry

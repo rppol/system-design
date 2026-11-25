@@ -2,7 +2,7 @@
 
 The lifecycle and platform layer for AI systems: every artifact an AI feature ships (weights, adapters, prompts, tool servers, vector indexes, eval sets, decision schemas) as a versioned, gated, rolled-out and rolled-back release input, plus the serving, compute and operations platform that runs them. The [ML](../ml/README.md), [LLM](../llm/README.md) and [DevOps](../devops/README.md) sections teach the models, the techniques and the substrate. This section links to them and covers what crosses between them.
 
-> **No runnable application.** All content is Markdown. Version facts are pinned in [CLAUDE.md](CLAUDE.md) "Version pins", fetched 2026-10-18.
+> **No runnable application.** All content is Markdown. Version facts are pinned in [CLAUDE.md](CLAUDE.md) "Version pins", fetched 2026-11-25.
 
 ---
 
@@ -205,7 +205,7 @@ The Principal Path is the judgment: which refresh policy, scheduler, quota model
 
 The pin table in [CLAUDE.md](CLAUDE.md) is the only source for versions in this section. Each module page carries a dated version-anchor blockquote that uses rows from it. A fact not in the table is fetched from its primary source before it is written, or cut.
 
-Rows with frequent releases: vLLM (v0.30.0, v0.31.0 and v0.32.0 shipped between 2026-09-22 and 2026-10-18), llm-d, Gateway API Inference Extension, KServe, and the decision-model APIs. The OpenAI Decisions API is in public beta as of 2026-10-18. TGI is archived (2026-03-21). Re-fetch these rows before an audit pass.
+Rows with frequent releases: vLLM (v0.32.0, v0.33.0 and v0.34.0 shipped between 2026-10-18 and 2026-11-16), llm-d (v1.0.0 on 2026-10-20), Gateway API Inference Extension, KServe, dcgm-exporter, and the decision-model APIs. The OpenAI Decisions API is generally available, with prompt caching, as of 2026-11-25. TGI is archived (2026-03-21). Re-fetch these rows before an audit pass.
 
 ---
 

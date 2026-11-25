@@ -1,10 +1,10 @@
 # Dataset and Label Versioning
 
-> **Version anchor** (checked 2026-10-18). lakeFS v1.88.0, released 2026-10-01. DVC 3.67.1,
+> **Version anchor (2026-11-25).** lakeFS v1.88.0, released 2026-10-01. DVC 3.67.1,
 > released 2026-03-31; the repo is `treeverse/dvc` and `iterative/dvc` redirects to it, so DVC
-> and lakeFS sit in the same GitHub org. Label Studio 1.23.2, released 2026-09-29. Every other
-> tool on this page is either named without a version or carries its release, with the same
-> check date, in the §11 table.
+> and lakeFS sit in the same GitHub org. Label Studio 1.23.2, released 2026-09-29. All three were
+> still the latest releases on 2026-11-25. Every other tool on this page is either named without
+> a version or carries its release, checked 2026-10-18, in the §11 table.
 
 A model is a function of its code, its data, its labels, and the feature definitions that turned raw records into inputs. Code is versioned in git. The other three usually have an S3 prefix, a spreadsheet of annotation guidelines, and a table that someone overwrites every night. This page treats each of them as a release input: something with an immutable id, a contract that is checked before it is used, and provenance that survives an audit or an erasure request.
 
@@ -791,6 +791,19 @@ flowchart LR
 1. **Data.** Nightly exports land on an `ingest-YYYYMMDD` branch in the lakeFS repo `support-ml`. A pre-merge hook runs a GX suite (row counts within 20% of the 28-day median, no null `ticket_id`, `amount_usd` between 0 and 50,000), checks that every row has `license` and `consent_basis`, and runs a PII scanner on free text. Passing branches merge to `main`. Each training run keeps a `train-<run_id>` branch whose HEAD is its training commit, so GC never collects those objects; a cleanup job deletes the branch after 400 days. The repository default GC retention is 14 days.
 2. **Labels.** The schema lives in git at `label_schemas/support_intent.yaml`. Label Studio projects are created per round from that file by a script, so the tool's XML config is generated, never edited by hand. Closed rounds export to the append-only label table. LLM pre-labels carry `source = 'llm_prelabel:<model>@<prompt_version>'`; accepted pre-labels keep that source with an `accepted_by` annotator id. 10% of items are double-labeled.
 3. **Split and gate.** Split by `thread_id` with a salt rotated only on a schema major bump. The gate removes exact duplicates (about 18,000 per run, mostly macro replies), runs MinHash LSH at 16 x 8 against the eval set, and fails the run if more than 0.1% of eval items have a training near-duplicate or any class's kappa on the overlap slice is below 0.6.
+
+   The old random 10% split was keyed by `ticket_id`, one row per ticket:
+
+   ```python
+   # BROKEN: replies in one thread land on both sides, so eval sees near-copies of training text
+   split = "eval" if hash_bucket(f"{salt}:{row.ticket_id}") < 10 else "train"
+   ```
+
+   ```python
+   # FIX: split on the thread, so every ticket in a conversation goes to the same side
+   split = "eval" if hash_bucket(f"{salt}:{row.thread_id}") < 10 else "train"
+   ```
+
 4. **Eval set.** 6,000 human-only, adjudicated tickets in a private Hub dataset repo, referenced by commit sha. A separate 1,500-item slice is regenerated quarterly from tickets created after the last training cutoff, as the freshness control.
 5. **Manifest and registry.** Each run writes the manifest of §6.10. The registry rejects a model version without a manifest whose data commit resolves.
 6. **Erasure.** A request resolves `subject_id` to ticket ids, queries the lineage store, deletes on an `erase-<request_id>` branch (tickets, labels, synthetic children by `parent_item_id`), bumps the eval set if hit, and merges. The classifier picks it up at the next monthly retrain, inside the one-month window. The quarterly fine-tune is the gap: requests that hit its training set trigger an out-of-cycle retrain if more than 30 days remain before the scheduled one. Pre-erasure training branches are not retained for audit beyond 30 days after a request; the audit retention policy names this exception and the legal basis.

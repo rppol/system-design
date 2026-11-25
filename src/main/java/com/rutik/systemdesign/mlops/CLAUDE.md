@@ -72,76 +72,81 @@ listed in the right column, link to it. Do not repeat it.
 
 ---
 
-## Version pins (fetched 2026-10-18)
+## Version pins (fetched 2026-11-25)
 
 Every module's version-anchor blockquote uses only rows from this table. A version or
 product fact not in this table is fetched from its primary source before it is written. If
 the fetch fails, cut the fact. No "verify" marker ships. Re-fetch the table before an audit
-pass. llm-d, GIE, KServe, vLLM and the decision-model APIs change monthly.
+pass. llm-d, GIE, KServe, vLLM and the decision-model APIs change monthly: between the
+2026-10-18 and 2026-11-25 fetches, llm-d, vLLM, dcgm-exporter and the OpenAI Decisions API
+each changed taught behavior, so schedule the next re-fetch within 30 days.
 
 | Tool | Pin | Date | Source |
 |---|---|---|---|
-| vLLM | v0.32.0 (v0.31.0 2026-10-05, v0.30.0 2026-09-22); `POST /v1/systemone` added in v0.32.0 | 2026-10-18 | https://github.com/vllm-project/vllm/releases |
-| SGLang | v0.5.21; Decisions API `/v1/decisions` and `/v1/systemone` (PR #41208) | 2026-10-02 | https://github.com/sgl-project/sglang/releases |
-| SGLang decision-model docs | validated on Qwen3.8-27B and Qwen3.5-35B-A3B, one H200, BF16 | checked 2026-10-18 | https://docs.sglang.io/docs/supported-models/decision_models |
-| TensorRT-LLM | stable v1.2.1; pre-release v1.4.0rc0 2026-10-14 (v1.3.0 shipped only as rc builds) | 2026-04-20 | https://github.com/NVIDIA/TensorRT-LLM/releases |
-| llama.cpp | stable v0.7.0 (2026-10-15, the only non-pre-release in the last 100 releases); rolling build b11719 (2026-10-18, pre-release); decision-model support noted in b11714 | 2026-10-18 | https://github.com/ggml-org/llama.cpp/releases |
-| llama-server | `-np/--parallel` default -1 (auto); `-cb/--cont-batching` default enabled; `--kv-unified` default enabled when slots are auto; `/metrics` only with `--metrics`; `--port` default 9931 (was 8080; changed in PR #30159, listed in the v0.7.0 notes) | checked 2026-10-18 | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
-| Ollama | v0.40.6; decision models via `/v1/systemone` since v0.35.0 (2026-09-28); Clef models v0.35.1 (2026-09-29); CLI and MLX support v0.40.4 (2026-10-12) | 2026-10-16 | https://github.com/ollama/ollama/releases |
+| vLLM | v0.34.0 (v0.33.0 tagged 2026-11-01); the extensible KV cache is on by default and sizes the cache from memory free after CUDA graph capture and warmup, `gpu_memory_utilization` defaults to 1.0 and the notes say to stop setting it in most cases (opt out with `--gpu-memory-utilization 0.9` or `--no-enable-extensible-kv-cache`); default `--block-size` is 64 (was 16); Model Runner V1 is removed (`VLLM_USE_V2_MODEL_RUNNER=0` fails at startup); `POST /v1/systemone` added in v0.32.0 | 2026-11-16 | https://github.com/vllm-project/vllm/releases |
+| SGLang | v0.5.23; Decisions API `/v1/decisions` and `/v1/systemone` since v0.5.21 (PR #41208) | 2026-11-02 | https://github.com/sgl-project/sglang/releases |
+| SGLang decision-model docs | validated on Qwen3.8-27B and Qwen3.5-35B-A3B, one H200, BF16 | checked 2026-11-25 | https://docs.sglang.io/docs/supported-models/decision_models |
+| TensorRT-LLM | stable v1.3.0 (2026-11-20); v1.4.0rc4 is the newest pre-release | 2026-11-20 | https://github.com/NVIDIA/TensorRT-LLM/releases |
+| llama.cpp | stable v1.0.0 (2026-11-13; removes the deprecated public API, including `--defrag-thold`); rolling build b12722 (2026-11-25, pre-release); decision-model support noted in b11714 | 2026-11-25 | https://github.com/ggml-org/llama.cpp/releases |
+| llama-server | `-np/--parallel` default -1 (auto); `-cb/--cont-batching` default enabled; `--kv-unified` default enabled when slots are auto; `/metrics` only with `--metrics`; `--port` default 9931 (was 8080; changed in PR #30159, listed in the v0.7.0 notes) | checked 2026-11-25 | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| Ollama | v0.40.18; decision models via `/v1/systemone` since v0.35.0 (2026-09-28); Clef models v0.35.1 (2026-09-29); CLI and MLX support v0.40.4 (2026-10-12) | 2026-11-24 | https://github.com/ollama/ollama/releases |
 | TGI | archived; README points to vLLM, SGLang, llama.cpp, MLX | 2026-03-21 | https://github.com/huggingface/text-generation-inference |
-| KServe | v0.21.0 | 2026-09-25 | https://github.com/kserve/kserve/releases |
-| llm-d | v0.10.0 (CNCF Sandbox since 2026-03) | 2026-09-29 | https://github.com/llm-d/llm-d/releases |
+| KServe | v0.21.0 (no later release as of 2026-11-25) | 2026-09-25 | https://github.com/kserve/kserve/releases |
+| llm-d | v1.0.0 (CNCF Sandbox since 2026-03): router configuration API graduates to `v1`; priority- and fairness-aware flow control consolidated under `flowControl`; router HA with hot standby; `DisaggregatedSet` manages prefill and decode replicas as one unit; components renamed `llm-d-router-endpoint-picker`, `llm-d-router-disagg-sidecar`, `llm-d-router-coordinator`; `llm-d-kv-cache` moved into `llm-d-router`; llm-d is deprecating its own inference images (`llm-d-rocm` deprecated) in favor of upstream engine images; `ai-dynamo/modelexpress` integrated for P2P weight loading; all components version-aligned at 1.0.0 | 2026-10-20 | https://github.com/llm-d/llm-d/releases |
 | Gateway API Inference Extension | v1.6.2 (EPP, BBR, InferenceObjective, InferenceModelRewrite moved to llm-d in v1.6.0) | 2026-09-17 | https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases |
 | LeaderWorkerSet | v1.0.0 (adds DisaggregatedSet) | 2026-10-16 | https://github.com/kubernetes-sigs/lws/releases |
-| NVIDIA Dynamo | v1.5.1 stable (v1.6.0 dev pre-releases after it) | 2026-10-07 | https://github.com/ai-dynamo/dynamo/releases |
+| NVIDIA Dynamo | v1.7.0 stable (model-specific `-dev` and `-post` builds are published beside it) | 2026-11-24 | https://github.com/ai-dynamo/dynamo/releases |
 | AIBrix | v0.8.0 (StormService, ModelAdapter, predictive autoscaling APIs, scheduled replica bounds) | 2026-10-13 | https://github.com/vllm-project/aibrix/releases |
-| Ray | 2.59.0 (Serve LLM, Ray Data LLM) | 2026-10-02 | https://github.com/ray-project/ray/releases |
-| Triton Inference Server | 2.73.0 / NGC 26.09 | 2026-09-30 | https://github.com/triton-inference-server/server/releases |
-| BentoML | v1.4.39; no release after it as of 2026-10-18 | 2026-05-07 | https://github.com/bentoml/BentoML/releases |
+| Ray | 2.60.1 (Serve LLM, Ray Data LLM) | 2026-11-23 | https://github.com/ray-project/ray/releases |
+| KubeRay | v1.7.3 (v1.8.0-rc.0 is a pre-release) | 2026-11-23 | https://github.com/ray-project/kuberay/releases |
+| Triton Inference Server | 2.75.0 / NGC 26.11 | 2026-11-17 | https://github.com/triton-inference-server/server/releases |
+| BentoML | v1.4.40 | 2026-10-23 | https://github.com/bentoml/BentoML/releases |
 | Seldon Core 2 | v2.10.2 (newest v2 tag; the repo's newer v1.19.0 of 2026-01-23 is the v1 line); `LICENSE` is a Business Source License naming "Seldon Core v2" as the Licensed Work | 2025-12-19 | https://github.com/SeldonIO/seldon-core/releases |
-| Kueue | v0.20.2 (v1beta1 no longer served) | 2026-10-15 | https://github.com/kubernetes-sigs/kueue/releases |
+| Kueue | v0.20.7 (v1beta1 no longer served); v0.21.0-rc.2 (2026-11-24) is a pre-release | 2026-11-19 | https://github.com/kubernetes-sigs/kueue/releases |
 | Volcano | v1.16.0 | 2026-10-14 | https://github.com/volcano-sh/volcano/releases |
-| KAI Scheduler | v0.18.6 (v0.16.12 on 2026-10-18 is a backport line) | 2026-10-15 | https://github.com/NVIDIA/KAI-Scheduler/releases |
-| Kubeflow Trainer | v2.3.0 | 2026-08-07 | https://github.com/kubeflow/trainer/releases |
-| Kubeflow Pipelines | 2.17.2 | 2026-09-04 | https://github.com/kubeflow/pipelines/releases |
-| Kubeflow Hub | v0.3.17 (renamed from Model Registry at v0.3.9; MCP and Agents catalogs in v0.3.14 and v0.3.16) | 2026-09-21 | https://github.com/kubeflow/hub/releases |
-| MLflow | 3.17.1 ("Support Decision API in `make_judge()`"); 3.17.0 2026-10-07 adds TypeSafe judges | 2026-10-13 | https://github.com/mlflow/mlflow/releases |
-| Langfuse | v4.63.0; OpenAI decision-model evaluators v4.55.0 (2026-10-08); decision-model evaluators graduated v4.57.0 (2026-10-12) | 2026-10-16 | https://github.com/langfuse/langfuse/releases |
-| Arize Phoenix | v20.23.0 | 2026-10-16 | https://github.com/Arize-ai/phoenix/releases |
-| OpenAI Decisions API | public beta, `POST /v1/decisions`, model `gpt-6-luna`, input $0.10 per 1M tokens, no output charge | checked 2026-10-18 | https://developers.openai.com/api/docs/guides/decisions |
-| TypeSafe System One API | model family Jev, alias `jev-latest`; pin a versioned id | checked 2026-10-18 | https://typesafe.ai/ |
+| KAI Scheduler | v0.19.0; the repo moved from `NVIDIA/KAI-Scheduler` to `kai-scheduler/KAI-Scheduler` (the old path redirects); v0.19.0 consumes its CRDs from a standalone `kai-scheduler/api` module | 2026-11-11 | https://github.com/kai-scheduler/KAI-Scheduler/releases |
+| Kubeflow Trainer | v2.4.0: BREAKING, ReplicatedJob names in runtimes limited to 20 characters, the TrainJob image is set on the MPI launcher and nodes, CRDs kept on `helm uninstall`, CertManagement fields renamed; suspended MPI-plugin TrainJobs created before the upgrade fail to resume after it; Workload-Aware Scheduling for TrainJob phase 1 (KEP-3015); `OptimizationJob` controller behind an alpha feature gate; DRA support for TrainJob (KEP-2782). v2.3.0 (2026-08-07) introduced the `OptimizationJob` CRD and requires clusters on v2.0, v2.1 or v2.2 to upgrade to v2.3 before any later version | 2026-11-06 | https://github.com/kubeflow/trainer/releases |
+| Kubeflow Pipelines | 2.18.2 | 2026-11-23 | https://github.com/kubeflow/pipelines/releases |
+| Kubeflow Hub | v0.3.18 (renamed from Model Registry at v0.3.9; MCP and Agents catalogs in v0.3.14 and v0.3.16) | 2026-10-22 | https://github.com/kubeflow/hub/releases |
+| MLflow | 3.18.0; 3.17.1 (2026-10-13) added "Support Decision API in `make_judge()`"; 3.17.0 (2026-10-07) added TypeSafe judges | 2026-11-04 | https://github.com/mlflow/mlflow/releases |
+| Langfuse | v4.86.0; OpenAI decision-model evaluators v4.55.0 (2026-10-08); decision-model evaluators graduated v4.57.0 (2026-10-12) | 2026-11-24 | https://github.com/langfuse/langfuse/releases |
+| Arize Phoenix | v22.0.1 (server package `arize-phoenix`; the repo also publishes client releases) | 2026-11-21 | https://pypi.org/project/arize-phoenix/ |
+| OpenAI Decisions API | generally available, `POST /v1/decisions`, model `gpt-6-luna` (the only supported model); uncached input $0.10 per 1M tokens, cache reads $0.01 per 1M, cache writes $0.125 per 1M, no output charge; prompt caching needs a reusable `input` prefix of at least 1,024 tokens; 1 to 400 questions per request (200 in the beta); `input_json` content parts and hosted image URLs | checked 2026-11-25 | https://developers.openai.com/api/docs/guides/decisions, https://developers.openai.com/api/docs/models/gpt-6-luna |
+| TypeSafe System One API | model family Jev, `POST /v1/systemone`; current models `jev-1.14.0` (available 2026-10-14, adds Box questions) and `jev-1.13.0`, both $42 per billion input tokens with output free; aliases `jev-latest` and `jev-preview` both point to `jev-1.14.0`; pin a versioned id | checked 2026-11-25 | https://docs.typesafe.ai/models |
 | vLLM Semantic Router | v0.4.0 (signal-driven decisions; Router Replay plugin since v0.2.0) | 2026-09-27 | https://github.com/vllm-project/semantic-router/releases |
-| Agent Router (envoyproxy/ai-gateway) | v1.2.0, renamed from Envoy AI Gateway, CRDs and API group unchanged | 2026-10-07 | https://github.com/envoyproxy/ai-gateway/releases |
-| LiteLLM | v1.106.0 (stdio MCP servers disabled by default, #44066) | 2026-10-18 | https://github.com/BerriAI/litellm/releases |
-| NVIDIA GPU Operator | v26.7.2; manages DRA Driver v0.5.1 through the `GPUCluster` CR | 2026-10-14 | https://github.com/NVIDIA/gpu-operator/releases |
+| Agent Router | v1.3.0; the repo moved from `envoyproxy/ai-gateway` to `theagentrouter/agent-router` (the old path redirects); renamed from Envoy AI Gateway at v1.2.0, API group `aigateway.envoyproxy.io` unchanged; v1.3.0 makes `QuotaPolicy` a token-budget system (charged at response end, live policy changes, `fromMetadata` per-tenant limits, `1w`/`1mo`/`1y` windows, cross-namespace targets with a ReferenceGrant, quota-aware backend failover in preview), adds the OpenAI Files and Decisions APIs, moves to Envoy Gateway v1.10.0 | 2026-11-18 | https://github.com/theagentrouter/agent-router/releases |
+| LiteLLM | v1.111.0; stdio MCP servers disabled by default since v1.106.0 (#44066) | 2026-11-25 | https://github.com/BerriAI/litellm/releases |
+| NVIDIA GPU Operator | v26.7.3 (ships dcgm-exporter 4.9.0 and DCGM 4.7.0, so its metric renames are a breaking change of this Operator release); the v26.7.2 notes name DRA Driver v0.5.1 managed through the `GPUCluster` CR | 2026-11-17 | https://github.com/NVIDIA/gpu-operator/releases, https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/release-notes.html |
 | AMD GPU Operator | v1.5.1 (chart `gpu-operator-charts-v1.5.1`); DRA driver v1.0.1 or newer required from amdgpu 6.19.14 (release 31.40) | 2026-07-21 | https://github.com/ROCm/gpu-operator/releases |
 | Intel Device Plugins Operator | v0.37.1 (v0.37.0 on 2026-09-16 removed the DLB and FPGA plugins) | 2026-10-02 | https://github.com/intel/intel-device-plugins-for-kubernetes/releases |
-| dcgm-exporter / DCGM | 4.8.4 / 4.6.1 | 2026-09-18 | https://github.com/NVIDIA/dcgm-exporter/releases |
-| KEDA | v2.21.0 | 2026-09-23 | https://github.com/kedacore/keda/releases |
-| ExecuTorch | v1.5.1 | 2026-09-23 | https://github.com/pytorch/executorch/releases |
-| Kubernetes | 1.37 (1.37.0 2026-08-26, 1.37.1 2026-09-15); ImageVolume GA since 1.36 | 2026-09-15 | https://kubernetes.io/releases/ |
-| Model Streamer | 0.17.0 (GPU streaming through the C API); repo `dsx-ai-factory/model-streamer`, `run-ai/runai-model-streamer` redirects to it | 2026-10-13 | https://github.com/dsx-ai-factory/model-streamer/releases |
+| dcgm-exporter / DCGM | 4.9.0 / 4.7.0: renames the 23 default and profiling-preset fields to DCGM 4.7 names, 11 of them with a new unit (percent to a 0 to 1 ratio, MiB to bytes, MHz to hertz, mJ to joules, MB/s to bytes per second); driver label `DCGM_FI_DRIVER_VERSION` becomes `DCGM_FI_SYSTEM_DRIVER_VERSION`; per-pod utilization and memory are exported under both old and new names; GPU-wide fields under MIG are reported once per physical GPU; pod labels need a non-empty allowlist (`.*` for all); preview v2 YAML replaced by the final v2 format, v1 YAML deprecated (support ends in 4.10). Renames used in this section: `GPU_UTIL` to `GPU_UTIL_RATIO`, `MEM_COPY_UTIL` to `MEMORY_UTIL_RATIO`, `FB_USED`/`FB_FREE`/`FB_RESERVED` to `*_BYTES`, `SM_CLOCK` to `SM_CLOCK_HERTZ`, `MEM_CLOCK` to `MEMORY_CLOCK_HERTZ`, `GPU_TEMP` to `GPU_TEMP_CELSIUS`, `MEMORY_TEMP` to `MEMORY_TEMP_CELSIUS`, `POWER_USAGE` to `BOARD_POWER_WATTS`, `TOTAL_ENERGY_CONSUMPTION` to `GPU_ENERGY_JOULES_TOTAL`, `XID_ERRORS` to `XID_ERROR`, `PCIE_REPLAY_COUNTER` to `PCIE_REPLAY_TOTAL`, `NVLINK_BANDWIDTH_TOTAL` to `NVLINK_THROUGHPUT_BYTES_PER_SECOND`, `UNCORRECTABLE_REMAPPED_ROWS` to `ROW_REMAP_UNCORRECTABLE_TOTAL`, `ROW_REMAP_FAILURE` to `ROW_REMAP_FAILED`, `PROF_GR_ENGINE_ACTIVE` to `PROF_GR_ENGINE_UTIL_RATIO`, `PROF_SM_ACTIVE` to `PROF_SM_UTIL_RATIO`, `PROF_SM_OCCUPANCY` to `PROF_SM_OCCUPANCY_RATIO`, `PROF_PIPE_TENSOR_ACTIVE` to `PROF_TENSOR_UTIL_RATIO`, `PROF_DRAM_ACTIVE` to `PROF_DRAM_UTIL_RATIO` (all `DCGM_FI_DEV_` or `DCGM_FI_` prefixed); `DCGM_FI_PROF_PCIE_TX_BYTES` and `_RX_BYTES` unchanged | 2026-11-06 | https://github.com/NVIDIA/dcgm-exporter/releases, https://github.com/NVIDIA/dcgm-exporter/blob/4.9.0/etc/default-counters.csv |
+| KEDA | v2.21.1 | 2026-11-15 | https://github.com/kedacore/keda/releases |
+| ExecuTorch | v1.6.0 | 2026-11-12 | https://github.com/pytorch/executorch/releases |
+| Kubernetes | 1.37 (1.37.0 2026-08-26, 1.37.2 2026-10-13); ImageVolume GA since 1.36 | 2026-10-13 | https://kubernetes.io/releases/ |
+| Model Streamer | 0.17.3 (GPU streaming through the C API since 0.17.0); repo `dsx-ai-factory/model-streamer`, `run-ai/runai-model-streamer` redirects to it | 2026-11-11 | https://github.com/dsx-ai-factory/model-streamer/releases |
 | ModelPack model-spec | v0.0.7 (tag; no GitHub release objects) | 2025-07-21 | https://github.com/modelpack/model-spec |
-| KitOps | v1.16.0 (repo `kitops-ml/kitops`) | 2026-09-29 | https://github.com/kitops-ml/kitops/releases |
-| NVIDIA Network Operator | v26.7.1 | 2026-10-16 | https://github.com/Mellanox/network-operator/releases |
-| Slinky slurm-operator | v1.2.3 (tag; date is the tag commit) | 2026-09-30 | https://github.com/SlinkyProject/slurm-operator |
-| NIXL | v1.5.0 | 2026-09-30 | https://github.com/ai-dynamo/nixl/releases |
-| Mooncake | v0.3.13.post1 (v0.3.14-rc1 is a pre-release) | 2026-08-31 | https://github.com/kvcache-ai/Mooncake/releases |
+| KitOps | v1.17.0 (repo `kitops-ml/kitops`; adds ModelKit indexes) | 2026-11-06 | https://github.com/kitops-ml/kitops/releases |
+| NVIDIA Network Operator | v26.10.0 | 2026-11-17 | https://github.com/Mellanox/network-operator/releases |
+| Slinky slurm-operator | v1.3.0 (tag; date is the tag commit; v1.2.5 and v1.1.6 patch lines tagged the same day) | 2026-11-19 | https://github.com/SlinkyProject/slurm-operator |
+| NIXL | v1.5.2 | 2026-10-29 | https://github.com/ai-dynamo/nixl/releases |
+| Mooncake | v0.3.14 | 2026-11-03 | https://github.com/kvcache-ai/Mooncake/releases |
 | lakeFS | v1.88.0 | 2026-10-01 | https://github.com/treeverse/lakeFS/releases |
 | DVC | 3.67.1; repo is `treeverse/dvc` (`iterative/dvc` redirects to it) | 2026-03-31 | https://github.com/treeverse/dvc/releases |
 | Label Studio | 1.23.2 | 2026-09-29 | https://github.com/HumanSignal/label-studio/releases |
-| Argo Rollouts | v1.10.1 (v1.9.2 and v1.8.5 patch lines released the same day) | 2026-10-12 | https://github.com/argoproj/argo-rollouts/releases |
+| Argo Rollouts | v1.10.2 | 2026-11-04 | https://github.com/argoproj/argo-rollouts/releases |
 | Flagger | v1.45.0 | 2026-09-01 | https://github.com/fluxcd/flagger/releases |
-| model-transparency (OpenSSF Model Signing) | v1.1.1 | 2025-10-10 | https://github.com/sigstore/model-transparency/releases |
+| Kyverno | v1.20.0; removes the legacy `kyverno.io` policy engine, so `ClusterPolicy` objects stop enforcing and new legacy policies are blocked; use `ValidatingPolicy` and `ImageValidatingPolicy` (`policies.kyverno.io/v1`) | 2026-11-12 | https://github.com/kyverno/kyverno/releases |
+| model-transparency (OpenSSF Model Signing) | v1.1.1 (still the newest release on 2026-11-25) | 2025-10-10 | https://github.com/sigstore/model-transparency/releases |
 | CycloneDX specification | 1.7 (repo tag 1.7.2) | 2026-09-17 | https://github.com/CycloneDX/specification/releases |
-| CNCF Kubernetes AI Conformance | per-version directories v1.33 to v1.37 | checked 2026-10-18 | https://github.com/cncf/k8s-ai-conformance |
-| MCP specification | current revision 2026-07-28 (per-request version in `_meta`, `server/discover`); handshake-based revisions are 2025-11-25 and earlier | checked 2026-10-18 | https://modelcontextprotocol.io/specification/versioning |
-| MCP Registry | preview; API v0.1 frozen 2025-10-24 | checked 2026-10-18 | https://github.com/modelcontextprotocol/registry |
-| OTel GenAI semantic conventions | moved to `open-telemetry/semantic-conventions-genai`; stability not stated there, so content claims no stability level | checked 2026-10-18 | https://opentelemetry.io/docs/specs/semconv/gen-ai/ |
-| Ultra Ethernet | specification 1.1 (publication date not stated) | checked 2026-10-18 | https://ultraethernet.org/ |
+| Feast | v0.68.0 (link-only: feature stores are taught in `ml/`) | 2026-11-10 | https://github.com/feast-dev/feast/releases |
+| CNCF Kubernetes AI Conformance | per-version directories v1.33 to v1.37 | checked 2026-11-25 | https://github.com/cncf/k8s-ai-conformance |
+| MCP specification | current revision 2026-07-28 (per-request version in `_meta`, `server/discover`); handshake-based revisions are 2025-11-25 and earlier | checked 2026-11-25 | https://modelcontextprotocol.io/specification/versioning |
+| MCP Registry | preview; API v0.1 frozen 2025-10-24 | checked 2026-11-25 | https://github.com/modelcontextprotocol/registry |
+| OTel GenAI semantic conventions | moved to `open-telemetry/semantic-conventions-genai`; stability not stated there, so content claims no stability level | checked 2026-11-25 | https://opentelemetry.io/docs/specs/semconv/gen-ai/ |
+| Ultra Ethernet | specification 1.1 (publication date not stated) | checked 2026-11-25 | https://ultraethernet.org/ |
 
 Cut for lack of a confirmable source: NVIDIA NIM version, OS-provided on-device model
-names, Neptune.ai status, Feast. A module that needs one fetches it first or leaves it out.
+names, Neptune.ai status. A module that needs one fetches it first or leaves it out.
 LMCache publishes only nightly pre-releases; name it without a version. Argilla, Snorkel,
 LaunchDarkly AI Configs and the flag tools (OpenFeature, Statsig, Unleash) have no pin;
 name them without a version or fetch first.
@@ -155,13 +160,15 @@ source before it is written, or left out.
 |---|---|---|
 | KServe is a CNCF incubating project, accepted 2025-09-29 | Confirmed 2026-10-18 | https://www.cncf.io/projects/ |
 | KAI Scheduler is a CNCF Sandbox project, accepted 2025-12-21; license Apache-2.0 | Confirmed 2026-10-18 | https://www.cncf.io/sandbox-projects/, GitHub repo license |
-| llm-d is a CNCF Sandbox project, accepted 2026-03-12 | Confirmed 2026-10-18 | https://www.cncf.io/sandbox-projects/ |
+| llm-d is a CNCF Sandbox project, accepted 2026-03-12 | Confirmed 2026-11-25 (still Sandbox after v1.0.0) | https://www.cncf.io/projects/llm-d/ |
 | Kueue is not a CNCF project (Kubernetes SIG project) | Confirmed 2026-10-18: absent from both CNCF lists | https://www.cncf.io/projects/ |
 | ClickHouse acquired Langfuse, announced 2026-01-16 | Confirmed 2026-10-18 | https://langfuse.com/blog/joining-clickhouse |
 | OpenAI agreed to acquire promptfoo, announced 2026-03-09; repo license MIT | Confirmed 2026-10-18 | https://www.promptfoo.dev/blog/, GitHub repo license |
 | DVC lives under the `treeverse` org | Confirmed 2026-10-18 | GitHub redirect `iterative/dvc` to `treeverse/dvc` |
 | Model Streamer repo moved to `dsx-ai-factory/model-streamer` | Confirmed 2026-10-18 (repo redirect); the rename date is not confirmed, so content gives no date | GitHub redirect |
-| TGI repo is archived | Confirmed 2026-10-18 (`archived: true`) | GitHub API |
+| TGI repo is archived | Confirmed 2026-11-25 (archived 2026-03-21) | GitHub repo page |
+| KAI Scheduler repo moved to `kai-scheduler/KAI-Scheduler` | Confirmed 2026-11-25 (redirect from `NVIDIA/KAI-Scheduler`); the move date is not confirmed, so content gives no date | GitHub redirect |
+| Agent Router repo moved to `theagentrouter/agent-router` | Confirmed 2026-11-25 (redirect from `envoyproxy/ai-gateway`); the API group stays `aigateway.envoyproxy.io`; the move date is not confirmed | GitHub redirect, v1.3.0 release notes |
 | W&B is part of CoreWeave | Not confirmed | fetch before writing |
 | Tecton is part of Databricks | Not confirmed | fetch before writing |
 | Humanloop is sunsetting | Not confirmed | fetch before writing |
@@ -288,7 +295,8 @@ Studies must not duplicate `llm/case_studies/design_gpu_inference_platform.md`,
 
 Senior is the craft: build it, debug it, say why it broke. Principal is the judgment: which
 approach at what cost, what migration, what not to build. They are different cuts, not
-nested depths. 7 of the 13 principal entries are material the senior path never sees.
+nested depths. 7 of the 13 principal files (11 module pages plus 2 sub-files) are material
+the senior path never sees.
 Do not promote a module to principal because it is advanced.
 
 Membership is declared once, in the `<!-- study-paths -->` block in `README.md`. Order comes

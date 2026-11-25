@@ -1,14 +1,17 @@
 # Model Storage, Loading and Cold Start
 
-> **Version anchor (2026-10-18).** vLLM v0.32.0 (2026-10-18); its `--load-format` values include
-> `safetensors`, `fastsafetensors`, `instanttensor`, `runai_streamer`, `runai_streamer_sharded`,
-> `sharded_state`, `tensorizer` and `ipc_cache`, and `--safetensors-load-strategy` takes `lazy`,
-> `eager`, `prefetch` or `torchao`. Model Streamer 0.17.0 (2026-10-13) adds GPU streaming through
+> **Version anchor (2026-11-25).** vLLM v0.34.0 (2026-11-16); its `--load-format` values (read at
+> the v0.34.0 tag) include `safetensors`, `fastsafetensors`, `instanttensor`, `runai_streamer`,
+> `runai_streamer_sharded`, `sharded_state`, `tensorizer`, `ipc_cache` and `modelexpress` (P2P
+> weight loading through NVIDIA's ModelExpress, which llm-d v1.0.0 integrates), and
+> `--safetensors-load-strategy` takes `lazy`, `eager`, `prefetch` or `torchao`. `vllm preload`
+> and the `tensorizer` extra were re-read at the v0.34.0 tag; the compile cache was read at v0.32.0. Model Streamer 0.17.3
+> (2026-11-11); 0.17.0 (2026-10-13) added GPU streaming through
 > the C API and a ring buffer that bounds host RAM; the repo is `dsx-ai-factory/model-streamer`
 > (`run-ai/runai-model-streamer` redirects to it) and the pip package is `runai-model-streamer`.
 > KServe v0.21.0 (2026-09-25), with `LocalModelCache`, `LocalModelNamespaceCache`,
 > `LocalModelNodeGroup` and `LocalModelNode` in `serving.kserve.io/v1alpha1`. Kubernetes 1.37
-> (1.37.1 on 2026-09-15); the OCI image volume source has been GA since 1.36. ModelPack
+> (1.37.2 on 2026-10-13); the OCI image volume source has been GA since 1.36. ModelPack
 > model-spec v0.0.7 (git tag of 2025-07-21). Every version claim below is checked against this
 > anchor; versions of tools outside it (fastsafetensors, Dragonfly, Kraken, Modal) were fetched
 > from their release pages and docs on 2026-10-18 and are dated where they appear.
@@ -360,7 +363,7 @@ initContainers:
     volumeMounts: [{name: weights, mountPath: /models}]
 containers:
   - name: vllm
-    image: vllm/vllm-openai:v0.32.0
+    image: vllm/vllm-openai:v0.34.0
     args: ["/models", "--tensor-parallel-size", "4"]
 volumes:
   - name: weights
@@ -376,7 +379,7 @@ Fixed: stream straight from the object store into GPU memory.
 ```yaml
 containers:
   - name: vllm
-    image: vllm/vllm-openai:v0.32.0
+    image: vllm/vllm-openai:v0.34.0
     args:
       - "s3://models/llama-70b/sha-7c1e/"
       - "--tensor-parallel-size=4"
@@ -390,8 +393,9 @@ containers:
 `concurrency` sets the number of parallel reads (vLLM writes it to `RUNAI_STREAMER_CONCURRENCY`) and
 `memory_limit` caps the host buffer in bytes (`RUNAI_STREAMER_MEMORY_LIMIT`; `-1` means no cap).
 The only other key vLLM accepts in that JSON for this loader is `distributed`; anything else is
-rejected. The `vllm[runai]` extra accepts `runai-model-streamer` 0.15.7 or newer; with 0.17.0
-installed, a ring buffer bounds host RAM by storage bandwidth instead of model size. The path in the
+rejected (the same three keys at v0.32.0 and v0.34.0). The `vllm[runai]` extra requires
+`runai-model-streamer` 0.17.1 or newer at v0.34.0 (0.15.7 or newer at v0.32.0); from 0.17.0 a
+ring buffer bounds host RAM by storage bandwidth instead of model size. The path in the
 example ends in a digest-named prefix, so a re-upload cannot change what the pod loads.
 
 ### 6.4 mmap on network file systems and `--safetensors-load-strategy`
@@ -409,7 +413,7 @@ vllm serve /fsx/models/llama-70b --tensor-parallel-size 4 \
   --safetensors-load-strategy prefetch
 ```
 
-In vLLM v0.32.0 the default (no strategy set) already turns on prefetch when it detects NFS and the
+In vLLM v0.32.0 through v0.34.0 the default (no strategy set) already turns on prefetch when it detects NFS and the
 checkpoint fits in 90% of available RAM. Lustre and other mounts it does not detect need the flag.
 `eager` reads whole files into process memory, which vLLM recommends for network file systems and
 which uses the most host RAM; `lazy` set explicitly turns the NFS auto-prefetch off; `prefetch` uses 8 threads and 16 MiB reads by default
@@ -645,7 +649,7 @@ stream pre-serialized tensors from HTTP, S3 or local files.
 copy instead of running the storage initializer on every pod start. In v0.21.0 it has a
 namespace-scoped variant, `LocalModelNamespaceCache`, for multi-tenant clusters.
 
-**vLLM weight cache daemon.** v0.32.0 includes `vllm preload` and `--load-format ipc_cache`, which
+**vLLM weight cache daemon.** v0.34.0 ships `vllm preload` and `--load-format ipc_cache`, which
 keep post-quantized, TP-sharded weights in HBM across engine restarts on the same node.
 
 ---
@@ -761,10 +765,10 @@ record the parallel layout in the registry entry and build shard sets per layout
 
 | Tool | Role | Notes |
 |---|---|---|
-| vLLM | Inference engine and loaders | v0.32.0; `--load-format`, `--safetensors-load-strategy`, `vllm preload`, compile cache |
-| Model Streamer | Streaming weight loader | 0.17.0; repo `dsx-ai-factory/model-streamer`; pip `runai-model-streamer`; local FS, S3, GCS, Azure Blob |
+| vLLM | Inference engine and loaders | v0.34.0; `--load-format` (adds `modelexpress`), `--safetensors-load-strategy`, `vllm preload`, compile cache |
+| Model Streamer | Streaming weight loader | 0.17.3; vLLM v0.34.0 requires 0.17.1 or newer; repo `dsx-ai-factory/model-streamer`; pip `runai-model-streamer`; local FS, S3, GCS, Azure Blob |
 | fastsafetensors | Batched safetensors loader | 0.5.0 (2026-10-17); GPUDirect Storage when available |
-| tensorizer | Tensor serialization and streaming | CoreWeave library; vLLM v0.32.0's `tensorizer` extra pins `tensorizer==2.10.1` |
+| tensorizer | Tensor serialization and streaming | CoreWeave library; vLLM's `tensorizer` extra pins `tensorizer==2.10.1` at both v0.32.0 and v0.34.0 |
 | KServe | Model serving platform | v0.21.0; `LocalModelCache`, `LocalModelNamespaceCache`, `LocalModelNodeGroup` |
 | Kubernetes | Image volume source | GA since 1.36, pinned 1.37 |
 | ModelPack | OCI model artifact spec | model-spec v0.0.7 |
@@ -820,7 +824,7 @@ then let liveness take over. Size it from the stage timings, not a guess.
 On local NVMe, mmap reads exactly the needed ranges and is fast. Over a network file system, each
 page fault becomes a small remote read. vLLM's `--safetensors-load-strategy prefetch` reads files
 into the page cache with parallel 16 MiB reads, and `eager` reads whole files into process memory.
-v0.32.0 turns prefetch on automatically only when it detects NFS and the checkpoint fits in 90% of
+From v0.32.0 (unchanged at v0.34.0) vLLM turns prefetch on automatically only when it detects NFS and the checkpoint fits in 90% of
 available RAM, so Lustre needs the flag set explicitly.
 
 **Q: What does `--load-format runai_streamer` change compared with downloading the model and then loading it?**
@@ -960,7 +964,7 @@ autoscaler's reaction budget, and on any load that read from the origin when a c
 
 ### 70B support assistant on vLLM and KServe: cold-start reduction
 
-**Setup.** A support assistant runs a 70B BF16 model (140 GB) with vLLM v0.32.0 at TP=4 on 8-GPU H100
+**Setup.** A support assistant runs a 70B BF16 model (140 GB) with vLLM v0.34.0 at TP=4 on 8-GPU H100
 nodes, two replicas per node, behind KServe v0.21.0. Weights sit in S3. The autoscaler adds a node
 when queue depth stays high for 60 s. Traffic has six sharp spikes a day around shift changes.
 
@@ -992,7 +996,33 @@ starts. New replicas become Ready after the spike has already peaked.
 - A warmup sidecar that sends 20 prompts at production lengths before readiness, so users no longer
   pay the cold latency.
 - A `startupProbe` with a 600 s budget replaces the old liveness-only setup that occasionally
-  killed slow loads.
+  killed slow loads:
+
+```yaml
+# BROKEN: liveness only. 30 s delay plus 3 failed checks 10 s apart kills a pod that is still
+# compiling at second 60, and the restart begins the 540 s cold start again.
+livenessProbe:
+  httpGet: {path: /health, port: 8000}
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+```yaml
+# FIX: the startupProbe owns the load window (60 checks x 10 s = 600 s). Liveness and readiness
+# start only after it passes, so a slow load is waited for, and a hung one is still killed.
+startupProbe:
+  httpGet: {path: /health, port: 8000}
+  periodSeconds: 10
+  failureThreshold: 60
+livenessProbe:
+  httpGet: {path: /health, port: 8000}
+  periodSeconds: 10
+  failureThreshold: 3
+readinessProbe:
+  httpGet: {path: /health, port: 8000}
+  periodSeconds: 5
+```
 
 **Result.** Median cold start 54 s, p95 75 s. p99 TTFT during spikes stays under 1.5 s. The team
 lowered `minReplicas` by two, since a replica now arrives within one autoscaler cycle, which saved
