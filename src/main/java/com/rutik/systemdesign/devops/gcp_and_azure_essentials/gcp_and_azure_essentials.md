@@ -2,6 +2,8 @@
 
 > Phase 5 — Cloud Platforms · Difficulty: Intermediate
 
+> **Version anchor (2026-11-25).** The Bicep snippets pin **`Microsoft.ContainerService/managedClusters@2026-08-01`**, the newest non-preview API version on the ARM template reference (page updated 2026-10-20; `2026-08-02-preview` is newer but preview). Product names checked the same day: Google renamed **Vertex AI** to **Gemini Enterprise Agent Platform** (vertex-ai URLs now redirect there); Microsoft's AI platform is **Microsoft Foundry** (formerly Azure AI Foundry); AWS's is **Amazon Bedrock** plus **Amazon SageMaker AI**. GPU VM families: AWS **P6-B200, P6-B300, P6e-GB200 and P6e-GB300**; GCP **A4 (B200), A4X (GB200), A4X Max (GB300)** and **A5X (Vera Rubin)**; Azure **ND GB200 v6, ND H200 v5, ND MI300X v5**. GCP Infrastructure Manager is the Terraform-based successor to the retired Deployment Manager.
+
 Most architects work primarily on AWS, but real organizations run multi-cloud or migrate between clouds, and interviews probe whether you can map concepts across providers. This module covers the **Google Cloud Platform** (GKE, GCS, Cloud Run, Cloud IAM, BigQuery) and **Microsoft Azure** (AKS, Blob Storage, Microsoft Entra ID, Azure Functions) essentials, and — most importantly — a thorough **AWS ↔ GCP ↔ Azure service-mapping table** so you can translate any design instantly. AWS remains the default reference; this module is about transferring that knowledge.
 
 ---
@@ -80,6 +82,9 @@ See [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamental
 | Audit log | CloudTrail | Cloud Audit Logs | Activity Log |
 | Container registry | ECR | Artifact Registry | Azure Container Registry (ACR) |
 | Workflow orchestration | Step Functions | Workflows | Logic Apps / Durable Functions |
+| Managed AI platform | Amazon Bedrock / SageMaker AI | Gemini Enterprise Agent Platform (formerly Vertex AI) | Microsoft Foundry (formerly Azure AI Foundry) |
+| Current GPU VMs | P6-B200 / P6-B300, P6e-GB200 / P6e-GB300 UltraServers | A4 (B200), A4X (GB200), A4X Max (GB300) | ND GB200 v6, ND H200 v5 |
+| Non-NVIDIA accelerators | Trainium (`trn2`), Inferentia (`inf2`) | Cloud TPU | AMD Instinct MI300X (ND MI300X v5) |
 
 ### Where the semantics genuinely differ
 
@@ -252,7 +257,7 @@ resource "google_storage_bucket" "uploads" {
 ### Azure: AKS + Managed Identity (Bicep)
 
 ```bicep
-resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
+resource aks 'Microsoft.ContainerService/managedClusters@2026-08-01' = {
   name: 'orders'
   location: 'eastus'
   identity: { type: 'SystemAssigned' }       // cluster gets a managed identity
@@ -512,7 +517,7 @@ BROKEN: lift-and-shift the AWS IAM/networking design verbatim
 
 ```bicep
 // FIX: design natively on Azure using the service mapping, integrate Entra ID
-resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
+resource aks 'Microsoft.ContainerService/managedClusters@2026-08-01' = {
   name: 'orders'
   location: 'westeurope'
   identity: { type: 'SystemAssigned' }

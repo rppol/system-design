@@ -2,6 +2,8 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Intermediate
 
+> **Version anchor (2026-11-25).** Ownership and licensing checked against vendor pages on this date: **Ansible** (Red Hat), `ansible-core` **v2.22.0** (2026-11-02); **Puppet Core** (Perforce) free for development on up to 25 nodes, commercial for production; **OpenVox 9.5.0** (2026-11-19); **Chef** (Progress), EULA plus a license key enforced at download; **Salt** (Apache 2.0, sponsored by Broadcom; paid edition now VMware Compliance and Configuration Management); **Packer v1.16.3** (2026-11-25). Examples assume nginx **1.30**, the current stable branch (1.30.8, 2026-11-23).
+
 Where [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) provisions the *boxes* (VMs, networks, load balancers), configuration management decides **what goes inside them** — packages, files, services, users, kernel settings — and keeps that state correct over time. Tools like **Ansible, Chef, Puppet, and Salt** declare the desired in-host state and converge each machine to it **idempotently**: run the same playbook twice and the second run changes nothing. The modern counter-philosophy is **immutable infrastructure** — don't reconfigure a running server, bake a golden image with **Packer** and replace the server entirely.
 
 ---
@@ -21,14 +23,16 @@ Two axes separate the tools:
 **Who owns these tools, and on what licence.** This materially affects tool choice, so it belongs
 next to the feature comparison rather than in a footnote. **Ansible** is Red Hat's, with
 `ansible-core` plus the Galaxy collections free and open source and the commercial Ansible
-Automation Platform layered on top. **Puppet** belongs to Perforce, which moved development
-behind a private repository and a EULA: Puppet's own binaries are a commercial product beyond a
-small free node allowance, and the community answer is **OpenVox**, the Vox Pupuli soft-fork that
-tracks Puppet release-for-release and stays freely redistributable. **Chef** belongs to Progress
-and is likewise commercially licensed — Chef Infra Client obtained outside an official Progress
-distribution requires a runtime licence key — with **Cinc** as the licence-free community rebuild
-of the same source. **Salt** is Apache 2.0 and remains genuinely open, sponsored by Broadcom
-(via the VMware acquisition), with the paid Tanzu Salt product built on it.
+Automation Platform layered on top. **Puppet** belongs to Perforce, which stopped public
+packaging in late 2024 and moved development to internal forks: **Puppet Core** is free under a
+developer EULA for up to 25 nodes of development and testing, and commercially licensed for any
+production use. The community answer is **OpenVox**, the Vox Pupuli soft-fork that tracks Puppet
+and stays freely redistributable. **Chef** belongs to Progress and is likewise commercially
+licensed: every distribution requires accepting the Chef EULA, and a Chef license key is needed
+to download binaries, including from public Ruby gems (enforced at download, not at runtime),
+with **Cinc** as the licence-free community rebuild of the same source. **Salt** is Apache 2.0 and
+remains genuinely open, sponsored by Broadcom (via the VMware acquisition); its paid edition,
+formerly Tanzu Salt, is now sold as VMware Compliance and Configuration Management.
 - **Mutable vs immutable.** Classic CM *mutates* long-lived servers in place. Immutable infrastructure says servers are disposable: **Packer** bakes a versioned machine image (AMI) with everything pre-installed, and you deploy by launching new instances and terminating old ones — no in-place drift possible.
 
 The big shift over the last decade: CM moved from "carefully tend pet servers" toward "bake an image, replace the cattle." Packer-baked AMIs deployed via [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) auto-scaling groups, plus container images (see [containers_and_docker](../containers_and_docker/containers_and_docker.md)), have absorbed much of what Puppet/Chef once did — but CM is still essential for image-baking steps, bootstrap, on-prem fleets, and compliance enforcement.
@@ -363,12 +367,26 @@ Push and pull CM both run on a schedule or a human trigger. **Event-Driven Ansib
 
 ```mermaid
 flowchart LR
-    AM["Alertmanager<br/>webhook"] --> SRC["Source plugin<br/>ansible.eda.alertmanager"]
-    SRC --> ENG["ansible-rulebook<br/>rule engine"]
-    ENG -->|"condition true"| ACT["run_job_template"]
-    ENG -->|"no match"| DROP["event discarded"]
-    ACT --> CTRL["Automation controller<br/>job in an execution environment"]
-    CTRL --> HOST["Target host<br/>/var cleaned"]
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    AM(["Alertmanager<br/>webhook"]) --> SRC(["Source plugin<br/>ansible.eda.alertmanager"])
+    SRC --> ENG(["ansible-rulebook<br/>rule engine"])
+    ENG -->|"condition true"| ACT(["run_job_template"])
+    ENG -->|"no match"| DROP(["event discarded"])
+    ACT --> CTRL(["Automation controller<br/>job in an execution<br/>environment"])
+    CTRL --> HOST(["Target host<br/>/var cleaned"])
+
+    class AM io
+    class SRC req
+    class ENG mathOp
+    class ACT,CTRL base
+    class DROP frozen
+    class HOST train
 ```
 
 The rulebook decides *whether* to act; the job template it calls is an ordinary playbook with RBAC, credentials, and an audit log in the controller, so a remediation is reviewable the same way a scheduled run is. Two guards matter in production: throttle a rule (`throttle` with `once_within` or `once_after` and a `group_by_attributes` key) so a flapping alert does not start one job per firing, and restrict automatic actions to steps that are safe to repeat, leaving anything destructive to a human approval in a workflow template.

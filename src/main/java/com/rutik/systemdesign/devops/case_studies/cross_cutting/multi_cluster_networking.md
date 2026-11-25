@@ -2,6 +2,8 @@
 
 > Cross-Cutting Primitive — DevOps Case Studies · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** **Cilium 1.20** (latest patch 1.20.5, 2026-11-17) is the ClusterMesh reference; ClusterMesh needs a unique cluster ID (1-255 by default) and non-overlapping Pod CIDRs per cluster. **Gateway API v1.7.0** (2026-10-29) is current. Each public IPv4 address on AWS costs $0.005 per hour, one reason IPv6 Pod CIDRs (see [ipv6_and_dual_stack](../../kubernetes_networking/ipv6_and_dual_stack.md)) avoid overlap problems entirely.
+
 ---
 
 ## 1. Concept Overview

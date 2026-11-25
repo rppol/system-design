@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** **Helm v4.3.1** (2026-10-15) is the current major line; Helm 4 renames `--atomic` to `--rollback-on-failure` and uses server-side apply for releases it creates. Helm 3 shipped its final feature release on 2026-09-09 and gets security fixes only until 2027-02-10 (**v3.22.1**, 2026-10-15, is one of them); after that date no Helm 3 release of any kind ships ([Helm 3 end of life](https://helm.sh/blog/helm-v3-end-of-life)).
+> **Version anchor (2026-11-25).** **Helm v4.3.2** (2026-11-13) is the current major line; Helm 4 renames `--atomic` to `--rollback-on-failure` and uses server-side apply for releases it creates. Helm 3 shipped its final feature release on 2026-09-09 and gets security fixes only until 2027-02-10 (**v3.22.1**, 2026-10-15, is one of them); after that date no Helm 3 release of any kind ships ([Helm 3 end of life](https://helm.sh/blog/helm-v3-end-of-life)).
 
 Raw Kubernetes YAML doesn't scale: the same Deployment differs across dev/staging/prod, and a real app is a dozen interrelated objects. **Helm** packages them into versioned, templated, parameterized **charts** with release tracking and rollback. **Kustomize** takes the opposite, template-free approach — patch a base with overlays. Knowing both, and when each fits, is core DevOps fluency.
 

@@ -2,7 +2,7 @@
 
 > Phase 1 — Foundations · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** Kubernetes **1.37.1** (2026-09-23) is the current patch release. Cluster DNS and certificate tools named on this page: **CoreDNS v1.14.7** (2026-08-19) and **cert-manager v1.21.2** (2026-09-11). Public TLS certificate limits follow CA/Browser Forum ballot SC-081v3 (passed 2025-04-11): maximum validity 200 days for certificates issued from 2026-03-15, 100 days from 2027-03-15 and 47 days from 2029-03-15. Let's Encrypt's default `classic` profile moves to 64-day certificates on 2027-02-10 and 45-day certificates on 2028-02-16. ACME Renewal Information (ARI) is RFC 9773 (June 2025).
+> **Version anchor (2026-11-25).** Kubernetes **1.37** is the current minor (latest patch 1.37.2, released 2026-10-13 per kubernetes.io/releases). Cluster DNS and certificate tools named on this page: **CoreDNS v1.15.0** (2026-10-21) and **cert-manager v1.21.3** (2026-10-23). AWS has charged **$0.005 per hour for every public IPv4 address** since 2024-02-01, the main cost driver behind IPv6 adoption covered in §6. Public TLS certificate limits follow CA/Browser Forum ballot SC-081v3 (passed 2025-04-11): maximum validity 200 days for certificates issued from 2026-03-15, 100 days from 2027-03-15 and 47 days from 2029-03-15. Let's Encrypt's default `classic` profile moves to 64-day certificates on 2027-02-10 and 45-day certificates on 2028-02-16. ACME Renewal Information (ARI) is RFC 9773 (June 2025).
 
 Networking is where "it works locally" goes to die. DNS resolution, CIDR planning, NAT, firewall rules, load-balancer health checks, and TLS termination are the layers a DevOps engineer debugs daily. This module covers the operational networking knowledge that underpins VPCs, Kubernetes Services, ingress, and service mesh — focused on *what breaks and how to find it*.
 
@@ -293,6 +293,23 @@ The Section 10 fix sets `HealthCheckIntervalSeconds: 15`, `UnhealthyThresholdCou
 
 Asymmetry is deliberate: eject slowly (3 strikes) so a single GC pause or transient blip does not drain the pool, but re-admit quickly (2 passes) so recovered capacity comes back fast. Set `UnhealthyThresholdCount: 1` and one hiccup empties your target group — which is exactly the Pitfall 1 failure mode, reached by a different route.
 
+### IPv6 addressing and subnetting
+
+IPv6 addresses are 128 bits written as eight 16-bit hex groups, with leading zeros dropped and one run of all-zero groups shortened to `::` (`2001:0db8:0000:0000:0000:0000:0000:0001` is `2001:db8::1`). The subnetting arithmetic is the same as IPv4, only the numbers change:
+
+```
+  subnets of size /S inside a /P   = 2^(S - P)
+  addresses in a /S                = 2^(128 - S)
+
+  AWS VPC (Amazon-provided)  /56  -> 2^(64-56) = 256 subnets of /64
+  one subnet                 /64  -> 2^64 = 1.8 x 10^19 addresses (5 reserved by AWS)
+  IPv4 comparison            /16  -> 65,536 addresses for the whole VPC
+```
+
+A worked plan for one Region: reserve a /48 in IPAM (65,536 /64s), give each VPC a /56, and inside each VPC encode purpose in the last two hex digits of the /64: `...:1a00::/64` public, `...:1a01::/64` private app in AZ a, `...:1a02::/64` private app in AZ b. Every subnet is a /64, the smallest AWS allows (IPv6 subnet sizes run /44 to /64 in 4-bit steps), and staying on 4-bit boundaries keeps each level one hex digit, so a single prefix in a route or firewall rule can cover a whole tier.
+
+Three IPv4 habits do not carry over. There is no NAT: VPC IPv6 addresses are globally routable, so an **egress-only internet gateway** gives private subnets outbound-only access and security groups do the filtering. Every rule must exist for both families: `0.0.0.0/0` does not match `::/0`. And IPv6-only hosts reach IPv4-only services through **DNS64 + NAT64** (AAAA records synthesised in `64:ff9b::/96`, translated by the NAT gateway). The migration pressure is partly financial: AWS charges $0.005 per hour, about $3.65 a month, for every public IPv4 address. Kubernetes dual-stack and EKS IPv6 clusters are in [ipv6_and_dual_stack](../kubernetes_networking/ipv6_and_dual_stack.md).
+
 ### Diagnosing DNS
 
 ```bash
@@ -536,6 +553,10 @@ Edge termination (at the LB) is simplest, offloads crypto, and centralizes cert 
 **Q: What is NAT source-port exhaustion and how do you fix it?**
 **Short:** A NAT gateway's 55,000-connection-per-destination limit per IP gets exhausted by many connections to one endpoint, fixed with VPC endpoints or connection pooling.
 A NAT gateway SNATs many hosts behind one IP, and each of its IPv4 addresses supports only 55,000 simultaneous connections to a given unique destination (destination IP + port + protocol). Thousands of connections to the *same* endpoint exhaust that pool — and because Linux holds each closed socket in `TIME_WAIT` for 60 s, sustained churn never lets it refill — so new egress connections time out while bandwidth is unused; `ErrorPortAllocation` on the NAT gateway is the giveaway. Fixes: VPC endpoints (PrivateLink) to reach AWS services without NAT, connection pooling/reuse, secondary IPv4 addresses on the gateway (up to 8), or a NAT gateway per AZ with clients split across them.
+
+**Q: A VPC gets an IPv6 /56. How would you lay out subnets, and what replaces the private-subnet-behind-NAT pattern?**
+**Short:** Carve /64 subnets, 256 of them from the /56, on 4-bit boundaries; outbound-only access comes from an egress-only internet gateway plus security groups, not NAT.
+The subnet count is 2^(64-56) = 256 /64s, and every subnet should be a /64 (AWS allows /44 to /64 in 4-bit steps, so /64 is the smallest). Encode tier and zone in the hex digits of the subnet ID so one shorter prefix can match a whole tier in a route or rule. VPC IPv6 addresses are globally routable, so there is no NAT hiding hosts: a route of `::/0` to an egress-only internet gateway lets private subnets connect out while refusing inbound connections, and security groups stay default-deny in both families. For IPv6-only hosts that must reach IPv4-only services, enable DNS64 on the subnet and route `64:ff9b::/96` to a NAT gateway, which performs NAT64. Write every firewall rule twice: `0.0.0.0/0` does not cover `::/0`.
 
 **Q: How does DNS TTL affect failover, and what's the tradeoff?**
 **Short:** Low TTL propagates failover quickly but raises query volume, while high TTL reduces load but leaves clients hitting a dead IP longer after a change.

@@ -1,12 +1,12 @@
 # GPU Scheduling and Inference Operations
 
-> **Version anchor (2026-08-26).** **vLLM v0.27.1** (2026-08-11) is current; its **v1 engine renamed the KV-cache metric to `vllm:kv_cache_usage_perc`** — `vllm:gpu_cache_usage_perc` was the v0 name and is the single most-copied stale metric in autoscaling configs. **Gateway API Inference Extension v1.6.0** (2026-08-10): `InferencePool` is **v1/stable**, and the alpha `InferenceObjective`, `InferenceModelRewrite` and `EndpointPickerConfig` were **REMOVED from GAIE and migrated to `llm-d`** — a manifest naming any of them no longer applies. **Karpenter v1.14.1** supports EC2 Capacity Blocks (since v1.6) via `capacityReservationSelectorTerms` and `karpenter.sh/capacity-type: reserved`. **NVIDIA Dynamo 1.0 went GA 2026-03-16**; Triton is folded into it as Dynamo-Triton. **P6-B200** (8x B200, GA 2025-05-15) and **P6e-GB200 UltraServers** (up to 72 GB200 in one NVLink domain) are the current AWS training generation.
+> **Version anchor (2026-11-25).** **vLLM v0.34.0** (2026-11-16) is current. It turns the **extensible KV cache on by default**, makes `gpu_memory_utilization` default to 1.0 (the release notes say most configs should now drop the flag), changes the default `--block-size` to 64, and removes Model Runner V1. The metric names are unchanged: the v1 engine's KV-cache gauge is `vllm:kv_cache_usage_perc`, and `vllm:gpu_cache_usage_perc` was the v0 name, the most-copied stale metric in autoscaling configs. **Gateway API Inference Extension v1.6.2** (2026-09-17): `InferencePool` is **v1/stable**; in v1.6.0 the alpha `InferenceObjective`, `InferenceModelRewrite` and `EndpointPickerConfig` were **removed from GAIE and migrated to `llm-d`**, so a manifest naming any of them no longer applies. **Karpenter v1.15.3** (2026-11-20) supports EC2 Capacity Blocks via `capacityReservationSelectorTerms` and `karpenter.sh/capacity-type: reserved`. **Kueue v0.20.7** (2026-11-19): since v0.20.0 Kueue **no longer serves `kueue.x-k8s.io/v1beta1`**, so every manifest here uses `v1beta2`. **Volcano v1.16.0** (2026-10-14), **KAI Scheduler v0.19.0** (2026-11-11, CNCF Sandbox, `kai-scheduler` GitHub org). **LeaderWorkerSet v1.0.0** (2026-10-16, `leaderworkerset.x-k8s.io/v1`); its native gang-scheduling integration is still alpha and opt-in. **NVIDIA Dynamo 1.0 went GA 2026-03-16**; Triton is folded into it as Dynamo-Triton. **P6-B200** (8x B200) and **P6e-GB200 UltraServers** (up to 72 GB200 in one NVLink domain) are the current AWS training generation. **Certified Kubernetes AI Conformance** launched 2025-11-11; the v1.37 checklist in `kubernetes-sigs/ai-conformance` has 8 MUST and 7 SHOULD requirements. Kubernetes 1.37 adds the alpha `CompositePodGroup` API.
 
 > **Pricing anchor (checked 2026-08-26).** On-Demand, `us-east-1`, Linux, shared tenancy, taken from **AWS's own Price List Bulk API** (`pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-1/index.json`, publication timestamp 2026-08-25T21:32:33Z) rather than from any reseller or aggregator: **`p5.48xlarge` $55.0400/hr**, **`p6-b200.48xlarge` $113.9328/hr**, **`g6e.xlarge` $1.8610/hr**, **`g6e.12xlarge` $10.49264/hr**, **`inf2.48xlarge` $12.98127/hr**. Every dollar figure below derives from these five and nothing else. (Worth knowing: **`trn2.48xlarge` has no On-Demand SKU in `us-east-1` at all** — it exists only in `us-east-2`, and there only through Capacity Blocks.) If you update one, recompute the tables rather than editing them individually. Throughput figures used in the cost-per-token arithmetic are **stated assumptions from your own benchmark**, never vendor claims — §6 says so explicitly at the point of use.
 
-> **Version anchor (2026-10-19), multi-host serving and schedulers.** **LeaderWorkerSet v1.0.0** (2026-10-16, `leaderworkerset.x-k8s.io/v1`, tested on Kubernetes 1.34 to 1.37); its native gang-scheduling integration is still alpha and opt-in. **KAI Scheduler v0.18.6** (2026-10-15), Apache-2.0, a CNCF Sandbox project, repository moved from `NVIDIA/` to the `kai-scheduler` GitHub org. **Certified Kubernetes AI Conformance** launched 2025-11-11 at KubeCon NA; the v1.37 checklist in `kubernetes-sigs/ai-conformance` has 8 MUST and 7 SHOULD requirements. Kubernetes 1.37 adds the alpha `CompositePodGroup` API, which the release's workload-aware scheduling post names as the path to native scheduling for JobSet and LeaderWorkerSet.
-
 This page sits under [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure.md). The parent owns the *substrate* — the GPU Operator, the device plugin, MIG and time-slicing mechanics, Karpenter GPU NodePools, and what the fleet costs. This page owns the *two workload shapes that substrate has to serve*, because they are different scheduling problems with opposite failure modes: **training is a gang, inference is a queue.**
+
+**Ownership boundary with `mlops/`.** This page teaches the Kubernetes *mechanism*: what gang admission and topology constraints do to Pod placement, how a node pool's capacity mode and disruption policy interact with a job, how an engine metric reaches the generic HPA/KEDA machinery, and how GPU sharing isolates (or fails to isolate) tenants. **Scheduler and quota policy** — choosing between Kueue, Volcano and KAI Scheduler, designing cohorts, borrowing, fair sharing and preemption — lives in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md). **Inference autoscaling policy and capacity planning** — which engine signal, which threshold, warm floors, scheduled floors, bursting — lives in [mlops/inference_autoscaling_and_capacity_planning](../../mlops/inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md).
 
 Deliberately not repeated here: the allocation mechanism is [device_scheduling_and_dra](../kubernetes_scheduling_and_autoscaling/device_scheduling_and_dra.md); node bring-up, XID remediation and drain are [gpu_node_lifecycle](../case_studies/cross_cutting/gpu_node_lifecycle.md); the Gateway API resources themselves are [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md). **Model-side concerns stop at this page's boundary** — PagedAttention internals, continuous-batching algorithms, quantisation and speculative decoding belong to [llm/inference_engines](../../llm/inference_engines/inference_engines.md), and the application architecture of a serving platform to [llm/case_studies/design_gpu_inference_platform.md](../../llm/case_studies/design_gpu_inference_platform.md). The DevOps angle is *the GPU is a claim on a scheduler*; the LLM angle is *the GPU is a throughput budget*.
 
@@ -65,12 +65,15 @@ Multi-GPU inference parallelism and prefill/decode disaggregation are covered in
 
 ### Who admits the gang
 
-| Layer | What it adds | When to reach for it |
+Gang admission comes in two mechanical shapes, and the difference is where the decision runs:
+
+| Shape | What it does to placement | Examples |
 |---|---|---|
-| **Kueue** | Job-queueing on top of the default scheduler: quotas, cohort borrowing, fair-share, gang admission, topology-aware scheduling | The common default for multi-team clusters |
-| **Volcano 1.15** | Replaces the default scheduler for its Pods: queues, gang, HPC bin-packing, MPI/TF plugins, DRA queue quota | HPC-shaped batch, or when you need scheduler-level bin-packing |
-| **KAI Scheduler v0.18** | Replaces the default scheduler for its Pods (`schedulerName: kai-scheduler`): hierarchical queues with quota, over-quota weight and limit, DRF fairness and reclaim, gang via PodGroups, bin-pack or spread, fractional GPUs, topology-aware and hierarchical PodGroups | Many teams sharing one GPU fleet with nested org quotas, or fractional-GPU notebooks next to training. Built on kube-batch, from Run:ai |
-| **Native `Workload` API** | All-or-nothing placement and nothing else; Beta in 1.37 (`scheduling.k8s.io/v1beta1`) but off by default behind `GenericWorkload` | Only when the gang primitive is genuinely all you need. See [the parent scheduling module](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) for its exact shape |
+| **Queueing layer on the default scheduler** | Holds the Job suspended (`spec.suspend: true`) until quota and, optionally, a topology domain exist for every Pod, then unsuspends it; kube-scheduler still places each Pod | Kueue |
+| **Replacement scheduler** | Pods opt in with `schedulerName`; the second scheduler places the whole PodGroup itself, so its placement logic replaces kube-scheduler's plugins for those Pods | Volcano, KAI Scheduler |
+| **Native `Workload` API** | All-or-nothing placement and nothing else; Beta in 1.37 (`scheduling.k8s.io/v1beta1`) but off by default behind `GenericWorkload` | kube-scheduler itself. See [the parent scheduling module](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) for its exact shape |
+
+Which layer to run, and how to design its quotas, cohorts, borrowing, fair sharing and preemption, is policy, and it is taught in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md). This page uses Kueue for the worked example only because it keeps the default scheduler in the path.
 
 ### Where the capacity comes from
 
@@ -98,7 +101,7 @@ An A100-80GB partitions as 7x `1g.10gb`, 3x `2g.20gb`, 2x `3g.40gb`, or 1x `7g.8
 
 ### How inference requests are routed
 
-Plain Gateway API treats backends as interchangeable. LLM replicas are not. The **Gateway API Inference Extension** (v1.6.0) adds `InferencePool` (v1/stable), with an **Endpoint Picker (EPP)** — an Envoy `ext_proc` gRPC service — choosing a replica per request on live signals: **queue depth, KV-cache utilization, prefix-cache locality, and LoRA adapter affinity**. As of v1.6.0 the full-featured EPP, body-based routing and latency predictor moved to the separate `llm-d` project, leaving a lightweight reference EPP in-tree. Implementations include Envoy Gateway, GKE Inference Gateway, Istio and kgateway.
+Plain Gateway API treats backends as interchangeable. LLM replicas are not. The **Gateway API Inference Extension** (v1.6.2) adds `InferencePool` (v1/stable), with an **Endpoint Picker (EPP)** — an Envoy `ext_proc` gRPC service — choosing a replica per request on live signals: **queue depth, KV-cache utilization, prefix-cache locality, and LoRA adapter affinity**. As of v1.6.0 the full-featured EPP, body-based routing and latency predictor moved to the separate `llm-d` project, leaving a lightweight reference EPP in-tree. Implementations include Envoy Gateway, GKE Inference Gateway, Istio and kgateway.
 
 ---
 
@@ -191,8 +194,10 @@ xychart-beta
 
 ### Gang admission with topology, in Kueue
 
+The objects below are the minimum that makes the mechanism visible: one flavor bound to a `Topology`, one queue, one Job carrying a topology annotation. Quota sizing, cohorts and borrowing are left out on purpose; they are policy (see the ownership note at the top).
+
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata: {name: training}
 spec:
@@ -205,23 +210,30 @@ spec:
             - name: "nvidia.com/gpu"
               nominalQuota: 64        # 8 x p6-b200.48xlarge
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata: {name: training-lq, namespace: training}
+spec:
+  clusterQueue: training
+---
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata: {name: b200}
 spec:
   nodeLabels: {node.kubernetes.io/instance-type: p6-b200.48xlarge}
   topologyName: aws-network-topology
 ---
-apiVersion: kueue.x-k8s.io/v1alpha1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: Topology
 metadata: {name: aws-network-topology}
 spec:
-  # EC2's Instance Topology API surfaces as node labels. Layer 1 is the
-  # tightest grouping; requiring it keeps all ranks inside one network block.
+  # EC2's instance topology surfaces as node labels. Layer 1 is the TOP of
+  # the AWS network hierarchy (widest); the highest-numbered layer is the
+  # node an instance plugs into. Kueue wants levels widest first.
   levels:
-    - nodeLabel: topology.k8s.aws/network-node-layer-3
-    - nodeLabel: topology.k8s.aws/network-node-layer-2
     - nodeLabel: topology.k8s.aws/network-node-layer-1
+    - nodeLabel: topology.k8s.aws/network-node-layer-2
+    - nodeLabel: topology.k8s.aws/network-node-layer-3
     - nodeLabel: kubernetes.io/hostname
 ```
 
@@ -239,8 +251,8 @@ spec:
   template:
     metadata:
       annotations:
-        # All 4 pods must land inside ONE layer-1 network block, or don't run.
-        kueue.x-k8s.io/podset-required-topology: "topology.k8s.aws/network-node-layer-1"
+        # All 4 pods must land under ONE layer-3 network node, or don't run.
+        kueue.x-k8s.io/podset-required-topology: "topology.k8s.aws/network-node-layer-3"
         karpenter.sh/do-not-disrupt: "true"   # consolidation must not kill it mid-epoch
     spec:
       restartPolicy: Never
@@ -251,11 +263,11 @@ spec:
             limits: {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 8}
 ```
 
-Kueue holds every Pod suspended until all four can be placed inside one block. Without `podset-required-topology`, four nodes scattered across the fabric is a *successful* schedule that quietly runs the all-reduce over the slow path.
+Kueue holds every Pod suspended until all four can be placed under one layer-3 node. Without `podset-required-topology`, four nodes scattered across the fabric is a *successful* schedule that quietly runs the all-reduce over the slow path. (`p6-b200.48xlarge` reports four network layers in `DescribeInstanceTopology`, so on that type the instance-facing node is one layer deeper still; read the layer count for your instance type before choosing the level.)
 
 ### Autoscaling inference on a signal that means something
 
-The broken version first, because it is what ships by default:
+This is the generic HPA/KEDA mechanism from [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) pointed at a GPU-bound workload. Which engine signal to use, the threshold, warm and scheduled floors, and the capacity arithmetic behind them are policy, taught in [mlops/inference_autoscaling_and_capacity_planning](../../mlops/inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md). The broken version first, because it is what ships by default:
 
 ```yaml
 # BROKEN: HPA on CPU for an LLM endpoint.
@@ -308,7 +320,7 @@ spec:
         threshold: "0.85"
 ```
 
-The metric names are the v1-engine names as of vLLM v0.27.1. **`vllm:gpu_cache_usage_perc` is the v0 name and does not exist any more** — a `ScaledObject` referencing it does not error, it simply evaluates to nothing and the trigger never fires, which is the worst possible failure shape for an autoscaler.
+The metric names are the v1-engine names, unchanged in vLLM v0.34.0. **`vllm:gpu_cache_usage_perc` is the v0 name and does not exist any more** — a `ScaledObject` referencing it does not error, it simply evaluates to nothing and the trigger never fires, which is the worst possible failure shape for an autoscaler.
 
 The full current set worth knowing:
 
@@ -409,7 +421,7 @@ spec:
       spec:
         containers:
           - name: vllm-leader
-            image: vllm/vllm-openai:v0.27.1
+            image: vllm/vllm-openai:v0.34.0
             command: [vllm, serve, meta-llama/Llama-3.1-405B-Instruct,
                       --tensor-parallel-size, "8", --pipeline-parallel-size, "2",
                       --nnodes, $(LWS_GROUP_SIZE), --node-rank, $(LWS_WORKER_INDEX),
@@ -419,7 +431,7 @@ spec:
       spec:
         containers:
           - name: vllm-worker
-            image: vllm/vllm-openai:v0.27.1
+            image: vllm/vllm-openai:v0.34.0
             command: [vllm, serve, meta-llama/Llama-3.1-405B-Instruct,
                       --tensor-parallel-size, "8", --pipeline-parallel-size, "2",
                       --nnodes, $(LWS_GROUP_SIZE), --node-rank, $(LWS_WORKER_INDEX),
@@ -449,29 +461,9 @@ flowchart LR
 
 The restart policy is the reason to use LWS for tensor-parallel serving. With `RecreateGroupOnPodRestart` (the default) a crash in any one Pod deletes and recreates the leader and all workers, because the NCCL communicator of the survivors is dead anyway. `None` restarts only the failed Pod and suits loosely coupled workers; `RecreateGroupAfterStart` recreates the group only when no Pod in it is still `Pending`, which stops a slow image pull from causing a restart loop. Gang admission is still a separate concern: LWS's own PodGroup integration is alpha in v1.0.0, so production clusters admit LWS groups through Kueue, whose LeaderWorkerSet integration admits each group as one Workload and scales the set group by group.
 
-### KAI Scheduler: hierarchical GPU queues
+### Fractional GPUs: accounting is not isolation
 
-KAI Scheduler is NVIDIA's open-sourced Run:ai scheduler, now a CNCF Sandbox project. Like Volcano it is a second scheduler, so a Pod opts in with `schedulerName: kai-scheduler` and a queue label. Only leaf queues accept workloads; parent queues divide capacity among their children.
-
-```yaml
-apiVersion: scheduling.run.ai/v2
-kind: Queue
-metadata: {name: research-nlp}
-spec:
-  parentQueue: research          # research itself has gpu.quota: 32 for all its teams
-  resources:
-    gpu: {quota: 8, overQuotaWeight: 2, limit: 24}   # 8 guaranteed, may borrow idle GPUs up to 24
-    cpu: {quota: -1, limit: -1}
-    memory: {quota: -1, limit: -1}
----
-# Pod side
-metadata:
-  labels: {kai.scheduler/queue: research-nlp}
-spec:
-  schedulerName: kai-scheduler
-```
-
-`quota` is guaranteed, `limit` is a hard cap, and capacity above quota is split by `overQuotaWeight` within a priority level; when the owner of borrowed GPUs submits work, KAI reclaims them using DRF. Fractional GPUs (`gpu-fraction`, `gpu-memory` annotations) run by default in `NonMemoryEnforced` mode, where KAI only does the accounting and a container can still allocate more GPU memory than it asked for. Memory isolation needs the `HamiCore` or `NvFractions` mode. The choice against Kueue is the same as against Volcano: Kueue keeps the default scheduler and adds admission; KAI replaces the scheduler to get fractional GPUs, deep queue trees and its own placement.
+Replacement schedulers such as KAI Scheduler (`schedulerName: kai-scheduler`) can place two Pods that each ask for half a card on one GPU. That is a *scheduling* decision; whether the halves are *enforced* is a separate mechanism question, and it is the one this section owns. KAI's fractional mode runs by default as `NonMemoryEnforced`: the scheduler only does the accounting, and a container can still allocate more GPU memory than it asked for. Memory isolation needs the `HamiCore` or `NvFractions` mode, or MIG. Time-slicing behaves the same way: it interleaves time on an undivided card and caps nothing. Queue trees, over-quota weights and DRF reclaim in KAI are policy and live in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
 
 ### Kubernetes AI Conformance as a platform checklist
 
@@ -542,10 +534,8 @@ The same arithmetic sets the actual utilization target:
 
 | Decision | Option A | Option B | How to choose |
 |---|---|---|---|
-| Gang admission | Kueue (queue on default scheduler) | Volcano (replacement scheduler) | Kueue unless you need scheduler-level bin-packing or MPI plugins |
-| Gang admission at org scale | Kueue + default scheduler | KAI Scheduler | KAI when you need nested queue trees and fractional GPUs in one scheduler; Kueue to keep the default scheduler and its plugins |
+| Gang primitive | Native `Workload`/`PodGroup` (1.37 Beta, opt-in via `GenericWorkload`) | A queueing layer or replacement scheduler | Native only for one team with no quota; a queueing layer once tenants share GPUs. Which one, and its quota design, is in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md) |
 | Multi-host replica | StatefulSet per model shard | LeaderWorkerSet | LWS whenever one replica spans nodes; it scales, restarts and rolls out the group as a unit |
-| Gang primitive | Native `Workload`/`PodGroup` (1.37 Beta, opt-in via `GenericWorkload`) | Kueue | Native only for one team with no quota; Kueue once tenants share GPUs and need quotas, borrowing, or fair-share |
 | Scale trigger | `num_requests_waiting` | `kv_cache_usage_perc` | Use both — they catch different saturation modes |
 | Routing | Round-robin / least-request | EPP cache-aware | EPP whenever prompts share prefixes; round-robin otherwise |
 | Sharing | MIG | Time-slicing | MIG for any multi-tenant SLO; time-slicing only for dev |
@@ -600,25 +590,52 @@ sum(vllm:num_requests_waiting{service="llama-serve"})
 
 **9. Serving a multi-node model with a StatefulSet.** Two 8-GPU Pods form one tensor/pipeline-parallel replica. One Pod OOMs and restarts alone; the survivor's NCCL communicator is gone, so it hangs on its next collective while its readiness probe still passes, and the load balancer keeps sending it traffic. FIX: deploy as a LeaderWorkerSet with `restartPolicy: RecreateGroupOnPodRestart`, so the whole group is rebuilt, and probe readiness on the leader's HTTP port.
 
+**10. Upgrading Kueue past v0.20 with `v1beta1` manifests still in Git.** Kueue v0.20.0 (2026-09-30) stopped serving `kueue.x-k8s.io/v1beta1`. Every queue manifest copied from an older tutorial now fails `kubectl apply`, and a GitOps controller reports the whole Application as failed, so new queues and quota changes stop landing while existing jobs keep running. Objects already in etcd still need rewriting into `v1beta2` storage before the upgrade.
+
+```yaml
+# BROKEN after Kueue v0.20.0: the API server no longer serves this version
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata: {name: research}
+spec:
+  cohort: gpu-fleet               # v1beta1 field name
+```
+
+```yaml
+# FIX: v1beta2, where the cohort reference is spec.cohortName
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata: {name: research}
+spec:
+  cohortName: gpu-fleet
+```
+
+```bash
+# Before the upgrade, on the old version: rewrite stored objects into v1beta2.
+# The script refuses a kind whose CRD storage version is not v1beta2 yet.
+curl -sLO https://raw.githubusercontent.com/kubernetes-sigs/kueue/main/hack/migrate-to-v1beta2.sh
+bash migrate-to-v1beta2.sh --dry-run=server   # then rerun without --dry-run
+```
+
+Grep the repository for `kueue.x-k8s.io/v1beta1` and run the migration script before bumping the chart, not after the first failed sync.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Category | Role | Note |
 |---|---|---|---|
-| Kueue | Gang admission, quota | Suspends jobs until the whole gang plus topology fits | The default choice; TAS is beta and on since v0.14 |
-| Volcano 1.15 | Batch scheduler | Gang, queues, HPC bin-packing, DRA queue quota | Replaces the default scheduler for its Pods |
-| vLLM v0.27.1 | Inference engine | Continuous batching, paged KV cache, the metrics above | Engine internals belong to [llm/inference_engines](../../llm/inference_engines/inference_engines.md) |
-| Gateway API Inference Extension v1.6.0 | Routing | `InferencePool` (v1), Endpoint Picker | The alpha `InferenceObjective`/`InferenceModelRewrite`/`EndpointPickerConfig` CRDs and the full EPP both moved to `llm-d` |
+| Kueue v0.20.7 / Volcano v1.16.0 / KAI Scheduler v0.19.0 | Gang admission, quota | Kueue suspends jobs until the whole gang plus topology fits; Volcano and KAI replace the scheduler for their Pods | Selection and quota policy: [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md). Kueue serves only `v1beta2` since v0.20.0 |
+| vLLM v0.34.0 | Inference engine | Continuous batching, paged KV cache, the metrics above | Extensible KV cache on by default; engine internals belong to [llm/inference_engines](../../llm/inference_engines/inference_engines.md) |
+| Gateway API Inference Extension v1.6.2 | Routing | `InferencePool` (v1), Endpoint Picker | The alpha `InferenceObjective`/`InferenceModelRewrite`/`EndpointPickerConfig` CRDs and the full EPP both moved to `llm-d` in v1.6.0 |
 | KEDA | Autoscaling | Prometheus scaler on vLLM metrics; scale-to-zero | The bridge from engine metrics to replica count |
 | KServe | Serving control plane | `LLMInferenceService`, vLLM `ServingRuntime` | Pairs with KEDA for custom-metric autoscaling |
 | NVIDIA Dynamo 1.0 | Distributed serving | Disaggregated prefill/decode at scale | GA 2026-03-16; absorbs Triton as Dynamo-Triton |
 | NVIDIA NIM | Packaged serving | One container, model plus optimized stack | Lower operational surface than Dynamo |
 | DCGM / dcgm-exporter | Telemetry | `DCGM_FI_PROF_SM_ACTIVE`, `DCGM_FI_DEV_FB_USED`, XID counters | `GPU_UTIL` is the misleading one |
-| Karpenter v1.14.1 | Node provisioning | GPU NodePools, Capacity Blocks via `capacityReservationSelectorTerms` | Reserved > spot > on-demand priority |
+| Karpenter v1.15.3 | Node provisioning | GPU NodePools, Capacity Blocks via `capacityReservationSelectorTerms` | Reserved > spot > on-demand priority |
 | EC2 Capacity Blocks for ML | Capacity | 1–64 instances, 1–14 days or 7-day multiples to 182 days | Non-cancelable; book up to 8 weeks ahead |
 | LeaderWorkerSet v1.0.0 | Workload API | One model replica = leader + workers; group-level scale, rollout, restart, exclusive topology | `leaderworkerset.x-k8s.io/v1`; built on two tiers of StatefulSets |
-| KAI Scheduler v0.18.6 | Batch scheduler | Hierarchical queues, DRF reclaim, gang, fractional GPUs, topology-aware PodGroups | CNCF Sandbox; fractional GPU memory is not enforced in the default mode |
 | Kubernetes AI Conformance | Certification | CNCF checklist per Kubernetes minor: 8 MUST, 7 SHOULD in v1.37 | Certifies building blocks are installable, not that they are configured |
 | EFA + NCCL | Interconnect | Up to 3,200 Gbps on P6-B200; 28.8 Tbps aggregate on GB200 UltraServers | Requires `vpc.amazonaws.com/efa` in limits |
 
@@ -635,9 +652,9 @@ In an LLM server the CPU thread mostly blocks waiting on GPU kernels, so measure
 **Short:** The survivor's NCCL group died with its peer and a StatefulSet restarts Pods singly; a LeaderWorkerSet with `RecreateGroupOnPodRestart` rebuilds the whole group.
 Tensor- and pipeline-parallel ranks share one communicator. When one Pod restarts, the other keeps its process but its collectives can never complete, and a TCP readiness probe on the port still passes, so traffic keeps arriving. A StatefulSet manages Pods individually and has no concept of "these two are one replica". LeaderWorkerSet makes the group the unit: `replicas` counts groups, `size` counts Pods per group, `RecreateGroupOnPodRestart` (the default) deletes and recreates the leader and all workers when any one fails, rolling updates replace whole groups, and the HPA scales groups through the `/scale` subresource. Add `leaderworkerset.sigs.k8s.io/exclusive-topology` so each group lands in one network block, and admit groups through Kueue's LeaderWorkerSet integration for all-or-nothing placement.
 
-**Q: You enable KAI Scheduler fractional GPUs and two notebooks with `gpu-fraction: "0.5"` OOM each other. Why?**
-**Short:** KAI's default fractional mode, `NonMemoryEnforced`, only accounts for the fraction; it does not limit GPU memory, so one container can take the whole card.
-KAI Scheduler places two half-GPU Pods on one card based on the requested fraction, but in the default `NonMemoryEnforced` mode nothing in the container runtime caps CUDA allocations. A notebook that loads a model larger than half the memory, or a framework that preallocates (JAX takes 75% by default), takes memory its neighbour was promised. Turn on the `HamiCore` mode (HAMi-core intercepts CUDA allocation) or `NvFractions`, or use MIG where the hardware supports it, which gives hardware memory and fault isolation. Treat any fractional-GPU scheme as a scheduling hint until you have confirmed its enforcement mode.
+**Q: Two notebooks share one GPU at half a card each and OOM each other. Why?**
+**Short:** A fractional-GPU request is usually only accounting; unless the sharing mode enforces memory (MIG, or an enforcing fractional mode), one container can take the whole card.
+A scheduler that places two half-GPU Pods on one card decides placement from the requested fraction, but nothing in the container runtime caps CUDA allocations unless the sharing mechanism does. KAI Scheduler's default fractional mode, `NonMemoryEnforced`, is accounting only, and time-slicing interleaves time on an undivided card with no memory limit at all. A notebook that loads a model larger than half the memory, or a framework that preallocates (JAX takes 75% by default), takes memory its neighbour was promised. Use MIG where the hardware supports it, which gives hardware memory and fault isolation, or an enforcing software mode such as KAI's `HamiCore` (HAMi-core intercepts CUDA allocation) or `NvFractions`. Treat any fractional-GPU scheme as a scheduling hint until you have confirmed its enforcement mode.
 
 **Q: A vendor says its Kubernetes service is Certified Kubernetes AI Conformant. What does that tell you, and what does it not?**
 **Short:** It shows the platform can install and run the AI building blocks, such as gang scheduling, accelerator autoscaling, metrics and Gateway API; it does not show your cluster is configured to use them.
@@ -743,7 +760,8 @@ Gang semantics exist to protect jobs whose ranks perform collectives, because th
 - **Benchmark cost per token before choosing an instance size.** Cost per hour is not the decision variable, and the big card is frequently the expensive one per token.
 - **Use MIG for multi-tenant serving; confine time-slicing to dev.** Only MIG gives memory and fault isolation.
 - **Deploy any model that spans nodes as a LeaderWorkerSet,** with group recreation on failure and exclusive topology per group.
-- **Check the enforcement mode before trusting fractional GPUs.** KAI's default fractional mode does not cap memory.
+- **Check the enforcement mode before trusting fractional GPUs.** A fraction is accounting unless MIG or an enforcing mode caps memory; KAI's default fractional mode does not.
+- **Grep for `kueue.x-k8s.io/v1beta1` before any Kueue upgrade** and run the `v1beta2` migration script first; v0.20 and later do not serve the old version.
 - **Read an AI Conformance badge as a floor.** It covers installability of gang scheduling, autoscaling and metrics, not their configuration.
 - **Reconcile allocated, running and SM-active** as three separate numbers. Every gap between them is a distinct problem with a distinct fix.
 

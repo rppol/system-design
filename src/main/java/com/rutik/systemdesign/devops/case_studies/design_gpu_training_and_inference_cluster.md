@@ -1,8 +1,10 @@
 # Design a GPU Training and Inference Cluster
 
-> **Version anchor (2026-08-27).** Kubernetes **DRA is GA (1.34)** with its feature gate **locked on in 1.35**, API group `resource.k8s.io/v1`; **partitionable devices / consumable capacity are not GA**, and the `ResourceSlice` schema changed incompatibly between 1.34 and 1.35. Kubernetes **1.35 introduced a native `Workload` API for gang scheduling**; in **1.37 it is Beta** at `scheduling.k8s.io/v1beta1` and still **disabled by default** behind the `GenericWorkload` gate. **Kueue v0.19.x** (a Kubernetes SIG subproject) and **Volcano ~1.14** (CNCF **Incubating**) are the production gang schedulers today. **Karpenter 1.14**, **NVIDIA GPU Operator v26.7** (DCGM 4.6.0-1, device plugin v0.20.0), **NCCL 2.27.7**, **vLLM ~0.28**, **KServe 0.18** (CNCF Incubating since 2025-09-29). **Gateway API Inference Extension v1.6.0**: `InferencePool` is **v1/stable** at `inference.networking.k8s.io/v1`, while `InferenceObjective`, `InferenceModelRewrite` and `EndpointPickerConfig` were **removed in v1.6.0 and migrated to `llm-d`** (they were `v1alpha2`/`v1alpha1`, never v1) — and, separately, the full EPP, Body-Based Routing and latency-predictor *implementations* also moved to `llm-d`, leaving a lightweight reference EPP for conformance. Those are two distinct migrations; do not conflate them.
+> **Version anchor (2026-11-25).** Kubernetes **DRA is GA (1.34)** with its feature gate **locked on in 1.35**, API group `resource.k8s.io/v1`; **partitionable devices / consumable capacity are not GA**, and the `ResourceSlice` schema changed incompatibly between 1.34 and 1.35. Kubernetes **1.35 introduced a native `Workload` API for gang scheduling**; in **1.37 it is Beta** at `scheduling.k8s.io/v1beta1` and still **disabled by default** behind the `GenericWorkload` gate. **Kueue v0.20.7** (2026-11-19, a Kubernetes SIG subproject; it has **not served `kueue.x-k8s.io/v1beta1` since v0.20.0**, so the manifests below use `v1beta2`) and **Volcano v1.16.0** (CNCF **Incubating**) are the production gang schedulers today. **Karpenter v1.15.3**, **NVIDIA GPU Operator v26.7** (DCGM 4.6.0-1, device plugin v0.20.0), **NCCL v2.32.7-1**, **vLLM v0.34.0** (extensible KV cache on by default, so `gpu_memory_utilization` is normally left unset), **KServe v0.21.0** (CNCF Incubating since 2025-09-29). **Gateway API Inference Extension v1.6.2** (latest patch; the API changes below landed in v1.6.0): `InferencePool` is **v1/stable** at `inference.networking.k8s.io/v1`, while `InferenceObjective`, `InferenceModelRewrite` and `EndpointPickerConfig` were **removed in v1.6.0 and migrated to `llm-d`** (they were `v1alpha2`/`v1alpha1`, never v1) — and, separately, the full EPP, Body-Based Routing and latency-predictor *implementations* also moved to `llm-d`, leaving a lightweight reference EPP for conformance. Those are two distinct migrations; do not conflate them.
 >
 > **On prices.** This document deliberately contains **no dollar figures**. AWS's EC2 pricing page renders its tables dynamically and no on-demand hourly rate for any P5/P6 instance could be pulled from a primary AWS source at the time of writing. Every cost argument below is therefore expressed in **GPU-hours**, **ratios**, and **tokens per GPU-second** — units you can multiply by whatever your account actually pays. Read the live pricing page or your own Cost Explorer for the multiplier; do not inherit a number from a document.
+>
+> **Scope next to its sibling.** [design_ml_platform_infrastructure](design_ml_platform_infrastructure.md) designs the *product* layer of an ML platform — pipelines, experiment tracking, the model registry, self-service and chargeback — and delegates GPU scheduling here. This case study is the deeper treatment of the *compute* layer: gang admission, topology, capacity modes and inference routing on one shared fleet.
 
 ---
 
@@ -330,7 +332,7 @@ POD:.status.reservedFor[*].name
 This is the heart of the training half. Kueue holds a job until the entire gang's quota is available, then admits it atomically.
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: h100-capacity-block
@@ -340,13 +342,13 @@ spec:
     example.com/capacity-type: capacity-block
   topologyName: nvlink-topology          # topology-aware placement
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: research-pretrain
 spec:
   namespaceSelector: {}
-  cohort: gpu-fleet                       # borrowing happens inside a cohort
+  cohortName: gpu-fleet                   # borrowing happens inside a cohort
   preemption:
     reclaimWithinCohort: Any              # take back lent quota when needed
     withinClusterQueue: LowerPriority
@@ -360,7 +362,7 @@ spec:
               borrowingLimit: 128         # may borrow up to 128 idle GPUs
               lendingLimit: 64            # may lend at most 64 of its own
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: pretrain
@@ -412,7 +414,7 @@ spec:
 
 `backoffLimit: 0` with gang restart is not a detail. A distributed training job whose rank 7 restarts alone rejoins a collective that has already moved on, and hangs in an all-reduce until somebody notices — often hours later, burning 512 GPUs on a deadlock.
 
-**Kueue versus Volcano versus the native Workload API.** Kueue (a Kubernetes SIG subproject, v0.19.x) owns quota, borrowing, preemption and admission, and delegates placement to the default scheduler. Volcano (CNCF **Incubating**, ~1.14) replaces the scheduler outright with its own gang-aware one. Kubernetes **1.35 added a native `Workload` API** for gang semantics; in 1.37 it is **Beta at `scheduling.k8s.io/v1beta1` and still off by default** behind the `GenericWorkload` gate, which also carries workload-aware preemption. The native API is a lower-level primitive that Kueue and Volcano may eventually build on; it is not a replacement for either today, and a 2026 candidate is expected to know it exists without over-claiming its maturity.
+**Kueue versus Volcano versus the native Workload API.** Kueue (a Kubernetes SIG subproject, v0.20.x) owns quota, borrowing, preemption and admission, and delegates placement to the default scheduler. Volcano (CNCF **Incubating**, v1.16) replaces the scheduler outright with its own gang-aware one. Kubernetes **1.35 added a native `Workload` API** for gang semantics; in 1.37 it is **Beta at `scheduling.k8s.io/v1beta1` and still off by default** behind the `GenericWorkload` gate, which also carries workload-aware preemption. The native API is a lower-level primitive that Kueue and Volcano may eventually build on; it is not a replacement for either today, and a 2026 candidate is expected to know it exists without over-claiming its maturity. Quota trees, fair-share weights, preemption cost and the full Kueue/Volcano/KAI selection argument are taught in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md); this case study applies them to one fleet.
 
 ### 4.3 The broken configuration, and the fix
 
@@ -498,12 +500,14 @@ spec:
         example.com/pool: serving
       containers:
         - name: vllm
-          image: vllm/vllm-openai:v0.28.0
+          image: vllm/vllm-openai:v0.34.0
           args:
             - --model=/models/llama-70b
             - --tensor-parallel-size=8
             - --max-model-len=8192
-            - --gpu-memory-utilization=0.92
+            # no --gpu-memory-utilization: since v0.34.0 the extensible KV cache
+            # sizes itself from memory free after warmup; set the flag only to
+            # share the GPU with another process
             - --enable-prefix-caching
           ports:
             - { name: http, containerPort: 8000 }
@@ -576,7 +580,7 @@ The asymmetric `behavior` block is the design: scale up immediately because queu
 ### 4.5 Routing: `InferencePool` and where the rest of GAIE went
 
 ```yaml
-# InferencePool is v1/stable in GAIE v1.6.0.
+# InferencePool is v1/stable in GAIE v1.6.x.
 apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
@@ -717,7 +721,7 @@ The 95 case is the one to explain in an interview: an uncontained ECC error mean
 |---|---|---|---|
 | Model | quota and admission; default scheduler places | replaces the scheduler | a core primitive for pod-group binding |
 | Quota, borrowing, preemption | **strong** — cohorts, lending limits | present, less developed | none — it is not a queueing system |
-| Maturity | Kubernetes SIG subproject, v0.19.x | CNCF **Incubating**, ~1.14 | **Beta, off by default** (1.37, `v1beta1`) |
+| Maturity | Kubernetes SIG subproject, v0.20.x | CNCF **Incubating**, v1.16 | **Beta, off by default** (1.37, `v1beta1`) |
 | Risk | admission-only means placement quirks remain | a second scheduler is a large blast radius | off by default and no quota layer |
 
 **Decision:** Kueue. Multi-tenant quota with cohort borrowing is the requirement that actually matters (F5), and keeping the default scheduler keeps the blast radius small. Volcano is the right answer if you need scheduling policies the default scheduler cannot express at all. Watch the native Workload API; do not build on it yet.
@@ -758,7 +762,7 @@ The 95 case is the one to explain in an interview: an uncontained ECC error mean
 - **AWS** publishes the constraints this design is built around: EC2 Capacity Blocks for ML with its 8-week booking horizon, 1-64 instance cluster sizes and hard end times; the `aws-efa-k8s-device-plugin` exposing `vpc.amazonaws.com/efa`; and the P6e-GB200 UltraServer's 72-GPU NVLink domain with 13.4 TB of HBM3e. The P6e-GB300 UltraServer reached GA on 2025-12-02.
 - **NVIDIA** ships the GPU Operator (v26.7 bundling DCGM 4.6.0-1, DCGM Exporter, and device plugin v0.20.0) and documents the XID error taxonomy that every serious GPU platform's health checking is built on. MIG's supported hardware and profile naming come from the same source.
 - **Google** shipped DRA support in GKE and its engineering blog is one of the clearest published explanations of why integer-counting device management broke down — the same argument this design makes in §4.1.
-- **Kubernetes SIG Scheduling** ships Kueue (v0.19.x) as the queueing layer and, since 1.35, the `Workload` API (Beta in 1.37), a rare case of a pattern being proven by projects and then absorbed into the core.
+- **Kubernetes SIG Scheduling** ships Kueue (v0.20.x) as the queueing layer and, since 1.35, the `Workload` API (Beta in 1.37), a rare case of a pattern being proven by projects and then absorbed into the core.
 - **CNCF** hosts Volcano (Incubating since March 2022, accepted April 2020) and KServe (Incubating since 2025-09-29), which is a useful reminder that the batch-scheduling and model-serving layers are both still maturing.
 - **vLLM** popularised PagedAttention and continuous batching, and its metric surface (`vllm:num_requests_waiting`, `vllm:kv_cache_usage_perc`) is why LLM autoscaling on a meaningful signal is possible at all — before it, teams autoscaled on CPU because nothing better was exposed.
 - **`llm-d`** is now the home of the Endpoint Picker, Body-Based Routing and latency-predictor implementations, plus the `InferenceObjective` and `InferenceModelRewrite` APIs removed from GAIE in v1.6.0. Knowing where those went is a current-events question a 2026 interviewer can reasonably ask.
@@ -771,17 +775,17 @@ The 95 case is the one to explain in an interview: an uncontained ECC error mean
 |---|---|---|---|
 | Device allocation | DRA (`resource.k8s.io/v1`) | topology and heterogeneity are expressible | `ResourceSlice` schema changed 1.34 -> 1.35 |
 | Fallback allocation | NVIDIA device plugin v0.20.0 | ubiquitous, fine for homogeneous pools | cannot express locality |
-| Queue and quota | Kueue v0.19.x | cohorts, borrowing, atomic gang admission | admission only; placement is still the default scheduler's |
-| Alternative scheduler | Volcano ~1.14 (CNCF Incubating) | richer placement policy | replacing the scheduler is a large blast radius |
-| Node provisioning | Karpenter 1.14 | fast, per-pool disruption budgets | default budget is 10%; set `0` for training pools |
+| Queue and quota | Kueue v0.20.7 | cohorts, borrowing, atomic gang admission | admission only; placement is still the default scheduler's |
+| Alternative scheduler | Volcano v1.16.0 (CNCF Incubating) | richer placement policy | replacing the scheduler is a large blast radius |
+| Node provisioning | Karpenter v1.15.3 | fast, per-pool disruption budgets | default budget is 10%; set `0` for training pools |
 | Reserved capacity | EC2 Capacity Blocks for ML | the only real capacity guarantee | hard end time; 1-64 instances; 8-week horizon |
 | GPU runtime | NVIDIA GPU Operator v26.7 | driver, toolkit, device plugin, DCGM in one | node bring-up is minutes, gate it with a taint |
 | GPU health | DCGM 4.6.0-1 + DCGM Exporter + NPD | turns XIDs into node conditions | cardinality — see the note below |
 | Interconnect | EFA + `aws-efa-k8s-device-plugin` + AWS OFI-NCCL | `vpc.amazonaws.com/efa` as a schedulable resource | hugepages and pod memory limits must be set too |
-| Collectives | NCCL 2.27.7 | `NCCL_DEBUG`, `NCCL_SOCKET_IFNAME` for triage | a silent hang is usually a topology or interface problem |
-| Inference engine | vLLM ~0.28 | PagedAttention, continuous batching, prefix caching | autoscale on its metrics, not on CPU |
-| Serving framework | KServe 0.18 (CNCF Incubating) | scale-to-zero, canary, model registry integration | cold start is the whole story |
-| Inference routing | Gateway API Inference Extension v1.6.0 | `InferencePool` v1, prefix-cache-aware routing | most of the rest moved to `llm-d` |
+| Collectives | NCCL v2.32.7-1 | `NCCL_DEBUG`, `NCCL_SOCKET_IFNAME` for triage | a silent hang is usually a topology or interface problem |
+| Inference engine | vLLM v0.34.0 | PagedAttention, continuous batching, prefix caching | autoscale on its metrics, not on CPU |
+| Serving framework | KServe v0.21.0 (CNCF Incubating) | scale-to-zero, canary, model registry integration | cold start is the whole story |
+| Inference routing | Gateway API Inference Extension v1.6.2 | `InferencePool` v1, prefix-cache-aware routing | most of the rest moved to `llm-d` |
 | Training storage | FSx for Lustre | over 1 TB/s aggregate at scale; S3-linked | provision throughput for the checkpoint burst, not the average |
 | Archive | S3, S3 Express One Zone | AWS documents up to 10x faster access for Express | Express is one-AZ by design |
 | Metrics | Prometheus + Thanos | DCGM at fleet scale | per-GPU per-container labels explode cardinality |

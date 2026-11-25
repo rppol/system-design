@@ -2,6 +2,8 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** Progressive-delivery controllers named on this page: **Argo Rollouts v1.10.2** (2026-11-04), whose Gateway API support ships as the separate `argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi` plugin (**v0.18.0**, 2026-11-18), and **Flagger v1.45.0** (2026-09-01). Gateway API itself is at **v1.7.0** (2026-10-29), see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md).
+
 How you *release* a new version determines your blast radius when (not if) a deploy is bad. Rolling, blue-green, canary, and feature-flag strategies trade off speed, cost, rollback time, and risk exposure. Progressive delivery automates the safest of these — shifting a small fraction of traffic to the new version, watching metrics, and promoting or aborting automatically. Choosing and tuning the right strategy is a core production-readiness skill.
 
 ---
@@ -326,14 +328,27 @@ AWS's Builders' Library article "Automating safe, hands-off deployments" gives c
 
 ```mermaid
 flowchart LR
-    pre["Pre-prod +<br/>integration tests"] --> ob["One-box<br/>max 10% of one AZ"]
-    ob -->|"bake 1 h+"| w1["Wave 1<br/>1 AZ / cell,<br/>low-traffic Region"]
-    w1 -->|"bake 12 h+"| w2["Wave 2<br/>rest of Region 1"]
-    w2 -->|"bake"| w3["Wave 3<br/>several Regions"]
-    w3 -->|"bake"| w4["Final waves<br/>all Regions<br/>~4-5 business days total"]
-    ob -.->|"alarm"| rb["Automatic rollback,<br/>pipeline stops"]
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    pre(["Pre-prod +<br/>integration tests"]) --> ob(["One-box<br/>max 10% of one AZ"])
+    ob -->|"bake 1 h+"| w1(["Wave 1<br/>1 AZ / cell,<br/>low-traffic Region"])
+    w1 -->|"bake 12 h+"| w2(["Wave 2<br/>rest of Region 1"])
+    w2 -->|"bake"| w3(["Wave 3<br/>several Regions"])
+    w3 -->|"bake"| w4(["Final waves<br/>all Regions<br/>~4-5 business days total"])
+    ob -.->|"alarm"| rb(["Automatic rollback,<br/>pipeline stops"])
     w1 -.->|"alarm"| rb
     w2 -.->|"alarm"| rb
+
+    class pre io
+    class ob req
+    class w1,w2,w3 base
+    class w4 train
+    class rb lossN
 ```
 
 Bake time exists because some failures need time or traffic to appear: a memory leak, a cache that expires after 6 hours, a nightly batch job, a daily traffic peak in a timezone that has not woken up yet. A canary that runs 10 minutes catches none of these; a 12-hour bake after the first wave covers one peak and one off-peak period.

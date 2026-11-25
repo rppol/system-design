@@ -2,7 +2,7 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** Current releases: **Loki v3.7.8** (2026-09-17), **Fluent Bit v5.1.4** (2026-10-16), **Fluentd v1.19.4** (2026-09-28) and **Vector v0.59.0** (2026-10-06).
+> **Version anchor (2026-11-25).** Current releases: **Loki v3.7.10** (2026-11-13; Loki 4.0 is still a release candidate, so nothing here assumes it), **Fluent Bit v5.2.1** (2026-11-25), **Fluentd v1.20.1** (2026-10-26) and **Vector v0.62.0** (2026-11-16).
 
 Logs are the **per-event, high-cardinality record of what a system did** — the pillar you reach for when metrics tell you *that* something broke and you need to know *exactly what and why*. Log aggregation collects logs from thousands of ephemeral containers into a central, searchable store. This module covers the two dominant architectures (index-everything EFK/ELK vs. label-and-store Loki), structured logging, parsing pipelines, and the retention/sampling discipline that keeps logging from bankrupting you.
 

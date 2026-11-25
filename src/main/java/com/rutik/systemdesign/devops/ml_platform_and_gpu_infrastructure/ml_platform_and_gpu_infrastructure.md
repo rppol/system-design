@@ -2,15 +2,21 @@
 
 > Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced
 
-> **Pricing anchor (checked 2026-08-25).** Every dollar figure on this page derives from one
-> base rate: **`p4de.24xlarge` (8x A100 80GB) at $27.4471/hour On-Demand in `us-east-1`**,
+> **Pricing anchor (rechecked 2026-11-25).** Every dollar figure on this page derives from one
+> base rate: **`p4de.24xlarge` (8x A100 80GB) at $27.44705/hour On-Demand in `us-east-1`**,
 > which is **$3.43 per GPU-hour** and **~$20,036/month** at 730 hours. The §10 pitfall, the
 > §14 fleet bill, and the checkpoint-interval arithmetic are all computed from that number
 > and nothing else — if you update the base rate, recompute them rather than editing them
 > individually. Verified against the AWS EC2 price list via
-> [instances.vantage.sh](https://instances.vantage.sh/aws/ec2/p4de.24xlarge). A100 pricing is
-> used deliberately: it is the generation most fleets are still depreciating, and it keeps the
-> MIG arithmetic in §6 concrete. Current-generation accelerator families are named in §11.
+> [instances.vantage.sh](https://instances.vantage.sh/aws/ec2/p4de.24xlarge). **A100 is kept
+> on purpose as the previous-generation contrast**: it is the generation most fleets are still
+> depreciating, it lists at less than half the hourly rate of a `p5.48xlarge` or a P6, and it keeps the MIG arithmetic
+> in §6 concrete. The **current AWS training generation is P6**: **`p6-b200.48xlarge` (8x B200)
+> lists at $113.9328/hour** in the same region ([instances.vantage.sh](https://instances.vantage.sh/aws/ec2/p6-b200.48xlarge)),
+> which is **$14.24 per GPU-hour, 4.15x the A100 rate**. A B200 is only cheaper per unit of work
+> if your measured throughput per GPU is more than 4.15x an A100's on your model; the
+> cost-per-token arithmetic on current hardware lives in
+> [gpu_scheduling_and_inference_ops](gpu_scheduling_and_inference_ops.md) §6.
 
 > **Version anchor (2026-09-04).** **Kubernetes 1.37 "Garhwal"** (2026-08-26) is the current
 > release; **1.36 "Haru"** (2026-04-22) is the prior minor. **Dynamic Resource Allocation (DRA) went
@@ -38,7 +44,7 @@ The platform must solve four problems the default Kubernetes install does not:
 3. **Sharing one GPU across workloads** — a single inference request may use 5% of an A100. Native K8s gives a Pod the *whole* card. **MIG** (hardware partitioning) and **time-slicing** (oversubscription) reclaim that waste.
 4. **Elastic, cost-aware capacity** — GPU nodes should appear when a training job is queued and disappear when idle. **Karpenter** (or Cluster Autoscaler) provisions GPU instance types on demand, preferring Spot for fault-tolerant training.
 
-On top of that substrate sit the workload orchestrators — **Kubeflow** (Pipelines, Trainer, Katib), **KServe** for serving, **Ray** (distributed Python: Ray Train, Ray Serve, Ray Tune), and **Volcano** / **Kueue** (batch gang-scheduling) — which translate "train this model on 16 GPUs" into Pods the scheduler can place.
+On top of that substrate sit the workload orchestrators — **Kubeflow** (Pipelines, Trainer, Katib), **KServe** for serving, **Ray** (distributed Python: Ray Train, Ray Serve, Ray Tune), and **Volcano** / **Kueue** (batch gang-scheduling) — which translate "train this model on 16 GPUs" into Pods the scheduler can place. This page shows the gang-admission *mechanism*; choosing among Kueue, Volcano and KAI Scheduler and designing team quotas is policy, owned by [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md), and inference autoscaling policy by [mlops/inference_autoscaling_and_capacity_planning](../../mlops/inference_autoscaling_and_capacity_planning/inference_autoscaling_and_capacity_planning.md).
 
 The lifecycle of the data, models, prompts, and eval sets that run on this platform is covered in [MLOps Foundations and the AI Lifecycle](../../mlops/mlops_foundations_and_the_ai_lifecycle/mlops_foundations_and_the_ai_lifecycle.md).
 
@@ -576,7 +582,7 @@ The broken version cost 12 × $3.43/hr ≈ $41/hr; the fix runs the same 12 repl
 |-----------|-----|-----|-------|
 | GPU instances | p4de (A100 80GB), p5/p5en (H100/H200), p6-b200 (B200), g6e (L40S) | a2 (A100), a3 (H100/H200), a4 (B200), g2 (L4) | ND H100 v5, ND GB200 v6 |
 | Managed K8s GPU | EKS + GPU Operator | GKE (GPU node pools, time-sharing built-in) | AKS GPU node pools |
-| Managed training | SageMaker Training | Vertex AI Training | Azure ML |
+| Managed training | SageMaker Training | Gemini Enterprise Agent Platform training (formerly Vertex AI) | Azure ML |
 | Node autoscaler | Karpenter / CAS | GKE Autopilot / node auto-provisioning | AKS Node Auto Provisioning (Karpenter) |
 | Serverless GPU | SageMaker Asynchronous Inference (scales to zero) | Cloud Run GPU | Azure Container Apps GPU |
 

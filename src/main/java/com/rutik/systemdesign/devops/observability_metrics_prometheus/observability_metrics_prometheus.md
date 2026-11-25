@@ -2,8 +2,8 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** **Prometheus v3.15.0** (2026-09-24) is the current release;
-> the LTS line is **v3.13**, at **v3.13.4** (2026-09-29). Two things on this page are gated rather than on by
+> **Version anchor (2026-11-25).** **Prometheus v3.16.0** (2026-11-05) is the current release;
+> the LTS line is **v3.13**, at **v3.13.5** (2026-10-21). Two things on this page are gated rather than on by
 > default and the distinction is asked about constantly: **OTLP ingestion** needs
 > `--web.enable-otlp-receiver` and **exemplar storage** needs
 > `--enable-feature=exemplar-storage`. **Remote-Write 2.0 is still experimental** — the spec

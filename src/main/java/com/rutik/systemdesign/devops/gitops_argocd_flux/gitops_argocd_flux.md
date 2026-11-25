@@ -2,7 +2,7 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** **Argo CD v3.5.5** (2026-10-12); run at least 3.5.4, 3.4.10 or 3.3.15, the releases that fix CVE-2026-55797 (repo-server command injection through SSH repository proxy settings, CVSS 8.8, affects 2.11.0 onward); **Flux v2.9.6** (2026-10-01); **Argo Rollouts v1.10.1** (2026-10-12); **Gateway API v1.6.3** (2026-10-06), the API Argo Rollouts and Flagger drive traffic through for GitOps-managed progressive delivery. Argo CD 3.x has **not** removed ApplicationSet fasttemplate; `goTemplate: true` remains opt-in.
+> **Version anchor (2026-11-25).** **Argo CD v3.6.3** (2026-11-24; the 3.6 line opened with 3.6.0 on 2026-11-03); on older lines run at least 3.5.4, 3.4.10 or 3.3.15, the releases that fix CVE-2026-55797 (repo-server command injection through SSH repository proxy settings, CVSS 8.8, affects 2.11.0 onward); **Flux v2.10.1** (2026-11-20); **Argo Rollouts v1.10.2** (2026-11-04); **Gateway API v1.7.0** (2026-10-29), the API Argo Rollouts and Flagger drive traffic through for GitOps-managed progressive delivery. Argo CD 3.x has **not** removed ApplicationSet fasttemplate; `goTemplate: true` remains opt-in.
 
 GitOps makes **Git the single source of truth for the desired state of your infrastructure**, and an in-cluster agent continuously reconciles reality to match it. Instead of a pipeline pushing `kubectl apply` with cluster credentials, an operator (ArgoCD or Flux) *pulls* from Git, detects drift, and self-heals. The result: every change is a reviewed, audited Git commit; rollback is `git revert`; and the cluster can never silently diverge from what's declared.
 
@@ -258,13 +258,27 @@ spec:
 
 ```mermaid
 flowchart LR
-    dev["PR to main<br/>(values.yaml change)"] --> dry["Dry source<br/>main: Helm / Kustomize"]
-    dry --> hyd["Argo CD hydrator<br/>renders + commit-server pushes"]
-    hyd --> br["environments/prod branch<br/>manifest.yaml, README.md,<br/>hydrator.metadata (drySha)"]
-    br --> sync["Argo CD sync<br/>applies plain YAML"]
-    sync --> k8s["Cluster"]
-    hyd -.->|"hydrateTo set"| stage["environments/prod-next<br/>promotion PR merges it"]
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    dev(["PR to main<br/>(values.yaml change)"]) --> dry(["Dry source<br/>main: Helm / Kustomize"])
+    dry --> hyd(["Argo CD hydrator<br/>renders + commit-server<br/>pushes"])
+    hyd --> br(["environments/prod branch<br/>manifest.yaml, README.md,<br/>hydrator.metadata (drySha)"])
+    br --> sync(["Argo CD sync<br/>applies plain YAML"])
+    sync --> k8s(["Cluster"])
+    hyd -.->|"hydrateTo set"| stage(["environments/prod-next<br/>promotion PR merges it"])
     stage -.-> br
+
+    class dev io
+    class dry base
+    class hyd mathOp
+    class br,stage req
+    class sync frozen
+    class k8s train
 ```
 
 The hydrator was alpha in Argo CD 2.14 and is beta since 3.5, disabled by default (`hydrator.enabled: "true"` in `argocd-cmd-params-cm` plus the commit server). Each hydrated commit carries a `hydrator.metadata` file with the dry commit SHA, and state is kept in a git note so a dry commit that renders identically adds no new commit. Limits to plan for: Argo CD 3.5 does not sign hydrated commits, so signature verification or branch protection that requires signed commits rejects them; rendering must be deterministic, so pin chart and remote-base versions and avoid `randAlphaNum` or `lookup`, or every run produces a diff; never let a secret injector run during hydration, because its output is committed to Git; and two Argo CD instances writing the same branch is unsupported.

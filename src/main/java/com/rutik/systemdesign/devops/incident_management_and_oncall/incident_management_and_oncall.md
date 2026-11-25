@@ -2,6 +2,8 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
+> **Version anchor (2026-11-25).** Product names checked against vendor pages on this date: **Opsgenie** customers are being migrated into **Jira Service Management** (Atlassian runs an automated migration tool and monthly migration office hours), so this page names JSM Operations, not Opsgenie, as Atlassian's on-call product; **Grafana IRM** is the paid Grafana Cloud on-call and incident product, billed per monthly active IRM user; **AWS DevOps Agent** is generally available and now covers release readiness reviews as well as incident investigation across AWS, multicloud and on-prem.
+
 Incident management is the **structured, repeatable process for responding to and learning from outages** — so that under the stress of a production fire, the team has clear roles, defined severities, working communication, and a path to resolution instead of chaos. On-call is the **human readiness layer** that makes someone responsible for responding 24/7, sustainably. The two metrics that quantify how well you do this are **MTTD** (mean time to detect) and **MTTR** (mean time to resolve), and the cultural practice that keeps you improving is the **blameless postmortem**. This module owns the *process*: roles, severities, comms, escalation, postmortems, rotation health. The *technical* diagnosis of a live latency or saturation incident — which signal to read first, which hypothesis to test next — belongs to [`../../backend/performance_incident_playbook/`](../../backend/performance_incident_playbook/performance_incident_playbook.md), which delegates the process half back here.
 
 ---
@@ -376,19 +378,31 @@ The learning-from-incidents practice (John Allspaw, Etsy's 2016 Debriefing Facil
 
 ```mermaid
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
     subgraph W["5 whys: one chain, one stop"]
         direction TB
-        w1["5xx spike"] --> w2["pool exhausted"] --> w3["v2.7.0 lowered max pool"] --> w4["engineer changed config"]
+        w1(["5xx spike"]) --> w2(["pool exhausted"]) --> w3(["v2.7.0 lowered<br/>max pool"]) --> w4(["engineer changed<br/>config"])
     end
     subgraph C["Contributing factors: every condition that had to hold"]
         direction TB
-        o["38 min SEV1"]
-        f1["pool max lowered in v2.7.0"] --> o
-        f2["canary at off-peak load"] --> o
-        f3["no pool-saturation SLI"] --> o
-        f4["no auto-rollback on burn rate"] --> o
-        f5["review checklist has no capacity check"] --> o
+        o(["38 min SEV1"])
+        f1(["pool max lowered<br/>in v2.7.0"]) --> o
+        f2(["canary at<br/>off-peak load"]) --> o
+        f3(["no pool-saturation<br/>SLI"]) --> o
+        f4(["no auto-rollback<br/>on burn rate"]) --> o
+        f5(["review checklist has<br/>no capacity check"]) --> o
     end
+
+    class w1,o lossN
+    class w2,w3 req
+    class w4 frozen
+    class f1,f2,f3,f4,f5 base
 ```
 
 Practical changes to the postmortem: interview responders one at a time before the group meeting and record what they saw, knew, and expected at each decision; tag each factor by type (change, detection, mitigation, process) so action items cover more than the trigger; and keep a "what made this hard" section for things that slowed diagnosis even though they did not cause the outage, such as a dashboard that hid the pool metric.

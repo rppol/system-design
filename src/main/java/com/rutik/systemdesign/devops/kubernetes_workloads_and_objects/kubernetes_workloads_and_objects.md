@@ -2,27 +2,28 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** Kubernetes **1.37** is the current minor (1.37.0 "Garhwal" on 2026-08-26, patch 1.37.1 on 2026-09-23); 1.36 "Haru" (2026-04-22) is the prior minor. StatefulSet **`maxUnavailable`** (`MaxUnavailableStatefulSet`, Beta) is on by default again in 1.37 after a 1.36 bug (kubernetes#137409), and the StatefulSet **`Recreate`** update strategy is alpha in 1.37 (`StatefulSetRecreateStrategy`, off by default). **External Secrets Operator v2.13.0** (2026-10-16) is the current release of the operator this page names for syncing Secrets.
+> **Version anchor (2026-11-25).** Kubernetes **1.37** is the current minor (1.37.0 "Garhwal" on 2026-08-26; the latest patch was 1.37.2 on 2026-10-13 per kubernetes.io/releases, and patches ship roughly monthly, so check that page rather than this line); 1.36 "Haru" (2026-04-22) is the prior minor. StatefulSet **`maxUnavailable`** (`MaxUnavailableStatefulSet`, Beta) is on by default again in 1.37 after a 1.36 bug (kubernetes#137409), and the StatefulSet **`Recreate`** update strategy is alpha in 1.37 (`StatefulSetRecreateStrategy`, off by default). **Native sidecar containers** (an init container with `restartPolicy: Always`) are stable since **1.33**; Job **`podFailurePolicy`** is stable since **1.31**; **`backoffLimitPerIndex`** and **`successPolicy`** are stable since **1.33**. For L7 entry, **Gateway API v1.7.0** (2026-10-29) is the current Standard channel; the `Ingress` API is still served but feature-frozen, and the community ingress-nginx controller was retired in March 2026. The External Secrets Operator version is pinned in [secrets_management](../secrets_management/secrets_management.md), not here.
 
-If [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) explains *how* the cluster works, this module covers *what you actually declare*: Pods, the controllers that manage them (Deployment, StatefulSet, DaemonSet, Job/CronJob), and the objects that connect and configure them (Service, Ingress, ConfigMap, Secret). Choosing the right workload object and configuring probes and update strategy correctly is the difference between a self-healing system and one that drops traffic on every deploy.
+If [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) explains *how* the cluster works, this module covers *what you actually declare*: Pods and the containers inside them (app, init and sidecar), the controllers that manage them (Deployment, StatefulSet, DaemonSet, Job/CronJob), and the objects that connect, protect and configure them (Service, Gateway API routes, PodDisruptionBudget, ConfigMap, Secret). Choosing the right workload object and configuring probes and update strategy correctly is the difference between a self-healing system and one that drops traffic on every deploy.
 
 ---
 
 ## 1. Concept Overview
 
-The **Pod** is the atomic unit — one or more containers sharing a network namespace (same IP/localhost) and storage volumes, scheduled together. You almost never create bare Pods; you declare a **controller** that manages Pods for you:
+The **Pod** is the atomic unit — one or more containers sharing a network namespace (same IP/localhost) and storage volumes, scheduled together. Inside a Pod there are three kinds of container: **app containers** (the workload), **init containers** (run to completion, one at a time, before any app container starts), and **sidecar containers** (init containers with `restartPolicy: Always`, which start before the app and keep running beside it). You almost never create bare Pods; you declare a **controller** that manages Pods for you:
 
 - **Deployment** → manages a **ReplicaSet** → manages stateless Pods, with rolling updates and rollback.
 - **StatefulSet** → Pods with stable identity (ordinal names, stable storage, ordered rollout) for databases/brokers.
 - **DaemonSet** → exactly one Pod per (matching) node — agents, log shippers, CNI.
-- **Job** → run-to-completion Pods; **CronJob** → scheduled Jobs.
+- **Job** → run-to-completion Pods, optionally Indexed with per-index retry and success rules; **CronJob** → scheduled Jobs.
 
-Connectivity and config objects:
+Connectivity, protection and config objects:
 - **Service** → a stable virtual IP/DNS name load-balancing to a set of Pods (selected by labels).
-- **Ingress** → L7 HTTP routing (host/path) to Services, via an ingress controller.
-- **ConfigMap / Secret** → inject configuration / sensitive data as env vars or mounted files.
+- **Gateway API** (`Gateway` + `HTTPRoute`) → the L7 entry point: host/path/header routing, traffic splits and retries to Services. The older **Ingress** API is still served but feature-frozen; mechanics are in [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md).
+- **PodDisruptionBudget** → how many Pods a voluntary disruption (a node drain, an upgrade) may take down at once.
+- **ConfigMap / Secret** → inject configuration / sensitive data as env vars or mounted files; the **Downward API** injects the Pod's own metadata the same way.
 
-**Labels and selectors** are the glue: controllers and Services find their Pods by label match, not by name.
+**Labels and selectors** are the glue: controllers, Services and PDBs find their Pods by label match, not by name.
 
 ---
 
@@ -123,11 +124,48 @@ stateDiagram-v2
     Serving --> [*]: SIGTERM, graceful drain
 ```
 
+### Containers inside one Pod
+
+| Kind | Declared in | Starts | Stops | Typical use |
+|------|-------------|--------|-------|-------------|
+| Init container | `initContainers`, no `restartPolicy` | One at a time, in order, before anything else; each must exit 0 | When it exits | Schema migration, wait-for-dependency, fetch config, set file permissions |
+| Sidecar (native) | `initContainers` with `restartPolicy: Always` | In list order with the init containers; the next one starts once it is *started* (or its `startupProbe` passes) | **After** every app container has exited, in reverse order | Log shipper, service-mesh proxy, secrets agent, metrics exporter |
+| App container | `containers` | After every init container has completed and every sidecar has started | On Pod termination | The workload itself |
+
+The old pattern ran a sidecar as a second entry in `containers`. That has no ordering at all: the proxy can start after the app (first requests fail), and in a Job the proxy never exits, so the Pod never completes. Native sidecars fix both and are the default to reach for since they went stable in 1.33.
+
+**Pod phase versus container state.** `kubectl get pods` shows a mix of two things. The Pod **phase** is coarse: `Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`. Each container has its own **state** (`Waiting`, `Running`, `Terminated`) with a reason such as `CrashLoopBackOff` or `OOMKilled`. A Pod can be `Running` while one container is in `CrashLoopBackOff`, which is why the STATUS column shows the worst container reason rather than the phase.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: accepted by API server
+    Pending --> Pending: scheduling, image pull,<br/>init containers running
+    Pending --> Running: all init done,<br/>sidecars started,<br/>app containers started
+    Running --> Running: container restarts<br/>restartPolicy Always or OnFailure
+    Running --> Succeeded: all app containers exit 0<br/>restartPolicy Never or OnFailure
+    Running --> Failed: an app container exits non-zero<br/>and is not restarted
+    Pending --> Failed: init container fails<br/>with restartPolicy Never
+    Running --> Unknown: node stops reporting
+    Succeeded --> [*]
+    Failed --> [*]
+```
+
+### Job completion and failure controls
+
+| Field | What it controls | Stable since |
+|-------|------------------|--------------|
+| `completions` / `parallelism` | How many successful Pods finish the Job, and how many run at once | long-standing |
+| `completionMode: Indexed` | Each Pod gets `JOB_COMPLETION_INDEX` 0..completions-1 and a stable hostname; one success per index | 1.24 |
+| `backoffLimit` | Total failed Pods before the Job fails (default 6) | long-standing |
+| `podFailurePolicy` | Per exit code or Pod condition: `FailJob`, `Ignore` (do not count, for example preemption), `Count`, or `FailIndex` | 1.31 |
+| `backoffLimitPerIndex` / `maxFailedIndexes` | Retries counted per index, so one bad shard does not eat the whole budget | 1.33 |
+| `successPolicy` | Declare success early: specific indexes (a leader) or a count of indexes | 1.33 |
+
 ---
 
 ## 5. Architecture Diagrams
 
-**Ownership chain (stateless app).** Traffic flows Ingress to Service to Pods; management flows Deployment to ReplicaSet to those same Pods. The prior rollout's ReplicaSet is retained at zero replicas so rollback is just scaling it back up.
+**Ownership chain (stateless app).** Traffic flows Gateway to HTTPRoute to Service to Pods; management flows Deployment to ReplicaSet to those same Pods. The prior rollout's ReplicaSet is retained at zero replicas so rollback is just scaling it back up.
 
 ```mermaid
 flowchart LR
@@ -139,13 +177,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    ingress(["Ingress<br/>host/path rules"]) --> svc(["Service web<br/>ClusterIP"])
+    gw(["Gateway<br/>shared L7 entry"]) --> route(["HTTPRoute<br/>host/path rules"])
+    route --> svc(["Service web<br/>ClusterIP"])
     svc -->|"selects label<br/>app=web"| pods(["3 Pods<br/>app-7f9-a/b/c"])
-    deploy(["Deployment<br/>replicas: 3"]) -->|"creates/scales"| rsNew["ReplicaSet<br/>current"]
+    deploy(["Deployment<br/>replicas: 3"]) -->|"creates/scales"| rsNew(["ReplicaSet<br/>current"])
     rsNew -->|"owns"| pods
-    deploy -.->|"prior rollout"| rsOld["ReplicaSet<br/>scaled to 0"]
+    deploy -.->|"prior rollout"| rsOld(["ReplicaSet<br/>scaled to 0"])
 
-    class ingress io
+    class gw io
+    class route req
     class svc base
     class deploy mathOp
     class rsNew,pods train
@@ -307,14 +347,106 @@ At 3 replicas the "faster" 25% option is not faster at all — it rounds to exac
 
 **Why `maxUnavailable: 0` needs headroom.** It forces every replacement Pod to be scheduled *before* any old Pod is removed, so the cluster must have room for `replicas + maxSurge` Pods at once — 4 in the manifest above. On a cluster with no spare capacity the surge Pod stays Pending and the rollout stalls indefinitely rather than degrading; that is the tradeoff the "capacity headroom vs availability" row is naming.
 
+### Init containers and a native sidecar
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: orders}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: orders}}
+  template:
+    metadata: {labels: {app: orders}}
+    spec:
+      initContainers:
+        - name: wait-for-db                      # plain init: runs once, must exit 0
+          image: busybox:1.37
+          command: ["sh", "-c", "until nc -z postgres 5432; do sleep 2; done"]
+        - name: log-shipper                      # native sidecar: starts here, keeps running
+          image: fluent/fluent-bit:5.2
+          restartPolicy: Always
+          volumeMounts: [{name: logs, mountPath: /var/log/app}]
+      containers:
+        - name: orders
+          image: registry/orders@sha256:...
+          volumeMounts: [{name: logs, mountPath: /var/log/app}]
+          env:
+            - name: POD_NAME                     # Downward API: the Pod's own metadata
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: MEM_LIMIT_BYTES              # size heaps from the real limit, not the node
+              valueFrom: {resourceFieldRef: {containerName: orders, resource: limits.memory}}
+          resources: {limits: {memory: 512Mi}}
+      volumes:
+        - {name: logs, emptyDir: {}}
+```
+
+Order on start: `wait-for-db` runs to completion, then `log-shipper` starts and is marked started, then `orders` starts. On termination the order reverses: `orders` gets SIGTERM first and the kubelet keeps `log-shipper` alive until `orders` has exited, so the last log lines still ship. The Downward API is how a container learns its own Pod name, namespace, node, labels or resource limits without calling the API server, which also means it needs no RBAC.
+
+### An Indexed Job with failure and success policies
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata: {name: reindex}
+spec:
+  completions: 32                 # 32 shards, one index each (JOB_COMPLETION_INDEX 0..31)
+  parallelism: 8
+  completionMode: Indexed
+  backoffLimitPerIndex: 2         # each shard may fail twice before that index is marked failed
+  maxFailedIndexes: 3             # more than 3 failed shards: stop the whole Job
+  podFailurePolicy:
+    rules:
+      - action: FailIndex         # exit 42 = bad input for this shard; retrying will not help
+        onExitCodes: {containerName: worker, operator: In, values: [42]}
+      - action: Ignore            # preemption, eviction, node drain: do not count it
+        onPodConditions: [{type: DisruptionTarget}]
+  template:
+    spec:
+      restartPolicy: Never        # required by podFailurePolicy and backoffLimitPerIndex
+      containers:
+        - name: worker
+          image: registry/reindex@sha256:...
+```
+
+The arithmetic matters. With a plain `backoffLimit: 6`, the whole 32-shard Job fails after 6 failed Pods anywhere, so one poisoned shard failing 7 times kills the other 31. With `backoffLimitPerIndex: 2` the bad shard is marked failed after 3 attempts (1 + 2 retries), the other 31 keep going, and the Job ends `Failed` with `status.failedIndexes` naming exactly which shard to look at. The `Ignore` rule stops a node drain from spending retries at all. For a leader-worker job (MPI, a PyTorch launcher), `successPolicy: {rules: [{succeededIndexes: "0", succeededCount: 1}]}` declares success when index 0 succeeds and terminates the remaining workers.
+
+### PodDisruptionBudget: how many Pods a drain may take
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: web}
+spec:
+  maxUnavailable: 1               # or minAvailable: 2; set exactly one of the two
+  selector: {matchLabels: {app: web}}
+```
+
+A PDB limits **voluntary** disruptions that go through the Eviction API: `kubectl drain`, cluster-autoscaler and Karpenter scale-down, managed node-pool upgrades. It does nothing for a node crash. `ALLOWED DISRUPTIONS = current healthy - required healthy`. For the 3-replica `web` Deployment, `maxUnavailable: 1` allows 1 eviction when all 3 are healthy and 0 while one is already down; `maxUnavailable: 30%` rounds up to 1 as well. Two settings block every drain: `maxUnavailable: 0` and `minAvailable` equal to the replica count. A 1-replica Deployment with `minAvailable: 1` is the most common way a node upgrade hangs for hours. Prefer `maxUnavailable`, because it follows the replica count when the Deployment scales.
+
+### `externalTrafficPolicy: Local`
+
+```yaml
+kind: Service
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local    # Cluster (default) or Local
+```
+
+With the default `Cluster`, a node that receives external traffic may forward it to a Pod on another node, and it SNATs the packet, so the Pod sees the node IP instead of the client IP. `Local` sends traffic only to Pods on the receiving node and keeps the client source IP, which allow-lists and rate limiters need. The costs: nodes with no local Pod fail the load balancer's health check and get no traffic, and traffic is balanced per node, not per Pod, so a node with 1 Pod gets the same share as a node with 4.
+
 ---
 
 ## 7. Real-World Examples
 
-- **Stateless web/API tiers** run as Deployments behind a ClusterIP Service and an Ingress — the bread-and-butter pattern.
+- **Stateless web/API tiers** run as Deployments behind a ClusterIP Service and a Gateway API `HTTPRoute` on a shared `Gateway` — the bread-and-butter pattern. Clusters that predate Gateway API still run the same shape on the frozen `Ingress` API.
 - **Kafka, Postgres, Elasticsearch** run as StatefulSets (or operators) for stable identity and per-pod storage; brokers/replicas need predictable names and retained disks.
 - **Datadog/Fluent Bit/Cilium agents** run as DaemonSets — one per node to collect logs/metrics or program networking.
 - **Database migrations** run as Jobs in CI/CD before the app Deployment rolls; **nightly backups** as CronJobs.
+- **Service meshes and log agents** moved to native sidecars: Istio supports running its proxy as a native sidecar, which fixes the two classic failures of the old pattern, an app starting before its proxy and a Job that never completes because the proxy never exits.
+- **Sharded batch** (reindexing, ML preprocessing, test sharding) runs as Indexed Jobs, with `backoffLimitPerIndex` so one bad shard is reported instead of failing the whole run.
 
 ---
 
@@ -325,7 +457,10 @@ At 3 replicas the "faster" 25% option is not faster at all — it rounds to exac
 | App controller | Deployment (simple, fast rollout) | StatefulSet (identity/storage) | Does the workload need stable identity/disk? |
 | Rollout | `maxUnavailable: 0, maxSurge: 1` (zero-downtime) | `maxUnavailable: 25%` (faster) | Capacity headroom vs availability |
 | StatefulSet rollout | `maxUnavailable: 1` (default, one ordinal at a time) | `maxUnavailable: 2+` with `Parallel` (faster) | Quorum: at most `(members - 1) / 2` down at once |
-| Service exposure | LoadBalancer (one per svc, costly) | Ingress (shared L7) | Cost + L7 features |
+| Service exposure | LoadBalancer (one per svc, costly) | Shared L7 entry: Gateway API `Gateway` + `HTTPRoute` (or the frozen Ingress API) | Cost + L7 features |
+| Helper process | Second entry in `containers` | Native sidecar (`initContainers` + `restartPolicy: Always`) | Ordering on start and stop; Jobs that must complete |
+| Job retries | `backoffLimit` (one budget for the whole Job) | `backoffLimitPerIndex` + `podFailurePolicy` | Whether one bad shard should fail all shards |
+| PDB | `minAvailable: N` | `maxUnavailable: 1` | `maxUnavailable` follows scaling; `minAvailable` equal to replicas blocks every drain |
 | Config | ConfigMap env vars | Mounted files (hot-reload) | Reload-without-restart need |
 | Liveness probe | Aggressive | Lenient/none | Restart storms vs slow recovery |
 | Secret storage | Native Secret (b64) | External store (Vault/ESO) | Security/compliance |
@@ -336,7 +471,7 @@ At 3 replicas the "faster" 25% option is not faster at all — it rounds to exac
 
 **Deployment**: stateless services — the default. **StatefulSet**: only when you genuinely need stable network identity, ordered startup, or per-pod persistent storage (DBs, clustered brokers). **DaemonSet**: node-level agents. **Job/CronJob**: batch and scheduled work.
 
-**Avoid:** bare Pods in prod (no self-healing); StatefulSets for stateless apps (slower, more complex rollouts for no benefit); `LoadBalancer` per service when an Ingress would share one (cost). Don't run a heavy database as a StatefulSet if a managed service (RDS) fits — operational burden is real.
+**Avoid:** bare Pods in prod (no self-healing); StatefulSets for stateless apps (slower, more complex rollouts for no benefit); `LoadBalancer` per service when one shared Gateway would front them all (cost); a sidecar as a plain second container in a Job (the Job never completes); a PDB that allows zero disruptions (node drains hang). Don't run a heavy database as a StatefulSet if a managed service (RDS) fits — operational burden is real.
 
 ---
 
@@ -376,6 +511,39 @@ spec: {selector: {app: web}}        # pods have labels.app: webapp
 # FIX: ensure labels match; verify endpoints exist.
 kubectl get endpointslices -l kubernetes.io/service-name=web    # should list pod IPs, not be empty
 ```
+
+**Pitfall 4 — A sidecar declared as a regular container keeps the Job Running forever.** A nightly export Job ships its logs through a Fluent Bit sidecar. The export finishes at 03:12 and exits 0, but the Pod stays `Running`, because a Pod only reaches `Succeeded` when every container in `containers` has exited and the log shipper never does. The Job never completes, `concurrencyPolicy: Forbid` then skips every later run, and nobody notices until the export is a week stale.
+
+```yaml
+# BROKEN: the shipper is an ordinary container with no reason to exit.
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: export
+          image: registry/export@sha256:...
+        - name: log-shipper
+          image: fluent/fluent-bit:5.2
+```
+
+```yaml
+# FIX: a native sidecar. It starts before export, keeps running beside it, and the
+# kubelet stops it after export exits, so the Pod reaches Succeeded and the Job completes.
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: log-shipper
+          image: fluent/fluent-bit:5.2
+          restartPolicy: Always          # this one line makes it a sidecar
+      containers:
+        - name: export
+          image: registry/export@sha256:...
+```
+
+**Pitfall 5 — A PodDisruptionBudget that allows zero disruptions blocks node upgrades.** A single-replica admin service has `minAvailable: 1`. `ALLOWED DISRUPTIONS` is permanently 0, so `kubectl drain` retries the eviction forever and a managed node-group upgrade stalls on that node until its timeout. FIX: run 2 replicas with `maxUnavailable: 1`, or, for a genuinely single-instance service, accept the brief outage and use `maxUnavailable: 1`; never ship a budget whose allowed disruptions are 0 in steady state.
 
 ---
 
@@ -453,11 +621,27 @@ A `preStop` hook bridges the gap between a Pod being marked Terminating and kube
 
 **Q: What are the Kubernetes Service types and how does each expose Pods?**
 **Short:** There are four `type` values — ClusterIP, NodePort, LoadBalancer, ExternalName — plus the headless variant, each exposing Pods differently from internal-only to internet-facing.
-There are four values of the `type` field — ClusterIP, NodePort, LoadBalancer, ExternalName — plus the headless variant, which is a ClusterIP Service with `clusterIP: None` rather than a type of its own. ClusterIP (the default) gives an internal-only virtual IP for service-to-service calls, and the rest build outward from there for different exposure needs. NodePort opens the same port on every node for simple external access, usually behind an external load balancer; LoadBalancer provisions one cloud load balancer with an external IP per Service; a headless Service skips the virtual IP entirely and returns individual Pod IPs via DNS, which is what StatefulSets use for stable per-Pod addressing; and ExternalName is just a DNS CNAME to an external hostname with no proxying at all. In production, ClusterIP handles internal traffic, an Ingress fronting ClusterIP (or occasionally LoadBalancer directly) handles internet-facing traffic, and NodePort is mostly a dev/debug tool since it exposes a high port on every node. Pick headless only when clients genuinely need to address a specific Pod rather than any ready replica.
+There are four values of the `type` field — ClusterIP, NodePort, LoadBalancer, ExternalName — plus the headless variant, which is a ClusterIP Service with `clusterIP: None` rather than a type of its own. ClusterIP (the default) gives an internal-only virtual IP for service-to-service calls, and the rest build outward from there for different exposure needs. NodePort opens the same port on every node for simple external access, usually behind an external load balancer; LoadBalancer provisions one cloud load balancer with an external IP per Service; a headless Service skips the virtual IP entirely and returns individual Pod IPs via DNS, which is what StatefulSets use for stable per-Pod addressing; and ExternalName is just a DNS CNAME to an external hostname with no proxying at all. In production, ClusterIP handles internal traffic, a shared Gateway API `Gateway` with `HTTPRoute`s fronting ClusterIP Services (or the frozen Ingress API on older clusters, or occasionally a LoadBalancer directly) handles internet-facing traffic, and NodePort is mostly a dev/debug tool since it exposes a high port on every node. Pick headless only when clients genuinely need to address a specific Pod rather than any ready replica.
 
-**Q: Why prefer an Ingress over giving every Service its own LoadBalancer?**
-**Short:** An Ingress shares one L7 load balancer and controller across many Services' host and path rules, versus one costly cloud load balancer per Service.
-A cloud LoadBalancer Service provisions one external load balancer per Service, while an Ingress shares a single L7 load balancer and controller across many Services' host and path rules. Ten services fronted by ten `LoadBalancer` Services means ten cloud load balancers billed and managed separately, while the same ten services behind one Ingress controller share a single load balancer and route by hostname or URL path, cutting both cost and the number of moving parts to monitor. Ingress also provides L7 features a plain Service can't: path-based routing, host-based virtual hosting, TLS termination, and header-based rules, all configured declaratively per Ingress object. The tradeoff is an extra layer — the ingress controller itself — to operate and secure, so default to Ingress for HTTP(S) services and reserve raw `LoadBalancer` Services for internet-facing TCP/UDP workloads an Ingress controller can't route.
+**Q: Why front many Services with one shared L7 entry point (Gateway API, or the frozen Ingress API) instead of a LoadBalancer per Service?**
+**Short:** One shared Gateway routes many Services by host and path behind a single cloud load balancer, instead of paying for and operating one load balancer per Service.
+A `LoadBalancer` Service provisions one external cloud load balancer per Service, while a shared L7 entry point puts one load balancer and one controller in front of many Services and routes by hostname, path or header. Ten services behind ten `LoadBalancer` Services means ten load balancers billed and monitored separately; the same ten behind one Gateway API `Gateway`, with an `HTTPRoute` per team, share one. The L7 layer also adds what a plain Service cannot: host and path routing, TLS termination, weighted traffic splits for canaries, header matching, and, since Gateway API v1.7, portable retries. Use Gateway API for new work: the `Ingress` API is still served but feature-frozen, and its most common controller, community ingress-nginx, was retired in March 2026. Keep raw `LoadBalancer` Services for TCP/UDP workloads the Gateway implementation does not route.
+
+**Q: A Job's main container exits 0 but the Job never completes. What is the usual cause and the fix?**
+**Short:** A helper such as a log shipper or mesh proxy runs as a second regular container that never exits; declare it as a native sidecar (init container with `restartPolicy: Always`).
+A Pod reaches `Succeeded` only when every container in `containers` has exited, so a log shipper or service-mesh proxy declared there keeps the Pod `Running` after the real work is done, and the Job never records a completion. Native sidecars, stable since Kubernetes 1.33, fix this: an entry in `initContainers` with `restartPolicy: Always` starts before the app containers, runs beside them, and is stopped by the kubelet after the app containers exit, in reverse order of declaration. That also fixes the start-order bug of the old pattern, where the app could start before its proxy and fail its first network calls. The old workarounds (a shared file that tells the proxy to quit, or calling the proxy's quit endpoint from the app) are no longer needed.
+
+**Q: A 32-shard Indexed Job fails after one shard hits bad data. How do you stop one shard from failing all of them?**
+**Short:** Use `backoffLimitPerIndex` so retries are counted per shard, plus a `podFailurePolicy` that fails only that index on its known-bad exit code.
+With a plain `backoffLimit` (default 6), failures from every Pod count against one budget, so a single poisoned shard that fails 7 times fails the whole Job and the 31 healthy shards stop with it. `backoffLimitPerIndex` (stable since 1.33) counts failures per index: the bad index is marked failed after its retries, the others keep running, and `status.failedIndexes` names it. `maxFailedIndexes` sets how many bad shards you tolerate before stopping everything. A `podFailurePolicy` (stable since 1.31) refines it: `FailIndex` on an exit code that means "bad input, retrying is pointless", and `Ignore` on the `DisruptionTarget` condition so preemption or a node drain does not spend retries at all. Both require `restartPolicy: Never` on the Pod template.
+
+**Q: A node drain hangs for hours on one Pod. What is the likely cause?**
+**Short:** A PodDisruptionBudget whose allowed disruptions are 0, such as `minAvailable: 1` on a single replica, so every eviction the drain requests is refused.
+`kubectl drain` and managed node upgrades evict Pods through the Eviction API, which refuses any eviction that would breach a PodDisruptionBudget. `ALLOWED DISRUPTIONS` is current healthy Pods minus the required healthy count, so `minAvailable: 1` on one replica, `minAvailable` equal to the replica count, or `maxUnavailable: 0` all give 0, and the drain retries forever. A Deployment already short a replica, for example one Pod stuck in `CrashLoopBackOff`, also drops allowed disruptions to 0 under `maxUnavailable: 1`. Check with `kubectl get pdb -A` and look for `ALLOWED DISRUPTIONS 0`. Fix the budget rather than force the drain: run at least 2 replicas with `maxUnavailable: 1`, which also follows the replica count when the workload scales.
+
+**Q: How does a container find out its own Pod name, node or memory limit without calling the API server?**
+**Short:** Through the Downward API, which injects Pod fields and container resource limits as environment variables or files, with no API call and no RBAC.
+The Downward API exposes fields of the Pod itself to its containers: `fieldRef` for `metadata.name`, `metadata.namespace`, `metadata.labels`, `spec.nodeName`, `status.podIP` and similar, and `resourceFieldRef` for the container's own `requests` and `limits`. It is delivered as environment variables or as files in a `downwardAPI` volume; the volume form picks up label and annotation changes, while environment variables are fixed when the container starts. The common production use is sizing a runtime from its real limit: a JVM or Node.js process that reads the node's total memory instead of the container's 512 Mi limit sizes its heap too large and gets OOM-killed, so pass `limits.memory` in and size from that. It needs no ServiceAccount token, which keeps the Pod's permissions minimal.
 
 **Q: How does a plain Job differ from a CronJob, and what does `backoffLimit` control?**
 **Short:** A Job runs Pods to completion once, a CronJob schedules new Jobs on a cron, and `backoffLimit` caps retries before the Job itself is marked Failed.
@@ -473,7 +657,10 @@ A Job runs Pods to completion a single time when created, while a CronJob is a s
 - Set **requests and (memory) limits**; aim for Guaranteed QoS on latency-critical pods.
 - Keep labels/selectors consistent; verify EndpointSlices are non-empty after changes.
 - Inject config via ConfigMap/Secret; pin images by digest; one image across environments.
-- Prefer **Ingress** over per-Service `LoadBalancer`; use **PodDisruptionBudgets** to survive node drains (see [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md)).
+- Prefer one shared **Gateway API** `Gateway` with per-team `HTTPRoute`s over per-Service `LoadBalancer`s; keep existing `Ingress` objects only until they are migrated, since the API is frozen.
+- Give every multi-replica workload a **PodDisruptionBudget** with `maxUnavailable: 1` (or a percentage), never one that allows zero disruptions (see [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md)).
+- Run helpers (proxies, log shippers, secret agents) as **native sidecars**, and one-time setup as **init containers**.
+- For sharded batch, use **Indexed Jobs** with `backoffLimitPerIndex` and a `podFailurePolicy` that ignores `DisruptionTarget`.
 - For databases, strongly consider managed services over self-run StatefulSets.
 
 ---
@@ -550,4 +737,4 @@ The `preStop sleep` covers the gap between a Pod being marked Terminating and ku
 
 ---
 
-**Cross-references:** [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (controllers that manage these objects), [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md) (Services, Ingress, EndpointSlices), [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) (requests/limits/QoS, PDB), [kubernetes_storage_and_state](../kubernetes_storage_and_state/kubernetes_storage_and_state.md) (PVCs for StatefulSets), [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (SIGTERM, grace period).
+**Cross-references:** [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (controllers that manage these objects), [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md) (Services, Gateway API and the frozen Ingress API, EndpointSlices), [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) (requests/limits/QoS, PDB), [kubernetes_storage_and_state](../kubernetes_storage_and_state/kubernetes_storage_and_state.md) (PVCs for StatefulSets), [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (SIGTERM, grace period).

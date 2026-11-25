@@ -2,7 +2,7 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** Current releases: **Jaeger v2.22.0** (2026-10-06), **Grafana Tempo v3.1.0** (2026-09-29) and **OpenTelemetry Collector v0.163.1** (2026-10-16). Specification, OTLP, semantic-convention and SDK versions are pinned in the anchor of [the OpenTelemetry deep dive](opentelemetry_deep_dive.md).
+> **Version anchor (2026-11-25).** Current releases: **Jaeger v2.23.0** (2026-11-05), **Grafana Tempo v3.1.1** (2026-10-21) and **OpenTelemetry Collector v0.166.0** (2026-11-24). Specification, OTLP, semantic-convention and SDK versions are pinned in the anchor of [the OpenTelemetry deep dive](opentelemetry_deep_dive.md).
 
 Distributed tracing follows a **single request as it fans out across many services**, stitching the per-service work into one causally-linked tree (a *trace* of *spans*). It answers the question metrics and logs can't: "for *this specific slow request*, where did the 800ms go?" **OpenTelemetry (OTel)** is the vendor-neutral CNCF standard for generating, collecting, and exporting traces (and metrics and logs) — its SDKs instrument code and its **Collector** receives, processes, samples, and exports to backends like Jaeger or Tempo. This module owns the *platform* side: Collector pipelines, sampling strategy, context propagation, and backends; **application instrumentation** (SDK setup, manual spans) lives in [../../backend/observability_and_monitoring](../../backend/observability_and_monitoring/observability_and_monitoring.md).
 

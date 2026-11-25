@@ -2,6 +2,8 @@
 
 > Cross-Cutting Primitive — DevOps Case Studies · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** **Prometheus v3.16.0** (2026-11-05) is the current release and **v3.13.5** the current LTS. Native histograms became **stable in v3.8.0** but stay opt-in: scraping them needs `scrape_native_histograms: true` (global or per scrape config), and since v3.9 the old `--enable-feature=native-histograms` flag is a no-op.
+
 ---
 
 ## 1. Concept Overview
@@ -368,7 +370,7 @@ When `sample_limit` is exceeded, the entire scrape is dropped and `up{job="api"}
 
 **Why high cardinality slows queries.** A PromQL query first resolves label matchers against the inverted index to get a postings list of matching series IDs, then reads and decompresses chunks for each. A query like `sum(rate(http_requests_total[5m]))` over 4M matching series must touch 4M postings entries and decompress 4M chunk sets per evaluation step. Query latency is roughly linear in matched series, so a metric at 4M series turns a sub-second query into a multi-second one, and a dashboard with 12 such panels refreshing every 15s can saturate the query engine and starve rule evaluation.
 
-**Native histograms (stable since Prometheus 3.8; opt-in until 4.0).** Classic histograms store one series per bucket boundary plus the `+Inf` bucket, so the 11-boundary client default means 12 `_bucket` series per label combination, and 14 series once `_sum` and `_count` are counted. Native (sparse) histograms store the entire distribution in a single series with dynamically-sized exponential buckets, collapsing the bucket fanout to effectively 1 series. For a metric with 200 label combinations, this is 200 series instead of 200 × 14 = 2,800 — a ~14x reduction. They are the strategic fix for histogram cardinality where buckets, not the other labels, are the dominant multiplier.
+**Native histograms (stable since Prometheus 3.8, still opt-in per scrape config).** Classic histograms store one series per bucket boundary plus the `+Inf` bucket, so the 11-boundary client default means 12 `_bucket` series per label combination, and 14 series once `_sum` and `_count` are counted. Native (sparse) histograms store the entire distribution in a single series with dynamically-sized exponential buckets, collapsing the bucket fanout to effectively 1 series. For a metric with 200 label combinations, this is 200 series instead of 200 × 14 = 2,800 — a ~14x reduction. They are the strategic fix for histogram cardinality where buckets, not the other labels, are the dominant multiplier.
 
 ---
 
@@ -401,7 +403,7 @@ When `sample_limit` is exceeded, the entire scrape is dropped and `up{job="api"}
 | remote_write to Mimir/Thanos | Horizontal, long retention, dedup | Operational complexity, object storage cost | >5M series or >30d retention |
 | Thanos sidecar + Store | Reuses object storage; downsampling 5m/1h | Query fan-out latency; eventual block upload | Long-term, multi-cluster global query |
 | Histograms | Quantiles + aggregatable | Bucket × label fanout | Latency SLIs with bounded labels |
-| Native histograms (sparse) | Far fewer series than classic buckets | Must be enabled explicitly before 4.0; tooling still maturing | Prometheus 3.8+ with high bucket counts |
+| Native histograms (sparse) | Far fewer series than classic buckets | Must be enabled per scrape config (`scrape_native_histograms: true`); tooling still maturing | Prometheus 3.8+ with high bucket counts |
 
 ---
 

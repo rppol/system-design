@@ -2,7 +2,7 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** GitHub Actions majors used on this page: **`actions/checkout@v7`** (v7.0.1, 2026-07-20), **`actions/setup-node@v7`** (v7.1.0, 2026-10-08), **`docker/build-push-action@v7`** (v7.4.0, 2026-09-15) and **`aws-actions/configure-aws-credentials@v6`** (v6.3.0, 2026-09-15). The pipeline example pins each action to its full commit SHA with the version in a trailing comment, because a tag can be moved.
+> **Version anchor (2026-11-25).** Node.js **26** is the active LTS line (since 2026-10-28), so the pipeline builds on `node-version: 26`. GitHub Actions concurrency now has a `queue: max` option (up to 100 pending runs per group, not combinable with `cancel-in-progress: true`), and a matrix is capped at 256 jobs per workflow run. GitHub Actions majors used on this page: **`actions/checkout@v7`** (v7.0.1, 2026-07-20), **`actions/setup-node@v7`** (v7.1.0, 2026-10-08), **`docker/build-push-action@v7`** (v7.4.0, 2026-09-15) and **`aws-actions/configure-aws-credentials@v6`** (v6.3.0, 2026-09-15). The pipeline example pins each action to its full commit SHA with the version in a trailing comment, because a tag can be moved.
 
 CI/CD is the automated path from a code commit to running software. **Continuous Integration** merges and verifies every change frequently (build + test on each commit); **Continuous Delivery/Deployment** automates the release of verified changes to production. Done well, it turns deployment from a risky quarterly event into a boring, many-times-a-day non-event — the single biggest lever on engineering velocity and reliability.
 
@@ -186,7 +186,7 @@ jobs:
       # Renovate/Dependabot read the trailing version comment and bump both together.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1     # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1   # v7.1.0
-        with: {node-version: 24, cache: npm}    # dependency cache -> faster installs
+        with: {node-version: 26, cache: npm}    # dependency cache -> faster installs
       - run: |
           set -euo pipefail          # fail fast (see shell module)
           npm ci
@@ -261,10 +261,63 @@ The 8x is a ratio, so it is unaffected by which step dominates; the 342s is what
 
 ### Parallelism and the dependency graph
 
+Independent jobs run concurrently and `needs:` expresses ordering, so test, lint and scan in parallel cost the slowest of the three, not the sum. Three more controls decide how a real pipeline behaves under load.
+
+**Concurrency groups: cancel superseded runs, never a deploy.**
+
 ```yaml
-# Independent jobs run concurrently; `needs:` expresses ordering.
-# test + lint + scan in parallel -> the slowest determines wall-clock, not the sum.
+# Workflow level: a new push to the same PR branch cancels the older run still in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # cancel PR runs only
+
+jobs:
+  deploy-prod:
+    needs: [build, test]
+    if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: deploy-prod            # one production deploy at a time, repo-wide
+      cancel-in-progress: false     # never kill a deploy halfway through
+      queue: max                    # keep up to 100 waiting deploys instead of dropping all but one
 ```
+
+Within a group at most one run executes. By default only one run may wait: a newer queued run cancels the older *pending* one. `cancel-in-progress: true` also kills the *running* one, which is right for PR checks (only the newest commit matters) and wrong for deploys, where a half-applied migration is worse than a slow queue. The `queue: max` option keeps up to 100 pending runs in order and cannot be combined with `cancel-in-progress: true`.
+
+**Matrix strategy: one job definition, many combinations.**
+
+```yaml
+test:
+  strategy:
+    fail-fast: false                # default is true: one failing cell cancels every other cell
+    max-parallel: 6
+    matrix:
+      node: [24, 26]
+      shard: [1, 2, 3, 4, 5, 6, 7, 8]
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with: {node-version: "${{ matrix.node }}", cache: npm}
+    - run: npm ci
+    - run: npx jest --shard=${{ matrix.shard }}/8
+```
+
+That is 2 x 8 = 16 jobs; GitHub caps one matrix at 256 jobs per workflow run. Set `fail-fast: false` on test matrices, otherwise the first failing cell cancels the rest and you learn about one failure per push instead of all of them.
+
+**Test sharding: the wall-clock arithmetic.** Assume a suite that takes 40 minutes on one runner and a fixed 1.5 minutes per job for checkout, cached install and report upload.
+
+```
+  1 runner:                       40 + 1.5            = 41.5 min wall clock,  41.5 runner-min
+  8 shards, split by file count:  slowest shard 11.0 + 1.5 = 12.5 min wall clock
+  8 shards, split by timing data: 40 / 8 = 5.0 + 1.5  =  6.5 min wall clock
+                                  runner-minutes = 8 x 6.5 = 52 (+25% vs 41.5)
+```
+
+Sharding buys latency with runner-minutes: 6.4x faster feedback for 25% more compute. The split method matters as much as the shard count. Splitting by file count lets one shard collect the slow integration files and become the critical path; splitting by recorded test durations (JUnit timing reports fed back into the next run, which most runners and test tools support) keeps the shards even. Past the point where the fixed 1.5 minutes dominates, more shards add cost without adding speed.
+
+**Path filters: skip what a commit did not touch.** `on.push.paths` / `on.pull_request.paths` skip a whole workflow when no matching file changed; in a monorepo, affected-target tools (Bazel, Nx, Turborepo) go further and compute the dependency graph. A workflow skipped by `paths` never reports a status, so a required status check on it blocks the merge forever; gate on a small always-running job that inspects changes instead.
+
+Action references in these snippets use major-version tags for readability; production workflows should pin full commit SHAs, as the pipeline above does and as [ci_cd_platforms](../ci_cd_platforms/ci_cd_platforms.md) explains with the `tj-actions/changed-files` compromise.
 
 ### Secrets in pipelines
 
@@ -347,6 +400,25 @@ deploy-prod:    {needs: deploy-staging, steps: [{run: deploy prod registry/app:$
 
 **Pitfall 3 — Slow pipelines that get bypassed.** A 40-minute pipeline pushes developers to batch changes and skip CI locally. FIX: cache aggressively, parallelize, run only affected tests, and put fast checks first — keep PR feedback under ~10 minutes.
 
+**Pitfall 4 — `cancel-in-progress` on the deploy job.** A team adds one workflow-level concurrency block to stop wasted PR runs, and it also covers the production deploy job. Two merges land 40 seconds apart; the second run cancels the first while its database migration is half applied, and the second run then fails on the inconsistent schema.
+
+```yaml
+# BROKEN: one group for everything, so a newer push kills an in-flight deploy
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+```yaml
+# FIX: cancel PR runs only; give deploys their own non-cancelling, queued group
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  deploy-prod:
+    concurrency: {group: deploy-prod, cancel-in-progress: false, queue: max}
+```
+
 ---
 
 ## 11. Technologies & Tools
@@ -426,6 +498,14 @@ Cache dependency directories and build layers by hashing the lockfile or Dockerf
 **Short:** Self-hosted runners suit special hardware like GPUs or ARM or tighter cost control, while managed runners trade that control for zero infrastructure upkeep billed per minute.
 Choose self-hosted runners for special hardware (GPUs, ARM) or tighter cost/environment control; managed runners trade that control for zero infrastructure upkeep billed per minute. The runner-models table frames ephemeral container/VM-per-job as the reproducible standard regardless of who hosts it, static self-hosted runners as existing mainly for special hardware needs, and managed cloud runners (GitHub/GitLab) as removing infrastructure ownership entirely. Self-hosted runners should still be ephemeral — spin up a fresh container per job on your own hardware rather than reusing one long-lived box. At high build volume, self-hosted can undercut per-minute managed pricing, but you take on patching, scaling, and runner security yourself. Default to managed runners unless a concrete hardware or cost driver forces you to operate your own fleet.
 
+**Q: How do you stop CI from wasting runners on superseded pushes without ever cancelling a deploy?**
+**Short:** Put PR runs in a concurrency group with `cancel-in-progress: true`, and give deploy jobs their own group with `cancel-in-progress: false` so they queue instead of being killed.
+A concurrency group allows one running job or workflow per group key, so keying the group on the branch (`${{ github.workflow }}-${{ github.ref }}`) and setting `cancel-in-progress: true` kills the older run when a developer pushes again to the same PR, which is pure savings because only the newest commit matters. Deploys are the opposite case: killing one halfway can leave a half-applied migration or a split rollout. Give the deploy job its own group, such as `deploy-prod`, with `cancel-in-progress: false`; by default only one deploy can wait in the group and a newer one replaces it, and `queue: max` keeps up to 100 waiting in order. `cancel-in-progress` accepts an expression, so one workflow-level block can cancel PR runs and leave pushes to `main` alone.
+
+**Q: An 8-way sharded test job finishes in 12 minutes when the serial suite takes 40. Why not 5, and how do you fix it?**
+**Short:** Wall clock is the slowest shard plus fixed per-job setup, so an uneven split by file count dominates; split by recorded test timings and stop adding shards once setup dominates.
+Sharding divides the suite across parallel jobs, and the job finishes when its slowest shard finishes. Splitting by file count puts slow integration files together, so one shard takes 11 minutes while the others take 3, and every shard also pays the fixed setup cost (checkout, cached install, report upload, about 1.5 minutes here). Splitting by recorded durations evens the shards to about 40 / 8 = 5 minutes, giving roughly 6.5 minutes of wall clock for 8 x 6.5 = 52 runner-minutes, 25% more compute than one 41.5-minute runner. Feed JUnit timing reports from the last run into the splitter, set `fail-fast: false` so one failing shard does not hide the others' results, and stop adding shards when the fixed setup becomes the larger part of each job.
+
 **Q: In a multi-service repo, would you run one big pipeline or a separate pipeline per service?**
 **Short:** Tightly coupled services in a monorepo often share one pipeline, while independently deployable services are better served by per-service pipelines that isolate blast radius.
 It depends on coupling: tightly coupled services in a monorepo often share one pipeline, while independently deployable services are better served by per-service pipelines. The tradeoffs table lists this exactly as mono- versus multi-pipeline, with the deciding factor being coupling and repo layout rather than a universal rule. A single pipeline is simpler to reason about but means one team's unrelated change can block or slow another team's deploy if the whole repo builds together. Per-service pipelines isolate blast radius and let each service deploy independently, pairing naturally with the monorepo affected-target tooling (Bazel/Nx/Turborepo) that only builds what a commit actually touches. Pick per-service pipelines once services deploy independently in production, and keep one pipeline only while the codebase truly ships as a single unit.
@@ -442,6 +522,8 @@ It depends on coupling: tightly coupled services in a monorepo often share one p
 - Treat **flaky tests as defects**; quarantine and fix, don't paper over with retries.
 - Tag artifacts by **commit SHA/digest**; sign and scan them (supply chain).
 - Track **DORA metrics**; graduate from Delivery to Deployment as test/observability confidence grows.
+- Cancel superseded **PR** runs with a concurrency group; give **deploys** their own non-cancelling group.
+- Shard long test suites by **recorded timings**, with `fail-fast: false` on the matrix.
 
 ---
 

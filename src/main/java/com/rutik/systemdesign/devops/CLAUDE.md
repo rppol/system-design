@@ -73,14 +73,16 @@ AWS is the default cloud in worked examples; GCP/Azure appear in comparison tabl
 | 7 — DevSecOps & Reliability | devsecops_and_supply_chain_security, policy_as_code_and_compliance, disaster_recovery_and_resilience, platform_engineering_and_idp |
 | 8 — Specialized Platforms & Performance | ml_platform_and_gpu_infrastructure, event_streaming_operations, performance_and_load_testing |
 
-**Deep-dive sub-files — 10.** None has a `STUDY_ORDER` entry — a sub-file groups under its
+**Deep-dive sub-files — 12.** None has a `STUDY_ORDER` entry — a sub-file groups under its
 parent via `splitModulePath()` — and each is wired into its tiers through the parent
-module's line in the `<!-- study-paths -->` block in `README.md`, which already lists all ten.
+module's line in the `<!-- study-paths -->` block in `README.md`, which lists all twelve.
 
 | Sub-file | Parent module |
 |----------|---------------|
+| `cluster_lifecycle_and_fleet_upgrades.md` | `kubernetes_architecture` |
 | `oci_image_formats_and_lazy_pulling.md` | `container_runtimes_and_oci` |
 | `cilium_and_ebpf_dataplane.md` | `kubernetes_networking` |
+| `ipv6_and_dual_stack.md` | `kubernetes_networking` |
 | `device_scheduling_and_dra.md` | `kubernetes_scheduling_and_autoscaling` |
 | `workload_identity_and_federation.md` | `kubernetes_security` |
 | `environment_promotion.md` | `gitops_argocd_flux` |
@@ -90,7 +92,7 @@ module's line in the `<!-- study-paths -->` block in `README.md`, which already 
 | `gpu_and_ai_finops.md` | `cloud_cost_optimization_finops` |
 | `gpu_scheduling_and_inference_ops.md` | `ml_platform_and_gpu_infrastructure` |
 
-`opentelemetry_deep_dive.md` (2,037 lines, 36 Q&As) is the largest: the OTel project-level
+`opentelemetry_deep_dive.md` (2,043 lines, 36 Q&As) is the largest: the OTel project-level
 mechanism — the spec / API-SDK / Collector three-layer split, per-signal data models, W3C
 context-propagation byte layout, consistent probability sampling (`ot=th` / `rv`), OTLP wire
 behaviour, Collector internals, semantic-convention migration, and cost arithmetic.
@@ -164,7 +166,7 @@ design_ci_cd_platform, design_kubernetes_platform, design_observability_platform
 | `observability_tracing_and_otel/` | `../../backend/observability_and_monitoring/` — Micrometer, MDC; `../../spring/observability_and_tracing/` |
 | `event_streaming_operations/` | `../../backend/kafka_deep_dive/` — Kafka internals; `../../backend/event_driven_fundamentals/` |
 | `ml_platform_and_gpu_infrastructure/` | `../../ml/gpu_and_hardware_optimization/` — CUDA profiling; `../../ml/mlops_and_ci_cd/` |
-| `ml_platform_and_gpu_infrastructure/`, `kubernetes_scheduling_and_autoscaling/`, `deployment_strategies/` | `../../mlops/`: GPU schedulers and quota policy (Kueue, Volcano, KAI Scheduler), model-server progressive delivery, inference autoscaling, GPU fleet health. This section keeps the device plugin, DRA, MIG, MPS and time-slicing mechanism and the generic deployment strategies |
+| `ml_platform_and_gpu_infrastructure/`, `kubernetes_scheduling_and_autoscaling/`, `deployment_strategies/` | `../../mlops/` owns **GPU schedulers and quota policy** (Kueue, Volcano, KAI Scheduler: selection, cohorts, borrowing, fair sharing, preemption) in `gpu_cluster_scheduling_and_quotas/`, **inference autoscaling** (which engine signal, thresholds, warm and scheduled floors, capacity planning) in `inference_autoscaling_and_capacity_planning/`, model-server progressive delivery, and GPU fleet health. This section keeps the device plugin, DRA, MIG, MPS and time-slicing **mechanism**, the gang-admission and topology **placement primitive** (one minimal Kueue `v1beta2` example is allowed to make it visible), **generic** HPA/VPA/KEDA/Karpenter autoscaling, and the generic deployment strategies. A devops page that needs scheduler policy or inference-autoscaling policy links the mlops page instead of teaching it (owner decision 2026-11-25) |
 | `observability_tracing_and_otel/opentelemetry_deep_dive.md`, `devsecops_and_supply_chain_security/` | `../../rust/`: `observability_tracing_and_opentelemetry/` (the `tracing` crate and its OTel bridge), `build_deployment_and_supply_chain/` (cargo-deny, cargo-audit, cargo-vet, cargo-auditable). This section keeps the OTel concepts, OTLP, the collector, the per-language status, SLSA, Sigstore and SBOM formats |
 
 ---

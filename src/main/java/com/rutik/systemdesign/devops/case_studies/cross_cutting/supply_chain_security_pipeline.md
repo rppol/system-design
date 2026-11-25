@@ -2,6 +2,8 @@
 
 > Cross-Cutting Primitive — DevOps Case Studies · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** **SLSA v1.x** Build track runs **L0 to L3** (there is no Build L4; two-party review is in the separate Source track). **cosign v3.1.5** (2026-11-24) and **Kyverno v1.20.0** (2026-11-12) are current; the `ImageValidatingPolicy` kind used in §6 exists from **Kyverno 1.17**.
+
 ---
 
 ## 1. Concept Overview

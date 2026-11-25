@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
-> **Version anchor (2026-09-04).** **Kubernetes 1.37 "Garhwal"** (released 2026-08-26) is the current release; **1.36 "Haru"** (2026-04-22) is the prior minor. **Gateway API v1.6** (v1.6.2, 2026-09-03) is current on the Standard (GA) channel (TCPRoute/UDPRoute graduated to Standard in v1.6), and the **Gateway API Inference Extension** is GA; conformant implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric. kube-proxy's **nftables** mode is the recommended Linux backend; **IPVS was marked deprecated in 1.35** (its feature gate is staged to default off in 1.40, with removal later still). **ingress-nginx was retired in March 2026**: the community controller is archived and read-only, though the Kubernetes `Ingress` API itself remains supported (feature-frozen).
+> **Version anchor (2026-11-25).** **Kubernetes 1.37 "Garhwal"** (released 2026-08-26) is the current minor; **1.36 "Haru"** (2026-04-22) is the prior minor; 1.38 is scheduled for 2026-12-16. **Gateway API v1.7.0** (2026-10-29) is current on the Standard (GA) channel: v1.7 promoted **HTTPRoute retries** (`retry.codes`, `retry.attempts`, `retry.backoff`) to Standard, and TCPRoute/UDPRoute graduated to Standard in v1.6. and the **Gateway API Inference Extension** is GA; conformant implementations include Envoy Gateway, Istio, Traefik, kgateway, and NGINX Gateway Fabric. kube-proxy's **nftables** mode is the recommended Linux backend (SIG Network recommends it on 1.36+ with kernel 5.13+); **IPVS was deprecated in 1.35, and SIG Network announced on 2026-11-16 that it plans to remove IPVS in 1.40**. **IPv4/IPv6 dual-stack** Services and Pods have been stable since 1.23; the address-planning side is in [ipv6_and_dual_stack](ipv6_and_dual_stack.md). **ingress-nginx was retired in March 2026**: the community controller is archived and read-only, though the Kubernetes `Ingress` API itself remains supported (feature-frozen).
 
 Kubernetes networking is where many engineers' understanding gets fuzzy — and where interviewers probe hardest. The model rests on a few rules (every Pod gets a routable IP; all Pods can reach each other without NAT) implemented by pluggable layers: the **CNI** (Pod IPs and connectivity), **Services + kube-proxy** (stable virtual IPs), **CoreDNS** (service discovery), **Ingress/Gateway API** (L7 entry), and **NetworkPolicy** (segmentation). This module traces a packet from the internet to a container and back.
 
@@ -345,6 +345,59 @@ flowchart LR
 
 *One `LoadBalancer` Service per app (left) multiplies cloud LB cost with no L7 features; an Ingress controller behind a single shared LB (right) fronts every Service by host/path — the pattern that lets an Ingress or Gateway API controller "front dozens of microservices behind one cloud LB" (see Real-World Examples).*
 
+### Gateway API with retries (Standard since v1.7)
+
+The same routing as the Ingress above, as Gateway API objects, plus the retry stanza that v1.7.0 promoted to the Standard channel. Retries used to need a controller-specific annotation or policy CRD; now they are part of the portable `HTTPRoute` rule.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: external, namespace: infra}
+spec:
+  gatewayClassName: envoy-gateway          # whichever implementation runs the data plane
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: app.example.com
+      tls: {certificateRefs: [{name: app-tls}]}
+      allowedRoutes: {namespaces: {from: All}}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: api, namespace: shop}
+spec:
+  parentRefs: [{name: external, namespace: infra}]
+  hostnames: [app.example.com]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /api}}]
+      backendRefs: [{name: api, port: 80}]
+      timeouts: {request: 10s}              # retries must fit inside this budget
+      retry:
+        codes: [502, 503, 504]              # 500, 502, 503, 504 are the conformance-tested codes
+        attempts: 2                         # retries in addition to the first try
+        backoff: 100ms                      # base interval; the curve and jitter are implementation-specific
+```
+
+Two rules make this safe. First, `timeouts.request` caps the whole exchange: the initial attempt plus every retry must finish inside it, or the Gateway returns a timeout. Second, only retry idempotent routes. A `POST /api/orders` retried on a 503 that the backend had already committed creates a second order, so put non-idempotent paths in their own rule with no `retry` block. `attempts: 2` also multiplies worst-case backend load by 3 during an outage, which is how retries turn a brownout into a retry storm; keep it at 1 or 2 and pair it with a circuit breaker or rate limit at the mesh layer.
+
+### Dual-stack Services
+
+On a cluster configured with both an IPv4 and an IPv6 Service CIDR (stable since 1.23), each Service chooses its families:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: {name: web}
+spec:
+  ipFamilyPolicy: PreferDualStack     # SingleStack (default) | PreferDualStack | RequireDualStack
+  ipFamilies: [IPv6, IPv4]            # order decides which address lands in .spec.clusterIP
+  selector: {app: web}
+  ports: [{port: 80}]
+```
+
+A Service with no `ipFamilyPolicy` gets `SingleStack` in the family of the *first* `--service-cluster-ip-range`, so turning on dual-stack changes nothing for existing Services until you set the policy. `RequireDualStack` fails creation on a single-stack cluster; `PreferDualStack` falls back silently. The primary family is immutable on an existing Service; you can add or drop only the secondary one. EKS is the notable exception: an EKS cluster is either IPv4 or IPv6 for its whole life and does not support dual-stack Pods or Services. Address planning, NAT64/DNS64 and the EKS IPv6 model are in [ipv6_and_dual_stack](ipv6_and_dual_stack.md).
+
 ### NetworkPolicy (default-deny + explicit allow)
 
 ```yaml
@@ -478,7 +531,7 @@ egress:
 |------|---------|
 | Calico / Cilium / AWS VPC CNI / Flannel | CNI (Pod networking, policy) |
 | CoreDNS + NodeLocal DNSCache | Service discovery + per-node cache |
-| Gateway API (Envoy Gateway, Istio, Traefik, kgateway, NGINX Gateway Fabric) | L7 routing, TLS termination |
+| Gateway API (Envoy Gateway, Istio, Traefik, kgateway, NGINX Gateway Fabric) | L7 routing, TLS termination, HTTPRoute retries (Standard since v1.7.0) |
 | kube-proxy (iptables/nftables) / Cilium eBPF | Service dataplane |
 | Hubble (Cilium) | Flow-level network observability |
 | `kubectl get endpointslices` | Endpoint debugging |
@@ -510,8 +563,8 @@ The Container Network Interface plugin is invoked by the kubelet when a Pod is c
 kube-proxy watches Services and EndpointSlices and programs the node's dataplane so Service VIPs route to ready Pod IPs. In iptables mode (the default) it installs chains the kernel evaluates sequentially, so per-packet cost grows with Service count; in nftables mode, the recommended mode on Linux, it installs a single verdict map, giving O(1) dispatch that stays flat into the tens of thousands of Services; with Cilium/eBPF, kube-proxy is replaced by eBPF programs entirely. In iptables/nftables modes it doesn't proxy bytes itself; the kernel forwards. The third historical mode, IPVS, was marked deprecated in 1.35 (see the IPVS question in §12).
 
 **Q: Why was kube-proxy's IPVS mode deprecated, and what should a cluster running it migrate to?**
-**Short:** IPVS was marked deprecated in Kubernetes 1.35 because SIG Network wants one high-performance backend, and nftables is the migration target.
-Kubernetes marked the IPVS kube-proxy mode deprecated in 1.35 — not because it stopped working, but because maintaining three separate Linux dataplanes (iptables, IPVS, nftables) split a shrinking pool of backend-expert maintainers, and nftables already matches IPVS's near-O(1) scaling once past its own stabilization. The deprecation is staged rather than immediate: the `KubeProxyIPVS` feature gate is scheduled to default off starting in 1.40, with code removal even later, so an IPVS cluster keeps running today but is on a clock with no further investment coming. Migrate by switching a node pool at a time to `--proxy-mode=nftables` (or the equivalent `KubeProxyConfiguration` field) and validating Service connectivity before rolling the rest, since the two modes use different kernel primitives and a mid-migration node runs one or the other, never both.
+**Short:** IPVS never matched every Service edge case and still leaned on iptables; it is deprecated since 1.35, planned for removal in 1.40, and nftables is the target.
+Kubernetes deprecated the IPVS kube-proxy mode in 1.35, and on 2026-11-16 SIG Network announced that it plans to remove it in 1.40. The kernel IPVS API turned out to be a poor match for the Service API: the backend never implemented every Service edge case, it has no batch-update call, and it falls back to iptables for everything beyond plain load balancing, so it inherits iptables' scaling limits and its long-term support problem (Red Hat plans to remove the iptables API from RHEL). The nftables backend, GA since 1.33, is feature-complete and benchmarks no slower than IPVS. SIG Network recommends nftables on 1.36 or later with kernel 5.13 or later, because post-1.33 scaling fixes were not backported; on older clusters or kernels, iptables mode is the fallback. Migrate by switching a node pool at a time to `--proxy-mode=nftables` (or the equivalent `KubeProxyConfiguration` field) and validating Service connectivity before rolling the rest, since the two modes use different kernel primitives and a mid-migration node runs one or the other, never both.
 
 **Q: Walk a packet from the internet to a container.**
 **Short:** The cloud LB hands the packet to the ingress controller, kube-proxy DNATs it from the Service ClusterIP to a ready Pod IP, then the CNI routes it to the container.
@@ -536,6 +589,14 @@ By default all Pod-to-Pod traffic is allowed. The moment a NetworkPolicy selects
 **Q: Ingress vs LoadBalancer Service vs Gateway API?**
 **Short:** A LoadBalancer Service provisions one costly L4 LB per Service, Ingress routes many Services through one L7 controller but is feature-frozen, and Gateway API is its GA successor.
 A `LoadBalancer` Service provisions one cloud LB per Service (costly, L4). Ingress lets one ingress controller (behind a single LB) route HTTP by host/path to many Services with TLS termination — far cheaper and L7-aware, though the Ingress API itself is feature-frozen. Gateway API is its GA successor and the target for new work: role-separated `GatewayClass`/`Gateway`/`HTTPRoute`, with native traffic splitting and header matching instead of Ingress's per-controller annotations.
+
+**Q: You add `retry: {attempts: 2}` to an HTTPRoute and a payment endpoint starts creating duplicate orders. Why?**
+**Short:** HTTPRoute retries replay the request on a retryable status, and a non-idempotent POST that the backend already committed is executed again on the retry.
+Gateway API v1.7.0 made `retry` (`codes`, `attempts`, `backoff`) a Standard field on an `HTTPRoute` rule, so it now applies portably across implementations. The Gateway retries when the backend returns one of the listed codes or the connection fails, and it cannot know whether the backend had already done the work: an order service that commits and then returns a 503 from a slow dependency gets the same POST again. Split routes so that only idempotent paths (GETs, PUTs with a client-supplied key) carry a `retry` block, or make the backend idempotent with an idempotency key. Also bound the blast radius: `attempts: 2` means up to 3 requests per call during an outage, so set a `timeouts.request` that caps the total and keep attempts low.
+
+**Q: What do `ipFamilyPolicy` and `ipFamilies` control on a dual-stack Service?**
+**Short:** `ipFamilyPolicy` picks single-stack, prefer-dual or require-dual allocation, and the order of `ipFamilies` decides which family becomes the primary `clusterIP`.
+On a cluster with both IPv4 and IPv6 Service ranges, `ipFamilyPolicy: SingleStack` (the default) allocates one ClusterIP from the first configured range, `PreferDualStack` allocates both and silently falls back to one on a single-stack cluster, and `RequireDualStack` allocates both or fails creation. `ipFamilies` sets the order, for example `[IPv6, IPv4]`, and the first entry is what lands in the legacy `.spec.clusterIP` field. The primary family is immutable afterwards; only the secondary can be added or removed. The trap is assuming that enabling dual-stack on the cluster makes existing Services reachable over IPv6: they stay `SingleStack` until each Service opts in.
 
 **Q: ingress-nginx was retired in March 2026: what does that actually mean for a cluster running it today?**
 **Short:** The community ingress-nginx project stopped shipping releases and security patches in March 2026, but a running cluster keeps working until the next unpatched CVE.

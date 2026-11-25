@@ -2,7 +2,7 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** GitHub Actions majors used on this page: **`actions/checkout@v7`** (v7.0.1, 2026-07-20) and **`docker/build-push-action@v7`** (v7.4.0, 2026-09-15). The examples pin each action to its full commit SHA with the version in a trailing comment, because a tag can be moved (see Pitfall 3).
+> **Version anchor (2026-11-25).** GitHub Actions majors used on this page: **`actions/checkout@v7`** (v7.0.1, 2026-07-20) and **`docker/build-push-action@v7`** (v7.4.0, 2026-09-15). GitHub-hosted runners give each job a fresh VM except the single-CPU runners, which are containers on a shared VM; GitHub Actions `concurrency` supports `queue: max` (up to 100 pending runs). GitLab CI's `resource_group` and `interruptible` keywords are from the current `.gitlab-ci.yml` reference. The examples pin each action to its full commit SHA with the version in a trailing comment, because a tag can be moved (see Pitfall 3).
 
 Knowing CI/CD *principles* (see [ci_cd_fundamentals](../ci_cd_fundamentals/ci_cd_fundamentals.md)) is necessary but not sufficient — you must also know the *platforms* that implement them and how to choose between them. GitHub Actions, GitLab CI, Jenkins, and Kubernetes-native engines (Tekton, Argo Workflows) make very different tradeoffs around hosting, configuration model, ecosystem, and where they run. This module compares them and covers the cross-cutting concerns (runners, secrets, reusability) that apply to all.
 
@@ -236,6 +236,42 @@ flowchart LR
 
 Demand spikes fan out to each platform's own autoscaling mechanism, but all three converge on the same principle: ephemeral, queue-driven runners so idle cost and cross-job state never accumulate.
 
+### Runner sandboxing: what "ephemeral" does and does not isolate
+
+An ephemeral runner gives each job a clean filesystem, which stops state and secrets leaking from one job to the next. It does not, by itself, stop a malicious job from attacking the machine it runs on, and on Kubernetes that machine is a node shared with other jobs. The isolation boundary is a separate choice:
+
+| Runner shape | Boundary between a job and its neighbours | Typical use |
+|---|---|---|
+| GitHub-hosted runner | A fresh VM per job (single-CPU runners are containers on a shared VM) | Default for public and fork-PR builds |
+| Ephemeral container Pod (ARC, GitLab Kubernetes executor, Jenkins Kubernetes plugin) | Linux namespaces and cgroups on a shared kernel | Trusted internal repos |
+| Container Pod with a sandboxed `RuntimeClass` (gVisor `runsc`, Kata Containers) | gVisor intercepts syscalls in a user-space kernel; Kata runs each Pod in a lightweight VM | Untrusted or dependency-heavy builds on a shared Kubernetes fleet |
+| MicroVM per job (Firecracker-based runners) | A hardware-virtualised VM with its own kernel, booted per job | Multi-tenant CI services; builds that need Docker inside the job |
+
+```yaml
+# ARC runner scale set whose runner Pods run under gVisor on a dedicated node pool
+apiVersion: v1
+kind: Pod                                     # the template ARC stamps out per job
+spec:
+  runtimeClassName: gvisor                    # a RuntimeClass whose handler is runsc
+  nodeSelector: {pool: ci-sandboxed}
+  automountServiceAccountToken: false         # the job never needs the Kubernetes API
+  securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: runner
+      image: ghcr.io/actions/actions-runner@sha256:...
+```
+
+The decision rule: if a job can run code from a fork, a third-party dependency's install script, or another team's repo, a shared kernel is not a security boundary, so use a VM per job or a sandboxed runtime. Docker-in-Docker with `--privileged` defeats every row of this table; build images with rootless BuildKit or Buildah instead (see [containers_and_docker](../containers_and_docker/containers_and_docker.md)). Runtime mechanics are in [container_runtimes_and_oci](../container_runtimes_and_oci/container_runtimes_and_oci.md).
+
+### Concurrency controls per platform
+
+| Need | GitHub Actions | GitLab CI |
+|---|---|---|
+| Cancel a superseded run on the same branch | `concurrency: {group: ..., cancel-in-progress: true}` | `interruptible: true` on jobs, with auto-cancel redundant pipelines |
+| Only one deploy to an environment at a time | Job-level `concurrency` group with `cancel-in-progress: false` (and `queue: max` to keep waiting runs) | `resource_group: production` (only one job in the group starts; others wait) |
+
+The arithmetic and the deploy-cancellation pitfall are in [ci_cd_fundamentals](../ci_cd_fundamentals/ci_cd_fundamentals.md) §6 and §10.
+
 ---
 
 ## 7. Real-World Examples
@@ -425,6 +461,14 @@ Pin every consumer to an explicit library version instead of tracking the defaul
 **Short:** `pull_request_target` runs with the base repo's secrets even for untrusted fork PRs, while plain `pull_request` runs with a read-only token and no secret access.
 `pull_request_target` runs in the context of the base repository with full access to its secrets and a write-scoped token, even though it's triggered by an untrusted fork. If that workflow checks out and executes the fork's code (a common pattern for "build the PR"), the fork's author can smuggle in a script that reads and exfiltrates those secrets — a well-known supply-chain hole. Plain `pull_request` from a fork instead runs with a read-only `GITHUB_TOKEN` and no access to repository secrets at all, so even a malicious fork's build script has nothing sensitive to steal. If a workflow genuinely needs secrets on fork PRs, keep the checkout of untrusted code and the secret-bearing steps in separate jobs, gated by required approval.
 
+**Q: Your CI runs every job in a fresh, ephemeral Kubernetes Pod. Is that enough isolation for fork pull requests?**
+**Short:** No; an ephemeral Pod gives a clean filesystem but shares the node's kernel, so untrusted code needs a VM per job or a sandboxed runtime such as gVisor or Kata.
+Ephemerality stops one job's files, caches and credentials from leaking into the next job, which fixes the long-lived-runner problem. It does not change the isolation boundary: container Pods on a node share one Linux kernel, so a kernel exploit, a privileged container, or a mounted Docker socket in one job can reach every other job on that node and the node's own credentials. For code you do not trust, such as fork PRs or dependency install scripts, use a VM per job (GitHub-hosted runners, Firecracker microVM runners) or run the runner Pods under a sandboxed `RuntimeClass`: gVisor intercepts syscalls in a user-space kernel, and Kata runs each Pod in a lightweight VM. Put those runners on a dedicated node pool, disable the ServiceAccount token, and never run Docker-in-Docker with `--privileged` there.
+
+**Q: How do GitHub Actions and GitLab CI each guarantee that only one production deploy runs at a time?**
+**Short:** GitHub Actions uses a job-level concurrency group with `cancel-in-progress: false`; GitLab CI uses `resource_group`, which lets only one job in the group start while the rest wait.
+In GitHub Actions, a `concurrency` group keyed on the environment (for example `deploy-prod`) allows one running job; with `cancel-in-progress: false` a newer deploy waits instead of killing the running one, and `queue: max` keeps up to 100 waiting deploys in order rather than only the newest. In GitLab CI, `resource_group: production` makes jobs in that group mutually exclusive across pipelines: one starts and the others wait, and the process mode (`unordered` by default) decides which waiting job goes next. Both are distinct from the cancel-superseded feature (`cancel-in-progress: true` in Actions, `interruptible: true` in GitLab), which is right for test jobs and wrong for deploys, where a cancelled half-applied rollout is worse than a short queue.
+
 **Q: What do ephemeral runners give up in exchange for their isolation guarantees?**
 **Short:** They pay a cold-start cost on every job since a fresh Pod must pull the toolchain and re-fetch dependencies from scratch, which a remote cache can offset without giving up isolation.
 Ephemeral runners pay a cold-start cost on every single job that a persistent, warm runner doesn't. A fresh Pod or VM has to pull the toolchain image and re-fetch dependencies from scratch each time — no warm `node_modules`, no locally cached layers — which can add anywhere from several seconds to a minute or more before the job even starts, versus a persistent runner that's already primed. The fix isn't to give up ephemerality; it's to pair it with a remote cache (registry layer cache, GitHub Actions cache, S3-backed dependency cache) so a fresh runner rehydrates quickly instead of rebuilding from nothing. That combination — ephemeral isolation plus remote caching — gets you both the security property and most of the speed.
@@ -437,6 +481,8 @@ Ephemeral runners pay a cold-start cost on every single job that a persistent, w
 
 ## 13. Best Practices
 
+- Run untrusted or fork-PR jobs on a **VM per job** or under a **sandboxed `RuntimeClass`** (gVisor, Kata) on a dedicated node pool; an ephemeral container alone shares the node kernel.
+- Serialize production deploys with a **non-cancelling concurrency group** (Actions) or a **`resource_group`** (GitLab); cancel only superseded test runs.
 - Choose by **SCM + ops appetite**; don't run Jenkins for a small SaaS-hosted team.
 - Keep pipelines **as code** in the repo; **reuse** via reusable workflows/templates/shared libraries.
 - Use **ephemeral, autoscaled runners** (ARC/K8s executors); never share persistent runners across repos.

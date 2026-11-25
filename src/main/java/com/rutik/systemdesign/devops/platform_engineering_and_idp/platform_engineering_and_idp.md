@@ -2,7 +2,7 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** Current releases: **Backstage v1.55.3** (2026-09-29) and **Crossplane v2.4.2** (2026-09-22). The Crossplane examples use the v2 model (`apiextensions.crossplane.io/v2`, namespaced composite resources). DORA defines five software delivery metrics ([DORA metrics guide](https://dora.dev/guides/dora-metrics/)).
+> **Version anchor (2026-11-25).** Current releases: **Backstage v1.57.1** (2026-11-18) and **Crossplane v2.5.0** (2026-11-24). The Crossplane examples use the v2 model (`apiextensions.crossplane.io/v2`, namespaced composite resources). DORA defines five software delivery metrics ([DORA metrics guide](https://dora.dev/guides/dora-metrics/)).
 
 ---
 

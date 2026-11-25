@@ -2,6 +2,8 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
+> **Version anchor (2026-11-25).** **Node.js 26 ("Lithium") became the active LTS line on 2026-10-28** (v26.13.0; latest v26.13.1, 2026-11-10), so every example here uses `node:26-slim` and `gcr.io/distroless/nodejs26-debian13`, which the distroless README lists next to the Node 22 and 24 images. Docker Hub sizes for the amd64 images on the same day: `node:26` about 445 MB compressed, `node:26-slim` about 86 MB compressed. **Docker Hardened Images** are free under Apache 2.0 in the Community tier; FIPS/STIG variants and SLA-backed CVE fixes are in the paid Select and Enterprise tiers. Dockerfile `HEALTHCHECK` defaults (interval 30s, timeout 30s, start-period 0s, start-interval 5s, retries 3) and the ENTRYPOINT/CMD table are from the Dockerfile reference; Compose `depends_on.condition: service_healthy` and `profiles` from the Compose file reference.
+
 Containers package an application with its dependencies into a portable, immutable image that runs identically on a laptop, in CI, and in production. Docker popularized the workflow, but the value is in understanding what an image *is* (layered, content-addressed), how builds cache, and how to produce small, secure, reproducible images — the artifacts every Kubernetes pod ultimately runs.
 
 > The kernel primitives (namespaces, cgroups) are covered in [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md); the runtime that actually executes images (containerd/runc) is in [container_runtimes_and_oci](../container_runtimes_and_oci/container_runtimes_and_oci.md). This module is about *images and the build*.
@@ -54,7 +56,7 @@ The build is driven by a **Dockerfile**: each instruction (`RUN`, `COPY`, `ADD`)
 | `*-slim` | 30–80 MB | Smaller, still has package manager | Some tools missing |
 | `alpine` | ~5 MB base | Tiny, musl libc | musl vs glibc bugs (DNS, Python wheels) |
 | `distroless` (Google) | ~2–20 MB | No shell/package manager, minimal CVEs | Hard to debug (no shell) |
-| Docker Hardened Images (DHI) | distroless-class runtime variants | Free under Apache 2.0 since 2025-12-17; 1,000+ Debian- and Alpine-based images, non-root by default, each with an SBOM and SLSA Build L3 provenance; `-dev` variants for build stages | Patch SLAs, FIPS/STIG images, and support past upstream end of life are the paid DHI Enterprise tier |
+| Docker Hardened Images (DHI) | distroless-class runtime variants | Free under Apache 2.0 since 2025-12-17; 1,000+ Debian- and Alpine-based images, non-root by default, each with an SBOM and SLSA Build L3 provenance; `-dev` variants for build stages | FIPS/STIG variants, SLA-backed CVE fixes and extended lifecycle support are the paid Select and Enterprise tiers |
 | `scratch` | 0 | Absolute minimum (static binaries) | Only for fully static apps (Go) |
 
 ```mermaid
@@ -71,6 +73,30 @@ xychart-beta
 
 Compile/build in a stage with the full toolchain, then `COPY --from=builder` only the final artifact into a minimal runtime image. The toolchain, source, and intermediate files never ship.
 
+### ENTRYPOINT and CMD together
+
+`ENTRYPOINT` is the executable; `CMD` supplies default arguments (or the whole command when there is no `ENTRYPOINT`). Exec form is a JSON array and runs the binary directly as PID 1; shell form is a plain string wrapped in `/bin/sh -c`, which makes the shell PID 1. From the Dockerfile reference:
+
+| | No `ENTRYPOINT` | `ENTRYPOINT exec_entry p1` (shell form) | `ENTRYPOINT ["exec_entry", "p1"]` (exec form) |
+|---|---|---|---|
+| No `CMD` | error, not allowed | `/bin/sh -c exec_entry p1` | `exec_entry p1` |
+| `CMD ["exec_cmd", "p1_cmd"]` | `exec_cmd p1_cmd` | `/bin/sh -c exec_entry p1` (CMD ignored) | `exec_entry p1 exec_cmd p1_cmd` |
+| `CMD exec_cmd p1_cmd` | `/bin/sh -c exec_cmd p1_cmd` | `/bin/sh -c exec_entry p1` (CMD ignored) | `exec_entry p1 /bin/sh -c exec_cmd p1_cmd` |
+
+Two rules fall out of it. A shell-form `ENTRYPOINT` swallows `CMD` and any `docker run` arguments, so use exec form whenever `CMD` should be overridable. And a shell at PID 1 does not forward SIGTERM, which is the signal-handling pitfall in §12. Setting `ENTRYPOINT` also resets any `CMD` inherited from the base image. In Kubernetes, `command` overrides `ENTRYPOINT` and `args` overrides `CMD`.
+
+### Docker networking modes
+
+| Driver | What the container gets | Use |
+|--------|-------------------------|-----|
+| `bridge` (default network) | Private IP on `docker0`, NAT to the host; containers reach each other **by IP only** | Quick single containers |
+| User-defined `bridge` | Same, plus **automatic DNS by container name or alias** and isolation from unrelated containers | Every multi-container app; what Compose creates per project |
+| `host` | The host's network namespace directly; no port mapping, no isolation | Network-heavy agents that need the host stack |
+| `none` | Loopback only | Batch jobs that must have no network |
+| `overlay` | A network spanning several Docker hosts (Swarm) | Multi-host Swarm services |
+
+The default `bridge` network has no name resolution, so `web` cannot reach `db` by name there; a user-defined bridge resolves names through Docker's embedded DNS. Kubernetes does not use any of these drivers: Pod networking comes from the CNI plugin (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -85,9 +111,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    base(["FROM node:24-slim<br/>shared, changes rarely"]) --> pkg["COPY package.json"]
-    pkg --> npmci["RUN npm ci<br/>changes when deps change"]
-    npmci --> appcode["COPY app code<br/>changes every commit"]
+    base(["FROM node:26-slim<br/>shared, changes rarely"]) --> pkg(["COPY package.json"])
+    pkg --> npmci(["RUN npm ci<br/>changes when deps change"])
+    npmci --> appcode(["COPY app code<br/>changes every commit"])
     appcode -->|"keep LAST for<br/>max cache hits"| rw(["container R/W<br/>logs, tmp"])
 
     class base base
@@ -109,15 +135,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph builder["Stage 1 · builder (node:24)"]
+    subgraph builder["Stage 1 · builder (node:26)"]
         direction LR
-        src(["COPY src"]) --> build["RUN npm ci && build<br/>toolchain ~900MB"]
+        src(["COPY src"]) --> build(["RUN npm ci && build<br/>toolchain ~900MB"])
         build --> artifacts(["dist/, node_modules"])
     end
 
     subgraph runtime["Stage 2 · runtime (distroless)"]
         direction LR
-        copyart["COPY --from=builder<br/>dist + node_modules"] --> cmd(["CMD server.js<br/>final image ~80MB"])
+        copyart(["COPY --from=builder<br/>dist + node_modules"]) --> cmd(["CMD server.js<br/>final image ~80MB"])
     end
 
     artifacts -->|"only artifacts<br/>copied"| copyart
@@ -141,7 +167,7 @@ flowchart LR
 
 ```dockerfile
 # ---- build stage: has the full toolchain ----
-FROM node:24-slim AS builder
+FROM node:26-slim AS builder
 WORKDIR /app
 
 # Copy ONLY manifests first so the expensive install layer caches across code changes.
@@ -152,7 +178,7 @@ COPY . .                                     # source changes often -> later lay
 RUN npm run build                            # produces /app/dist
 
 # ---- runtime stage: minimal, no toolchain, no source ----
-FROM gcr.io/distroless/nodejs24-debian13 AS runtime
+FROM gcr.io/distroless/nodejs26-debian13 AS runtime
 WORKDIR /app
 COPY --from=builder /app/dist        ./dist
 COPY --from=builder /app/node_modules ./node_modules
@@ -203,9 +229,64 @@ node_modules
 
 ```bash
 # Tags are mutable (someone can re-push :latest). Digests are immutable.
-FROM node:24-slim                                   # mutable
-FROM node:24-slim@sha256:abc123...                  # pinned, reproducible
+FROM node:26-slim                                   # mutable
+FROM node:26-slim@sha256:abc123...                  # pinned, reproducible
 ```
+
+### Sharing the build cache across CI runners
+
+A cache mount lives on one builder. Ephemeral CI runners start empty, so export the layer cache to the registry and import it on the next run:
+
+```bash
+docker buildx build \
+  --cache-from type=registry,ref=registry.example.com/orders:buildcache \
+  --cache-to   type=registry,ref=registry.example.com/orders:buildcache,mode=max \
+  -t registry.example.com/orders:$GIT_SHA --push .
+# mode=max also exports the intermediate builder-stage layers, which is where
+# the expensive npm ci layer lives; the default (min) exports only final-image layers.
+```
+
+### HEALTHCHECK
+
+```dockerfile
+# Defaults if you omit the flags: interval 30s, timeout 30s, start-period 0s,
+# start-interval 5s, retries 3.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
+  CMD ["node", "dist/healthcheck.js"]
+```
+
+`docker ps` then shows `healthy` or `unhealthy`, and Docker Compose can gate start order on it. Two things it does not do: plain Docker never restarts an unhealthy container because of it (a restart policy reacts to the process exiting), and **Kubernetes ignores `HEALTHCHECK` entirely** — the kubelet only runs the Pod's `livenessProbe`, `readinessProbe` and `startupProbe`. Distroless images have no shell or `curl`, so the check must be an exec-form command the image already contains, like the small Node script above.
+
+### Docker Compose for a local stack
+
+```yaml
+# compose.yaml -- the app waits for a HEALTHY database, not just a started one
+services:
+  api:
+    build: .
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/app   # "db" resolves via Compose's network DNS
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:17
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+  adminer:
+    image: adminer
+    profiles: ["debug"]          # only starts with: docker compose --profile debug up
+volumes:
+  pgdata: {}
+```
+
+Compose puts every service of a project on one user-defined network, so `api` reaches `db` by name. Plain `depends_on: [db]` waits only for the `db` container to *start*; Postgres then needs several more seconds before it accepts connections, and an API that connects at boot crashes in that window. `condition: service_healthy` waits for the healthcheck to pass. Compose is a local-development and single-host tool; production orchestration on Kubernetes expresses the same intent with readiness probes and retries in the client.
 
 ---
 
@@ -228,6 +309,8 @@ FROM node:24-slim@sha256:abc123...                  # pinned, reproducible
 | Image reference | Tag (convenient) | Digest (reproducible) | Reproducibility/supply-chain needs |
 | Layers | Few big (simple) | Ordered by change frequency | Cache efficiency |
 | Process model | One process/container | Multiple (supervisor) | Orchestration vs legacy apps |
+| Container network | Default `bridge` (IP only) | User-defined bridge (DNS by name, isolated) | Any multi-container setup wants the user-defined network |
+| Start ordering | `depends_on` (start order only) | `depends_on.condition: service_healthy` | Whether the dependency must be ready, not just running |
 
 ---
 
@@ -295,16 +378,33 @@ USER 10001
 # In Kubernetes also set securityContext: runAsNonRoot: true, readOnlyRootFilesystem: true
 ```
 
+**Pitfall 4 — `depends_on` without a health condition.** A Compose stack starts the API and Postgres together. `depends_on: [db]` only orders container *start*, so the API boots while Postgres is still initialising, its connection pool fails, and the process exits. On a fast laptop it usually works; on a loaded CI runner it fails intermittently, which is how it gets mislabelled as a flaky test.
+
+```yaml
+# BROKEN: starts after the db container starts, not after Postgres accepts connections
+depends_on: [db]
+```
+
+```yaml
+# FIX: wait for the healthcheck, and give db a real one (pg_isready, see §6)
+depends_on:
+  db:
+    condition: service_healthy
+```
+
+The same lesson applies in Kubernetes, where there is no `depends_on` at all: make the client retry with backoff and gate traffic with a readiness probe, rather than relying on start order.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Purpose |
 |------|---------|
-| Docker / `buildx` | Build/run; BuildKit, multi-arch |
+| Docker / `buildx` | Build/run; BuildKit, multi-arch, registry cache export |
+| Docker Compose | Multi-container local stacks: shared network with DNS, `depends_on` health conditions, profiles |
 | Podman / Buildah | Daemonless, rootless builds |
 | `dive` | Inspect layers, find wasted space |
-| Trivy / Grype | Image CVE scanning (see [devsecops](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)) |
+| Trivy / Grype / Docker Scout | Image CVE scanning; Docker Scout builds an SBOM and matches it against a vulnerability database from the Docker CLI or Hub (see [devsecops](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md)) |
 | distroless / Chainguard images / Docker Hardened Images | Minimal, low-CVE base images; Chainguard and DHI ship an SBOM and signed provenance with each image |
 | Rootless BuildKit / Buildah | In-cluster, daemonless image builds (CI) |
 | SlimToolkit (`slim`) | Auto-minify images |
@@ -332,11 +432,23 @@ Root in the container is root in its namespaces; combined with a kernel containe
 
 **Q: Tag vs digest: why pin by digest?**
 **Short:** A tag is a mutable pointer that can be re-pushed to different content, while a digest is immutable and content-verified, guaranteeing exactly the bits you tested.
-A tag (`node:24`) is a mutable pointer — the same tag can be re-pushed to point at different content, so builds aren't reproducible and a supply-chain attacker could swap it. A digest (`node:24@sha256:...`) is immutable and content-verified, guaranteeing you get exactly the bits you tested. Pin by digest for reproducible builds and supply-chain integrity.
+A tag (`node:26`) is a mutable pointer — the same tag can be re-pushed to point at different content, so builds aren't reproducible and a supply-chain attacker could swap it. A digest (`node:26@sha256:...`) is immutable and content-verified, guaranteeing you get exactly the bits you tested. Pin by digest for reproducible builds and supply-chain integrity.
 
 **Q: Alpine vs Debian-slim: what's the catch with Alpine?**
 **Short:** Alpine's tiny size comes from musl libc instead of glibc, causing DNS quirks and glibc-wheel recompilation, which is why many teams choose Debian-slim for reliability instead.
 Alpine is tiny (~5 MB) but uses musl libc instead of glibc. This causes real problems: different DNS resolution behavior, Python packages that ship glibc wheels needing recompilation (slower builds), and occasional subtle runtime bugs. Debian-slim is larger but glibc-compatible and avoids these surprises — many teams choose slim for reliability over Alpine's size.
+
+**Q: You added a `HEALTHCHECK` to the Dockerfile. Does Kubernetes use it?**
+**Short:** No; the kubelet ignores Dockerfile `HEALTHCHECK` and acts only on the Pod's liveness, readiness and startup probes, so health must be declared in the Pod spec.
+Docker records the `HEALTHCHECK` result as the container's `healthy`/`unhealthy` status, and Docker Compose can wait on it with `depends_on.condition: service_healthy`, but Kubernetes never reads it. The kubelet runs only the probes in the Pod spec: `readinessProbe` to gate traffic, `livenessProbe` to restart, `startupProbe` to hold off liveness during boot. Even on plain Docker an unhealthy container is not restarted automatically, because restart policies react to the process exiting. So a team that relies on `HEALTHCHECK` alone ships an image that Kubernetes will happily route traffic to while it is broken. Keep the Dockerfile check for local and Compose use, and declare the real probes in the Deployment.
+
+**Q: Two containers on the same host cannot reach each other by name, only by IP. Why?**
+**Short:** They are on the default `bridge` network, which has no name resolution; a user-defined bridge network gives containers DNS by name or alias.
+Containers started without `--network` join the default `bridge` network, where Docker provides no name resolution, so `db` does not resolve and only the IP works (or the legacy `--link` flag). On a user-defined bridge (`docker network create app`), Docker's embedded DNS resolves every container by name and alias, and only containers attached to that network can talk to each other, which is also better isolation. Docker Compose creates one user-defined network per project automatically, which is why `db` just works there. Create a network for any multi-container setup instead of relying on the default bridge.
+
+**Q: Your image sets `ENTRYPOINT ["python", "app.py"]` and `CMD ["--port", "8080"]`. What runs, and what does `docker run img --port 9090` change?**
+**Short:** The container runs `python app.py --port 8080`; arguments after the image name replace `CMD`, so it becomes `python app.py --port 9090`.
+With both in exec form, Docker appends `CMD` to `ENTRYPOINT`, so the process is `python app.py --port 8080`, running directly as PID 1. Arguments given after the image name on `docker run` replace `CMD` only, giving `python app.py --port 9090`; replacing the executable itself needs `--entrypoint`. If `ENTRYPOINT` were shell form (`ENTRYPOINT python app.py`), Docker would run `/bin/sh -c "python app.py"` and ignore `CMD` and any run arguments entirely, and the shell would be PID 1 and swallow SIGTERM. Kubernetes maps the same pair: `command` replaces `ENTRYPOINT`, `args` replaces `CMD`. Use exec form for both, with `ENTRYPOINT` as the fixed binary and `CMD` as overridable defaults.
 
 **Q: How do you keep build secrets out of the final image?**
 **Short:** Never put secrets in `ARG` or `ENV` since they persist in image layers; use BuildKit's `--mount=type=secret`, which exposes the secret only during one `RUN` and never writes it to a layer.
@@ -390,6 +502,10 @@ Run `docker history` to list each layer's size and the instruction that created 
 - Use **BuildKit secret/cache mounts**; never bake secrets via `ARG`/`ENV`.
 - One main process per container; use exec-form `CMD`/`ENTRYPOINT` (signals — see [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md)).
 - Build **multi-arch** images when dev/prod CPU architectures differ.
+- Use exec-form `ENTRYPOINT` for the fixed binary and exec-form `CMD` for overridable defaults.
+- Put multi-container local stacks on a **user-defined network** (Compose does this) and gate start order on `condition: service_healthy`.
+- Treat `HEALTHCHECK` as a Docker/Compose feature only; declare **Kubernetes probes** in the Pod spec.
+- Export the BuildKit cache to the registry (`--cache-to type=registry,mode=max`) so ephemeral CI runners start warm.
 
 ---
 
@@ -401,7 +517,7 @@ A Node.js service's image is 1.4 GB and rebuilds take ~6 minutes on every commit
 
 ```
 Original Dockerfile (single stage, bad order)
-  FROM node:24            # full image ~1.1GB
+  FROM node:26            # full Debian image, ~445 MB compressed on Docker Hub
   COPY . .                # source FIRST -> any code change busts cache below
   RUN npm install         # full devDependencies + build toolchain shipped
   CMD npm start           # shell-form, root user, dev deps in prod image
@@ -409,22 +525,15 @@ Original Dockerfile (single stage, bad order)
 ```
 
 ```dockerfile
-# FIX: multi-stage + cache-friendly order + distroless + non-root.
+# FIX: the §6 multi-stage Dockerfile, with the two lines that made the difference here.
 # syntax=docker/dockerfile:1
-FROM node:24-slim AS builder
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci      # cached across code changes
-COPY . .
-RUN npm run build && npm prune --omit=dev            # drop devDependencies
-
-FROM gcr.io/distroless/nodejs24-debian13
-WORKDIR /app
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-USER nonroot
-CMD ["dist/server.js"]
+# ... builder stage exactly as in §6, except:
+RUN --mount=type=cache,target=/root/.npm npm ci      # npm cache survives code-only changes
+RUN npm run build && npm prune --omit=dev            # devDependencies never reach the runtime stage
+# ... runtime stage exactly as in §6: distroless nodejs26-debian13, USER nonroot, exec-form CMD
 ```
+
+In CI the cache mount alone is not enough, because each ephemeral runner starts with an empty builder; the team also added the `--cache-to`/`--cache-from type=registry` flags from §6 so the `npm ci` layer is pulled from the registry instead of rebuilt.
 
 **Outcome metrics:**
 
@@ -445,3 +554,5 @@ CMD ["dist/server.js"]
 ---
 
 **Cross-references:** [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md) (namespaces/cgroups, PID 1, signals), [container_runtimes_and_oci](../container_runtimes_and_oci/container_runtimes_and_oci.md) (how images execute), [kubernetes_workloads_and_objects](../kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) (pods run these images), [devsecops_and_supply_chain_security](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) (scanning, signing, SBOM).
+
+**From first principles:** [cs_fundamentals/virtualization_and_containers_from_first_principles](../../cs_fundamentals/virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) (why a container is a process with namespaces and cgroups, and how that differs from a VM).

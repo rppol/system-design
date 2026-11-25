@@ -1,6 +1,6 @@
 # Design a Multi-Tenant Platform — The Isolation Ladder
 
-> **Version anchor (2026-08-27).** **Kubernetes NetworkPolicy** `networking.k8s.io/v1` (stable). **Pod Security Admission** stable since **v1.25**; `PodSecurityPolicy` was deprecated in **v1.21** and **removed in v1.25** — deprecated and removed are not the same claim, and this page never uses the first word for the second fact. **vCluster v0.27** ("Private Nodes") is the current release referenced below. **gVisor** (`runsc`) and **Kata Containers** (QEMU / Cloud Hypervisor / Firecracker) are cited from their own docs, not a vendor's marketing page. **Amazon EKS** control-plane price: **$0.10/cluster/hour**, standard support. Every apiVersion, price, and product claim below carries its own source and check-date; see the citation table at the end of this file's companion report.
+> **Version anchor (2026-11-25).** **Kubernetes NetworkPolicy** `networking.k8s.io/v1` (stable). **Pod Security Admission** stable since **v1.25**; `PodSecurityPolicy` was deprecated in **v1.21** and **removed in v1.25** — deprecated and removed are not the same claim, and this page never uses the first word for the second fact. **vCluster v0.38.0** (2026-11-17) is the current release referenced below; its chart offers only the `k8s` distro under `controlPlane.distro` (the `k3s` option that v0.27's chart still had is gone) and adds `sync.toHost.gatewayApi` for tenant Gateways and HTTPRoutes. The `vcluster.yaml` keys in §4.6 were checked against the v0.38.0 chart `values.yaml`. **gVisor** (`runsc`) and **Kata Containers** (QEMU / Cloud Hypervisor / Firecracker) are cited from their own docs, not a vendor's marketing page. **Amazon EKS** control-plane price: **$0.10/cluster/hour**, standard support. Every apiVersion, price, and product claim below carries its own source and check-date; see the citation table at the end of this file's companion report.
 
 **Key insight:** "How do we isolate tenants on Kubernetes?" has four different correct answers, and the interview trap is picking one and defending it forever. The right answer is a **ladder** — namespace, node-pool, virtual cluster, dedicated cluster — where each rung buys a specific, nameable guarantee at a specific, nameable cost, and the platform's job is routing each tenant to the cheapest rung that satisfies *their* threat model, not the platform's convenience.
 
@@ -397,6 +397,8 @@ spec:
 
 The ordering matters as a *template* discipline: the tenancy controller renders `default-deny-all` and `allow-dns` in the same reconciliation as the namespace itself (§4.4's Kyverno `generate` rule can auto-inject both), so there is never a window where a namespace exists without both policies — an unfenced namespace, even for 60 seconds, is exactly the noisy-neighbor and lateral-movement risk this whole section exists to close.
 
+A NetworkPolicy stops at the cluster edge. Tenants whose services span two fleet clusters (an active-active pair, or a tenant split across regions) need the same allow-list expressed in the cross-cluster layer as well — Cilium ClusterMesh identities or a mesh's authorization policy — and the patterns for that live in [cross_cutting/multi_cluster_networking.md](cross_cutting/multi_cluster_networking.md). The rule does not change: a tenant reaches only its own services and the shared ingress, in every cluster it runs in.
+
 ### 4.4 Pod Security Admission — the kernel-adjacent guardrail namespaces get for free
 
 Pod Security Admission (PSA) has been stable since **Kubernetes v1.25** and replaced `PodSecurityPolicy`, which was deprecated in v1.21 and **removed** — not deprecated, removed, no fallback — in v1.25. PSA is a built-in admission controller driven entirely by three labels on the `Namespace` object itself, at one of three levels: `privileged`, `baseline`, `restricted`.
@@ -415,6 +417,8 @@ metadata:
 ```
 
 `restricted` forbids privileged containers, host namespaces (`hostNetwork`, `hostPID`, `hostIPC`), most capability additions, and requires a non-root, seccomp-profiled security context — it is the closest a namespace-only tenant gets to a kernel-adjacent guardrail without an actual kernel boundary. It is still not a kernel boundary: `restricted` reduces the *attack surface* a container needs to escalate out of, it does not stop a kernel-level 0-day from crossing to a sibling pod on the same node. That gap is what §4.7 closes.
+
+PSA checks how a Pod runs, not what it runs. The other half of the per-namespace admission template is image provenance: the tenancy controller also renders a signature-verification policy that admits only images signed by that tenant's CI identity (and the platform's base images), so one tenant cannot deploy another tenant's unreviewed image into its own namespace. The signing and admission chain is in [cross_cutting/supply_chain_security_pipeline.md](cross_cutting/supply_chain_security_pipeline.md); the remaining per-workload defaults every namespace template stamps out (probes, PDBs, resource limits, `securityContext`) are in [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md).
 
 ### 4.5 Node-pool-per-tenant — closing the kernel-sharing gap without a new control plane
 
@@ -462,6 +466,8 @@ spec:
 
 This closes the "shares a kernel with a stranger" gap the namespace rung leaves open (§4.1's table), because no other tenant's pod can land on these nodes at all — the taint plus the tenant's own toleration is a two-sided lock, not a preference. It does **not** close the CRD/control-plane gap; a node-pool tenant still shares the fleet's one API server, one etcd, and one set of CRDs with every namespace tenant. The cost is the ~43% bin-packing premium computed in §2 — paid specifically for kernel isolation, nothing else.
 
+When the dedicated pool is a GPU pool, the taint-and-toleration lock decides *which tenant* lands on the node; how that tenant's Pods then claim whole GPUs, MIG slices or time-sliced shares is a device-allocation question (device plugin versus DRA `ResourceClaim`s), covered in [cross_cutting/dra_and_device_plugins.md](cross_cutting/dra_and_device_plugins.md). A shared GPU pool across tenants needs that layer to be right, because a time-sliced GPU gives no memory isolation between the tenants sharing it.
+
 ### 4.6 vCluster — closing the control-plane and CRD gap
 
 ```yaml
@@ -476,7 +482,7 @@ spec:
   chart:
     spec:
       chart: vcluster
-      version: "0.27.x"
+      version: "0.38.x"
       sourceRef: { kind: HelmRepository, name: loft, namespace: flux-system }
   values:
     controlPlane:
@@ -615,7 +621,7 @@ Reuses the fleet cluster-provisioning path from [design_kubernetes_platform.md](
 - **Decision:** Run the vCluster control plane on the `k8s` distro (real upstream `kube-apiserver`), not the lighter `k3s` distro vCluster also supports.
 - **Alternatives:** `k3s` — smaller footprint, faster to start, but historically diverges from upstream API behavior on some CRD and admission-webhook edge cases, which defeats the exact reason a tenant escalated to this rung (CRD parity with a real cluster).
 - **Rationale:** Tenants choosing vCluster over a namespace are choosing it specifically because they need cluster-admin/CRD semantics that behave like production; a distro that diverges from upstream reintroduces the gap this rung exists to close.
-- **Consequences:** Slightly higher per-tenant control-plane footprint than `k3s` would give; still an order of magnitude below a dedicated cluster (§2).
+- **Consequences:** Slightly higher per-tenant control-plane footprint than `k3s` would give; still an order of magnitude below a dedicated cluster (§2). Since the vCluster v0.38 chart the choice is made for you: `k8s` is the only `controlPlane.distro` left, so this decision matters only for fleets still on an older vCluster release.
 
 ### Decision 3 — Sandboxed runtime is a per-pod `RuntimeClass`, not a separate tenancy rung
 
@@ -713,7 +719,7 @@ The **Hierarchical Namespace Controller (HNC)** — a `kubernetes-sigs` project 
 | **`NetworkPolicy`** (`networking.k8s.io/v1`) | Network fencing | Free, built-in, CNI-enforced | Additive-only semantics are easy to get backwards (§4.3) | Every rung's baseline |
 | **Pod Security Admission** | Kernel-adjacent guardrail | Built-in since v1.25, label-driven, no webhook to operate | Reduces attack surface, is not a kernel boundary | Every rung's baseline |
 | **Karpenter `NodePool`** | Node-pool isolation | Fast, right-sized provisioning; taint-based tenant pinning is a one-field config | Bin-packing loss vs. a shared pool (§2) | Rung 2 |
-| **vCluster** | Control-plane isolation | Real API server + CRDs per tenant, cheap vs. a real cluster, `k8s`/`k3s`/`k0s` distro choice | Syncer edge cases on exotic object kinds; still shares the host kernel | Rung 3 |
+| **vCluster** | Control-plane isolation | Real API server + CRDs per tenant, cheap vs. a real cluster, upstream `k8s` distro (the only one in the v0.38 chart) | Syncer edge cases on exotic object kinds; still shares the host kernel | Rung 3 |
 | **gVisor (`runsc`)** | Kernel-boundary sandbox | Low overhead, no VM boot, production-proven at Google Cloud scale | Syscall-heavy workloads pay a userspace round-trip tax | Default sandboxed runtime |
 | **Kata Containers** | Kernel-boundary VM | Strongest boundary short of a dedicated cluster; hardware-virtualization backed | Higher startup latency; another runtime to operate | Escalation sandbox for stricter threat models |
 | **Kyverno / OPA Gatekeeper** | Admission policy | Enforces the tenancy template (quota/netpol/PSA presence) at every rung, including inside a vCluster | Policy authored twice if the vCluster's own API server also needs it | Cross-rung guardrail |

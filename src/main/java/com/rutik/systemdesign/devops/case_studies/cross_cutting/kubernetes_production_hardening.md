@@ -2,6 +2,8 @@
 
 > Cross-Cutting Primitive — DevOps Case Studies · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** Kubernetes **1.37** is the current minor. `ValidatingAdmissionPolicy` is stable since **1.30** and `MutatingAdmissionPolicy` since **1.36**; Pod Security Admission is stable since **1.25**, the release that removed PodSecurityPolicy. Since 1.37, admission webhooks no longer receive the virtual TokenReview and access-review writes (`ExcludeAdmissionWebhookVirtualResources` on by default). **Kyverno v1.20.0** (2026-11-12) is the current policy-engine release.
+
 ---
 
 ## 1. Concept Overview

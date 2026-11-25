@@ -2,6 +2,8 @@
 
 > Principal-grade case study · Phase 8 (Specialized Platforms & Performance) · 11-section template
 > Reference template: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md)
+>
+> **Scope next to its sibling.** This case study designs the **product layer** of an ML platform: self-service submission, pipelines, experiment tracking, the model registry and promotion, lineage, and chargeback. GPU scheduling depth (gang admission with topology, capacity modes, inference routing) is delegated to [design_gpu_training_and_inference_cluster](design_gpu_training_and_inference_cluster.md), the same way cluster tenancy is delegated to [design_kubernetes_platform](design_kubernetes_platform.md); §4.1 shows only the queue objects the product layer submits into. Quota and scheduler policy is taught in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
 
 ## Intuition
 
@@ -27,7 +29,9 @@ The serving platforms that run on this infrastructure, such as KServe, are compa
 - **Self-service serving**: deploy a model as an autoscaling endpoint (including scale-to-zero for rarely-used models) with canary rollout.
 - **Multi-tenancy**: 14 teams share GPU pools with quotas, fair-share queuing, and isolation so one team can't starve or crash another.
 - **Pipelines**: orchestrate preprocessing → train → evaluate → register → deploy as a DAG.
-- **Experiment tracking & model registry**: every run's params/metrics/artifacts tracked; promote models through stages.
+- **Experiment tracking & model registry**: every run's params/metrics/artifacts tracked; promote models with registry aliases (`@challenger`, `@champion`), with the deployed version pinned in Git.
+- **Lineage**: every registered version traceable to its code commit, immutable dataset snapshot and pipeline run, enforced at registration.
+- **Reproducible pipelines**: unchanged steps (same data snapshot and code version) are served from a cache instead of re-run.
 - **GPU sharing**: fractional GPUs (MIG/time-slicing) for small inference; whole/many GPUs for training.
 - **Cost attribution**: per-team GPU-hour chargeback with utilization weighting.
 - **Observability**: GPU utilization, job/endpoint health, lag-to-ready, and per-team dashboards.
@@ -115,6 +119,26 @@ Cardinality risk: DCGM exports ~30 series/GPU x 360 GPUs x (MIG multiplies) -> w
   (See ./cross_cutting/prometheus_cardinality_and_scale.md)
 ```
 
+### Product-layer load (the part that is not GPUs)
+
+```
+Tracking API
+  runs in flight at peak        = 30 training jobs + ~200 sweep trials       = ~230
+  metric writes per run         = 25 metrics every 30 s
+  unbatched                     = 230 x 25 / 30                              = ~190 requests/s
+  batched (one log_metrics call per step)  = 230 / 30                         = ~8 requests/s
+  -> batching in the SDK is a 25x load reduction on the tracking server
+
+Registry and deploy
+  promotions per day            = 40 models x ~0.3                           = ~12
+  alias reads per deploy        = 1 (resolved once, pinned in Git; never at Pod start)
+
+Pipelines
+  workflows per day             = ~900, ~6 Pods each                          = ~5,400 Pods/day
+```
+
+The tracking server is sized by the unbatched number, not the batched one, until the SDK enforces batching; that single client-side change is the cheapest capacity win on the product layer. Detailed sizing is in §10.
+
 ---
 
 ## 3. High-Level Architecture
@@ -190,6 +214,8 @@ flowchart TD
 
 **Data-flow narrative (serving):** engineer runs `mlctl serve deploy model.yaml` → a KServe `InferenceService` requesting a `mig-1g.10gb` slice is created → KServe (via Knative) autoscales replicas on RPS, scaling to zero when idle → a canary rollout shifts 5% traffic, checks p99/error metrics, then promotes or rolls back → traffic served behind an ALB.
 
+**Data-flow narrative (promotion):** the pipeline's register step creates version N in the MLflow registry with lineage tags (§4.8) → the offline eval gate passes and sets the `@challenger` alias → the deploy step resolves `@challenger` to a concrete artifact URI and opens a PR that pins it into the shadow and canary `InferenceService`s → canary gates pass (§8a) → the same step moves `@champion` to version N, records the previous champion as a tag, and merges the PR that pins version N for 100% of traffic. The registry says what *should* run; Git says what *does* run; an hourly reconciliation compares the two.
+
 **Multi-region note:** Tier-1 serving runs active-active across two regions for the 99.9% SLA; training is single-region (data gravity — datasets live in one region's S3/FSx). Cross-region serving topology and failover follow [`./cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md).
 
 ```mermaid
@@ -234,11 +260,11 @@ The core fairness and correctness engine. Each team gets a `ClusterQueue` with a
 
 ```yaml
 # A team's queue with a hard GPU quota and borrowing across a shared cohort
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata: { name: fraud-team }
 spec:
-  cohort: shared-gpu                  # teams in a cohort can borrow each other's idle quota
+  cohortName: shared-gpu              # teams in a cohort can borrow each other's idle quota
   resourceGroups:
     - coveredResources: ["nvidia.com/gpu"]
       flavors:
@@ -378,7 +404,7 @@ Self-service training is only trustworthy if every run is reproducible and every
 
 ```python
 # A pipeline step logs params, metrics, and the model artifact to MLflow.
-# The registry stage-gates promotion (None -> Staging -> Production).
+# Promotion is an alias move (@challenger -> @champion), see §4.7; stages are deprecated.
 import mlflow
 
 mlflow.set_tracking_uri("http://mlflow.platform.svc:5000")
@@ -388,7 +414,7 @@ with mlflow.start_run(run_name="fraud-scorer-v8") as run:
     mlflow.log_metric("val_auc", 0.948)
     mlflow.pytorch.log_model(pytorch_model=model, name="model",
                              registered_model_name="fraud-scorer")
-# Promotion is gated by eval (see §8a); only a model that passes is moved to Production.
+# Promotion is gated by eval (see §8a); only a model that passes gets the @champion alias.
 ```
 
 ```yaml
@@ -438,6 +464,95 @@ spec:
 # training job now labeled kueue.x-k8s.io/queue-name -> atomic all-or-nothing placement
 ```
 Impact of the fix: serving collapsed from ~40 A100s to ~24 (slices) — 2 fewer p4de.24xlarge at $27.45/hr, **~$40k/month** — and the deadlocks vanished, which bought back far more than the hardware line: the GPUs that were held hostage by partial placements went back to producing training throughput.
+
+### 4.7 Model promotion with registry aliases — BROKEN (stages) → FIX (aliases)
+
+MLflow deprecated Model Registry **stages** (`Staging`, `Production`, `Archived`) in 2.9.0 and documents them for removal in a future major release; the replacement is **aliases**, mutable named pointers to a version (`@champion`, `@challenger`). The platform's first registry integration used stages, and serving loaded "whatever is in Production":
+
+```python
+# BROKEN: stage-based promotion. Only one fixed set of stage names, transitions are
+# global to the model, and the serving side resolves models:/fraud-scorer/Production,
+# which is deprecated and gives no way to name two candidates at once.
+from mlflow import MlflowClient
+client = MlflowClient()
+client.transition_model_version_stage(name="fraud-scorer", version=8, stage="Production")
+# serving: mlflow.pyfunc.load_model("models:/fraud-scorer/Production")
+```
+
+```python
+# FIX: aliases. The eval gate moves @challenger; promotion after the canary moves @champion.
+# Rollback is pointing @champion back at the previous version, a single API call.
+from mlflow import MlflowClient
+client = MlflowClient()
+client.set_registered_model_alias("fraud-scorer", "challenger", 8)   # passed offline eval
+# ... shadow + canary pass (§8a) ...
+prev = client.get_model_version_by_alias("fraud-scorer", "champion").version
+client.set_registered_model_alias("fraud-scorer", "champion", 8)
+client.set_model_version_tag("fraud-scorer", "8", "previous_champion", prev)
+# serving: mlflow.pyfunc.load_model("models:/fraud-scorer@champion")
+```
+
+KServe never reads the alias directly at request time. The deploy step resolves `@champion` to a concrete version and artifact URI and writes that URI into the `InferenceService`, so what runs is pinned and auditable in Git even though the registry pointer is mutable.
+
+### 4.8 Lineage: from a production prediction back to data and code
+
+A registered version is only reproducible if it records what produced it. The pipeline's register step attaches three things to every version, and the promotion gate refuses a version missing any of them:
+
+```python
+# Tags written by the register step (Argo passes these in as parameters)
+client.set_model_version_tag("fraud-scorer", "8", "git_commit", "3f9c2e1")
+client.set_model_version_tag("fraud-scorer", "8", "dataset_uri",
+    "s3://ml-data/fraud/train/2026-11-20/")              # immutable, date-partitioned snapshot
+client.set_model_version_tag("fraud-scorer", "8", "dataset_manifest_sha256",
+    "9b1d...e7")                                         # hash of the object list + ETags
+client.set_model_version_tag("fraud-scorer", "8", "pipeline_run", "fraud-pipeline-7k2qx")
+```
+
+The dataset is never "the latest table": training reads a date-partitioned prefix that is written once, and the manifest hash proves the files did not change afterwards. With that, the incident question "which data trained the model that is mis-scoring right now?" is a registry lookup, not a search. Data-versioning depth (point-in-time correctness, label versioning) is in [mlops/dataset_and_label_versioning](../../mlops/dataset_and_label_versioning/dataset_and_label_versioning.md).
+
+### 4.9 Pipeline caching: do not re-run a 2-hour preprocess for a hyperparameter change
+
+```yaml
+# Argo Workflows step-level memoization: the preprocess output is cached in a ConfigMap
+# keyed by the dataset snapshot, so a new training run on the same data skips it.
+- name: spark-prep
+  inputs:
+    parameters: [{name: dataset_uri}, {name: prep_version}]   # prep_version = image digest
+  memoize:
+    key: "prep-{{inputs.parameters.dataset_uri}}-{{inputs.parameters.prep_version}}"
+    maxAge: "168h"                       # a week; snapshots are immutable anyway
+    cache:
+      configMap: {name: ml-prep-cache}   # needs create/update on configmaps for argo's role
+  container:
+    image: "registry.example.com/spark-prep@{{inputs.parameters.prep_version}}"
+```
+
+Two limits shape the design. The cache lives in a ConfigMap, which is capped at 1 MiB, so memoized steps must output a small pointer (an S3 prefix), never the data itself; a step whose cached output would push the ConfigMap past the limit ends in `Error`. And the key must include everything that changes the output: Argo does not hash the template for you, so a key of `dataset_uri` alone would keep serving the old output after the prep code changed. Putting the image digest in both the key and the image reference makes a code change a cache miss by construction.
+
+### 4.10 The self-service contract: one spec, four platform objects
+
+Data scientists never write Kueue, Kubeflow Trainer or MLflow objects by hand. They submit one spec, and the platform's admission service validates it and renders the rest:
+
+```yaml
+# job.yaml -- the only file a data scientist writes for a training run
+team: fraud
+experiment: fraud-scorer
+code: {repo: git@github.example.com:ml/fraud.git, commit: 3f9c2e1}
+data: {snapshot: s3://ml-data/fraud/train/2026-11-20/}
+resources: {gpus: 32, gpu_type: a100, spot: true}
+checkpoint: {every: 6m, to: s3://ml-ckpt/fraud/}
+register: {model: fraud-scorer, eval_gate: auc_no_regression_0.5pct}
+```
+
+```text
+rendered by the platform (never edited by users)
+  TrainJob            labels: kueue.x-k8s.io/queue-name=fraud-lq; numNodes 4 x 8 GPUs
+  LocalQueue          fraud-lq -> ClusterQueue fraud-team (quota, cohort borrowing)
+  MLflow experiment   fraud-scorer; run tags: git_commit, dataset_uri, pipeline_run
+  Argo Workflow       preprocess (memoized) -> train -> eval -> register -> deploy
+```
+
+The admission service rejects a spec without a pinned commit, an immutable snapshot URI or a checkpoint target, which is how the lineage in §4.8 and the Spot discipline in §4.3 are enforced rather than recommended. It also caps `gpus` at the team's quota plus its borrowing limit, so a typo cannot request 320 GPUs.
 
 ---
 
@@ -492,7 +607,12 @@ flowchart LR
 - *Rationale:* Opposite profiles (Spot/bursty vs On-Demand/steady), opposite disruption policies; a shared pool causes Spot reclaims to kill serving and consolidation churn to destabilize endpoints.
 - *Consequences:* Slightly lower bin-packing efficiency across pools; mitigated by Kueue borrowing.
 
-**Decision 6: Build the platform vs buy (Anyscale/Databricks/SageMaker).**
+**Decision 6: Promotion state lives in the registry as aliases; what runs is pinned in Git.**
+- *Alternatives:* MLflow stages (`Production`); serving that loads "the latest version"; a deploy that reads the alias at Pod start.
+- *Rationale:* Stages are deprecated since MLflow 2.9 and allow one global state per model. Aliases name any number of candidates. Resolving the alias at deploy time and committing the concrete version keeps GitOps as the record of what runs, so a Pod restart can never silently pick up a newly promoted model.
+- *Consequences:* Promotion is two writes (the alias, then the Git commit), so the deploy step must be the only writer of `@champion`; a manual alias move without a deploy leaves the registry and production disagreeing, which the reconciliation alert in Runbook 4 catches.
+
+**Decision 7: Build the platform vs buy (Anyscale/Databricks/SageMaker).**
 - *Rationale:* At ~$1.8M/month GPU spend and 14 teams, the savings and control justify a 6-engineer platform team; managed offerings' per-unit pricing would exceed self-run at this scale, and data-residency/control needs argue for in-house.
 - *Consequences:* Ongoing platform-team headcount; on-call for a stateful, expensive system.
 
@@ -504,6 +624,7 @@ flowchart LR
 | Training cost | Spot + checkpoint | On-Demand | ~65% cheaper, training is restartable |
 | Serving stack | KServe + Triton | Plain Deployment, Ray Serve | Golden-path CRD, scale-to-zero, throughput |
 | Build vs buy | Build | SageMaker/Anyscale | Savings + control at this scale |
+| Promotion state | Registry aliases + version pinned in Git | Registry stages; "latest" | Deprecated stages; pinned versions are auditable and roll back with one alias move |
 
 ---
 
@@ -529,7 +650,7 @@ flowchart LR
 | Kubeflow Trainer | Orchestration | One `TrainJob` CRD for PyTorch/JAX/DeepSpeed/MPI/XGBoost | Heavyweight install footprint |
 | KubeRay / Ray | Orchestration | Python-native train+serve+tune+data | Another cluster abstraction to operate |
 | KServe + Triton | Serving | Scale-to-zero, canary, max GPU throughput | Knative dependency; cold-start work |
-| MLflow | Tracking/registry | Experiment tracking + model stages | Scaling the tracking DB at high run volume |
+| MLflow | Tracking/registry | Experiment tracking + model aliases (`@champion`, `@challenger`) | Stages are deprecated since 2.9; scaling the tracking DB at high run volume |
 | DCGM + Prometheus/Thanos | Observability | GPU health + utilization at scale | Cardinality (see cross_cutting/prometheus_cardinality) |
 | FSx for Lustre | Data | High-throughput hot data for dataloaders | Cost; S3 linkage management |
 
@@ -539,7 +660,7 @@ flowchart LR
 |-----------|-----|-----|-------|
 | Managed K8s + GPU | EKS + GPU Operator | GKE (GPU pools, time-sharing, MIG) | AKS GPU pools |
 | Node autoscaler | Karpenter | GKE node auto-provisioning | AKS Node Auto Provisioning (Karpenter) |
-| Managed ML platform | SageMaker | Vertex AI | Azure ML |
+| Managed ML platform | SageMaker AI | Gemini Enterprise Agent Platform (formerly Vertex AI) | Azure ML |
 | Hot data | FSx for Lustre | Filestore / GCS FUSE | Azure NetApp Files |
 | Managed Prometheus | AMP | Managed Service for Prometheus | Azure Monitor managed Prometheus |
 
@@ -593,7 +714,21 @@ Platform SLO dashboards (per team + global):
 ```
 Utilization (not allocation) is the headline metric; the cost dashboard juxtaposes "GPU-hours you reserved" vs "GPU-hours actually busy" per team to drive the chargeback conversation. SLO/error-budget accounting follows [`./cross_cutting/slo_error_budget_math.md`](./cross_cutting/slo_error_budget_math.md).
 
-### (c) Incident runbooks
+### (c) Product-layer SLOs
+
+The GPU fleet has utilization targets; the product layer has user-facing SLOs of its own, because a data scientist experiences the platform through submission and promotion, not through DCGM:
+
+| SLI | Target | Measured as |
+|---|---|---|
+| Job submission to admission (quota available) | p95 under 2 min | `TrainJob` creation to Kueue `Admitted` condition |
+| Tracking API availability | 99.9% monthly | non-5xx share of MLflow API requests |
+| Tracking write latency | p99 under 250 ms | MLflow server request histogram |
+| Promotion lead time (eval pass to 100% traffic) | under 4 h for tier-1 | `@challenger` set to `@champion` set |
+| Registry/Git agreement | 100% of tier-1 endpoints | hourly reconciliation of alias versus pinned version |
+
+A 99.9% monthly target allows about 43 minutes of tracking-API errors a month; the burn-rate alerting for these follows the same multi-window pattern as serving ([`./cross_cutting/slo_error_budget_math.md`](./cross_cutting/slo_error_budget_math.md)).
+
+### (d) Incident runbooks
 
 **Runbook 1 — Serving p99 SLO breach (tier-1 endpoint).**
 Symptom: p99 > 150ms, burn-rate alert firing. Diagnosis: check replica count (did autoscale lag a traffic spike?), MIG co-tenant contention, GPU util saturation, or a bad model version. Mitigation: bump `minReplicas`, roll back the last model version if it correlates, or move the endpoint to exclusive GPU if a noisy co-tenant. Resolution: re-run the capacity test; adjust `scaleTarget`; if MIG contention, isolate.
@@ -604,7 +739,10 @@ Symptom: a team's jobs queue forever. Diagnosis: `kubectl get workloads` (Kueue)
 **Runbook 3 — GPU node health failure.**
 Symptom: DCGM ECC/XID alert on a node. Diagnosis: confirm via `nvidia-smi`/DCGM which GPU. Mitigation: cordon + drain (PDB-respecting; training checkpoints) per [`./cross_cutting/gpu_node_lifecycle.md`](./cross_cutting/gpu_node_lifecycle.md); Karpenter replaces it. Resolution: track failure rates per instance/AZ; open a support case if a host repeatedly fails.
 
-**Runbook 4 — Cost spike / runaway provisioning.**
+**Runbook 4 — Tracking server or registry degraded.**
+Symptom: training steps slow down while GPU utilization drops, or the deploy step times out resolving `@champion`. Diagnosis: MLflow server p99 and Postgres CPU/connection count; a team logging metrics one call per step (thousands of HTTP calls per run) is the usual cause; for the registry, compare the version behind `@champion` with the version pinned in the deployed `InferenceService` (they must match). Mitigation: rate-limit or batch the noisy client (`log_metrics`/`log_batch`), scale the tracking server horizontally (it is stateless in front of Postgres and S3), and if `@champion` and Git disagree, treat Git as the truth and re-point the alias. Resolution: client-side batching in the platform SDK, and an hourly reconciliation alert on alias versus deployed version.
+
+**Runbook 5 — Cost spike / runaway provisioning.**
 Symptom: GPU-hours or spend alert spikes. Diagnosis: a buggy job or HPA creating Pods endlessly; which team/queue? Mitigation: the NodePool `limits` cap should have bounded it — if not, set/lower it; pause the offending queue. Resolution: per-team spend alerts; require quota for new workloads; post-incident review of the cap.
 
 ---
@@ -622,6 +760,10 @@ Symptom: GPU-hours or spend alert spikes. Diagnosis: a buggy job or HPA creating
 **War story 5 — DCGM cardinality crashed Prometheus.** Enabling per-MIG-slice DCGM metrics across 360 GPUs multiplied series count past the Prometheus memory ceiling; the server OOM-crashed, taking down all platform dashboards during an unrelated incident — so on-call was flying blind. Fix: recording rules + dropping high-cardinality labels + Thanos for long-term, per [`./cross_cutting/prometheus_cardinality_and_scale.md`](./cross_cutting/prometheus_cardinality_and_scale.md). *Lesson: GPU metrics are a cardinality risk; budget series.*
 
 **War story 6 — Spot drought stranded a deadline.** A regional A100 Spot shortage left a team's training jobs Pending for hours before a launch. The pool was Spot-only with no fallback. Fix: NodePool with Spot-preferred + On-Demand fallback (`capacity-type In [spot, on-demand]` with Spot weighted), and capacity reservations for known peak windows. *Lesson: Spot-only has no floor; design On-Demand fallback for deadline-bound work.*
+
+**War story 7 — A cleanup job deleted the model in production.** A storage-cost script deleted registered model versions older than 90 days. One was still the version serving a tier-1 endpoint, because that model had not been retrained in four months; the next Pod restart failed to fetch its artifact and the endpoint fell back to its last two warm replicas for six hours until the artifact was restored from S3 versioning. Fix: retention keeps every version referenced by an alias or by a deployed `InferenceService`, S3 versioning stays on for the artifact bucket, and deletion runs as a dry-run report for a week before acting. *Lesson: "old" is not "unused"; derive retention from references, not age.*
+
+**War story 8 — A memoized step served stale features for two weeks.** The preprocess step's memoization key was the dataset URI only. A bug fix to the feature code shipped, but every training run on the existing snapshot hit the cache and trained on the old features; offline metrics looked fine because the eval set came from the same cached output. Fix: the key includes the prep image digest (§4.9), and a pipeline lint rejects memoized templates whose key does not reference the image or code version. *Lesson: a cache key that omits the code version turns a bug fix into a silent no-op.*
 
 ---
 
@@ -667,6 +809,35 @@ Total ≈ $270k/month steady, ~$410k with training and batch at peak all month
       (vs $1.8M before) at ~66% utilization.
 ```
 
+**Product-layer capacity: tracking server, artifact store, pipeline controller.** The GPU fleet is the cost; these are what page you at 2 a.m. The inputs below are this platform's own measurements, stated as assumptions:
+
+```
+Experiment tracking (MLflow, Postgres backend)
+  runs/day                     = 14 teams x ~60 runs           = ~840
+  metric points per run        = 200 steps x 25 metrics        = 5,000
+  metric rows/day              = 840 x 5,000                   = 4.2 M
+  at ~100 bytes/row in Postgres (with index)                   = ~420 MB/day
+  one year retained                                            = ~150 GB  -> one db.r-class instance, not a cluster
+  log_metric calls per run if logged one at a time             = 5,000 HTTP calls; batch them
+    (log_metrics / log_batch) or the tracking server, not the GPUs, sets the step rate
+
+Model artifacts (S3)
+  registered versions/month    = 40 models x ~6                 = 240
+  avg artifact size            = 2 GB (largest ranker 9 GB)
+  growth                       = 240 x 2 GB                     = ~480 GB/month
+  keep all versions 1 year     = ~5.8 TB x $0.023/GB-mo         = ~$133/month at the end of year 1
+  -> storage is not the constraint; keep every version referenced by an alias or a deployment,
+     lifecycle the rest to an infrequent-access class after 90 days
+
+Pipeline controller (Argo Workflows)
+  workflows/day                = ~900 (training + batch + eval)
+  pods per workflow            = ~6
+  Workflow objects kept in etcd for 7 days = 6,300 objects, each with node status that grows with steps
+  -> enable the workflow archive (Postgres) and a TTL strategy (e.g. secondsAfterCompletion: 86400)
+     so completed Workflows leave etcd after a day; etcd's 2 GiB default quota is shared with
+     everything else in the cluster
+```
+
 **Scaling triggers:**
 - GPU fleet utilization > 80% sustained → expand NodePool `limits` and/or capacity reservations.
 - Kueue queue-wait p95 > 5 min → raise quotas or add capacity.
@@ -705,10 +876,19 @@ Past roughly a few thousand nodes (OpenAI documented ~7,500), the control plane 
 AWS gives ~120s notice. Karpenter's interruption queue (or the Node Termination Handler) cordons the node and sends SIGTERM; the training Pod traps it (and/or uses a `preStop` hook) to write a checkpoint — model, optimizer, step — to S3 within a `terminationGracePeriodSeconds` set under 120s. Checkpoints also fire every ~6 minutes regardless, so worst-case loss is small. After the node dies, Karpenter sees the pending Pod and relaunches (Spot, with On-Demand fallback to avoid Spot-drought stalls), and training resumes from the last checkpoint. For very large jobs, PyTorch Elastic lets the job rescale around a lost worker instead of restarting. This discipline is what makes Spot's discount safe for training.
 
 **Q: Build vs buy — when would you NOT build this platform?**
-You shouldn't build when the scale doesn't justify a platform team. With one or two ML teams and modest GPU spend, a managed offering (SageMaker, Vertex AI, Databricks, Anyscale) gets you training and serving without operating stateful, expensive infrastructure or staffing on-call — the per-unit premium is cheaper than a 6-engineer platform team. Build when GPU spend is large (here ~$1.8M/month), many teams share the fleet (so centralizing the hard parts has leverage), you need fine-grained control or data residency, and the modeled savings (~$1M/month here) dwarf the platform team's cost. The breakpoint is roughly: does centralizing scheduling/isolation/cost across N teams save more than it costs to run? At 14 teams and this spend, clearly yes.
+You shouldn't build when the scale doesn't justify a platform team. With one or two ML teams and modest GPU spend, a managed offering (SageMaker AI, Gemini Enterprise Agent Platform (formerly Vertex AI), Databricks, Anyscale) gets you training and serving without operating stateful, expensive infrastructure or staffing on-call — the per-unit premium is cheaper than a 6-engineer platform team. Build when GPU spend is large (here ~$1.8M/month), many teams share the fleet (so centralizing the hard parts has leverage), you need fine-grained control or data residency, and the modeled savings (~$1M/month here) dwarf the platform team's cost. The breakpoint is roughly: does centralizing scheduling/isolation/cost across N teams save more than it costs to run? At 14 teams and this spend, clearly yes.
 
 **Q: How do you keep GPUs from being starved by the data pipeline?**
 A GPU waiting on data is as wasted as an idle one, and it's a common hidden cause of low utilization (DCGM shows the card allocated but at 12% SM busy). The fixes: put hot training data on a high-throughput store like FSx for Lustre (hundreds of GB/s aggregate) linked to S3, not on slow per-Pod EBS; tune dataloader worker counts and prefetching so CPU preprocessing keeps ahead of the GPU; cache decoded/preprocessed data; and for serving, pre-stage model weights on the node to avoid per-cold-start S3 downloads. You diagnose it by correlating GPU utilization with I/O metrics — if the card is allocated but idle and disk/network reads are saturated, the bottleneck is upstream and adding GPUs won't help.
+
+**Q: A tier-1 model starts mis-scoring. How do you find the data and code that produced it within minutes?**
+Every registered version carries lineage tags written by the pipeline's register step: the git commit, the immutable dataset snapshot URI, a hash of that snapshot's object manifest, and the pipeline run ID, and the promotion gate refuses a version that lacks any of them. The deployed `InferenceService` pins the exact version, so the path is: deployed version → registry tags → commit and snapshot. Because training reads write-once, date-partitioned prefixes and the manifest hash proves nothing changed, "which data trained this?" is a lookup. Without it, the same question during an incident means reconstructing a training run from logs, which is exactly when nobody has time to.
+
+**Q: Why did the platform move model promotion from registry stages to aliases, and how does rollback work now?**
+MLflow deprecated Model Registry stages in 2.9.0, and they were the wrong shape anyway: one fixed set of global states per model, no way to name two candidates, and serving that resolved "whatever is in Production" at load time. Aliases are named, mutable pointers: the eval gate sets `@challenger`, the canary's success moves `@champion`, and the previous champion's version is recorded as a tag. Rollback is one call that points `@champion` back. The deploy step resolves the alias to a concrete version and artifact URI and commits that into the `InferenceService`, so the running model is pinned in Git even though the registry pointer moves.
+
+**Q: A preprocessing step takes two hours. How do you stop every hyperparameter experiment from re-running it, without serving stale data?**
+Memoize the step and make the key carry everything that determines its output. Argo Workflows' step-level memoization stores a template's outputs in a ConfigMap under a key you choose, with an optional `maxAge`; here the key combines the immutable dataset snapshot URI and the prep image digest, so a new run on the same data and code is a cache hit and any change to either is a miss. Because ConfigMaps are capped at 1 MiB, the cached output is a pointer to the prepared data in S3, not the data. The failure to avoid is a key that omits the code version: Argo does not hash the template, so the old output would be served after the prep logic changed.
 
 **Q: How do you safely roll out a new model version to a tier-1 endpoint?**
 Through the eval gate, not a direct swap. First an offline eval on a golden holdout set compares the candidate's key metric (AUC/precision) against current prod, gating on no regression beyond a small threshold. Then a shadow deploy mirrors live traffic to the candidate with no user impact, comparing predictions and latency. Then a KServe canary shifts ~5% of live traffic and monitors p99 (<150ms) and error rate for a bake period, auto-promoting to 100% if gates hold and auto-rolling-back on breach. The promoted version and its eval report are registered in MLflow for auditability. This staged gate — offline → shadow → canary → promote — is how you change a revenue-critical model without betting the SLA on it.

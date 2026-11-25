@@ -2,7 +2,7 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** Current releases: **Terraform v1.16.6** (2026-10-14), **OpenTofu v1.13.1** (2026-10-01), **Terragrunt v1.1.6** (2026-09-21), **Pulumi v3.270.0** (2026-10-16), **Atlantis v0.48.1** (2026-10-07) and **Checkov 3.3.29** (2026-10-13). HashiCorp archived the CDKTF repository in December 2025.
+> **Version anchor (2026-11-25).** Current releases: **Terraform v1.17.2** (2026-11-11), **OpenTofu v1.13.10** (2026-11-23), **Terragrunt v1.2.2** (2026-11-11), **Pulumi v3.278.0** (2026-11-25), **Atlantis v0.50.0** (2026-11-21) and **Checkov 3.4.10** (2026-11-24). HashiCorp archived the CDKTF repository in December 2025.
 
 Once core Terraform (see [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md)) is in production, the next problems are organizational, not syntactic: **how do you stay DRY across dozens of environments, test infrastructure before it ships, enforce policy, and pick the right tool from a crowded field** (Terragrunt, Pulumi, CloudFormation/CDK, OpenTofu)? This module covers the wrapper tooling, the IaC alternatives and their tradeoffs, infrastructure testing with Terratest, and policy-as-code with Sentinel and OPA.
 

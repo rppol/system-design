@@ -2,7 +2,7 @@
 
 > Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A floor: 15
 
-> **Version anchor (2026-10-19).** **Apache Kafka 4.3.1** (2026-06-25) is the latest release, with 4.4.0 at release candidate; Kafka is KRaft-only since 4.0. The **KIP-848 consumer rebalance protocol** (`group.protocol=consumer`) is GA since 4.0 but opt-in on the client, and 4.3 logs a warning when a consumer starts on the `classic` protocol (KIP-1274) and deprecates for removal in 5.0 the broker setting `group.coordinator.rebalance.protocols` (KIP-1237), the `streams-scala` module (KIP-1244), and the old MirrorMaker metric names (KIP-1280). **Share groups** (KIP-932, Queues for Kafka) are production-ready since 4.2. **Strimzi 1.3.0** (2026-10-12) serves only `kafka.strimzi.io/v1` (the `v1beta2` API was removed in 1.0.0) and requires `KafkaNodePool`. **KEDA v2.21.0** (2026-09-23).
+> **Version anchor (2026-11-25).** **Apache Kafka 4.4.0** (2026-10-22) is the latest release, and **4.3.2** (2026-10-23) is the latest 4.3 patch; Kafka is KRaft-only since 4.0. 4.4 deprecates the `broker.id` config (KIP-1232), adds **dead-letter queues for share groups** (KIP-1191), and makes `kafka-storage`-formatted directories **no longer forward-compatible** (KIP-1170). The **KIP-848 consumer rebalance protocol** (`group.protocol=consumer`) is GA since 4.0 but opt-in on the client, and 4.3 logs a warning when a consumer starts on the `classic` protocol (KIP-1274) and deprecates for removal in 5.0 the broker setting `group.coordinator.rebalance.protocols` (KIP-1237), the `streams-scala` module (KIP-1244), and the old MirrorMaker metric names (KIP-1280). **Share groups** (KIP-932, Queues for Kafka) are production-ready since 4.2. **Strimzi 1.3.1** (2026-11-04) serves only `kafka.strimzi.io/v1` (the `v1beta2` API was removed in 1.0.0), requires `KafkaNodePool`, and supports Kafka up to **4.3.2**, not yet 4.4, which is why the §6 manifest stays on the 4.3 line. **KEDA v2.21.1** (2026-11-15).
 
 Operating Apache Kafka (and Kafka-compatible streaming) as platform infrastructure: the Strimzi operator on Kubernetes, partition and disk capacity sizing, consumer-lag monitoring, rebalancing without latency spikes, rack awareness for AZ-failure survival, and tiered storage for cost. This module owns the **run-it-at-scale** angle. For the *messaging concepts* themselves (delivery semantics, partitioning theory, log compaction, the dual-write/outbox pattern) cross-reference [`../../hld/`](../../hld/README.md) and the backend messaging material; for *application consumer/producer code patterns* see [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md). Here we focus on keeping the cluster alive, sized, and observable.
 
@@ -259,7 +259,7 @@ metadata:
   name: prod
 spec:
   kafka:
-    version: 4.3.0
+    version: 4.3.2               # newest Kafka that Strimzi 1.3.1 supports
     metadataVersion: 4.3-IV0     # KRaft feature level; bumped after a binary upgrade
     listeners:
       - name: tls
@@ -560,6 +560,8 @@ kafka-features.sh --bootstrap-server prod-kafka:9092 upgrade --metadata 4.3
 
 Keeping them apart is what preserves the rollback: new binaries at an old metadata version can be rolled back, a raised metadata version cannot be lowered.
 
+Two 4.4-specific steps belong in the same runbook. **KIP-1170** made storage directories formatted by `kafka-storage` no longer forward-compatible: a broker must run the same version as, or a newer version than, the `kafka-storage` tool that formatted its directory, whatever `--release-version` was passed at format time. So format new or replacement disks with the oldest binary still running in the cluster, never with a newer tool staged for the next upgrade. **KIP-1232** deprecates `broker.id`; KRaft clusters already identify nodes by `node.id`, so remove any leftover `broker.id` from templated configs now rather than at the next major upgrade.
+
 ---
 
 ## 7. Real-World Examples
@@ -603,7 +605,7 @@ Keeping them apart is what preserves the rollback: new binaries at an old metada
 - You have low volume and a simple work-queue need — SQS/RabbitMQ or a managed queue is far less operational burden.
 - Request/response or RPC semantics — Kafka is a log, not an RPC bus.
 - You lack the team to operate stateful infra — use MSK Serverless / Confluent Cloud and pay for someone else to run it.
-- You need per-message TTL or priority queues, which Kafka does not provide. Per-record acknowledgement and work-queue consumption are covered: share groups (KIP-932), production-ready since Kafka 4.2, let many consumers read one partition with per-record ack, redelivery counting and no partition-to-consumer cap.
+- You need per-message TTL or priority queues, which Kafka does not provide. Per-record acknowledgement and work-queue consumption are covered: share groups (KIP-932), production-ready since Kafka 4.2, let many consumers read one partition with per-record ack, redelivery counting and no partition-to-consumer cap. Since 4.4 (KIP-1191) records released past the max delivery count or rejected by the consumer can go to a dead-letter queue, once the `share.version` feature is upgraded to 2 and `errors.deadletterqueue.topic.name` is set.
 
 ---
 

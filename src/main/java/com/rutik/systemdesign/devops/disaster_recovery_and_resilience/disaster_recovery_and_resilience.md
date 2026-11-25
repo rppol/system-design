@@ -2,6 +2,8 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** AWS facts this page relies on, checked against AWS documentation on this date: **S3 Replication Time Control** replicates most objects in seconds and its SLA commits to **99.9% of objects within 15 minutes** per month, paid in service credits below that; **Aurora Global Database** replicates to secondary Regions with latency **typically under a second**; **Route 53 health checks** run at a 30-second or 10-second request interval. The Salesforce/Hyperforce RTO is deliberately left unquantified (see the section CLAUDE.md).
+
 ---
 
 ## 1. Concept Overview
@@ -264,7 +266,7 @@ resource "aws_route53_record" "secondary" {
 }
 ```
 
-**S3 Cross-Region Replication (CRR)** replicates objects asynchronously; with S3 Replication Time Control (RTC) AWS contractually replicates 99.99% of objects within 15 minutes. Enabling object lock on the destination protects against ransomware deletes.
+**S3 Cross-Region Replication (CRR)** replicates objects asynchronously; with S3 Replication Time Control (RTC) AWS replicates most objects in seconds and commits, in the RTC SLA, to 99.9% of objects within 15 minutes per month (service credits below that). Enabling object lock on the destination protects against ransomware deletes.
 
 **AWS Backup logically air-gapped vaults** (GA August 2024) are the managed answer to "the attacker has admin in the backup account too". A standard backup vault lives in your account, uses your KMS key, and is only as safe as that account's root and KMS key policies. A logically air-gapped vault differs in four ways: it is always locked with Vault Lock in **compliance mode** (no one, including root and AWS, can delete a recovery point before its retention ends), its minimum and maximum retention are set at creation (the minimum cannot be under 7 days), backups are stored in an AWS Backup service-owned account and encrypted by default with an **AWS-owned key** (a customer-managed key is optional), and the vault can be shared through **AWS RAM** with another account, even in another AWS Organization, which can restore directly from it. With **multi-party approval** (MPA) integration, a team of approvers can grant access to the vault even when the owning account is locked out or closed, for as long as the account's post-closure period lasts. The usual layout: the backup plan writes to a standard vault in each workload account and copies to a logically air-gapped vault in a central account in another Region, and a separate recovery account holds the RAM share and is where restore tests run.
 
@@ -504,8 +506,8 @@ DynamoDB Global Tables replicate a table across Regions, and the consistency mod
 AWS DRS operates at the block/host level, continuously replicating an entire server's disk blocks so the whole machine — OS, application, and data — can be recovered in a target region within minutes. Aurora Global Database only replicates the managed database layer, so it says nothing about application servers, custom AMIs, or non-database state that DRS covers. Use DRS for pilot-light-style recovery of whole servers or lift-and-shift workloads without database-level replication built in, and Aurora Global Database specifically for the data tier of a cloud-native application.
 
 **Q: Is S3 Cross-Region Replication's RPO actually "near zero"?**
-**Short:** No — S3 CRR is asynchronous, and even with Replication Time Control its SLA only guarantees 99.99% of objects replicate within 15 minutes.
-No — S3 CRR is asynchronous, and even with Replication Time Control (RTC) enabled, AWS's contractual SLA only guarantees 99.99% of objects replicate within 15 minutes, not instantly. An object written to the primary bucket seconds before a regional outage may not have replicated yet, so the real RPO for S3-backed data is "up to 15 minutes for the vast majority of objects," not zero. Treat S3 CRR as a strong but bounded-lag safety net and enable Object Lock on the destination bucket so the replicated copies also survive a ransomware or fat-finger delete.
+**Short:** No — S3 CRR is asynchronous, and even with Replication Time Control the SLA only commits to 99.9% of objects replicating within 15 minutes.
+No — S3 CRR is asynchronous, and even with Replication Time Control (RTC) enabled, AWS's SLA only commits to 99.9% of objects replicating within 15 minutes in a month, with service credits (not data) when it misses, not to instant replication. An object written to the primary bucket seconds before a regional outage may not have replicated yet, so the real RPO for S3-backed data is "up to 15 minutes for the vast majority of objects," not zero. Treat S3 CRR as a strong but bounded-lag safety net and enable Object Lock on the destination bucket so the replicated copies also survive a ransomware or fat-finger delete.
 
 **Q: What lesson did the AWS us-east-1 outages of 2020, 2021, and 2025 teach about single-region architectures?**
 **Short:** The us-east-1 outages showed that even fully managed-service workloads can go dark from a shared control-plane dependency, and only genuine multi-region architecture with every dependency audited survives it.

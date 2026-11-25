@@ -2,7 +2,7 @@
 
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
-> **Version anchor (2026-10-19).** Current releases: **Grafana v13.2.4** (2026-10-13), **Alertmanager v0.34.1** (2026-09-17) and **Prometheus v3.15.0** (2026-09-24). Grafana **Git Sync** is generally available from Grafana 13.0 (the `provisioning.grafana.app/v0alpha1` `Repository` resource). **Perses v0.54.0** (2026-07-29) is the latest stable release of the CNCF Sandbox dashboard project. The **Grafana Foundation SDK** (Apache-2.0) ships builders for Go, TypeScript, Python, PHP and Java.
+> **Version anchor (2026-11-25).** Current releases: **Grafana v13.3.2** (2026-11-24), **Alertmanager v0.35.1** (2026-11-24) and **Prometheus v3.16.0** (2026-11-05). Grafana **Git Sync** is generally available from Grafana 13.0 (the `provisioning.grafana.app/v0alpha1` `Repository` resource). **Perses v0.55.1** (2026-11-02) is the latest stable release of the CNCF Sandbox dashboard project. The **Grafana Foundation SDK** (Apache-2.0) ships builders for Go, TypeScript, Python, PHP and Java.
 
 Visualization turns raw telemetry into **dashboards humans can read at a glance**; alerting turns telemetry into **pages that wake the right person at the right time — and only when action is needed**. **Grafana** is the de-facto dashboard layer over metrics/logs/traces; **Alertmanager** (and Grafana Alerting) dedupes, groups, silences, and routes alerts to **PagerDuty / Jira Service Management Operations / Slack**. The hardest problem here is not building dashboards — it's **alert quality**: too many alerts cause fatigue and missed incidents; too few mean outages go unnoticed. The modern answer is **SLO burn-rate alerting** instead of static thresholds.
 

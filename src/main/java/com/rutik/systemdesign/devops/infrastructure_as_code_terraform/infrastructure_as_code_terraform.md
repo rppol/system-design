@@ -2,11 +2,12 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** **Terraform 1.16.6** (2026-10-14) is the current stable
-> release, with 1.17.0-rc2 out the same day; 1.15.x and 1.16.x are the supported lines. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
+> **Version anchor (2026-11-25).** **Terraform 1.17.2** (2026-11-11) is the current stable
+> release (1.17.0 shipped 2026-10-21 with variables and locals in provider requirements, a
+> `-minimal-refresh` plan option, and Terraform Policy GA); 1.16.x and 1.17.x are the supported lines. The `required_version = ">= 1.11"` below is a deliberate **floor**, not a
 > recommendation — it is the release that made S3-native state locking GA, which is the
 > oldest version the backend block on this page will work on, and the first with write-only
-> arguments. The `hashicorp/aws ~> 6.57` pin admits the current provider, 6.69.1 (2026-10-15);
+> arguments. The `hashicorp/aws ~> 6.57` pin admits the current provider, 6.74.0 (2026-11-23);
 > providers move faster than the CLI, so re-check the pin before copying it. **Terraform Stacks** (§4) are GA and **HCP Terraform-only**.
 > Sources: [Terraform releases](https://github.com/hashicorp/terraform/releases),
 > [Stacks](https://developer.hashicorp.com/terraform/language/stacks).
@@ -738,7 +739,7 @@ Stacks move the ordering problem from your pipeline into Terraform. Today that g
 **Q: What does `required_version = ">= 1.11"` actually protect you from, and why not pin it exactly?**
 **Short:** It is a floor that stops an older CLI from misreading configuration written for a newer one, and pinning it exactly would break every colleague who is one patch ahead.
 
-`required_version` is a compatibility floor, and its job is to fail `init` loudly rather than let an older binary silently misinterpret newer syntax. The `>= 1.11` on this page is not arbitrary: 1.11 is where S3-native state locking went GA, so it is the oldest CLI that understands the `use_lockfile = true` in this configuration's backend block; an older binary would ignore the setting and run unlocked, which is exactly the silent-corruption case the constraint exists to prevent. Pinning it exactly (`= 1.11.0`) is the common overcorrection and it is worse: every teammate, CI runner and Atlassian bot then has to hold that precise patch, and a security patch release breaks the whole team at once. Use a floor for the CLI and a pessimistic major pin (`~> 6.57`) for providers, and commit `.terraform.lock.hcl` so provider *versions and checksums* are reproducible even though the constraint is a range. The current stable line is 1.16.x, so a `>= 1.11` floor is comfortably satisfied everywhere while still refusing the binary that would run your state unlocked.
+`required_version` is a compatibility floor, and its job is to fail `init` loudly rather than let an older binary silently misinterpret newer syntax. The `>= 1.11` on this page is not arbitrary: 1.11 is where S3-native state locking went GA, so it is the oldest CLI that understands the `use_lockfile = true` in this configuration's backend block; an older binary would ignore the setting and run unlocked, which is exactly the silent-corruption case the constraint exists to prevent. Pinning it exactly (`= 1.11.0`) is the common overcorrection and it is worse: every teammate, CI runner and Atlantis bot then has to hold that precise patch, and a security patch release breaks the whole team at once. Use a floor for the CLI and a pessimistic major pin (`~> 6.57`) for providers, and commit `.terraform.lock.hcl` so provider *versions and checksums* are reproducible even though the constraint is a range. The current stable line is 1.17.x, so a `>= 1.11` floor is comfortably satisfied everywhere while still refusing the binary that would run your state unlocked.
 
 **Q: You run `terraform plan` and it wants to destroy and recreate a resource you only renamed in the config. Why, and what do you do?**
 **Short:** Terraform keys state by resource address, so renaming the block makes the old address vanish and a new one appear — which reads as a destroy plus a create.

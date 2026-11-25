@@ -2,7 +2,7 @@
 
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** Current releases: **HashiCorp Vault v2.2.0** (2026-10-15), **OpenBao v2.7.1** (2026-10-01), **SOPS v3.13.3** (2026-07-23), **Sealed Secrets v0.40.0** (2026-09-10) and **External Secrets Operator v2.13.0** (2026-10-16).
+> **Version anchor (2026-11-25).** Current releases: **HashiCorp Vault v2.2.2** (2026-11-12), **OpenBao v2.7.3** (2026-11-19), **SOPS v3.13.3** (2026-07-23), **Sealed Secrets v0.41.2** (2026-10-26) and **External Secrets Operator v2.15.0** (2026-11-10).
 
 > **Pricing anchor (checked 2026-08-25).** **AWS Secrets Manager is $0.40 per secret per
 > month (prorated hourly) plus $0.05 per 10,000 API calls**, with no free tier. The secret-count

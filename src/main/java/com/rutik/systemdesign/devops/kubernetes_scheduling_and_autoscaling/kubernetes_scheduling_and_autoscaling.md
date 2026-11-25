@@ -140,7 +140,7 @@ spec:
       schedulingPolicy: {gang: {minCount: 4}}   # schedulable only if 4 pods can run at once
 ```
 
-This is deliberately thinner than Kueue or Volcano — it gives you the all-or-nothing placement primitive and nothing else: no quotas, no cross-team borrowing, no fair-share, no preemption policy beyond workload-aware preemption, which `GenericWorkload` includes and which honours a PodGroup's `disruptionMode` (`all` evicts the whole gang together, `single` lets Pods go one at a time). Reach for the native `Workload` API only when all you need is "don't partially schedule this job"; reach for Kueue (the common default) or Volcano when you're running a shared cluster across teams and need quota enforcement and fair-share on top of gang semantics.
+This is deliberately thinner than Kueue or Volcano — it gives you the all-or-nothing placement primitive and nothing else: no quotas, no cross-team borrowing, no fair-share, no preemption policy beyond workload-aware preemption, which `GenericWorkload` includes and which honours a PodGroup's `disruptionMode` (`all` evicts the whole gang together, `single` lets Pods go one at a time). Reach for the native `Workload` API only when all you need is "don't partially schedule this job"; reach for a queueing layer or batch scheduler when you're running a shared cluster across teams and need quota enforcement and fair-share on top of gang semantics. Which one (Kueue, Volcano or KAI Scheduler) and how to design its quotas, cohorts and preemption is scheduler policy, taught in [mlops/gpu_cluster_scheduling_and_quotas](../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md); this module owns only the placement primitive.
 
 ---
 

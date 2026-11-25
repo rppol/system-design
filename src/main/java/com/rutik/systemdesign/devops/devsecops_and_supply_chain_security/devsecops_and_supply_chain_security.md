@@ -2,7 +2,7 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** **cosign v3.1.3** (2026-08-06). **Rekor v2** reached GA on 2025-10-10 (tile-backed, sharded by year); signing clients do not switch to it automatically and **Rekor v1 still runs in parallel**. **SLSA v1.2** is the approved specification, with a Build track (L0 to L3, no L4) and a Source track. Fulcio certificates are valid for 10 minutes. The CRA reporting and SBOM obligations are in [regulated_supply_chain](regulated_supply_chain.md).
+> **Version anchor (2026-11-25).** **cosign v3.1.5** (2026-11-24). **Rekor v2** reached GA on 2025-10-10 (tile-backed, sharded by year); signing clients do not switch to it automatically and **Rekor v1 still runs in parallel**. **SLSA v1.2** is the approved specification, with a Build track (L0 to L3, no L4) and a Source track. Fulcio certificates are valid for 10 minutes. The CRA reporting and SBOM obligations are in [regulated_supply_chain](regulated_supply_chain.md).
 
 ---
 

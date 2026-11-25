@@ -2,7 +2,7 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
-> **Version anchor (2026-09-04).** **Kubernetes v1.37 "Garhwal"** (2026-08-26) is current; **v1.36 "Haru"** (2026-04-22) is the prior minor. `flowcontrol.apiserver.k8s.io/v1beta3` (API Priority and Fairness) **stopped being served in v1.32** — `flowcontrol.apiserver.k8s.io/v1` has been stable since v1.29, so every FlowSchema/PriorityLevelConfiguration example below uses `v1`. **etcd 3.7** is the current release line (3.7.0 shipped 2026); 3.5 and 3.6 remain in support, 3.4 reached end of support 2026-06-01. Every version-tagged claim on this page is checked against these anchors.
+> **Version anchor (2026-11-25).** **Kubernetes v1.37 "Garhwal"** (2026-08-26) is current (latest patch 1.37.2, 2026-10-13); **v1.36 "Haru"** (2026-04-22) is the prior minor, and 1.38 is scheduled for 2026-12-16. `flowcontrol.apiserver.k8s.io/v1beta3` (API Priority and Fairness) **stopped being served in v1.32** — `flowcontrol.apiserver.k8s.io/v1` has been stable since v1.29, so every FlowSchema/PriorityLevelConfiguration example below uses `v1`. **etcd 3.7** is the current release line (latest patch v3.7.4, 2026-11-19); 3.5 and 3.6 remain in support, 3.4 reached end of support 2026-06-01. The upgrade facts in §6 (EKS 15-minute drain limit, extended support at $0.60 per cluster-hour) were checked against AWS documentation on the anchor date. Every version-tagged claim on this page is checked against these anchors.
 
 Kubernetes is the de-facto container orchestrator and the single most-tested DevOps interview topic. Its genius is one idea applied everywhere: **declare desired state; controllers continuously reconcile reality toward it.** Understanding the control plane (API server, etcd, scheduler, controller-manager) and node components (kubelet, kube-proxy) — and how they communicate only through the API server — explains nearly every Kubernetes behavior and failure mode.
 
@@ -375,6 +375,10 @@ sequenceDiagram
 
 Classic leader election is first-come: whichever kube-controller-manager replica grabs the `Lease` first leads. During a rolling control-plane upgrade that can be a new-version controller running against an API server that is still one version back, which the version-skew policy does not allow. **Coordinated leader election** (`CoordinatedLeaderElection`, alpha 1.31, beta 1.33, still off by default and requiring `coordination.k8s.io/v1beta1`) adds a `LeaseCandidate` object per replica carrying its binary and emulation version. An election coordinator in the API server picks the leader with the strategy `OldestEmulationVersion`: lowest emulation version, then lowest binary version, then oldest candidate. In 1.37 kube-controller-manager and kube-scheduler use it automatically once the gate and API group are on.
 
+### Upgrading a cluster: the short version
+
+The skew rules above fix the order: latest patch of the current minor first; then `kube-apiserver`, one minor at a time with no skipping; then the controller manager, scheduler and cloud controller manager; then the nodes. Because kubelets may trail the API server by three minors, a cluster can take its control plane from 1.35 to 1.36 to 1.37 and replace its node pools **once**, straight to 1.37, instead of draining every node twice. Four things break upgrades far more often than Kubernetes itself, and all four can be checked beforehand: an API version that the target stops serving (read `apiserver_requested_deprecated_apis` and scan manifests in Git), an add-on that does not support the target minor, a PodDisruptionBudget that allows zero disruptions (EKS fails the node update after a 15-minute drain), and an admission webhook that cannot handle the new API server's requests. Node pool strategies (surge, minimal, blue-green), the cost of falling behind (EKS extended support is $0.60 instead of $0.10 per cluster-hour), and fleet rollouts in waves with Cluster API are in [cluster_lifecycle_and_fleet_upgrades](cluster_lifecycle_and_fleet_upgrades.md).
+
 ### etcd: the source of truth
 
 ```bash
@@ -578,6 +582,10 @@ With plain `--leader-elect`, the first replica to take the `Lease` leads, so dur
 **Short:** kube-apiserver leads the upgrade; kubelet may trail it by up to three minor versions, and every HA apiserver instance must stay within one minor version of the others.
 kube-apiserver is upgraded first and is the ceiling every other component tracks: kube-controller-manager, kube-scheduler, and cloud-controller-manager may be up to one minor version older; kubelet may be up to three minor versions older (two, for kubelet versions before 1.25); and kubectl may be one minor version older or newer. In an HA cluster the newest and oldest kube-apiserver replicas must themselves stay within one minor version during a rolling upgrade, which is what makes "upgrade the whole control plane, then the nodes, oldest kubelets last" the only supported order; skipping straight from N to N+2 anywhere in the chain is unsupported and can desync RBAC/API behavior mid-rollout. Skew is not the only upgrade gate; read each release's removals first. For 1.37: static Pods may no longer reference Secrets or ConfigMaps (for example via `configMapRef` or `secretRef`), and the `PreventStaticPodAPIReferences` gate that allowed opting out is gone, so such a static Pod no longer runs after the kubelet upgrade; `kube-dns` is deprecated in favor of CoreDNS, with no kube-dns packages expected after 1.40; and since 1.35 the kubelet refuses to start on cgroup v1 nodes by default (see [Linux and OS fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md)).
 
+**Q: Your control plane is three minors behind. How do you plan the upgrade so you drain every node only once?**
+**Short:** Step the control plane one minor at a time while nodes stay within the three-minor kubelet skew, then replace node pools once, straight to the target version.
+The API server may not skip a minor, so 1.34 to 1.37 is three control-plane upgrades. Kubelets may be up to three minors older than the API server and never newer, so 1.34 nodes remain supported at every step (skew 1, 2, then 3), and the node pools can be replaced once, directly to 1.37, after the last control-plane step. That turns three drains of every node into one, which removes most of the risk, since drains are where PodDisruptionBudgets and capacity limits bite. Two conditions: fix API versions the targets stop serving and confirm add-on support before the first step, and finish the node replacement before the next control-plane upgrade, because nodes already three minors behind block it. The full runbook is in [cluster_lifecycle_and_fleet_upgrades](cluster_lifecycle_and_fleet_upgrades.md).
+
 ---
 
 ## 13. Best Practices
@@ -588,6 +596,7 @@ kube-apiserver is upgraded first and is the ceiling every other component tracks
 - Keep **admission webhooks fast and fail-safe** (timeouts, `failurePolicy` chosen deliberately).
 - Use **GitOps** for desired state so changes are auditable and drift is detected (see [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md)).
 - Prefer **many smaller clusters** to limit blast radius unless fleet overhead dominates.
+- Upgrade **every minor** (about every four months): latest patch first, control plane one minor at a time, node pools replaced once; runbook in [cluster_lifecycle_and_fleet_upgrades](cluster_lifecycle_and_fleet_upgrades.md).
 - Right-size: don't adopt Kubernetes for a single app a PaaS could run.
 
 ---

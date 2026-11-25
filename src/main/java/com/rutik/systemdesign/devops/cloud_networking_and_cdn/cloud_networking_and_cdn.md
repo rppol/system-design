@@ -2,6 +2,8 @@
 
 > Phase 5 — Cloud Platforms · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** Prices and product facts checked against AWS pricing and documentation on this date: **CloudFront invalidations** are free for the first 1,000 paths or tags a month, then **$0.005 per path**; CloudFront also sells flat-rate plans (Free, $15, $200 and $1,000 a month, no overage charges) alongside pay-as-you-go. **AWS Cloud WAN** charges **$0.50 per hour per core network edge** in any Region plus $0.065 per hour per VPC attachment in us-east-1. Every public IPv4 address costs **$0.005 per hour** (since 2024-02-01).
+
 Once you have more than one VPC, account, or Region, the central problem becomes connecting them securely and cheaply, and serving content to users worldwide with low latency. This module covers **VPC peering**, **Transit Gateway** (hub-and-spoke), **PrivateLink** (private service access), **CDNs** (CloudFront, Cloudflare), **global load balancing**, and **DNS strategies** (latency/geo/failover routing). The recurring theme: keep traffic private, avoid the public internet where possible, push static and cacheable content to the edge, and route users to the nearest healthy endpoint — all while controlling the data-transfer costs that quietly dominate cloud bills.
 
 ---
@@ -66,14 +68,26 @@ Transit Gateway answers "which networks can reach which networks" one Region at 
 
 ```mermaid
 flowchart TD
-    Q["What do you need to connect?"] --> N["Whole networks<br/>(any port, any host)"]
-    Q --> S["One service or API"]
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    Q(["What do you need<br/>to connect?"]) --> N(["Whole networks<br/>(any port, any host)"])
+    Q --> S(["One service or API"])
     N --> R1{"One Region or many?"}
-    R1 -->|"One Region"| TGW["Transit Gateway<br/>route tables per Region"]
-    R1 -->|"Many Regions + branches,<br/>global segments"| WAN["Cloud WAN<br/>one JSON policy"]
+    R1 -->|"One Region"| TGW(["Transit Gateway<br/>route tables per Region"])
+    R1 -->|"Many Regions + branches,<br/>global segments"| WAN(["Cloud WAN<br/>one JSON policy"])
     S --> P1{"Many services,<br/>many callers, L7 auth?"}
-    P1 -->|"One service,<br/>TCP, provider to consumer"| PL["PrivateLink<br/>NLB + interface endpoint"]
-    P1 -->|"Many HTTP/gRPC services,<br/>IAM auth per request"| LAT["VPC Lattice<br/>service network"]
+    P1 -->|"One service,<br/>TCP, provider to consumer"| PL(["PrivateLink<br/>NLB + interface endpoint"])
+    P1 -->|"Many HTTP/gRPC services,<br/>IAM auth per request"| LAT(["VPC Lattice<br/>service network"])
+
+    class Q io
+    class N,S req
+    class R1,P1 mathOp
+    class TGW,WAN,PL,LAT train
 ```
 
 ### Cross-cloud connectivity mapping

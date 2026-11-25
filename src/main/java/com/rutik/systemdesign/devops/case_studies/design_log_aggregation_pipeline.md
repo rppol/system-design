@@ -38,7 +38,7 @@
 | Ingest volume | 50 TB/day raw ≈ **580 MB/s average**, **2.9 GB/s peak** (5x) |
 | Event rate | ~580K events/sec avg (avg log line ~1 KB), ~2.9M events/sec peak |
 | Durability | **Never drop logs under backpressure** — 4h of surge runway minimum |
-| Ingest-to-queryable lag | p99 < 60s under normal load; < 5 min under peak |
+| Ingest-to-queryable lag | p99 < 60s under normal load; < 5 min under normal daily peak; during a 5x incident surge lag may grow but the backlog must drain before Kafka's 8 h retention (§10) |
 | Query latency | p99 < **3s** for last-24h label-filtered queries; < 30s for 7-day; minutes for cold-tier |
 | Ingest availability | 99.95% (write path must survive single-AZ loss) |
 | Query availability | 99.9% (read path may degrade before write path) |
@@ -56,6 +56,8 @@
 - Real-time alerting on log patterns — a Flink job consumes Kafka; its design is a separate doc.
 
 See [`../observability_logging/observability_logging.md`](../observability_logging/observability_logging.md) for the single-system logging module this case study composes into a platform.
+
+> **Scenario note.** This is a different organisation from the one in [`design_observability_platform.md`](./design_observability_platform.md), which handles 20 TB/day of logs with 90-day total retention. Here the volume is 50 TB/day with 30-day hot and 1-year cold retention. Compare the designs, not the numbers.
 
 ---
 
@@ -123,10 +125,10 @@ Cold tier S3 (1-year raw 18,250 TB / 10x comp = 1,825 TB, 5 TB/day)
 Kafka brokers (12x i3en.2xlarge on-demand $0.904/h)       = $7,920/mo
 Compute: agents (DaemonSet, ~free), processors (40x c6i.4xlarge spot ~$0.30/h)
    40 x $0.30 x 730                                        = $8,760/mo
-Loki + OpenSearch ingest/query fleet (74 nodes, see §10)  ≈ $26,800/mo
+Loki + OpenSearch ingest/query fleet (134 nodes, see §10) ≈ $49,000/mo
 ```
 
-Loki-based total lands near **$59K/month ≈ $700K/year**, comfortably under the $1.2M target. The equivalent OpenSearch-index-everything design crosses **$3.5M–4.5M/year** purely on hot storage + indexing compute — which is exactly why §5 leans Loki for the bulk path.
+Loki-based total lands near **$81K/month ≈ $970K/year**, under the $1.2M target. Most of the Loki fleet is sized for draining a surge backlog, not for average ingest (§10 surge drain check). The equivalent OpenSearch-index-everything design crosses **$3.5M–4.5M/year** purely on hot storage + indexing compute — which is exactly why §5 leans Loki for the bulk path.
 
 ---
 
@@ -579,6 +581,58 @@ WHERE dt BETWEEN DATE '2026-02-01' AND DATE '2026-02-07'
 
 Partition pruning on `dt`+`tenant` means Athena reads gigabytes, not petabytes — keeping a cold query at seconds-to-minutes and a few dollars instead of a full-table scan costing hundreds.
 
+### 4.5 Per-tenant isolation in Loki: limits and runtime overrides
+
+The blast-radius requirement ("one tenant's spike must not degrade another tenant") is enforced by Loki's per-tenant limits. Every push carries an `X-Scope-OrgID` tenant header (set by the Vector sink from `.tenant`), and the distributor rate-limits per tenant before anything reaches an ingester. Defaults live in `limits_config`; per-tenant exceptions live in the runtime configuration file, which Loki reloads without a restart.
+
+**BROKEN** — one global limit sized for the biggest tenant:
+
+```yaml
+# loki.yaml -- BROKEN: every tenant gets the payments tenant's budget
+limits_config:
+  ingestion_rate_mb: 400          # sized for the largest tenant
+  ingestion_burst_size_mb: 600
+  max_global_streams_per_user: 500000
+  retention_period: 720h
+# A DEBUG-in-prod deploy in any of the 120 tenants can now push 400 MB/s and
+# create 500K streams. Ingesters run out of memory and every tenant's writes fail.
+```
+
+**FIX** — small defaults, explicit overrides for the few large tenants, per-stream retention for noisy streams:
+
+```yaml
+# loki.yaml -- defaults that fit ~110 of the 120 tenants
+limits_config:
+  ingestion_rate_strategy: global   # limit is shared across distributors (default)
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  max_global_streams_per_user: 20000
+  per_stream_rate_limit: 3MB
+  per_stream_rate_limit_burst: 15MB
+  max_line_size: 256KB
+  retention_period: 720h            # 30 days hot; needs compactor retention_enabled
+runtime_config:
+  file: /etc/loki/runtime/overrides.yaml
+---
+# overrides.yaml -- reviewed in Git, reloaded at runtime
+overrides:
+  payments:
+    ingestion_rate_mb: 120
+    ingestion_burst_size_mb: 240
+    max_global_streams_per_user: 150000
+  checkout:
+    ingestion_rate_mb: 60
+    ingestion_burst_size_mb: 120
+    retention_stream:
+      - selector: '{level="debug"}'
+        priority: 1
+        period: 72h                 # debug lines kept 3 days, not 30
+```
+
+With the `global` strategy, Loki divides each tenant's `ingestion_rate_mb` by the number of healthy distributors, so the limit stays correct when the distributor Deployment scales. A tenant that exceeds its limit gets HTTP 429 on push. In this pipeline that 429 is not data loss: Loki marks it retryable, so the consumer that writes `logs.parsed` into Loki retries with backoff and does not commit its Kafka offset until the push succeeds (in Vector, end-to-end acknowledgements on the Kafka source). The backlog sits in Kafka until the tenant's rate drops or the on-call raises the override. Alert on per-tenant `loki_discarded_samples_total` by `reason` (`rate_limited`, `per_stream_rate_limit`, `stream_limit`) so a team learns about its own spike before it learns about it from an incident.
+
+The sizing rule for the overrides is the tenant's p99 ingest over the last 30 days times 2, rounded up; anything bigger needs a capacity review, because the sum of overrides is what the ingester fleet in §10 must carry.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -706,6 +760,8 @@ Instrument every stage with OTel/Prometheus. The pipeline must be more observabl
 | `fluentbit_output_dropped_records_total` | Fluent Bit | **> 0** (page — we promised no drops) |
 | `fluentbit_input_storage_chunks_busy_bytes` | Fluent Bit | > 80% of `storage.total_limit_size` |
 | `kafka_consumergroup_lag` | Kafka exporter | > 5 min of throughput |
+| Consumer lag as time (age of oldest unread record) | lag exporter that reports time lag | > 4 h (half of the 8 h retention, §10 drain check) |
+| `loki_discarded_samples_total` by `reason` and tenant | Loki distributor/ingester | any `rate_limited` or `stream_limit` for 10 min (§4.5) |
 | `vector_component_errors_total` | Vector | rate > 1% of throughput |
 | `logs_dlq_rate` | Kafka `logs.dlq` | > 0.5% of ingest |
 | `loki_ingester_memory_streams` | Loki | sudden 2x jump (cardinality bomb) |
@@ -753,7 +809,7 @@ Cardinality is the silent killer of both the log index *and* the metrics you use
 
 - **Kafka `unclean.leader.election` data loss** — A cluster had `unclean.leader.election.enable=true` (a legacy default). During a multi-broker failure, an out-of-sync replica was elected leader, silently discarding ~4 minutes of un-replicated writes — **~700 GB of logs vanished** with no error surfaced anywhere. Lesson: `unclean.leader.election.enable=false` + `min.insync.replicas=2` is mandatory for a "no drop" pipeline.
 
-- **DEBUG-in-prod cost blowout** — A team shipped a build with `DEBUG` logging on a hot request path; one service's volume jumped 8x, consuming a tenant's entire ingest quota and pushing the cluster to ~62 TB/day for three days before detection. The direct bill barely moved — the pipeline's blended cost is ~$1.16K per TB/day-month ($58K/mo ÷ 50 TB/day), so 12 TB/day extra for three days is 12 × $1.16K × 3/30 ≈ **$1.4K** on a ~$58K monthly bill — and that is precisely the point: in a label-only architecture a volume blowout costs you *quota, hot-index noise, and on-call time*, not dollars, which is why nobody caught it for three days. The same spike on an index-everything store would have been ~10x that (§10's ~$28K/mo Loki line versus ~$280K/mo indexed). Fix: per-tenant volume alerts + level-based sampling under quota pressure (§5 Decision 6). The broader node-resource hardening that keeps such spikes from cascading lives in [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md).
+- **DEBUG-in-prod cost blowout** — A team shipped a build with `DEBUG` logging on a hot request path; one service's volume jumped 8x, consuming a tenant's entire ingest quota and pushing the cluster to ~62 TB/day for three days before detection. The direct bill barely moved — the pipeline's blended cost is ~$1.6K per TB/day-month ($80K/mo ÷ 50 TB/day), so 12 TB/day extra for three days is 12 × $1.6K × 3/30 ≈ **$1.9K** on a ~$80K monthly bill — and that is precisely the point: in a label-only architecture a volume blowout costs you *quota, hot-index noise, and on-call time*, not dollars, which is why nobody caught it for three days. The same spike on an index-everything store would have been ~10x that (§10's ~$50K/mo Loki line versus ~$280K/mo indexed). Fix: per-tenant volume alerts + level-based sampling under quota pressure (§5 Decision 6). The broader node-resource hardening that keeps such spikes from cascading lives in [`cross_cutting/kubernetes_production_hardening.md`](./cross_cutting/kubernetes_production_hardening.md).
 
 ---
 
@@ -771,11 +827,13 @@ Processor replicas    = ceil( peak_events_per_sec / per_replica_events_per_sec )
     -- ~5K events/sec per vCPU across its 16 vCPU)
 
 Loki ingesters        = max( active_streams x RF / streams_per_ingester ,
-                             ingest_MBps    x RF / MBps_per_ingester )
-                      = max( 1.2M x 3 / 100K , 580 MB/s x 3 / 30 MB/s )
-                      = max( 36 , 58 ) = 58  -> 60 ingesters
+                             ingest_MBps    x RF / MBps_per_ingester ,
+                             drain_MBps     x RF / MBps_per_ingester )
+                      = max( 1.2M x 3 / 100K , 580 MB/s x 3 / 30 MB/s , 1,200 x 3 / 30 )
+                      = max( 36 , 58 , 120 ) = 120 ingesters
    (replication_factor=3 means the distributor writes every stream to three
-    ingesters, so the write fleet must carry 3x the distinct ingest rate)
+    ingesters, so the write fleet must carry 3x the distinct ingest rate;
+    drain_MBps comes from the surge drain check below)
 
 Hot storage (Loki)    = days_hot x daily_raw / compression x (1 + index_overhead)
                       = 30 x 50 TB / 10 x 1.05 = ~158 TB in S3
@@ -784,21 +842,39 @@ Cold storage (S3)     = days_cold x daily_raw / compression
                       = 365 x 50 TB / 10 = ~1,825 TB
 ```
 
+### Surge drain check (why the Loki write path is sized above average)
+
+Sizing the Loki write path on the 580 MB/s average looks right and loses data. During a 4-hour 5x surge, Kafka absorbs the difference between 2.9 GB/s arriving and the Loki write capacity `C` draining. Kafka deletes by age, so the number that matters is the age of the oldest unread record, and it must stay under the 8 h `retention.ms`:
+
+```
+oldest unread age (max)  = surge_hours x (peak - C) / C
+
+C = 600 MB/s (60 ingesters x 30 MB/s / RF 3)
+  = 4 h x (2,900 - 600) / 600   = ~15.3 h   > 8 h retention -> the tail of the backlog is deleted unread
+C = 1,200 MB/s (120 ingesters)
+  = 4 h x (2,900 - 1,200) / 1,200 = ~5.7 h  < 8 h, with ~2.3 h margin
+
+backlog drain after the surge  = (2,900 - 1,200) x 14,400 s / (1,200 - 580)
+                               = ~24.5 TB / 620 MB/s = ~11 h until lag is back to zero
+```
+
+The rule: the write path must satisfy `surge_hours x (peak - C) / C < retention`, which here means `C > 967 MB/s`; 1,200 MB/s leaves margin for a slower-than-planned ingester rollout during the surge. The processors (3.2M events/s, about 3.2 GB/s) already clear this bar, so Loki is the binding stage. The alternative is a longer Kafka retention: 24 h costs about 6 more brokers (~$4K/month) but leaves logs hours stale for the whole incident, which defeats the point of a log pipeline. Alert on oldest-record age per partition (§8), not only on lag in messages.
+
 ### Worked example (AWS us-east-1)
 
 | Tier | Instance | Count | Unit/mo | Subtotal/mo |
 |------|----------|-------|---------|-------------|
 | Kafka brokers | i3en.2xlarge (NVMe, RF=3) | 12 | ~$660 | $7,920 |
 | Processors (Vector) | c6i.4xlarge (spot ~$0.30/h) | 40 | ~$220 | $8,760 |
-| Loki ingesters/queriers | r6i.2xlarge | 60 | ~$370 | $22,200 |
+| Loki ingesters/queriers | r6i.2xlarge | 120 | ~$370 | $44,400 |
 | Loki distributor/frontend | c6i.2xlarge | 8 | ~$250 | $2,000 |
 | OpenSearch (subset) | r6gd.2xlarge | 6 | ~$430 | $2,580 |
 | Hot chunks (S3 Std) | 158 TB | — | $0.023/GB | $3,634 |
 | Cold (450 TB Std-IA + 1,375 TB Glacier IR) | ~1,825 TB | — | blended | ~$11,125 |
 | Agents (DaemonSet) | on existing nodes | 6,000 | ~$0 | ~$0 |
-| **Total** | | | | **~$58K/mo ≈ $700K/yr** |
+| **Total** | | | | **~$80K/mo ≈ $965K/yr** |
 
-This sits well under the $1.2M/year target with headroom for the OpenSearch subset to grow. The equivalent OpenSearch-index-everything design replaces the ~$28K/mo Loki+chunk line with a ~$280K/mo hot-storage+compute line — the ~$3.0M/year delta that justifies the whole label-only architecture.
+This sits under the $1.2M/year target with headroom for the OpenSearch subset to grow; the drain-driven ingester count (120, not 60) is about $22K/month of it. The equivalent OpenSearch-index-everything design replaces the ~$50K/mo Loki+chunk line with a ~$280K/mo hot-storage+compute line — the ~$2.8M/year delta that justifies the whole label-only architecture.
 
 For multi-region: each region runs its own collection + Kafka + processing + hot store; cold S3 is replicated cross-region (or uses S3 Cross-Region Replication for DR). Cross-region query federation and the network cost of replication are covered in [`cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md).
 
@@ -831,7 +907,7 @@ Partitions = ceil(peak throughput / per-partition sustainable throughput); at 2.
 Hot tier (Loki, 30 days) keeps recent logs queryable in seconds; everything also lands in S3 as day/tenant-partitioned parquet for a year. Old queries hit the cold tier via Athena, where partition pruning on `dt`+`tenant` scans gigabytes instead of petabytes, costing a few dollars and running in seconds-to-minutes. The tradeoff is that cold queries are non-interactive — acceptable because >99% of queries hit the last 30 days, so paying 12x more to keep a year hot would serve ~1% of traffic.
 
 **Q: A tenant ships DEBUG logging to prod and 8x's their volume — what happens and how do you contain it?**
-Per-tenant ingest quotas cap their hot-tier impact so they can't starve other tenants; a volume-spike alert fires; under quota pressure, level-based sampling reduces DEBUG to a fraction in the *hot* index while keeping 100% in the cheap cold tier. Without these controls you get the real war story: three days of unnoticed 8x volume that exhausted the tenant's quota and buried on-call in DEBUG lines — the dollar cost was only ~$1.4K against a ~$58K monthly bill, which is exactly why nobody noticed. The structural fix is per-tenant isolation at ingest plus alerting on volume deltas.
+Per-tenant ingest quotas cap their hot-tier impact so they can't starve other tenants; a volume-spike alert fires; under quota pressure, level-based sampling reduces DEBUG to a fraction in the *hot* index while keeping 100% in the cheap cold tier. Without these controls you get the real war story: three days of unnoticed 8x volume that exhausted the tenant's quota and buried on-call in DEBUG lines — the dollar cost was only ~$1.9K against a ~$80K monthly bill, which is exactly why nobody noticed. The structural fix is per-tenant isolation at ingest plus alerting on volume deltas.
 
 **Q: How do you keep one tenant's query from degrading everyone else's?**
 The query-frontend enforces per-tenant limits — `max_query_length` (e.g., 31 days), `max_query_parallelism`, `max_query_series`, and a query timeout — and caches results. An unbounded 30-day, no-selector query gets rejected or throttled instead of fanning into thousands of subqueries that saturate shared queriers. Combined with per-tenant ingest isolation, this bounds blast radius on both read and write paths; without it, one runaway dashboard cost us ~$9K in an afternoon.

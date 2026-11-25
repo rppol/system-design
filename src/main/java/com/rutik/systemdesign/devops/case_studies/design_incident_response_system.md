@@ -549,6 +549,57 @@ func (d *Dispatcher) sendSMS(ctx context.Context, n Notification) error {
 
 Failover is in-band first, and that is what buys the **< 10s** of N7: a send that errors or blows its 8s timeout is retried on the next provider in the ring immediately, so the page still lands inside the budget even on the very first request that hits a dead provider. Health probes every 15s with 3 consecutive failures then open the circuit (~45s), after which sends skip the dead provider outright and stop paying the 8s penalty. The dispatcher's own failures emit a meta-alert routed to a *different* paging path (e.g., a dead-man's-switch — see §8).
 
+### 4.5 Dead-man's switch: paging on the absence of alerts
+
+Every check in §4.1–§4.4 assumes Prometheus and Alertmanager are alive to notice a failure. When they are not, nothing fires, and silence looks the same as health. The fix is an alert that always fires, and an external service that pages when it stops arriving. kube-prometheus ships it as the `Watchdog` rule (`expr: vector(1)`, `severity: none`); the design work is in routing it.
+
+**BROKEN** — Watchdog inherits the root route's timers:
+
+```yaml
+# alertmanager.yaml -- BROKEN
+route:
+  receiver: default-pagerduty
+  group_by: [alertname, cluster, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h            # the Alertmanager default
+  routes:
+    - matchers: [alertname="Watchdog"]
+      receiver: heartbeat         # inherits repeat_interval: 4h
+# The heartbeat arrives once every 4 h, so the external checker needs a period
+# above 4 h to avoid false pages. A dead Alertmanager goes unnoticed for up to
+# ~4 h, longer than most SEV1s last.
+```
+
+**FIX** — a dedicated route with its own timers, first in the tree, one per cluster:
+
+```yaml
+# alertmanager.yaml -- FIX
+route:
+  receiver: default-pagerduty
+  group_by: [alertname, cluster, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [alertname="Watchdog"]
+      receiver: heartbeat
+      group_by: [cluster]         # one heartbeat stream per cluster
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m         # re-send every minute while it fires (always)
+      continue: false             # never reaches the paging receivers
+receivers:
+  - name: heartbeat
+    webhook_configs:
+      - url: https://heartbeat.example.net/ping/prod-us-east-1   # external, other cloud account
+        send_resolved: false
+```
+
+The external checker expects one ping per cluster per minute, with a 5-minute grace period, and it pages through the delivery plane's own provider path, not through this Alertmanager. One check per cluster is the point: a single fleet-wide heartbeat stays green while one of the eight clusters is silent. The checker must run outside every failure domain it watches, which is why it sits in the separate account of D7.
+
+Two failure modes this does not catch, and what covers them: a Prometheus that is up but scrapes nothing (covered by `TargetDown` and an `absent(up{job="kubelet"})` rule), and a broken route that sends real alerts to the wrong receiver (covered by the routing tests in the §8 eval gate, `amtool config routes test`).
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -602,6 +653,13 @@ Failover is in-band first, and that is what buys the **< 10s** of N7: a send tha
 **Rationale:** A pager that shares fate with production goes dark during the exact outage it must report. Isolation is the whole point.
 **Consequences:** Cross-region webhook latency (~30–80ms), duplicated infra, and an independent on-call for the paging path itself. Worth it.
 
+### D8 — Dead-man's switch: one heartbeat per cluster, on its own route
+
+**Decision:** Route `Watchdog` to a dedicated receiver with `group_by: [cluster]`, a 1-minute `repeat_interval` and a 5-minute checker grace; one external check per cluster (§4.5).
+**Alternatives:** One fleet-wide heartbeat; Watchdog on the default route timers.
+**Rationale:** A fleet-wide heartbeat stays green while one cluster is blind, and default timers make detection take hours (war story P7).
+**Consequences:** 8 external checks to maintain and ~11.5K pings/day; worth it for a ~6-minute detection budget.
+
 | Decision | Chosen | Rejected | Primary win | Primary cost |
 |----------|--------|----------|-------------|--------------|
 | Build vs buy | Buy core, build glue | Fully build | telco-grade reliability | $0.5–1M/yr, lock-in |
@@ -611,6 +669,7 @@ Failover is in-band first, and that is what buys the **< 10s** of N7: a send tha
 | Remediation | Human + one-click | Autonomous | safety | slightly higher MTTR |
 | group_wait | 30s (5s SEV1) | 0s / 60s | noise reduction | +30s latency |
 | Topology | Isolated plane | Co-located | survives prod outage | duplicated infra |
+| Meta-monitoring | Per-cluster heartbeat, 1m repeat | Fleet-wide / default timers | ~6 min detection | 8 checks to maintain |
 
 ---
 
@@ -653,6 +712,7 @@ Treat alert rules like code: every new/changed alert passes a CI gate before mer
 - **Actionability check** — every alert MUST have a linked runbook annotation; CI fails the PR if `annotations.runbook` is missing.
 - **Backtest** — replay the last 30 days of metrics against the proposed rule; reject if it would have fired > 20 times or flapped > 5 times/day.
 - **Self-resolve rate** — alerts that resolve themselves within 2 min without human action are noise; if > 30%, the threshold is too tight → auto-ticket to tune.
+- **Routing test** — CI runs `amtool config routes test --verify.receivers=<expected>` for one sample alert per team and for `Watchdog`, so a route change cannot silently send pages to the wrong receiver or send the heartbeat to a pager.
 
 ```yaml
 # CI gate (pseudo): fail the PR if a paging alert lacks a runbook or backtests noisy.
@@ -668,7 +728,7 @@ alert_lint:
 
 The paging path is monitored by an **independent** system — you cannot monitor the pager with the pager.
 
-- **Dead-man's switch**: a synthetic `Watchdog` alert fires *always* (every 30s) and is expected to reach a heartbeat endpoint (e.g., healthchecks.io / Grafana Cloud). If the heartbeat *stops*, an external service pages — this catches a fully-dead Alertmanager.
+- **Dead-man's switch**: a synthetic `Watchdog` alert fires *always* and a dedicated route re-sends it every minute per cluster to an external heartbeat endpoint (e.g., healthchecks.io / Grafana Cloud). If a cluster's heartbeat *stops* for 5 minutes, the external service pages — this catches a fully-dead Prometheus or Alertmanager (§4.5).
 - **OTel spans** across the paging path: `ingest → incident.open → schedule.resolve → escalation.arm → dispatch → provider.send → ack`. SLI: p99 `ingest→provider.send` **< 25s** — the 60s N1 budget minus the 30s `group_wait` that Alertmanager spends before ingest, with a few seconds of headroom.
 - **Prometheus SLIs** for the paging path: `alertmanager_notifications_failed_total`, `dispatcher_provider_failover_total`, `escalation_fallback_total`, `paging_path_end_to_end_seconds`. Keep cardinality bounded — see `cross_cutting/prometheus_cardinality_and_scale.md` (don't label by `incident_id`).
 - **Error-budget for the pager**: the paging path has its own 99.99% SLO with its own burn-rate alerting — math in `cross_cutting/slo_error_budget_math.md`.
@@ -687,6 +747,12 @@ Symptom: the same incident escalating in a loop, paging the whole org. Diagnosis
 **Runbook 4 — Notification provider outage (Twilio down).**
 Symptom: `dispatcher_provider_failover_total` spiking, SMS/voice delivery failing. Diagnosis: check provider status page + health-probe metrics; confirm circuit breaker tripped to Bandwidth. Mitigation: failover should be automatic (< 10s, N7); if not, manually pin the provider ring to the healthy provider via feature flag. Resolution: confirm both providers' webhooks/numbers are warm; add the affected provider to the meta-alert allowlist so its outage is itself a SEV2.
 
+**Runbook 5 — Heartbeat missing for one cluster (dead-man's switch fired).**
+Symptom: the external checker pages "no Watchdog ping from `prod-eu-west-1` for 5 min" while other clusters ping normally. Diagnosis: treat it as "this cluster has no alerting" until proven otherwise. Check, in order: Alertmanager Pods (`kubectl -n monitoring get pods`, crash loops after a config push), Prometheus Pods and their rule evaluation (`prometheus_rule_group_last_evaluation_timestamp_seconds` stale), the webhook egress path to the checker (NetworkPolicy, proxy, DNS). Mitigation: while the cluster is blind, the on-call watches its golden-signal dashboards from the central metrics store and declares a SEV2 so other teams know paging there is down; roll back the last Alertmanager or Prometheus config change if one landed in the window. Resolution: restore paging, then fire a synthetic critical alert in that cluster and confirm it reaches a phone end to end before closing.
+
+**Runbook 6 — On-call overload (rotation above 2 pages per shift for 28 days).**
+Symptom: F10 analytics flag a rotation; the on-call engineers report fatigue. Diagnosis: list the rotation's top paging rules by count and by precision (§8a). Usually 2–3 rules cause most of the load. Mitigation: demote low-precision rules to tickets, add missing inhibition, and add a secondary engineer for the hot week. Resolution: if the load is real (the service is unstable), the action items go to the owning team's reliability backlog with an error-budget policy decision, not to the alerting config.
+
 ---
 
 ## 9. Common Pitfalls & War Stories
@@ -702,6 +768,8 @@ Symptom: `dispatcher_provider_failover_total` spiking, SMS/voice delivery failin
 **P5 — Single SMS provider outage.** Twilio had a regional SMS degradation for **22 minutes**. With no failover provider, pages queued and arrived **18 minutes late**; one SEV1 was effectively unhandled until voice (also Twilio) finally connected. Estimated impact: **$90k** in SLA credits across affected customers. Root cause: single-provider dependency. Fix: multi-provider ring with < 10s failover (§4.4) + provider health probes.
 
 **P6 — Audit gap killed the postmortem.** A SEV1 was resolved, but chat retention (90 days) expired before the regulator's postmortem request (130 days later). The timeline couldn't be reconstructed, resulting in a **compliance finding** and a remediation mandate. Root cause: conflating chat retention with audit retention. Fix: persist the full timeline + every paging event to an object-locked audit store with 18-month retention, independent of chat (§3).
+
+**P7 — The heartbeat that only beat every four hours.** A team added `Watchdog` as a child route but did not override the timers, so it inherited the root `repeat_interval: 4h`; the external checker was set to a 5-hour period to stop false pages. A bad Alertmanager config push left all replicas crash-looping on a Friday evening. The checker paged **4 h 40 min** later, and during that window a database failover on one cluster went unpaged for **52 minutes** until a customer reported it. Root cause: the dead-man's switch had a detection budget longer than the incidents it guarded. Fix: dedicated Watchdog route with 1-minute repeat and a 5-minute checker grace (§4.5), plus a CI routing test so the route cannot regress.
 
 ---
 
@@ -741,6 +809,36 @@ peak (storm)    = 3 × 2 × 44 alerts/s × 2KB ≈ ~530 KB/s              (still
 Gossip bandwidth is negligible; the constraint is **memory** (active alerts + silences in RAM) and **notification log replication latency** (set `--cluster.peer-timeout=15s`). For 8,000 peak active alerts: ~8,000 × 2KB ≈ 16 MB — fits comfortably in a 1 GB-limit pod.
 
 **Sizing (per cluster):** 3 Alertmanager replicas, each `500m CPU / 1Gi RAM`, with anti-affinity across nodes and a PodDisruptionBudget of `minAvailable: 2` so a node drain never drops below 2 replicas — see `cross_cutting/kubernetes_production_hardening.md` for the PDB/anti-affinity/resource-limit patterns and `cross_cutting/multi_cluster_networking.md` for cross-region webhook delivery from these replicas to the isolated delivery plane.
+
+### Dead-man detection budget
+
+```
+time to detect a dead alerting stack = heartbeat period + checker grace
+
+BROKEN (Watchdog on the root route)  = repeat_interval 4h + grace           -> > 4 h
+FIX    (dedicated route, §4.5)       = repeat_interval 1m + grace 5m        -> <= 6 min
+
+heartbeat traffic = 8 clusters x 1 ping/min = 11,520 pings/day   (free tier of most checkers)
+```
+
+Six minutes is the number to compare with N1: a real page arrives in under 60 s, but the page that says "the pager is dead" takes up to six minutes. Any incident that starts inside that window is detected late, which is why Runbook 2 also adds an hourly synthetic end-to-end page.
+
+### On-call staffing check
+
+The paging pipeline can deliver 50 pages a day; whether people can absorb them is a staffing question. The Google SRE book's on-call rules give the bounds: at most 25% of an engineer's time on call, which with a primary and a secondary and week-long shifts means at least **8 engineers per single-site rotation** (or 6 per site for a two-site, follow-the-sun rotation), and at most **2 incidents per 12-hour shift**, because each incident takes about 6 hours of follow-up work.
+
+```
+staffed 24/7 rotations the org can afford
+  on-call-eligible engineers      = 2,000 x ~70%          = ~1,400
+  single-site rotations            = 1,400 / 8             = ~175
+
+page load per rotation
+  pages/day                        = 50
+  if spread evenly over 175        = ~0.3 pages/day per rotation   (cap: 4/day = 2 per 12 h shift)
+  if 20% of pages hit 5 hot services = 10 / 5             = 2 pages/day each (half the cap)
+```
+
+The result: 300 rotations is a *routing* count, not a *staffing* count. About 175 can be staffed 24/7; the rest must be business-hours rotations for tier-3 services, or share people with a parent team's schedule. The schedule service models this explicitly (a rotation references a team roster), and the analytics in F10 alert when any rotation's 28-day page rate exceeds 2 per shift.
 
 ### Cost estimate
 
@@ -796,4 +894,10 @@ Use `peak_sends_per_sec = (team_size × channels_per_target) / delivery_window`.
 Cap maximum escalation levels with a circuit breaker that broadcasts once then stops re-paging; ensure ack callbacks atomically cancel all timers (the GetIncident re-check in §4.3 prevents a late-ack/escalation race — war story Runbook 3); set a sane `repeat_interval` (4h, not 1m) so a still-firing non-resolving alert doesn't re-page constantly; and use inhibition so the deploy's root-cause alert suppresses dependents. A storm runbook also lets on-call apply a broad label-matched silence to stop the bleeding while the inhibition rule is fixed.
 
 **Q: How do you handle on-call for the paging system itself?**
-The delivery plane has its own independent on-call rotation, its own 99.99% SLO with burn-rate alerting, and is meta-monitored by an external dead-man's-switch (a Watchdog alert fires every 30s to an external heartbeat service; if heartbeats stop, that external service pages). You cannot monitor the pager with the pager — the meta-monitoring must be a fully separate vendor/path. This rotation is staffed by the platform team that owns the IR system, kept deliberately small and high-skill.
+The delivery plane has its own independent on-call rotation, its own 99.99% SLO with burn-rate alerting, and is meta-monitored by an external dead-man's-switch (an always-firing Watchdog alert is re-sent every minute per cluster to an external heartbeat service; if a cluster's heartbeats stop for 5 minutes, that external service pages). You cannot monitor the pager with the pager — the meta-monitoring must be a fully separate vendor/path. This rotation is staffed by the platform team that owns the IR system, kept deliberately small and high-skill.
+
+**Q: Your dead-man's switch is configured. How do you know it would actually fire in time?**
+Compute its detection budget and test it. The budget is the heartbeat period plus the checker's grace; if `Watchdog` inherits the root route's 4-hour `repeat_interval`, the checker must allow more than 4 hours, which is longer than most SEV1s. A dedicated route with a 1-minute repeat and a 5-minute grace brings it to about 6 minutes. Then prove it: CI runs `amtool config routes test` so `Watchdog` always reaches the heartbeat receiver, and a quarterly game day scales one cluster's Alertmanager to zero and times the external page. One heartbeat per cluster, not one per fleet, or a silent cluster hides behind seven healthy ones.
+
+**Q: The org has 300 on-call rotations and 2,000 engineers. Is that sustainable?**
+Not as 300 staffed 24/7 rotations. The SRE book's 25% on-call rule with a primary and a secondary on week-long shifts needs at least 8 engineers per single-site rotation, so about 1,400 on-call-eligible engineers can staff roughly 175. The remaining rotations have to be business-hours schedules for lower-tier services or share a roster with a parent team. The other bound is load: no more than 2 incidents per 12-hour shift, because each takes about 6 hours of follow-up. At 50 pages a day the average rotation is far under that, so the risk is concentration: track the 28-day page rate per rotation and act on the few hot ones.

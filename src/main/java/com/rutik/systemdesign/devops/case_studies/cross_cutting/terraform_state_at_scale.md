@@ -2,6 +2,8 @@
 
 > Cross-Cutting Primitive — DevOps Case Studies · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** **Terraform v1.17.2** (2026-11-11) and **OpenTofu v1.13.10** (2026-11-23) are current. The S3 backend's native lock (`use_lockfile = true`, a conditional write of `<key>.tflock`) went GA in **Terraform 1.11**, so the DynamoDB lock table is only needed for older binaries; `moved` blocks date from 1.1 and `import` blocks from 1.5. OpenTofu has offered client-side state encryption since 1.7.
+
 ---
 
 ## 1. Concept Overview

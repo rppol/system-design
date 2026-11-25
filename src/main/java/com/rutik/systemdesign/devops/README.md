@@ -68,20 +68,20 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 |---|-----------------|-------|------------|------------|
 | 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md) | 1 — Foundations | Intermediate | Processes, signals, file descriptors, cgroups v2, namespaces, systemd, /proc, ulimits, OOM killer |
 | 2 | [shell_scripting_and_automation](shell_scripting_and_automation/shell_scripting_and_automation.md) | 1 — Foundations | Beginner | Bash, `sed`/`awk`/`jq`, Python for ops, idempotent scripts, exit codes, `set -euo pipefail` |
-| 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | 1 — Foundations | Intermediate | DNS, DHCP, CIDR/subnetting, NAT, firewalls, L4/L7 load balancing, TLS/mTLS/certs, Nginx/Envoy reverse proxy |
+| 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | 1 — Foundations | Intermediate | DNS, DHCP, CIDR/subnetting (IPv4 and IPv6), NAT, NAT64/DNS64, firewalls, L4/L7 load balancing, TLS/mTLS/certs, Nginx/Envoy reverse proxy |
 | 4 | [version_control_and_git_workflows](version_control_and_git_workflows/version_control_and_git_workflows.md) | 1 — Foundations | Beginner | Git internals, trunk-based vs GitFlow, monorepo vs polyrepo, hooks, release tagging |
-| 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | 2 — Containers & K8s | Intermediate | Namespaces/cgroups, image layers, multi-stage builds, distroless, BuildKit, registries, Dockerfile best practices |
+| 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | 2 — Containers & K8s | Intermediate | Namespaces/cgroups, image layers, multi-stage builds, distroless, BuildKit, ENTRYPOINT/CMD, Docker networking, HEALTHCHECK, Docker Compose, Dockerfile best practices |
 | 6 | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md) | 2 — Containers & K8s | Advanced | containerd, runc, CRI-O, OCI image/runtime spec, gVisor/Kata isolation, plus 1 deep-dive sub-file |
-| 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | 2 — Containers & K8s | Advanced | API server, etcd, scheduler, controller-manager, kubelet, kube-proxy, reconciliation loop |
-| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | 2 — Containers & K8s | Intermediate | Pods, Deployments, StatefulSets, DaemonSets, Jobs/CronJobs, Services, Ingress, ConfigMap/Secret |
-| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 — Containers & K8s | Advanced | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress controllers, Gateway API, NetworkPolicy, CoreDNS, plus 1 deep-dive sub-file |
+| 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | 2 — Containers & K8s | Advanced | API server, etcd, scheduler, controller-manager, kubelet, kube-proxy, reconciliation loop, plus 1 deep-dive sub-file (cluster lifecycle and fleet upgrades) |
+| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | 2 — Containers & K8s | Intermediate | Pods, init and native sidecar containers, Deployments, StatefulSets, DaemonSets, Indexed Jobs and failure policies, CronJobs, Services, Gateway API routes, PodDisruptionBudgets, ConfigMap/Secret, Downward API |
+| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 — Containers & K8s | Advanced | CNI (Calico/Cilium/eBPF), kube-proxy modes, Gateway API (and the frozen Ingress API), NetworkPolicy, CoreDNS, dual-stack Services, plus 2 deep-dive sub-files (Cilium/eBPF, IPv6 and dual-stack) |
 | 10 | [kubernetes_storage_and_state](kubernetes_storage_and_state/kubernetes_storage_and_state.md) | 2 — Containers & K8s | Intermediate | PV/PVC, StorageClass, CSI, StatefulSet storage, volume snapshots |
 | 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 — Containers & K8s | Advanced | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB, plus 1 deep-dive sub-file |
 | 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | 2 — Containers & K8s | Advanced | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy, plus 1 deep-dive sub-file |
 | 13 | [helm_and_package_management](helm_and_package_management/helm_and_package_management.md) | 2 — Containers & K8s | Intermediate | Helm charts/templating/releases, Kustomize overlays, repositories |
 | 14 | [kubernetes_operators_and_crds](kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) | 2 — Containers & K8s | Advanced | CRDs, custom controllers, operator pattern, Operator SDK, reconcile loop |
-| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | 3 — CI/CD & GitOps | Intermediate | Pipeline anatomy, stages, artifacts, caching, parallelism, ephemeral runners |
-| 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | 3 — CI/CD & GitOps | Intermediate | GitHub Actions, GitLab CI, Jenkins, Argo Workflows/Tekton, CircleCI (comparison) |
+| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | 3 — CI/CD & GitOps | Intermediate | Pipeline anatomy, stages, artifacts, caching, parallelism, concurrency groups, matrix builds, test sharding, ephemeral runners |
+| 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | 3 — CI/CD & GitOps | Intermediate | GitHub Actions, GitLab CI, Jenkins, Argo Workflows/Tekton, CircleCI (comparison), runner sandboxing, deploy serialization |
 | 17 | [deployment_strategies](deployment_strategies/deployment_strategies.md) | 3 — CI/CD & GitOps | Advanced | Rolling/blue-green/canary, feature flags, progressive delivery (Argo Rollouts/Flagger) |
 | 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | 3 — CI/CD & GitOps | Advanced | Declarative delivery, ArgoCD, Flux, drift detection, app-of-apps, sync waves, plus 1 deep-dive sub-file |
 | 19 | [artifact_and_registry_management](artifact_and_registry_management/artifact_and_registry_management.md) | 3 — CI/CD & GitOps | Intermediate | Container/artifact registries, Artifactory/Nexus, SemVer, promotion across envs |
@@ -213,11 +213,13 @@ container_runtimes_and_oci
   oci_image_formats_and_lazy_pulling.md  senior
 kubernetes_architecture
   kubernetes_architecture.md  senior
+  cluster_lifecycle_and_fleet_upgrades.md  senior
 kubernetes_workloads_and_objects
   kubernetes_workloads_and_objects.md  senior
 kubernetes_networking
   kubernetes_networking.md  senior
   cilium_and_ebpf_dataplane.md  senior
+  ipv6_and_dual_stack.md  senior
 kubernetes_storage_and_state
   kubernetes_storage_and_state.md  -
 kubernetes_scheduling_and_autoscaling
@@ -309,7 +311,7 @@ case_studies
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 41 modules from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD, IaC, cloud platforms, observability, SRE, DevSecOps, and specialized GPU/MLOps and event-streaming platforms. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 41 modules from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD, IaC, cloud platforms, observability, SRE, DevSecOps, and specialized GPU/MLOps and event-streaming platforms. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces them as a **Full / Senior / Principal** toggle (Full is the default).
 
 ### Full Path (41 modules)
 
@@ -324,9 +326,9 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-
 | 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | module page only |
 | 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | module page only |
 | 6 | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md) | 2 files |
-| 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | module page only |
+| 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | 2 files |
 | 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | module page only |
-| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 files |
+| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 3 files |
 | 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 files |
 | 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | 2 files |
 | 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | module page only |
@@ -450,6 +452,9 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | CDN | CloudFront | Cloud CDN | Azure CDN / Front Door |
 | Infra-as-code native | CloudFormation / CDK | Infrastructure Manager / Config Connector | ARM / Bicep |
 | Managed Prometheus | AMP | Managed Service for Prometheus | Azure Monitor managed Prometheus |
+| Managed AI platform | Bedrock / SageMaker AI | Gemini Enterprise Agent Platform (formerly Vertex AI) | Microsoft Foundry (formerly Azure AI Foundry) |
+| Current GPU VMs | P6-B200 / P6-B300, P6e-GB200 / P6e-GB300 | A4 (B200), A4X (GB200), A4X Max (GB300) | ND GB200 v6, ND H200 v5 |
+| Non-NVIDIA accelerators | Trainium, Inferentia | Cloud TPU | AMD Instinct MI300X (ND MI300X v5) |
 
 ---
 
@@ -499,79 +504,73 @@ Worked examples use AWS; this is the quick translation table referenced througho
 
 ## Known Gaps & Planned Work
 
-Recorded 2026-09-04 from a verified gap review of all 51 files. Every entry below is
-briefable on its own — pick one, read the entry, start. Nothing here is a blocker for the
-section shipping; it is the ordered backlog of what would make it better.
+Recorded 2026-09-04 from a verified gap review of all 51 files; rechecked 2026-11-25 over
+53 files (41 module pages + 12 deep-dive sub-files) and the 15 case studies. Every entry
+below is briefable on its own — pick one, read the entry, start. Nothing here is a blocker
+for the section shipping; it is the ordered backlog of what would make it better.
 
-### A. Version-anchor backfill — 11 of 51 module and sub-files lack the dated anchor `CLAUDE.md` mandates
+### A. Version-anchor backfill — done
 
-`CLAUDE.md` requires a `> **Version anchor (YYYY-MM-DD).**` blockquote on every
-version-exposed page. Checked 2026-10-22 over the module pages and sub-files (case studies
-excluded): 40 carry one. The three below are the most version-exposed of the 11 that do
-not, and should be done first, in this order.
+Rechecked 2026-11-25: all 41 module pages and all 12 sub-files carry a dated anchor. Two use
+a label variant on purpose: `cloud_cost_optimization_finops` has a dated `Pricing anchor`,
+and `devsecops_and_supply_chain_security/regulated_supply_chain.md` has a dated
+`Regulatory anchor` and `Tooling anchor`. No backfill remains; the open work is keeping the
+anchors current (`CLAUDE.md` re-verify rule).
 
-| # | File | Why it is urgent |
-|---|------|------------------|
-| 1 | `configuration_management/configuration_management.md:21-31` | The densest licence/ownership block in the section — Ansible/Red Hat, Puppet/Perforce plus the OpenVox fork, Chef/Progress plus Cinc, Salt/Broadcom. Ownership claims rot faster than APIs and there is no check date. |
-| 2 | `gcp_and_azure_essentials/gcp_and_azure_essentials.md` | Pins the Bicep resource version `Microsoft.ContainerService/managedClusters@2024-02-01` twice; near-certainly stale, and a stale ARM API version is a copy-paste failure, not a stylistic one. |
-| 3 | `containers_and_docker/containers_and_docker.md` | Pins `node:24-slim` and `gcr.io/distroless/nodejs24-debian13` in examples readers copy verbatim. |
+### B. Thin modules — 25 of 41 sit under the section's own 700-line bar (median 643)
 
-The other eight: `artifact_and_registry_management`, `cloud_cost_optimization_finops`,
-`cloud_networking_and_cdn`, `deployment_strategies`, `disaster_recovery_and_resilience`,
-`incident_management_and_oncall`, `kubernetes_operators_and_crds` (module pages), and
-`devsecops_and_supply_chain_security/regulated_supply_chain.md`, which carries a dated
-`Regulatory anchor` and `Tooling anchor` but not the `Version anchor` label.
+Line counts measured 2026-11-25. Ranked by interview frequency times the size of the gap,
+with the specific missing content named so each is briefable without re-reading the file.
 
-### B. Thin modules — 32 of 41 sit under the section's own 700-line bar (median 567)
-
-Ranked by interview frequency times the size of the gap, with the specific missing content
-named so each is briefable without re-reading the file.
-
-1. **`containers_and_docker` (446 lines — thinnest in the section, highest-frequency interview topic).** Missing Docker Compose entirely; `HEALTHCHECK`; Docker networking (bridge/host/none); an ENTRYPOINT-vs-CMD interaction table; rootless daemon beyond a tools row; BuildKit's LLB.
-2. **`kubernetes_workloads_and_objects` (544).** Missing init containers entirely; multi-container pod patterns; native sidecars (`restartPolicy: Always` on an init container); the pod phase/lifecycle state machine; `PodDisruptionBudget` YAML; the Downward API; `externalTrafficPolicy`; Job `parallelism`/`completions`/Indexed mode; the `Recreate` strategy; `postStart`.
-3. **`kubernetes_storage_and_state` (483).** CSI stays at concept level and never opens the sidecar architecture (external-provisioner/attacher/resizer/snapshotter/node-driver-registrar). Missing `fsGroup` volume ownership — the classic "mounted as root, app can't write" pitfall — plus `persistentVolumeClaimRetentionPolicy`, raw block volumes, PVC cloning, `CSIStorageCapacity` scheduling, and `subPath` gotchas.
-4. **`platform_engineering_and_idp` (548).** The **only module in its cluster with no worked-math section 6 at all**, plus the SPACE/DevEx gap (see D). Its Crossplane v2 and DORA claims are correct and current; add one sentence noting v1-style XRDs still work via the `LegacyCluster` scope default, which *does* support claims — the migration escape hatch a reader will hit on their first upgrade.
-5. **`devsecops_and_supply_chain_security` (466).** **Zero worked-arithmetic blocks anywhere.** Missing in-toto's layout/link model; `slsa-verifier` (never named, despite SLSA being the headline); reproducible-build mechanics. Dependency confusion sits in a Q&A rather than in section 10 where a pitfall belongs.
-6. **`helm_and_package_management` (482).** Missing `configMapGenerator`/`secretGenerator` content-hash suffixing — the most-used Kustomize feature — plus Helm hook YAML, chart signing/provenance, `helm test`, and Kustomize `replacements`.
-7. **`ci_cd_platforms` (512) and `ci_cd_fundamentals` (504).** Both missing concurrency groups / cancel-superseded-run, build-matrix strategy, test sharding, and monorepo path filtering. `ci_cd_platforms` additionally leans on "ephemeral runners" without ever covering runner sandboxing (gVisor/Kata/Firecracker).
-8. **`artifact_and_registry_management` (442).** Section 6 has one comment-only bash block. Dependency confusion gets two words in the module whose subject *is* registry supply chain. Missing `imagePullSecrets` mechanics and air-gapped mirroring.
-9. **`kubernetes_operators_and_crds` (506).** Missing garbage-collection propagation policies, conversion-webhook code, admission-webhook implementation, and server-side-apply field-manager conflicts.
-10. **`observability_tracing_and_otel` (572).** A 572-line parent under a 2,037-line child.
+1. **`containers_and_docker` (556).** Compose, `HEALTHCHECK`, Docker networking and the ENTRYPOINT-vs-CMD table were added 2026-11-25. Still missing: BuildKit's LLB and a rootless-daemon section beyond the existing mentions.
+2. **`kubernetes_workloads_and_objects` (740, now above the bar).** Init containers, native sidecars, the Pod phase state machine, PDB, Downward API, `externalTrafficPolicy` and Indexed Jobs were added 2026-11-25. Still missing: `postStart`/`preStop` lifecycle-hook semantics.
+3. **`kubernetes_storage_and_state` (621).** CSI stays at concept level and never opens the sidecar architecture (external-provisioner/attacher/resizer/snapshotter/node-driver-registrar). Missing raw block volumes, PVC cloning, `subPath` gotchas, and `CSIStorageCapacity` beyond a single mention.
+4. **`platform_engineering_and_idp` (552).** Section 6 has no worked-math block. Its Crossplane v2 and DORA claims are correct and current; add one sentence noting v1-style XRDs still work via the `LegacyCluster` scope default, which *does* support claims — the migration escape hatch a reader will hit on their first upgrade.
+5. **`devsecops_and_supply_chain_security` (479).** **Zero worked-arithmetic blocks anywhere.** Missing in-toto's layout/link model (one mention); `slsa-verifier` (never named, despite SLSA being the headline); reproducible-build mechanics. Dependency confusion sits in a Q&A rather than in section 10 where a pitfall belongs.
+6. **`helm_and_package_management` (485).** Missing `configMapGenerator`/`secretGenerator` content-hash suffixing — the most-used Kustomize feature — plus Helm hook YAML, chart signing/provenance, `helm test`, and Kustomize `replacements`.
+7. **`ci_cd_platforms` (564) and `ci_cd_fundamentals` (590).** Concurrency groups, build matrices, test-sharding math, path filters and runner sandboxing (gVisor/Kata/Firecracker) were added 2026-11-25. Still under the bar; the next additions are cache-key design and a self-hosted runner autoscaling worked example.
+8. **`artifact_and_registry_management` (446 — now the thinnest in the section).** Section 6 has one comment-only bash block. Dependency confusion gets two words in the module whose subject *is* registry supply chain. Missing `imagePullSecrets` mechanics and air-gapped mirroring.
+9. **`kubernetes_operators_and_crds` (642).** Missing garbage-collection propagation policies (`Foreground`/`Background`/`Orphan`), conversion-webhook code, and admission-webhook implementation.
+10. **`observability_tracing_and_otel` (574).** A 574-line parent under a 2,043-line child.
 
 Second tier, same treatment, lower priority:
 
 | Module | Lines | Missing |
 |--------|-------|---------|
-| `kubernetes_architecture` | 673 | Watch semantics (`resourceVersion`, bookmarks, `410 Gone`); built-in admission controllers; the API aggregation layer; etcd encryption-at-rest / KMS v2; static pods; audit logging |
-| `cloud_networking_and_cdn` | 738 | Origin shield; multi-CDN failover; CNAME flattening at the apex |
-| `cloud_fundamentals_and_aws` | 689 | IMDSv2; SCPs and permission boundaries; VPC Flow Logs |
-| `serverless_and_faas` | 617 | Function URLs; response streaming; Lambda extensions; Cloudflare Workers |
-| `deployment_strategies` | 559 | Shadow/dark traffic; ring rollout; session affinity during a canary |
-| `configuration_management` | 556 | Windows DSC / WinRM |
-| `gcp_and_azure_essentials` | 537 | The only cloud module with no worked arithmetic; no VPC Service Controls, Shared VPC, or Azure Policy vs RBAC |
+| `kubernetes_architecture` | 723 | Watch `410 Gone` handling; built-in admission controllers; the API aggregation layer; etcd encryption-at-rest / KMS v2; static pods beyond one mention. Upgrades are now covered by the `cluster_lifecycle_and_fleet_upgrades.md` sub-file |
+| `cloud_networking_and_cdn` | 824 | Origin shield; multi-CDN failover; CNAME flattening at the apex |
+| `cloud_fundamentals_and_aws` | 720 | IMDSv2; SCPs and permission boundaries; VPC Flow Logs |
+| `serverless_and_faas` | 742 | Function URLs; response streaming; Lambda extensions; Cloudflare Workers |
+| `deployment_strategies` | 632 | Shadow/dark traffic; ring rollout; session affinity during a canary |
+| `configuration_management` | 654 | Windows DSC / WinRM |
+| `gcp_and_azure_essentials` | 545 | The only cloud module with no worked arithmetic; no VPC Service Controls, Shared VPC, or Azure Policy vs RBAC |
 | `container_runtimes_and_oci` | 487 | containerd runtime-handler registration; CDI; user namespaces |
-| `version_control_and_git_workflows` | 494 | Commit signing — absent from the Git module |
+| `version_control_and_git_workflows` | 552 | Commit signing — absent from the Git module |
 
 ### C. Content gaps
 
-- **IPv6 and dual-stack are absent section-wide.** `networking_for_devops/networking_for_devops.md` has exactly one IPv6 mention (a table row near line 150) and every CIDR and subnetting example is IPv4-only. **`dual-stack` has zero occurrences in any of the 51 files**, including `kubernetes_networking`, where dual-stack Services (`ipFamilyPolicy`, `ipFamilies`) have been GA since 1.23. Two-module fix: address plan and subnetting in `networking_for_devops`, Service/Pod dual-stack in `kubernetes_networking`.
-- **VictoriaMetrics is missing from the module pages.** `observability_metrics_prometheus/observability_metrics_prometheus.md` around line 92 and its section 11 name Thanos, Cortex and Mimir and stop. VictoriaMetrics appears only inside two case studies. Add it to the section 4 comparison and to section 11.
+- **IPv6 and dual-stack — resolved 2026-11-25.** `networking_for_devops` has an IPv6 addressing and subnetting section, `kubernetes_networking` covers dual-stack Services (`ipFamilyPolicy`, `ipFamilies`), and the new `kubernetes_networking/ipv6_and_dual_stack.md` sub-file carries the full treatment.
+- **VictoriaMetrics is missing from the module pages.** `observability_metrics_prometheus/observability_metrics_prometheus.md` names Thanos, Cortex and Mimir and stops. VictoriaMetrics appears only inside two case studies. Add it to the section 4 comparison and to section 11.
 
 ### D. Case studies
 
-- **Three sit below the 900-line principal floor:** `design_ml_platform_infrastructure` (720), `design_incident_response_system` (799), `design_log_aggregation_pipeline` (846).
-- **`design_multi_tenant_platform.md` has 1 inline `cross_cutting/` link against a 4+ bar.** Its cross-links are parked in a `## Cross-References` appendix after section 11 — a workaround, not compliance. Inline them where the primitive is actually used.
-- **Real, unacknowledged duplication: `design_ml_platform_infrastructure` vs `design_gpu_training_and_inference_cluster`.** Both cover self-service submission, GPU quota / fair-share / borrowing / preemption, MIG vs time-slicing, scale-to-zero serving, and Spot plus checkpointing — and **neither cross-references the other**. `gpu_training` is the deeper, more current treatment. **Re-scope rather than delete:** shrink `ml_platform` to pipelines, experiment tracking and model registry, and delegate GPU scheduling to `gpu_training` the same way it already delegates cluster tenancy to `design_kubernetes_platform`.
-- **Numeric inconsistency across two case studies describing what reads as the same org:** `design_observability_platform` says 20 TB/day with 90-day cold retention; `design_log_aggregation_pipeline` says 50 TB/day with 1-year retention. Reconcile or explicitly separate the two scenarios.
-- **`design_kubernetes_platform` Decision 1 re-derives** the namespace / vCluster / cluster-per-tenant comparison that `design_multi_tenant_platform` expands into a four-rung threat-modeled ladder. Make Decision 1 link forward instead of re-deriving, or the two will drift.
-
+Resolved 2026-11-25: all 15 case studies are at or above the 900-line principal floor
+(`design_ml_platform_infrastructure` 902, `design_incident_response_system` 903,
+`design_log_aggregation_pipeline` 922); `design_multi_tenant_platform` links four
+cross-cutting primitives inline in section 4; `design_ml_platform_infrastructure` is
+re-scoped to pipelines, tracking and the registry and delegates GPU scheduling to
+`design_gpu_training_and_inference_cluster`, and both now reference each other;
+`design_kubernetes_platform` Decision 1 links forward to `design_multi_tenant_platform`
+instead of re-deriving the ladder; `design_observability_platform` (20 TB/day, 90 days) and
+`design_log_aggregation_pipeline` (50 TB/day, 1 year) each state that they are different
+organisations. No open case-study items.
 ### E. Proposed modules (6)
 
 Each is justified by a primitive the section already uses but no module owns.
 
 | # | Module | Placement | Justification |
 |---|--------|-----------|---------------|
-| 1 | `multi_cluster_and_fleet_management` | after `kubernetes_operators_and_crds` | Cluster API, Karmada / Open Cluster Management, fleet upgrade orchestration, placement policy. **Cluster API today appears only inside a case study** — a case study carrying a primitive no module owns. |
+| 1 | `multi_cluster_and_fleet_management` | after `kubernetes_operators_and_crds` | Karmada / Open Cluster Management and placement policy. Fleet upgrade orchestration and Cluster API basics moved into `kubernetes_architecture/cluster_lifecycle_and_fleet_upgrades.md` (2026-11-25); multi-cluster scheduling and placement still have no owner. |
 | 2 | `runtime_security_and_ebpf_observability` | after `kubernetes_security` | Falco appears in one file only; Tetragon only inside the Cilium sub-file; **AppArmor is absent section-wide**. This section owns eBPF-for-networking and `backend/` owns eBPF-for-performance; **nobody owns eBPF-for-security**. |
 | 3 | `certificate_and_pki_lifecycle` | after `secrets_management` | cert-manager peaks at 4 mentions and is never explained. ACME and DNS-01, private CA hierarchy, mTLS rotation at fleet scale, and the expiry outage as an incident class. |
 | 4 | `continuous_profiling` | after `observability_tracing_and_otel` | **Zero hits section-wide** for Pyroscope, Parca or the phrase "continuous profiling". The OTel deep dive covers the Profiles *signal*; nothing covers the practice. |
@@ -593,7 +592,7 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 
 ## 8. Build Status & Implementation Tracker
 
-> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/case_studies.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** Later additions bring the section to 41 modules + 10 deep-dive sub-files + 15 case studies + 8 cross-cutting primitives. No NEXT UP pointer remains.
+> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/case_studies.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** Later additions bring the section to 41 modules + 12 deep-dive sub-files + 15 case studies + 8 cross-cutting primitives (the two newest, `cluster_lifecycle_and_fleet_upgrades` and `ipv6_and_dual_stack`, were added 2026-11-25). No NEXT UP pointer remains.
 >
 > Chunk 11 added Phase 8 — Specialized Platforms & Performance: 3 modules (`ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`), 1 case study (`design_ml_platform_infrastructure`), 1 cross-cutting primitive (`gpu_node_lifecycle`). Future additions should append modules/case studies following the "Adding a DevOps module" instructions in CLAUDE.md and flip new rows below.
 
@@ -626,9 +625,11 @@ curation call, not a defect to fix automatically. **Needs an owner decision.**
 | 6 | `container_runtimes_and_oci/container_runtimes_and_oci.md` | 2 | 2 | done | 15 |
 | 6a | `container_runtimes_and_oci/oci_image_formats_and_lazy_pulling.md` | 2 | - | done | 15 |
 | 7 | `kubernetes_architecture/kubernetes_architecture.md` | 2 | 2 | done | 18 |
+| 7a | `kubernetes_architecture/cluster_lifecycle_and_fleet_upgrades.md` | 2 | - | done | 15 |
 | 8 | `kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md` | 2 | 2 | done | 15 |
 | 9 | `kubernetes_networking/kubernetes_networking.md` | 2 | 2 | done | 18 |
 | 9a | `kubernetes_networking/cilium_and_ebpf_dataplane.md` | 2 | - | done | 15 |
+| 9b | `kubernetes_networking/ipv6_and_dual_stack.md` | 2 | - | done | 15 |
 | 10 | `kubernetes_storage_and_state/kubernetes_storage_and_state.md` | 2 | 3 | done | 15 |
 | 11 | `kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md` | 2 | 3 | done | 15 |
 | 11a | `kubernetes_scheduling_and_autoscaling/device_scheduling_and_dra.md` | 2 | - | done | 15 |

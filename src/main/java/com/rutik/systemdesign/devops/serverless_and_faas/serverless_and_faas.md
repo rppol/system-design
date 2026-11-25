@@ -2,7 +2,7 @@
 
 > Phase 5 — Cloud Platforms · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** Since **2025-08-01** AWS Lambda bills the INIT phase in every configuration, including on-demand ZIP functions on managed runtimes ([AWS announcement](https://aws.amazon.com/blogs/compute/aws-lambda-standardizes-billing-for-init-phase/)). **Knative Serving v1.23.0** (2026-07-29) is the current Knative release. Lambda **durable functions** and **Lambda Managed Instances** were launched at re:Invent 2025: durable executions run up to one year via checkpoint and replay (managed-runtime support for Node.js, Python, Java and .NET; Terraform needs AWS provider 6.25.0+), and Managed Instances bill the EC2 instance price plus a 15% management fee. Lambda **response streaming** returns up to 200 MB (buffered responses stay at 6 MB).
+> **Version anchor (2026-11-25).** Lambda prices and quotas checked against the AWS pricing page and the Lambda quotas page on this date: compute is **$0.0000166667 per GB-s on x86_64 and $0.0000133334 on arm64** (us-east-1, first tier), requests $0.20 per million; each function scales by at most **1,000 execution environments every 10 seconds**; asynchronous invocation payloads are capped at **1 MB**. Since **2025-08-01** AWS Lambda bills the INIT phase in every configuration, including on-demand ZIP functions on managed runtimes ([AWS announcement](https://aws.amazon.com/blogs/compute/aws-lambda-standardizes-billing-for-init-phase/)). **Knative Serving v1.24.0** (2026-10-26) is the current Knative release. Lambda **durable functions** and **Lambda Managed Instances** were launched at re:Invent 2025: durable executions run up to one year via checkpoint and replay (managed-runtime support for Node.js, Python, Java and .NET; Terraform needs AWS provider 6.25.0+), and Managed Instances bill the EC2 instance price plus a 15% management fee. Lambda **response streaming** returns up to 200 MB (buffered responses stay at 6 MB).
 
 Serverless lets you run code without provisioning or managing servers — the platform handles scaling (including to zero), patching, and capacity, and you pay only for actual execution. **Function-as-a-Service (FaaS)** — AWS Lambda, Google Cloud Run functions, Azure Functions, and the Kubernetes-native **Knative** — is the purest form. This module covers the FaaS execution model, the **cold-start** problem, **event-driven** architectures, **API Gateway** as the HTTP front door, and **Step Functions** for orchestrating multi-step workflows, with concrete limits (Lambda's 15-minute max timeout, ~100ms-1s cold starts, 10 GB memory ceiling) that shape real designs.
 
@@ -78,6 +78,8 @@ Serverless GPU and the other targets for model serving are compared in [Deployme
 | Reserved concurrency | Caps a function's max concurrent executions (also guarantees that floor) |
 | Provisioned concurrency | Pre-warms N environments -> no cold start on those |
 | Account concurrency | Default 1000 (soft); shared across functions unless reserved |
+| Per-function scaling rate | Each function can add at most **1,000 execution environments every 10 seconds**, so a cold burst to 5,000 concurrent requests takes roughly 40 to 50 s to absorb fully, even with account quota to spare, and the overflow is throttled meanwhile |
+| Payload limits | 6 MB request and response (synchronous, buffered), 200 MB streamed response, **1 MB for asynchronous invocations** (S3, SNS, EventBridge targets pass a pointer, not the object) |
 | SnapStart (Java 11+, Python 3.12+, .NET 8+) | Snapshots initialized state to cut cold starts ~10x; published versions/aliases only, and mutually exclusive with provisioned concurrency |
 
 ### Lambda execution models
@@ -256,7 +258,7 @@ called a GB-second — which is why memory and duration are not two independent 
 | `memory_GB` | The `memory_size` you set, in GB (512 MB = 0.5). CPU is allocated in proportion |
 | `duration_seconds` | Billed wall-clock run time of the handler, plus the INIT phase on a cold start, metered per millisecond |
 | `memory_GB x duration_seconds` | One **GB-second** — the actual billed unit of compute |
-| `price_per_GB_second` | ~$0.0000166667 in us-east-1 (x86) |
+| `price_per_GB_second` | $0.0000166667 in us-east-1 on x86_64; **$0.0000133334 on arm64 (Graviton), 20% lower** (first pricing tier) |
 | `price_per_request` | ~$0.20 per million invocations, charged regardless of duration |
 
 **Walk one example.** 1,000,000 invocations, comparing two memory settings where the extra
@@ -266,13 +268,21 @@ CPU at 1024 MB halves the run time of a CPU-bound handler:
   setting          memory   duration   GB-s per call   total GB-s   compute $   req $   total $
   512 MB           0.5 GB     200 ms       0.100        100,000      1.6667     0.20    1.8667
   1024 MB          1.0 GB     100 ms       0.100        100,000      1.6667     0.20    1.8667
+  1024 MB arm64    1.0 GB     100 ms       0.100        100,000      1.3333     0.20    1.5333
 ```
 
-Identical bill. Doubling memory is *free* whenever it at least halves duration — and strictly
+Identical bill for the two x86 rows. Doubling memory is *free* whenever it at least halves duration — and strictly
 cheaper the moment it does better than halve it, while also cutting user-visible latency by
 100 ms. This is the whole reason Section 13 says to right-size via power tuning rather than
 defaulting to the smallest setting: the smallest memory is only the cheapest for work that is
 I/O-bound, where extra CPU buys no speedup and the GB-seconds simply rise.
+
+The third row is the other lever: the same function on `arm64` costs 100,000 x $0.0000133334 =
+$1.33 of compute instead of $1.67, 20% less, with the request charge unchanged. That holds only
+if duration does not rise on arm64, so benchmark first: pure-Python, Node.js and Java code usually
+moves with no change, while a dependency that ships only x86_64 native wheels or binaries will not
+load at all until it is rebuilt for `aarch64`. In Terraform it is one line,
+`architectures = ["arm64"]` on the `aws_lambda_function`.
 
 Cold starts add to the same bill. Since 2025-08-01 AWS bills the INIT phase for every configuration, including on-demand ZIP functions on managed runtimes where it used to be free. A 1 s INIT at 1 GB is 1 GB-s, so 10,000 cold starts in the month above add 10,000 GB-s, about $0.17, on top of the $1.67 of handler compute.
 
@@ -605,6 +615,14 @@ Configure dead-letter queues (DLQs) on async invocations and SQS event sources w
 **Short:** API Gateway adds rich API management like throttling and authorizers for public APIs; an ALB is cheaper at very high volume but lacks API-management features.
 
 API Gateway provides rich API features — request validation, throttling, API keys, usage plans, authorizers (JWT/IAM/Cognito), and caching — and is the default for public APIs, but costs more per request at high volume. An ALB invoking Lambda is cheaper at very high request volumes and integrates with existing VPC/WAF setups but lacks API-management features. Use API Gateway (HTTP API for lower cost) for managed public APIs and ALB-to-Lambda when you need cheap, high-volume routing alongside other targets.
+
+**Q: What is the cheapest change that cuts a Lambda compute bill by a fifth, and what can break?**
+**Short:** Switching the function to `arm64` (Graviton): compute is billed at $0.0000133334 per GB-s instead of $0.0000166667, 20% less, provided duration does not rise and native dependencies are rebuilt.
+In us-east-1 the first pricing tier charges $0.0000166667 per GB-second on x86_64 and $0.0000133334 on arm64, so the same 100,000 GB-s costs $1.33 instead of $1.67; the $0.20 per million request charge is the same on both. The saving is real only if the function runs at least as fast on Graviton, so run the same benchmark or power-tuning pass on both architectures before switching. The thing that breaks is native code: a layer or package built only for x86_64 (a Python wheel with C extensions, a bundled binary) fails to load on `aarch64` until it is rebuilt or replaced, which is why the switch belongs in CI with a test invocation, not in a console toggle. Change it with `architectures = ["arm64"]` on the function and keep the x86 version published until the arm64 one has run in production.
+
+**Q: A function has 10,000 of spare concurrency quota, yet a sudden spike still gets throttled. Why?**
+**Short:** Lambda scales each function by at most 1,000 execution environments every 10 seconds, so a cold burst outruns the scaling rate long before it reaches the concurrency quota.
+Concurrency quota caps how many environments may exist; the scaling rate caps how fast they can be created. Each function can add at most 1,000 execution environments every 10 seconds, so going from near zero to 5,000 concurrent requests takes roughly 40 to 50 seconds, and requests above the environments that exist so far are throttled (synchronous callers get a 429, asynchronous events are retried). Raising the account quota does nothing for this. The fixes are to keep environments warm ahead of a known spike with provisioned concurrency, to put a queue (SQS) in front so the burst is absorbed and drained at a controlled rate, or to smooth the client side. Load-test the burst shape you expect, not just the steady peak.
 
 **Q: What is provisioned concurrency and when do you use it?**
 **Short:** Provisioned concurrency keeps a set number of execution environments pre-initialized so requests never cold-start, used for latency-sensitive synchronous endpoints.

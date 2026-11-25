@@ -2,6 +2,8 @@
 
 > A shared infrastructure primitive referenced by the ML platform / GPU case studies. The complete lifecycle of a GPU node on Kubernetes: from "Karpenter launches an empty EC2 instance" through driver bring-up, device-plugin readiness, health monitoring, Spot-interruption handling, graceful drain, and decommission. This is the operational glue beneath every GPU workload — get it wrong and you waste $3/hour cards, lose training runs, or schedule Pods onto half-broken nodes.
 
+> **Version anchor (2026-11-25).** **NVIDIA GPU Operator v26.7.3** (2026-11-17) is the current release of the operator whose driver, toolkit, device-plugin and DCGM DaemonSets this lifecycle walks through; **Karpenter v1.15.3** (2026-11-20) provides the `startupTaints` used to hold a node until its GPUs are advertised. GPU scheduler and quota policy is out of scope here and lives in [mlops/gpu_cluster_scheduling_and_quotas](../../../mlops/gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
+
 Read this alongside [`../../ml_platform_and_gpu_infrastructure/`](../../ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) (the module) and [`../design_ml_platform_infrastructure.md`](../design_ml_platform_infrastructure.md) (the case study). For Kubernetes node basics and scheduling cross-reference [`../../kubernetes_scheduling_and_autoscaling/`](../../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) and [`../../kubernetes_architecture/`](../../kubernetes_architecture/kubernetes_architecture.md).
 
 ---

@@ -2,6 +2,8 @@
 
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** Kubernetes **1.37** is the current minor; **`StorageVersionMigration` is GA and on by default in 1.37**, which is what makes the storage-version workflow in §6 a built-in step rather than a separate controller. Operator toolchains named here: **Kubebuilder v4.16.0** (2026-09-10) and **Operator SDK v1.42.3** (2026-06-26).
+
 Kubernetes is extensible: you can teach it new object types (**Custom Resource Definitions**) and write controllers (**operators**) that reconcile them — applying the same "declare desired state, reconcile continuously" model to anything, from databases to certificates to your own platform abstractions. Operators are how complex stateful software (Postgres, Kafka, Prometheus) gets day-2 automation (backups, failover, upgrades) encoded as code.
 
 ---

@@ -2,6 +2,8 @@
 
 > Cross-Cutting Primitive — DevOps Case Studies · Difficulty: Advanced
 
+> **Version anchor (2026-11-25).** This file is arithmetic, not product versions: every error-budget, burn-rate and window figure is derived in place from the SLO target and can be re-checked by hand. The multi-window burn-rate thresholds (14.4x over 1 hour, 6x over 6 hours) follow the Google SRE Workbook's alerting chapter. Tool names (Sloth, Pyrra) are pinned in [sre_principles_and_slos](../../sre_principles_and_slos/sre_principles_and_slos.md).
+
 ---
 
 ## 1. Concept Overview

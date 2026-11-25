@@ -6,6 +6,8 @@
 
 **Key insight:** The three pillars (metrics, logs, traces) are not three products — they are three *cardinality regimes* of the same telemetry stream. Metrics are cheap-per-sample but explode on label cardinality; logs are cheap-per-write but expensive-per-query; traces are cheap-per-span but useless without correlation. A platform succeeds or fails on how it controls cardinality and cost across all three, not on any single ingest path.
 
+> **Scenario note.** This is a different organisation from the one in [design_log_aggregation_pipeline](design_log_aggregation_pipeline.md): here 20 TB/day of logs with 30-day hot and 90-day total retention for a 2,000-engineer fleet; there 50 TB/day with 30-day hot and 1-year cold retention for a 4,000-service estate. The numbers are not meant to reconcile; compare the designs, not the volumes.
+
 The mental model: telemetry is a firehose where 99% of the data is never read and 1% saves the company during an incident. The platform's job is to ingest the 100% durably and cheaply, while making the 1% retrievable in under two seconds — without letting one noisy tenant's 50-million-series cardinality bomb take down everyone else's dashboards.
 
 This platform exists because at 2000 engineers and ~4000 microservices, no single Prometheus, no single Elasticsearch cluster, and no single Jaeger instance can hold the working set. You must shard, replicate, tier to object storage, and enforce per-tenant limits — or you spend your engineering budget firefighting the monitoring system instead of the product.

@@ -2,7 +2,7 @@
 
 > Phase 1 — Foundations · Difficulty: Beginner
 
-> **Version anchor (2026-10-19).** **Git 2.56.0** (tagged 2026-09-28) is the current release. SSH commit signing exists since Git 2.34. The **reftable** ref backend is opt-in since 2.45 (`git init --ref-format=reftable`; `git refs migrate` converts an existing repository since 2.46), and the **SHA-256** object format is opt-in since 2.29 with no SHA-1 interoperability. `Documentation/BreakingChanges.adoc` lists both as the defaults for new repositories in Git 3.0, conditional on JGit, libgit2, Gitoxide and the forges supporting them. **gitsign v0.17.1** (2026-08-05) is the Sigstore keyless signer.
+> **Version anchor (2026-11-25).** **Git 2.56.1** (2026-10-26) is the current release. SSH commit signing exists since Git 2.34. The **reftable** ref backend is opt-in since 2.45 (`git init --ref-format=reftable`; `git refs migrate` converts an existing repository since 2.46), and the **SHA-256** object format is opt-in since 2.29 with no SHA-1 interoperability. `Documentation/BreakingChanges.adoc` lists both as the defaults for new repositories in Git 3.0, conditional on JGit, libgit2, Gitoxide and the forges supporting them. **gitsign v0.18.0** (2026-10-20) is the Sigstore keyless signer.
 
 Git is the source of truth for code, infrastructure (IaC), and — under GitOps — the desired state of production itself. A DevOps engineer must understand Git's internal model well enough to recover from a botched rebase, design a branching strategy that supports continuous delivery, and reason about why "the commit is the deployable unit."
 

@@ -2,7 +2,7 @@
 
 > Phase 7 — DevSecOps & Reliability · Difficulty: Advanced
 
-> **Version anchor (2026-10-19).** Current releases: **OPA v1.21.2** (2026-10-12), **Gatekeeper v3.23.1** (2026-08-27), **Kyverno v1.19.1** (2026-09-10), **Conftest v0.71.1** (2026-10-06) and **Checkov 3.3.29** (2026-10-13).
+> **Version anchor (2026-11-25).** Current releases: **OPA v1.22.4** (2026-11-12), **Gatekeeper v3.23.1** (2026-08-27), **Kyverno v1.20.0** (2026-11-12), **Conftest v0.71.1** (2026-10-06) and **Checkov 3.4.10** (2026-11-24).
 
 ---
 

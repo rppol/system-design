@@ -594,12 +594,11 @@ The p99 admission budget is 100 ms (§1). Kyverno background scans catch drift o
 
 ## 5. Design Decisions & Tradeoffs
 
-### Decision 1 — Tenant isolation model: namespace vs cluster-per-tenant vs vcluster
+### Decision 1 — Tenant isolation model: namespace by default, escalate by rung
 
-- **Decision:** Namespace-per-tenant by default (soft multi-tenancy); vcluster for the ~10% needing cluster-scoped resources or stronger isolation; dedicated cluster only for regulated/compliance-bound tenants.
-- **Alternatives:** Cluster-per-tenant (200 clusters) — 200× the control-plane cost and upgrade toil for a 12-person team. One giant cluster — single blast radius, etcd ceiling.
-- **Rationale:** A 12-engineer team cannot operate 200 clusters; namespaces give 90% of isolation at ~1% of the operational cost. vcluster fills the gap where namespaces leak (CRDs, cluster-admin).
-- **Consequences:** Soft isolation requires *disciplined* quotas, network policy, and PSA — exactly the §4.2 template. A bug in the tenant template is a fleet-wide risk.
+- **Decision:** Namespace-per-tenant by default, with an explicit escalation ladder (node pool, vCluster, dedicated cluster) for tenants that justify it. The full ladder — what each rung isolates, its per-tenant cost, the reason-code gate and the migration path between rungs — is designed in [design_multi_tenant_platform.md](design_multi_tenant_platform.md); this platform adopts it unchanged.
+- **Why it matters here:** a 12-engineer team cannot operate 200 clusters, so the default rung must be the cheap one, and the fleet's cluster count (Decision 2) stays driven by blast radius, not by tenant count.
+- **Consequences:** Soft isolation requires *disciplined* quotas, network policy, and PSA — exactly the §4.2 template. A bug in the tenant template is a fleet-wide risk, which is why the template rolls out cluster-by-cluster as a canary, like any other platform change (Decision 2).
 
 ### Decision 2 — Many medium clusters vs one huge cluster
 

@@ -2,6 +2,8 @@
 
 > Phase 3 — CI/CD & GitOps · Difficulty: Intermediate
 
+> **Version anchor (2026-11-25).** Docker Hub pull limits per 6 hours: **100 for unauthenticated pulls per IPv4 address or IPv6 /64**, 200 for authenticated Personal accounts, unlimited for Pro, Team and Business. **Harbor v2.15.5** (2026-11-12) is the current self-hosted OCI registry release. Examples use `node:26`, the active Node.js LTS line since 2026-10-28.
+
 Build outputs — container images, language packages (npm/Maven/PyPI), Helm charts, OS packages — are **artifacts** that must be stored, versioned, secured, and promoted from build to production. Artifact repositories (Artifactory, Nexus) and container registries (ECR, GAR, Harbor) are the system of record for "what can run." Getting versioning, immutability, retention, and promotion right is what makes "build once, promote the same artifact" (see [ci_cd_fundamentals](../ci_cd_fundamentals/ci_cd_fundamentals.md)) actually work.
 
 ---
@@ -387,7 +389,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(CI pulls node:24<br/>anonymously from Hub) --> B(over 100 pulls<br/>per 6h limit hit)
+    A(CI pulls node:26<br/>anonymously from Hub) --> B(over 100 pulls<br/>per 6h limit hit)
     B --> C(random toomanyrequests<br/>failures across fleet)
     D(prod image:<br/>registry/app:latest) --> E(mutable tag<br/>re-pushed constantly)
     E --> F(what runs in prod<br/>is unknowable)
@@ -412,7 +414,7 @@ resource "aws_ecr_pull_through_cache_rule" "dockerhub" {
 resource "aws_secretsmanager_secret" "dockerhub" {
   name = "ecr-pullthroughcache/dockerhub"   # holds {"username":..., "accessToken":...}
 }
-# Dockerfile now: FROM <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/library/node:24
+# Dockerfile now: FROM <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/library/node:26
 # -> cached locally, no Hub rate limits, survives Hub outages.
 # ECR revalidates a cached tag against the upstream at most once every 24h.
 ```
