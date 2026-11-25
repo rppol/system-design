@@ -245,6 +245,24 @@ Re-check before quoting any Rubin, ROCm or Apple figure in new work.
 
 ---
 
+## Planned / Missing Topics (not yet created)
+
+Gaps from the 2026-11-25 AI/infra gap analysis. The build was started and then dropped by the
+owner the same day; nothing below is on disk. Roadmap, not a queue: build only on explicit
+request, each with the full "Adding a New CUDA Module" or "Adding a New CUDA Case Study"
+procedure.
+
+| Topic | Planned path | Priority | Note |
+|-------|--------------|----------|------|
+| Async data movement and warp specialization | `async_data_movement_and_warp_specialization/` (Phase 4) | P0 | cp.async to TMA to TMA multicast; mbarrier phase/parity; `cuda::pipeline`; producer/consumer warps; warpgroups and wgmma; clusters and DSMEM; PDL; Hopper vs Blackwell tcgen05/TMEM |
+| CuTe layout algebra | `cute_layout_algebra/` | P1 | Layouts, composition, complement, divide/product, partitioning, swizzles, TiledMMA/TiledCopy, CuTe DSL; builds on the async module |
+| MPS and GPU sharing | `streams_events_and_concurrency/mps_and_gpu_sharing.md` (sub-file) | P1 | MPS daemon/server/client, per-client SM and memory limits, fault isolation, MPS vs MIG vs time-slicing vs green contexts |
+| GPU algorithms: sort, sparse, graph, search | `gpu_algorithms_sort_sparse_graph_and_search/` (Phase 3) | P1 | Onesweep radix sort, segmented sort, top-k, CSR/ELL/SELL SpMV/SpMM, frontier BFS, GPU hash tables, CAGRA/IVF-PQ. A partial draft (sections 1-4) was discarded |
+| Case study: GPU radix sort and top-k | `case_studies/implement_gpu_radix_sort_and_top_k.md` | P1 | Pairs with the algorithms module |
+| Case study: GPU ANN search kernel | `case_studies/build_a_gpu_ann_search_kernel.md` | P1 | CAGRA-style graph search plus IVF-PQ scan; links cuda to RAG and vector DBs |
+
+---
+
 ## Adding a New CUDA Module
 
 1. Create `<module_name>/<module_name>.md` — 14-section template; 15 Q&As minimum (18 for the deep modules listed above), ordered by interview frequency (gotchas first). **Prefix every §12 question with `Q: ` inside the bold** (`**Q: <question>?**`) — repo-wide convention (root `CLAUDE.md` → Interview Q&A Rules); `extract.py` strips the label for the MCQ bank.
