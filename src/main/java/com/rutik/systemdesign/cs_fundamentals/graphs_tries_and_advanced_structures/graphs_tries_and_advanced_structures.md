@@ -1246,6 +1246,7 @@ if __name__ == "__main__":
 - [Graph and String Algorithms](../graph_and_string_algorithms/graph_and_string_algorithms.md) — BFS/DFS, Dijkstra, Bellman-Ford, topo sort algorithms (this module covers data structures; that covers algorithms)
 - [Trees and Binary Search Trees](../trees_and_binary_search_trees/trees_and_binary_search_trees.md) — segment trees extend BST concepts; B+trees bridge to graph-like index structures
 - [Sorting and Searching](../sorting_and_searching/sorting_and_searching.md) — Kruskal's MST requires edge sorting; binary search on Fenwick/segment tree queries
+- [Spatial and Persistent Data Structures](../spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md) — spatial indexes and persistent structures; HAMTs and persistent vectors are wide tries
 - [Probabilistic and Streaming Data Structures](../probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) — the rest of the sketch family this module only introduces: sizing formulas and error bounds for Bloom/cuckoo filters, Count-Min, HyperLogLog, MinHash/LSH, and consistent + rendezvous hashing
 - [HLD Caching Patterns](../../hld/README.md) — Bloom filters in distributed caching layers (Redis Bloom, Cassandra row-level Bloom filter)
 - [Database Indexing Deep Dive](../../database/indexing_deep_dive/indexing_deep_dive.md) — B+tree index structure; Bloom filters in RocksDB/LevelDB to skip SSTable reads

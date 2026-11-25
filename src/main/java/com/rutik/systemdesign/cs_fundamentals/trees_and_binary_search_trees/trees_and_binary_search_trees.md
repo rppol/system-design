@@ -1024,4 +1024,5 @@ class Leaderboard_Broken:
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — BST height O(log n) derivation; Master theorem for tree recursion
 - [`database/indexing_deep_dive`](../../database/indexing_deep_dive/indexing_deep_dive.md) — B+Tree in PostgreSQL/MySQL; clustered vs secondary indexes
 - [`java/collections_internals`](../../java/collections_internals/collections_internals.md) — Java TreeMap red-black tree internals
+- [spatial_and_persistent_data_structures](../spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md) — what these trees become in 2-D and across versions: k-d trees, quadtrees, R-trees, path copying
 - [DSA Pattern Playbooks](../dsa_patterns/dsa_patterns.md) — apply these structures: [Tree BFS](../dsa_patterns/tree_bfs.md), [Tree DFS](../dsa_patterns/tree_dfs.md)

@@ -1358,7 +1358,7 @@ See the [GPGPU Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md
 
 ### CS Fundamentals — Senior Engineer & Interview Prep Guide
 
-The language-agnostic computer-science spine: 27 modules across 5 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (28 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
+The language-agnostic computer-science spine: 31 modules across 5 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (32 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
 
 #### Phase 1 — Complexity & Computation
 
@@ -1378,6 +1378,7 @@ The language-agnostic computer-science spine: 27 modules across 5 phases + 6 int
 | [trees_and_binary_search_trees](src/main/java/com/rutik/systemdesign/cs_fundamentals/trees_and_binary_search_trees/trees_and_binary_search_trees.md) | Binary tree traversals, BST, AVL/red-black (concept), B/B+ trees (concept), trie |
 | [heaps_and_priority_queues](src/main/java/com/rutik/systemdesign/cs_fundamentals/heaps_and_priority_queues/heaps_and_priority_queues.md) | Binary heap, heapify O(n), d-ary heaps, extract-min O(log n), k-way merge |
 | [graphs_tries_and_advanced_structures](src/main/java/com/rutik/systemdesign/cs_fundamentals/graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) | Graph representations, trie, union-find/DSU (path compression + union by rank), segment tree, Fenwick tree, Bloom filter |
+| [spatial_and_persistent_data_structures](src/main/java/com/rutik/systemdesign/cs_fundamentals/spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md) | k-d trees, quadtrees, R-trees, Z-order/Hilbert curves, geohash, S2/H3, path copying, HAMTs, ropes, B^epsilon-trees |
 | [Probabilistic and Streaming Data Structures](src/main/java/com/rutik/systemdesign/cs_fundamentals/probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | Bloom/cuckoo filters, Count-Min, HyperLogLog, MinHash/LSH, t-digest, reservoir sampling, consistent hashing |
 
 #### Phase 3 — Algorithms
@@ -1396,8 +1397,10 @@ The language-agnostic computer-science spine: 27 modules across 5 phases + 6 int
 | [processes_threads_and_context_switching](src/main/java/com/rutik/systemdesign/cs_fundamentals/processes_threads_and_context_switching/processes_threads_and_context_switching.md) | Process vs thread, address spaces, user/kernel mode, context switch cost ~1–10 µs |
 | [cpu_scheduling_algorithms](src/main/java/com/rutik/systemdesign/cs_fundamentals/cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | FCFS, SJF, Round-Robin, MLFQ, preemption, starvation, CFS concept |
 | [memory_management_and_virtual_memory](src/main/java/com/rutik/systemdesign/cs_fundamentals/memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | Paging (4 KB pages), TLB, page faults, page-replacement (OPT/LRU/Clock) |
+| [file_systems_and_persistent_storage](src/main/java/com/rutik/systemdesign/cs_fundamentals/file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) | Inodes, page cache, journaling vs copy-on-write, fsync semantics, durable rename, SSD write amplification, RAID and erasure coding |
 | [deadlocks_and_synchronization](src/main/java/com/rutik/systemdesign/cs_fundamentals/deadlocks_and_synchronization/deadlocks_and_synchronization.md) | Mutex/semaphore/monitor, Coffman conditions, prevention/avoidance/detection, dining philosophers |
 | [Memory Models and Concurrency Theory](src/main/java/com/rutik/systemdesign/cs_fundamentals/memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | happens-before, DRF-SC, SC/TSO/weak, acquire-release, linearizability vs serializability, ABA |
+| [virtualization_and_containers_from_first_principles](src/main/java/com/rutik/systemdesign/cs_fundamentals/virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) | Popek-Goldberg, trap-and-emulate, VT-x, EPT/NPT, virtio, namespaces, cgroups v2, seccomp, gVisor/Firecracker/Kata |
 
 #### Phase 5 — Systems & Security Foundations
 
@@ -1405,6 +1408,7 @@ The language-agnostic computer-science spine: 27 modules across 5 phases + 6 int
 |--------|-------------|
 | [computer_architecture_and_memory_hierarchy](src/main/java/com/rutik/systemdesign/cs_fundamentals/computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) | CPU pipeline, branch prediction, L1/L2/L3 cache (64 B line), false sharing, NUMA |
 | [networking_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/networking_fundamentals/networking_fundamentals.md) | OSI/TCP-IP primer, TCP vs UDP, DNS resolution, TLS handshake concept |
+| [distributed_systems_theory](src/main/java/com/rutik/systemdesign/cs_fundamentals/distributed_systems_theory/distributed_systems_theory.md) | System and failure models, FLP, 2f+1 and 3f+1 bounds, Lamport/vector/hybrid logical clocks, TrueTime, linearizability vs sequential consistency |
 | [database_and_storage_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/database_and_storage_fundamentals/database_and_storage_fundamentals.md) | ACID, isolation levels, indexing concept, storage hierarchy (SSD vs HDD latency) |
 | [cryptography_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/cryptography_fundamentals/cryptography_fundamentals.md) | Hash functions, symmetric/asymmetric encryption, HMAC, digital signatures, Diffie-Hellman, salting |
 | [character_encoding_deep_dive](src/main/java/com/rutik/systemdesign/cs_fundamentals/character_encoding_deep_dive/character_encoding_deep_dive.md) | Unicode code points/planes, UTF-8/16/32, surrogate pairs, BOM, normalization (NFC/NFD/NFKC/NFKD), grapheme clusters, mojibake |

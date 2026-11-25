@@ -610,7 +610,7 @@ For a balance-read path, 840 errors per minute is well past "alert" and into "pa
 
 ---
 
-**Cross-references:** [database/consistency_models_and_consensus](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md) (linearizability, quorum reads/writes, Raft), [database/replication_and_high_availability](../../database/replication_and_high_availability/replication_and_high_availability.md) (sync vs async replication, failover), [database/database_fundamentals](../../database/database_fundamentals/database_fundamentals.md) (ACID vs BASE), [backend/distributed_transactions_and_consistency](../../backend/distributed_transactions_and_consistency/distributed_transactions_and_consistency.md).
+**Cross-references:** [database/consistency_models_and_consensus](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md) (linearizability, quorum reads/writes, Raft), [database/replication_and_high_availability](../../database/replication_and_high_availability/replication_and_high_availability.md) (sync vs async replication, failover), [database/database_fundamentals](../../database/database_fundamentals/database_fundamentals.md) (ACID vs BASE), [backend/distributed_transactions_and_consistency](../../backend/distributed_transactions_and_consistency/distributed_transactions_and_consistency.md), [cs_fundamentals/distributed_systems_theory](../../cs_fundamentals/distributed_systems_theory/distributed_systems_theory.md) (the formal system models, consistency hierarchy and impossibility results under CAP).
 
 ---
 

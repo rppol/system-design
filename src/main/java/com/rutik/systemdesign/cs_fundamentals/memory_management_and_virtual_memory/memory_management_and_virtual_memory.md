@@ -843,3 +843,5 @@ java \
 - [computer_architecture_and_memory_hierarchy](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — cache hierarchy, cache lines, NUMA
 - [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) — OOM killer, cgroups memory limits, vmstat, /proc/meminfo
 - [`rust/ownership_borrowing_and_raii`](../../rust/ownership_borrowing_and_raii/ownership_borrowing_and_raii.md): ownership instead of a collector
+- [file_systems_and_persistent_storage](../file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) — the page cache, mmap-backed files, dirty-page writeback and fsync
+- [virtualization_and_containers_from_first_principles](../virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) — nested paging (EPT/NPT) doubles the page walk; cgroup memory limits

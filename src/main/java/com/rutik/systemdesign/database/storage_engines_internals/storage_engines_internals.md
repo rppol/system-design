@@ -1,5 +1,7 @@
 # Storage Engines Internals
 
+> **See also:** [Logging, Recovery and Checkpointing](../logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) (the WAL rules, ARIES redo and undo, checkpoints and group commit); [Query Execution and Join Algorithms](../query_execution_and_join_algorithms/query_execution_and_join_algorithms.md) (Volcano vs vectorized execution, nested-loop, sort-merge and hash joins, spills and memory grants); [MongoDB Internals](../mongodb_internals/mongodb_internals.md) (the WiredTiger cache and MVCC, oplog and elections, sharding and chunk migration, the query planner); [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction).
+
 ## 1. Concept Overview
 
 A storage engine is the component of a database system responsible for storing, retrieving, and managing data on disk. The choice of storage engine determines fundamental performance characteristics: read/write latency, throughput, compression ratios, recovery time, and space amplification. Two dominant storage engine families are B+tree-based engines (PostgreSQL heap + index, InnoDB) and LSM-tree-based engines (RocksDB, LevelDB, Cassandra SSTables).
@@ -764,3 +766,5 @@ checkpoint_timeout = 10min       -- Maximum time between checkpoints
 **Result**: Checkpoint I/O spread over 9 minutes (vs 30 seconds), eliminating spikes. p99 write latency returned to 5-8ms consistently. Disk I/O bandwidth utilization smoothed from 100% bursts to steady 30%.
 
 Key lesson: checkpoint tuning is one of the most impactful PostgreSQL performance levers, but it requires understanding the interaction between `max_wal_size`, `checkpoint_timeout`, and `checkpoint_completion_target`.
+
+**See also:** [cs_fundamentals/file_systems_and_persistent_storage](../../cs_fundamentals/file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) (the fsync, O_DIRECT and page-cache layer engines sit on) and [cs_fundamentals/spatial_and_persistent_data_structures](../../cs_fundamentals/spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md) (R-trees, write-optimized B^epsilon-trees and copy-on-write trees).

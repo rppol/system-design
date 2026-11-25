@@ -1497,3 +1497,4 @@ process.
 - [../../database/database_fundamentals](../../database/database_fundamentals/database_fundamentals.md) — MVCC internals, PACELC theorem, isolation anomaly deep dive
 - [../../database/indexing_deep_dive](../../database/indexing_deep_dive/indexing_deep_dive.md) — B+Tree page layout, clustered vs. secondary indexes, InnoDB internals
 - [../../database/schema_design_and_normalization](../../database/schema_design_and_normalization/schema_design_and_normalization.md) — normalisation forms (BCNF, 4NF, 5NF) and schema design patterns in depth
+- [file_systems_and_persistent_storage](../file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) — the layer under durability: fsync, journaling, crash-consistent writes and SSD write amplification

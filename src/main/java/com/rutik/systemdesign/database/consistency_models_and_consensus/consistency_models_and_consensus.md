@@ -1,5 +1,7 @@
 # Consistency Models and Consensus
 
+> **See also:** [Design a Metrics Platform](../case_studies/design_metrics_platform/design_metrics_platform.md) (case study: the TSDB storage layer, head block and WAL, chunk codec, postings index, compaction).
+
 ## 1. Concept Overview
 
 Consistency models define the rules about which values a distributed system may return for read operations and in what order writes become visible to concurrent readers. They form a spectrum from strong (expensive, high coordination) to weak (cheap, higher concurrency). Consensus algorithms (Paxos, Raft) are the mechanisms distributed systems use to agree on the order of events despite node failures and network delays.
@@ -840,3 +842,5 @@ All three options trace back to the same 10K-editor, 40%-abort-rate problem; CRD
 - Edit latency: 200ms (DB round-trip) → 5ms (local CRDT apply + async sync)
 - PostgreSQL write load: 40K/s (optimistic lock retries) → 1K/s (persistence worker)
 - Tradeoff accepted: eventual consistency — users may briefly see different document states; CRDT merge guarantees convergence within 100–500ms of network sync
+
+**See also:** [cs_fundamentals/distributed_systems_theory](../../cs_fundamentals/distributed_systems_theory/distributed_systems_theory.md) (the theory under these models: logical and vector clocks, FLP impossibility, and the consistency hierarchy).

@@ -30,10 +30,10 @@ The language-agnostic computer-science spine that every senior-engineer intervie
 This section covers:
 
 - **Phase 1 — Complexity & Computation**: asymptotic notation (O/Θ/Ω), amortized analysis, Master theorem, Big-O for common operations; the discrete-math toolkit (logic, sets and relations, induction, combinatorics, recurrences, modular arithmetic); number systems (binary/hex, two's complement, IEEE-754), bitwise operations and tricks, endianness; character encoding theory (Unicode code points/planes, UTF-8/16/32, surrogate pairs, normalization, grapheme clusters, mojibake) as the next layer up from raw bytes; recursion mechanics and the canonical problem-solving patterns (two-pointer, sliding window, backtracking, divide-and-conquer framing)
-- **Phase 2 — Data Structures**: dynamic arrays and hash tables (collision resolution, load factor, resize); linked lists, stacks, queues, deques, circular buffers; binary trees, BST, AVL and red-black trees (concept), B/B+ trees as a concept; binary heap, heapify, d-ary heaps, priority queues; graph representations (adjacency list/matrix), trie, union-find/DSU, segment tree, Fenwick tree, Bloom filter concept; probabilistic and streaming structures (Count-Min Sketch, HyperLogLog, MinHash, reservoir sampling, consistent hashing)
+- **Phase 2 — Data Structures**: dynamic arrays and hash tables (collision resolution, load factor, resize); linked lists, stacks, queues, deques, circular buffers; binary trees, BST, AVL and red-black trees (concept), B/B+ trees as a concept; binary heap, heapify, d-ary heaps, priority queues; graph representations (adjacency list/matrix), trie, union-find/DSU, segment tree, Fenwick tree, Bloom filter concept; probabilistic and streaming structures (Count-Min Sketch, HyperLogLog, MinHash, reservoir sampling, consistent hashing); spatial and persistent structures (k-d trees, quadtrees, R-trees, Z-order/Hilbert curves, geohash, path copying, HAMTs, B^epsilon-trees)
 - **Phase 3 — Algorithms**: comparison sorts (merge/quick/heap) and non-comparison sorts (counting/radix), binary search and variants; dynamic programming (memoisation vs tabulation, knapsack/LCS/edit distance/coin change families); greedy algorithms and proofs, divide-and-conquer recurrences, Huffman, interval scheduling; BFS/DFS/Dijkstra/Bellman-Ford/Kruskal/Prim/topological sort; string algorithms (KMP, Rabin-Karp, Z-algorithm)
-- **Phase 4 — Operating Systems**: process vs thread, address spaces, user/kernel mode, syscall overhead, context-switch cost (~1–10 µs); CPU scheduling (FCFS/SJF/Round-Robin/MLFQ/CFS); virtual memory, paging (4 KB pages), TLB, page-replacement algorithms; mutex/semaphore/monitor (concept), Coffman conditions, deadlock prevention/avoidance/detection, dining-philosophers problem; memory models (happens-before, TSO vs ARM/POWER, linearizability)
-- **Phase 5 — Systems & Security Foundations**: CPU pipeline, branch prediction, cache hierarchy (L1 64 B cache line, ~1–4 ns; L2 ~10 ns; L3 ~40 ns; RAM ~100 ns), NUMA; OSI/TCP-IP primer, TCP vs UDP, DNS, TLS handshake concept; ACID/BASE, isolation levels, indexing concept, storage hierarchy (SSD vs HDD); hash functions, symmetric vs asymmetric encryption, HMAC, digital signatures, Diffie-Hellman key exchange, salting; automata, decidability and NP-completeness; entropy, source coding and compression; how source becomes a running process (lexer/parser/IR/codegen, JIT vs AOT, linker/loader)
+- **Phase 4 — Operating Systems**: process vs thread, address spaces, user/kernel mode, syscall overhead, context-switch cost (~1–10 µs); CPU scheduling (FCFS/SJF/Round-Robin/MLFQ/CFS); virtual memory, paging (4 KB pages), TLB, page-replacement algorithms; file systems and durability (inodes, journaling vs copy-on-write, fsync semantics, SSD write amplification, RAID and erasure coding); mutex/semaphore/monitor (concept), Coffman conditions, deadlock prevention/avoidance/detection, dining-philosophers problem; memory models (happens-before, TSO vs ARM/POWER, linearizability); virtualization and containers (trap-and-emulate, VT-x, nested paging, namespaces, cgroups v2, gVisor/Firecracker/Kata)
+- **Phase 5 — Systems & Security Foundations**: CPU pipeline, branch prediction, cache hierarchy (L1 64 B cache line, ~1–4 ns; L2 ~10 ns; L3 ~40 ns; RAM ~100 ns), NUMA; OSI/TCP-IP primer, TCP vs UDP, DNS, TLS handshake concept; distributed systems theory (system and failure models, FLP, Byzantine 3f+1 bound, Lamport/vector/hybrid logical clocks, the consistency hierarchy); ACID/BASE, isolation levels, indexing concept, storage hierarchy (SSD vs HDD); hash functions, symmetric vs asymmetric encryption, HMAC, digital signatures, Diffie-Hellman key exchange, salting; automata, decidability and NP-completeness; entropy, source coding and compression; how source becomes a running process (lexer/parser/IR/codegen, JIT vs AOT, linker/loader)
 
 ---
 
@@ -57,6 +57,10 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 | [`backend/auth_and_authorization_systems`](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md) | JWT, OAuth 2, mTLS applied | Digital signatures and key-exchange concept |
 | [`python/strings_bytes_encoding_and_regex`](../python/strings_bytes_encoding_and_regex/strings_bytes_encoding_and_regex.md) | Full codec API (`str.encode`/`bytes.decode`), the `codecs`/`unicodedata` modules, regex engine internals | Unicode code point/plane model, UTF-8/16/32 transformation-format theory, normalization forms (NFC/NFD/NFKC/NFKD), grapheme-cluster segmentation (UAX #29) as language-agnostic foundations |
 | [`java/strings_and_text`](../java/strings_and_text/strings_and_text.md) | Compact Strings internals, `codePoints()`/`String` API specifics | Same Unicode/encoding/normalization theory, applied via a different runtime's string model |
+| [`database/storage_engines_internals`](../database/storage_engines_internals/storage_engines_internals.md), [`database/logging_recovery_and_checkpointing`](../database/logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md) | Buffer pool, page formats, WAL and checkpoint tuning | File-system crash consistency, fsync semantics, journaling vs copy-on-write, SSD write amplification |
+| [`hld/consensus_algorithms`](../hld/consensus_algorithms/consensus_algorithms.md), [`hld/time_clocks_and_ordering`](../hld/time_clocks_and_ordering/time_clocks_and_ordering.md) | Paxos/Raft step by step, NTP/PTP/TrueTime engineering | System models, FLP, quorum bounds, logical and vector clocks, the consistency hierarchy |
+| [`devops/containers_and_docker`](../devops/containers_and_docker/containers_and_docker.md), [`devops/container_runtimes_and_oci`](../devops/container_runtimes_and_oci/container_runtimes_and_oci.md) | Dockerfiles, images, runc/containerd/CRI-O operations | Popek-Goldberg, trap-and-emulate, nested paging, namespaces and cgroups as the isolation model |
+| [`hld/geospatial_indexing`](../hld/geospatial_indexing/geospatial_indexing.md) | Geo-index service design, sharding and dispatch | k-d trees, quadtrees, R-trees, space-filling curves and geohash as data structures |
 
 **CS Fundamentals owns**: language-agnostic DSA, asymptotic analysis, OS scheduling/synchronization/paging theory, computer architecture (CPU pipeline, cache hierarchy), abstract cryptography theory, and the conceptual networking/database vocabulary that interviews assume without referencing a specific implementation.
 
@@ -93,6 +97,10 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 | 25 | [how_code_runs_compilers_and_interpreters](how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md) | 5 — Systems & Security | Advanced | Lexer/parser/AST, symbol tables, IR & optimization, codegen, compiler vs interpreter, JIT vs AOT, linker/loader, ELF |
 | 26 | [probabilistic_and_streaming_structures](probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | 2 — Data Structures | Advanced | Bloom, cuckoo and quotient filters, Count-Min Sketch, HyperLogLog, MinHash, reservoir sampling (Algorithm R), consistent and rendezvous (HRW) hashing, sketch merging and seed mismatch |
 | 27 | [memory_models_and_concurrency_theory](memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | 4 — Operating Systems | Advanced | Compiler and CPU reordering, happens-before, DRF-SC, TSO vs ARM/POWER, store-buffer litmus test, release/acquire publication, linearizability vs sequential consistency, progress guarantees, consensus numbers, ABA |
+| 28 | [file_systems_and_persistent_storage](file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) | 4 — Operating Systems | Advanced | Inodes and block maps, page cache and writeback, journaling vs copy-on-write, fsync/fdatasync/O_DIRECT, the durable-replace protocol, fsync failure semantics, SSD FTL and write amplification, RAID and erasure coding |
+| 29 | [virtualization_and_containers_from_first_principles](virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) | 4 — Operating Systems | Advanced | Popek-Goldberg requirements, trap-and-emulate, VT-x/AMD-V and VM exits, EPT/NPT two-dimensional page walk, virtio, namespaces, cgroups v2, capabilities and seccomp, gVisor, Firecracker, Kata |
+| 30 | [distributed_systems_theory](distributed_systems_theory/distributed_systems_theory.md) | 5 — Systems & Security | Advanced | System and failure models, FLP impossibility, crash 2f+1 and Byzantine 3f+1 bounds, failure detectors and phi accrual, Lamport/vector/hybrid logical clocks, TrueTime, linearizability vs sequential consistency, replicated state machines |
+| 31 | [spatial_and_persistent_data_structures](spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md) | 2 — Data Structures | Advanced | k-d trees, quadtrees, R-trees, Z-order and Hilbert curves, geohash, S2/H3, persistent BSTs by path copying, 32-way vector tries, HAMTs, finger trees, ropes, cache-oblivious layout, B^epsilon-trees |
 
 ---
 
@@ -109,10 +117,10 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     p1("Phase 1 - Complexity and Computation Foundations<br/>complexity_analysis_and_big_o, discrete_math_for_engineers<br/>number_systems_and_bit_manipulation<br/>character_encoding_deep_dive<br/>recursion_and_problem_solving_patterns")
-    p2("Phase 2 - Data Structures, builds on Phase 1 vocabulary<br/>arrays_strings_and_hashing, linked_lists_stacks_and_queues<br/>trees_and_binary_search_trees, heaps_and_priority_queues<br/>graphs_tries_and_advanced_structures<br/>probabilistic_and_streaming_structures")
+    p2("Phase 2 - Data Structures, builds on Phase 1 vocabulary<br/>arrays_strings_and_hashing, linked_lists_stacks_and_queues<br/>trees_and_binary_search_trees, heaps_and_priority_queues<br/>graphs_tries_and_advanced_structures<br/>spatial_and_persistent_data_structures<br/>probabilistic_and_streaming_structures")
     p3("Phase 3 - Algorithms, builds on Phase 2 structures<br/>sorting_and_searching, dynamic_programming<br/>greedy_and_divide_and_conquer<br/>graph_and_string_algorithms")
-    p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>deadlocks_and_synchronization<br/>memory_models_and_concurrency_theory")
-    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>theory_of_computation<br/>information_theory_and_compression<br/>how_code_runs_compilers_and_interpreters")
+    p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>file_systems_and_persistent_storage<br/>deadlocks_and_synchronization<br/>memory_models_and_concurrency_theory<br/>virtualization_and_containers_from_first_principles")
+    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>distributed_systems_theory<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>theory_of_computation<br/>information_theory_and_compression<br/>how_code_runs_compilers_and_interpreters")
     cs("Case Studies, all phases<br/>design_lru_cache, top_k_and_streaming_problems<br/>dynamic_programming_patterns, graph_traversal_and_shortest_path<br/>autocomplete_and_string_search, interval_and_scheduling_problems")
     dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/dsa_patterns.md - recognition engine:<br/>decision tree + cue-pattern table<br/>26 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - the problem-list canon<br/>ai_assisted_round_playbook.md - the AI-assisted round")
 
@@ -133,6 +141,7 @@ flowchart TD
 - Phase 1 (Complexity) is a prerequisite for everything — you cannot analyse an algorithm without asymptotic vocabulary.
 - Phases 4 and 5 are largely independent of Phases 2–3 (OS/systems theory does not require DSA fluency) — they can be studied in parallel with Phase 3 once Phase 1 is solid.
 - The Case Studies draw from all phases; `design_lru_cache` requires Phase 2; DP/graph studies require Phase 3; `autocomplete_and_string_search` requires Phase 3 string algorithms.
+- `spatial_and_persistent_data_structures` builds on balanced BSTs, B-trees and tries; `file_systems_and_persistent_storage` and `virtualization_and_containers_from_first_principles` build on `memory_management_and_virtual_memory`; `distributed_systems_theory` builds on `memory_models_and_concurrency_theory` (linearizability on one machine first) and `networking_fundamentals`.
 
 ---
 
@@ -165,6 +174,8 @@ heaps_and_priority_queues
   heaps_and_priority_queues.md  senior
 graphs_tries_and_advanced_structures
   graphs_tries_and_advanced_structures.md  senior
+spatial_and_persistent_data_structures
+  spatial_and_persistent_data_structures.md  -
 sorting_and_searching
   sorting_and_searching.md  senior
 dynamic_programming
@@ -211,12 +222,16 @@ cpu_scheduling_algorithms
   cpu_scheduling_algorithms.md  senior
 memory_management_and_virtual_memory
   memory_management_and_virtual_memory.md  senior
+file_systems_and_persistent_storage
+  file_systems_and_persistent_storage.md  senior
 deadlocks_and_synchronization
   deadlocks_and_synchronization.md  senior
 computer_architecture_and_memory_hierarchy
   computer_architecture_and_memory_hierarchy.md  -
 networking_fundamentals
   networking_fundamentals.md  -
+distributed_systems_theory
+  distributed_systems_theory.md  senior
 database_and_storage_fundamentals
   database_and_storage_fundamentals.md  -
 cryptography_fundamentals
@@ -239,19 +254,21 @@ probabilistic_and_streaming_structures
   probabilistic_and_streaming_structures.md  senior
 memory_models_and_concurrency_theory
   memory_models_and_concurrency_theory.md  senior
+virtualization_and_containers_from_first_principles
+  virtualization_and_containers_from_first_principles.md  senior
 information_theory_and_compression
   information_theory_and_compression.md  -
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 27 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Senior** level filter (Full is the default).
+This section is exhaustive by design — 31 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Senior** level filter (Full is the default).
 
-### Full Path (27 modules + DSA pattern playbooks)
+### Full Path (31 modules + DSA pattern playbooks)
 
-The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped. In the game's Study path the DSA pattern playbooks topic (`dsa_patterns`) follows Phase 3 (right after Graph & String Algorithms), where the recognition engine over Phases 1–3 becomes useful.
+The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family (spatial and persistent structures included), the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, distributed systems theory, database storage, cryptography, character encoding). Nothing is dropped. In the game's Study path the DSA pattern playbooks topic (`dsa_patterns`) follows Phase 3 (right after Graph & String Algorithms), where the recognition engine over Phases 1–3 becomes useful.
 
 <!-- study-path-table senior -->
-### Senior Path (19 modules)
+### Senior Path (22 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -263,19 +280,22 @@ The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-
 | 8 | [trees_and_binary_search_trees](trees_and_binary_search_trees/trees_and_binary_search_trees.md) | module page only |
 | 9 | [heaps_and_priority_queues](heaps_and_priority_queues/heaps_and_priority_queues.md) | module page only |
 | 10 | [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) | module page only |
-| 11 | [probabilistic_and_streaming_structures](probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | module page only |
-| 12 | [sorting_and_searching](sorting_and_searching/sorting_and_searching.md) | module page only |
-| 13 | [dynamic_programming](dynamic_programming/dynamic_programming.md) | module page only |
-| 14 | [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) | module page only |
-| 15 | [graph_and_string_algorithms](graph_and_string_algorithms/graph_and_string_algorithms.md) | module page only |
-| 16 | [dsa_patterns](dsa_patterns/dsa_patterns.md) | 30 files |
-| 17 | [processes_threads_and_context_switching](processes_threads_and_context_switching/processes_threads_and_context_switching.md) | 2 files |
-| 18 | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | module page only |
-| 19 | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | module page only |
-| 20 | [deadlocks_and_synchronization](deadlocks_and_synchronization/deadlocks_and_synchronization.md) | module page only |
-| 21 | [memory_models_and_concurrency_theory](memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | module page only |
+| 12 | [probabilistic_and_streaming_structures](probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md) | module page only |
+| 13 | [sorting_and_searching](sorting_and_searching/sorting_and_searching.md) | module page only |
+| 14 | [dynamic_programming](dynamic_programming/dynamic_programming.md) | module page only |
+| 15 | [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) | module page only |
+| 16 | [graph_and_string_algorithms](graph_and_string_algorithms/graph_and_string_algorithms.md) | module page only |
+| 17 | [dsa_patterns](dsa_patterns/dsa_patterns.md) | 30 files |
+| 18 | [processes_threads_and_context_switching](processes_threads_and_context_switching/processes_threads_and_context_switching.md) | 2 files |
+| 19 | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) | module page only |
+| 20 | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) | module page only |
+| 21 | [file_systems_and_persistent_storage](file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) | module page only |
+| 22 | [deadlocks_and_synchronization](deadlocks_and_synchronization/deadlocks_and_synchronization.md) | module page only |
+| 23 | [memory_models_and_concurrency_theory](memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md) | module page only |
+| 24 | [virtualization_and_containers_from_first_principles](virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) | module page only |
+| 27 | [distributed_systems_theory](distributed_systems_theory/distributed_systems_theory.md) | module page only |
 
-**Not in this path** (9 of 28, Full Path only): `discrete_math_for_engineers`, `character_encoding_deep_dive`, `computer_architecture_and_memory_hierarchy`, `networking_fundamentals`, `database_and_storage_fundamentals`, `cryptography_fundamentals`, `theory_of_computation`, `information_theory_and_compression`, `how_code_runs_compilers_and_interpreters`
+**Not in this path** (10 of 32, Full Path only): `discrete_math_for_engineers`, `character_encoding_deep_dive`, `spatial_and_persistent_data_structures`, `computer_architecture_and_memory_hierarchy`, `networking_fundamentals`, `database_and_storage_fundamentals`, `cryptography_fundamentals`, `theory_of_computation`, `information_theory_and_compression`, `how_code_runs_compilers_and_interpreters`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -288,7 +308,8 @@ A ruthless cut to what a **senior software engineering interview** actually prob
 | Core Algorithms | Sorting/searching complexity and the DP-vs-greedy fork are asked directly ("why quicksort over merge sort", "DP or greedy here") more than almost any other algorithmic decision |
 | Graph & String Algorithms | BFS/Dijkstra/topological sort anchor "design a route or dependency system" prompts; KMP/Rabin-Karp separate candidates who can only brute-force string matching from those who know the O(n+m) trick |
 | DSA Pattern Recognition | The recognition engine over Phases 1–3: cue→pattern tables and 26 playbooks are the coding-round strategy layer |
-| Operating Systems Core | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops |
+| Operating Systems Core | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops; "is a successful `write()` on disk?" and "container or VM?" are the storage and isolation questions that follow |
+| Distributed Systems Theory | Every system-design round leans on it: why Raft needs 2f+1 nodes, why wall-clock timestamps cannot order writes, and what linearizable actually promises |
 
 ---
 
@@ -318,6 +339,10 @@ The highest-frequency CS-fundamentals *knowledge* questions mapped to the file t
 | What causes starvation in a scheduler, and how does aging fix it? | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) |
 | What's a page fault, and what separates a soft fault from a hard one? | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/memory_management_and_virtual_memory.md) |
 | What are the four Coffman conditions for deadlock, and why does breaking any one prevent it? | [deadlocks_and_synchronization](deadlocks_and_synchronization/deadlocks_and_synchronization.md) |
+| Does a successful `write()` mean the data is on disk, and what is the correct protocol for atomically replacing a file? | [file_systems_and_persistent_storage](file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) |
+| What is the fundamental difference between a VM and a container? | [virtualization_and_containers_from_first_principles](virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) |
+| What does the FLP impossibility result say, and why does crash-fault consensus need 2f + 1 nodes? | [distributed_systems_theory](distributed_systems_theory/distributed_systems_theory.md) |
+| Can Lamport timestamps tell you whether two events are concurrent? | [distributed_systems_theory](distributed_systems_theory/distributed_systems_theory.md) |
 
 ---
 
@@ -332,7 +357,7 @@ A 6-week plan over the Senior Path. cs_fundamentals has no per-topic `case_studi
 | 3 | Trees, Heaps & Graph Structures | trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures, probabilistic_and_streaming_structures | [tree_bfs.md](dsa_patterns/tree_bfs.md), [tree_dfs.md](dsa_patterns/tree_dfs.md), [two_heaps.md](dsa_patterns/two_heaps.md), [top_k_elements.md](dsa_patterns/top_k_elements.md), [trie_patterns.md](dsa_patterns/trie_patterns.md), [union_find.md](dsa_patterns/union_find.md); [Top-K and Streaming Problems](case_studies/top_k_and_streaming_problems.md) |
 | 4 | Core Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer | [modified_binary_search.md](dsa_patterns/modified_binary_search.md), [dynamic_programming.md](dsa_patterns/dynamic_programming.md), [greedy.md](dsa_patterns/greedy.md); [Dynamic Programming Patterns](case_studies/dynamic_programming_patterns.md) |
 | 5 | Graph & String Algorithms | graph_and_string_algorithms | [graph_traversal.md](dsa_patterns/graph_traversal.md), [shortest_path.md](dsa_patterns/shortest_path.md), [topological_sort.md](dsa_patterns/topological_sort.md); [Graph Traversal and Shortest Path](case_studies/graph_traversal_and_shortest_path.md), [Autocomplete and String Search](case_studies/autocomplete_and_string_search.md) |
-| 6 | Operating Systems Core | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization, memory_models_and_concurrency_theory | No DSA-pattern companion — pure OS theory; rehearse via [Interval and Scheduling Problems](case_studies/interval_and_scheduling_problems.md) (interval scheduling is the closest DSA analogue to CPU scheduling) and cross-link to [`java/concurrency`](../java/concurrency/concurrency.md) / [`devops/linux_and_os_fundamentals`](../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) for the applied angle |
+| 6 | Operating Systems Core + Distributed Theory | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, file_systems_and_persistent_storage, deadlocks_and_synchronization, memory_models_and_concurrency_theory, virtualization_and_containers_from_first_principles, distributed_systems_theory | No DSA-pattern companion — pure OS theory; rehearse via [Interval and Scheduling Problems](case_studies/interval_and_scheduling_problems.md) (interval scheduling is the closest DSA analogue to CPU scheduling) and cross-link to [`java/concurrency`](../java/concurrency/concurrency.md) / [`devops/linux_and_os_fundamentals`](../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) for the applied angle |
 
 ---
 
@@ -389,6 +414,10 @@ A 6-week plan over the Senior Path. cs_fundamentals has no per-topic `case_studi
 | [database_and_storage_fundamentals](database_and_storage_fundamentals/database_and_storage_fundamentals.md) | [`database/database_fundamentals`](../database/database_fundamentals/database_fundamentals.md); [`database/indexing_deep_dive`](../database/indexing_deep_dive/indexing_deep_dive.md); [`database/schema_design_and_normalization`](../database/schema_design_and_normalization/schema_design_and_normalization.md) |
 | [cryptography_fundamentals](cryptography_fundamentals/cryptography_fundamentals.md) | [`backend/backend_security_owasp`](../backend/backend_security_owasp/backend_security_owasp.md); [`backend/auth_and_authorization_systems`](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md); [`devops/secrets_management`](../devops/secrets_management/secrets_management.md) |
 | [character_encoding_deep_dive](character_encoding_deep_dive/character_encoding_deep_dive.md) | [`python/strings_bytes_encoding_and_regex`](../python/strings_bytes_encoding_and_regex/strings_bytes_encoding_and_regex.md) — codec API, `str`/`bytes` split; [`java/strings_and_text`](../java/strings_and_text/strings_and_text.md) — Compact Strings, surrogate pairs in practice |
+| [file_systems_and_persistent_storage](file_systems_and_persistent_storage/file_systems_and_persistent_storage.md) | [`database/storage_engines_internals`](../database/storage_engines_internals/storage_engines_internals.md); [`database/logging_recovery_and_checkpointing`](../database/logging_recovery_and_checkpointing/logging_recovery_and_checkpointing.md); [`hld/case_studies/design_object_storage_s3`](../hld/case_studies/design_object_storage_s3.md) — erasure coding at scale |
+| [virtualization_and_containers_from_first_principles](virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) | [`devops/containers_and_docker`](../devops/containers_and_docker/containers_and_docker.md); [`devops/container_runtimes_and_oci`](../devops/container_runtimes_and_oci/container_runtimes_and_oci.md); [`devops/linux_and_os_fundamentals`](../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md); [`devops/kubernetes_security`](../devops/kubernetes_security/kubernetes_security.md) |
+| [distributed_systems_theory](distributed_systems_theory/distributed_systems_theory.md) | [`hld/consensus_algorithms`](../hld/consensus_algorithms/consensus_algorithms.md); [`hld/cap_theorem`](../hld/cap_theorem/cap_theorem.md); [`hld/time_clocks_and_ordering`](../hld/time_clocks_and_ordering/time_clocks_and_ordering.md); [`database/consistency_models_and_consensus`](../database/consistency_models_and_consensus/consistency_models_and_consensus.md) |
+| [spatial_and_persistent_data_structures](spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md) | [`hld/geospatial_indexing`](../hld/geospatial_indexing/geospatial_indexing.md); [`hld/case_studies/design_proximity_service`](../hld/case_studies/design_proximity_service.md); [`database/storage_engines_internals`](../database/storage_engines_internals/storage_engines_internals.md) |
 | [dsa_patterns/](dsa_patterns/dsa_patterns.md) (pattern playbooks) | All Phase 1–3 concept modules (recognition layer above them); [`../../java/collections_internals`](../java/collections_internals/collections_internals.md) — per-collection Big-O; [`../../hld/caching`](../hld/caching/caching.md) — LRU/LFU as applied DS; [`../../hld/rate_limiting`](../hld/rate_limiting/rate_limiting.md) — sliding window; [`../../backend/osi_model_and_networking`](../backend/osi_model_and_networking/osi_model_and_networking.md) — Dijkstra/Bellman-Ford; [`../../devops/infrastructure_as_code_terraform`](../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) — topological sort |
 
 ---
@@ -438,7 +467,7 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 
 ## 7. Build Status & Implementation Tracker
 
-> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master page + 26 pattern files + 3 guides (`interview_execution_playbook.md`, `study_plans.md`, `ai_assisted_round_playbook.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25. **2026-07-07**: `character_encoding_deep_dive/` built as module 21 (see §3), plus the Senior learning path (see "Learning Paths", directly below §4).
+> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master page + 26 pattern files + 3 guides (`interview_execution_playbook.md`, `study_plans.md`, `ai_assisted_round_playbook.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25. **2026-07-07**: `character_encoding_deep_dive/` built as module 21 (see §3), plus the Senior learning path (see "Learning Paths", directly below §4). **2026-11-25**: modules 28–31 added (`file_systems_and_persistent_storage`, `virtualization_and_containers_from_first_principles`, `distributed_systems_theory`, `spatial_and_persistent_data_structures`); the first three joined the Senior path.
 >
 > **NEXT UP**: None queued for `cs_fundamentals/`. The prior candidate list (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`, `character_encoding_deep_dive/`) is now fully built (see the §3 module table), leaving no queued candidates if this section is revisited.
 
@@ -497,6 +526,10 @@ The 6 case studies in [case_studies/](case_studies/case_studies.md) are the **wo
 | 25 | `how_code_runs_compilers_and_interpreters/how_code_runs_compilers_and_interpreters.md` | 5 | 2026-07-07 | done | 15 |
 | 26 | `probabilistic_and_streaming_structures/probabilistic_and_streaming_structures.md` | 2 | - | done | 15 |
 | 27 | `memory_models_and_concurrency_theory/memory_models_and_concurrency_theory.md` | 4 | - | done | 15 |
+| 28 | `file_systems_and_persistent_storage/file_systems_and_persistent_storage.md` | 4 | 2026-11-25 | done | 15 |
+| 29 | `virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md` | 4 | 2026-11-25 | done | 15 |
+| 30 | `distributed_systems_theory/distributed_systems_theory.md` | 5 | 2026-11-25 | done | 15 |
+| 31 | `spatial_and_persistent_data_structures/spatial_and_persistent_data_structures.md` | 2 | 2026-11-25 | done | 15 |
 
 ### Case Study File Status
 

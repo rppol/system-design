@@ -812,3 +812,4 @@ server.start();   // non-blocking: do NOT wrap in try-with-resources, which woul
 - [`python/threading_and_multiprocessing`](../../python/threading_and_multiprocessing/threading_and_multiprocessing.md) — GIL mechanics, multiprocessing, asyncio applied depth
 - [deadlocks_and_synchronization](../deadlocks_and_synchronization/deadlocks_and_synchronization.md) — mutex, semaphore, Coffman conditions
 - [cpu_scheduling_algorithms](../cpu_scheduling_algorithms/cpu_scheduling_algorithms.md) — how the OS scheduler decides which thread runs next
+- [virtualization_and_containers_from_first_principles](../virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) — a container is a process with namespaces and cgroups; a VM traps privileged instructions

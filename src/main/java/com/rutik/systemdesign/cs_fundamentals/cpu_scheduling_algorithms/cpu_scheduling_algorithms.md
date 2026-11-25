@@ -987,3 +987,4 @@ class BrokenFIFOScheduler:
 - [deadlocks_and_synchronization](../deadlocks_and_synchronization/deadlocks_and_synchronization.md) — priority inversion (affects scheduling)
 - [`devops/linux_and_os_fundamentals`](../../devops/linux_and_os_fundamentals/linux_and_os_fundamentals.md) — the Linux fair scheduler in production (cgroups, nice, taskset, perf)
 - [`java/concurrency`](../../java/concurrency/concurrency.md) — Java thread priorities, ForkJoinPool work-stealing
+- [virtualization_and_containers_from_first_principles](../virtualization_and_containers_from_first_principles/virtualization_and_containers_from_first_principles.md) — cgroup CPU bandwidth control on top of the fair scheduler, and CPU throttling in containers

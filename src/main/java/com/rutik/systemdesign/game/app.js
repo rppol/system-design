@@ -344,10 +344,10 @@ const STUDY_ORDER = {
   ],
   cs_fundamentals: [
     "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/discrete_math_for_engineers","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/character_encoding_deep_dive","cs_fundamentals/recursion_and_problem_solving_patterns",
-    "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures","cs_fundamentals/probabilistic_and_streaming_structures",
+    "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures","cs_fundamentals/spatial_and_persistent_data_structures","cs_fundamentals/probabilistic_and_streaming_structures",
     "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms","cs_fundamentals/dsa_patterns",
-    "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization","cs_fundamentals/memory_models_and_concurrency_theory",
-    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals","cs_fundamentals/theory_of_computation","cs_fundamentals/information_theory_and_compression","cs_fundamentals/how_code_runs_compilers_and_interpreters",
+    "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/file_systems_and_persistent_storage","cs_fundamentals/deadlocks_and_synchronization","cs_fundamentals/memory_models_and_concurrency_theory","cs_fundamentals/virtualization_and_containers_from_first_principles",
+    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/distributed_systems_theory","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals","cs_fundamentals/theory_of_computation","cs_fundamentals/information_theory_and_compression","cs_fundamentals/how_code_runs_compilers_and_interpreters",
   ],
   cuda: [
     "cuda/gpu_computing_foundations","cuda/gpu_hardware_architecture","cuda/cuda_toolkit_and_compilation",

@@ -93,17 +93,17 @@ This section is the **language-agnostic spine**: it teaches the concept at the C
 
 ---
 
-## Module List — 28 Modules (5 Phases)
+## Module List — 31 Modules + the dsa_patterns topic (5 Phases)
 
 Code examples use Python (type-hinted, runnable-shaped) as the default language for algorithms and data structures. Java is noted where JVM-specific behaviour matters. This section deliberately **cross-references** `java/`, `python/`, `backend/`, `database/`, `devops/`, `hld/`, and `lld/` instead of duplicating applied depth — see the non-overlap boundary in `README.md` §2.
 
 | Phase | Modules |
 |-------|---------|
 | 1 — Complexity & Computation | complexity_analysis_and_big_o, discrete_math_for_engineers, number_systems_and_bit_manipulation, character_encoding_deep_dive, recursion_and_problem_solving_patterns |
-| 2 — Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures, probabilistic_and_streaming_structures |
+| 2 — Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures, spatial_and_persistent_data_structures, probabilistic_and_streaming_structures |
 | 3 — Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer, graph_and_string_algorithms, dsa_patterns (pattern playbooks topic) |
-| 4 — Operating Systems | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization, memory_models_and_concurrency_theory |
-| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals, theory_of_computation, information_theory_and_compression, how_code_runs_compilers_and_interpreters |
+| 4 — Operating Systems | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, file_systems_and_persistent_storage, deadlocks_and_synchronization, memory_models_and_concurrency_theory, virtualization_and_containers_from_first_principles |
+| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, distributed_systems_theory, database_and_storage_fundamentals, cryptography_fundamentals, theory_of_computation, information_theory_and_compression, how_code_runs_compilers_and_interpreters |
 
 `character_encoding_deep_dive` sits in **Phase 1**, at position 4 in `STUDY_ORDER.cs_fundamentals` — directly after `number_systems_and_bit_manipulation`, because bits -> bytes -> code points is one chain. It was documented as Phase 5 for a while; the shipped order was always Phase 1, and the tables now agree with it.
 
@@ -176,6 +176,12 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `cryptography_fundamentals/` | `../../backend/backend_security_owasp/` — applied crypto (BCrypt, A02); `../../backend/auth_and_authorization_systems/` — JWT/TLS applied; `../../devops/secrets_management/` — Vault, key rotation |
 | `information_theory_and_compression/` | `../ml/feature_engineering/`, `../database/database_compression/`, `../hld/cdn/` |
 | `character_encoding_deep_dive/` | `../../python/strings_bytes_encoding_and_regex/` — codec API, `str`/`bytes` split; `../../java/strings_and_text/` — Compact Strings, surrogate pairs in practice |
+| `file_systems_and_persistent_storage/` | `../database/storage_engines_internals/`, `../database/logging_recovery_and_checkpointing/`, `../hld/case_studies/design_object_storage_s3.md` |
+| `virtualization_and_containers_from_first_principles/` | `../devops/containers_and_docker/`, `../devops/container_runtimes_and_oci/`, `../devops/linux_and_os_fundamentals/`, `../devops/kubernetes_security/` |
+| `distributed_systems_theory/` | `../hld/consensus_algorithms/`, `../hld/cap_theorem/`, `../hld/time_clocks_and_ordering/`, `../hld/failure_detection_and_membership/`, `../database/consistency_models_and_consensus/` |
+| `spatial_and_persistent_data_structures/` | `../hld/geospatial_indexing/`, `../hld/case_studies/design_proximity_service.md`, `../database/storage_engines_internals/` |
+
+The four modules added 2026-11-25 are linked back from these pages: `memory_management_and_virtual_memory` (file systems, virtualization), `processes_threads_and_context_switching` and `cpu_scheduling_algorithms` (virtualization), `database_and_storage_fundamentals` (file systems), `computer_architecture_and_memory_hierarchy` (file systems, spatial), `memory_models_and_concurrency_theory` (distributed), `trees_and_binary_search_trees` and `graphs_tries_and_advanced_structures` (spatial). Outside the section: `database/{storage_engines_internals, logging_recovery_and_checkpointing, consistency_models_and_consensus}`, `hld/{consensus_algorithms, cap_theorem, time_clocks_and_ordering, geospatial_indexing}`, `devops/{containers_and_docker, container_runtimes_and_oci, linux_and_os_fundamentals}`.
 
 ---
 
@@ -262,7 +268,7 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 
 ## Learning Paths (Full + Senior)
 
-`README.md` documents the **Full Path** (all 27 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (19 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — which is how `dsa_patterns/` names its 26 playbook files plus the three guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
+`README.md` documents the **Full Path** (all 31 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (22 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is ONCE per SECTION, in the `<!-- study-paths -->` block in `README.md`, naming every module, every file it owns, and the tiers each tier takes — which is how `dsa_patterns/` names its 26 playbook files plus the three guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
