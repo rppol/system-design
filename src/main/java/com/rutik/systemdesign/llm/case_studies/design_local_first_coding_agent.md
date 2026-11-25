@@ -9,6 +9,8 @@ The design looks like a smaller version of a cloud coding assistant, and that re
 
 **Key insight for this design.** On owned hardware, the expensive resource is not tokens, it is *re-read work*. An agent turn is mostly prefill (the whole session goes back to the model every step), so the design is won or lost on three things that have nothing to do with model quality: keeping the prompt prefix byte-stable so the cache survives, keeping the allocated context large enough that nothing is silently cut, and keeping the server reachable only by the harness that should reach it. Pick a 25-35B mixture-of-experts model with 3-4B active parameters for the laptops, because decode speed follows active bytes and memory capacity follows total bytes, and spend the remaining design effort on the cache, the context and the boundary.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the harness discipline on local models, and [Design an Agent-First Software Factory](design_agent_first_software_factory.md) for the organization-scale view.
+
 ---
 
 ## 1. Requirements Clarification

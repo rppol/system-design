@@ -1,5 +1,11 @@
 # Data Flywheels and Continuous Learning
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [continual_learning_and_test_time_memory.md](continual_learning_and_test_time_memory.md) | How a deployed LLM absorbs new knowledge without forgetting: mitigation families, where new knowledge should live, measured forgetting, test-time training and test-time memory |
+
 ---
 
 ## 1. Concept Overview
@@ -829,7 +835,7 @@ A startup collected production conversations for fine-tuning without explicit us
 
 ### Pitfall 7: Catastrophic Forgetting in Continuous Fine-Tuning
 
-A team implemented daily fine-tuning on the previous day's feedback. After three weeks, the model had largely forgotten how to handle the long tail of infrequent but important query types (escalation to human agent, compliance-sensitive responses) because those examples never appeared in recent daily batches. Always mix historical data with recent data in the fine-tuning set. A common formula: 30% recent production data, 30% historical curated data, 40% original SFT data. This prevents the model from drifting toward the most common recent query types at the expense of everything else.
+A team implemented daily fine-tuning on the previous day's feedback. After three weeks, the model had largely forgotten how to handle the long tail of infrequent but important query types (escalation to human agent, compliance-sensitive responses) because those examples never appeared in recent daily batches. Always mix historical data with recent data in the fine-tuning set. A common formula: 30% recent production data, 30% historical curated data, 40% original SFT data. This prevents the model from drifting toward the most common recent query types at the expense of everything else. For measured forgetting effects and the choice between weights, adapters, retrieval and memory, see [Continual Learning and Test-Time Memory](continual_learning_and_test_time_memory.md).
 
 ---
 

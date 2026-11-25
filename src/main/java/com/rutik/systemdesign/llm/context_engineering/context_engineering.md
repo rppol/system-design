@@ -20,6 +20,8 @@ second costs $2.50/second in input tokens alone — $9,000/hour. Even with promp
 uncached portion grows with every conversation turn. Context engineering is simultaneously a
 quality and a cost discipline.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for context as a repository design problem: a short map-style instruction file that points to docs instead of holding them.
+
 ---
 
 ## 2. Intuition

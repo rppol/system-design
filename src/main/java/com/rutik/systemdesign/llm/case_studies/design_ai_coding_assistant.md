@@ -6,6 +6,8 @@
 
 **Key insight for this design**: The repository context problem is central — an LLM seeing only the current file gives poor completions; seeing the entire 500K-token codebase is expensive. The solution is a retrieval layer (embedding-based file selection + dependency graph analysis) that assembles the most relevant 20-50K token context for each request.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the instructions, feedback and mechanical rules around the model, and [Design an Agent-First Software Factory](design_agent_first_software_factory.md) for an organization where agents write all the code.
+
 ---
 
 ## 1. Requirements Clarification

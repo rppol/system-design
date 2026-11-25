@@ -1,6 +1,6 @@
 # LLM Case Studies — Learning Path
 
-31 case studies + 9 cross-cutting infrastructure deep-dives.
+33 case studies + 9 cross-cutting infrastructure deep-dives.
 
 Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII and Mermaid), executable Python code, production war stories, and 10+ design-rationale interview Q&As. Each cross-cutting file is 600–800 lines covering one infrastructure primitive that recurs across many products.
 
@@ -15,6 +15,8 @@ Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII a
 | 3 | [design_gpu_inference_platform.md](./design_gpu_inference_platform.md) | Infrastructure layer that every product sits on top of. Covers multi-tenant GPU scheduling, cold-start, LoRA multiplexing, autoscaling. |
 
 If your constraint is that code or data must stay on company hardware, read [design_local_first_coding_agent.md](./design_local_first_coding_agent.md) after these three: it replaces the elastic fleet of file 3 with laptops and owned team boxes.
+
+For the agent track, read [design_autonomous_swe_agent.md](./design_autonomous_swe_agent.md) next. Then take [design_agent_first_software_factory.md](./design_agent_first_software_factory.md) (many agents writing all of one organization's code) or [design_personal_ai_agent.md](./design_personal_ai_agent.md) (one always-on agent per user, multiplied by a million users).
 
 ---
 
@@ -69,6 +71,8 @@ Read [agent_durability_patterns.md](./cross_cutting/agent_durability_patterns.md
 |------|-----------------------------|-----------------|
 | [design_computer_use_agent.md](./design_computer_use_agent.md) | VLM-driven UI control | Screenshot tokenization economics (~1,500 tokens/frame), action confirmation gates, OS-level sandboxing (VM vs container), trajectory replay for debugging, CAPTCHA/auth-wall handling |
 | [design_autonomous_swe_agent.md](./design_autonomous_swe_agent.md) | Long-horizon durable execution | 50+ tool call planning, hour-scale task checkpointing, repo-level context engineering, test-driven self-correction loop, per-task cost ceiling ($2–20), SWE-bench Pro + internal-set eval harness |
+| [design_agent_first_software_factory.md](./design_agent_first_software_factory.md) | Org-scale agent-written code | The repo, CI and review loop for an org where agents write all the code: map-style repo and per-worktree environments, risk-tiered review that spends scarce human attention, path leases and a merge queue for hundreds of concurrent runs, throughput and quality metrics, cost per merged PR |
+| [design_personal_ai_agent.md](./design_personal_ai_agent.md) | Always-on per-user agents at 1M-user scale | An always-on agent that handles email, calendar, messaging and tasks: leased per-user virtual actors instead of daemons, push-subscription leases and provider quotas, a budget governor, memory erasure by key destruction, tiered consent, injection defense for untrusted inbound content, a transactional outbox for side effects |
 | [design_browser_research_agent.md](./design_browser_research_agent.md) | Multi-source synthesis | Sub-question decomposition, source deduplication across 100+ URLs, citation provenance graph, mid-process plan revision, paywall/JS-rendering handling, report-grade vs chat-grade output |
 | [design_ai_data_analyst.md](./design_ai_data_analyst.md) | Sandboxed code execution | Schema inference, iterative SQL/Python generation, sandboxed execution with memory limits, chart rendering pipeline, ambiguous query clarification loop |
 | [design_sales_ai_agent.md](./design_sales_ai_agent.md) | Multi-week stateful agents | Prospect sequence state across weeks (Temporal/Postgres checkpoints), CRM integration, email/LinkedIn tool orchestration, personalization without hallucinating company facts |
@@ -151,6 +155,12 @@ design_rag_pipeline
 design_autonomous_swe_agent
     └─> design_browser_research_agent (shares durable agent pattern)
     └─> design_computer_use_agent     (shares sandboxing + VLM grounding)
+    └─> design_agent_first_software_factory (many such agents, one repo, org-scale review and merge)
+            (also builds on design_ai_coding_assistant and design_local_first_coding_agent)
+
+design_agent_platform
+    └─> design_personal_ai_agent    (per-user leased actors at 1M users; also needs the
+                                     personal_and_ambient_agents module; counterpart to design_ai_companion_platform)
 
 design_llm_fine_tuning_platform
     └─> design_synthetic_data_platform (feeds training data into fine-tuning)
@@ -177,3 +187,5 @@ If you are preparing for a specific interview question, jump directly to the cas
 | "Design a legal / medical / financial AI platform" | Phase 6 files |
 | Design an internal agent platform | [Design an Agent Platform](design_agent_platform.md) |
 | "Design a coding assistant whose code never leaves company hardware" | [design_local_first_coding_agent.md](./design_local_first_coding_agent.md) |
+| "How would you set up an engineering org and repo where agents write all the code?" | [design_agent_first_software_factory.md](./design_agent_first_software_factory.md) |
+| "Design a personal AI assistant that acts on your email, calendar and chat" | [design_personal_ai_agent.md](./design_personal_ai_agent.md) |

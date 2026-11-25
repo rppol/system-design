@@ -259,6 +259,8 @@ Architecture: DiT (Diffusion Transformer) replacing UNet for video
 OpenAI has no video-generation API: the Videos API and the `sora-2` models shut down on
 2026-09-24, so a hosted video pipeline on these providers runs on Veo 3.1 or Gemini Omni Flash.
 
+For world models that predict video or latent futures for robot policies (Genie, Cosmos, V-JEPA 2), see [World Models](../vla_and_robotics_foundation_models/world_models.md).
+
 **Put simply.** "A video is just a stack of images, so its token cost is `sampled frames x tokens per frame` — and the sampling rate you pick is the only knob standing between a one-hour clip and a blown context window."
 
 This is why "can it process a 1-hour video?" is really a question about frame sampling, not about model capability. Gemini 4 Argon's 1M-token context is what buys the headroom.
@@ -935,5 +937,6 @@ Cross-encoders can overfit to low-level visual features that correlate with enga
 ## See Also
 - [Vision-Language Models](../vision_language_models/vision_language_models.md) — deeper dive into VLM architectures, training recipes, and deployment
 - [Voice Agents](../voice_agents/voice_agents.md) — ASR/TTS/native-audio stacks for production conversational systems
+- [World Models](../vla_and_robotics_foundation_models/world_models.md) — video and latent world models for robotics: Genie, Cosmos, V-JEPA 2, driving world models
 - [Computer Vision (ML)](../../ml/computer_vision/computer_vision.md) — vision encoders, ViT, CLIP, object detection — the CV foundation of multimodal LLMs
 - [Generative Models (ML)](../../ml/generative_models/generative_models.md) — VAEs, GANs, Diffusion (DDPM) — generative foundation for image/video generation

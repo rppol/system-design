@@ -11,6 +11,8 @@ As of this writing Agent Skills is an **open specification**, not a Claude-only 
 
 Take a support-ticket-routing team as the smallest concrete illustration. Before Skills, "how we route a billing dispute versus a bug report versus a legal request" lived as either eight paragraphs pasted into the routing agent's system prompt (paid on every single ticket, whether it was billing, a bug, or spam) or as a wiki page nobody's agent ever actually read. Packaged as a `ticket-routing` Skill, the same eight paragraphs cost ~100 tokens of always-resident metadata on every ticket and load their full ~2,000-token body only on the tickets where routing judgment is actually ambiguous enough to need it — the same knowledge, radically cheaper to keep current, because there is exactly one file to edit when the legal-escalation address changes.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for where skills sit among the harness controls (guides and sensors) and how to test that a control pays for its tokens.
+
 ---
 
 ## 2. Intuition

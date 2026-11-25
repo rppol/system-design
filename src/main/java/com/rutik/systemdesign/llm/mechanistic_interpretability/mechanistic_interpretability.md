@@ -14,6 +14,8 @@ The field has moved from a primarily academic pursuit (2020-2022, small models l
 
 For a senior LLM engineer in 2026, mech interp shows up in interviews in three flavors: (1) "how would you debug a model that hallucinates/jailbreaks in production beyond prompt tweaking?", (2) "what is a sparse autoencoder and why does it help with superposition?", and (3) "how do techniques like activation steering or model editing actually work, and what are their failure modes?"
 
+See also: [Continual Learning and Test-Time Memory](../data_flywheels_and_continuous_learning/continual_learning_and_test_time_memory.md) for model editing and knowledge updates compared with fine-tuning and retrieval.
+
 ---
 
 ## 2. Intuition

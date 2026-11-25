@@ -2,6 +2,8 @@
 
 > **Version anchor (2026-11-25).** `kubernetes-sigs/agent-sandbox` v1.0.12 (released 2026-11-20) is current. Its CRDs are served only as `v1beta1`: `Sandbox` in `agents.x-k8s.io` and `SandboxTemplate`, `SandboxClaim` and `SandboxWarmPool` in `extensions.agents.x-k8s.io`. The project needs Kubernetes 1.25 or later with CRD CEL validation and recommends 1.29 or later. Kubernetes 1.37 is current (1.37.2 on 2026-10-13); its scalability criteria are at most 110 pods per node, 5,000 nodes and 150,000 pods per cluster. gVisor release 20261123.0 (2026-11-24), Firecracker v1.18.0 (2026-11-09) and Kata Containers 4.4.0 (2026-11-17) are the current isolation runtimes. GKE Pod snapshots are read from the vendor documentation as checked on 2026-11-25. Every limit and flag on this page was read from the project's own documentation or source on that date. Numbers marked "modeled" are arithmetic on stated assumptions, not measurements.
 
+See also: [Design an Agent-First Software Factory](../../llm/case_studies/design_agent_first_software_factory.md) for the organization-scale view: per-task environment slots, path leases and a merge queue for hundreds of agent runs a day.
+
 ---
 
 ## 1. Concept Overview

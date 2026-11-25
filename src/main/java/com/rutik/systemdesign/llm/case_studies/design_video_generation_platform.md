@@ -8,6 +8,8 @@
 
 Real systems: Google Veo 2/3, OpenAI Sora (its Videos API and `sora-2` API models shut down 2026-09-24), Runway Gen-3, Pika Labs, Luma Dream Machine, Kling (Kuaishou), Hailuo (MiniMax).
 
+See also: [World Models](../vla_and_robotics_foundation_models/world_models.md) for how video world models are used as simulators and data engines for robot policies, not only as a generation product.
+
 ---
 
 ## 1. Requirements Clarification

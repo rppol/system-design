@@ -67,6 +67,8 @@ not teach them again.
 - Calibrated thresholds `p > C_FP/(C_FP+C_FN)`, abstain bands and expected cost per decision:
   [Decision Models](../../mlops/decision_models/decision_models.md).
 
+See also: [Personal and Ambient Agents](../personal_and_ambient_agents/personal_and_ambient_agents.md) for autonomy promotion per action class applied to an always-on agent.
+
 ---
 
 ## 2. Intuition

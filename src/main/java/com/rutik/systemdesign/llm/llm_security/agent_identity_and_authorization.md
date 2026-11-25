@@ -32,6 +32,8 @@ layer underneath it; and the enterprise pattern — Microsoft Entra Agent ID, Ok
 that registers an agent instance as a principal distinct from both the human it serves and the
 service account its code runs under.
 
+See also: [Personal and Ambient Agents](../personal_and_ambient_agents/personal_and_ambient_agents.md) for delegated authority in an always-on agent, and [Design a Personal AI Agent](../case_studies/design_personal_ai_agent.md) for tiered consent and token handling at 1M users.
+
 ---
 
 ## 2. Intuition

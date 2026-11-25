@@ -7,6 +7,8 @@
 | [privacy_and_data_governance.md](privacy_and_data_governance.md) | Memorization & extraction attacks, membership inference, PII pipelines, DP-SGD, machine unlearning, deletion requests, retention & residency |
 | [agent_identity_and_authorization.md](agent_identity_and_authorization.md) | How an agent authenticates and is authorized: workload identity, delegated user authority, token exchange and scoping across MCP, A2A and tool calls |
 
+See also: [Personal and Ambient Agents](../personal_and_ambient_agents/personal_and_ambient_agents.md) for the threat model of an always-on agent: untrusted inbound content, trust labels and the Rule of Two.
+
 ---
 
 ## 1. Concept Overview

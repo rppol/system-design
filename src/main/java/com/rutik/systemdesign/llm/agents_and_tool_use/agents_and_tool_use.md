@@ -1,6 +1,6 @@
 # Agents & Tool Use
 
-## Sub-Files — Deep Dives (17 total)
+## Sub-Files — Deep Dives (18 total)
 
 | File | Topic | Q&As |
 |------|-------|------|
@@ -17,6 +17,7 @@
 | [sandboxed_code_execution.md](sandboxed_code_execution.md) | E2B, Riza, Daytona, Modal, isolation, resource limits | 15+ |
 | [subagents_and_delegation.md](subagents_and_delegation.md) | Parallel dispatch, context isolation, structured return contracts | 15+ |
 | [agent_ux_patterns.md](agent_ux_patterns.md) | Streaming, interrupt/resume, approval gates, artifacts, confidence | 15+ |
+| [generative_ui_and_agent_ui_protocols.md](generative_ui_and_agent_ui_protocols.md) | AG-UI event streams, A2UI, MCP Apps, typed component catalogs, rendering model-chosen UI safely | 15+ |
 | [durable_long_running_agents.md](durable_long_running_agents.md) | Temporal, Inngest, Restate, LangGraph checkpointing, idempotency | 15+ |
 | [agent_cost_and_token_budget.md](agent_cost_and_token_budget.md) | Per-task budgets, model cascading, compaction, caching, batch APIs | 15+ |
 | [agent_skills_and_progressive_disclosure.md](agent_skills_and_progressive_disclosure.md) | Agent Skills spec, SKILL.md, three-level progressive loading, Skills vs MCP | 15+ |
@@ -759,6 +760,8 @@ Related standalone modules:
 | Guardrails & Content Safety | [../guardrails_and_content_safety/guardrails_and_content_safety.md](../guardrails_and_content_safety/guardrails_and_content_safety.md) | Input/output filters, NeMo, Llama Guard, prompt injection, HIPAA/PCI |
 | Code Generation | [../code_generation/code_generation.md](../code_generation/code_generation.md) | FIM, SWE-bench, security risks, hallucinated APIs, code agents |
 | Agentic Frameworks | [../agentic_frameworks/agentic_frameworks.md](../agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, LCEL, observability |
+| Personal & Ambient Agents | [../personal_and_ambient_agents/personal_and_ambient_agents.md](../personal_and_ambient_agents/personal_and_ambient_agents.md) | Always-on agents: event and schedule triggers, long-lived memory, trust labels, tiered consent, cost per wake-up |
+| Agent Harness Engineering | [../agent_harness_engineering/agent_harness_engineering.md](../agent_harness_engineering/agent_harness_engineering.md) | Agent = Model + Harness: instructions, guides and sensors, lints with remediation, per-worktree environments |
 
 ---
 

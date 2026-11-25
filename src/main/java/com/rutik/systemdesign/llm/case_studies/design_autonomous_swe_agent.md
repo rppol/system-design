@@ -5,6 +5,8 @@
 
 **Key insight**: The difference between a "coding assistant" (Cursor, Copilot) and an "autonomous SWE agent" is that the agent must be correct by the time the PR is opened — it has no human in the loop to catch its mistakes. This demands eval-gated iteration: run tests, check lint, fix regressions. Generation alone is insufficient. The scaffolding that enforces this loop — durable checkpoints, sandbox isolation, flakiness-aware test retry, cost ceilings — is where the engineering complexity lives, not in the LLM prompt.
 
+See also: [Design an Agent-First Software Factory](design_agent_first_software_factory.md) for many such agents working in one organization's repository (risk-tiered review, path leases, merge queue), and [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the per-repository discipline that makes an agent succeed.
+
 ---
 
 ## 1. Requirements Clarification

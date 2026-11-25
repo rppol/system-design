@@ -9,6 +9,8 @@ Mental model: per-sensor encoders feed a Bird's Eye View fusion, 3D detection ru
 
 Why this system exists: at Level 4 there is no human fallback inside the operating domain, so every perception error becomes a physical outcome.
 
+See also: [World Models](../../llm/vla_and_robotics_foundation_models/world_models.md) for driving world models that simulate and evaluate the scenes this perception stack consumes.
+
 ---
 
 ## 1. Requirements Clarification

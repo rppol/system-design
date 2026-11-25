@@ -8,6 +8,8 @@ Agent UX patterns are the user-facing conventions that make autonomous agent sys
 
 The eight core patterns covered here — streaming thoughts, interrupt/resume, approval gates, artifact rendering, step visualization, error transparency, confidence/uncertainty signaling, and consent/scope declaration — are what separates production-grade agent products (Claude Code, Cursor, Devin) from research prototypes. Get these wrong and users either abandon the agent (silent waits) or learn to distrust it (false confidence, surprise actions).
 
+See also: [Generative UI and Agent UI Protocols](generative_ui_and_agent_ui_protocols.md) for the wire level underneath these conventions: AG-UI event streams, A2UI and MCP Apps.
+
 ---
 
 ## 2. Intuition

@@ -58,6 +58,8 @@ in general and on cloud APIs: [LLM Caching](../llm_caching/llm_caching.md) and
 Model supply-chain security and signing: [LLM Security](../llm_security/llm_security.md). The
 hardware numbers used below: [Local AI Hardware and Sizing](local_ai_hardware_and_sizing.md).
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the same discipline applied to local models, and [Personal and Ambient Agents](../personal_and_ambient_agents/personal_and_ambient_agents.md) with [Design a Personal AI Agent](../case_studies/design_personal_ai_agent.md) for always-on agents on local or hybrid execution.
+
 ---
 
 ## 2. Intuition

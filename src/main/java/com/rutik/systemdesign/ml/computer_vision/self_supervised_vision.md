@@ -119,7 +119,7 @@ pulls the student's patch-to-patch similarity structure back to the teacher's wh
 
 JEPA models predict *representations* of hidden regions, not pixels. **I-JEPA** (Assran et al., CVPR 2023) takes one large context block of an image, encodes it, and uses a narrow predictor to output the embeddings of several masked target blocks. The targets come from an EMA target encoder, as in BYOL and DINO. Two differences from MAE matter. The loss lives in embedding space, so the model does not spend capacity on texture and pixel detail it cannot predict. And there are no hand-made augmentations such as color jitter, so the features do not inherit those invariances. I-JEPA trained a ViT-H/14 on ImageNet in under 72 hours on 16 A100s.
 
-**V-JEPA 2** (Meta, June 2025) applies the same idea to video at about 1B parameters, pretrained on over 1M hours of video. A second stage, V-JEPA 2-AC, adds an action-conditioned predictor trained on under 62 hours of unlabeled robot video from the DROID dataset and plans zero-shot pick-and-place on Franka arms in new labs by searching for actions whose predicted future embedding matches a goal image.
+**V-JEPA 2** (Meta, June 2025) applies the same idea to video at about 1B parameters, pretrained on over 1M hours of video. A second stage, V-JEPA 2-AC, adds an action-conditioned predictor trained on under 62 hours of unlabeled robot video from the DROID dataset and plans zero-shot pick-and-place on Franka arms in new labs by searching for actions whose predicted future embedding matches a goal image. For how latent and pixel world models compare for robot policies, see [World Models](../../llm/vla_and_robotics_foundation_models/world_models.md).
 
 ### Language-Free Scaling: Web-SSL
 

@@ -21,6 +21,8 @@ Knowledge distillation, model merging, and structured pruning are three compleme
 
 These techniques are increasingly critical in production: distillation powers the deployment of large model capabilities at small model cost, merging drives the open-source model ecosystem, and pruning enables deployment on constrained hardware.
 
+See also: [Continual Learning and Test-Time Memory](../data_flywheels_and_continuous_learning/continual_learning_and_test_time_memory.md) for merging and distillation as ways to absorb new knowledge without forgetting.
+
 ---
 
 ## 2. Intuition

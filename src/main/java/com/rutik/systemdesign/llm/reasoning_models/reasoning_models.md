@@ -1,5 +1,13 @@
 # Reasoning Models
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [latent_and_looped_reasoning.md](latent_and_looped_reasoning.md) | Reasoning in depth instead of tokens: looped and recurrent-depth transformers (Huginn, Ouro), Coconut, pause and filler tokens, Quiet-STaR, implicit CoT, HRM and TRM, KV-cache and batching effects, monitorability |
+
+---
+
 ## 1. Concept Overview
 
 Reasoning models are LLMs that spend significantly more computation at inference time by generating extended internal "thinking" before producing a final answer. Unlike standard LLMs that generate the next token as fast as possible, reasoning models simulate deliberate, step-by-step thinking — exploring multiple approaches, self-correcting errors, and verifying answers before committing.

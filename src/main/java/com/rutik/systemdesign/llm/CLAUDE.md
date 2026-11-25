@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List: 56 Modules
+## Module List: 58 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
@@ -21,13 +21,15 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `prompt_engineering/` | CoT, few-shot, ReAct, structured outputs, system prompts | — |
 | `rag_fundamentals/` | Chunking, vector DBs, retrieval, reranking, hybrid search | chunking_strategies, embedding_models, retrieval_methods, reranking |
 | `advanced_rag/` | Agentic RAG, Graph RAG, multimodal RAG, evaluation | agentic_rag, corrective_rag, graph_rag, multimodal_rag, query_transformation, self_rag |
-| `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | — |
+| `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | latent_and_looped_reasoning |
 | `code_generation/` | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | — |
-| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability, reflexion_and_self_correction, tree_of_thoughts_for_agents, tool_selection_at_scale, sandboxed_code_execution, subagents_and_delegation, agent_ux_patterns, durable_long_running_agents, agent_cost_and_token_budget, agent_skills_and_progressive_disclosure, reasoning_models_vs_scaffolds |
+| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability, reflexion_and_self_correction, tree_of_thoughts_for_agents, tool_selection_at_scale, sandboxed_code_execution, subagents_and_delegation, agent_ux_patterns, generative_ui_and_agent_ui_protocols, durable_long_running_agents, agent_cost_and_token_budget, agent_skills_and_progressive_disclosure, reasoning_models_vs_scaffolds |
 | `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK, Microsoft Agent Framework | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor, openai_agents_sdk, claude_agent_sdk, pydantic_ai, smolagents, strands_aws, mastra_typescript, litellm_routing, google_adk, microsoft_agent_framework |
 | `multi_agent_systems/` | Orchestrator, debate, ChatDev, MetaGPT, Swarm, Magentic-One, A2A | orchestrator_worker_pattern, agent_debate_and_consensus, chatdev_and_software_simulation, openai_swarm_and_handoffs, magentic_one_and_autogen_v04, agent_to_agent_protocols, agentic_commerce_and_payments, multi_agent_security |
 | `agentic_workflow_patterns/` | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer | — |
+| `personal_and_ambient_agents/` | Always-on personal agents: event and schedule triggers, long-lived memory, trust labels and tiered consent, local vs cloud execution, OpenClaw/Hermes-style gateways, cost per wake-up. Counterpart case study: `design_personal_ai_agent` | — |
 | `coding_agents/` | SWE-agent, OpenHands, Aider, Devin, Cursor, Claude Code, SWE-bench | — |
+| `agent_harness_engineering/` | Agent = Model + Harness: map-style AGENTS.md, docs as system of record, guides and sensors, lints with remediation messages, per-worktree environments, long-running-agent progress files, entropy control. Org-scale counterpart: `design_agent_first_software_factory` | — |
 | `voice_agents/` | Realtime API, Gemini Live, STT→LLM→TTS, VAD, barge-in, telephony | — |
 | `browser_agents_deep_dive/` | Browser Use, Stagehand, Playwright MCP, DOM vs vision, WebArena | — |
 | `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | constrained_decoding_and_structured_outputs, speculative_decoding, sampling_and_decoding_strategies, kv_cache_optimization |
@@ -51,7 +53,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `mixture_of_experts/` | MoE routing, Mixtral 8x7B, DeepSeek-V3, load balancing, sparse activation | — |
 | `llm_routing_and_model_selection/` | Multi-model routing, cascade patterns, confidence thresholds, cost optimization | — |
 | `token_economics_and_cost_optimization/` | Per-token pricing, prompt caching, batch APIs, self-hosting break-even | — |
-| `data_flywheels_and_continuous_learning/` | Production feedback loops, active learning, drift detection, A/B testing | — |
+| `data_flywheels_and_continuous_learning/` | Production feedback loops, active learning, drift detection, A/B testing, continual learning and test-time memory | continual_learning_and_test_time_memory |
 | `llm_testing_strategies/` | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | — |
 | `knowledge_distillation_and_model_merging/` | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | — |
 | `llm_observability_and_monitoring/` | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | — |
@@ -63,7 +65,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `llm_ops_platforms/` | MLflow, W&B, LangSmith, LangFuse, Braintrust, DeepEval, Ragas — experiment tracking, LLM observability, eval CI/CD | — |
 | `vision_language_models/` | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | — |
 | `constitutional_ai/` | SL-CAI critique-revision pipeline, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF, Llama Guard | — |
-| `vla_and_robotics_foundation_models/` | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | — |
+| `vla_and_robotics_foundation_models/` | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts, world models | world_models |
 | `diffusion_language_models/` | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion | — |
 
 ---
@@ -108,8 +110,8 @@ cosmetic in the reader only.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 56 modules = "Recommended Learning Order")
-plus two curated tiers: **Senior** (36 modules) and **Principal** (32). They are
+`README.md` documents the **Full Path** (all 58 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (38 modules) and **Principal** (34). They are
 different cuts, not nested depths — senior is the craft (ship the pipeline, debug the
 eval that lies), principal is the judgment (which architecture at what token cost, what
 failure domains, what you tell a team *not* to do), so the two lists overlap only partly
@@ -142,10 +144,10 @@ The following are gaps for senior AI engineer coverage, identified by the 2026-0
 
 ---
 
-## Case Studies — 31 Total
+## Case Studies — 33 Total
 
 `case_studies/` directory. The 11-section principal template is the standard for every case study,
-but it is **not yet met by all 31**: the 2026-11-25 audit found 14 off-template — all 13 Wave-1
+but it is **not yet met by all 33**: the 2026-11-25 audit found 14 off-template (of the 31 then on disk) — all 13 Wave-1
 studies plus `design_gpu_inference_platform` (7 numbered sections, no Real-World Implementations,
 Technologies & Tools or Common Pitfalls, 8 interview Q&As). Re-templating them is tracked work; do
 not describe the set as conformant until it is done.
@@ -167,6 +169,8 @@ Learning-path index: `case_studies/case_studies.md` (mandatory; update with ever
 **Wave 5 (1):** design_agent_platform
 
 **Wave 6 (1):** design_local_first_coding_agent
+
+**Wave 7 (2):** design_agent_first_software_factory, design_personal_ai_agent (both on the 11-section template)
 
 ---
 

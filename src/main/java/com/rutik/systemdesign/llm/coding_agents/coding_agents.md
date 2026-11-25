@@ -77,6 +77,8 @@ Every major agent now ships the same four control surfaces around the model loop
 - **Plan mode.** A read-only permission mode: the agent reads files and proposes a plan, and nothing touches disk until the user approves (Claude Code: `--permission-mode plan` or `Shift+Tab`).
 - **Parallel agents in git worktrees.** Each agent session gets its own `git worktree` (separate checkout, separate branch, shared object store), so two agents editing the same repo never write over each other's files (Claude Code: `claude --worktree <name>`).
 
+See [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the full discipline behind these four surfaces, and [Design an Agent-First Software Factory](../case_studies/design_agent_first_software_factory.md) for running them across an organization where agents write all the code.
+
 ---
 
 ## 5. Architecture Diagrams

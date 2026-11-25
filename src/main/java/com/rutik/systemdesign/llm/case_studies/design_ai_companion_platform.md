@@ -5,6 +5,8 @@
 
 **Key insight**: Unlike a general-purpose chatbot, a companion platform's competitive moat is *relationship continuity* — the model must remember your name, your dog's name from session 47, and the argument you had three weeks ago. Every architectural decision (prefix caching, episodic memory compression, per-user-per-character namespacing) exists to create that illusion of memory at a cost structure that survives 1 billion messages per day. The safety layer is not an afterthought — it is the license to operate: one incident involving a minor or a missed crisis signal can escalate into litigation, regulatory attention, and ultimately the withdrawal of the product for an entire age cohort, as Character.AI's path from the 2024 Setzer lawsuit to its November 2025 under-18 chat ban shows.
 
+See also: [Design a Personal AI Agent](design_personal_ai_agent.md) for the task-first counterpart: an always-on agent that acts on email, calendar and chat, with a different risk model.
+
 ---
 
 ## 1. Requirements Clarification

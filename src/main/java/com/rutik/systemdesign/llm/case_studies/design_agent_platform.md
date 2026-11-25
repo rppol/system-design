@@ -6,6 +6,8 @@ Twenty product teams inside one company are each building an LLM agent. Every on
 
 The second-order difficulty is that "twenty tenants" is not twenty copies of the same trust level. A finance team's agent touching payment tools and a marketing team's agent drafting social copy have wildly different blast radii if either one misbehaves, yet both run on the same registry, the same runtime, and the same sandbox pool. A platform that treats every tenant identically either over-isolates the low-risk team (wasted cost) or under-isolates the high-risk one (a real incident). Every component in §4 has a tenant-scoping decision baked into it for exactly this reason — visibility on the registry, fair-share scheduling on the runtime, egress policy on the sandbox, audience scoping on identity — because "multi-tenant" here means "many trust levels sharing infrastructure," not just "many customers sharing a database."
 
+See also: [Design a Personal AI Agent](design_personal_ai_agent.md) for a consumer product built on this kind of platform: leased per-user actors, a budget governor and tiered consent for 1M users.
+
 ---
 
 ## 1. Requirements Clarification

@@ -968,5 +968,6 @@ exactly why the team's later SnapKV work was headroom, not necessity.
 - [Optimization & Quantization](../optimization_and_quantization/optimization_and_quantization.md) — KV cache quantization mechanisms (INT8/FP8/KIVI)
 - [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — PagedAttention internals, FP8 KV cache serving flags, prefix caching
 - [LLM Caching](../llm_caching/llm_caching.md) — prompt/prefix caching and its interaction with per-request eviction
+- [Latent and Looped Reasoning](../reasoning_models/latent_and_looped_reasoning.md) — what looped and recurrent-depth models do to KV cache size and batching
 - [Speculative Decoding](speculative_decoding.md) — how KV cache state interacts with draft/target verification
 - [Sampling & Decoding Strategies](sampling_and_decoding_strategies.md) — beam search's k× KV cost

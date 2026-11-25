@@ -5,6 +5,8 @@ Domain adaptation is the process of making a general-purpose LLM perform signifi
 
 Two primary techniques: (1) continued pre-training (CPT) on a large domain corpus using the standard causal language modeling (CLM) objective — teaches the model domain vocabulary, entities, and knowledge structures; (2) domain-specific [instruction tuning](instruction_tuning.md) — teaches the model domain-specific task behavior and style. The most effective approach is the "domain-then-instruct" pipeline: CPT first (add domain knowledge), then instruction tuning (teach domain-specific behavior).
 
+See also: [Continual Learning and Test-Time Memory](../data_flywheels_and_continuous_learning/continual_learning_and_test_time_memory.md) for measured forgetting effects and where new knowledge should live (weights, adapters, retrieval or memory).
+
 ---
 
 ## 2. Intuition

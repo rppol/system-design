@@ -5,6 +5,8 @@ Agent memory encompasses all mechanisms by which an LLM agent stores and retriev
 
 Memory for LLM agents has four distinct types, each with different storage mechanisms, retrieval characteristics, and use cases. Managing memory efficiently — knowing what to store, how to retrieve it, and when to evict it — is one of the primary engineering challenges in production agentic systems.
 
+See also: [Personal and Ambient Agents](../personal_and_ambient_agents/personal_and_ambient_agents.md) for long-lived memory in an always-on agent, [Continual Learning and Test-Time Memory](../data_flywheels_and_continuous_learning/continual_learning_and_test_time_memory.md) for learning in weights versus memory, and [Design a Personal AI Agent](../case_studies/design_personal_ai_agent.md) for per-user memory erasure by key destruction.
+
 ---
 
 ## 2. Intuition

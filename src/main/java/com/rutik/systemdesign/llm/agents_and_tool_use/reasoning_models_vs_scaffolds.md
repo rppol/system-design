@@ -22,6 +22,8 @@ interleaved) — this file starts where that table ends and answers the decision
 question it raises but does not resolve: given a specific task, do you still need
 the outer loop, and if so, what should be left in it.
 
+See also: [Latent and Looped Reasoning](latent_and_looped_reasoning.md) for reasoning through depth instead of tokens, and what hidden-state reasoning means for [Reasoning Models vs Scaffolds](../agents_and_tool_use/reasoning_models_vs_scaffolds.md).
+
 ---
 
 ## 2. Intuition

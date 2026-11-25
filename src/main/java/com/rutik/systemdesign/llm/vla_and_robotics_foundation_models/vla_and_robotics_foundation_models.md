@@ -1,5 +1,11 @@
 # Vision-Language-Action (VLA) Models & Robotics Foundation Models
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [world_models.md](world_models.md) | World models for robotics: Dreamer-style imagination training, interactive video world models, JEPA latent models, driving world models, action conditioning, simulators and data engines for policies |
+
 ## 1. Concept Overview
 
 Vision-Language-Action (VLA) models extend a vision-language model (VLM) with an **action output
@@ -1293,6 +1299,7 @@ Yes, in principle — if the VLA's policy deterministically proposes the same re
 
 - [Vision-Language Models](../vision_language_models/vision_language_models.md) — the VLM backbones (CLIP, SigLIP, DINOv2) and visual-grounding techniques (Grounding DINO, SAM) that every VLA in this module builds on
 - [Diffusion Language Models](../diffusion_language_models/diffusion_language_models.md) — the other major Phase 6 "new generation paradigm" module; pi-0's flow-matching action expert (§6.3) shares mathematical lineage with diffusion
+- [World Models](world_models.md) — deep dive: imagination-trained agents, interactive video world models, JEPA latent models, driving world models, and world models as simulators for robot policies
 - [Multimodal Models](../multimodal_models/multimodal_models.md) — broader multimodal architecture context
 - [Small Language Models & Edge AI](../small_language_models_and_edge_ai/small_language_models_and_edge_ai.md) — on-device/on-robot inference constraints relevant to System 1 in dual-system architectures
 - [Alignment & RLHF — GRPO and RLVR](../alignment_and_rlhf/grpo_and_rlvr.md) — contrasts classic robotics RL formulations with LLM-style RL

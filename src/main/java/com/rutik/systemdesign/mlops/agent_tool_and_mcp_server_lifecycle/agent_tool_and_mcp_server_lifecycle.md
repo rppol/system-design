@@ -631,7 +631,7 @@ Most teams replay in the per-PR gate and run live nightly.
 | Open Policy Agent | scope policy evaluation at the gateway | policy files versioned in git |
 | AWS Cedar | scope policy evaluation at the gateway | policy files versioned in git |
 
-Related pages: [Function Calling and Tool Design](../../llm/agents_and_tool_use/function_calling_and_tool_design.md) for writing the tool schema in the first place, [Design an Agent Platform](../../llm/case_studies/design_agent_platform.md) for the platform around it, and [AI Release Engineering](../ai_release_engineering/ai_release_engineering.md) for how the agent bundle joins the wider release bundle.
+Related pages: [Agent Harness Engineering](../../llm/agent_harness_engineering/agent_harness_engineering.md) for tool descriptions, error messages and lints as parts of the harness, [Function Calling and Tool Design](../../llm/agents_and_tool_use/function_calling_and_tool_design.md) for writing the tool schema in the first place, [Design an Agent Platform](../../llm/case_studies/design_agent_platform.md) for the platform around it, and [AI Release Engineering](../ai_release_engineering/ai_release_engineering.md) for how the agent bundle joins the wider release bundle.
 
 ---
 

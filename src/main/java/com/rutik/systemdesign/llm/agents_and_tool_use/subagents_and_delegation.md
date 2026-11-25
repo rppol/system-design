@@ -9,6 +9,8 @@ Subagents matter for three reasons: (1) **context isolation** — a subagent doi
 
 The pattern is the foundation of Claude Code's parallel research, Anthropic's published multi-agent research system (which reports outperforming single-agent Claude Opus 4 by 90.2% on its internal research eval, and cutting research time by up to 90% on complex queries), and most production agent architectures handling tasks that decompose into independent subtasks. The same post is candid about the cost: multi-agent systems burn roughly 15x the tokens of a chat interaction.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the planner, generator and evaluator split in long-running harnesses and why each component is an assumption to re-test.
+
 ---
 
 ## 2. Intuition

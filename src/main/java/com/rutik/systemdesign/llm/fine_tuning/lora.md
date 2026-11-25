@@ -7,6 +7,8 @@ For a 7B model where a typical attention weight matrix is 4096×4096, the full u
 
 For serving many adapters on one base model and managing their versions, see [LoRA Adapter Serving and Lifecycle](../../mlops/lora_adapter_serving_and_lifecycle/lora_adapter_serving_and_lifecycle.md).
 
+See also: [Continual Learning and Test-Time Memory](../data_flywheels_and_continuous_learning/continual_learning_and_test_time_memory.md) for LoRA as a continual-learning mitigation and how adapters interact with forgetting.
+
 ---
 
 ## 2. Intuition

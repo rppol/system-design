@@ -149,13 +149,13 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [RAG Fundamentals](src/main/java/com/rutik/systemdesign/llm/rag_fundamentals/rag_fundamentals.md) | Chunking, hybrid retrieval, reranking, RAGAS evaluation |
 | [Advanced RAG](src/main/java/com/rutik/systemdesign/llm/advanced_rag/advanced_rag.md) | Graph RAG, Agentic RAG, HyDE, Self-RAG, multi-query expansion |
 | [Context Engineering](src/main/java/com/rutik/systemdesign/llm/context_engineering/context_engineering.md) | Context budget allocation, "lost in the middle" fix, KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix |
-| [Reasoning Models](src/main/java/com/rutik/systemdesign/llm/reasoning_models/reasoning_models.md) | o1/o3, DeepSeek-R1, test-time compute, PRM/ORM, MCTS |
+| [Reasoning Models](src/main/java/com/rutik/systemdesign/llm/reasoning_models/reasoning_models.md) | o1/o3, DeepSeek-R1, test-time compute, PRM/ORM, MCTS — with 1 deep-dive sub-file (latent and looped reasoning) |
 | [Code Generation](src/main/java/com/rutik/systemdesign/llm/code_generation/code_generation.md) | FIM, Copilot architecture, HumanEval, SWE-bench, StarCoder |
 
 #### Agents & Frameworks
 | Topic | Key Concepts |
 |-------|-------------|
-| [Agents & Tool Use](src/main/java/com/rutik/systemdesign/llm/agents_and_tool_use/agents_and_tool_use.md) | Function calling, ReAct, plan-and-execute, memory systems |
+| [Agents & Tool Use](src/main/java/com/rutik/systemdesign/llm/agents_and_tool_use/agents_and_tool_use.md) | Function calling, ReAct, plan-and-execute, memory systems, generative UI and agent UI protocols — with 18 deep-dive sub-files |
 | [Agentic Frameworks](src/main/java/com/rutik/systemdesign/llm/agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, Haystack |
 | [Multi-Agent Systems](src/main/java/com/rutik/systemdesign/llm/multi_agent_systems/multi_agent_systems.md) | Orchestrator, debate, hierarchical, ChatDev, MetaGPT, Swarm |
 
@@ -196,16 +196,18 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Local AI](src/main/java/com/rutik/systemdesign/llm/local_ai/local_ai.md) | Unified-memory desktops, bandwidth sizing, llama.cpp/Ollama/LM Studio/MLX, FP4 and speculative decoding locally, local agents, hybrid routing |
 | [Mixture of Experts](src/main/java/com/rutik/systemdesign/llm/mixture_of_experts/mixture_of_experts.md) | MoE routing, Mixtral, DeepSeek-V3, load balancing, sparse activation |
 | [MCP (Model Context Protocol)](src/main/java/com/rutik/systemdesign/llm/mcp_model_context_protocol/mcp_model_context_protocol.md) | Universal LLM-tool protocol, servers/clients, JSON-RPC, A2A |
-| [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing |
+| [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing — with 1 deep-dive sub-file (continual learning and test-time memory) |
 | [LLM Testing Strategies](src/main/java/com/rutik/systemdesign/llm/llm_testing_strategies/llm_testing_strategies.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration |
 | [AI Regulations & Compliance](src/main/java/com/rutik/systemdesign/llm/ai_regulations_and_compliance/ai_regulations_and_compliance.md) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA |
 | [LLMOps Platforms](src/main/java/com/rutik/systemdesign/llm/llm_ops_platforms/llm_ops_platforms.md) | MLflow, W&B, LangSmith, LangFuse, Braintrust, DeepEval — experiment tracking, observability, eval CI/CD |
 | [Vision-Language Models](src/main/java/com/rutik/systemdesign/llm/vision_language_models/vision_language_models.md) | CLIP dual encoder, LLaVA adapter, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA |
-| [VLA & Robotics Foundation Models](src/main/java/com/rutik/systemdesign/llm/vla_and_robotics_foundation_models/vla_and_robotics_foundation_models.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, flow-matching action experts |
+| [VLA & Robotics Foundation Models](src/main/java/com/rutik/systemdesign/llm/vla_and_robotics_foundation_models/vla_and_robotics_foundation_models.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, flow-matching action experts — with 1 deep-dive sub-file (world models) |
 | [Diffusion Language Models](src/main/java/com/rutik/systemdesign/llm/diffusion_language_models/diffusion_language_models.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion |
 | [Constitutional AI](src/main/java/com/rutik/systemdesign/llm/constitutional_ai/constitutional_ai.md) | SL-CAI critique-revision, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF tradeoffs |
 | [Agentic Workflow Patterns](src/main/java/com/rutik/systemdesign/llm/agentic_workflow_patterns/agentic_workflow_patterns.md) | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer |
 | [Coding Agents](src/main/java/com/rutik/systemdesign/llm/coding_agents/coding_agents.md) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench |
+| [Personal & Ambient Agents](src/main/java/com/rutik/systemdesign/llm/personal_and_ambient_agents/personal_and_ambient_agents.md) | Always-on agents: event and schedule triggers, long-lived memory, trust labels, tiered consent, local vs cloud execution, cost per wake-up |
+| [Agent Harness Engineering](src/main/java/com/rutik/systemdesign/llm/agent_harness_engineering/agent_harness_engineering.md) | Agent = Model + Harness: map-style AGENTS.md, guides and sensors, lints with remediation messages, per-worktree environments, entropy control |
 | [Voice Agents](src/main/java/com/rutik/systemdesign/llm/voice_agents/voice_agents.md) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony |
 | [Browser Agents Deep Dive](src/main/java/com/rutik/systemdesign/llm/browser_agents_deep_dive/browser_agents_deep_dive.md) | Browser Use, Stagehand, Playwright MCP, DOM vs vision, WebArena |
 
@@ -243,6 +245,8 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Design Avatar Video Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_avatar_video_platform.md) | TTS→lip-sync pipeline pipelining, tier economics, deepfake consent, C2PA signing |
 | [Design an Agent Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_agent_platform.md) | Multi-tenant agent execution, tenant isolation at the execution boundary, durable resumption across tool calls, per-tenant token accounting |
 | [Design a Local-First Coding Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_local_first_coding_agent.md) | Code never leaves company hardware: laptop MoE models, owned team pods, prefix-stable harness, redaction gateway |
+| [Design an Agent-First Software Factory](src/main/java/com/rutik/systemdesign/llm/case_studies/design_agent_first_software_factory.md) | Org where agents write all the code: risk-tiered review, path leases and merge queue, throughput and quality metrics, cost |
+| [Design a Personal AI Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_personal_ai_agent.md) | Always-on email, calendar and chat agent for 1M users: leased per-user actors, push leases, budget governor, memory erasure by key destruction, tiered consent |
 
 See the [LLM Master Index](src/main/java/com/rutik/systemdesign/llm/README.md) for the full 6-phase learning path and system design interview framework.
 

@@ -5,6 +5,8 @@ Evaluating LLM agents is fundamentally different from evaluating single-call LLM
 
 Two complementary evaluation modes exist: trajectory-level evaluation (was each step correct?) and outcome-level evaluation (did the task succeed?). Both are needed — a correct final answer via a lucky shortcut is less reliable than a correct answer via a coherent multi-step plan.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for evaluating a harness change (ablation against a fixed task suite) rather than a model change.
+
 ---
 
 ## 2. Intuition

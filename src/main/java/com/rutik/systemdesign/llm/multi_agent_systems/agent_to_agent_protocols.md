@@ -13,6 +13,8 @@ Three major open specifications emerged in 2024-2025, and the field has since co
 
 These protocols sit above [MCP (Model Context Protocol)](../mcp_model_context_protocol/mcp_model_context_protocol.md), which handles LLM-to-tool communication. A2A/ACP/ANP handle agent-to-agent peer communication — a fundamentally different concern.
 
+See also: [Generative UI and Agent UI Protocols](../agents_and_tool_use/generative_ui_and_agent_ui_protocols.md) for how A2A fits beside AG-UI (agent to user) and A2UI (declarative UI) in one stack.
+
 ---
 
 ## 2. Intuition

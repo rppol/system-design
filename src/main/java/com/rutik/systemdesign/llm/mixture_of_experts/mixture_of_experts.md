@@ -37,6 +37,8 @@ parameters at roughly the same inference FLOP cost as a dense model of active-pa
 
 For serving MoE models across many GPUs with expert parallelism, see [Distributed Inference and Disaggregation](../../mlops/distributed_inference_and_disaggregation/distributed_inference_and_disaggregation.md).
 
+See also: [Latent and Looped Reasoning](../reasoning_models/latent_and_looped_reasoning.md) for the parameter-light, compute-heavy counterpart: looped transformers reuse the same weights for many passes.
+
 ---
 
 ## 2. Intuition

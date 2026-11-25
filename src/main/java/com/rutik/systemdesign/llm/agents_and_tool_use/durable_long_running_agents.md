@@ -7,6 +7,8 @@ Durable long-running agents are LLM agents designed to survive process crashes, 
 
 The fundamental shift from short-lived to durable agents is moving from in-process state (Python objects, async tasks) to externalized state (database checkpoints, durable queues, event sourcing). Four ecosystem solutions dominate: Temporal (most mature, polyglot), Inngest (serverless functions + durable queues), Restate (durable promises with strong consistency), and LangGraph with checkpointing (purpose-built for LLM agents). Each shares the core pattern: every step is a checkpoint; replay survives crashes; idempotency is the contract.
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the initializer agent, feature list and progress file that carry work across context windows.
+
 ---
 
 ## 2. Intuition

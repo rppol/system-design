@@ -86,7 +86,7 @@ resource's `_meta.ui.csp` are outbound destinations the app can reach.
 
 **Mitigation**: the host limits which tools an app may call and asks the user before an app-initiated
 tool call with side effects; treat context updates from the app as untrusted content, the same as a
-tool result; review the `_meta.ui.csp` origin list before allowlisting a server.
+tool result; review the `_meta.ui.csp` origin list before allowlisting a server. The host-side rendering model (double-iframe sandbox, CSP, typed component catalogs) is in [Generative UI and Agent UI Protocols](../agents_and_tool_use/generative_ui_and_agent_ui_protocols.md).
 
 ---
 

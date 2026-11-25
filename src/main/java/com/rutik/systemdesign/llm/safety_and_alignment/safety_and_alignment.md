@@ -653,7 +653,7 @@ CoTs that look good, and architectures that reason in latent vectors instead of 
 | Monitor reads the CoT, reward ignores it | Preserves the signal |
 | Penalize "bad thoughts" in the RL reward | Teaches the model to hide them (obfuscation) |
 | Show users a summarized CoT, log the raw CoT | Preserves the signal for the monitor |
-| Reason in continuous latent space | Removes the signal entirely |
+| Reason in continuous latent space | Removes the signal entirely (see [Latent and Looped Reasoning](../reasoning_models/latent_and_looped_reasoning.md)) |
 
 The rule that follows is the **monitorability tax**: accept a slightly less capable or slightly
 more expensive training run in exchange for not optimizing the CoT, so the monitor stays useful.

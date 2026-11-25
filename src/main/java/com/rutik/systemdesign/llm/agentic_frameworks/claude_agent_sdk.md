@@ -14,6 +14,8 @@ The pattern: you send a message, Claude responds with either text or one-or-more
 
 **Current version**: anthropic 2.14.0 (Python SDK) and claude-agent-sdk 0.2.189 (PyPI, both checked 2026-11-25).
 
+See also: [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the harness around the agent loop: instructions, tools, feedback and the mechanical rules that stop drift.
+
 ---
 
 ## 2. Intuition

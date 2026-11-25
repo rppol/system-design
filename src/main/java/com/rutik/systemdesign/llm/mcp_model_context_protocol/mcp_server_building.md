@@ -7,6 +7,8 @@ MCP servers expose data, capabilities, and prompts to LLM clients (Claude Deskto
 
 This deep-dive covers building MCP servers from scratch: the three server primitives (Resources, Tools, Prompts) plus the client-side features a server can call back into (Sampling, Roots, Elicitation), the lifecycle (initialize → operate → close the transport), the Python and TypeScript SDKs, common server patterns (filesystem, database, web search, internal API wrappers), and testing with MCP Inspector. A minimal Python MCP server is ~50 lines; a production server with auth, logging, and error handling is 200-400 lines.
 
+See also: [Generative UI and Agent UI Protocols](../agents_and_tool_use/generative_ui_and_agent_ui_protocols.md) for MCP Apps, the sandboxed interactive HTML a server can return, and how a host renders it.
+
 ---
 
 ## 2. Intuition

@@ -13,6 +13,8 @@
 | [local_ai_hardware_and_sizing.md](local_ai_hardware_and_sizing.md) | Hardware ladder (Apple M5/M6/Ultra, Strix Halo, DGX Spark, RTX Spark, RTX 50, NPUs, phones), decode = bandwidth / active bytes, prefill = compute, KV budgets, MoE offload, multi-box clusters, measured benchmark tables, buying guide | 15 |
 | [local_agents_and_hybrid_routing.md](local_agents_and_hybrid_routing.md) | Coding and personal agents on local models, harness wiring, Anthropic/OpenAI API compatibility, prefix-cache discipline, the context-length trap, MCP with local runtimes, local RAG, local-first cloud-burst routing, local server security | 15+ |
 
+See also: [Personal and Ambient Agents](../personal_and_ambient_agents/personal_and_ambient_agents.md) for always-on agents that run on a user's own hardware, and [Agent Harness Engineering](../agent_harness_engineering/agent_harness_engineering.md) for the harness that wraps a local model.
+
 ---
 
 ## 1. Concept Overview

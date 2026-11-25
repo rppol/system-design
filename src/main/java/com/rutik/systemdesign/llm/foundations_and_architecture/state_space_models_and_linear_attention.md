@@ -1002,4 +1002,6 @@ shorter-context, retrieval-critical workflows where the 3-point gap matters more
 - [Context Windows & Long Context](../context_windows_and_long_context/context_windows_and_long_context.md) — RoPE/ALiBi/YaRN context-extension techniques for attention-based long context, and where Jamba/Mamba fit as alternatives
 - [Diffusion Language Models](../diffusion_language_models/diffusion_language_models.md) — another non-standard sequence-generation paradigm explored in Phase 6
 - [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — serving-engine internals, including current state-space-model support status (Pitfall 10.6)
+- [Latent and Looped Reasoning](../reasoning_models/latent_and_looped_reasoning.md) — the other recurrence in modern LLMs: over depth (looped weights) rather than over time
+- [Continual Learning and Test-Time Memory](../data_flywheels_and_continuous_learning/continual_learning_and_test_time_memory.md) — recurrent state as test-time memory and fast-weight updates compared with weight-based continual learning
 - [Voice Cloning / TTS Platform Case Study](../case_studies/design_voice_cloning_tts_platform.md) — Cartesia Sonic's production use of a Mamba-based architecture (§5, §7)
