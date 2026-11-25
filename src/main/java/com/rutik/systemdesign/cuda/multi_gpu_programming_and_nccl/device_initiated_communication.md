@@ -63,7 +63,7 @@ Decision table:
 
 ### 4.3 Copy Engine (CE) collectives — the zero-SM path
 
-NCCL 2.28's other major addition offloads AllGather and AlltoAll onto the GPU's **copy engines** — the same DMA hardware that already executes `cudaMemcpyAsync` — instead of an SM-resident kernel. Measured on 8 Blackwell GPUs at a 4 GB message: CE Multicast AllGather peaks at **~780 GB/s**, versus **~620 GB/s** for the SM-based ("SM NonSymmetric") path — a 1.25x bandwidth gain NVIDIA attributes directly to CE Multicast over SM Symmetric. The number that matters more than the 1.25x, though, is the SM count: **zero**. A GEMM or attention kernel that is already SM-starved (every SM busy with useful FLOPs) has no room to also host a communication kernel; a CE collective needs none of them.
+NCCL 2.28's other major addition offloads data-movement collectives (AllGather, AlltoAll, Gather, and Scatter, within one NVLink domain) onto the GPU's **copy engines** — the same DMA hardware that already executes `cudaMemcpyAsync` — instead of an SM-resident kernel. NVIDIA's chart for one 8-GPU Blackwell node shows, at a 4 GB message, CE Multicast AllGather peaking around **~780 GB/s**, versus **~620 GB/s** for the SM-based ("SM NonSymmetric") path — a 1.25x bandwidth gain the chart's caption attributes to CE Multicast "over SM Symmetric," naming a different SM series than the 620 GB/s one it quotes. The number that matters more than the 1.25x, though, is the SM count: **zero**. A GEMM or attention kernel that is already SM-starved (every SM busy with useful FLOPs) has no room to also host a communication kernel; a CE collective needs none of them.
 
 **Walk one example.** Confirming NVIDIA's "1.25x" figure and what it costs in wall-clock time for a 4 GB AllGather:
 
@@ -102,7 +102,7 @@ Where NVSHMEM's symmetric heap and NCCL's symmetric window overlap conceptually 
 
 ### 4.6 DeepEP as the production consumer
 
-DeepEP (DeepSeek's expert-parallel communication library) is the clearest real-world case where device-initiated communication is not an optimization but a requirement: MoE dispatch and combine move tokens whose destination GPU is a runtime result of the router kernel, in a fine-grained, small-message, latency-sensitive pattern that a host-launched collective's floor makes unworkable. **DeepEP v2 moved off NVSHMEM and onto the NCCL Gin backend** — a fact worth stating plainly because most existing write-ups still describe DeepEP as NVSHMEM-based, which was true of v1 but is no longer the architecture. v2 also unifies the previously separate high-throughput and low-latency kernels behind a single `ElasticBuffer` interface and ships experimental primitives (pipeline parallelism, context parallelism, a remote-memory-access feature called "Engram") explicitly "designed for zero or minimal SM occupation" — the same SM-budget concern that motivates Copy Engine collectives in Section 4.3.
+DeepEP (DeepSeek's expert-parallel communication library) is the clearest real-world case where device-initiated communication is not an optimization but a requirement: MoE dispatch and combine move tokens whose destination GPU is a runtime result of the router kernel, in a fine-grained, small-message, latency-sensitive pattern that a host-launched collective's floor makes unworkable. **DeepEP v2 moved off NVSHMEM and onto the NCCL Gin backend** — a fact worth stating plainly because many existing write-ups still describe DeepEP as NVSHMEM-based, which was true of v1 but is no longer the architecture. V2 (April 2026) unified the previously separate high-throughput and low-latency kernels behind a single `ElasticBuffer` interface and added experimental primitives (pipeline parallelism, context parallelism, and a remote-memory feature called "Engram" listed as "0 SM Engram (with RDMA)"). V2.5 (September 2026) split `ElasticBuffer` into `EPBuffer`, `EngramBuffer`, `PPBuffer`, and `BucketBuffer`, and fully removed V1 along with its NVSHMEM backend, so NVSHMEM is no longer a dependency at all. Its bucket all-gather runs on copy engines with `num_sms=0` — the same SM-budget concern that motivates Copy Engine collectives in Section 4.3.
 
 ```mermaid
 flowchart LR
@@ -210,7 +210,7 @@ SM occupancy on an 8-GPU node, 132 SMs/GPU (illustrative allocation):
   per topology as a first-class column, not a footnote.
 ```
 
-*The EP 8x2 vs EP 8x4 rows are the same operation at two different topology configurations from DeepEP's own measured table (Section 7) — doubling the SM budget (6 to 12) buys higher per-GPU RDMA bandwidth (61 to 90 GB/s). That is a real tradeoff a kernel author makes, not a free upgrade.*
+*The EP 8x2 vs EP 8x4 rows are the same operation at two different topology configurations from DeepEP's V2 measured table (Section 7): 12 SMs at 90 GB/s logical RDMA bandwidth on 2 nodes, 6 SMs at 61 GB/s on 4 nodes. Because the node count changes too, the pair shows that SM count is a real, reported cost of dispatch, not that doubling SMs alone buys 1.5x.*
 
 **Worked example: one-shot vs. two-shot bytes moved per rank.** Take an 8-rank expert-parallel group (`N = 8`) dispatching a `size = 256 KB` batch of token activations:
 
@@ -242,29 +242,31 @@ Before any kernel can call a device-API primitive, the host process must build a
 ```cpp
 #include <nccl_device.h>
 
+const int nCTAs = 16;   // grid width of the kernel that will use devComm
+
 ncclDevCommRequirements reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
-reqs.lsaBarrierCount      = 1;      // one LSA barrier session used by the kernel below
-reqs.lsaMultimem          = false;  // this kernel only needs LSA, not multimem
-reqs.worldGinBarrierCount = 1;      // one cross-node GIN barrier session
-reqs.ginSignalCount       = 4;      // one-sided put()/get() completion signals
-reqs.ginConnectionType    = ncclGinConnTypeDefault;
+reqs.lsaBarrierCount      = nCTAs;   // one LSA barrier slot per CTA that syncs
+reqs.lsaMultimem          = false;   // this kernel only needs LSA, not multimem
+reqs.worldGinBarrierCount = nCTAs;   // one cross-node GIN barrier slot per CTA
+reqs.ginSignalCount       = nCTAs;   // one put() completion signal per CTA
+reqs.ginConnectionType    = NCCL_GIN_CONNECTION_FULL;
 
 ncclDevComm devComm;
 NCCLCHECK(ncclDevCommCreate(comm, &reqs, &devComm));
 
-// devComm is now passed into the kernel launch (by value or via a
-// __grid_constant__ parameter, same discipline as a TMA descriptor --
-// see cuda_memory_model_and_hierarchy Section 6.7 for that pattern).
-myFusedKernel<<<grid, block>>>(devComm, /* ... */);
+// devComm is passed into the kernel launch by value, the way NCCL's own
+// device-API examples do.
+myFusedKernel<<<nCTAs, 512>>>(devComm, /* ... */);
 ```
 
-Symmetric buffers must already be registered before this point:
+Symmetric buffers must already be registered before this point. NCCL's device-API examples allocate with `ncclMemAlloc` and register with the `NCCL_WIN_COLL_SYMMETRIC` flag:
 
 ```cpp
 void* d_buf;
-cudaMalloc(&d_buf, N * sizeof(float));
+NCCLCHECK(ncclMemAlloc(&d_buf, N * sizeof(float)));
 ncclWindow_t win;
-NCCLCHECK(ncclCommWindowRegister(comm, d_buf, N * sizeof(float), &win, /*flags=*/0));
+NCCLCHECK(ncclCommWindowRegister(comm, d_buf, N * sizeof(float), &win,
+                                 NCCL_WIN_COLL_SYMMETRIC));
 // win now has the same relative layout on every rank -- this is what makes
 // a peer pointer computable without a host-mediated address lookup.
 ```
@@ -273,20 +275,22 @@ NCCLCHECK(ncclCommWindowRegister(comm, d_buf, N * sizeof(float), &win, /*flags=*
 
 ```cpp
 __global__ void fusedComputeAndLsaPut(ncclDevComm devComm, ncclWindow_t win,
-                                       const float* localTile, int peerRank, int n) {
+                                       size_t offset, const float* localTile,
+                                       int peerRank, int n) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n) return;
 
     // ... compute localTile[tid] here, fused into the same kernel ...
 
-    // Get a locally-addressable pointer into peerRank's symmetric window --
-    // no host round trip, no stream boundary, just a pointer computation.
-    float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, peerRank);
-    peerPtr[tid] = localTile[tid];   // direct store over NVLink P2P
+    // Locally-addressable pointer to the buffer at byte `offset` inside
+    // peerRank's symmetric window -- no host round trip, just arithmetic.
+    float* peerPtr = (float*)ncclGetLsaPointer(win, offset, peerRank);
+    if (tid < n) peerPtr[tid] = localTile[tid];   // direct store over NVLink P2P
 
-    // Every thread in the group must reach this point before any thread
-    // trusts a peer's write has landed -- see 6.3 for why.
-    ncclLsaBarrierSession(devComm, /*barrierIdx=*/0).sync();
+    // Every thread of the CTA calls the barrier (no early return above), and
+    // every LSA rank's CTA blockIdx.x meets here -- see 6.3 for why.
+    ncclLsaBarrierSession<ncclCoopCta> bar{ncclCoopCta(), devComm,
+                                           ncclTeamTagLsa(), blockIdx.x};
+    bar.sync(ncclCoopCta(), cuda::memory_order_release);
 }
 ```
 
@@ -298,22 +302,31 @@ A one-sided `put()` has no return-value acknowledgment that the receiver has con
 
 ```cpp
 __global__ void allToAllViaLsa(ncclDevComm devComm, ncclWindow_t win,
-                                const float* localData, float* gathered, int n) {
+                                size_t offset, const float* localData,
+                                float* gathered, int n) {
     int tid = threadIdx.x;
-    int myRank = blockIdx.y;
+    int myRank = devComm.lsaRank;
+    int nRanks = devComm.lsaSize;
 
-    // Phase 1: every rank writes its own tile into every peer's window
-    for (int peer = 0; peer < gridDim.y; ++peer) {
-        float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, peer);
-        peerPtr[myRank * n + tid] = localData[tid];
+    // Phase 1: every rank writes its own tile into slot `myRank` of every
+    // peer's window.
+    for (int peer = 0; peer < nRanks; ++peer) {
+        float* peerPtr = (float*)ncclGetLsaPointer(win, offset, peer);
+        if (tid < n) peerPtr[myRank * n + tid] = localData[tid];
     }
 
-    // Phase 2: barrier -- without this, a thread could read a peer's slot
-    // before that peer's write has landed, and get stale or torn data.
-    ncclLsaBarrierSession(devComm, /*barrierIdx=*/0).sync();
+    // Phase 2: barrier -- without this, a thread could read a slot before
+    // the peer that owns it has written, and get stale data. acq_rel:
+    // release this rank's stores, acquire the peers'.
+    ncclLsaBarrierSession<ncclCoopCta> bar{ncclCoopCta(), devComm,
+                                           ncclTeamTagLsa(), blockIdx.x};
+    bar.sync(ncclCoopCta(), cuda::memory_order_acq_rel);
 
-    // Phase 3: now every rank's contribution is guaranteed visible
-    gathered[myRank * n + tid] = localData[tid];  // local copy already valid
+    // Phase 3: every peer's contribution in this rank's own window is now
+    // visible to local loads.
+    const float* mine = (const float*)ncclGetLsaPointer(win, offset, myRank);
+    for (int r = 0; r < nRanks; ++r)
+        if (tid < n) gathered[r * n + tid] = mine[r * n + tid];
 }
 ```
 
@@ -322,38 +335,55 @@ This is the device-side analog of the mbarrier phase-parity discipline `synchron
 ### 6.4 GIN: one-sided RMA across the network
 
 ```cpp
-__global__ void ginDispatchToken(ncclDevComm devComm, ncclWindow_t remoteWin,
-                                  const float* token, int destRank, int destOffset, int n) {
-    // ncclGin::put -- a one-sided write to a rank possibly on a different
-    // NODE, driven from inside the kernel. No host CPU is on this path.
-    ncclGin::put(devComm, remoteWin, destOffset, token, n, destRank);
+__global__ void ginDispatchToken(ncclDevComm devComm,
+                                  ncclWindow_t sendWin, size_t sendOffset,
+                                  ncclWindow_t recvWin, size_t recvOffset,
+                                  size_t bytes, int destRank) {
+    ncclGin gin{devComm, /*context=*/0};
+    unsigned int signalIndex = blockIdx.x;
+
+    // ncclGin::put -- a one-sided write of `bytes` from this rank's sendWin
+    // into destRank's recvWin, possibly on a different NODE, driven from
+    // inside the kernel. It also increments signal `signalIndex` on the
+    // receiver, which the receiver waits on with gin.waitSignal().
+    if (threadIdx.x == 0)
+        gin.put(ncclTeamWorld(devComm), destRank, recvWin, recvOffset,
+                sendWin, sendOffset, bytes, ncclGin_WeakSignalInc{signalIndex});
+    gin.flush(ncclCoopCta());
 
     // A GIN barrier session is the network-crossing equivalent of the
     // LSA barrier above -- it also synchronizes ranks that are not on the
     // same NVLink domain, which an LSA barrier cannot reach.
-    ncclGinBarrierSession(devComm, /*barrierIdx=*/0).sync();
-}
-
-__global__ void ginFetchResult(ncclDevComm devComm, ncclWindow_t remoteWin,
-                                float* localDst, int srcRank, int srcOffset, int n) {
-    // ncclGin::get -- pull data from a remote rank's window into local memory.
-    ncclGin::get(devComm, localDst, remoteWin, srcOffset, n, srcRank);
+    ncclGinBarrierSession<ncclCoopCta> bar{ncclCoopCta(), gin,
+                                           ncclTeamTagWorld(), blockIdx.x};
+    bar.sync(ncclCoopCta(), cuda::memory_order_release, ncclGinFenceLevel::None);
 }
 ```
 
-GIN requires Volta or later and driver >= 510.40.3; compiling GIN code needs CUDA 12.2+, and the host-side RMA setup APIs need CUDA 12.5+. Host-backed symmetric buffers (as opposed to device-resident ones) must use `CU_MEM_LOCATION_TYPE_HOST_NUMA`. As with any NCCL deployment, the compile-time NCCL version linked into your binary must not exceed the runtime version loaded on the machine.
+The call shapes follow the GIN AlltoAll kernel in NCCL's device-API guide (NCCL 2.30 and later); GIN API signatures are explicitly "subject to change" per the 2.28.7 release notes, so check the guide for the NCCL version you build against. `ncclGin` also has a one-sided `get`.
+
+GIN requires Volta or later and driver >= 510.40.3; compiling GIN code needs CUDA 12.2+, and the host RMA APIs need CUDA 12.5+. Host-backed symmetric buffers (as opposed to device-resident ones) must use `CU_MEM_LOCATION_TYPE_HOST_NUMA`. As with any NCCL deployment, the compile-time NCCL version linked into your binary must not exceed the runtime version loaded on the machine.
 
 ### 6.5 Copy Engine collectives: the host-side call that costs zero SMs
 
 Unlike the device-API calls above, CE collectives are still issued from the **host** — the zero-SM property is about which hardware unit executes the transfer, not about who issues it:
 
 ```cpp
-// Host-launched, but the actual bytes move through the copy engines,
-// not an SM-resident kernel -- compare against ncclAllGather's SM cost.
+// Host-launched, but the bytes move through the copy engines, not an
+// SM-resident kernel. Per the NCCL 2.28.3 release notes, CE collectives
+// need (1) buffers registered into symmetric windows and (2) the
+// NCCL_CTA_POLICY_ZERO policy in the communicator config.
+ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
+config.CTAPolicy = NCCL_CTA_POLICY_ZERO;
+NCCLCHECK(ncclCommInitRankConfig(&comm, nranks, id, rank, &config));
+
+NCCLCHECK(ncclCommWindowRegister(comm, sendbuf, sendBytes, &sendWin,
+                                 NCCL_WIN_COLL_SYMMETRIC));
+NCCLCHECK(ncclCommWindowRegister(comm, recvbuf, recvBytes, &recvWin,
+                                 NCCL_WIN_COLL_SYMMETRIC));
 NCCLCHECK(ncclAllGather(sendbuf, recvbuf, N, ncclFloat, comm, stream));
-// NCCL 2.28 selects the CE-Multicast path automatically when the topology
-// and message size favor it; NCCL_ALGO can pin it for benchmarking the
-// same way it pins Ring/Tree/NVLS in the parent module's Section 4.6.
+// NCCL_ALGO / algSelection cannot pick a Copy Engine path; the NCCL docs
+// say to request it with CTAPolicy instead.
 ```
 
 The choice between a device-API kernel-fused collective (Sections 6.2-6.4) and a CE collective is a choice about *where the SM budget should go*: fuse communication into a compute kernel when the whole point is overlapping communication with THAT kernel's own compute; reach for a CE collective when the collective is logically separate from any one kernel and you would rather not spend any SMs on it at all.
@@ -364,13 +394,17 @@ The choice between a device-API kernel-fused collective (Sections 6.2-6.4) and a
 // ONE-SHOT: every rank writes its full contribution to every peer directly.
 // Minimal latency (one round), traffic scales with N per rank -- good for
 // small messages (a single activation tensor in a tensor-parallel decode step).
-__global__ void oneShotAllReduce(ncclDevComm devComm, ncclWindow_t win, float* buf, int n) {
-    for (int peer = 0; peer < N_RANKS; ++peer) {
-        if (peer == myRank()) continue;
-        float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, peer);
+__global__ void oneShotAllReduce(ncclDevComm devComm, ncclWindow_t win,
+                                  size_t offset, const float* buf) {
+    int myRank = devComm.lsaRank;
+    for (int peer = 0; peer < devComm.lsaSize; ++peer) {
+        if (peer == myRank) continue;
+        float* peerPtr = (float*)ncclGetLsaPointer(win, offset, peer);
         atomicAdd(&peerPtr[threadIdx.x], buf[threadIdx.x]);  // reduce on arrival
     }
-    ncclLsaBarrierSession(devComm, 0).sync();
+    ncclLsaBarrierSession<ncclCoopCta> bar{ncclCoopCta(), devComm,
+                                           ncclTeamTagLsa(), blockIdx.x};
+    bar.sync(ncclCoopCta(), cuda::memory_order_acq_rel);
 }
 
 // TWO-SHOT: reduce-scatter round, then all-gather round -- same 2(N-1)/N
@@ -391,24 +425,25 @@ Topology detection still happens at communicator setup — `ncclCommInitRank`/`n
 
 ## 7. Real-World Examples
 
-- **DeepEP** (github.com/deepseek-ai/DeepEP) — MoE dispatch and combine kernels with FP8 support, the clearest production case for device-initiated communication. v2 moved off NVSHMEM onto the NCCL Gin backend, unifying high-throughput and low-latency paths behind a single `ElasticBuffer` interface. Requires Hopper (SM90) or later, CUDA 12.3+ on SM90, PyTorch 2.10+, NCCL 2.30.4+.
+- **DeepEP** (github.com/deepseek-ai/DeepEP) — MoE dispatch and combine kernels with FP8 support, the clearest production case for device-initiated communication. V2 moved off NVSHMEM onto the NCCL Gin backend, and V2.5 (September 2026) removed V1 and NVSHMEM entirely and split the V2 `ElasticBuffer` into `EPBuffer`, `EngramBuffer`, `PPBuffer`, and `BucketBuffer`. The V2.5 README requires NVIDIA Hopper or newer, PyTorch 2.10+, and NCCL 2.32.3+. The table below is from the V2 README (April 2026); the V2.5 README no longer carries a performance table.
 
   | GPU | NIC | Topology | Dispatch BW | Combine BW | SMs used |
   |---|---|---|---|---|---|
   | SM90 (Hopper) | CX7 | EP 8x2 | 90 GB/s RDMA | 81 GB/s RDMA | 12 |
   | SM90 | CX7 | EP 8x4 | 61 GB/s RDMA | 61 GB/s RDMA | 6 |
   | SM100 (Blackwell) | CX7 | EP 8x2 | 90 GB/s RDMA | 91 GB/s RDMA | 12 |
-  | SM100 | — | EP 8 (intranode) | 726 GB/s NVLink | 740 GB/s NVLink | 64 (max) |
+  | SM100 | — | EP 8 (intranode) | 726 GB/s NVLink | 740 GB/s NVLink | 64 (max perf) |
+  | SM100 | — | EP 8 (intranode) | 643 GB/s NVLink | 675 GB/s NVLink | 24 (min SMs) |
 
-  Read the last row against the parent module's ~900 GB/s per-direction NVLink 5 ceiling: 726-740 GB/s is roughly 80-82% of the wire, which is a strong result for a collective sharing bandwidth with every other kernel on the GPU. The 90 GB/s internode RDMA figure is the library's own measured number against a ConnectX-7 NIC — present it as measured, since a 400 Gb/s (50 GB/s per direction) single port cannot alone explain it, and re-deriving a NIC-count assumption from that gap is not something this file will do.
+  Read the intranode rows against the parent module's ~900 GB/s per-direction NVLink 5 ceiling: 726-740 GB/s is roughly 80-82% of the wire with 64 SMs, and 24 SMs still reach 643-675 GB/s. The RDMA rows need the README's own footnote: the figures are *logical* bandwidth, and "under the `EP 8 x 2` case, 90 GB/s actually contains local rank traffic." That is why 90 GB/s can exceed what one 400 Gb/s (50 GB/s per direction) ConnectX-7 port carries on its own.
 
-- **NCCL EP** (`nccl-ep-v0.1.0`, released June 8, 2026 in the NVIDIA/nccl repository): NVIDIA's own MoE expert-parallel dispatch/combine library, built on the NCCL device API's LSA and GIN modes. It covers the same job as DeepEP. HT (high-throughput) mode supports flat and expert-major layouts; LL (low-latency) mode supports expert- and rank-major layouts with a top-K limit of 9. Its handles work inside CUDA Graphs, and an active-rank mask marks failed ranks so the remaining ranks keep communicating instead of aborting the process.
+- **NCCL EP** (`nccl-ep-v0.1.0`, released June 8, 2026 in the NVIDIA/nccl repository): NVIDIA's own MoE expert-parallel dispatch/combine library, built on the NCCL device API's LSA and GIN modes. It covers the same job as DeepEP. HT (high-throughput) mode supports flat and expert-major layouts; LL (low-latency) mode supports expert- and rank-major layouts. Its handles work inside CUDA Graphs, and an active-rank mask marks failed ranks so the remaining ranks keep communicating instead of aborting the process.
 - **NVSHMEM-based inference kernels** — before NCCL's device API existed, custom tensor-parallel and expert-parallel kernels reached for NVSHMEM directly to get one-sided `put`/`get` from inside a kernel; NVSHMEM remains the PGAS substrate of choice where a project's build does not yet track NCCL 2.28+.
 - **IBGDA-enabled inference engines** — serving stacks that need to post RDMA work requests from inside a GPU kernel (rather than via a CPU-mediated doorbell) use IBGDA specifically to keep the CPU off the per-token dispatch path in expert-parallel serving.
 - **Copy Engine collectives in bandwidth-bound AllGather/AlltoAll steps** — any workload whose SMs are already saturated by compute (a GEMM-bound MoE FFN, a fully-occupied attention kernel) is a candidate for routing its AllGather/AlltoAll through NCCL 2.28's CE path instead of an SM-resident collective kernel, trading a modest bandwidth difference (780 vs. 620 GB/s measured, Section 4.3) for zero SM contention.
 - **vLLM and TensorRT-LLM tensor-parallel inference**, per the parent module's Section 7, already issue host-launched `ncclAllReduce` after every sharded block; the device-API and CE-collective paths in this file are the next step past that for the specific case where the collective and the surrounding compute kernel should be fused rather than sequenced.
 - **`ncclDevCommRequirements`'s `ginConnectionType` field** exists because GIN can be provisioned over more than one connection style for a given node; a deployment picks the type its NIC/driver combination supports, the same way the parent module's `NCCL_IB_HCA` restricts which InfiniBand adapter a host-launched collective may use for GPUDirect RDMA — device-initiated networking still has to be told which physical path it may take.
-- **PyTorch 2.10+ and CUDA 12.3+ (SM90) requirements gating DeepEP** reflect that device-initiated communication is not a drop-in for an older stack — a team evaluating whether to adopt it has to check toolkit and framework floors alongside the GPU generation, not just whether the hardware is Hopper-class or newer.
+- **Hopper-or-newer, PyTorch 2.10+ and NCCL 2.32.3+ requirements gating DeepEP V2.5** reflect that device-initiated communication is not a drop-in for an older stack — a team evaluating whether to adopt it has to check NCCL and framework floors alongside the GPU generation, not just whether the hardware is Hopper-class or newer.
 
 ---
 
@@ -420,7 +455,7 @@ Topology detection still happens at communicator setup — `ncclCommInitRank`/`n
 | Device-API LSA | Cheapest device-initiated path (a pointer dereference), lowest latency intra-node | Only reaches P2P-capable peers — no path across nodes |
 | Device-API Multimem | Offloads reduction into the switch ASIC, same as NVLS but callable from inside a kernel | Requires NVLink SHARP hardware (NVSwitch, Hopper-class fabric or later) |
 | Device-API GIN | The only device-initiated path that crosses the network; removes host round trip for cross-node fusion | Needs Volta+/driver >= 510.40.3, CUDA 12.2+ (12.5+ for host RMA setup); more setup than LSA |
-| Copy Engine (CE) collectives | Zero SM occupancy — frees the SM budget entirely for compute; 1.25x over SM-based AllGather in NVIDIA's own measurement | Host-launched only (not fusable into a kernel's own compute the way the device API is); limited to AllGather/AlltoAll shapes |
+| Copy Engine (CE) collectives | Zero SM occupancy — frees the SM budget entirely for compute; 1.25x over SM-based AllGather in NVIDIA's own measurement | Host-launched only (not fusable into a kernel's own compute the way the device API is); limited to data-movement collectives (AllGather, AlltoAll, Gather, Scatter) within one NVLink domain; needs symmetric windows and `NCCL_CTA_POLICY_ZERO` |
 | One-shot device-initiated allreduce | Minimal latency, single round | Per-rank traffic scales with N — poor for large messages |
 | Two-shot device-initiated allreduce | Bandwidth-optimal `2(N-1)/N` traffic, same as the host-launched ring | More rounds, more barrier overhead than one-shot |
 | NVSHMEM | Mature, broad ecosystem adoption predating NCCL's device API | A separate library/build dependency from NCCL, with its own symmetric-heap model to learn |
@@ -467,7 +502,7 @@ __global__ void badKernel(ncclDevComm devComm, ncclWindow_t win, float* d_buf, i
     // at runtime, and on some paths this manifests as a silent wrong-data
     // bug rather than a crash, because the pointer arithmetic still "works",
     // it just points at memory nobody registered as symmetric.
-    float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, 1);
+    float* peerPtr = (float*)ncclGetLsaPointer(win, 0, 1);
     peerPtr[threadIdx.x] = d_buf[threadIdx.x];
 }
 ```
@@ -477,12 +512,13 @@ Device-side addressing has no host round trip to catch a bad window at call time
 ```cpp
 // FIX -- register the window before any kernel that will address it launches
 float* d_buf;
-cudaMalloc(&d_buf, N * sizeof(float));
+NCCLCHECK(ncclMemAlloc((void**)&d_buf, N * sizeof(float)));
 ncclWindow_t win;
-NCCLCHECK(ncclCommWindowRegister(comm, d_buf, N * sizeof(float), &win, /*flags=*/0));
+NCCLCHECK(ncclCommWindowRegister(comm, d_buf, N * sizeof(float), &win,
+                                 NCCL_WIN_COLL_SYMMETRIC));
 
 goodKernel<<<grid, block>>>(devComm, win, d_buf, N);
-// Inside goodKernel, ncclGetLsaPointer(devComm, win, peer) now returns a
+// Inside goodKernel, ncclGetLsaPointer(win, offset, peer) now returns a
 // pointer into a window with the SAME relative layout on every rank.
 ```
 
@@ -490,7 +526,7 @@ goodKernel<<<grid, block>>>(devComm, win, d_buf, N);
 
 ```cpp
 // BROKEN -- thread reads gathered[] before the peer's put() is guaranteed visible
-float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, peer);
+float* peerPtr = (float*)ncclGetLsaPointer(win, offset, peer);
 peerPtr[tid] = myData[tid];         // one-sided write, no acknowledgment
 float result = gathered[tid];       // may read stale data -- no barrier between
                                      // "I wrote" and "you may now read"
@@ -500,9 +536,10 @@ A one-sided `put()` is exactly that — one-sided. There is no implicit synchron
 
 ```cpp
 // FIX -- an explicit barrier session separates "writes issued" from "safe to read"
-float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, peer);
+float* peerPtr = (float*)ncclGetLsaPointer(win, offset, peer);
 peerPtr[tid] = myData[tid];
-ncclLsaBarrierSession(devComm, /*barrierIdx=*/0).sync();   // every rank waits here
+ncclLsaBarrierSession<ncclCoopCta> bar{ncclCoopCta(), devComm, ncclTeamTagLsa(), blockIdx.x};
+bar.sync(ncclCoopCta(), cuda::memory_order_acq_rel);   // every LSA rank waits here
 float result = gathered[tid];   // now guaranteed visible
 ```
 
@@ -526,10 +563,10 @@ float result = gathered[tid];   // now guaranteed visible
 | **NCCL EP** (v0.1.0, June 2026) | MoE dispatch/combine on LSA and GIN, HT and LL modes, CUDA-Graph-compatible handles, active-rank mask for failed ranks |
 | **nccl4py** (0.6.0, September 23, 2026) | NCCL's Python bindings; 0.6.0 adds experimental CuTe DSL device functions for reduce and copy over LSA windows, multimem pointers, and local tensors (`lsa_reduce_sum()`, `multimem_copy()`, `local_reduce_sum_copy()`) |
 | **`ncclCommWindowRegister`** | Registers a buffer as a symmetric memory window across every rank — the precondition for any device-side addressing |
-| **Copy Engine (CE) collectives** (NCCL 2.28+) | Host-launched AllGather/AlltoAll that execute on copy-engine DMA hardware instead of an SM-resident kernel — zero SM occupancy |
+| **Copy Engine (CE) collectives** (NCCL 2.28+) | Host-launched AllGather, AlltoAll, Gather, and Scatter within one NVLink domain that execute on copy-engine DMA hardware instead of an SM-resident kernel — zero SM occupancy; enabled by symmetric-window registration plus `NCCL_CTA_POLICY_ZERO` |
 | **NVSHMEM** | NVIDIA's PGAS library for GPU-to-GPU one-sided `put`/`get`, addressed from inside a kernel; predates and remains an alternative to the NCCL device API |
 | **IBGDA** (GPUDirect Async, kernel-initiated networking) | Lets a kernel post an RDMA work request directly, removing the CPU from the network-doorbell step entirely |
-| **DeepEP** (github.com/deepseek-ai/DeepEP) | MoE dispatch/combine kernels with FP8 support; v2 runs on the NCCL Gin backend behind a unified `ElasticBuffer` interface |
+| **DeepEP** (github.com/deepseek-ai/DeepEP) | MoE dispatch/combine kernels with FP8 support; runs on the NCCL Gin backend, with V2.5's `EPBuffer`/`EngramBuffer`/`PPBuffer`/`BucketBuffer` replacing V2's single `ElasticBuffer` |
 | **`EventOverlap`** | DeepEP's interface for overlapping communication with independent computation on separate streams |
 | **ConnectX-7 (CX7)** | The RDMA-capable NIC DeepEP's measured internode numbers (Section 7) are reported against |
 | **`torch.library.custom_op`** | The registration path a device-initiated fused kernel typically needs to become a differentiable, graph-capturable PyTorch operator — owned by `python_gpu_ecosystem`, not re-taught here |
@@ -559,20 +596,20 @@ A barrier session is missing. `put()` is a one-sided operation with no implicit 
 No — the physical link bandwidth is exactly the same whether a byte is pushed by a host-launched collective or a kernel's own `put()`. What changes is *when* the transfer is allowed to start: device-initiated communication can begin the instant a kernel's own tile of data is ready, overlapping communication with that same kernel's remaining compute, which a stream-ordered host-launched collective structurally cannot do. Reaching for the device API on a large, phase-separated collective with no overlap opportunity buys nothing over the parent module's host-launched ring.
 
 **Q: What are Copy Engine (CE) collectives, and why do they matter for an SM-starved kernel?**
-**Short:** CE collectives offload AllGather/AlltoAll onto copy-engine DMA hardware instead of an SM-resident kernel, so they cost zero SMs and free that budget for compute.
-CE collectives, new in NCCL 2.28, offload AllGather and AlltoAll onto the GPU's copy engines — the same DMA hardware `cudaMemcpyAsync` uses — instead of running as an SM-resident kernel. Measured on 8 Blackwell GPUs, CE Multicast AllGather peaks at ~780 GB/s versus ~620 GB/s for the SM-based path, a 1.25x gain, but the number that matters more for a kernel author is zero SMs consumed. A GEMM or attention kernel that is already using every SM for useful FLOPs has no room to also host a communication kernel, and CE collectives are the way to move that traffic without taking any of those SMs away.
+**Short:** CE collectives run data-movement collectives such as AllGather and AlltoAll on copy-engine DMA hardware instead of an SM-resident kernel, so they cost zero SMs and free that budget for compute.
+CE collectives, new in NCCL 2.28, run AllGather, AlltoAll, Gather, and Scatter within one NVLink domain on the GPU's copy engines — the same DMA hardware `cudaMemcpyAsync` uses — instead of as an SM-resident kernel. You enable them by registering the buffers in symmetric windows and setting `NCCL_CTA_POLICY_ZERO` in the communicator config. On one 8-GPU Blackwell node, NVIDIA's chart shows CE Multicast AllGather peaking around 780 GB/s versus about 620 GB/s for the SM-based path at 4 GB, a 1.25x gain, but the number that matters more for a kernel author is zero SMs consumed. A GEMM or attention kernel that is already using every SM for useful FLOPs has no room to also host a communication kernel, and CE collectives are the way to move that traffic without taking any of those SMs away.
 
 **Q: What happened to DeepEP's NVSHMEM dependency?**
-**Short:** DeepEP v2 removed it — dispatch and combine now run on the NCCL Gin backend, unified behind a single ElasticBuffer interface.
-DeepEP v2 moved off NVSHMEM entirely and onto the NCCL Gin backend, which NVIDIA describes as "header-only & lightweight." This unified the previously separate high-throughput and low-latency kernel paths behind a single `ElasticBuffer` interface. This is worth stating explicitly because a lot of existing documentation and commentary still describes DeepEP as NVSHMEM-based — accurate for v1, wrong for the current architecture.
+**Short:** It is gone — DeepEP V2 moved dispatch and combine to the NCCL Gin backend, and V2.5 removed V1 and NVSHMEM from the codebase entirely.
+DeepEP V2 (April 2026) moved dispatch and combine off NVSHMEM and onto the NCCL Gin backend, which its README calls lightweight, and unified the previously separate high-throughput and low-latency kernel paths behind a single `ElasticBuffer` interface. V2.5 (September 2026) went further: it fully removed V1, including its APIs and NVSHMEM backend, and split `ElasticBuffer` into `EPBuffer`, `EngramBuffer`, `PPBuffer`, and `BucketBuffer`. This is worth stating explicitly because a lot of existing documentation and commentary still describes DeepEP as NVSHMEM-based — accurate for v1, wrong for the current architecture.
 
 **Q: What is NCCL EP, and what does it offer that a third-party MoE library like DeepEP does not?**
 **Short:** NVIDIA's own MoE dispatch/combine library on the NCCL device API (v0.1.0, June 2026), shipped in the NCCL repo, with an active-rank mask that routes around failed ranks.
-NCCL EP is an NCCL API extension for Mixture-of-Experts dispatch and combine, released as v0.1.0 on June 8, 2026 in the NVIDIA/nccl repository. It runs on the device API's LSA mode inside a node and GIN across nodes, and offers two modes like DeepEP: HT (high-throughput, flat and expert-major layouts) and LL (low-latency, expert- and rank-major layouts, top-K up to 9). Two points set it apart. It is versioned and tested with NCCL itself, so a team does not track a separate project's CUDA, PyTorch, and NCCL floors. And it has an active-rank mask: a failed rank is marked and left out of later dispatches, so the job keeps running instead of aborting. Its handles are CUDA-Graph compatible, which matters for decode loops that replay a captured graph per token.
+NCCL EP is an NCCL API extension for Mixture-of-Experts dispatch and combine, released as v0.1.0 on June 8, 2026 in the NVIDIA/nccl repository. It runs on the device API's LSA mode inside a node and GIN across nodes, and offers two modes like DeepEP: HT (high-throughput, flat and expert-major layouts) and LL (low-latency, expert- and rank-major layouts). Two points set it apart. It lives in the NCCL repository and, per its release notes, depends only on NCCL, with all CUDA IPC references removed. And it has an active-rank mask: a failed rank is marked and left out of later communication, so the job keeps running instead of aborting. Its handles are CUDA-Graph compatible, which matters for decode loops that replay a captured graph per token.
 
-**Q: In DeepEP's measured table, EP 8x2 uses 12 SMs at 90 GB/s RDMA while EP 8x4 uses 6 SMs at 61 GB/s. What does that tradeoff represent?**
-**Short:** Doubling the SM budget from 6 to 12 buys roughly 1.5x higher per-GPU RDMA bandwidth — a direct SM-for-bandwidth tradeoff a kernel author chooses explicitly.
-It represents a direct SM-for-bandwidth tradeoff: doubling the communication kernel's SM allocation from 6 to 12 raises measured RDMA dispatch bandwidth from 61 to 90 GB/s, roughly 1.5x. Since every SM spent on communication is an SM not running the MoE FFN's GEMMs, a kernel author picks the topology (EP 8x2 vs. 8x4) based on whether the workload is more bandwidth-starved or more SM-starved at that point in the pipeline — there is no universally correct choice.
+**Q: In DeepEP's measured table, EP 8x2 uses 12 SMs at 90 GB/s RDMA while EP 8x4 uses 6 SMs at 61 GB/s. What does that comparison show, and what does it not show?**
+**Short:** It shows SM count is a reported cost of dispatch; it is not a controlled SM-versus-bandwidth experiment, because the node count changes too and the figures are logical bandwidth.
+It shows that DeepEP treats the SM budget as a first-class cost, reported next to bandwidth. It is not a controlled experiment that doubling SMs buys 1.5x bandwidth: the two rows also differ in topology (8 GPUs per node across 2 nodes versus 4 nodes), and the README notes the figures are logical bandwidth that "contains local rank traffic," a share that differs between the two layouts. To learn what extra SMs buy on your own topology, sweep the SM count with the node count fixed. Every SM spent on communication is still an SM not running the MoE FFN's GEMMs, so the measurement is worth making.
 
 **Q: What does IBGDA remove from the network path that GPUDirect RDMA alone does not?**
 **Short:** IBGDA lets the GPU kernel itself post the RDMA work request, so the CPU is never invoked even to ring the network doorbell that GPUDirect RDMA still needs.
@@ -623,7 +660,7 @@ Because a device-initiated communication kernel is not free in the way a host-la
 - **Never issue a device-side `put()` without a barrier session downstream of it before any reader trusts the destination.** Treat every one-sided write as unobserved until a `ncclLsaBarrierSession`/`ncclGinBarrierSession` proves otherwise — the same discipline `synchronization_and_atomics` teaches for mbarrier phase parity, just scoped across GPUs.
 - **Match the device-API mode to the peer's actual location, and verify topology rather than assume it.** LSA has no path across nodes; picking the wrong mode is a silent correctness failure, not a graceful fallback.
 - **Reach for Copy Engine collectives when the compute kernel is SM-starved, and for the device API when it is not.** These are complementary answers to the same SM-budget question, not competing options for the same job — pick based on which resource (SMs vs. latency) is actually binding.
-- **Verify DeepEP's dependency surface against the version you actually deploy, not against older commentary.** v1's NVSHMEM dependency and v2's NCCL Gin dependency are architecturally different; check the README/requirements for the pinned version before assuming either.
+- **Verify DeepEP's dependency surface against the version you actually deploy, not against older commentary.** v1 depended on NVSHMEM; V2 runs on the NCCL Gin backend; V2.5 removed NVSHMEM entirely and requires NCCL 2.32.3+. Check the README/requirements for the pinned version before assuming any of them.
 - **Benchmark measured bandwidth against the correct per-direction ceiling, exactly as the parent module's `nccl-tests` section teaches for host-launched collectives.** A device-initiated collective's `busbw` should still be read against NVLink's per-direction figure (~900 GB/s on B200), not the bidirectional headline — the unit-convention trap does not go away just because the call moved into a kernel.
 - **Keep symmetric-window registration and kernel launch in the same code path, not scattered across setup code that can drift out of sync.** A window registered once at startup but a kernel that later assumes a different buffer layout is exactly the class of bug Section 10's first pitfall describes, and it is easiest to prevent by keeping registration adjacent to the kernel that depends on it.
 
@@ -658,30 +695,34 @@ This pays for the entire router kernel's duration before a single token can move
 
 ```cpp
 __global__ void routerAndDispatchFused(ncclDevComm devComm, ncclWindow_t win,
-                                        const float* tokens, int tokenDim,
-                                        int numTokens, int numGPUs) {
+                                        size_t offset, const float* tokens,
+                                        int tokenDim, int numTokens) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= numTokens) return;
 
-    // Router decision computed right here, in this thread/block.
-    int destGPU = computeExpertAssignment(tokens, t);   // routing logic
+    // No early return: every thread of the CTA must reach the barrier below.
+    if (t < numTokens) {
+        // Router decision computed right here, in this thread/block.
+        int destGPU = computeExpertAssignment(tokens, t);   // routing logic
 
-    // FIX: dispatch THIS token to its expert the instant its destination
-    // is known -- no waiting for sibling tokens, no host round trip.
-    float* peerPtr = (float*)ncclGetLsaPointer(devComm, win, destGPU);
-    for (int d = 0; d < tokenDim; ++d) {
-        peerPtr[t * tokenDim + d] = tokens[t * tokenDim + d];
+        // FIX: dispatch THIS token to its expert the instant its destination
+        // is known -- no waiting for sibling tokens, no host round trip.
+        float* peerPtr = (float*)ncclGetLsaPointer(win, offset, destGPU);
+        for (int d = 0; d < tokenDim; ++d) {
+            peerPtr[t * tokenDim + d] = tokens[t * tokenDim + d];
+        }
     }
 
     // Barrier before any expert kernel reads its assigned tokens --
     // required precisely because put() gives no implicit acknowledgment
     // (Section 10's second pitfall).
-    ncclLsaBarrierSession(devComm, /*barrierIdx=*/0).sync();
+    ncclLsaBarrierSession<ncclCoopCta> bar{ncclCoopCta(), devComm,
+                                           ncclTeamTagLsa(), blockIdx.x};
+    bar.sync(ncclCoopCta(), cuda::memory_order_release);
 }
 ```
 
 Every token's dispatch now overlaps with the router's own compute for every *other* token still being processed — the tile-by-tile overlap pattern from Section 5's timing diagram, applied to per-token routing instead of per-tile GEMM output. This is structurally the same shift DeepEP v2 made in production: dispatch and combine fused into kernels that issue device-initiated transfers as soon as each token's destination is known, rather than as a separate host-launched step after routing completes.
 
-**Measured shape of the win, following DeepEP's own reported numbers (Section 7):** on SM90 with a CX7 NIC at EP 8x4 topology, dispatch achieves 61 GB/s RDMA bandwidth using only 6 SMs — a small enough SM footprint that it runs concurrently with the router and expert-FFN kernels rather than serializing after them. The team's actual win was not a faster wire (identical hardware, identical NVLink/NIC ceiling) but the elimination of the "wait for the whole router kernel, then wait for a host round trip, then dispatch" sequence — replaced by dispatch that starts as each token's routing decision lands, which is exactly what a host-launched collective, however well-tuned, structurally cannot do.
+**Measured shape of the win, and what DeepEP's numbers do and do not say (Section 7):** this single-node case uses LSA over NVLink, so DeepEP's RDMA rows do not apply to it directly; its V2 README reports 6 SMs for 61 GB/s RDMA dispatch at EP 8x4 on SM90 with CX7 (a multi-node setup), which shows how small a dispatch kernel's SM footprint can be when it runs alongside the router and expert-FFN kernels. Measure the single-node LSA path yourself. The team's actual win was not a faster wire (identical hardware, identical NVLink/NIC ceiling) but the elimination of the "wait for the whole router kernel, then wait for a host round trip, then dispatch" sequence — replaced by dispatch that starts as each token's routing decision lands, which is exactly what a host-launched collective, however well-tuned, structurally cannot do.
 
 **What this case study deliberately leaves out**: MoE routing algorithms (top-k gating, load-balancing losses, capacity factors) belong to [`llm/mixture_of_experts`](../../llm/mixture_of_experts/mixture_of_experts.md) — this case study assumes a routing decision already computed and focuses only on what happens to a token once its destination is known. Expert-parallel degree selection and its interaction with data/tensor parallelism belong to [`ml/distributed_training`](../../ml/distributed_training/distributed_training.md).

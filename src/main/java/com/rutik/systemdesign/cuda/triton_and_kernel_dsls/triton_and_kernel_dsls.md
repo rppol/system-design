@@ -259,7 +259,14 @@ and its release notes add Ampere and Hopper (`sm_80` and later) as supported tar
 view types, `ct::strided_view` for stencil access and `ct::gather_scatter_view` for
 sparse access, gave Tile IR a developer-preview `sm_107` (Rubin) target, and added
 Programmatic Dependent Launch to Tile IR (`cuda_tile.gdc_launch_dependents_tko`) and to
-Tile Python 1.6.0.
+Tile Python 1.6.0. CUDA 13.5, the current release, adds `ct::scaled_mma()` for
+block-scaled matrix multiplication to Tile C++, along with `ct::insert()`, `ct::repack()`,
+masked atomic read-modify-write on partition and strided views, `__nv_fp8_e8m0`,
+`__nv_fp8_ue5m3` and `__nv_fp4_e2m1` tile elements, and a `num_worker_warps_per_cta` hint
+that accepts any power of two from 1 to 32 (previously only 4 and 8). Tile IR gains
+multi-GPU `multimem` load-reduce, reduce and store operations on multicast-backed views
+for `sm_100`, `sm_103` and `sm_107` over an NVSwitch fabric with NVLink SHARP, and Tile
+Python 1.7.0 ships with it.
 
 **What changes when the unit of computation is a tile instead of a thread.** Every
 kernel in §6 eventually names a thread: `threadIdx.x` in CUDA C++, or a
@@ -1286,7 +1293,7 @@ multi-day CUDA C++ investment.
 | **JAX / Pallas** | Python DSL, block-level (Triton-like) | Fused kernels inside JAX programs, TPU + GPU targets | Closest philosophical peer to Triton; JAX-native instead of PyTorch-native |
 | **ThunderKittens** | C++ template library | Hopper/Blackwell-specific Tensor-Core kernel building blocks | Lower-level than CUTLASS's classic API; targets newest hardware features directly |
 | **CuTe DSL** | Python DSL over CUTLASS's CuTe layout algebra | Tiling, TMA copies, and `tcgen05` MMAs expressed from Python without dropping to PTX or C++ templates | Ships inside CUTLASS 4.8.0 (September 22, 2026), still labeled public beta; 4.8.0 adds initial Rubin (SM107) support and an opt-in `cute_ext` compiler pipeline preview. The language FlashAttention-4 is written in end to end; see §7 and [tensor_cores_and_mixed_precision §4.1b](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) |
-| **CUDA Tile (cuTile)** | Python and C++ (CUDA 13.3+), tile-level, compiles to CUDA Tile IR | Compiler-owned thread mapping, TMA staging and Tensor-Core dispatch from a single tile-shaped kernel | NVIDIA-native peer to Triton. CUDA 13.1 shipped the Python DSL; CUDA 13.3 added C++ and Ampere/Hopper targets (CC 8.0+); CUDA 13.4 added C++ strided and gather/scatter views, a Tile IR `sm_107` developer preview, and PDL. See §4.4 |
+| **CUDA Tile (cuTile)** | Python and C++ (CUDA 13.3+), tile-level, compiles to CUDA Tile IR | Compiler-owned thread mapping, TMA staging and Tensor-Core dispatch from a single tile-shaped kernel | NVIDIA-native peer to Triton. CUDA 13.1 shipped the Python DSL; CUDA 13.3 added C++ and Ampere/Hopper targets (CC 8.0+); CUDA 13.4 added C++ strided and gather/scatter views, a Tile IR `sm_107` developer preview, and PDL; CUDA 13.5 added `ct::scaled_mma()` block-scaled MMA and multi-GPU `multimem` Tile IR operations. See §4.4 |
 | **`compute-sanitizer` / `cuda-gdb`** | N/A (CUDA C++ toolchain) | Race/memcheck, step debugging | Applies to Triton's *generated* SASS only indirectly — Triton's own error surface is less mature |
 | **Nsight Compute** | N/A (profiler) | Occupancy, memory-throughput, Tensor-Core utilization for ANY of the above | See [profiling_and_performance_analysis](../profiling_and_performance_analysis/profiling_and_performance_analysis.md) — the profiler doesn't care which DSL produced the SASS |
 

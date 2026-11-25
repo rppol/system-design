@@ -6,7 +6,7 @@ This is a deep dive off [streams_events_and_concurrency](streams_events_and_conc
 
 ## 1. Concept Overview
 
-A **green context** is an in-process partition of a CUDA device's streaming multiprocessors. Where an ordinary CUDA context sees the whole device — every SM eligible to run any kernel launched into it — a green context is built from a *resource descriptor* that names a specific subset of SMs, and every stream created against that green context only ever dispatches blocks onto that subset. Two kernels launched into two green contexts built from disjoint SM subsets cannot contend for the same SM, because neither one's blocks are ever eligible to land there. That is a stronger guarantee than anything streams, events, or priorities can offer on their own: those three coordinate *when* work runs on a shared pool of SMs, while a green context changes *which* SMs are even in the pool a given kernel can see.
+A **green context** is an in-process partition of a CUDA device's streaming multiprocessors. Where an ordinary CUDA context sees the whole device — every SM eligible to run any kernel launched into it — a green context is built from a *resource descriptor* that names a specific subset of SMs, and every stream created against that green context only ever dispatches blocks onto that subset. Two kernels launched into two green contexts built from disjoint SM subsets do not contend for the same SM, because neither one's blocks are eligible to land there. That is a stronger guarantee than anything streams, events, or priorities can offer on their own: those three coordinate *when* work runs on a shared pool of SMs, while a green context changes *which* SMs are even in the pool a given kernel can see. It is still not a guarantee of concurrency: NVIDIA's driver API notes say that even with disjoint SM partitions, kernels in different green contexts are not guaranteed to run concurrently or to make forward progress, because other shared resources (work queues among them) can create a dependency.
 
 Multiple green contexts can exist in the same process at once, and CUDA explicitly permits their SM sets to overlap — oversubscription is legal, not an error condition, which matters because it means "green context" alone does not imply "hard isolation"; it implies "hard isolation among green contexts whose descriptors were built from disjoint SM subsets." Support first shipped through the CUDA Driver API. **CUDA 13.1 exposed green contexts through the CUDA Runtime API** via the "execution context" (EC) abstraction, and NVIDIA's own guidance is now to prefer it: the Programming Guide states that "with the runtime exposure of green contexts, using the CUDA runtime API directly is strongly recommended." This file covers both surfaces, with the driver API shown first because its five-call shape is what the runtime API still mirrors step-for-step — though not name-for-name; see §6.3 for where the two surfaces' naming actually diverges.
 
@@ -14,7 +14,7 @@ Multiple green contexts can exist in the same process at once, and CUDA explicit
 
 ## 2. Intuition
 
-> **One-line analogy**: Streams are lanes painted on a shared highway — cars still merge for the same on-ramp under congestion. A green context is building a second, physically separate highway next to the first: nothing on it can ever be blocked by traffic on the other one, because the two roads share no pavement.
+> **One-line analogy**: Streams are lanes painted on a shared highway — cars still merge for the same on-ramp under congestion. A green context is building a second highway next to the first with its own lanes: traffic on one never takes the other's lanes, though both still share the same exits (memory bandwidth, L2, work queues).
 
 **Mental model**: Every SM on the device is, by default, fair game for any kernel launched into the process's primary context. A green context is created by drawing a fence around a fixed subset of those SMs and handing that fenced-off group its own context handle. A stream created *against* that green-context handle (`cuGreenCtxStreamCreate`) only ever dispatches its kernels' blocks onto SMs inside the fence — the CUDA work distributor simply does not consider the SMs outside it as candidates. Nothing about queue order, priority weighting, or "the scheduler prefers X" is involved; the SMs outside the fence are invisible to that stream's launches, full stop.
 
@@ -27,7 +27,7 @@ Multiple green contexts can exist in the same process at once, and CUDA explicit
 ## 3. Core Principles
 
 - **A green context is a subset of one device's SMs, valid only within the process that created it.** It is not a separate device, not a separate driver context in the MPS sense, and it confers no protection across process boundaries — that is MPS's and MIG's job, not this one.
-- **The partition is enforced by the work distributor, not by a scheduling preference.** Once a stream is bound to a green context, the hardware simply never assigns that stream's blocks to an SM outside the context's resource set. There is no "usually" here, unlike stream priority.
+- **The partition is enforced by the driver and work distributor, not by a scheduling preference — with two documented exceptions that only ever add SMs.** Once a stream is bound to a green context, its blocks are not assigned to SMs outside the context's resource set. NVIDIA's driver API notes name two cases where work can run on *more* SMs than provisioned, never fewer: under Volta+ MPS with `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`, and on compute capability 9.x once a module using dynamic parallelism (CDP) is loaded, when green-context kernels may share an additional 2 SMs.
 - **SM count only — memory bandwidth, L2, and HBM capacity are never partitioned.** Every green context in a process draws from the same shared memory subsystem. A green context gives compute isolation, not end-to-end performance isolation; a neighbor's memory-bound kernel can still degrade a green context's kernel through bandwidth contention even though the two never touch the same SM.
 - **`minCount` is a documented floor, and the driver silently rounds UP.** Ask for an SM count that isn't a legal multiple of the architecture's granularity and every created group is guaranteed *at least* that many SMs — aligned up, never down. That inflation is not free: on a fixed device budget it means **fewer groups get created** than a naive `total / minCount` division would suggest, and the true group count (`nbGroups`, overwritten in place by the call) and true per-group size (`cuGreenCtxGetDevResource`) both have to be read back, never assumed.
 - **Overlapping (oversubscribed) green contexts are legal, and the driver will not stop you from creating them.** Whether that is a deliberate soft-partition strategy or a correctness bug depends entirely on whether the programmer *intended* two contexts to share SMs — the API gives no signal either way.
@@ -42,10 +42,10 @@ Multiple green contexts can exist in the same process at once, and CUDA explicit
 
 | Surface | Introduced | Status |
 |---|---|---|
-| **Driver API** (`cuGreenCtx*`, `cuDevSmResourceSplitByCount`, `cuDevResourceGenerateDesc`) | Original green-context support | Still fully functional; the lower-level surface the runtime API is built on |
-| **Runtime API** (`cudaGreenCtxCreate`, `cudaDevSmResourceSplit`, `cudaExecutionCtxStreamCreate`) | **CUDA 13.1**, via the "execution context" (EC) abstraction | **Strongly recommended by NVIDIA going forward** |
+| **Driver API** (`cuGreenCtx*`, `cuDevSmResourceSplitByCount`, `cuDevSmResourceSplit`, `cuDevResourceGenerateDesc`) | Original green-context support | Still fully functional; the lower-level surface the runtime API is built on |
+| **Runtime API** (`cudaGreenCtxCreate`, `cudaDevSmResourceSplitByCount`, `cudaDevSmResourceSplit`, `cudaExecutionCtxStreamCreate`) | **CUDA 13.1**, via the "execution context" (EC) abstraction | **Strongly recommended by NVIDIA going forward** |
 
-The two surfaces mirror each other call-for-call — query a resource, split it, generate a descriptor, create the context, create a stream against it — so everything in §6 that is shown in the driver API has a direct runtime-API analog with the `cu` prefix swapped for `cuda` and camelCase.
+The two surfaces mirror each other step-for-step — query a resource, split it, generate a descriptor, create the context, create a stream against it — but not name-for-name: past creation, the runtime calls are `cudaExecutionCtx*`, not `cudaGreenCtx*` (§6.3). Each surface has two split calls: `...SplitByCount` creates one or more groups of the *same* size, and `...Split` (with an array of per-group parameters) creates groups of *different* sizes in a single call.
 
 ### 4.2 Where green contexts sit relative to MPS and MIG
 
@@ -93,10 +93,14 @@ The driver models more than just SMs under the same descriptor mechanism, though
 
 | Flag | Value | Effect |
 |---|---|---|
-| `CU_GREEN_CTX_NONE` | `0x0` | No special behavior at creation |
-| `CU_GREEN_CTX_DEFAULT_STREAM` | `0x1` | Green context gets its own default stream, analogous to a normal context's default stream |
-| `CU_DEV_SM_RESOURCE_GROUP_DEFAULT` | `0` | Standard SM-group split behavior |
-| `CU_DEV_SM_RESOURCE_GROUP_BACKFILL` | `0x1` | Split behavior for backfilling groups — see the coscheduled-count note in §6.2 |
+| `CU_GREEN_CTX_NONE` | `0x0` | `cuGreenCtxCreate`: no special behavior at creation |
+| `CU_GREEN_CTX_DEFAULT_STREAM` | `0x1` | `cuGreenCtxCreate`: creates a default stream to use inside the green context |
+| `CU_DEV_SM_RESOURCE_SPLIT_IGNORE_SM_COSCHEDULING` | `0x1` | `cuDevSmResourceSplitByCount`: lowers the minimum SM count and alignment and treats each SM independently, at the cost of features such as large clusters on CC 9.0+ |
+| `CU_DEV_SM_RESOURCE_SPLIT_MAX_POTENTIAL_CLUSTER_SIZE` | `0x2` | `cuDevSmResourceSplitByCount`, CC 9.0+ only: tries to create groups that allow maximally sized thread-block clusters |
+| `CU_DEV_SM_RESOURCE_GROUP_DEFAULT` | `0` | `cuDevSmResourceSplit` per-group flag: standard group formation |
+| `CU_DEV_SM_RESOURCE_GROUP_BACKFILL` | `0x1` | `cuDevSmResourceSplit` per-group flag: treats the coscheduling constraint as a hint, letting `smCount` be a non-multiple of `coscheduledSmCount` and filling the gap with other SMs |
+
+`cuDevSmResourceSplitByCount` takes `0` (default) or the `CU_DEV_SM_RESOURCE_SPLIT_*` flags; the `CU_DEV_SM_RESOURCE_GROUP_*` flags belong in the per-group parameters of `cuDevSmResourceSplit`. Passing a `GROUP` constant to the by-count call compiles because both are plain integers, but it names the wrong enum.
 
 ---
 
@@ -104,7 +108,7 @@ The driver models more than just SMs under the same descriptor mechanism, though
 
 ### H100 SXM: 132 SMs Split Three Ways, One Peel at a Time
 
-An H100 SXM device carries 132 SMs. Compute capability 9.0 requires `smCount` to be a **multiple of 8** per partition, and `cuDevSmResourceSplitByCount` produces groups that are all the *same* size for a single call — so three differently-sized partitions take three successive calls, each peeling a group off the remainder the previous call left behind. `minCount` is a floor: each call is guaranteed *at least* the requested SMs, aligned **up**.
+An H100 SXM device carries 132 SMs. Compute capability 9.0 requires `smCount` to be a **multiple of 8** per partition, and `cuDevSmResourceSplitByCount` produces groups that are all the *same* size for a single call — so the diagram below builds three differently-sized partitions with three successive by-count calls, each peeling a group off the remainder the previous call left behind. (`cuDevSmResourceSplit` can produce the same three sizes in one call, and NVIDIA's driver API notes recommend a single call wherever possible; the peel form is shown because it makes the rounding visible one step at a time.) `minCount` is a floor: each call is guaranteed *at least* the requested SMs, aligned **up**.
 
 ```
 H100 SXM -- 132 SMs total, CC 9.0 granularity = multiple of 8, three successive splits
@@ -227,7 +231,7 @@ CUgreenCtx build_green_context(CUdevice device, unsigned int requested_sm_count,
     unsigned int nb_groups = 1;
     DRV_CHECK(cuDevSmResourceSplitByCount(&result_group, &nb_groups,
                                            &device_sm_resource, &remainder,
-                                           CU_DEV_SM_RESOURCE_GROUP_DEFAULT,
+                                           0 /* flags */,
                                            requested_sm_count));
 
     // 3. Generate a resource descriptor from the split-off group.
@@ -246,7 +250,7 @@ CUgreenCtx build_green_context(CUdevice device, unsigned int requested_sm_count,
 
 CUstream stream_on_green_context(CUgreenCtx green_ctx, int priority) {
     CUstream stream;
-    DRV_CHECK(cuGreenCtxStreamCreate(&stream, green_ctx, CU_GREEN_CTX_NONE, priority));
+    DRV_CHECK(cuGreenCtxStreamCreate(&stream, green_ctx, CU_STREAM_NON_BLOCKING, priority));
     return stream;   // every launch on this stream is confined to green_ctx's SM set
 }
 ```
@@ -255,10 +259,10 @@ CUstream stream_on_green_context(CUgreenCtx green_ctx, int priority) {
 
 `minCount` is documented as "Minimum number of SMs required" — a floor, not a target. `smCount` must land on a legal multiple for the target architecture, and the driver enforces that by rounding **up**, never down:
 
-| Compute capability | Granularity | Notes |
+| Compute capability | Granularity (driver API) | Minimum partition, `useFlags = 0` (Programming Guide) |
 |---|---|---|
-| 7.x, 8.x, and Tegra SoC | Multiple of **2** | Ampere, Ada, older Hopper-adjacent parts |
-| **9.0 and later** | Multiple of **8** (or of `coscheduledSmCount` if provided) | Hopper (9.0) and newer; max coscheduled count is **32** |
+| 7.x, 8.x, and all Tegra SoCs | Multiple of **2**; alignment and default `coscheduledSmCount` are 2 | 2 SMs on 7.5, 4 SMs on 8.x |
+| **9.0 and later** | Multiple of `coscheduledSmCount` if provided; alignment is **8**; maximum coscheduled count is **32** | 8 SMs |
 
 The Programming Guide's own GH200 walkthrough states it plainly: "The minimum number of SMs per partition is 8" for compute capability 9.0. On an H100 (132 SMs, CC 9.0), requesting a partition of 20 SMs does not produce 20 — the driver guarantees *at least* 20 and rounds up to 24, the nearest multiple of 8 that is `>= 20` — see §5's "Querying What You Actually Got." The driver-API reference is explicit about the downstream cost of that inflation: because each group ends up larger than the caller asked for, a single call requesting several equal-sized groups "may lead to fewer groups created than purely dividing the total SM count by the minCount," and `nbGroups` is overwritten in place with the true count. There is no API-level warning when this happens — `cuDevSmResourceSplitByCount` returns `CUDA_SUCCESS` either way — so a dry run (call with `result = NULL`, which reports the group count that *would* be created via `nbGroups` without allocating anything) or comparing the requested count against `cuGreenCtxGetDevResource`'s answer afterward are the only ways to detect it.
 
@@ -309,13 +313,16 @@ A green context is not an island with respect to events. `cuGreenCtxRecordEvent`
 CUevent partition_ready;
 DRV_CHECK(cuEventCreate(&partition_ready, CU_EVENT_DEFAULT));
 
-// Record an event against green context A once its setup kernel finishes.
+// Record an event capturing all work submitted to green context A so far
+// (for example, its setup kernel).
 DRV_CHECK(cuGreenCtxRecordEvent(green_ctx_a, partition_ready));
 
-// Green context B's stream waits on that specific event before starting --
+// All future work submitted to green context B waits on that event --
 // a fine-grained cross-partition dependency, not a device-wide sync.
 DRV_CHECK(cuGreenCtxWaitEvent(green_ctx_b, partition_ready));
 ```
+
+The runtime-API equivalents are `cudaExecutionCtxRecordEvent` and `cudaExecutionCtxWaitEvent`. Both act on every stream of the context at once, which is why the Programming Guide calls them more convenient than recording and waiting on one event per stream.
 
 `cuCtxFromGreenCtx` converts a green context handle into an ordinary `CUcontext` when an API that only accepts the classic context type needs to operate against it, and `cuStreamGetGreenCtx` recovers the green context a given stream was created against — useful when a stream handle has been passed several layers deep and the caller needs to confirm which SM partition it is bound to before assuming anything about its concurrency behavior with another stream.
 
@@ -431,7 +438,7 @@ TierPool broken_build_tier_pool(CUdevice device) {
     CUdevResource remainder;
     unsigned int nb_groups = 6;   // BUG: treated as a fixed count, never re-read
     cuDevSmResourceSplitByCount(groups, &nb_groups, &device_sm_resource,
-                                 &remainder, CU_DEV_SM_RESOURCE_GROUP_DEFAULT,
+                                 &remainder, 0 /* flags */,
                                  /* minCount = */ 20);
     // minCount is a FLOOR: each group is guaranteed >= 20 SMs, rounded UP
     // to 24 (the nearest legal multiple of 8 on CC 9.0) -- not held at 20.
@@ -470,7 +477,7 @@ TierPool fixed_build_tier_pool(CUdevice device) {
     CUdevResource remainder;
     unsigned int nb_groups = 6;   // request: UP TO 6 groups
     cuDevSmResourceSplitByCount(groups, &nb_groups, &device_sm_resource,
-                                 &remainder, CU_DEV_SM_RESOURCE_GROUP_DEFAULT,
+                                 &remainder, 0 /* flags */,
                                  /* minCount = */ 20);
 
     // FIX: nb_groups was overwritten in place -- 5, not 6, on a 132-SM H100
@@ -505,7 +512,7 @@ TierPool fixed_build_tier_pool(CUdevice device) {
 | `cuDevSmResourceSplitByCount` | Split an SM resource into one or more groups | `minCount` is a floor — rounds silently UP to the architecture's granularity, which can yield fewer groups than requested; see §6.2 |
 | `cuDevResourceGenerateDesc` | Build a `CUdevResourceDesc` from one or more resource groups | Input to `cuGreenCtxCreate` |
 | `cuGreenCtxCreate` / `cuGreenCtxDestroy` | Create/destroy a green context from a descriptor | One-time setup cost; not for a hot resize loop |
-| `cuGreenCtxStreamCreate` | Create a stream bound to a green context | Every launch on this stream is confined to that context's SM set |
+| `cuGreenCtxStreamCreate` | Create a stream bound to a green context | `flags` must be `CU_STREAM_NON_BLOCKING`; launches on this stream are confined to that context's SM set (see §3 for the two documented exceptions) |
 | `cuGreenCtxGetDevResource` | Read back the SM count a green context actually holds | The only reliable way to detect the floor's up-rounding — call this, always |
 | `cuCtxFromGreenCtx` / `cuStreamGetGreenCtx` | Interop with ordinary `CUcontext`-based APIs / recover a stream's green context | Needed when a green-context stream flows into code expecting a classic context |
 | `cuGreenCtxRecordEvent` / `cuGreenCtxWaitEvent` | Cross-green-context event synchronization | Analog of `cudaStreamWaitEvent` from the parent module, scoped to green contexts |
@@ -513,7 +520,7 @@ TierPool fixed_build_tier_pool(CUdevice device) {
 | CUDA Graphs (CUDA 13.4+) | Bind a green context to event-record, host, external-semaphore, and kernel nodes | Keeps per-node SM partitioning across graph replay; see §6.6 |
 | cuBLAS (CUDA 13.3+) | GEMMs on a green-context stream | cuBLAS 13.3 added green-context support, so library GEMMs respect the partition |
 | `cuda.core` 1.0 (CUDA 13.3) | Python surface for green contexts | Splits a GPU's SMs into disjoint partitions, each with its own context and streams, without writing driver-API bindings |
-| Nsight Systems | Confirm a green context's kernels only ever land on its granted SM subset | The definitive way to verify partitioning is real, not assumed |
+| Nsight Systems / Nsight Compute | Check green-context use in a profile | Nsight Systems shows kernels from different green contexts under separate Green Context rows of the CUDA HW timeline; Nsight Compute's Session page has a Green Context Resources view with a bitmask of provisioned SMs. The Programming Guide says these verify use "to some extent," not as proof |
 | MPS control daemon | Alternative multi-process spatial-sharing mechanism | Out of scope here — see §4.2 and [`devops/ml_platform_and_gpu_infrastructure`](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) |
 | MIG (via GPU Operator / Kubernetes device plugin) | Hardware-level multi-tenant partitioning (SMs + memory + L2) | Fully out of scope here — operator concern, not a kernel-author API |
 
@@ -562,8 +569,8 @@ It returns the `CUdevResource` — including `smCount` — that the green contex
 On compute architectures 7.x, 8.x, and Tegra SoC, `smCount` must be a multiple of 2 — a fine-grained floor. On compute architecture 9.0 and later, it must be a multiple of 8 (or of `coscheduledSmCount` when provided, with a maximum coscheduled count of 32) — four times coarser. A partitioning scheme tuned against an Ampere-class multiple-of-2 assumption and ported unchanged to a Hopper-or-later device will silently get much coarser partitions than intended, because the rounding granularity itself changed, not just the SM totals.
 
 **Q: What is `CU_DEV_SM_RESOURCE_GROUP_BACKFILL` for?**
-**Short:** A split flag governing how backfilling SM groups are formed, distinct from the default group-formation behavior used for a straightforward fixed split.
-It is one of the two documented SM-group split flags (`CU_DEV_SM_RESOURCE_GROUP_DEFAULT` = `0` is the other), controlling how the split call forms backfilling groups as opposed to the standard default grouping behavior. Most straightforward "carve off N SMs into one group" splits use the default flag; the backfill flag matters when the split needs to account for coscheduled-group placement rather than a simple fixed-size cut.
+**Short:** A per-group flag for `cuDevSmResourceSplit` that treats the coscheduling constraint as a hint, so a group can reach its requested smCount even when it is not a multiple of coscheduledSmCount.
+It is a per-group flag in the parameter array passed to `cuDevSmResourceSplit`, not a flag for `cuDevSmResourceSplitByCount`. By default a group's `smCount` must be a multiple of its `coscheduledSmCount`. With `CU_DEV_SM_RESOURCE_GROUP_BACKFILL`, the driver treats that constraint as a hint: it forms as many coscheduled groupings as it can and fills the difference with other SMs to reach the requested count. The driver API docs use it for a catch-all last group (`smCount = 0` with backfill), which, unlike the remainder output, must still be a valid group.
 
 **Q: Why does the Programming Guide recommend calling `cudaInitDevice` or `cudaSetDevice` before creating a green context?**
 **Short:** A green context is built relative to a device CUDA already has an established primary context on, not as a substitute for initializing one.
@@ -582,8 +589,8 @@ Yes — `cuStreamGetGreenCtx` takes a `CUstream` handle and returns the `CUgreen
 No. A green context does not virtualize anything — there is no new device, no new address space, and no new OS-level execution environment. It is a scoping mechanism inside one CUDA process that restricts which SMs a given stream's kernel launches are eligible to run on. The isolation it provides is narrower and cheaper than virtualization, which is exactly why it cannot substitute for MPS or MIG when the requirement crosses a process or tenant boundary.
 
 **Q: A team observes that two green contexts with disjoint SM partitions still show performance interference in Nsight Systems. What is the most likely explanation?**
-**Short:** Memory-subsystem contention — HBM bandwidth or L2 — since green contexts never partition anything but SM count.
-The most likely explanation is contention on a resource the green-context partition never touched: HBM bandwidth or L2 cache, both fully shared across every green context in the process regardless of SM disjointness. Since SM sets do not overlap, the interference is not a compute-eligibility bug — it is the exact blind spot named in §8 and §9, and the fix is either to profile and reduce the memory pressure of the contending kernel or to escalate to MIG, which is the mechanism that actually partitions the memory subsystem.
+**Short:** A shared resource the SM partition never touched — HBM bandwidth, L2, or the device's work queues — since green contexts partition SMs, not concurrency.
+The most likely explanation is contention on a resource the green-context partition never touched. HBM bandwidth and L2 cache are fully shared across every green context in the process. NVIDIA's driver API notes add that even with disjoint SM partitions, concurrent execution and forward progress are not guaranteed, because other resources such as work queues can create a dependency; they suggest combining disjoint SMs with the `CU_WORKQUEUE_SCOPE_GREEN_CTX_BALANCED` work-queue configuration for the best chance of avoiding interference. So profile memory pressure first, try balanced work queues, and escalate to MIG only if the memory subsystem itself must be partitioned.
 
 ---
 
@@ -596,7 +603,7 @@ The most likely explanation is contention on a resource the green-context partit
 5. **Track claimed SM groups explicitly in application code if oversubscription must be avoided.** CUDA has no API that reports whether two green contexts' SM sets intersect — the application is the only party that can enforce a disjoint-partition invariant.
 6. **Never treat SM partitioning as a substitute for memory-bandwidth-aware kernel design.** A green context protects compute eligibility only; a memory-bound neighbor in a different partition can still degrade a protected kernel's latency through shared HBM and L2 contention.
 7. **Reach for MPS or MIG, not a green context, the moment isolation needs to cross a process boundary.** A green context's scope stops at the process it was created in — see §4.2's decision table.
-8. **Verify partitioning is real in Nsight Systems, not assumed from source code.** Confirm the profiled kernel's blocks actually land only within the granted SM subset before relying on the isolation in a latency-sensitive design.
+8. **Check partitioning in the profiler, not just in source code.** Nsight Systems puts each green context's kernels on its own Green Context row, and Nsight Compute shows the provisioned-SM bitmask; the Programming Guide calls this verification "to some extent," so pair it with the read-back from best practice 1.
 
 ---
 
@@ -666,18 +673,18 @@ struct FixedServer {
         CUdevResource decode_group, after_decode;
         unsigned int one_group = 1;
         cuDevSmResourceSplitByCount(&decode_group, &one_group, &device_sm_resource,
-                                     &after_decode, CU_DEV_SM_RESOURCE_GROUP_DEFAULT, 48);
+                                     &after_decode, 0 /* flags */, 48);
 
         CUdevResourceDesc decode_desc;
         cuDevResourceGenerateDesc(&decode_desc, &decode_group, 1);
         cuGreenCtxCreate(&decode_ctx, decode_desc, device, CU_GREEN_CTX_NONE);
-        cuGreenCtxStreamCreate(&decode_stream, decode_ctx, CU_GREEN_CTX_NONE, 0);
+        cuGreenCtxStreamCreate(&decode_stream, decode_ctx, CU_STREAM_NON_BLOCKING, 0);
 
         // Prefill gets the remainder (84 SMs -- everything decode didn't take).
         CUdevResourceDesc prefill_desc;
         cuDevResourceGenerateDesc(&prefill_desc, &after_decode, 1);
         cuGreenCtxCreate(&prefill_ctx, prefill_desc, device, CU_GREEN_CTX_NONE);
-        cuGreenCtxStreamCreate(&prefill_stream, prefill_ctx, CU_GREEN_CTX_NONE, 0);
+        cuGreenCtxStreamCreate(&prefill_stream, prefill_ctx, CU_STREAM_NON_BLOCKING, 0);
 
         // FIX: verify the actual grants -- never trust the requested numbers.
         CUdevResource actual_decode, actual_prefill;
@@ -689,11 +696,11 @@ struct FixedServer {
 };
 // Measured: p50 decode latency 13 ms (marginally higher -- decode now has
 // 48 of 132 SMs instead of the whole device when idle), p99 held at 19 ms
-// even during prefill bursts -- prefill's kernels are simply never eligible
-// to run on decode's 48-SM partition, no matter how large the batch.
+// even during prefill bursts -- prefill's kernels are not eligible to run
+// on decode's 48-SM partition, no matter how large the batch.
 ```
 
-**Metrics comparison:**
+**Metrics comparison** (illustrative figures for this scenario — re-measure on your own workload before citing):
 
 | Design | Decode p50 | Decode p99 (prefill burst) | Prefill throughput impact |
 |---|---|---|---|

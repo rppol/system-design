@@ -107,13 +107,14 @@ capabilities a kernel author must know about:
 | Ada Lovelace | L4, L40S, RTX 40xx | 8.9 | 4th-gen Tensor Cores + FP8; large L2 |
 | Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory across a cluster; 50 MB L2; 228 KB shared memory/SM |
 | Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; NVLink 5 at 1.8 TB/s bidirectional per GPU, 72-GPU NVL72 domains |
-| Rubin | VR200, Vera Rubin NVL72 | 10.7 (`sm_107`, CUDA 13.4 developer preview) | TSMC 3nm multi-chip module, 336B transistors; 288 GB HBM4 per GPU; NVLink 6 at 3.6 TB/s bidirectional per GPU; production shipments H2 2026 |
+| Rubin | VR200, Vera Rubin NVL72 | 10.7 (`sm_107`; added in CUDA 13.4 as a developer preview, GA support in CUDA 13.5) | Two compute dies, 336B transistors; 288 GB HBM4 per GPU at 19.2 TB/s; NVLink 6 at 3 TB/s per GPU; NVIDIA lists Vera Rubin NVL72 as available now |
 
 Constants worth memorizing (used throughout this section): **warp = 32 threads**; the
 register file is **64K 32-bit registers per SM (256 KB)** on every architecture from
 Volta onward, with a hard **255 registers/thread** ceiling; max **1024 threads/block**;
 max **2048 resident threads/SM on the data-center parts** (compute capability 8.0, 9.0,
-10.x) but only **1536** on the consumer/inference parts (8.6, 8.9, 12.x); **L2 40 MB on
+10.0/10.3) but only **1536** on the consumer/inference parts (8.6, 8.9, 12.x) and on Jetson
+Thor (11.0), and **1024** on Rubin (10.7, 32 warps and 16 blocks per SM); **L2 40 MB on
 A100, 50 MB on H100**; **HBM3 ~3.35 TB/s** (H100 SXM5); **H100 SXM5 has 132 SMs**.
 
 The table above compresses seven years of hardware evolution; laid out as a timeline
@@ -133,8 +134,8 @@ timeline
                 : thread-block clusters
     Blackwell (10.0) : FP4 / FP6 Tensor Cores and Tensor Memory (tcgen05)
                 : 2nd-gen Transformer Engine
-    Rubin (H2 2026) : 288 GB HBM4 per GPU
-                : NVLink 6 at 3.6 TB/s per GPU
+    Rubin (10.7, shipping 2026) : 288 GB HBM4 per GPU
+                : NVLink 6 at 3 TB/s per GPU
 ```
 
 A kernel targeting a later `sm_XX` inherits every earlier generation's capability —
@@ -392,7 +393,8 @@ print(f"{props.name}: {props.multi_processor_count} SMs, "
 ### The Occupancy Math — Three Independent Ceilings
 
 Occupancy is `resident_threads / max_threads_per_sm` (2048 on the data-center parts —
-compute capability 8.0, 9.0, 10.x — and 1536 on 8.6, 8.9 and 12.x, so query it rather
+compute capability 8.0, 9.0, 10.0/10.3 — 1536 on 8.6, 8.9, 11.0 and 12.x, and 1024 on Rubin
+10.7, so query it rather
 than assuming it).
 Three resources independently cap `resident_threads`, and the *smallest* wins:
 
@@ -416,8 +418,8 @@ why tuning the resource that is *not* currently smallest changes nothing at all.
 | `regs_per_thread` | What `ptxas` decided this kernel needs per thread; read it off `nvcc --ptxas-options=-v` |
 | `smem_per_sm` | The SM's configurable shared-memory carveout — 164 KB on A100 (8.0), 228 KB on H100 (9.0) and B200 (10.0) |
 | `smem_per_block` | Bytes of shared memory one block reserves; reserved for the block's whole lifetime. Anything over 48 KB must be *dynamic* and opted into with `cudaFuncAttributeMaxDynamicSharedMemorySize` |
-| `max_blocks_per_sm` | Hard hardware cap on resident blocks — 32 on 8.0/9.0/10.0, 16-24 on 8.6/8.9/12.x — independent of how small they are |
-| `max_threads_per_sm` | Hard hardware cap on resident threads, 2048 on 8.0/9.0/10.x — the denominator of "occupancy" |
+| `max_blocks_per_sm` | Hard hardware cap on resident blocks — 32 on 8.0/9.0/10.0/10.3, 16-24 on 8.6/8.9/11.0/12.x, 16 on 10.7 — independent of how small they are |
+| `max_threads_per_sm` | Hard hardware cap on resident threads, 2048 on 8.0/9.0/10.0/10.3 (1024 on Rubin 10.7) — the denominator of "occupancy" |
 | `//` | Integer division. It *floors*, and that flooring is where occupancy silently disappears |
 | `min(...)` | The binding constraint. Only the smallest of the four numbers ever matters |
 

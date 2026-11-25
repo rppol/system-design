@@ -111,7 +111,7 @@ cuBLAS can run an FP64 GEMM (DGEMM/ZGEMM) on the low-precision integer Tensor Co
 
 The default leaves results non-reproducible: cuBLAS's run-to-run guarantee does not hold with fixed-point emulation, because the workspace it gets can change the path it takes. Give it a workspace with `cublasSetWorkspace()` and use one handle per stream, or call `cublasLtMatmul()` with a workspace you own.
 
-CUDA 13.4 makes emulation use the Ozaki-II scheme when it is faster than Ozaki-I (Ampere and newer), reaching up to 175 TFLOPS emulated DGEMM on B200 by NVIDIA's numbers, and adds Rubin (compute capability 10.7) at up to 212 TFLOPS emulated DGEMM through a new TI16 type on `tcgen05.mma`.
+CUDA 13.4 makes emulation use the Ozaki-II scheme when it is faster than Ozaki-I (Ampere and newer), reaching up to 175 TFLOPS emulated DGEMM on B200 by NVIDIA's numbers, and adds Rubin (compute capability 10.7) at up to 212 TFLOPS emulated DGEMM through a new TI16 type on `tcgen05.mma`. CUDA 13.5 (cuBLAS 13.10) extends Ozaki-II to the symmetric and Hermitian rank-k updates — `{D,Z}SYRK`, `{D,Z}SYR2K`, `{D,Z}SYRKX` and `ZHERK`/`ZHER2K`/`ZHERKX` — on Ampere and newer, with NVIDIA quoting up to 1.7x higher peak on Vera Rubin.
 
 ---
 
@@ -982,7 +982,7 @@ cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | `cuBLAS` (`cublas_v2.h`) | Dense BLAS L1/L2/L3 | Column-major; `cublasSgemm`/`cublasGemmEx`; link `-lcublas` |
-| cuBLAS FP64 emulation | DGEMM/ZGEMM on integer Tensor Cores (Ozaki-I/II) | `CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT`; set a workspace (up to 8 GB) with `cublasSetWorkspace()` for reproducible results; Rubin support from CUDA 13.4 |
+| cuBLAS FP64 emulation | DGEMM/ZGEMM on integer Tensor Cores (Ozaki-I/II) | `CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT`; set a workspace (up to 8 GB) with `cublasSetWorkspace()` for reproducible results; Rubin support from CUDA 13.4; Ozaki-II for SYRK/SYR2K/HERK-family routines from CUDA 13.5 |
 | `cuBLASLt` (`cublasLt.h`) | Fused/mixed-precision GEMM | Descriptor-based API; algorithm heuristic search (`cublasLtMatmulAlgoGetHeuristic`); link `-lcublasLt` |
 | `cuDNN` (`cudnn_frontend.h`) | Convolution, pooling, RNN, normalization, fused attention | Graph API (`cudnn_frontend::graph::Graph`) is the supported surface; the pre-cuDNN-8 imperative API is deprecated. Heuristic (`HeurMode_t::A`) vs `BuildPlanPolicy_t::ALL` plan search; link `-lcudnn` |
 | `CUTLASS` (header-only) | Template GEMM/convolution building blocks | No separate runtime library — pure templates, compiled into your binary; open source on GitHub. CUTLASS 4.x also ships **CuTe DSL**, a Python-native front end for authoring the same kernels |

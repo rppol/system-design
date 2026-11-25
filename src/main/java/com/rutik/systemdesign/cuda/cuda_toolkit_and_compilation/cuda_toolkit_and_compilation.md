@@ -611,7 +611,7 @@ NVIDIA's CUDA 12.0 announcement reports cuFFT building kernels this way at runti
 3x faster for sizes under 8K, and callbacks linked with JIT LTO running nearly 2x faster
 than the same callbacks called through a function pointer.
 
-Version rules from the nvJitLink 13.4 documentation: the `nvJitLink` library must be at
+Version rules from the nvJitLink 13.5 documentation: the `nvJitLink` library must be at
 least as new as the newest toolkit that produced any input, and with LTO "compatibility
 is only guaranteed within a major release", so LTO-IR built with CUDA 12.x is not
 guaranteed to link under a 13.x `nvJitLink`; rebuild it as 13.x LTO-IR (or ship PTX/cubin).
@@ -626,7 +626,7 @@ SASS matched. A framework binary that carries thousands of kernels paid that for
 it never launched. With lazy loading the driver loads a module, and a kernel, on first
 use instead.
 
-| Fact | Value (CUDA Programming Guide 13.4) |
+| Fact | Value (CUDA Programming Guide 13.5) |
 |------|-------------------------------------|
 | Introduced | CUDA 11.7, off by default |
 | Default on | Linux from CUDA 12.2; all platforms from CUDA 12.3 |
@@ -857,7 +857,7 @@ nvcc -gencode arch=compute_80,code=sm_80 \
 - **Benchmarking a `-G` (device debug) build.** `-G` disables nearly all `ptxas`/NVVM optimizations to preserve debuggability and can be 10-100x slower than a `-O3` release build; a debug build's timings are meaningless for performance decisions.
 - **Ignoring `ptxas -v` output.** Register/shared-memory usage is only visible with `--ptxas-options=-v`; without it, a kernel can silently regress to register spilling (`spill stores`/`spill loads` > 0) after an innocuous code change, quietly cutting occupancy and throughput with no compiler warning.
 - **Using `__CUDA_ARCH__` unguarded in code the host compiler also sees.** Because the macro is undefined during the host-code pass, an `#if __CUDA_ARCH__ >= 800` guarding a device-only intrinsic with no `#else` for the host pass can leave that branch's *absence* silently compiled out on the host — usually harmless, but referencing a device intrinsic (e.g. `__ldg`) directly without any `__CUDA_ARCH__` guard breaks host compilation outright.
-- **Installing the CUDA 13.4 toolkit on Linux and expecting a driver upgrade.** From CUDA 13.4 the Linux toolkit installer no longer bundles the NVIDIA driver (Windows dropped it in 13.1). A machine that only gets the toolkit keeps its old driver. Minor-version compatibility still runs prebuilt SASS, but JIT of the PTX ISA 9.4 that 13.4 emits fails with `cudaErrorUnsupportedPtxVersion`, and a kernel built for `sm_107` needs R615 to run at all. Install the R615 driver branch as its own step and check it at startup (see "Checking Driver/Runtime Compatibility at Startup" in §6).
+- **Installing a CUDA 13.4 or later toolkit on Linux and expecting a driver upgrade.** From CUDA 13.4 the Linux toolkit installer no longer bundles the NVIDIA driver; Windows stopped bundling it with CUDA 13.0 (the 13.0 release notes: "Starting with CUDA 13.0, the Windows display driver is no longer bundled"). A machine that only gets the toolkit keeps its old driver. Minor-version compatibility (any R580 or later driver for 13.x) still runs prebuilt SASS, but JIT of the PTX that a newer `nvcc` emits fails with `cudaErrorUnsupportedPtxVersion` — PTX ISA 9.4 from 13.4 needs R615, PTX ISA 9.5 from 13.5 needs R620 — and a kernel built for Rubin's `sm_107` needs at least R615 to run at all. Install the driver branch that matches the toolkit (R620 for 13.5) as its own step and check it at startup (see "Checking Driver/Runtime Compatibility at Startup" in §6).
 - **Shipping unstripped host debug symbols alongside multi-arch fatbinaries.** Combining `-g` (host debug info) with several `-gencode` SASS targets produces bloated binaries; strip host symbols for release builds even when you intentionally keep `-lineinfo` for device-side profiling.
 
 ---
@@ -882,6 +882,7 @@ nvcc -gencode arch=compute_80,code=sm_80 \
 | C++ dialect and host compilers | Language level `nvcc`/`nvrtc` accept | CUDA 13.3 adds full C++23 in `nvcc` and `nvrtc`; CUDA 13.4 adds GCC 16 and Clang 22 as host compilers |
 | PTX ISA 9.4 (CUDA 13.4) | Virtual ISA version | The PTX version a 13.4 `nvcc` emits; a driver older than the toolkit cannot JIT it |
 | Windows on Arm (CUDA 13.4) | Platform support | Toolkit support for Windows on Arm on RTX Spark devices |
+| CUDA 13.5 (November 2026, current; driver branch R620) | Toolkit release | PTX ISA 9.5; CCCL 3.5; cuda.core 1.2; GA support for Vera Rubin (`sm_107`); CUDA Tile C++ adds `ct::scaled_mma()` for block-scaled MMA; NVCC/PTXAS `-pic` (`--position-independent-code`) deprecated; `nvprune --precompile` compiles embedded PTX/Tile IR to SASS during pruning; device-side control of TMA out-of-bounds addressing; 1-, 2- and 16-byte atomics with explicit memory ordering and scope on compute capability 10.0 and higher |
 
 ---
 

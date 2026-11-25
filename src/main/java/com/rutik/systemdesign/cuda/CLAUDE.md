@@ -13,7 +13,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 | Work | State |
 |------|-------|
 | Factual audit | **DONE — all 24 modules**, ~1,000 claims verified, ~145 corrections. Commits `312d0b4`, `ed1400a`, `e984f8c`, `60eed53` |
-| `**Short:**` MCQ summaries | **DONE — 427 of 427**, run after the audit as the ordering rule requires. Commit `6ce35a6` |
+| `**Short:**` MCQ summaries | **DONE — 544 of 544** (477 in the 24 module pages + 67 in the 4 deep-dive sub-files; counted 2026-11-25 as `**Q`/`**Short:**` lines inside the interview sections). The first pass was 427 of 427, run after the audit as the ordering rule requires, in commit `6ce35a6` |
 | Case studies | **AUDITED.** All 13 files (8 case studies + 5 `cross_cutting/`) — first pass 2026-08-04 in `c563ef86`, `13f9f445`, `4c1d2ccd`; re-audited 2026-08-05. Both gaps that pass found are now **CLOSED**: the FlashAttention lineage reaches FA4 (`build_a_flash_attention_kernel.md:639` — CuTe DSL, 2-CTA MMA, Blackwell tensor memory, warpgroup ping-pong), and PyTorch's deprecated `allow_tf32` booleans are gone section-wide, replaced by `fp32_precision` (2026-08-25; the fix had landed in the case studies and never propagated to `debugging_correctness_and_numerics` or `tensor_cores_and_mixed_precision`). Do not re-open either |
 
 ### What the audit found here, and why it is not what you would guess
@@ -50,13 +50,15 @@ is a result. Do not re-audit them looking for something.
 
 ### Open, needing an owner decision
 
-- **NVIDIA's own two sources disagree on compute capability 12.x** — the Programming Guide
-  says 24 resident blocks/SM and 100 KB shared memory; the Blackwell Tuning Guide says 32
-  and 128 KB. `occupancy_and_launch_configuration` follows the Programming Guide. No side
-  was picked.
-- CC **11.0** (Jetson Thor) is in `gpu_hardware_architecture/blackwell_and_rubin_architecture.md`
-  but missing from the capability enumerations in `occupancy_and_launch_configuration`, which
-  lists 10.0/10.3 and Rubin 10.7 but not 11.0. Fill it from the Programming Guide table, never from a guess.
+- **NVIDIA's own two sources still disagree on compute capability 12.x** — the CUDA Programming
+  Guide v13.5 compute-capability tables (last updated 2026-10-31) say 24 resident blocks/SM and
+  100 KB shared memory/SM; the Blackwell Tuning Guide (last updated 2026-11-02) says 32 and
+  128 KB for 12.0. Both say 48 warps and 99 KB per block. `occupancy_and_launch_configuration`
+  §4.1 and `blackwell_and_rubin_architecture` §4.3 now state both sources with dates and keep
+  the Programming Guide values in their arithmetic. No side was picked.
+- CC **11.0** (Jetson Thor) is now **filled** in `occupancy_and_launch_configuration` from the
+  Programming Guide table (2026-11-25): 24 blocks, 48 warps (1536 threads) and 228 KB shared
+  memory per SM, 227 KB per block — data-center shared memory with consumer-tier warp limits.
 - Unverified and deliberately left: the 3-8 us device-side child-launch figure (no NVIDIA
   source, and §5/§14 arithmetic depend on it) and a K=4095 cuBLAS sweep whose 8x drop
   likely overstates reality — now labelled illustrative with a re-measure instruction.
@@ -96,6 +98,20 @@ NVIDIA CUDA is the default platform in worked examples; exactly one module (`gpu
 | 6 — Profiling, Correctness & Portability | profiling_and_performance_analysis, debugging_correctness_and_numerics, gpu_portability_hip_sycl_and_beyond |
 
 **Deep modules requiring 18 Q&As:** memory_coalescing_and_access_patterns, shared_memory_and_bank_conflicts, occupancy_and_launch_configuration, tensor_cores_and_mixed_precision, profiling_and_performance_analysis. All other modules: 15 Q&A floor.
+
+### Deep-dive sub-files — 4 files
+
+Each sub-file groups under its parent module (no `STUDY_ORDER` entry) and is listed in the
+`README.md` `<!-- study-paths -->` block. All four had their first factual pass on 2026-11-25
+against NVIDIA primary sources (CUDA Programming Guide and driver/runtime API references, CUDA
+and NCCL release notes, NVIDIA product pages and blogs, the CUTLASS and DeepEP repositories).
+
+| Sub-file | Parent module | Covers | Q&As / Short | Fact pass 2026-11-25 |
+|----------|---------------|--------|--------------|----------------------|
+| `cuda_graphs/conditional_nodes_and_device_graph_launch.md` | `cuda_graphs` | IF/WHILE/SWITCH conditional nodes; device graph launch (fire-and-forget, tail, sibling) | 16 / 16 | IF/WHILE date from CUDA 12.3, not 12.4; conditional bodies cannot use device graph launch and device graphs cannot hold conditional nodes, so the two are alternatives, not layers |
+| `gpu_hardware_architecture/blackwell_and_rubin_architecture.md` | `gpu_hardware_architecture` | Blackwell two-die design and compute-capability map (10.0/10.3/11.0/12.x); Rubin 10.7 | 16 / 16 | Rubin is shipping and GA in CUDA 13.5; NVLink 6 is 3 TB/s per GPU on the product page (3.6 TB/s at launch); L2 has been split into two partitions since A100, so the "single-pool H100" contrast was cut |
+| `multi_gpu_programming_and_nccl/device_initiated_communication.md` | `multi_gpu_programming_and_nccl` | NCCL device API (LSA, Multimem, GIN), symmetric windows, Copy Engine collectives, NVSHMEM/IBGDA, DeepEP, NCCL EP | 19 / 19 | Device-API code rewritten to NCCL's documented signatures; CE collectives need `NCCL_CTA_POLICY_ZERO`; DeepEP V2.5 dropped NVSHMEM and needs NCCL 2.32.3+ |
+| `streams_events_and_concurrency/green_contexts_and_sm_partitioning.md` | `streams_events_and_concurrency` | Green contexts (driver and CUDA 13.1+ runtime API), SM split granularity, MPS/MIG comparison | 16 / 16 | `cuGreenCtxStreamCreate` requires `CU_STREAM_NON_BLOCKING`; disjoint SMs do not guarantee concurrency; two documented cases add SMs |
 
 ---
 

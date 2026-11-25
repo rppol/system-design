@@ -151,14 +151,23 @@ hidden tax.
 - **On-demand paging** (default): first device access to an unmigrated page
   triggers a page fault, the driver migrates that page (or a run of pages),
   and the kernel stalls until it lands.
-- **`cudaMemPrefetchAsync(ptr, size, dstDevice, stream)`** — explicitly moves
-  pages to a target device *before* the kernel needs them, converting
-  unpredictable fault stalls into a scheduled, overlappable async copy.
-- **`cudaMemAdvise(ptr, size, advice, device)`** — hints without moving data:
+- **`cudaMemPrefetchAsync(ptr, size, location, flags, stream)`** — explicitly
+  moves pages to a target *before* the kernel needs them, converting
+  unpredictable fault stalls into a scheduled, overlappable async copy. Since
+  CUDA 13 the target is a `cudaMemLocation`, not a device ordinal:
+  `type = cudaMemLocationTypeDevice` with `id = dev` for a GPU, or
+  `type = cudaMemLocationTypeHost` for host memory.
+- **`cudaMemAdvise(ptr, size, advice, location)`** — hints without moving data,
+  with the same `cudaMemLocation` argument:
   `cudaMemAdviseSetReadMostly` replicates read-only pages to multiple GPUs
-  instead of migrating and thrashing; `cudaMemAdviseSetPreferredLocation`
-  pins the "home" device for a range; `cudaMemAdviseSetAccessedBy` maps a
-  range into another device's page table without triggering a migration.
+  instead of migrating and thrashing (it ignores `location`);
+  `cudaMemAdviseSetPreferredLocation` pins the "home" location for a range;
+  `cudaMemAdviseSetAccessedBy` maps a range into another device's page table
+  without triggering a migration.
+- **Batch forms** — `cudaMemPrefetchBatchAsync` prefetches many ranges in one
+  stream-ordered call, `cudaMemDiscardBatchAsync` tells the driver the contents
+  of many ranges are no longer needed (so it can skip migrating them), and
+  `cudaMemDiscardAndPrefetchBatchAsync` does both in one call.
 
 ### One managed page's lifecycle
 
@@ -558,21 +567,29 @@ void unifiedMemoryExample(size_t n, int deviceId) {
     // Fill on the host -- pages are host-resident, no fault yet.
     for (size_t i = 0; i < n; ++i) data[i] = static_cast<float>(i);
 
+    // CUDA 13 API: targets are cudaMemLocation structs, not device ordinals.
+    cudaMemLocation gpu{};
+    gpu.type = cudaMemLocationTypeDevice;
+    gpu.id   = deviceId;
+    cudaMemLocation host{};
+    host.type = cudaMemLocationTypeHost;   // id is ignored for host
+
     // Hint: this range is read-mostly -- replicate rather than migrate
-    // when multiple GPUs touch it, avoiding thrash.
-    CUDA_CHECK(cudaMemAdvise(data, bytes, cudaMemAdviseSetReadMostly, deviceId));
+    // when multiple GPUs touch it, avoiding thrash. (location is ignored
+    // for this advice, but the parameter is still required.)
+    CUDA_CHECK(cudaMemAdvise(data, bytes, cudaMemAdviseSetReadMostly, gpu));
 
     // Explicitly move pages to the GPU *before* the kernel launch so the
     // migration becomes a scheduled async copy instead of per-page faults
     // stalling the kernel mid-flight.
-    CUDA_CHECK(cudaMemPrefetchAsync(data, bytes, deviceId, /*stream=*/0));
+    CUDA_CHECK(cudaMemPrefetchAsync(data, bytes, gpu, /*flags=*/0, /*stream=*/0));
     CUDA_CHECK(cudaStreamSynchronize(0));
 
     someKernel<<<grid, block>>>(data, n);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Prefetch back to the host (deviceId = cudaCpuDeviceId) before reading.
-    CUDA_CHECK(cudaMemPrefetchAsync(data, bytes, cudaCpuDeviceId, 0));
+    // Prefetch back to the host before reading.
+    CUDA_CHECK(cudaMemPrefetchAsync(data, bytes, host, /*flags=*/0, /*stream=*/0));
     CUDA_CHECK(cudaStreamSynchronize(0));
 
     CUDA_CHECK(cudaFree(data));
