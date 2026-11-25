@@ -571,119 +571,46 @@ Users upload reference images and the system trains a LoRA adapter using DreamBo
 
 ```python
 from __future__ import annotations
+import time
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass
 class LoRAConfig:
-    rank: int = 16                  # LoRA rank: 4 (50MB), 16 (200MB), 64 (800MB)
-    alpha: float = 16.0             # LoRA alpha (typically equals rank)
-    training_steps: int = 1500      # 1,000-2,000 steps optimal for 5-20 images
+    rank: int = 16                  # 4 (50MB), 16 (200MB), 64 (800MB)
+    alpha: float = 16.0             # typically equals rank
+    training_steps: int = 1500      # 1,000-2,000 steps for 5-20 images
     learning_rate: float = 1e-4     # higher than full fine-tune LR
-    text_encoder_lr: float = 1e-5   # lower LR for text encoder layers
     resolution: int = 1024          # FLUX native training resolution
-    train_batch_size: int = 1       # per-GPU batch size (gradient accumulation = 4)
     gradient_accumulation_steps: int = 4
     mixed_precision: str = "bf16"
 
 
 class LoRATrainer:
-    """
-    DreamBooth/LoRA fine-tuning pipeline.
-
-    Hardware: 4x A10G 24GB (multi-GPU DDP for speed).
-    Duration: ~35 minutes for 1,500 steps at batch_size=1, grad_accum=4.
-    GPU cost: 4x A10G @ $0.60/hr * (35/60)hr = ~$1.40 per user adapter.
-    Storage: rank-16 adapter = 200MB on S3 (safetensors format).
-
-    Auto-captioning: BLIP-2 generates captions for each reference image
-    using the trigger word; avoids manually written prompts.
-    """
+    """DreamBooth/LoRA on 4x A10G DDP: ~35 min for 1,500 steps, ~$1.40 GPU cost,
+    rank-16 adapter = 200MB safetensors on S3 under an immutable versioned key."""
 
     TRAINING_TIMEOUT_SECONDS = 3600   # 1-hour hard cap; abort and notify user
 
-    def __init__(self, s3_bucket: str, training_cluster_endpoint: str) -> None:
-        self._s3_bucket = s3_bucket
-        self._cluster = training_cluster_endpoint
+    def __init__(self, s3_bucket: str, jobs: "TrainingJobClient", safety: "CsamScanner") -> None:
+        self._bucket, self._jobs, self._safety = s3_bucket, jobs, safety
 
-    async def train(
-        self,
-        images: list[bytes],             # 5-20 JPEG/PNG images, max 10MB each
-        trigger_word: str,               # unique token, e.g. "ohwx person"
-        user_id: str,
-        config: LoRAConfig | None = None,
-    ) -> str:
-        """
-        Trains a LoRA adapter and returns the S3 URI of the saved adapter.
-        The returned URI is immutable (versioned key); a 'latest' alias is updated separately.
-
-        Steps:
-          1. CSAM scan all training images (PhotoDNA) — block if any match
-          2. Upload images to S3 training bucket
-          3. Auto-caption each image with BLIP-2 (15s)
-          4. Submit training job to 4x A10G cluster (~35 min)
-          5. Validate adapter quality (generate 5 test images with trigger word)
-          6. Store adapter to S3 with SHA-256 checksum
-          7. Register adapter_id in adapter registry (user_id → s3_uri)
-          8. Notify user via webhook
-        """
-        if config is None:
-            config = LoRAConfig()
-
-        # Step 1: CSAM scan training images before any processing
-        for img_bytes in images:
-            if await self._csam_scan_bytes(img_bytes):
-                raise ValueError("Training image matched CSAM database. Account suspended.")
-
-        image_s3_uris = await self._upload_training_images(images, user_id)
-        captions = await self._auto_caption(image_s3_uris, trigger_word)  # BLIP-2
-        adapter_version = f"v{int(asyncio.get_event_loop().time())}"
-        adapter_s3_uri = (
-            f"s3://{self._s3_bucket}/adapters/{user_id}/{adapter_version}/adapter.safetensors"
-        )
-
-        job_id = await self._submit_training_job(
-            image_s3_uris, captions, config, adapter_s3_uri
-        )
-        await self._wait_for_job(job_id, timeout=self.TRAINING_TIMEOUT_SECONDS)
-        await self._validate_adapter(adapter_s3_uri, trigger_word)
-        await self._register_adapter(user_id, adapter_version, adapter_s3_uri)
-        return adapter_s3_uri
-
-    async def _csam_scan_bytes(self, image_bytes: bytes) -> bool:
-        raise NotImplementedError  # PhotoDNA Cloud Service API
-
-    async def _upload_training_images(
-        self, images: list[bytes], user_id: str
-    ) -> list[str]:
-        raise NotImplementedError  # boto3 parallel upload
-
-    async def _auto_caption(self, uris: list[str], trigger_word: str) -> list[str]:
-        raise NotImplementedError  # BLIP-2 inference on training cluster
-
-    async def _submit_training_job(
-        self,
-        image_uris: list[str],
-        captions: list[str],
-        config: LoRAConfig,
-        output_uri: str,
-    ) -> str:
-        raise NotImplementedError  # Kubernetes job submission
-
-    async def _wait_for_job(self, job_id: str, timeout: int) -> None:
-        raise NotImplementedError
-
-    async def _validate_adapter(self, adapter_uri: str, trigger_word: str) -> None:
-        raise NotImplementedError  # generate 5 test images, score with aesthetic scorer
-
-    async def _register_adapter(
-        self, user_id: str, version: str, s3_uri: str
-    ) -> None:
-        raise NotImplementedError  # write to PostgreSQL adapter registry
-
-
-import asyncio  # noqa: E402 — placed here for narrative flow in this code block
+    async def train(self, images: list[bytes], trigger_word: str, user_id: str,
+                    config: LoRAConfig | None = None) -> str:
+        config = config or LoRAConfig()
+        # 1. CSAM-scan every training image BEFORE any processing or storage
+        for img in images:
+            if await self._safety.matches_known_csam(img):
+                raise PermissionError("training image matched hash set; account suspended")
+        uris = await self._jobs.upload_images(images, user_id)
+        captions = await self._jobs.auto_caption(uris, trigger_word)    # BLIP-2, ~15 s
+        version = f"v{int(time.time())}"                                 # immutable key
+        out_uri = f"s3://{self._bucket}/adapters/{user_id}/{version}/adapter.safetensors"
+        job_id = await self._jobs.submit(uris, captions, config, out_uri)
+        await self._jobs.wait(job_id, timeout=self.TRAINING_TIMEOUT_SECONDS)
+        await self._jobs.validate(out_uri, trigger_word)   # 5 test images, aesthetic gate
+        await self._jobs.register(user_id, version, out_uri)  # 'latest' alias moves last
+        return out_uri
 ```
 
 ### 4.5 Resolution-Aware GPU Routing
@@ -856,69 +783,30 @@ TensorRT requires model-specific compilation (4-8 hours per model/resolution com
 
 ### a) Eval Pipeline
 
-Weekly aesthetic quality benchmark runs every Monday at 01:00 UTC using 100 fixed prompts covering 5 style categories (portrait, landscape, abstract, product, illustration — 20 prompts each). Any model update, vLLM upgrade, or CUDA driver change triggers an immediate out-of-band run before traffic is shifted to new instances.
+Weekly aesthetic quality benchmark runs every Monday at 01:00 UTC using 100 fixed prompts covering 5 style categories (portrait, landscape, abstract, product, illustration — 20 prompts each). Any model update, diffusers or PyTorch upgrade, or CUDA driver change triggers an immediate out-of-band run before traffic is shifted to new instances.
 
 ```python
 from dataclasses import dataclass
+from statistics import mean
 
 
 @dataclass
 class ImageEvalResult:
     prompt_id: str
-    style_category: str
-    aesthetic_score: float          # 0.0-1.0 (LAION aesthetic scorer)
-    clip_alignment_score: float     # 0.0-1.0 (prompt-image CLIP similarity)
-    baseline_aesthetic: float
-    baseline_clip: float
-    aesthetic_regression_pct: float
-    generation_latency_ms: float
+    aesthetic: float          # 0.0-1.0 LAION aesthetic scorer
+    clip: float               # 0.0-1.0 prompt-image CLIP similarity
+    regression_pct: float     # positive = degradation vs. baseline
 
 
-def run_weekly_image_eval(
-    model_id: str, golden_prompts: list[dict]
-) -> list[ImageEvalResult]:
-    """
-    Generates 3 images per prompt (different seeds), averages scores.
-    Fires PagerDuty alert if aesthetic regression > 5% or CLIP alignment drops > 8%.
-    See: ./cross_cutting/llm_eval_harness_in_production.md for scoring rubrics.
-    """
-    results = []
-    for prompt in golden_prompts:
-        scores = []
-        for seed in [42, 1337, 9999]:
-            image = _generate(model_id, prompt["text"], seed=seed)
-            aesthetic = _laion_aesthetic_score(image)
-            clip_sim = _clip_alignment(image, prompt["text"])
-            scores.append((aesthetic, clip_sim))
-
-        avg_aesthetic = sum(s[0] for s in scores) / len(scores)
-        avg_clip = sum(s[1] for s in scores) / len(scores)
-        regression = (prompt["baseline_aesthetic"] - avg_aesthetic) / prompt["baseline_aesthetic"] * 100
-
-        result = ImageEvalResult(
-            prompt_id=prompt["id"],
-            style_category=prompt["category"],
-            aesthetic_score=avg_aesthetic,
-            clip_alignment_score=avg_clip,
-            baseline_aesthetic=prompt["baseline_aesthetic"],
-            baseline_clip=prompt["baseline_clip"],
-            aesthetic_regression_pct=regression,
-            generation_latency_ms=prompt.get("last_latency_ms", 0.0),
-        )
-        results.append(result)
-
-        if regression > 5.0:
-            _alert(f"Aesthetic regression {regression:.1f}% on {prompt['id']}")
-        if avg_clip < prompt["baseline_clip"] - 0.08:
-            _alert(f"CLIP alignment dropped {(prompt['baseline_clip'] - avg_clip):.3f} on {prompt['id']}")
-
-    return results
-
-
-def _generate(model_id: str, prompt: str, seed: int) -> object: raise NotImplementedError
-def _laion_aesthetic_score(image: object) -> float: raise NotImplementedError
-def _clip_alignment(image: object, prompt: str) -> float: raise NotImplementedError
-def _alert(msg: str) -> None: raise NotImplementedError
+def eval_prompt(model_id: str, prompt: dict, seeds=(42, 1337, 9999)) -> ImageEvalResult:
+    """3 seeds per prompt; page on > 5% aesthetic regression or > 0.08 CLIP drop."""
+    images = [generate(model_id, prompt["text"], seed=s) for s in seeds]
+    aesthetic = mean(laion_aesthetic(img) for img in images)
+    clip = mean(clip_alignment(img, prompt["text"]) for img in images)
+    regression = (prompt["baseline_aesthetic"] - aesthetic) / prompt["baseline_aesthetic"] * 100
+    if regression > 5.0 or clip < prompt["baseline_clip"] - 0.08:
+        alert(f"{prompt['id']}: aesthetic -{regression:.1f}%, clip {clip:.3f}")
+    return ImageEvalResult(prompt["id"], aesthetic, clip, regression)
 ```
 
 See also: [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for LLM-as-judge integration, regression gate configuration, and CI/CD eval gating patterns.
@@ -943,7 +831,7 @@ Trace: image_generation (trace_id: gen_abc123, generation_id: img_7f9a2c)
   |
   +-- Span: diffusion.pipeline           (3100ms)
   |     attrs:
-  |       gen_ai.system = "flux-dev"
+  |       gen_ai.provider.name = "self-hosted"   (replaced gen_ai.system)
   |       gen_ai.request.model = "flux.1-dev"
   |       image.width = 1024
   |       image.height = 1024
@@ -1128,46 +1016,57 @@ See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for spot v
 ## 11. Interview Discussion Points
 
 **Q: Why is LoRA adapter serving — not model quality — the core scaling challenge for an image generation platform?**
+**Short:** Users with custom adapters generate about 10x more images, so serving 100K adapters on a shared base model through hot-swapped HBM slots drives revenue and cost.
 
 Model quality is a solved problem: FLUX.1-dev and SDXL produce commercially viable outputs. The hard engineering problem is that users who train custom LoRA adapters generate 10x more images than users who don't, so adapter utilization is the primary revenue driver. Serving 100K unique user adapters on a shared fleet requires keeping the 12GB FP8 base model permanently in GPU HBM and hot-swapping only the 200MB LoRA delta weights. Naive per-adapter model copies would require 100K × 12GB = 1.2PB of GPU HBM — about 15,000 dedicated H100s to carry 20TB of actual adapter weights, which is economically absurd rather than literally impossible. S-LoRA (Stanford, 2023) solves this: base model stays resident, adapters occupy LRU slots. The correct interview answer is: LoRA multiplexing is to image generation what KV-cache management is to LLM text generation — the fundamental resource scheduling problem that determines whether the business unit economics work.
 
 **Q: What is CFG batching and why does it save 35% generation latency?**
+**Short:** It runs the conditional and unconditional passes as one batch of 2 instead of two sequential passes, cutting wall-clock time about 35% for roughly 2x peak VRAM.
 
 Classifier-free guidance requires two forward passes per denoising step: one with the prompt embedding (conditional) and one with a null embedding (unconditional). Sequential execution doubles the step time. The batching trick concatenates both embeddings into a single batch of size 2 and runs one forward pass, then splits the output predictions. A DiT or UNet forward pass is memory-bandwidth bound (not FLOP bound) at typical batch sizes, so batch_size=2 runs in ~1.35x the time of batch_size=1 (not 2x), yielding ~35% wall-clock savings. The tradeoff is 2x peak VRAM usage for the intermediate activation tensors. At FLUX.1-dev 1024px: conditional VRAM ~14.8GB, CFG batch VRAM ~18.2GB — still fits H100 80GB with room for LoRA adapters.
 
 **Q: How do you detect NSFW content in generated images when the original prompt passed the text classifier?**
+**Short:** Add a post-generation image classifier, because indirect prompts and NSFW-trained adapters produce unsafe images from text that passes the pre-generation filter.
 
 Two-stage approach is required. Pre-generation text classifiers (DistilBERT fine-tuned on NSFW text) catch direct NSFW requests. However, adversarial prompts use indirect references ("draw a medieval scene with the bath" → nudity), and LoRA adapters trained on NSFW data can generate NSFW from innocuous prompts. Post-generation image classification using a MobileNetV3 fine-tuned NSFW classifier (~20ms on dedicated safety GPU) catches what text classifiers miss. Key calibration point: set the image classifier threshold at 0.90 (higher specificity, lower false-positive rate), not 0.70, because false positives (blocking legitimate art, figure studies) drive user churn. Run both classifiers; never rely on just one.
 
 **Q: Why does DiT architecture scale better than UNet for large image generation models?**
+**Short:** DiT swaps convolutional locality biases for self-attention, so quality keeps rising with parameters, while UNet gains flatten above about 3B parameters.
 
 UNet uses convolutional skip connections that encode spatial structure inductively — the architecture has hard-coded assumptions about locality. Stacking more parameters in UNet yields diminishing quality returns above ~3B parameters because the inductive biases become constraints. DiT (Diffusion Transformer) replaces convolutions with self-attention, following the same scaling path as language model transformers: quality scales predictably with parameter count. FLUX.1-dev at 12B parameters achieves quality that would require a ~30B UNet to match (if such scaling were even practical). Additionally, DiT naturally handles variable-resolution inputs via sequence length variation, whereas UNet requires architectural modifications or training tricks for non-standard resolutions.
 
 **Q: How do you select LoRA rank for a production platform with varied user needs?**
+**Short:** Default to rank 16 (200MB) for faces and styles; use rank 4 for global style transfer and rank 64 only when a measured quality gain justifies 4x the size.
 
 Rank-4 (50MB adapter): sufficient for texture or style transfer where the change is global. Trains in 20-25 minutes on a single A10G. Poor for face capture (insufficient expressiveness). Rank-16 (200MB): good balance — captures faces, specific styles, and object classes. Trains in 30-45 minutes. Fits 16 slots per H100 with manageable HBM overhead. This is the default for consumer platforms. Rank-64 (800MB): near full fine-tune expressiveness, excellent for complex scene compositions. Trains in 45-70 minutes. Only 6 slots per H100. NVMe warm cache capacity drops 4x vs rank-16. Reserve rank-64 for enterprise customers paying for it explicitly — the operational cost (memory, load time, NVMe capacity) is 4x higher per adapter.
 
 **Q: How does Adobe Firefly's training data approach create competitive advantage beyond marketing?**
+**Short:** Licensed training data lets Adobe offer IP indemnification that enterprise legal teams require, which web-scraped models cannot match.
 
 The competitive advantage is enterprise B2B sales. Large media companies (Disney, Warner, Publicis) have legal teams that require indemnification against IP infringement claims before deploying AI tools. Adobe offers training data provenance attestation and commercial use indemnification as part of Creative Cloud Enterprise contracts. Competitors using LAION-trained models (SDXL, FLUX) cannot offer this indemnification because LAION contains uncurated copyrighted content. This is not a quality advantage — Firefly's output quality is behind FLUX in most benchmarks. It is a legal risk advantage that converts to enterprise revenue. Architectural decision: if your target market is enterprise B2B, training data provenance is an architectural requirement, not an afterthought.
 
 **Q: How do you handle CSAM in a platform that serves user-provided LoRA adapters?**
+**Short:** Scan at three points: training images at upload, probe images at training checkpoints, and every generated image, with mandatory NCMEC reporting.
 
 CSAM detection is mandatory at three points, not one. First: PhotoDNA scan all training images at upload time before the LoRA training job starts. Second: during LoRA training, generate probe images at each 250-step checkpoint and PhotoDNA-scan the outputs — this catches adapters that learn CSAM generation from non-CSAM training images through adversarial prompt-adapter combinations. Third: post-generation PhotoDNA scan of every generated image before delivery, regardless of prompt or adapter. Omitting any of the three layers creates a bypass vector. Detection triggers mandatory NCMEC CyberTipline reporting under 18 U.S.C. § 2258A, which applies to any "electronic communication service" or "remote computing service" provider — image generation platforms qualify — and requires a report "as soon as reasonably possible"; the 1-hour target here is an internal SLA, not the statutory wording. Note also that PhotoDNA only matches *known* material, so layer two and three must include a CSAM classifier, not just hash lookups. This is a legal obligation, not an optional feature.
 
 **Q: How does resolution-aware GPU routing reduce fleet costs?**
+**Short:** It sends 512-1024px jobs that fit in 24GB to A10Gs at $0.60/hr and keeps 2048px jobs on H100s at $2.50/hr, which cuts the blended cost per image.
 
 A10G GPUs cost $0.60/hr spot vs H100 at $2.50/hr — a 4.2x cost difference. 512px and 1024px FLUX.1-dev generations fit in 24GB A10G VRAM (14.8GB peak with CFG batching, leaving 9GB margin). 2048px generation requires 28.6GB (exceeds A10G 24GB, requires H100). Routing 60% of traffic (512px-1024px) to A10G and 40% (2048px or high-throughput) to H100 reduces the blended GPU cost per generation by roughly 25% (A10G at $0.60/hr and 1.2 s per 512px job costs ~$0.0002/generation vs ~$0.0021 for a 3 s H100 FLUX job). The router must also account for LoRA adapter overhead (+400MB) and check whether the candidate GPU has the adapter hot-cached (adapter-affinity routing reduces cache-miss latency from 2.1s to 260ms for 80% of requests).
 
 **Q: What is the async generation UX pattern and why is it mandatory above 4-second generation times?**
+**Short:** Return a job ID and deliver by webhook or polling, because mobile backgrounding and 60 s proxy timeouts break connections held open for 3-15 s generations.
 
 Synchronous HTTP requires the client to hold an open connection for the entire generation duration. At 3-15 seconds, this creates three failure modes: mobile app backgrounding closes the connection (iOS/Android kill background network activity after 30-90 seconds on cellular); corporate proxies and load balancers timeout idle connections at 60 seconds; HTTP keep-alive overhead becomes significant at scale. The async pattern: client submits job → receives `{"job_id": "gen_abc", "status": "queued"}` immediately → polls `GET /jobs/gen_abc` every 2 seconds (or receives webhook) → when status is "complete", retrieves presigned S3 URL (valid 7 days). Polling interval of 2 seconds is the practical sweet spot: aggressive enough that users perceive near-real-time feedback, light enough to stay cheap. Poll load scales with *in-flight jobs*, not with the user base: at 1,736 peak generations/sec and ~4 s per job there are roughly 7,000 jobs open at any instant, so a 2-second interval produces about 3,500 polls/sec — trivially served from a Redis-backed status endpoint. Webhook delivery (POST to user-registered URL) is preferred for API integrations; polling is for web/mobile UIs.
 
 **Q: How do you prevent the NVMe thundering herd problem when many users simultaneously request adapters not in cache?**
+**Short:** Cap concurrent S3-to-NVMe downloads per node, route requests to nodes that already cache the adapter, and pre-warm the top 1,000 adapters during the nightly low-traffic window.
 
 The thundering herd occurs when 60+ users simultaneously request different LoRA adapters not cached on NVMe: 60 × 200MB = 12GB of concurrent S3 downloads saturate the 3.5GB/s NVMe write bandwidth, causing all downloads to take 45s instead of 2.1s. Three mitigations work together: (1) Semaphore limiting concurrent S3→NVMe downloads to 4 per node (others wait in queue). (2) Adapter-affinity routing: check which nodes already have an adapter on NVMe before assigning the request to any node (router queries a Redis hash of `adapter_id → [node_ids with nvme_cache_hit]`). (3) Predictive pre-warming: hourly batch job analyzes the last 7 days of adapter usage patterns and pre-fetches the top-1,000 adapters (by hourly access count) onto all nodes during the 02:00-06:00 UTC low-traffic window. After these mitigations, the 45-second spike dropped to under 1 second in 97% of adapter load scenarios.
 
 **Q: What storage architecture supports petabyte-scale image retention at reasonable cost?**
+**Short:** Tiered lifecycle rules plus WebP conversion, because 250TB/day on S3 Standard compounds to about $2.1M/month after one year of unbounded retention.
 
 Tiered retention plus format conversion, because the cost is a run-rate that accumulates rather than a one-time charge. At 50M images/day × 5MB = 250TB/day, a single day's output on S3 Standard at $0.023/GB costs $5,750/month, and that charge repeats for every subsequent day retained — an unbounded policy therefore reaches ~$2.1M/month after one year. The practical architecture uses tiered retention: generated images are written to S3 Standard (hot, fast CDN delivery), automatically transitioned to S3 Intelligent-Tiering after 7 days (moves to IA when not accessed for 30 days, ~40% cost reduction), then to S3 Glacier Instant Retrieval after 90 days for paid tier (additional 60% reduction vs IA). Free tier images are deleted after 30 days. A pre-deletion notification email with a "download your images" link is sent 7 days before expiry. Additionally, WebP conversion at 85% quality at upload time reduces average file size from 5MB JPEG to 2.8MB WebP (44% reduction), applied to all tiers. Combined: storage cost per TB-month drops from $23 (S3 Standard) to $4.60 (tiered + WebP), an 80% reduction.
 

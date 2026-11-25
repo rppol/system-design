@@ -124,7 +124,7 @@ flowchart TD
     merge(("Hybrid Merge<br/>RRF"))
     rerank["Reranking Service<br/>cross-encoder top-50 to top-8<br/>+ permission re-validation"]
     ctx["Context Assembly<br/>expand to parent page context,<br/>breadcrumb, linked snippets, citations"]
-    llm["LLM Generation Service<br/>GPT-4o / Claude Sonnet 5<br/>streaming, grounded in context"]
+    llm["LLM Generation Service<br/>GPT-6.2 Sol / Claude Sonnet 5.5<br/>streaming, grounded in context"]
     post["Response Post-Processing<br/>citations, source links,<br/>safety filter, hallucination check"]
     resp(["User Response<br/>answer + page links"])
 
@@ -456,62 +456,22 @@ Permission change propagation:
 
 ### 4.5 AI Writing Assistance
 
-```
-Writing assist runs inline in the editor, requiring different context
-assembly than workspace search.
+Writing assist runs inline in the editor, so it assembles context differently from workspace search: the full current page (up to 8,000 tokens), 500 tokens either side of the cursor, title and breadcrumb, and the first 500 tokens of up to 3 linked pages.
 
-Input context for writing assist:
-  1. Current page content (full page, up to 8,000 tokens)
-  2. Surrounding blocks (500 tokens before and after cursor position)
-  3. Page metadata: title, breadcrumb, parent page title
-  4. Linked pages: if current page links to other pages, fetch first 500 tokens
-     of each linked page (max 3 linked pages)
-  5. User instruction: "summarize", "translate to Spanish", "make more formal",
-     "continue writing", "fix grammar", "explain this"
+| Mode | Context | Model | Latency target |
+|------|---------|-------|----------------|
+| Continue writing | Current page + cursor window | GPT-6.1 Terra | < 1 s to first token |
+| Summarize selection | Selection + heading hierarchy; 1-3 sentence output | GPT-6.1 Terra | < 1 s to first token |
+| Tone adjustment | Selection + target tone | GPT-6.1 Terra | < 1 s to first token |
+| Translate | Selection + target language; keep formatting and proper nouns | GPT-6.2 Sol | < 1.5 s to first token |
+| Ask AI about this page | Full page + permitted linked pages (mini-RAG, no workspace search) | GPT-6.2 Sol | < 1.5 s to first token |
 
-Writing assist modes:
+The current page needs no permission check (the user is already viewing it), but every linked page does, because a link is not a grant:
 
-1. Continue writing (autocomplete)
-   Context: current page + cursor position
-   Prompt: "Continue writing the following document naturally.
-            Match the existing tone, style, and topic."
-   Latency target: < 1 second to first token (streaming)
-   Model: Claude Haiku 4.5 (fast, cost-effective for generation)
-
-2. Summarize selection
-   Context: selected text + page title + heading hierarchy
-   Prompt: "Summarize the following text concisely. Preserve key facts
-            and action items."
-   Output: 1-3 sentences
-   Model: Claude Haiku 4.5
-
-3. Translate
-   Context: selected text + target language
-   Prompt: "Translate the following to {language}. Preserve formatting,
-            technical terms, and proper nouns."
-   Model: GPT-4o (best multilingual quality)
-
-4. Tone adjustment
-   Context: selected text + target tone (professional/casual/friendly/direct)
-   Prompt: "Rewrite the following in a {tone} tone. Preserve the meaning
-            and key information."
-   Model: Claude Haiku 4.5
-
-5. Page Q&A ("Ask AI about this page")
-   Context: full page content + linked pages
-   This is a mini-RAG over a single page (no workspace search needed)
-   Model: GPT-4o (reasoning quality matters)
-
-Context assembly for writing assist:
-  Unlike workspace search, writing assist does NOT need permission checks
-  for the current page (user is already viewing it). But linked page content
-  must be permission-checked before inclusion.
-
-  for linked_page in current_page.outgoing_links:
-    if linked_page.id in user_permission_set:
-      context.append(fetch_summary(linked_page))
-    else:
-      skip  # user cannot access this linked page; do not include
+```python
+def linked_context(current_page: Page, user_permissions: set[str], limit: int = 3) -> list[str]:
+    allowed = [p for p in current_page.outgoing_links if p.id in user_permissions]
+    return [fetch_summary(p, max_tokens=500) for p in allowed[:limit]]   # skip, never redact
 ```
 
 #### Block-Level SSE Streaming Handler
@@ -780,9 +740,7 @@ Hybrid approach: run both Path A and Path B in parallel, merge results.
   Path B catches: exact property matches, numerical filters, date ranges
 ```
 
----
-
-## 5. Query Understanding and Scope Detection
+### 4.9 Query Understanding and Scope Detection
 
 ```
 Not all AI queries need full workspace search. Scope detection saves
@@ -825,7 +783,7 @@ Query rewriting for workspace context:
 
 ---
 
-## 6. Trade-offs and Design Decisions
+## 5. Design Decisions & Tradeoffs
 
 | Decision | Chosen | Alternative | Reason |
 |----------|--------|-------------|--------|
@@ -836,81 +794,122 @@ Query rewriting for workspace context:
 | Permission caching | Redis bloom filter + exact PG check | Recompute on every query | 2-5ms vs 50-200ms; acceptable staleness with 5-min TTL + event-driven invalidation |
 | Database queries | Hybrid: semantic + structured filter | Semantic only | Precise property filters ("P0 bugs") fail on semantic search alone |
 | Indexing latency | 2-5 minute SLA via Kafka CDC | Synchronous indexing on write | Async avoids write-path latency; 5 min is acceptable for AI search freshness |
-| Writing assist model | Claude Haiku 4.5 (fast tasks) + GPT-4o (translation, reasoning) | Single model for all | Cost optimization: Haiku is 10x cheaper, adequate for summarize/continue/tone |
+| Writing assist model | GPT-6.1 Terra (fast tasks) + GPT-6.2 Sol (translation, reasoning) | Single model for all | Cost optimization: Terra is half the price of Sol and adequate for summarize/continue/tone |
 | Linked page context | Include in writing assist with permission check | Exclude linked pages | Significantly improves context-aware generation; permission check prevents leakage |
 | Change propagation for permissions | Deny-by-default during propagation | Allow-by-default during propagation | Security: briefly denying access to a chunk is better than briefly leaking it |
 
----
+### Evolution Roadmap
 
-## 7. Cost Analysis
-
+```mermaid
+timeline
+    title Notion AI System Evolution
+    Phase 1 (Launch) : AI search over workspace content with permission filtering
+                     : Basic writing assist (summarize, continue, translate)
+                     : Single embedding model, single LLM
+                     : 5-minute indexing SLA
+    Phase 2 (6 months) : Structured database query translation
+                       : Linked page context in writing assist
+                       : Scope detection optimization
+                       : Semantic caching layer
+                       : Model routing (Terra + Sol)
+    Phase 3 (12 months) : Cross-workspace search for enterprise (per-workspace permission enforcement)
+                        : AI-generated page summaries (precomputed, surfaced in search results)
+                        : Workspace-specific fine-tuned embedding model (domain terminology)
+                        : Agentic workflows — write-back with confirmation ('Summarize all Q1 decisions')
+    Phase 4 (18+ months) : Multimodal — index image content (OCR + VLM captions)
+                         : Voice queries in mobile app
+                         : Proactive AI — suggest related content while writing
+                         : Graph-based retrieval — page link graph for interconnected content
 ```
-15M AI queries/day, 40B chunks indexed:
 
-Embedding costs (query-time):
-  15M queries x $0.02/1M tokens x 50 tokens = $15/day (negligible)
-
-Embedding costs (indexing):
-  50M change events/day x 5 chunks x 384 tokens x $0.02/1M = $1,920/day
-
-Reranking (self-hosted bge-reranker-large on GPU):
-  15M queries x 50 passages = 750M cross-encoder inferences/day
-  8 x A100 GPUs (each handles ~100M inferences/day) = ~$800/day
-
-LLM generation costs:
-  AI search + Q&A (10M queries, GPT-4o):
-    Input: 10M x 3,500 tokens x $2.50/1M = $87,500/day
-    Output: 10M x 300 tokens x $10/1M = $30,000/day
-    Subtotal: $117,500/day
-
-  Writing assist (5M requests):
-    4M via Claude Haiku 4.5 ($1/1M input, $5/1M output):
-      Input: 4M x 3,000 tokens = 12,000 MTok x $1 = $12,000/day
-      Output: 4M x 500 tokens =  2,000 MTok x $5 = $10,000/day
-    1M via GPT-4o (translation, complex tasks):
-      Input: 1M x 3,000 tokens = 3,000 MTok x $2.50 = $7,500/day
-      Output: 1M x 500 tokens =   500 MTok x $10   = $5,000/day
-    Subtotal: $34,500/day
-
-  Total LLM: $152,000/day
-
-Infrastructure:
-  Qdrant cluster (260TB): 40 nodes x $200/day = $8,000/day
-  Elasticsearch cluster: 20 nodes x $150/day = $3,000/day
-  Redis cluster (permission cache + hot content): $1,500/day
-  Kafka + indexing workers: $2,000/day
-  PostgreSQL (Citus, metadata): $1,000/day
-  Application servers: $2,000/day
-  Total infra: $17,500/day
-
-TOTAL: $152,000 + $17,500 + $15 + $1,920 + $800 = ~$172,000/day = ~$5.16M/month
-
-Revenue estimation (illustrative attribution, not Notion's actual reporting):
-  Notion AI is no longer a separate $10/user/month add-on — it is bundled into
-  the paid plans (Plus $10/member/month, Business $20, Enterprise custom), with
-  Custom Agents metered separately on a credits system. There is therefore no
-  standalone AI line item to point at. For this model, attribute $10/month of
-  paid-seat revenue to AI.
-  Assume 30M MAU and 15% on AI-carrying paid seats: 4.5M seats
-  Attributed revenue: 4.5M x $10 = $45M/month
-  Margin: ($45M - $5.16M) / $45M = ~89%
-  (MAU and the 15% attach rate are assumptions for this exercise, not published
-   Notion figures — the margin is only as good as those two inputs.)
-
-Cost optimization levers:
-  - Semantic cache (20% hit rate) -> 0.20 x $152,000 = save $30,400/day
-  - Route 40% of AI search to Claude Haiku 4.5:
-      per query GPT-4o = 3,500 x $2.5e-6 + 300 x $1e-5 = $0.01175
-      per query Haiku 4.5 = 3,500 x $1e-6 + 300 x $5e-6 = $0.00500
-      4M queries x $0.00675 = save $27,000/day
-  - Quantize Qdrant float32 -> int8 (4x reduction) -> 40 nodes -> 12, save $5,600/day
-  - Local embedding model (e5-small-v2 on GPU) -> eliminate embedding API costs
-  Optimized total: ~$109,000/day = ~$3.27M/month
-```
+Each phase builds on the previous one's security foundation: the permission model shipped in Phase 1 is the enforcement layer every later feature (cross-workspace search, agentic write-back, multimodal indexing) must route through.
 
 ---
 
-## 8. Production Failure Modes
+## 6. Real-World Implementations
+
+- **Notion** stores every page as a tree of blocks in sharded Postgres; its engineering blog describes splitting the block table into 480 logical shards across 32 physical databases in 2021. Notion AI Q&A (launched November 2023) answers questions across a workspace, and AI is now bundled into the paid plans rather than sold as a separate add-on, which is why Section 10 attributes revenue instead of reading it off a price list.
+- **Microsoft 365 Copilot** grounds answers through Microsoft Graph and returns only content the signed-in user can already open. Early enterprise rollouts surfaced the failure mode this design guards against: Copilot faithfully exposed files that were *technically* shared too broadly, so permission hygiene (SharePoint oversharing reviews, sensitivity labels) became a deployment prerequisite.
+- **Glean** builds enterprise search on connectors that ingest each source's ACLs alongside content and enforce them at query time, the same "permissions are part of the index" stance as 4.1 and 4.7.
+- **Atlassian Rovo** spans Confluence and Jira, which forces the hybrid path in 4.8: semantic search over pages plus structured JQL-style filters over issue fields.
+- **Google Gemini in Workspace** answers over Drive and Gmail with the user's existing Drive permissions, and keeps workspace content out of model training by contract, the enterprise term every buyer in this market now asks for.
+
+---
+
+## 7. Technologies & Tools
+
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| Source of truth | Sharded Postgres (block tree) | Strong consistency for edits and permissions | Document store |
+| Change capture | Debezium CDC -> Kafka (content and permission topics) | Ordered, replayable events for the 2-5 minute indexing SLA | Dual writes (lose events on crash) |
+| Vector store | Qdrant, collection per workspace, int8 quantization | Hard tenant boundary, per-workspace deletion for GDPR | turbopuffer, pgvector, single shared collection |
+| Keyword search | Elasticsearch / OpenSearch | Exact titles, IDs, acronyms that embeddings miss | Postgres full-text |
+| Embeddings | text-embedding-3-small (1,536 dim) or self-hosted e5 | Half the storage of 3,072-dim with < 2% quality loss on workspace content | text-embedding-3-large |
+| Reranker | Self-hosted bge-reranker-large | 50 -> 8 passages, ~100M inferences/day per A100 | Cohere Rerank API |
+| Permission cache | Redis bloom filter + exact Postgres check | 2-5 ms hit path; deny-by-default during propagation | Recompute per query (50-200 ms) |
+| Generation | GPT-6.2 Sol (search, translation), GPT-6.1 Terra (writing assist) behind an LLM gateway | Routing on task difficulty; provider failover | Single model for everything |
+| Eval and tracing | Golden sets + LLM judge; OpenTelemetry with hashed user IDs | Permission compliance = 1.00 gate | Offline eval only |
+
+---
+
+## 8. Operational Playbook
+
+### Quality Targets
+
+| Area | Targets |
+|------|---------|
+| Retrieval (weekly golden set per workspace tier) | Recall@10 > 0.85, Precision@5 > 0.70, MRR > 0.75 |
+| Generation | Faithfulness > 0.92, answer relevancy > 0.88, permission compliance = 1.00 |
+| User signals | Thumbs up:down > 4:1, writing-assist text kept > 60%, re-query rate tracked as failure proxy |
+| Latency | AI search p50 < 1.5 s, p95 < 3.0 s, p99 < 5.0 s; writing assist TTFT p50 < 800 ms, p95 < 1.5 s |
+
+### Eval Pipeline
+
+Weekly workspace-grounded Q&A eval: 50 golden questions per workspace type (personal / team / enterprise), replayed through the production pipeline under known permission sets.
+
+Quality gates: Faithfulness > 0.92; Answer relevancy > 0.88; Citation accuracy > 0.99 (stricter than typical RAG's 0.90 — a wrong citation implies the answer may reference content the user cannot access); Permission compliance = 1.00 (any non-permitted chunk in the context window fails the gate and triggers a P1 investigation). A metric drop below threshold blocks the deployment.
+
+See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for golden-set management, LLM-as-judge scoring, and CI/CD integration.
+
+### Observability
+
+Every AI query emits an OTel trace. All user-identifying fields are hashed before export.
+
+```
+root span: notion_ai_query
+  workspace_id_hash, request_type, user_tier, scope
+
+  child: permission_check
+    cache_hit, num_allowed_groups, check_duration_ms (2-5ms hit / 50-200ms cold)
+
+  child: vector_retrieval
+    collection_name (hashed), top_k_requested=50, top_k_returned,
+    similarity_scores_p50, retrieval_duration_ms
+
+  child: reranking
+    input_passages, output_passages=8, reranker_model, reranking_duration_ms
+
+  child: llm_generation
+    model, input_tokens, output_tokens, streaming_ttft_ms, client_disconnected
+```
+
+Alert rules: `permission_check.check_duration_ms p95 > 25ms` (cache degradation); `top_k_returned < top_k_requested * 0.5` (permission bitmap staleness spike — ACL post-check dropping >50% of results).
+
+Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md) for the full observability design covering span naming conventions, sampling strategy, cost attribution by workspace_id, and Langfuse/Arize Phoenix integration.
+
+### Incident Runbooks
+
+| # | Name | Severity | Symptom | Diagnosis | Mitigation |
+|---|------|----------|---------|-----------|-----------|
+| 1 | Cross-workspace retrieval | P0 | Audit log: chunk from workspace A in workspace B's context; `_alert_cross_workspace_leak` fires | (a) Confirm chunk `workspace_id` != session `workspace_id`. (b) Determine if leak bypassed Qdrant filter or ACL post-check. (c) Find indexing worker that wrote chunk to wrong collection. | Terminate affected sessions; place AI features in maintenance mode; delete misrouted chunk. Add ingestion-time assertion `chunk.workspace_id == collection_workspace_id`. Post-mortem mandatory regardless of whether data was read. |
+| 2 | Indexing lag (freshness > 5 min) | P2 | `kafka_consumer_lag_seconds > 300`; users report stale search results | (a) Worker pod health (`kubectl get pods -n indexing`): OOMKilled / CrashLoopBackOff? (b) Embedding API error rate > 5% (throttling)? (c) `qdrant_ingest_queue_depth > 100K` (upsert bottleneck)? | Worker crash: scale replicas 200 -> 400. Embedding throttle: failover to local e5-small-v2 GPU cluster. Qdrant bottleneck: increase write threads, reduce replication factor 2 -> 1 for catch-up. Run reconciliation job after lag clears. |
+| 3 | Writing assist TTFT > 2s | P2 | `streaming_ttft_ms p95 > 2000ms`; user acceptance rate drops | (a) Provider TTFT elevated (>1.5s)? Upstream issue, no Notion action. (b) `retrieval_duration_ms p95 > 200ms`? Hot Qdrant shard. (c) Inference cluster GPU util > 90%? Self-hosted cluster saturated. | Provider issue: activate LLM gateway failover (Anthropic <-> OpenAI). Hot shard: migrate top-10 largest collections to dedicated nodes. GPU saturated: add 4 x A100 nodes (~15 min); route writing assist to provider API in the interim. |
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+Two scenarios show what these failures cost at this scale. A team-space permission revocation that propagates allow-by-default over its 15-minute window, at 15M queries/day, exposes the revoked pages to roughly 150K queries workspace-wide; in an enterprise tenant that is a reportable incident, and the reason propagation is deny-by-default. A Kafka consumer crash before offset commit with no reconciliation job left about 2% of new pages (roughly 1M pages a day at 50M change events) unsearchable until users complained, which surfaced as a 9-point drop in the "query success" metric a week later rather than as an alert.
 
 ```
 1. Permission leakage (severity: critical)
@@ -963,125 +962,127 @@ Cost optimization levers:
 
 ---
 
-## 9. Evaluation and Quality Metrics
+## 10. Capacity Planning
 
 ```
-Retrieval quality (measured weekly on golden dataset per workspace tier):
-  Recall@10: > 0.85 (of the relevant chunks, how many are in top 10?)
-  Precision@5: > 0.70 (of the top 5 chunks, how many are relevant?)
-  MRR (Mean Reciprocal Rank): > 0.75
+15M AI queries/day, 40B chunks indexed:
 
-Generation quality:
-  Faithfulness: > 0.92 (all claims supported by retrieved chunks)
-  Answer relevancy: > 0.88 (answer addresses the question)
-  Permission compliance: 1.00 (zero tolerance for violations)
+Embedding costs (query-time):
+  15M queries x $0.02/1M tokens x 50 tokens = $15/day (negligible)
 
-User-facing metrics:
-  AI feature adoption: % of workspace members using AI features weekly
-  Query success rate: % of queries where user does not immediately re-query
-  Thumbs up/down ratio on AI responses: target > 4:1
-  Writing assist acceptance rate: % of generated text kept by user > 60%
+Embedding costs (indexing):
+  50M change events/day x 5 chunks x 384 tokens x $0.02/1M = $1,920/day
 
-Latency percentiles:
-  AI search p50: < 1.5s
-  AI search p95: < 3.0s
-  AI search p99: < 5.0s
-  Writing assist p50: < 800ms to first token
-  Writing assist p95: < 1.5s to first token
+Reranking (self-hosted bge-reranker-large on GPU):
+  15M queries x 50 passages = 750M cross-encoder inferences/day
+  8 x A100 GPUs (each handles ~100M inferences/day) = ~$800/day
+
+LLM generation costs:
+  AI search + Q&A (10M queries, GPT-6.2 Sol at $2/1M in, $10/1M out):
+    Input: 10M x 3,500 tokens x $2/1M = $70,000/day
+    Output: 10M x 300 tokens x $10/1M = $30,000/day
+    Subtotal: $100,000/day
+
+  Writing assist (5M requests):
+    4M via GPT-6.1 Terra ($1/1M input, $5/1M output):
+      Input: 4M x 3,000 tokens = 12,000 MTok x $1 = $12,000/day
+      Output: 4M x 500 tokens =  2,000 MTok x $5 = $10,000/day
+    1M via GPT-6.2 Sol (translation, complex tasks):
+      Input: 1M x 3,000 tokens = 3,000 MTok x $2  = $6,000/day
+      Output: 1M x 500 tokens =   500 MTok x $10 = $5,000/day
+    Subtotal: $33,000/day
+
+  Total LLM: $133,000/day
+
+Infrastructure:
+  Qdrant cluster (260TB): 40 nodes x $200/day = $8,000/day
+  Elasticsearch cluster: 20 nodes x $150/day = $3,000/day
+  Redis cluster (permission cache + hot content): $1,500/day
+  Kafka + indexing workers: $2,000/day
+  PostgreSQL (Citus, metadata): $1,000/day
+  Application servers: $2,000/day
+  Total infra: $17,500/day
+
+TOTAL: $133,000 + $17,500 + $15 + $1,920 + $800 = ~$153,000/day = ~$4.6M/month
+
+Revenue estimation (illustrative attribution, not Notion's actual reporting):
+  Notion AI is no longer a separate $10/user/month add-on — it is bundled into
+  the paid plans (Plus $10/member/month, Business $20, Enterprise custom), with
+  Custom Agents metered separately on a credits system. There is therefore no
+  standalone AI line item to point at. For this model, attribute $10/month of
+  paid-seat revenue to AI.
+  Assume 30M MAU and 15% on AI-carrying paid seats: 4.5M seats
+  Attributed revenue: 4.5M x $10 = $45M/month
+  Margin: ($45M - $4.6M) / $45M = ~90%
+  (MAU and the 15% attach rate are assumptions for this exercise, not published
+   Notion figures — the margin is only as good as those two inputs.)
+
+Cost optimization levers:
+  - Semantic cache (20% hit rate) -> 0.20 x $133,000 = save $26,600/day
+  - Route 40% of AI search to GPT-6.1 Terra:
+      per query Sol   = 3,500 x $2e-6 + 300 x $1e-5 = $0.0100
+      per query Terra = 3,500 x $1e-6 + 300 x $5e-6 = $0.0050
+      4M queries x $0.0050 = save $20,000/day
+  - Quantize Qdrant float32 -> int8 (4x reduction) -> 40 nodes -> 12, save $5,600/day
+  - Local embedding model (e5-small-v2 on GPU) -> eliminate embedding API costs
+  Optimized total: ~$99,000/day = ~$3.0M/month
 ```
-
-See Operational Playbook below for the eval pipeline, OTel trace hierarchy, and incident runbooks.
 
 ---
 
-## Operational Playbook
+## 11. Interview Discussion Points
 
-### Eval Pipeline
+**Q: How is permission-aware RAG different from standard RAG?**
+**Short:** Retrieval becomes a security boundary: every chunk must be filtered by the requesting user's permissions before the LLM sees it, not after.
 
-Weekly workspace-grounded Q&A eval: 50 golden questions per workspace type (personal / team / enterprise), replayed through the production pipeline under known permission sets.
+Permission-aware RAG is fundamentally different from standard RAG. In standard RAG, any retrieved chunk is fair game for the LLM. In permission-aware RAG, the retrieval layer becomes a security boundary. This means pre-filtering at the vector DB level (not post-filtering), permission bitmap caching, and deny-by-default during permission propagation. The architectural consequence is that permission resolution is on the critical path of every single query -- it must be fast (< 15ms) and correct (zero false positives for access grants).
 
-Quality gates: Faithfulness > 0.92; Answer relevancy > 0.88; Citation accuracy > 0.99 (stricter than typical RAG's 0.90 — a wrong citation implies the answer may reference content the user cannot access); Permission compliance = 1.00 (any non-permitted chunk in the context window fails the gate and triggers a P1 investigation). A metric drop below threshold blocks the deployment.
+**Q: Should retrieval fail open or fail closed while a permission change propagates?**
+**Short:** Fail closed: hide affected chunks until a permission change finishes propagating, because briefly denying access is far cheaper than briefly leaking content.
 
-See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for golden-set management, LLM-as-judge scoring, and CI/CD integration.
+The deny-by-default vs. allow-by-default trade-off during permission propagation is a defining design decision. When a team space's permissions change, it can take minutes to update millions of chunks. During this window, do you allow access (risk: user sees content they should not) or deny access (risk: user temporarily cannot find content they should access)? For a security-conscious product, deny-by-default is the only defensible choice. Briefly missing search results is an inconvenience; briefly leaking confidential content is a breach.
 
-### Observability
+**Q: How should you chunk block-based documents differently from PDFs?**
+**Short:** Follow the page structure: split at heading boundaries and serialize each database row as its own chunk with its property schema, instead of fixed-size windows.
 
-Every AI query emits an OTel trace. All user-identifying fields are hashed before export.
+Hierarchical chunking for block-based documents is not the same as chunking PDFs. Notion pages have explicit structure: headings define sections, databases define rows, toggles nest content. Ignoring this structure and doing fixed-size chunking loses the semantic boundaries that make retrieval precise. The chunking strategy must be structure-aware, splitting at heading boundaries and serializing database rows as individual chunks with their property schemas.
 
-```
-root span: notion_ai_query
-  workspace_id_hash, request_type, user_tier, scope
+**Q: Why is real-time indexing with permission consistency the hardest problem in this system?**
+**Short:** Content and permission changes arrive on separate streams but must stay consistent, so a chunk can never become searchable before its permissions are applied.
 
-  child: permission_check
-    cache_hit, num_allowed_groups, check_duration_ms (2-5ms hit / 50-200ms cold)
+Real-time indexing with permission consistency is the hardest engineering problem in this system. Content and permission changes flow through separate Kafka topics but must be consistent: if a page moves to a restricted team space, the permission change must propagate before (or simultaneously with) the new content location becoming searchable. Workspace-level partitioning ensures within-workspace ordering, but cross-topic ordering (content-changes vs. permission-changes) requires version vectors or a two-phase commit on the indexing side.
 
-  child: vector_retrieval
-    collection_name (hashed), top_k_requested=50, top_k_returned,
-    similarity_scores_p50, retrieval_duration_ms
+**Q: Why can't embeddings alone answer structured database queries?**
+**Short:** Property filters like priority, assignee and due date need exact matches; semantic search returns near-misses, so you translate the query into a structured filter.
 
-  child: reranking
-    input_passages, output_passages=8, reranker_model, reranking_duration_ms
+Structured database queries cannot be solved with embeddings alone. When a user asks "show me P0 bugs assigned to Alice due this week," semantic search over serialized rows may return P1 bugs or bugs assigned to Bob that mention Alice in comments. The system needs a structured query path that translates natural language into typed property filters against the database schema. The hybrid approach (semantic + structured, merged) handles both fuzzy conceptual queries and precise filtered queries.
 
-  child: llm_generation
-    model, input_tokens, output_tokens, streaming_ttft_ms, client_disconnected
-```
+**Q: Why use a vector collection per workspace instead of one shared collection?**
+**Short:** It gives a hard tenant boundary, simple per-workspace deletion for GDPR and isolated index performance, at the cost of managing many collections.
 
-Alert rules: `permission_check.check_duration_ms p95 > 25ms` (cache degradation); `top_k_returned < top_k_requested * 0.5` (permission bitmap staleness spike — ACL post-check dropping >50% of results).
+Collection-per-workspace in the vector DB is a multi-tenancy decision with major operational implications. A single collection for all workspaces would simplify operations but make tenant deletion (GDPR Article 17) extremely expensive (scan and delete vs. drop collection). It would also mean a single HNSW index for 40 billion vectors, which is impractical. Collection-per-workspace enables independent scaling, fast deletion, and workspace-level performance isolation -- at the cost of managing millions of small collections.
 
-Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md) for the full observability design covering span naming conventions, sampling strategy, cost attribution by workspace_id, and Langfuse/Arize Phoenix integration.
+**Q: What is the most impactful latency optimization for workspace AI?**
+**Short:** Scope detection: a current-page question like "summarize this" skips workspace-wide vector search and answers in under a second.
 
-### Incident Runbooks
+Scope detection is the most impactful latency optimization. Detecting a current-page query ("summarize this") skips workspace-wide vector search and serves a response in under 1 second. Permissive errors waste compute; restrictive errors return incomplete answers. A rule-based first pass with LLM fallback balances speed and recall.
 
-| # | Name | Severity | Symptom | Diagnosis | Mitigation |
-|---|------|----------|---------|-----------|-----------|
-| 1 | Cross-workspace retrieval | P0 | Audit log: chunk from workspace A in workspace B's context; `_alert_cross_workspace_leak` fires | (a) Confirm chunk `workspace_id` != session `workspace_id`. (b) Determine if leak bypassed Qdrant filter or ACL post-check. (c) Find indexing worker that wrote chunk to wrong collection. | Terminate affected sessions; place AI features in maintenance mode; delete misrouted chunk. Add ingestion-time assertion `chunk.workspace_id == collection_workspace_id`. Post-mortem mandatory regardless of whether data was read. |
-| 2 | Indexing lag (freshness > 5 min) | P2 | `kafka_consumer_lag_seconds > 300`; users report stale search results | (a) Worker pod health (`kubectl get pods -n indexing`): OOMKilled / CrashLoopBackOff? (b) Embedding API error rate > 5% (throttling)? (c) `qdrant_ingest_queue_depth > 100K` (upsert bottleneck)? | Worker crash: scale replicas 200 -> 400. Embedding throttle: failover to local e5-small-v2 GPU cluster. Qdrant bottleneck: increase write threads, reduce replication factor 2 -> 1 for catch-up. Run reconciliation job after lag clears. |
-| 3 | Writing assist TTFT > 2s | P2 | `streaming_ttft_ms p95 > 2000ms`; user acceptance rate drops | (a) Provider TTFT elevated (>1.5s)? Upstream issue, no Notion action. (b) `retrieval_duration_ms p95 > 200ms`? Hot Qdrant shard. (c) Inference cluster GPU util > 90%? Self-hosted cluster saturated. | Provider issue: activate LLM gateway failover (Anthropic <-> OpenAI). Hot shard: migrate top-10 largest collections to dedicated nodes. GPU saturated: add 4 x A100 nodes (~15 min); route writing assist to provider API in the interim. |
+**Q: What dominates this system's cost, and where do you optimize first?**
+**Short:** LLM generation at about $133K/day dwarfs $17.5K/day of infrastructure, so model routing and semantic caching come before any index tuning.
 
----
+The cost structure is dominated by LLM generation, not embeddings or vector search. At $133K/day for LLM generation vs. $17.5K/day for all infrastructure, the obvious optimization target is the LLM. Model routing (GPT-6.1 Terra for simple tasks, GPT-6.2 Sol for complex reasoning), semantic caching for repeated queries, and scope detection (current-page queries skip RAG entirely) cut LLM cost by roughly 35% in the Section 10 model. The bundled ~$10/seat/month attribution works at scale because the per-query marginal cost is low (about $0.007/query after optimization) and most users make fewer than 50 AI queries per month.
 
-## 10. Interview Discussion Points
+**Q: How do you detect a permission leak that slipped past pre-filtering?**
+**Short:** Re-check every cited chunk against the user's permissions asynchronously after delivery, and run canary workspaces with secret strings that must never be retrieved.
 
-**Permission-aware RAG is fundamentally different from standard RAG.** In standard RAG, any retrieved chunk is fair game for the LLM. In permission-aware RAG, the retrieval layer becomes a security boundary. This means pre-filtering at the vector DB level (not post-filtering), permission bitmap caching, and deny-by-default during permission propagation. The architectural consequence is that permission resolution is on the critical path of every single query -- it must be fast (< 15ms) and correct (zero false positives for access grants).
+Audit every response after delivery, asynchronously, so detection never adds latency. For each answer, re-check every cited chunk's `page_id` against the user's permission set as of the request time, and page on any mismatch; the target is a permission compliance rate of exactly 1.00, so one mismatch is a P0, not a metric dip. Pair this with canary workspaces that hold known secret strings and a synthetic user who must never retrieve them, queried every few minutes from every region. The audit tells you how often the pre-filter fails; the canaries tell you within minutes when a deploy broke it.
 
-**The deny-by-default vs. allow-by-default trade-off during permission propagation is a defining design decision.** When a team space's permissions change, it can take minutes to update millions of chunks. During this window, do you allow access (risk: user sees content they should not) or deny access (risk: user temporarily cannot find content they should access)? For a security-conscious product, deny-by-default is the only defensible choice. Briefly missing search results is an inconvenience; briefly leaking confidential content is a breach.
+**Q: A large customer finds that workspace AI surfaces salary documents to every employee. Is that a bug in your system?**
+**Short:** Usually not: if the files were shared company-wide, retrieval is correct; ship oversharing reports and restrict-before-enable tooling so customers fix their ACLs.
 
-**Hierarchical chunking for block-based documents is not the same as chunking PDFs.** Notion pages have explicit structure: headings define sections, databases define rows, toggles nest content. Ignoring this structure and doing fixed-size chunking loses the semantic boundaries that make retrieval precise. The chunking strategy must be structure-aware, splitting at heading boundaries and serializing database rows as individual chunks with their property schemas.
+Usually not, and that is the harder conversation. If the documents were shared with "everyone at company", permission-aware retrieval is doing its job: it returns what the user can already open, just far faster than browsing ever did. Microsoft 365 Copilot rollouts hit exactly this oversharing problem, and the fix was permission hygiene, not a retrieval patch. Ship the tooling with the AI: an admin report of pages shared workspace-wide that match sensitive patterns, a "restrict before enabling AI" checklist, and per-space AI opt-out, so customers fix their ACLs before the AI amplifies them.
 
-**Real-time indexing with permission consistency is the hardest engineering problem in this system.** Content and permission changes flow through separate Kafka topics but must be consistent: if a page moves to a restricted team space, the permission change must propagate before (or simultaneously with) the new content location becoming searchable. Workspace-level partitioning ensures within-workspace ordering, but cross-topic ordering (content-changes vs. permission-changes) requires version vectors or a two-phase commit on the indexing side.
+**Q: How would you add agentic write-back ("update every Q1 decision page") without widening the blast radius?**
+**Short:** Run the agent with the user's own permissions, turn every write into a confirmed diff with undo, cap pages per run, and checkpoint long runs durably.
 
-**Structured database queries cannot be solved with embeddings alone.** When a user asks "show me P0 bugs assigned to Alice due this week," semantic search over serialized rows may return P1 bugs or bugs assigned to Bob that mention Alice in comments. The system needs a structured query path that translates natural language into typed property filters against the database schema. The hybrid approach (semantic + structured, merged) handles both fuzzy conceptual queries and precise filtered queries.
-
-**Collection-per-workspace in the vector DB is a multi-tenancy decision with major operational implications.** A single collection for all workspaces would simplify operations but make tenant deletion (GDPR Article 17) extremely expensive (scan and delete vs. drop collection). It would also mean a single HNSW index for 40 billion vectors, which is impractical. Collection-per-workspace enables independent scaling, fast deletion, and workspace-level performance isolation -- at the cost of managing millions of small collections.
-
-**Scope detection is the most impactful latency optimization.** Detecting a current-page query ("summarize this") skips workspace-wide vector search and serves a response in under 1 second. Permissive errors waste compute; restrictive errors return incomplete answers. A rule-based first pass with LLM fallback balances speed and recall.
-
-**The cost structure is dominated by LLM generation, not embeddings or vector search.** At $152K/day for LLM generation vs. $17.5K/day for all infrastructure, the obvious optimization target is the LLM. Model routing (Haiku 4.5 for simple tasks, GPT-4o for complex reasoning), semantic caching for repeated queries, and scope detection (current-page queries skip RAG entirely) cut LLM cost by roughly 38% in the Section 7 model. The bundled ~$10/seat/month attribution works at scale because the per-query marginal cost is low (about $0.006/query after optimization) and most users make fewer than 50 AI queries per month.
-
----
-
-## 11. System Evolution and Future Considerations
-
-```mermaid
-timeline
-    title Notion AI System Evolution
-    Phase 1 (Launch) : AI search over workspace content with permission filtering
-                     : Basic writing assist (summarize, continue, translate)
-                     : Single embedding model, single LLM
-                     : 5-minute indexing SLA
-    Phase 2 (6 months) : Structured database query translation
-                       : Linked page context in writing assist
-                       : Scope detection optimization
-                       : Semantic caching layer
-                       : Model routing (Haiku + GPT-4o)
-    Phase 3 (12 months) : Cross-workspace search for enterprise (per-workspace permission enforcement)
-                        : AI-generated page summaries (precomputed, surfaced in search results)
-                        : Workspace-specific fine-tuned embedding model (domain terminology)
-                        : Agentic workflows — write-back with confirmation ('Summarize all Q1 decisions')
-    Phase 4 (18+ months) : Multimodal — index image content (OCR + VLM captions)
-                         : Voice queries in mobile app
-                         : Proactive AI — suggest related content while writing
-                         : Graph-based retrieval — page link graph for interconnected content
-```
-
-Each phase builds on the previous one's security foundation: the permission model shipped in Phase 1 is the enforcement layer every later feature (cross-workspace search, agentic write-back, multimodal indexing) must route through.
+Run the agent with the invoking user's permissions, never a service account, and make every write a proposal the user confirms. Each tool call is checked against the same permission model as retrieval, edits are batched into a reviewable diff with per-page undo, and the agent gets a hard cap on pages touched per run (for example 50) so a bad plan cannot rewrite a workspace. Long runs need durable checkpoints so a crash mid-batch does not leave half the pages edited with no record; [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md) covers the resume contract.

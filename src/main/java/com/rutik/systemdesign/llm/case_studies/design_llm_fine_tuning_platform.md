@@ -499,29 +499,28 @@ Mode 2: Golden Dataset Comparison (runs in 10-30 minutes)
 Mode 3: LLM-as-Judge Quality Scoring (runs in 15-45 minutes)
   - Sample 200 examples from golden dataset
   - For each example, generate response with both base and fine-tuned model
-  - Submit to judge LLM (GPT-4o or Claude Sonnet 5):
+  - Submit to judge LLM (GPT-6.2 Sol or Claude Sonnet 5.5, both $2/1M in, $10/1M out):
     Prompt template:
       "You are an expert evaluator. Given the instruction and two responses (A and B,
        order randomized), rate each on: accuracy (1-5), helpfulness (1-5),
        safety (1-5), instruction following (1-5). Then pick the better response."
   - Randomize A/B position to avoid position bias
   - Aggregate: win rate of fine-tuned vs base, average score improvement
-  - Judge cost at GPT-4o list prices ($2.50/1M in, $10/1M out), ~1,800 input +
-    ~200 output tokens per example:
-      200 x (1,800 x $2.5e-6 + 200 x $1e-5) = 200 x $0.0065 = ~$1.30 per run
+  - Judge cost at those list prices, ~1,800 input + ~200 output tokens per example:
+      200 x (1,800 x $2e-6 + 200 x $1e-5) = 200 x $0.0056 = ~$1.12 per run
     Billed to the tenant at a flat $4 evaluation fee (see 4.7)
 
 Regression detection:
   - If fine-tuned model scores worse than base on any metric by >5%: flag as regression
   - If fine-tuned model produces toxic/harmful content not present in base: block deployment
-  - Safety check: run 50 adversarial prompts from red-team dataset
+  - Safety check: run 50 adversarial prompts from the red-team suite (Section 8)
     If any new safety failures: require manual review before promotion
 
 Evaluation record:
   {
     eval_id: uuid,
     job_id: uuid,
-    model_version: "ft:llama-3-70b:acme:v3",
+    model_version: "ft:llama-3.3-70b:acme:v3",
     base_model: "meta-llama/Llama-3.3-70B-Instruct",
     metrics: {
       val_loss: 1.42,
@@ -607,7 +606,7 @@ The model registry is the system of record for all fine-tuned model artifacts.
 
 Model versioning scheme:
   ft:{base_model}:{tenant}:{suffix}:{version}
-  Example: ft:llama-3-70b:acme:customer-support:v3
+  Example: ft:llama-3.3-70b:acme:customer-support:v3
 
 Model artifact stored in S3:
   s3://models/{tenant_id}/{model_id}/
@@ -786,6 +785,8 @@ Fair scheduling across tenants:
     Starvation prevention: no tenant waits more than 30 minutes if GPUs are available
 ```
 
+The shared-infrastructure, isolated-data model and the BYOK option follow [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md); the per-job checkpoint and resume contract is in [Training Loop Internals](./cross_cutting/training_loop_internals.md).
+
 ### 4.7 Cost Tracking and Billing
 
 ```
@@ -832,7 +833,7 @@ Cost estimation API (called before job submission):
     },
     "estimated_duration": "5h 20m",
     "gpu_allocation": "4x A100 80GB",
-    "estimated_start_time": "2024-03-15T14:30:00Z"
+    "estimated_start_time": "2026-11-25T14:30:00Z"
   }
 
 Real-time cost tracking during training:
@@ -848,150 +849,24 @@ Billing integration:
   - Spend anomaly detection: alert if daily spend >2x 7-day average
 ```
 
----
+### 4.8 API Surface
 
-## 5. API Design
+Base URL `https://api.finetune.example.com/v1`, Bearer API key per tenant. Every mutating call takes an `Idempotency-Key` header so a retried job submission never launches two GPU jobs.
 
-```
-Base URL: https://api.finetune.example.com/v1
-
-Authentication: Bearer token (API key per tenant)
-Headers:
-  Authorization: Bearer ft_key_abc123
-  Content-Type: application/json
-
---- Dataset Management ---
-
-POST /v1/datasets
-  Upload a new dataset for fine-tuning.
-  Body: multipart/form-data with "file" (JSONL) + "purpose" (fine-tune)
-  For files >100MB: returns presigned upload URL
-  Response:
-  {
-    "id": "ds_abc123",
-    "status": "uploading",
-    "filename": "support_data_v3.jsonl",
-    "bytes": 215_000_000,
-    "created_at": "2024-03-15T10:00:00Z"
-  }
-
-GET /v1/datasets/{dataset_id}
-  Returns dataset metadata, validation status, quality report.
-  Response includes: status, example_count, total_tokens, quality_score, pii_report
-
-GET /v1/datasets/{dataset_id}/quality-report
-  Detailed quality analysis: perplexity distribution, diversity score,
-  length histogram, flagged examples, duplicate count.
-
-DELETE /v1/datasets/{dataset_id}
-  Deletes dataset and all processed artifacts. Irreversible.
-  Active training jobs using this dataset are not affected (data already copied).
-
---- Training Jobs ---
-
-POST /v1/training/jobs
-  Create a new fine-tuning job.
-  Body:
-  {
-    "dataset_id": "ds_abc123",
-    "base_model": "meta-llama/Llama-3.3-70B-Instruct",
-    "method": "lora",
-    "hyperparameters": {
-      "preset": "quality",
-      "epochs": 3,
-      "learning_rate": 2e-4      // optional override
-    },
-    "eval_dataset_id": "ds_eval456",
-    "budget_cap_usd": 100.0,
-    "suffix": "customer-support"
-  }
-  Response:
-  {
-    "id": "ftjob_xyz789",
-    "status": "queued",
-    "estimated_cost": "$66.30",
-    "estimated_duration": "5h 20m",
-    "model_name": "ft:llama-3-70b:acme:customer-support:v1",
-    "created_at": "2024-03-15T10:05:00Z"
-  }
-
-GET /v1/training/jobs/{job_id}
-  Returns job status, progress, metrics, cost so far.
-  Response:
-  {
-    "id": "ftjob_xyz789",
-    "status": "running",          // queued | running | evaluating | completed | failed
-    "progress": {
-      "current_step": 1240,
-      "total_steps": 3600,
-      "current_epoch": 1.03,
-      "total_epochs": 3,
-      "elapsed_time": "1h 42m",
-      "eta": "3h 38m"
-    },
-    "metrics": {
-      "train_loss": 1.58,
-      "val_loss": 1.62,
-      "learning_rate": 1.8e-4,
-      "tokens_per_second": 8200,
-      "gpu_utilization": 0.92
-    },
-    "cost": {
-      "elapsed_usd": 18.40,
-      "projected_total_usd": 62.50,
-      "budget_cap_usd": 100.0
-    }
-  }
-
-GET /v1/training/jobs/{job_id}/metrics
-  Returns full training metric history (for plotting loss curves).
-  Response: array of {step, train_loss, val_loss, lr, grad_norm, timestamp}
-
-POST /v1/training/jobs/{job_id}/cancel
-  Cancel a running job. Saves last checkpoint. Partial billing applies.
-
-POST /v1/training/estimate
-  Cost and duration estimate without creating a job. (See 4.7 above.)
-
---- Model Registry ---
-
-GET /v1/models
-  List all fine-tuned models for this tenant.
-  Filter by: status, base_model, created_after
-
-GET /v1/models/{model_id}
-  Full model metadata: config, eval scores, lineage, status.
-
-POST /v1/models/{model_id}/promote
-  Promote model to next stage: evaluated -> staging -> production.
-  Body: {"target_stage": "staging", "approval_note": "Passed QA review"}
-
-POST /v1/models/{model_id}/rollback
-  Rollback to previous production model version. Instant (<30 seconds).
-
-DELETE /v1/models/{model_id}
-  Archive model. Artifacts deleted after retention period.
-
---- Evaluation ---
-
-POST /v1/evaluations
-  Trigger an evaluation of a fine-tuned model against a golden dataset.
-  Body:
-  {
-    "model_id": "ft_model_abc",
-    "eval_dataset_id": "ds_golden",
-    "modes": ["metrics", "golden_comparison", "llm_judge"],
-    "judge_model": "gpt-4o"      // or "claude-sonnet-5"
-  }
-
-GET /v1/evaluations/{eval_id}
-  Returns evaluation results, comparison tables, judge scores.
-```
+| Endpoint | Purpose | Notes |
+|----------|---------|-------|
+| `POST /datasets` | Upload JSONL (presigned URL above 100MB) | Returns `ds_*` id; status `uploading -> validating -> validated` |
+| `GET /datasets/{id}/quality-report` | Perplexity, diversity, PII and duplicate report | Drives the A-F quality grade |
+| `POST /training/estimate` | Cost and duration estimate, no job created | Same estimator as 4.2 |
+| `POST /training/jobs` | Create job: `dataset_id`, `base_model`, `method`, preset or overrides, `budget_cap_usd`, `suffix` | Returns `ftjob_*` and model name `ft:llama-3.3-70b:acme:customer-support:v1` |
+| `GET /training/jobs/{id}` | Status, step, ETA, live loss and cost | `queued, running, evaluating, completed, failed` |
+| `POST /training/jobs/{id}/cancel` | Stop and keep last checkpoint | Partial billing |
+| `POST /evaluations` | Run `metrics`, `golden_comparison`, `llm_judge` | Judge model is a pass-through cost |
+| `POST /models/{id}/promote` / `rollback` | Move `evaluated -> staging -> production`; rollback < 30 s | Promotion needs an approval note |
 
 ---
 
-## 6. Trade-offs and Design Decisions
-
+## 5. Design Decisions & Tradeoffs
 | Decision | Chosen | Alternative | Reason |
 |----------|--------|-------------|--------|
 | Default fine-tune method | LoRA | Full fine-tune | 95% of use cases need LoRA; 10-50x cheaper; comparable quality for most tasks |
@@ -1007,8 +882,84 @@ GET /v1/evaluations/{eval_id}
 
 ---
 
-## 7. Cost Impact Analysis
+## 6. Real-World Implementations
 
+- **OpenAI** ran the reference self-serve fine-tuning API (upload JSONL, create a job, get an `ft:` model ID) that this design's API mirrors. On its deprecations page OpenAI moved the cutoff for creating new self-serve fine-tuning jobs to **2026-12-15**; existing fine-tuned models keep serving until their base model retires. The lesson for a platform builder: a tenant's fine-tune is only as durable as the vendor's base-model lifecycle, which is why this design fine-tunes open-weight bases it controls.
+- **Together AI** and **Fireworks AI** offer LoRA and full fine-tuning on open-weight models and then serve the resulting adapters on shared multi-LoRA deployments, so a tenant pays per token instead of reserving a GPU per adapter.
+- **Predibase** (acquired by Rubrik in 2025) built LoRAX, an open-source server that hot-swaps thousands of LoRA adapters on one base model, the serving-side twin of 4.5.
+- **Amazon Bedrock** custom models and **Google Vertex AI** tuning wrap the same job/dataset/model-registry shape in a managed cloud console with IAM-scoped data access, which is the multi-tenancy model of 4.6.
+- **Databricks Mosaic AI** fine-tuning and **Unsloth** sit at two ends of the same trade: managed multi-node jobs with lineage in the lakehouse versus single-GPU kernels that cut LoRA memory enough to fit a 70B QLoRA job on one 80GB GPU.
+
+---
+
+## 7. Technologies & Tools
+
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| Trainer | Hugging Face TRL `SFTTrainer` + PEFT (LoRA, QLoRA, DoRA) | Standard config surface for 92% LoRA jobs | Axolotl, torchtune, Unsloth |
+| Distributed training | PyTorch FSDP2 (`fully_shard`) | Shards params, grads and optimizer state for full fine-tunes | DeepSpeed ZeRO-3, Megatron for > 70B |
+| Orchestration | Kubernetes + Kueue for gang admission and quotas | Tenant quotas and all-or-nothing multi-GPU admission | Ray Train, Slurm |
+| Data validation | Presidio (PII), MinHash LSH (dedup), Llama Guard (safety) | Each stage scales independently | Cloud DLP APIs |
+| Experiment tracking | MLflow or Weights & Biases | Loss curves, configs and artifacts per job | TensorBoard |
+| Registry and lineage | PostgreSQL + S3 with content hashes | Dataset-to-model audit trail for SOC 2 and GDPR | MLflow Model Registry |
+| Adapter serving | vLLM multi-LoRA or LoRAX | One base model, many adapters, no 140GB reload | Merged per-tenant models |
+| Eval | LLM judge (Claude Sonnet 5.5 or GPT-6.2 Sol) + golden sets | Pairwise win rate with randomized order; harness in [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) | Human review only |
+---
+
+## 8. Operational Playbook
+
+### Eval Pipeline (every job, automated)
+
+Every fine-tuning job must pass the eval gate before promotion. Gate runs automatically on job completion:
+1. Perplexity + token accuracy from validation loss: <5 minutes.
+2. Golden-set eval on 500 examples: 15-30 minutes on 1x A100.
+3. Task-specific metric (BLEU / pass@1 / accuracy / ROUGE-L).
+4. Decision: PASS auto-promotes; FAIL surfaces regression diff in dashboard; REVIEW routes to human queue.
+
+See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/evaluation_and_benchmarks.md) for the full eval harness.
+
+### Observability (OpenTelemetry trace per job)
+
+```
+job_span: job_id, tenant_id, base_model, method, dataset_hash
+  +-- data_pipeline_span: num_examples, num_tokens, pii_redacted, quality_score
+  +-- training_span (per 500-step checkpoint): train_loss, val_loss, grad_norm,
+  |     gpu_util_pct, mfu_pct, tokens_per_second, learning_rate
+  +-- eval_span: perplexity_delta_pct, task_metric_delta_pct, gate_decision
+```
+
+GPU-seconds per span tagged with tenant_id + job_id feed billing directly. Span names and `gen_ai.*` attributes follow [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md); dashboards are covered in [LLM Observability and Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md).
+
+### Incident Runbooks
+
+**Runbook 1 — Loss spike mid-training**
+Symptom: loss > 3x rolling mean. Auto-response: `FineTuningTrainer` saves emergency checkpoint `spike_{step}` and logs WARNING. Diagnosis: inspect the batch at that step index in training span -- common cause is a corrupted JSONL line with garbled token sequences that passed format validation. Resolution: if loss does not recover within 50 steps, cancel job, remove offending batch, restart from last clean checkpoint (max 500 steps lost).
+
+**Runbook 2 — GPU OOM during FSDP**
+Symptom: `torch.cuda.OutOfMemoryError` at step N; pod exits, node stays healthy (OOM is per-pod). Diagnosis: check `sequence_length_max` in training span -- a batch with 8192 tokens vs typical 2048 can exceed per-GPU HBM even with FSDP sharding. Resolution: reduce `max_length` or `per_device_batch_size` by 1 and resubmit; orchestrator auto-retries up to 3 times from last checkpoint. Persistent failure at same step -> manual review for pathologically long examples.
+
+**Runbook 3 — Eval gate regression blocking tenant**
+Symptom: `gate_decision=FAIL` on every job iteration; tenant reports "model is worse than base." Diagnosis: open eval report -- common causes: (a) golden set misaligned with task, (b) golden set too small (<50 examples, metric estimate noisy), (c) catastrophic forgetting from too-narrow training data. Resolution: (a)/(b) replace golden set or allow manager-approved gate bypass (audit-logged for SOC 2); (c) recommend data augmentation or reduce LoRA rank. The 50-prompt safety probe in the gate comes from [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md).
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+**Gradient-accumulation loss normalization.** In October 2024 Unsloth showed that Hugging Face Transformers' gradient accumulation did not match full-batch training: each micro-batch's cross-entropy was averaged over its own non-padded token count and then summed, so batches with uneven sequence lengths over-weighted short examples. Transformers shipped a fix in 4.46. Platform impact in this design's terms: every job with `gradient_accumulation_steps > 1` and mixed-length data trains on a subtly different objective. A 2-week window of 9,000 jobs at an average $12 is $108K of compute to re-run for tenants who ask. Prevention: pin the trainer version per job, record it in lineage, and keep a regression test that compares accumulated and full-batch loss on a fixed mixed-length batch to 1e-4.
+
+**Chat template mismatch between training and serving.** A tenant trains with the Llama 3 chat template and the serving stack applies ChatML. The adapter sees token sequences it never trained on, and golden-set exact match drops from 78% to 41% in production while offline eval, which used the training template, still reads 78%. Impact: 3 days of degraded answers on a support bot at 40K queries/day before the tenant noticed. Prevention: store the exact template string and tokenizer hash in `training_config.json` and have the serving loader refuse an adapter whose template hash differs.
+
+**Torn checkpoint on node loss.** A pre-fix checkpoint writer streamed directly to the final S3 key. A node died mid-write, the resume path loaded a truncated optimizer state, and the run diverged 400 steps later. Impact: 37 multi-GPU jobs restarted from step 0, about 1,800 wasted A100-hours (~$4,500) in one incident. Prevention: the temp-file-then-rename pattern in 4.2 plus a manifest written last, so resume only trusts checkpoints with a complete manifest. [Training Loop Internals](./cross_cutting/training_loop_internals.md) covers the full checkpoint contract.
+
+**Redaction token becomes a learned behaviour.** PII redaction replaced emails with `[REDACTED]` in 12% of examples. The fine-tuned model learned to emit `[REDACTED]` in place of any email-like slot, including the company's own support address. Impact: 6% of production replies contained the literal token. Prevention: redact with realistic synthetic surrogates (fake but well-formed emails) and add a golden-set assertion that the output never contains the redaction marker.
+
+**Eval contamination inflates the gate.** A tenant uploaded a golden set drawn from the same ticket export as the training set; 30% of golden examples were near-duplicates of training rows. The judge win rate read 0.91 and the model promoted, then lost to the base model in the online A/B test. Prevention: run the Stage 4 MinHash deduplicator across training and golden sets and block promotion when overlap exceeds 5%.
+
+---
+
+## 10. Capacity Planning
+
+GPU fleet sizing follows the peak-concurrency arithmetic in Section 2; the spot-versus-reserved blend below follows the cost model in [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md).
 ```
 Platform economics at scale (monthly):
 
@@ -1081,61 +1032,58 @@ Key cost levers:
 
 ---
 
-## 8. Operational Playbook
+## 11. Interview Discussion Points
 
-### Eval Pipeline (every job, automated)
+**Q: Why default to LoRA instead of full fine-tuning?**
+**Short:** LoRA trains 0.1-1% of parameters, so a 70B job runs on 4 GPUs for $60-90 instead of 32 GPUs for $1,000+, with most of the quality gain for typical tasks.
 
-Every fine-tuning job must pass the eval gate before promotion. Gate runs automatically on job completion:
-1. Perplexity + token accuracy from validation loss: <5 minutes.
-2. Golden-set eval on 500 examples: 15-30 minutes on 1x A100.
-3. Task-specific metric (BLEU / pass@1 / accuracy / ROUGE-L).
-4. Decision: PASS auto-promotes; FAIL surfaces regression diff in dashboard; REVIEW routes to human queue.
+LoRA trains only 0.1-1% of model parameters (low-rank adapters injected into attention layers), which removes the optimizer state and gradients for the frozen base and so cuts training memory several-fold. The LoRA paper (Hu et al., 2021) reports a 3x VRAM reduction on GPT-3 175B with Adam and roughly 25% training-throughput improvement — note that is a throughput gain, not the order-of-magnitude speedup sometimes claimed; the large wins are memory and the ability to fit on fewer GPUs. For a 70B model, full fine-tuning requires 32 A100 GPUs and costs $1,000+; LoRA runs on 4 GPUs for $60-90 and, on this platform's own golden-set evals, recovers most of the quality gain for typical domain-adaptation tasks. Full fine-tuning is only justified when the domain shift is extreme (e.g., English model to Japanese medical) and the dataset exceeds 100K examples. The platform should steer users toward LoRA by default and require explicit justification (minimum dataset size, budget confirmation) for full fine-tuning jobs.
 
-See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/evaluation_and_benchmarks.md) for the full eval harness.
+**Q: How do you handle the noisy neighbor problem on a shared GPU cluster?**
+**Short:** Dedicated GPUs per job, separate network paths for NCCL and data loading, and virtual-clock fair scheduling so no tenant can monopolize the queue.
 
-### Observability (OpenTelemetry trace per job)
+Three mechanisms work together. First, GPU isolation: each training job gets dedicated GPU(s) with no time-sharing -- one job per GPU eliminates memory contention and CUDA context switching. Second, network bandwidth isolation: NCCL traffic for distributed training jobs uses dedicated RDMA lanes; data loading traffic uses separate NICs. Third, fair scheduling with virtual clocks prevents any single tenant from monopolizing the queue. The remaining risk is CPU and disk I/O contention on shared nodes -- mitigated by pod resource limits (CPU requests/limits, ephemeral storage limits) and by scheduling memory-intensive jobs on dedicated high-memory nodes.
 
-```
-job_span: job_id, tenant_id, base_model, method, dataset_hash
-  +-- data_pipeline_span: num_examples, num_tokens, pii_redacted, quality_score
-  +-- training_span (per 500-step checkpoint): train_loss, val_loss, grad_norm,
-  |     gpu_util_pct, mfu_pct, tokens_per_second, learning_rate
-  +-- eval_span: perplexity_delta_pct, task_metric_delta_pct, gate_decision
-```
+**Q: What happens when a GPU fails mid-training?**
+**Short:** The orchestrator detects the failure, reschedules the job on healthy GPUs, and resumes from the last 30-minute checkpoint, losing at most 30 minutes of work.
 
-GPU-seconds per span tagged with tenant_id + job_id feed billing directly. See [LLM Observability and Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md).
+The platform checkpoints every 30 minutes to S3, storing optimizer state, model weights (or LoRA adapter weights), learning rate schedule position, data loader position, and random seed state. When a GPU failure is detected (heartbeat timeout after 3 minutes, CUDA error, or ECC memory error), the orchestrator marks the node unhealthy, evicts all jobs on that node, and reschedules each job on healthy GPUs starting from the last checkpoint. Maximum data loss is 30 minutes of training. For multi-GPU FSDP jobs, all GPUs must be replaced since FSDP state is sharded across them. The checkpoint-resume adds 2-5 minutes of overhead (download checkpoint, reinitialize training state). After 3 failed retries, the job is marked failed and the user is notified with a partial refund.
 
-### Incident Runbooks
+**Q: How do you prevent users from fine-tuning models on harmful data?**
+**Short:** Layered defenses: PII scanning, a safety classifier on sampled examples, adversarial safety evals before promotion, and output filters after deployment.
 
-**Runbook 1 — Loss spike mid-training**
-Symptom: loss > 3x rolling mean. Auto-response: `FineTuningTrainer` saves emergency checkpoint `spike_{step}` and logs WARNING. Diagnosis: inspect the batch at that step index in training span -- common cause is a corrupted JSONL line with garbled token sequences that passed format validation. Resolution: if loss does not recover within 50 steps, cancel job, remove offending batch, restart from last clean checkpoint (max 500 steps lost).
+The data pipeline has multiple defense layers. PII detection catches personal data (SSN, medical records) before it enters training. Content safety scoring samples 500 examples and runs them through a safety classifier (Llama Guard) to detect hate speech, violence instructions, or CSAM. If >2% of examples are flagged, the dataset is rejected with a detailed report. During training, the evaluation service runs adversarial safety prompts against the fine-tuned model -- if it produces harmful outputs not present in the base model (regression), deployment is blocked. Post-deployment, inference endpoints include output safety filters. These layers are defense-in-depth; no single layer is foolproof, but together they raise the bar significantly.
 
-**Runbook 2 — GPU OOM during FSDP**
-Symptom: `torch.cuda.OutOfMemoryError` at step N; pod exits, node stays healthy (OOM is per-pod). Diagnosis: check `sequence_length_max` in training span -- a batch with 8192 tokens vs typical 2048 can exceed per-GPU HBM even with FSDP sharding. Resolution: reduce `max_length` or `per_device_batch_size` by 1 and resubmit; orchestrator auto-retries up to 3 times from last checkpoint. Persistent failure at same step -> manual review for pathologically long examples.
+**Q: Why not let users bring arbitrary PyTorch training scripts instead of a managed config?**
+**Short:** Arbitrary code on shared GPUs enables data exfiltration, crypto mining and node crashes, and makes cost and memory impossible to predict, so it goes to a dedicated tier.
 
-**Runbook 3 — Eval gate regression blocking tenant**
-Symptom: `gate_decision=FAIL` on every job iteration; tenant reports "model is worse than base." Diagnosis: open eval report -- common causes: (a) golden set misaligned with task, (b) golden set too small (<50 examples, metric estimate noisy), (c) catastrophic forgetting from too-narrow training data. Resolution: (a)/(b) replace golden set or allow manager-approved gate bypass (audit-logged for SOC 2); (c) recommend data augmentation or reduce LoRA rank.
+Arbitrary code execution on GPU clusters creates severe security and operational risks: users could mine cryptocurrency, exfiltrate data from shared storage, crash nodes with OOM or infinite loops, or install malicious packages. The managed approach constrains the training loop to well-tested configurations (LoRA/QLoRA/FSDP with Hugging Face Trainer), which allows the platform to accurately estimate cost, predict GPU memory usage, guarantee checkpoint/resume works, and provide meaningful training metrics. Power users who need custom training loops are offered a "dedicated cluster" tier where they get isolated VMs with SSH access -- at 5-10x the cost of managed jobs.
 
----
+**Q: How does the cost estimator work, and how accurate is it?**
+**Short:** It divides total training tokens by benchmarked tokens per second for the model, method and GPU, then multiplies by GPU count and rate; it lands within 20% for 80% of jobs.
 
-## 9. Interview Discussion Points
+The estimator uses benchmarked throughput tables: for each (base_model, method, GPU_type) combination, the platform has measured tokens-per-second under typical conditions (e.g., Llama 3.3 70B LoRA on 4xA100: 8,000 tokens/sec). Estimated time = (total_tokens x epochs) / throughput. Estimated cost = time x GPU_count x rate. The confidence interval accounts for variance in sequence length distribution (longer sequences are slower), batch size effects, and queue wait time. In production, the estimator achieves within 20% accuracy for 80% of jobs. The remaining 20% are outliers from unusual sequence length distributions or unexpected early stopping. Users can set a hard budget cap -- the platform kills the job if cost exceeds the cap, ensuring no surprise bills.
 
-**Why default to LoRA instead of full fine-tuning?** LoRA trains only 0.1-1% of model parameters (low-rank adapters injected into attention layers), which removes the optimizer state and gradients for the frozen base and so cuts training memory several-fold. The LoRA paper (Hu et al., 2021) reports a 3x VRAM reduction on GPT-3 175B with Adam and roughly 25% training-throughput improvement — note that is a throughput gain, not the order-of-magnitude speedup sometimes claimed; the large wins are memory and the ability to fit on fewer GPUs. For a 70B model, full fine-tuning requires 32 A100 GPUs and costs $1,000+; LoRA runs on 4 GPUs for $60-90 and, on this platform's own golden-set evals, recovers most of the quality gain for typical domain-adaptation tasks. Full fine-tuning is only justified when the domain shift is extreme (e.g., English model to Japanese medical) and the dataset exceeds 100K examples. The platform should steer users toward LoRA by default and require explicit justification (minimum dataset size, budget confirmation) for full fine-tuning jobs.
+**Q: How would you implement A/B testing between a base model and a fine-tuned model in production?**
+**Short:** Split traffic at the inference endpoint with a canary percentage, log both variants, compare online metrics, and roll back automatically on error or latency breaches.
 
-**How do you handle the noisy neighbor problem on a shared GPU cluster?** Three mechanisms work together. First, GPU isolation: each training job gets dedicated GPU(s) with no time-sharing -- one job per GPU eliminates memory contention and CUDA context switching. Second, network bandwidth isolation: NCCL traffic for distributed training jobs uses dedicated RDMA lanes; data loading traffic uses separate NICs. Third, fair scheduling with virtual clocks prevents any single tenant from monopolizing the queue. The remaining risk is CPU and disk I/O contention on shared nodes -- mitigated by pod resource limits (CPU requests/limits, ephemeral storage limits) and by scheduling memory-intensive jobs on dedicated high-memory nodes.
+The deployment service supports traffic splitting at the inference endpoint level. When promoting a fine-tuned model, the user configures a canary percentage (e.g., 5%). The load balancer routes 5% of requests to the fine-tuned model and 95% to the current production model (base or previous fine-tune). Both responses are logged with a variant tag. The evaluation service computes online metrics: latency comparison, user feedback scores (thumbs up/down), task-specific KPIs (e.g., customer support ticket resolution rate). After the configured observation period (1-24 hours), the user reviews metrics and decides to promote (shift to 100%) or rollback. Automatic rollback triggers if fine-tuned model error rate exceeds base by >1% or latency p95 exceeds 2x.
 
-**What happens when a GPU fails mid-training?** The platform checkpoints every 30 minutes to S3, storing optimizer state, model weights (or LoRA adapter weights), learning rate schedule position, data loader position, and random seed state. When a GPU failure is detected (heartbeat timeout after 3 minutes, CUDA error, or ECC memory error), the orchestrator marks the node unhealthy, evicts all jobs on that node, and reschedules each job on healthy GPUs starting from the last checkpoint. Maximum data loss is 30 minutes of training. For multi-GPU FSDP jobs, all GPUs must be replaced since FSDP state is sharded across them. The checkpoint-resume adds 2-5 minutes of overhead (download checkpoint, reinitialize training state). After 3 failed retries, the job is marked failed and the user is notified with a partial refund.
+**Q: What is the model lineage problem and why does it matter for enterprises?**
+**Short:** Enterprises must prove which data trained which model, so the registry stores immutable hashes linking each prediction to model, job, dataset and raw upload.
 
-**How do you prevent users from fine-tuning models on harmful data?** The data pipeline has multiple defense layers. PII detection catches personal data (SSN, medical records) before it enters training. Content safety scoring samples 500 examples and runs them through a safety classifier (Llama Guard) to detect hate speech, violence instructions, or CSAM. If >2% of examples are flagged, the dataset is rejected with a detailed report. During training, the evaluation service runs adversarial safety prompts against the fine-tuned model -- if it produces harmful outputs not present in the base model (regression), deployment is blocked. Post-deployment, inference endpoints include output safety filters. These layers are defense-in-depth; no single layer is foolproof, but together they raise the bar significantly.
+Regulated industries (finance, healthcare) require audit trails: "Which data trained the model that made this decision?" The model registry stores cryptographic hashes of the exact dataset, training configuration, and base model weights used for each fine-tuned version. Given any production prediction, you can trace: prediction -> model version -> training job -> dataset version -> raw upload file. This chain is immutable -- even if the dataset or model is later deleted, the metadata and hashes persist. For GDPR compliance, if a user requests data deletion, the platform can identify which models were trained on that data, flag them for retraining, and prove the data was removed. Without lineage tracking, an enterprise cannot answer "was this customer's data used in model training?" -- a compliance failure.
 
-**Why not let users bring arbitrary PyTorch training scripts instead of a managed config?** Arbitrary code execution on GPU clusters creates severe security and operational risks: users could mine cryptocurrency, exfiltrate data from shared storage, crash nodes with OOM or infinite loops, or install malicious packages. The managed approach constrains the training loop to well-tested configurations (LoRA/QLoRA/FSDP with Hugging Face Trainer), which allows the platform to accurately estimate cost, predict GPU memory usage, guarantee checkpoint/resume works, and provide meaningful training metrics. Power users who need custom training loops are offered a "dedicated cluster" tier where they get isolated VMs with SSH access -- at 5-10x the cost of managed jobs.
+**Q: How do you handle the cold start problem for base model weights?**
+**Short:** Cache popular base models on node NVMe and prefetch from the job queue, avoiding a 2-minute 140GB download that wastes about $6,700 a month of GPU time.
 
-**How does the cost estimator work, and how accurate is it?** The estimator uses benchmarked throughput tables: for each (base_model, method, GPU_type) combination, the platform has measured tokens-per-second under typical conditions (e.g., Llama-3-70B LoRA on 4xA100: 8,000 tokens/sec). Estimated time = (total_tokens x epochs) / throughput. Estimated cost = time x GPU_count x rate. The confidence interval accounts for variance in sequence length distribution (longer sequences are slower), batch size effects, and queue wait time. In production, the estimator achieves within 20% accuracy for 80% of jobs. The remaining 20% are outliers from unusual sequence length distributions or unexpected early stopping. Users can set a hard budget cap -- the platform kills the job if cost exceeds the cap, ensuring no surprise bills.
+A 70B parameter model in bf16 is approximately 140GB. Downloading from S3 at 10Gbps takes about 2 minutes. If every training job downloads fresh, that is 2 minutes of wasted GPU time: 4 GPUs x (2/60) h x $2.50/GPU-h = $0.33 per job, or ~$6,700/month across 20,000 jobs. The solution is a two-tier cache: each GPU node has 2TB NVMe SSD that caches the 3-4 most popular base models (covering 90% of jobs). A background daemon pre-fetches models based on the job queue -- if a Llama 3.3 70B job is queued for node 7 and node 7 does not have it cached, the daemon starts downloading before the job is scheduled. Cache eviction uses LFU (least frequently used) with a 7-day minimum retention. For the 10% of jobs using rare models, the 2-minute download is acceptable and included in the cost estimate.
 
-**How would you implement A/B testing between a base model and a fine-tuned model in production?** The deployment service supports traffic splitting at the inference endpoint level. When promoting a fine-tuned model, the user configures a canary percentage (e.g., 5%). The load balancer routes 5% of requests to the fine-tuned model and 95% to the current production model (base or previous fine-tune). Both responses are logged with a variant tag. The evaluation service computes online metrics: latency comparison, user feedback scores (thumbs up/down), task-specific KPIs (e.g., customer support ticket resolution rate). After the configured observation period (1-24 hours), the user reviews metrics and decides to promote (shift to 100%) or rollback. Automatic rollback triggers if fine-tuned model error rate exceeds base by >1% or latency p95 exceeds 2x.
+**Q: How would you evolve this platform to support continual learning / online fine-tuning?**
+**Short:** Add a streaming feedback pipeline, scheduled retraining on new plus original data, and forgetting checks against the original golden set before each promotion.
 
-**What is the model lineage problem and why does it matter for enterprises?** Regulated industries (finance, healthcare) require audit trails: "Which data trained the model that made this decision?" The model registry stores cryptographic hashes of the exact dataset, training configuration, and base model weights used for each fine-tuned version. Given any production prediction, you can trace: prediction -> model version -> training job -> dataset version -> raw upload file. This chain is immutable -- even if the dataset or model is later deleted, the metadata and hashes persist. For GDPR compliance, if a user requests data deletion, the platform can identify which models were trained on that data, flag them for retraining, and prove the data was removed. Without lineage tracking, an enterprise cannot answer "was this customer's data used in model training?" -- a compliance failure.
+The current design is batch-oriented: upload data, train, evaluate, deploy. Continual learning requires three additions. First, a streaming data pipeline that accepts real-time feedback (user corrections, thumbs-down signals) and accumulates them into training batches automatically. Second, scheduled retraining triggers: "retrain every Sunday using the last 7 days of feedback data, merged with the original training set." Third, catastrophic forgetting prevention: when retraining on new data, evaluate on the original golden set to ensure old capabilities are preserved. The model registry already supports versioning, so each retrained model becomes a new version with full lineage. The key architectural change is the data pipeline: it must support append-mode datasets that grow over time, rather than static uploads.
+**Q: Why build on open-weight base models when hosted fine-tuning APIs exist?**
+**Short:** Because a hosted fine-tune lives only as long as the vendor's base model and job API; OpenAI moved its self-serve job-creation cutoff to 2026-12-15.
 
-**How do you handle the cold start problem for base model weights?** A 70B parameter model in bf16 is approximately 140GB. Downloading from S3 at 10Gbps takes about 2 minutes. If every training job downloads fresh, that is 2 minutes of wasted GPU time: 4 GPUs x (2/60) h x $2.50/GPU-h = $0.33 per job, or ~$6,700/month across 20,000 jobs. The solution is a two-tier cache: each GPU node has 2TB NVMe SSD that caches the 3-4 most popular base models (covering 90% of jobs). A background daemon pre-fetches models based on the job queue -- if a Llama-3-70B job is queued for node 7 and node 7 does not have Llama-3-70B cached, the daemon starts downloading before the job is scheduled. Cache eviction uses LFU (least frequently used) with a 7-day minimum retention. For the 10% of jobs using rare models, the 2-minute download is acceptable and included in the cost estimate.
-
-**How would you evolve this platform to support continual learning / online fine-tuning?** The current design is batch-oriented: upload data, train, evaluate, deploy. Continual learning requires three additions. First, a streaming data pipeline that accepts real-time feedback (user corrections, thumbs-down signals) and accumulates them into training batches automatically. Second, scheduled retraining triggers: "retrain every Sunday using the last 7 days of feedback data, merged with the original training set." Third, catastrophic forgetting prevention: when retraining on new data, evaluate on the original golden set to ensure old capabilities are preserved. The model registry already supports versioning, so each retrained model becomes a new version with full lineage. The key architectural change is the data pipeline: it must support append-mode datasets that grow over time, rather than static uploads.
+A tenant's adapter is an asset tied to one exact set of base weights. When a vendor retires the base model, every fine-tune built on it stops serving on the same date, and when the vendor closes job creation, the tenant cannot even retrain. OpenAI's deprecations page shows both: self-serve fine-tuning job creation ends on 2026-12-15, and existing fine-tuned models serve only until their base model's shutdown. Owning the base weights (Llama, Qwen, gpt-oss) moves that lifecycle decision inside your own change control: you choose when to migrate, and you can re-train the same data on a new base and gate it with the same eval suite. Keep a hosted-API path for tenants who want it, but price in a forced migration every 12-18 months.

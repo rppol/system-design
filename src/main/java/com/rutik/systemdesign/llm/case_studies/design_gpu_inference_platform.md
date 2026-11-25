@@ -12,7 +12,7 @@ For loading, versioning, and retiring the LoRA adapters this platform multiplexe
 ## 1. Requirements Clarification
 
 ### Functional Requirements
-- Serve any open-weight model: Llama-3 (8B, 70B), Mistral-7B, Mixtral-8x7B (MoE), CodeLlama-34B
+- Serve current open-weight models: Llama 3.1 8B and Llama 3.3 70B (dense), Qwen3 (8B-32B dense), gpt-oss-20b and gpt-oss-120b (MoE), Mistral Small; MoE models above 100B total parameters run on the dedicated tier
 - OpenAI-compatible REST API (`/v1/completions`, `/v1/chat/completions`, `/v1/models`) so customers can swap `base_url` without changing SDK code
 - Streaming responses via SSE at 50+ tokens/second sustained
 - Per-customer LoRA adapter registration and inference: customers upload adapters, reference by `adapter_id` in requests
@@ -227,7 +227,7 @@ class NaiveModelRouter:
         return pods[self._rr_counter % len(pods)]  # cache thrash guaranteed
 
 # Every request gets a different pod; system-prompt KV cache is never reused.
-# Llama-3-70B KV cost per token: 80 layers x 2 (K,V) x 8 KV heads x 128 head_dim
+# Llama 3.3 70B KV cost per token: 80 layers x 2 (K,V) x 8 KV heads x 128 head_dim
 #   x 2 bytes (FP16) = 327,680 bytes/token (~320 KB).
 # At 500 tenants x 2K-token system prompt, every pod that sees a tenant must
 # re-prefill 500 x 2,048 x 327,680 bytes = 328 GB of KV state.
@@ -530,7 +530,7 @@ spec:
           name: gpu_mbu_percent
           selector:
             matchLabels:
-              model: "llama-3-8b"
+              model: "llama-3.1-8b"
         target:
           type: AverageValue
           averageValue: "65"   # target 65% MBU across all pods
@@ -724,7 +724,7 @@ ClickHouse query for tenant daily usage:
 
 ---
 
-## 5. Key Design Decisions
+## 5. Design Decisions & Tradeoffs
 
 | Decision | Chosen Approach | Alternative Considered | Rationale |
 |----------|----------------|----------------------|-----------|
@@ -734,10 +734,8 @@ ClickHouse query for tenant daily usage:
 | Spot instance blending | 70% spot H100, 30% on-demand; checkpointed streaming for preemption | 100% on-demand | H100 spot at $2.50/hr vs ~$3.50/hr on-demand (2026 neocloud market median is $2.30-$3.10/hr; AWS p5 is ~$3.90/GPU-hr); 3-8% preemption rate manageable with stateless retry; 140 spot GPUs x $1.00/hr x 8,760 hr saves ~$1.2M/year at 200-GPU fleet size |
 | Autoscaling metric | MBU (model buffer utilization = KV-cache occupancy %) | RPS | RPS is not correlated with GPU saturation for variable-length LLM workloads; MBU directly measures the bottleneck resource |
 | API compatibility | OpenAI-compatible REST API (drop-in base_url swap) | Proprietary API | 80% of target customers use existing OpenAI SDK; zero client-side migration cost is a critical go-to-market advantage |
-
----
-
-## 6. Tradeoffs
+| Prefill/decode layout | Co-located for prompts < 4K tokens; disaggregated prefill and decode pools for long-context tenants | Co-located everywhere | A 32K-token prefill stalls every decode stream on a co-located GPU for 1-3 s; below ~4K tokens the KV transfer costs more than the interference it removes |
+| Router and scheduler | llm-d 1.0 endpoint picker (KV-aware scoring, flow control) with the 4.1 consistent-hash router as fallback | Fully custom router | KV-aware routing, fairness queues and P/D orchestration are now open-source commodity; own only quotas, adapters and billing |
 
 | Dimension | Serverless (scale-to-zero) | Dedicated (warm pool) |
 |-----------|--------------------------|----------------------|
@@ -746,13 +744,6 @@ ClickHouse query for tenant daily usage:
 | Cost at high traffic | Same as dedicated + preemption risk | Predictable, fully utilized |
 | Suitable for | Dev/test, bursty workloads | Production, latency-sensitive |
 | TTFT SLA | 500ms + cold start on first call | < 500ms guaranteed |
-
-| Dimension | Shared GPU Pool | Per-Tenant GPU Pool |
-|-----------|----------------|---------------------|
-| Cost | 17 pods for 500 tenants | 500 pods (29x more expensive) |
-| Isolation | Process-level (no hardware boundary) | Hardware-level (separate GPU) |
-| Suitable for | Commercial SaaS tenants | HIPAA, FedRAMP, financial |
-| KV cache affinity | Shared; consistent-hash preserves per-tenant locality | Dedicated; 100% KV reuse |
 
 | GPU Type | H100 SXM5 80GB | A10G 24GB |
 |----------|---------------|-----------|
@@ -773,66 +764,61 @@ ClickHouse query for tenant daily usage:
 
 ---
 
-## Operational Playbook
+## 6. Real-World Implementations
+
+- **Fireworks AI** runs multi-tenant serving on its own FireAttention kernels and serves fine-tuned adapters on shared base-model deployments, the same "one base model, many LoRAs" economics as 4.2. Serverless per-token pricing sits beside on-demand dedicated GPU deployments, which is the serverless/dedicated split in Section 1.
+- **Together AI** sells serverless per-token endpoints, dedicated endpoints and batch inference at a 50% discount, and publishes kernel work (FlashAttention authorship, speculative-decoding research) as its cost moat rather than relying on GPU list-price spread.
+- **Baseten** and **Modal** compete on cold start: both treat container plus weight loading as the product, with weight caching and pre-warmed pools, because scale-to-zero only sells if a 7B model is back in seconds.
+- **llm-d** (Red Hat, Google, IBM, NVIDIA, CoreWeave and others) shipped v1.0.0 on 2026-10-20: a `v1` router configuration API, priority- and fairness-aware flow control with load shedding, and `DisaggregatedSet`, which rolls prefill and decode replicas as one unit. The release also deprecated llm-d's own inference images in favour of upstream vLLM and SGLang images.
+- **NVIDIA Dynamo** provides disaggregated serving, KV-aware routing and KV offload across vLLM, SGLang and TensorRT-LLM back ends; llm-d 1.0 integrates Dynamo's ModelExpress for peer-to-peer weight loading, which attacks the same cold-start problem as 4.3.
+- **vLLM** itself (PagedAttention, SOSP 2023) is the default engine across these stacks. The paper measured prior systems using only 20.4-38.2% of reserved KV memory for real token state, which is the waste this platform's density depends on removing.
+
+---
+
+## 7. Technologies & Tools
+
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| Inference engine | vLLM 0.34 (PagedAttention, multi-LoRA, prefix caching) | Widest model and adapter coverage; OpenAI-compatible server | SGLang (RadixAttention prefix reuse), TensorRT-LLM (peak NVIDIA throughput) |
+| Router / scheduler | llm-d 1.0 endpoint picker on Gateway API Inference Extension | KV-aware scoring, flow control, `DisaggregatedSet` | NVIDIA Dynamo; custom router (4.1) |
+| Serving control plane | KServe on Kubernetes | Standard InferenceService CRD, canary rollouts | Ray Serve |
+| Node provisioning | Karpenter + NVIDIA GPU Operator | Gang-aware GPU node pools in < 90 s | Cluster Autoscaler |
+| GPU fleet | H100 SXM5 (70B, long context), A10G (short-context 7B), B200 for new 70B+ capacity | Match HBM and bandwidth to model size | GB200 NVL72 only for wide MoE expert parallelism |
+| Metering | Kafka -> ClickHouse -> Stripe usage billing | Durable, replayable per-token events | Postgres rollups (do not scale past ~10K events/s) |
+| GPU telemetry | DCGM exporter -> Prometheus -> Grafana | Per-GPU HBM, SM and NVLink health at 5 s resolution | Cloud vendor GPU metrics |
+| Tracing | OpenTelemetry `gen_ai.*` conventions -> Tempo | Vendor-neutral spans with token usage | Proprietary APM agents |
+| Quantization | FP8 (H100/B200 native), AWQ INT4 for A10G | Halves weight HBM with < 1% quality loss on most evals | GPTQ, bitsandbytes |
+
+---
+
+## 8. Operational Playbook
 
 ### Eval Pipeline
 
-Weekly quality regression check runs every Monday at 02:00 UTC. Any model update (quantization change, vLLM version upgrade) triggers an immediate out-of-band run.
+A golden-prompt regression suite runs every Monday at 02:00 UTC and out of band on any engine upgrade or quantization change. Alert on > 5% quality regression or > 20% p99 TTFT increase. The rubric and judge setup follow [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
 
 ```python
 from dataclasses import dataclass
+from statistics import mean, quantiles
 
 
 @dataclass
 class EvalResult:
-    model_id: str
     prompt_id: str
-    p50_ttft_ms: float
     p99_ttft_ms: float
-    output_quality_score: float    # 0.0–1.0, LLM-judge rubric
-    baseline_quality_score: float
-    regression_pct: float          # positive = degradation
+    quality: float          # 0.0-1.0 LLM-judge rubric score
+    regression_pct: float   # positive = degradation vs. baseline
 
 
-def run_weekly_eval(model_id: str, golden_prompts: list[dict]) -> list[EvalResult]:
-    """Run every Monday 02:00 UTC; alert on > 5% quality regression or > 20% p99 TTFT increase.
-    See: ./cross_cutting/llm_eval_harness_in_production.md for LLM-judge rubric."""
-    results = []
-    for prompt in golden_prompts:
-        # Run inference 10 times, measure TTFT and collect outputs
-        measurements = [_run_inference(model_id, prompt["messages"]) for _ in range(10)]
-        ttfts = [m["ttft_ms"] for m in measurements]
-        outputs = [m["output"] for m in measurements]
-
-        quality_scores = [
-            _llm_judge(output, prompt["expected_themes"]) for output in outputs
-        ]
-        avg_quality = sum(quality_scores) / len(quality_scores)
-        regression_pct = (
-            (prompt["baseline_quality"] - avg_quality) / prompt["baseline_quality"]
-        ) * 100
-
-        results.append(EvalResult(
-            model_id=model_id,
-            prompt_id=prompt["prompt_id"],
-            p50_ttft_ms=sorted(ttfts)[5],
-            p99_ttft_ms=sorted(ttfts)[9],
-            output_quality_score=avg_quality,
-            baseline_quality_score=prompt["baseline_quality"],
-            regression_pct=regression_pct,
-        ))
-
-        if regression_pct > 5.0:
-            _fire_alert(f"Quality regression {regression_pct:.1f}% on {model_id}/{prompt['prompt_id']}")
-
-    return results
-
-
-def _run_inference(model_id: str, messages: list[dict]) -> dict: raise NotImplementedError
-def _llm_judge(output: str, expected_themes: list[str]) -> float: raise NotImplementedError
-def _fire_alert(message: str) -> None: raise NotImplementedError
+def eval_prompt(model_id: str, prompt: dict, runs: int = 10) -> EvalResult:
+    samples = [run_inference(model_id, prompt["messages"]) for _ in range(runs)]
+    quality = mean(llm_judge(s["output"], prompt["expected_themes"]) for s in samples)
+    p99 = quantiles([s["ttft_ms"] for s in samples], n=100)[98]
+    regression = (prompt["baseline_quality"] - quality) / prompt["baseline_quality"] * 100
+    if regression > 5.0:
+        fire_alert(f"quality -{regression:.1f}% on {model_id}/{prompt['prompt_id']}")
+    return EvalResult(prompt["prompt_id"], p99, quality, regression)
 ```
-
 ### Observability
 
 Every inference request produces an OpenTelemetry trace with the following span hierarchy:
@@ -848,10 +834,10 @@ Trace: inference_request (trace_id: abc123)
   |
   +-- Span: gpu_inference                 (450 ms)
   |     attrs:
-  |       gen_ai.system = "vllm"
-  |       gen_ai.request.model = "llama-3-70b"
+  |       gen_ai.provider.name = "vllm"     (self-hosted; replaced gen_ai.system)
+  |       gen_ai.request.model = "llama-3.3-70b"
   |       gen_ai.request.max_tokens = 512
-  |       gen_ai.response.finish_reason = "stop"
+  |       gen_ai.response.finish_reasons = ["stop"]
   |       gen_ai.usage.input_tokens = 312
   |       gen_ai.usage.output_tokens = 487
   |       gen_ai.usage.cached_input_tokens = 200
@@ -949,47 +935,11 @@ Resolution:
 
 ---
 
-## 7. Interview Discussion Points
+## 9. Common Pitfalls & War Stories
 
-**Q: Why use token throughput (MBU) instead of RPS as the autoscaling metric?**
+**H100 Pod OOM Mid-Stream** (impact: ~30 streams dropped per crash, 25 s pod restart, every retry re-prefills its full 32K-token prompt)
 
-RPS treats a 10-token request and a 4,000-token request identically, but they consume completely different amounts of GPU resources. A 4,000-token request uses 400x more KV-cache pages than a 10-token request and may require 80x longer decode time. An autoscaler watching RPS would under-react to a traffic shift toward long-context requests and over-react to a shift toward short completions. MBU (KV-cache occupancy) directly measures what the GPU is actually doing — it is the HBM utilization proxy. A pod at 85% MBU is genuinely saturated regardless of whether it is serving 10 RPS of long requests or 200 RPS of short ones. As a practical rule: if your autoscaler metric does not correlate with GPU OOM probability, it is the wrong metric.
-
-**Q: How does S-LoRA multiplex 1,000 adapters on 4 GPUs without reloading the base model?**
-
-The base model (70 GB for Llama-70B FP8) is loaded once per GPU and never evicted. LoRA adapters are small (rank-64 FP16 ≈ 1.5 GB) and occupy reserved HBM "adapter slots" — 4 slots per GPU means 4 adapters active per GPU simultaneously. When a request arrives for adapter A that is not in any slot, the LRU adapter is swapped out (HBM slot reference released; weights remain on NVMe) and adapter A is copied from NVMe in ~200 ms. In-flight requests using the evicted adapter have already completed their current decode step before the swap begins. The mathematical breakthrough: 4 slots × 4 GPUs serve 1,000 adapters needing only 60 hot adapters × 1.5 GB = 90 GB NVMe, not 1,000 × 70 GB = 70 TB HBM.
-
-**Q: What happens to an in-flight streaming request when the pod it is on is preempted?**
-
-Spot preemption gives a 2-minute warning on AWS EC2 (instance interruption notice via IMDS). The streaming gateway receives the pod's drain signal, stops routing new requests to it, and records each active stream's last-token offset in Redis (key: `stream:{request_id}:last_token_offset`, TTL 60 s). When the pod terminates, the gateway emits `data: {"error": "stream_interrupted", "retry_after": 5}` and closes the connection. The client SDK retries automatically with `resume_from_token: N`; the new pod re-generates from that offset using the original prompt as KV-cache seed. This doubles the cost of the affected request but maintains the user-facing SLA. Dedicated-tier tenants (on-demand GPUs) are never preempted; the 3-8% preemption rate applies only to the serverless tier.
-
-**Q: How do you enforce tenant isolation in a shared vLLM engine?**
-
-Three layers: (1) Pre-inference quota check — Redis token bucket per tenant; quota-exceeded requests get HTTP 429 before touching the GPU. (2) KV-cache page tagging — PagedAttention allocates pages per sequence; pages are never shared across tenant sequences (prefix caching within a tenant is safe because the prefix is identical). (3) Process-level memory isolation — vLLM is a single process; cross-tenant reads require a vLLM bug. For HIPAA/FedRAMP tenants this risk is unacceptable: they run Strategy A (dedicated GPU pods), accepting 29x cost. For the remaining 95% of tenants, process-level isolation is contractually sufficient.
-
-**Q: Why is the cold start problem harder for 70B models than 7B models?**
-
-Three compounding factors: (1) Weight size: 70 GB vs 7 GB — 10x more bytes to transfer. (2) Tensor parallelism: 70B requires TP=4 (4 GPUs gang-scheduled); Karpenter must find 4 co-located GPUs simultaneously, which may require waiting for capacity. A 7B model starts on any single GPU with no coordination. (3) NVMe staging footprint: 70 GB of staged weights leaves less NVMe headroom for other model caches on the same node, cascading cold-start rates for less-popular 70B variants. Practical fix: always maintain 2 warm 70B pods (never scale to zero for 70B) — 2 pods x 4 GPUs x 24 h x $2.50/hr = $480/day of idle cost, cheap cold-start insurance.
-
-**Q: How do you handle the thundering herd when 50 customers all request the same rarely-used model simultaneously?**
-
-Without mitigation: 50 × 8 = 400 simultaneous S3 shard downloads compete for 6 GB/s NVMe write bandwidth — 50 × 70 GB = 3.5 TB of writes would saturate the drive for 583 seconds. The fix is a **thundering herd coalescer**: the first request acquires a Redis lock (`model_load_lock:{model_id}`); all subsequent requests enqueue on a Redis pub/sub channel (`model_loaded:{model_id}`). When the first pod finishes loading, it publishes the event and all queued requests dispatch immediately — only one cold start per model per node. Queued requests experience extra latency (up to 300 s for 70B) surfaced as `{"status": "warming", "estimated_seconds": 45}` on the first poll.
-
-**Q: What is the break-even point where a customer should switch from your platform to self-hosted GPUs?**
-
-Rule of thumb math: an H100 on-demand at ~$3.50/hr = $2,520/month produces 3.36B tokens/month (70B model at 2,000 tok/sec/GPU, 65% utilization). Our platform charges $0.80/M tokens = $2,688/month from that GPU's output — roughly at parity with raw on-demand hardware, before any networking, storage, or engineering cost. We survive through shared tenancy (17 tenants per pod) and spot pricing, not on the sticker spread. A single customer needs ~$20K/month in platform spend (self-hosted H100 + prorated ops salary) before self-hosting saves money — approximately 25B tokens/month. Below that threshold we win on cost; above it we must win on zero-ops value or they churn. This is why inference platforms introduce dedicated-tier pricing at enterprise scale: match self-hosted cost while retaining the simplicity proposition.
-
-**Q: How does LoRA adapter hot-swap work without interrupting other in-flight requests?**
-
-vLLM's scheduler operates at the granularity of one decode step (one forward pass per batch, typically 20 ms). Within a decode step, all sequences in the batch are processed together. The adapter swap protocol is: (1) The `LoRAAdapterManager` sets a flag `swap_pending=True` on the current HBM slot. (2) The vLLM scheduler completes the current decode step for all sequences using the about-to-be-evicted adapter. (3) After the step completes, the scheduler drains all sequences that need the evicted adapter into a temporary "paused" queue. (4) The HBM slot is freed and the new adapter is loaded from NVMe (200 ms). (5) Paused sequences resume on the next decode step. From the perspective of an in-flight streaming request, it sees a 200-220 ms pause in token streaming — within our 500 ms inter-token jitter budget. The client SDK does not detect this as an error. The critical invariant: the adapter swap never occurs mid-decode-step — it only occurs at decode step boundaries where the scheduler has full control over sequence dispatch.
-
----
-
-## Failure Scenarios
-
-**H100 Pod OOM Mid-Stream**
-
-Scenario: a tenant sends a 32,000-token context (legal document analysis) with `max_tokens=4096`. The total KV reservation (32K + 4K = 36K tokens × 327,680 bytes/token for Llama-3-70B FP16 = 11.8 GB, sharded across the TP=4 pod at ~3 GB/GPU) exceeds the available KV-cache pages on a pod already at 78% MBU. PagedAttention's pre-admission check should have rejected this request, but a race condition allowed it through when a concurrent request finished and freed pages between the check and the KV allocation. The pod allocates aggressively, hits 100% HBM, and the CUDA allocator throws OOM. The pod crashes; the client receives HTTP 500 mid-stream.
+Scenario: a tenant sends a 32,000-token context (legal document analysis) with `max_tokens=4096`. The total KV reservation (32K + 4K = 36K tokens × 327,680 bytes/token for Llama 3.3 70B FP16 = 11.8 GB, sharded across the TP=4 pod at ~3 GB/GPU) exceeds the available KV-cache pages on a pod already at 78% MBU. PagedAttention's pre-admission check should have rejected this request, but a race condition allowed it through when a concurrent request finished and freed pages between the check and the KV allocation. The pod allocates aggressively, hits 100% HBM, and the CUDA allocator throws OOM. The pod crashes; the client receives HTTP 500 mid-stream.
 
 Detection: `vllm_pod_oom_total` counter fires PagerDuty alert within 30 seconds.
 
@@ -997,7 +947,7 @@ Recovery: (1) Kubernetes restarts the pod (liveness probe fails immediately on O
 
 Prevention: set `--max-model-len 28672` in vLLM configuration to enforce a hard cap at 28K total context, below the OOM threshold for the fleet's median KV-cache availability.
 
-**Spot Preemption During Generation**
+**Spot Preemption During Generation** (impact: 1-2 pods per hour, ~30 streams each, 2-5 s stall per stream)
 
 Scenario: 3-8% of H100 spot instances receive a 2-minute preemption notice from AWS. Approximately 1-2 pods per hour are preempted on a 140-spot-GPU fleet. Each preemption affects an average of 30 active concurrent streams (at 65% MBU with avg 800-token requests).
 
@@ -1011,7 +961,7 @@ Scenario: tenant ACME pushes adapter version v4 while 80 in-flight requests are 
 
 Prevention: versioned S3 keys — each adapter upload gets a unique version suffix (`acme_adapter/v3/...`, `acme_adapter/v4/...`). Requests always reference an immutable version URI. The adapter registry maintains the `latest` alias separately; requests specifying `adapter_id=acme` resolve to `latest` at request time and the resolved version is logged in the billing event for auditability. Version transitions are atomic: the `latest` pointer is updated in Redis only after S3 upload completes and SHA-256 checksum is verified.
 
-**Model Weight Corruption on NVMe**
+**Model Weight Corruption on NVMe** (impact: one node of the 200-H100 fleet returned wrong arithmetic on every request it served for up to 7 days before the weekly eval caught it)
 
 Scenario: after 38 months of continuous operation, an NVMe drive develops bit-rot (silent data corruption). The Llama-70B shard 3 of 8 on one node has a 4-byte corruption in a weight tensor. The model loads without error (no checksum at load time), but all inferences on that pod produce subtly wrong outputs — off-by-one errors in arithmetic reasoning tasks, detected only by the weekly eval pipeline.
 
@@ -1023,7 +973,7 @@ Prevention: add SHA-256 checksum verification at every NVMe→HBM load (not just
 
 ---
 
-## Capacity Planning
+## 10. Capacity Planning
 
 **Fleet Sizing Formula**
 
@@ -1071,6 +1021,63 @@ Heterogeneous fleet savings — an A10G is NOT a 1:1 substitute for an H100
 
 At production scale (500+ active tenants), heterogeneous GPU fleet composition reduces total GPU cost by roughly 5-6% at this traffic mix — a ~25% saving on the ~23% of spend that shifts to A10G. Sizing the saving by counting GPUs rather than tokens overstates it by ~4x.
 
+*Production lesson*: The inference platform business is GPU arbitrage plus operational excellence. Every architectural decision — S-LoRA multiplexing, PagedAttention, MBU-based autoscaling, consistent-hash KV affinity — exists to push effective HBM utilization above 65% while maintaining sub-500ms TTFT. Below 55% utilization the business loses money on spot pricing; above 80% sustained, SLA breaches begin. The 65% target is not arbitrary: it is the narrow band where unit economics work and latency SLA holds simultaneously.
+
 ---
 
-*Production lesson*: The inference platform business is GPU arbitrage plus operational excellence. Every architectural decision — S-LoRA multiplexing, PagedAttention, MBU-based autoscaling, consistent-hash KV affinity — exists to push effective HBM utilization above 65% while maintaining sub-500ms TTFT. Below 55% utilization the business loses money on spot pricing; above 80% sustained, SLA breaches begin. The 65% target is not arbitrary: it is the narrow band where unit economics work and latency SLA holds simultaneously.
+## 11. Interview Discussion Points
+
+**Q: Why use token throughput (MBU) instead of RPS as the autoscaling metric?**
+**Short:** RPS ignores request length, so it under-reacts to long-context traffic; KV-cache occupancy measures the resource that actually saturates and predicts OOM.
+
+RPS treats a 10-token request and a 4,000-token request identically, but they consume completely different amounts of GPU resources. A 4,000-token request uses 400x more KV-cache pages than a 10-token request and may require 80x longer decode time. An autoscaler watching RPS would under-react to a traffic shift toward long-context requests and over-react to a shift toward short completions. MBU (KV-cache occupancy) directly measures what the GPU is actually doing — it is the HBM utilization proxy. A pod at 85% MBU is genuinely saturated regardless of whether it is serving 10 RPS of long requests or 200 RPS of short ones. As a practical rule: if your autoscaler metric does not correlate with GPU OOM probability, it is the wrong metric.
+
+**Q: How does S-LoRA multiplex 1,000 adapters on 4 GPUs without reloading the base model?**
+**Short:** The base model stays resident in HBM once, while small adapters swap through a few HBM slots from an NVMe LRU cache in about 200 ms each.
+
+The base model (70 GB for Llama-70B FP8) is loaded once per GPU and never evicted. LoRA adapters are small (rank-64 FP16 ≈ 1.5 GB) and occupy reserved HBM "adapter slots" — 4 slots per GPU means 4 adapters active per GPU simultaneously. When a request arrives for adapter A that is not in any slot, the LRU adapter is swapped out (HBM slot reference released; weights remain on NVMe) and adapter A is copied from NVMe in ~200 ms. In-flight requests using the evicted adapter have already completed their current decode step before the swap begins. The mathematical breakthrough: 4 slots × 4 GPUs serve 1,000 adapters needing only 60 hot adapters × 1.5 GB = 90 GB NVMe, not 1,000 × 70 GB = 70 TB HBM.
+
+**Q: What happens to an in-flight streaming request when the pod it is on is preempted?**
+**Short:** The gateway drains the pod, records each stream's last token offset in Redis, and the client retries on a new pod that regenerates from that offset.
+
+Spot preemption gives a 2-minute warning on AWS EC2 (instance interruption notice via IMDS). The streaming gateway receives the pod's drain signal, stops routing new requests to it, and records each active stream's last-token offset in Redis (key: `stream:{request_id}:last_token_offset`, TTL 60 s). When the pod terminates, the gateway emits `data: {"error": "stream_interrupted", "retry_after": 5}` and closes the connection. The client SDK retries automatically with `resume_from_token: N`; the new pod re-generates from that offset using the original prompt as KV-cache seed. This doubles the cost of the affected request but maintains the user-facing SLA. Dedicated-tier tenants (on-demand GPUs) are never preempted; the 3-8% preemption rate applies only to the serverless tier.
+
+**Q: How do you enforce tenant isolation in a shared vLLM engine?**
+**Short:** Per-tenant quotas before inference, KV pages never shared across tenants, and dedicated GPU pods for regulated tenants who need a hardware boundary.
+
+Three layers: (1) Pre-inference quota check — Redis token bucket per tenant; quota-exceeded requests get HTTP 429 before touching the GPU. (2) KV-cache page tagging — PagedAttention allocates pages per sequence; pages are never shared across tenant sequences (prefix caching within a tenant is safe because the prefix is identical). (3) Process-level memory isolation — vLLM is a single process; cross-tenant reads require a vLLM bug. For HIPAA/FedRAMP tenants this risk is unacceptable: they run Strategy A (dedicated GPU pods), accepting 29x cost. For the remaining 95% of tenants, process-level isolation is contractually sufficient.
+
+**Q: Why is the cold start problem harder for 70B models than 7B models?**
+**Short:** 10x more weight bytes, TP=4 gang scheduling across four co-located GPUs, and a larger NVMe footprint, so keep two 70B pods always warm.
+
+Three compounding factors: (1) Weight size: 70 GB vs 7 GB — 10x more bytes to transfer. (2) Tensor parallelism: 70B requires TP=4 (4 GPUs gang-scheduled); Karpenter must find 4 co-located GPUs simultaneously, which may require waiting for capacity. A 7B model starts on any single GPU with no coordination. (3) NVMe staging footprint: 70 GB of staged weights leaves less NVMe headroom for other model caches on the same node, cascading cold-start rates for less-popular 70B variants. Practical fix: always maintain 2 warm 70B pods (never scale to zero for 70B) — 2 pods x 4 GPUs x 24 h x $2.50/hr = $480/day of idle cost, cheap cold-start insurance.
+
+**Q: How do you handle the thundering herd when 50 customers all request the same rarely-used model simultaneously?**
+**Short:** Coalesce loads: the first request takes a Redis lock and loads once per node; later requests wait on a pub/sub event instead of starting more downloads.
+
+Without mitigation: 50 × 8 = 400 simultaneous S3 shard downloads compete for 6 GB/s NVMe write bandwidth — 50 × 70 GB = 3.5 TB of writes would saturate the drive for 583 seconds. The fix is a **thundering herd coalescer**: the first request acquires a Redis lock (`model_load_lock:{model_id}`); all subsequent requests enqueue on a Redis pub/sub channel (`model_loaded:{model_id}`). When the first pod finishes loading, it publishes the event and all queued requests dispatch immediately — only one cold start per model per node. Queued requests experience extra latency (up to 300 s for 70B) surfaced as `{"status": "warming", "estimated_seconds": 45}` on the first poll.
+
+**Q: What is the break-even point where a customer should switch from your platform to self-hosted GPUs?**
+**Short:** Around $20K per month of spend, about 25B tokens per month; below that the shared platform is cheaper, above it the platform must win on zero-ops value.
+
+Rule of thumb math: an H100 on-demand at ~$3.50/hr = $2,520/month produces 3.36B tokens/month (70B model at 2,000 tok/sec/GPU, 65% utilization). Our platform charges $0.80/M tokens = $2,688/month from that GPU's output — roughly at parity with raw on-demand hardware, before any networking, storage, or engineering cost. We survive through shared tenancy (17 tenants per pod) and spot pricing, not on the sticker spread. A single customer needs ~$20K/month in platform spend (self-hosted H100 + prorated ops salary) before self-hosting saves money — approximately 25B tokens/month. Below that threshold we win on cost; above it we must win on zero-ops value or they churn. This is why inference platforms introduce dedicated-tier pricing at enterprise scale: match self-hosted cost while retaining the simplicity proposition.
+
+**Q: How does LoRA adapter hot-swap work without interrupting other in-flight requests?**
+**Short:** Swaps happen only at decode-step boundaries: affected sequences pause, the adapter loads in about 200 ms, and they resume with no client-visible error.
+
+vLLM's scheduler operates at the granularity of one decode step (one forward pass per batch, typically 20 ms). Within a decode step, all sequences in the batch are processed together. The adapter swap protocol is: (1) The `LoRAAdapterManager` sets a flag `swap_pending=True` on the current HBM slot. (2) The vLLM scheduler completes the current decode step for all sequences using the about-to-be-evicted adapter. (3) After the step completes, the scheduler drains all sequences that need the evicted adapter into a temporary "paused" queue. (4) The HBM slot is freed and the new adapter is loaded from NVMe (200 ms). (5) Paused sequences resume on the next decode step. From the perspective of an in-flight streaming request, it sees a 200-220 ms pause in token streaming — within our 500 ms inter-token jitter budget. The client SDK does not detect this as an error. The critical invariant: the adapter swap never occurs mid-decode-step — it only occurs at decode step boundaries where the scheduler has full control over sequence dispatch.
+
+**Q: When does disaggregated prefill/decode beat a co-located vLLM pod, and how do you roll it out safely?**
+**Short:** When long prompts share a pool with decode streams; split pools keep inter-token latency flat, but below about 4K-token prompts KV transfer costs more than it saves.
+
+Disaggregation wins when long prompts and long generations share a pool: a 32K-token prefill on a co-located pod stalls every decode stream on that GPU for 1-3 s, so p99 inter-token latency explodes even though average throughput looks fine. Splitting into a prefill pool (compute-bound, large batches) and a decode pool (bandwidth-bound, many small steps), with the KV cache shipped over NVLink or RDMA, keeps decode jitter flat. Below roughly 4K-token prompts the KV transfer costs more than the interference it removes, so keep short-context 7B traffic co-located. The operational trap is version skew: prefill and decode replicas must run the same engine and model revision, which is why llm-d 1.0 manages them as one `DisaggregatedSet` with lockstep rollouts and readiness gated on both halves.
+
+**Q: What changes in your fleet plan when B200 or GB200 NVL72 capacity becomes available?**
+**Short:** Plan by HBM and NVLink domain per replica: a 180 GB B200 fits a 70B FP8 replica on one GPU, while NVL72 racks mainly pay off for wide MoE models.
+
+The unit of capacity planning moves from "GPUs per pod" to "HBM and NVLink domain per replica". An HGX B200 GPU carries 180 GB HBM3e versus 80 GB on an H100, so a 70B FP8 replica fits on one GPU with roughly 110 GB left for KV cache, which removes the TP=4 gang-scheduling problem from the cold-start path. GB200 NVL72 joins 72 GPUs in one NVLink domain, which matters for wide MoE expert parallelism, not for this platform's 7B-70B dense mix. Re-benchmark tokens per dollar on your own traffic before you move tiers: list price per GPU-hour rises faster than tokens per second for short-context, small-model traffic, so H100 and L4-class cards stay the cheaper home for that slice.
+
+**Q: Why would you adopt llm-d or NVIDIA Dynamo instead of extending your own Model Router?**
+**Short:** KV-aware routing, fairness flow control and P/D orchestration are now open-source commodity, so custom code should shrink to quotas, adapters and billing.
+
+Because the hard parts of the router in 4.1 are now commodity: KV-cache-aware endpoint picking, prefix-affinity scoring, priority and fairness flow control, and prefill/decode orchestration all ship in llm-d 1.0 (router config API `v1`, released 2026-10-20) and in NVIDIA Dynamo. Your own code should shrink to what is specific to the business: tenant quotas, adapter registry, billing events, and the dedicated-tier contract. Keep the consistent-hash router only as a fallback for engines the framework does not support, and run both behind the same OpenAI-compatible gateway so the swap is invisible to tenants.

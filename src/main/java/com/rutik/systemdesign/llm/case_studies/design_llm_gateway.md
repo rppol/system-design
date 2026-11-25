@@ -43,9 +43,9 @@ Average output: 300 tokens
 Daily tokens: 5B input + 3B output = 8B tokens/day
 
 Provider distribution (example):
-  OpenAI (GPT-4o): 40% of traffic
-  Anthropic (Claude Sonnet 5): 30%
-  Google (Gemini Pro tier): 15%
+  OpenAI (GPT-6.2 Sol): 40% of traffic
+  Anthropic (Claude Sonnet 5.5): 30%
+  Google (Gemini 4 tier): 15%
   Self-hosted (Llama 3.3 70B): 15%
 
 Request rate per provider at peak:
@@ -65,7 +65,7 @@ Request logs:
 Semantic cache:
   Cache entry: ~3KB (query embedding + response text + metadata)
   Cache size target: 10M entries = 30GB
-  Hit rate target: 20% → 10M x 20% x $0.015 = $30,000/day saved (see Section 7)
+  Hit rate target: 20% → 10M x 20% x $0.0035 = $7,000/day saved (see Section 10)
 
 Metrics time series:
   ~10K metric samples/sec → InfluxDB / Prometheus
@@ -142,13 +142,13 @@ Level 2: Routing policy (admin-configured per tenant)
   {
     "tenant_id": "acme_corp",
     "routing_policy": {
-      "default_model": "gpt-4o",
-      "fallback_model": "claude-sonnet-5",
+      "default_model": "gpt-6.2-sol",
+      "fallback_model": "claude-sonnet-5-5",
       "cost_limit_per_request": 0.10,
       "latency_mode": "balanced",  // "fast" | "balanced" | "quality"
       "blocked_models": [],
       "a_b_tests": [
-        {"name": "sonnet_vs_gpt4", "model": "claude-sonnet-5", "percent": 20}
+        {"name": "sonnet_vs_sol", "model": "claude-sonnet-5-5", "percent": 20}
       ]
     }
   }
@@ -162,7 +162,7 @@ Level 3: Smart routing based on request characteristics
 
   Cost-based routing:
     Estimate cost: (input_tokens × input_price + est_output_tokens × output_price)
-    If estimate > threshold → route to cheaper model (Claude Haiku 4.5, Gemini Flash)
+    If estimate > threshold → route to cheaper model (GPT-6 Luna, Claude Haiku 5.5)
 
   Load-based routing:
     Monitor provider health metrics (latency p95, error rate)
@@ -173,8 +173,8 @@ Routing example:
   Request: {model_hint: "any", task: "summarize", tokens_in: 2000, max_tokens: 200}
   → No vision, no long context needed
   → Cost estimate: $0.01 (within budget)
-  → A/B test: 80% → GPT-4o, 20% → Claude Sonnet 5
-  → Load check: GPT-4o p95=800ms (normal) → route to GPT-4o
+  → A/B test: 80% → GPT-6.2 Sol, 20% → Claude Sonnet 5.5
+  → Load check: GPT-6.2 Sol p95=800ms (normal) → route to GPT-6.2 Sol
 ```
 
 ### 4.2 Semantic Caching
@@ -330,11 +330,11 @@ stateDiagram-v2
     HALF_OPEN : send 10% to primary as probe
 ```
 
-The gateway runs the proportional `AdaptiveCircuitBreaker` (Section 10, Incident 2) rather than this binary lifecycle: it scales traffic down in proportion to the observed error rate, so the states above are the two endpoints of a continuous dial rather than the only two settings.
+The gateway runs the proportional `AdaptiveCircuitBreaker` (Section 9, Incident 2) rather than this binary lifecycle: it scales traffic down in proportion to the observed error rate, so the states above are the two endpoints of a continuous dial rather than the only two settings.
 
 ```
 Failover chain (configurable per tenant):
-  gpt-4o (OpenAI) → claude-sonnet-5 (Anthropic) → Gemini Pro tier (Google)
+  gpt-6.2-sol (OpenAI) → claude-sonnet-5-5 (Anthropic) → Gemini 4 tier (Google)
   → Llama-3.3-70B-Instruct (self-hosted, last resort)
 
 Format translation: provider-specific request/response shapes (Anthropic requires max_tokens,
@@ -432,9 +432,161 @@ false positive management: alert at > 2% FPR; tenant-specific allowlists; admin 
 trusted request patterns.
 ```
 
----
+### 4.7 Multi-Provider Routing and Provider Adapters
 
-## 5. API Design
+List prices as of 2026-11-25 from the OpenAI and Anthropic model pages. TTFT figures are this deployment's own measurements, not vendor SLAs.
+
+| Model | Strength | Context | Cost/1M tokens (in / out) | p99 TTFT |
+|---|---|---|---|---|
+| Llama 3.1 8B (self-hosted) | VPC-only and data-residency traffic | 128k | ~$0.20 amortized GPU | 180ms |
+| GPT-6 Luna | Simple classification, extraction, bulk | 1.05M | $0.10 / $0.50 | 250ms |
+| GPT-6.1 Terra | Medium reasoning, summarization | 1.05M | $1 / $5 | 350ms |
+| GPT-6.2 Sol | Code, complex multi-step | 1.05M | $2 / $10 | 800ms |
+| Claude Sonnet 5.5 | Long context, tool use, long-form | 1M | $2 / $10 | 600ms |
+
+Note the inversion since the GPT-4o era: hosted small models now undercut a self-hosted 8B on price, so the self-hosted route exists for data residency, not cost.
+
+```python
+def classify_and_route(messages: list[dict], tenant_config: dict) -> RoutingDecision:
+    """Heuristic, first-match-wins. $/token rates are the list prices in the table above."""
+    prompt_tokens = count_tokens(messages)
+    code_fence = "`" * 3   # built, not literal: a bare fence marker would close this block
+    has_code = any(code_fence in m.get("content", "") for m in messages)
+    has_tool_calls = any(m.get("role") == "tool" or m.get("tool_calls") for m in messages)
+
+    if tenant_config.get("force_model"):
+        return _build_decision(tenant_config["force_model"], prompt_tokens)
+    if tenant_config.get("residency") == "vpc_only":   # data never leaves the VPC
+        return RoutingDecision("self_hosted", "llama-3.1-8b-instruct", 512,
+                               prompt_tokens * 0.0000002, "residency")
+    if prompt_tokens > 16_000 or has_tool_calls:        # long context / tools
+        return RoutingDecision("anthropic", "claude-sonnet-5-5",
+                               min(4096, 1_000_000 - prompt_tokens),
+                               prompt_tokens * 0.000002 + 1000 * 0.00001, "long_or_tools")
+    if has_code or prompt_tokens > 4_000:               # code / complex
+        return RoutingDecision("openai", "gpt-6.2-sol", 1024,
+                               prompt_tokens * 0.000002 + 1024 * 0.00001, "code_or_complex")
+    if prompt_tokens > 1_000:                           # medium
+        return RoutingDecision("openai", "gpt-6.1-terra", 512,
+                               prompt_tokens * 0.000001 + 512 * 0.000005, "medium")
+    return RoutingDecision("openai", "gpt-6-luna", 256,                    # simple
+                           prompt_tokens * 0.0000001 + 256 * 0.0000005, "simple_short")
+```
+
+The adapter layer normalizes every provider behind one interface, so routing code never branches on provider shape. The broken version forwards every sampling parameter to every provider:
+
+```python
+# BROKEN: forwards temperature to every provider. Claude Opus 5.5 rejects
+# temperature/top_p/top_k with HTTP 400, so a tenant default of 0.0 breaks
+# every request the router sends there, and failover then masks it as an outage.
+payload = {"model": cfg.model, "max_tokens": cfg.max_tokens,
+           "temperature": cfg.temperature, "messages": msgs}
+
+# FIX: send sampling parameters only when explicitly set AND the model accepts them.
+REJECTS_SAMPLING = {"claude-opus-5-5"}
+payload = {"model": cfg.model, "max_tokens": cfg.max_tokens, "messages": msgs}
+if cfg.temperature is not None and cfg.model not in REJECTS_SAMPLING:
+    payload["temperature"] = cfg.temperature
+```
+
+```python
+from __future__ import annotations
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+import httpx
+
+
+@dataclass
+class CompletionConfig:
+    model: str
+    max_tokens: int = 1024
+    temperature: float | None = None     # None = provider default; never forced
+
+
+@dataclass
+class CompletionResult:
+    text: str
+    input_tokens: int
+    output_tokens: int
+    latency_ms: float
+    provider: str
+    model: str
+
+
+class RateLimitError(Exception): ...
+class ProviderError(Exception): ...
+
+
+class ProviderAdapter(ABC):
+    name: str
+    error_rate: float = 0.0              # updated by AdaptiveCircuitBreaker (Section 9)
+
+    @abstractmethod
+    async def complete(self, messages: list[dict], cfg: CompletionConfig) -> CompletionResult: ...
+
+    def health_score(self) -> float:
+        return max(0.0, 1.0 - self.error_rate * 5)    # 20% errors -> 0.0
+
+
+class OpenAICompatAdapter(ProviderAdapter):
+    """OpenAI and self-hosted vLLM share the /chat/completions shape; only base_url differs."""
+    def __init__(self, name: str, base_url: str, api_key: str = "") -> None:
+        self.name = name
+        self._http = httpx.AsyncClient(base_url=base_url, timeout=60.0,
+                                       headers={"Authorization": f"Bearer {api_key}"})
+
+    async def complete(self, messages: list[dict], cfg: CompletionConfig) -> CompletionResult:
+        t0 = time.perf_counter()
+        body = {"model": cfg.model, "messages": messages, "max_completion_tokens": cfg.max_tokens}
+        if cfg.temperature is not None:
+            body["temperature"] = cfg.temperature
+        resp = await self._http.post("/chat/completions", json=body)
+        if resp.status_code == 429:
+            raise RateLimitError(self.name)
+        resp.raise_for_status()
+        d = resp.json()
+        return CompletionResult(d["choices"][0]["message"]["content"],
+                                d["usage"]["prompt_tokens"], d["usage"]["completion_tokens"],
+                                (time.perf_counter() - t0) * 1000, self.name, cfg.model)
+
+
+class AnthropicAdapter(ProviderAdapter):
+    name = "anthropic"
+
+    def __init__(self, api_key: str) -> None:
+        self._http = httpx.AsyncClient(base_url="https://api.anthropic.com/v1", timeout=60.0,
+                                       headers={"x-api-key": api_key,
+                                                "anthropic-version": "2023-06-01"})
+
+    async def complete(self, messages: list[dict], cfg: CompletionConfig) -> CompletionResult:
+        t0 = time.perf_counter()
+        body = {"model": cfg.model, "max_tokens": cfg.max_tokens, "messages": messages}
+        resp = await self._http.post("/messages", json=body)
+        if resp.status_code in (429, 529):   # rate_limit_error / overloaded_error
+            raise RateLimitError(self.name)
+        resp.raise_for_status()
+        d = resp.json()
+        return CompletionResult(d["content"][0]["text"], d["usage"]["input_tokens"],
+                                d["usage"]["output_tokens"],
+                                (time.perf_counter() - t0) * 1000, self.name, cfg.model)
+
+
+async def complete_with_fallback(chain: list[tuple[ProviderAdapter, str]],
+                                 messages: list[dict], max_tokens: int) -> CompletionResult:
+    """Walk the per-tenant failover chain; skip adapters whose health score is below 0.3."""
+    last: Exception | None = None
+    for adapter, model in chain:
+        if adapter.health_score() < 0.3:
+            continue
+        try:
+            return await adapter.complete(messages, CompletionConfig(model, max_tokens))
+        except (RateLimitError, httpx.HTTPError) as exc:
+            last = exc
+    raise ProviderError("all providers in the chain failed") from last
+```
+
+### 4.8 API Surface
 
 ```
 Unified API (OpenAI-compatible for drop-in replacement):
@@ -447,13 +599,13 @@ Headers:
 
 Request body (OpenAI-compatible):
 {
-  "model": "gpt-4o",          // or "auto" for smart routing
+  "model": "gpt-6.2-sol",     // or "auto" for smart routing
   "messages": [...],
   "stream": true,
   "max_tokens": 1000,
   // Gateway extensions:
   "x_gateway": {
-    "fallback_models": ["claude-sonnet-5"],
+    "fallback_models": ["claude-sonnet-5-5"],
     "cache": true,
     "budget_limit_usd": 0.10
   }
@@ -462,7 +614,7 @@ Request body (OpenAI-compatible):
 Response (same as OpenAI format):
 {
   "id": "chatcmpl-...",
-  "model": "gpt-4o",          // actual model used (may differ from requested)
+  "model": "gpt-6.2-sol",     // actual model used (may differ from requested)
   "choices": [...],
   "usage": {
     "prompt_tokens": 500,
@@ -484,7 +636,7 @@ Streaming: SSE format, compatible with OpenAI streaming
 
 ---
 
-## 6. Trade-offs and Design Decisions
+## 5. Design Decisions & Tradeoffs
 
 | Decision | Chosen | Alternative | Reason |
 |----------|--------|-------------|--------|
@@ -505,39 +657,28 @@ Streaming: SSE format, compatible with OpenAI streaming
 
 ---
 
-## 7. Cost Impact Analysis
+## 6. Real-World Implementations
 
-```
-Benefits of the gateway. Per-request cost is derived from this design's own
-500-in / 300-out average and 2026-07 list prices, not a blended guess:
-  GPT-4o          500 x $2.50/MTok + 300 x $10/MTok  = $0.00425
-  Claude Sonnet 5 500 x $3/MTok    + 300 x $15/MTok  = $0.00600
-  Claude Haiku 4.5 500 x $1/MTok   + 300 x $5/MTok   = $0.00200
-  Self-hosted Llama 3 (amortized GPU)                = ~$0.00050
-Blended across the Section 2 provider mix (40/30/15/15): ~$0.0045/request.
+- **LiteLLM** (BerriAI) is the most widely deployed open-source gateway: an OpenAI-format proxy over 100+ providers with virtual keys, per-key budgets, fallbacks and Redis-backed caching. It is the build-vs-buy baseline; see [LiteLLM Routing](../agentic_frameworks/litellm_routing.md).
+- **Portkey** runs a hosted gateway with an open-source core that adds guardrails, semantic caching, conditional routing and per-request fallbacks configured as JSON.
+- **Cloudflare AI Gateway** puts caching, rate limiting, logging and analytics at the Cloudflare edge in front of provider APIs, which removes gateway hosting from the team's plate at the cost of routing control.
+- **Kong AI Gateway** ships the same features as Kong plugins (AI proxy, semantic cache, AI rate limiting), the natural choice for teams that already run Kong for REST traffic.
+- **Envoy AI Gateway**, started by Tetrate and Bloomberg on top of Envoy Gateway, handles token-based rate limiting and provider routing in a Kubernetes-native data plane.
+- **OpenRouter** is the hosted-aggregator end of the spectrum: one API key and one bill across hundreds of models, with provider fallback handled for you, but traffic leaves your VPC.
 
-1. Semantic caching (20% hit rate):
-   Daily cost without cache: 10M requests × $0.0045 = $45,000/day
-   With 20% cache hit: 10M × 80% × $0.0045 = $36,000/day
-   Savings: $9,000/day = $3.29M/year
+---
 
-2. Smart routing (route 60% to cheaper models):
-   Without routing: all requests → GPT-4o ($0.00425) = $42,500/day
-   With routing: 10M × (40% × $0.00425 + 60% × $0.00200) = $29,000/day
-   Savings vs all-GPT-4o: $13,500/day = $4.93M/year
+## 7. Technologies & Tools
 
-3. Budget enforcement:
-   Prevents runaway costs from bugs, prompt injection, excessive usage
-   Estimated: saves 5-10% from unexpected usage spikes
-
-Note: (1) and (2) overlap — cached requests are not also routed — so the two
-savings do not simply add. Applying routing first, then a 20% cache hit on the
-routed spend, the combined run rate is 10M × 0.80 × $0.0029 = $23,200/day,
-about $19,300/day below the unoptimized all-GPT-4o baseline.
-Gross annual saving: $19,300/day × 365 = ~$7.0M/year
-Gateway cost to run: ~$5,000/day = ~$1.8M/year (infrastructure, team)
-Net: ~$5.2M/year → positive ROI
-```
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| Gateway runtime | Go or Rust service (LiteLLM proxy for v1) | < 10 ms overhead at 350 req/s peak with streaming passthrough | Envoy AI Gateway, Kong AI Gateway |
+| Rate limits and budgets | Redis (`noeviction`) with Lua token buckets | Atomic, sub-millisecond, survives cache memory pressure | Postgres counters (too slow on the hot path) |
+| Semantic cache | Separate Redis (`allkeys-lru`) + HNSW index, 0.92 threshold | 15-25% hit rate measured in 4.2 | pgvector, Qdrant |
+| Logs and analytics | Kafka -> ClickHouse | Async, no hot-path cost; per-tenant cost queries | Direct DB writes |
+| Tracing | OpenTelemetry `gen_ai.*` -> Tempo or Jaeger | Cost attribution per span | Vendor APM |
+| Safety scanning | Input injection classifier + output PII and credential scan on every cache read | Stops cached poison (Section 9, Incident 3) | Provider-side moderation only |
+| Model lifecycle | Poll `GET /v1/models` for each model's `shutdown_date` + golden-set gate | Catches deprecations weeks early | Reading vendor email |
 
 ---
 
@@ -564,7 +705,7 @@ Span: llm_gateway.request
   Attributes:
     request_id        : "req_01HX..."
     tenant_id         : "acme_corp"
-    model_requested   : "gpt-4o"
+    model_requested   : "auto"
     cost_tier         : "balanced"
 
   Child span: llm_gateway.cache_lookup
@@ -575,8 +716,8 @@ Span: llm_gateway.request
 
   Child span: llm_gateway.provider_route
     Attributes:
-      provider.name       : "openai"
-      provider.model      : "gpt-4o-2024-11-20"
+      gen_ai.provider.name : "openai"
+      gen_ai.request.model : "gpt-6.2-sol"
       provider.health     : 0.98           # health_score() at routing time
       routing.reason      : "balanced_tier_primary"
       latency_ms          : 8             # routing decision overhead
@@ -632,7 +773,7 @@ See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) fo
 2. Run output safety classifier against the 100 most recently stored cache entries for the affected tenant.
 3. Scan semantic neighbors of the poisoned embedding (HNSW neighbors within radius 0.10) — they may also contain poisoned content from the same attack.
 
-**Resolution:** After flushing, re-enable caching with output safety scan enforced on every cache-read path (see Incident 3 fix above). Post-incident: add the specific injection pattern to the input scanner blocklist. File a root-cause report documenting how the poisoned response bypassed the original output filter.
+**Resolution:** After flushing, re-enable caching with output safety scan enforced on every cache-read path (see Section 9, Incident 3). Post-incident: add the specific injection pattern to the input scanner blocklist. File a root-cause report documenting how the poisoned response bypassed the original output filter.
 
 #### Runbook 3: Budget Overrun
 
@@ -652,21 +793,7 @@ See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) fo
 
 ---
 
-## 9. Interview Discussion Points
-
-**The 10ms latency requirement is challenging.** Every synchronous check in the request path (auth, rate limit, cache, safety filter) adds latency. The solution: run fast checks synchronously (Redis lookup: < 1ms), async checks where possible (logging, detailed safety analysis), and use connection pooling to LLM providers to amortize connection setup.
-
-**Why not just use LiteLLM or Portkey?** Open-source gateways ([LiteLLM](../agentic_frameworks/litellm_routing.md)) handle basic routing and format translation. Building in-house makes sense when you need: custom routing logic tightly integrated with your business rules, HIPAA/compliance requirements (data never leaves your VPC), custom semantic caching tuned to your query patterns, or deep integration with your observability stack.
-
-**Semantic cache cache poisoning.** If a cached response is wrong (hallucination) and many similar queries hit the cache, the wrong answer spreads. Mitigation: TTL ensures old responses expire, A/B test cache vs. fresh to measure quality, allow users to "thumbs down" which invalidates the cache entry.
-
-**The failover latency penalty.** Detecting failure + switching provider takes 100-200ms. Combined with retry logic, some requests might take 2-5× normal latency during provider incidents. For real-time applications, pre-warm connections to all providers and use shadow traffic (send 1% of requests to backup provider) to keep connections warm.
-
-**Budget enforcement granularity.** Per-tenant monthly budget is the minimum. Production systems also need per-project, per-application, per-user granularity. Hierarchical budgets: tenant limit > project limit > user limit. Each level can set its own limit (must be ≤ parent limit).
-
----
-
-## 10. Production Failure Scenarios
+## 9. Common Pitfalls & War Stories
 
 > The three incidents below are **illustrative composites** written against this case study's
 > own hypothetical deployment, not reports of named public outages. Timings, error rates and
@@ -791,9 +918,42 @@ def get_cached_response(
 
 ---
 
-## 11. Capacity Planning Math
+## 10. Capacity Planning
 
-**Target load:** 40M requests/month, mix: 65% simple (512-token output), 30% medium (1024-token), 5% complex (4096-token). This sizes a *single smaller reference deployment*, not the 10M req/day (300M/month) flagship figure used in Sections 1, 2 and 7 — multiply node and Redis counts by ~7.5x for that tier.
+```
+Benefits of the gateway at the 10M requests/day flagship scale. Per-request cost
+uses this design's 500-in / 300-out average and list prices as of 2026-11-25:
+  GPT-6.2 Sol        500 x $2/MTok    + 300 x $10/MTok   = $0.00400
+  Claude Sonnet 5.5  500 x $2/MTok    + 300 x $10/MTok   = $0.00400
+  GPT-6 Luna         500 x $0.10/MTok + 300 x $0.50/MTok = $0.00020
+  Self-hosted Llama 3.1 8B (amortized GPU)               = ~$0.00050
+Blended across the Section 2 mix (40% OpenAI, 30% Anthropic, 15% Google priced
+as a Sol-class model, 15% self-hosted): ~$0.0035/request.
+
+1. Semantic caching (20% hit rate):
+   Without cache: 10M x $0.0035 = $35,000/day
+   With 20% hits: 10M x 80% x $0.0035 = $28,000/day
+   Savings: $7,000/day = $2.56M/year
+
+2. Smart routing (60% of traffic to GPT-6 Luna):
+   All requests to GPT-6.2 Sol: 10M x $0.004 = $40,000/day
+   Routed: 10M x (40% x $0.004 + 60% x $0.0002) = $17,200/day
+   Savings vs all-Sol: $22,800/day = $8.32M/year
+
+3. Budget enforcement: stops runaway agent loops and leaked keys;
+   estimated 5-10% of spend protected from unexpected spikes.
+
+(1) and (2) overlap (cached requests are not routed), so they do not add.
+Routing first, then a 20% cache hit on routed spend:
+  10M x 0.80 x $0.00172 = $13,760/day, $26,240/day below the all-Sol baseline
+  Gross annual saving: ~$9.6M/year
+  Gateway cost to run: ~$5,000/day = ~$1.8M/year (infrastructure, team)
+  Net: ~$7.8M/year
+```
+
+For $50K+/month of API spend the gateway pays for itself through the cache (15-25% fewer calls, per 4.2), routing, and budget caps that stop runaway agent loops. A production v1 takes 4-6 weeks of engineering; measure your own cache-hit profile before you commit to build versus buy. Provider capacity per region and the active-active split follow [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md).
+
+**Target load:** 40M requests/month, mix: 65% simple (512-token output), 30% medium (1024-token), 5% complex (4096-token). This sizes a *single smaller reference deployment*, not the 10M req/day (300M/month) flagship figure used in Sections 1 and 2 and the flagship estimate above — multiply node and Redis counts by ~7.5x for that tier.
 
 ```
 Requests/second (peak 3× average):
@@ -812,323 +972,97 @@ Gateway nodes (routing + caching layer, NOT inference):
   Redis semantic cache: 1 × r6g.xlarge (32 GB) — covers 6-month cache growth at 20% hit rate
   Redis rate-limit: 1 × r6g.large (16 GB) — never needs eviction
 
-Cost breakdown at 40M req/month (list prices as of 2026-07; input and output
+Cost breakdown at 40M req/month (list prices as of 2026-11-25; input and output
 priced separately — a single blended $/1k rate is where cost models go wrong):
-  Simple  (GPT-4o-mini, $0.15/MTok in, $0.60/MTok out), 400 in + 512 out:
-    26M × 400  =  10,400 MTok × $0.15 =  $1,560
-    26M × 512  =  13,312 MTok × $0.60 =  $7,987
-    Subtotal: $9,547/month
-  Medium  (Claude Haiku 4.5, $1/MTok in, $5/MTok out), 800 in + 1,024 out:
+  Simple  (GPT-6 Luna, $0.10/MTok in, $0.50/MTok out), 400 in + 512 out:
+    26M × 400  =  10,400 MTok × $0.10 =  $1,040
+    26M × 512  =  13,312 MTok × $0.50 =  $6,656
+    Subtotal: $7,696/month
+  Medium  (GPT-6.1 Terra, $1/MTok in, $5/MTok out), 800 in + 1,024 out:
     12M × 800   =  9,600 MTok × $1 =  $9,600
     12M × 1,024 = 12,288 MTok × $5 = $61,440
     Subtotal: $71,040/month
-  Complex (GPT-4o, $2.50/MTok in, $10/MTok out), 2,000 in + 4,096 out:
-    2M × 2,000 = 4,000 MTok × $2.50 = $10,000
-    2M × 4,096 = 8,192 MTok × $10   = $81,920
-    Subtotal: $91,920/month
+  Complex (GPT-6.2 Sol, $2/MTok in, $10/MTok out), 2,000 in + 4,096 out:
+    2M × 2,000 = 4,000 MTok × $2  =  $8,000
+    2M × 4,096 = 8,192 MTok × $10 = $81,920
+    Subtotal: $89,920/month
 
-  Raw total (no cache, no routing): $172,507/month
+  Raw total (no cache, no routing): $168,656/month
 
   After 20% semantic cache hit rate (cached = $0 marginal; 20% is the target
   from Section 2, within the 15-25% band measured in 4.2):
-    $172,507 × 0.80 = $138,006/month
+    $168,656 × 0.80 = $134,925/month
 
   Infrastructure (gateway nodes, Redis, monitoring): $4,200/month
-  Total: ~$142,200/month vs ~$172,500/month unoptimized (18% saving from cache alone;
-  the larger lever is the routing mix above — sending all 40M requests to GPT-4o
-  instead, at the mix-weighted 600 in / 845 out, costs 24,000 MTok × $2.50 +
-  33,792 MTok × $10 = ~$398,000/month, 2.3x the routed figure)
+  Total: ~$139,100/month vs ~$168,700/month unoptimized (17.5% saving from cache alone;
+  the larger lever is the routing mix above — sending all 40M requests to GPT-6.2 Sol
+  instead, at the mix-weighted 600 in / 845 out, costs 24,000 MTok × $2 +
+  33,792 MTok × $10 = ~$386,000/month, 2.3x the routed figure)
 ```
+
+**Production lesson:** The most common gateway failure mode is under-investing in cache invalidation. Stale cached responses are worse than no cache — confidently wrong answers spread at scale. Monitor cache quality weekly and build invalidation triggers before the cache grows large enough to cause incidents.
 
 ---
 
-## 12. Additional Interview Questions
+## 11. Interview Discussion Points
 
 **Q: How do you implement per-tenant semantic cache isolation to prevent tenant A seeing tenant B's responses?**
+**Short:** Namespace every cache key by tenant and never look up across tenants, because identical queries can carry different system prompts, data access and compliance rules.
 Store cache keys as `sem:{tenant_id}:{query_hash}` where `query_hash` is BLAKE2b of the normalized query. Never allow cross-tenant cache lookup — even if two tenants send identical queries, they may have different system prompts, different data access, and different compliance requirements. The extra storage cost (no cross-tenant deduplication) is worth the security guarantee. An alternative where tenants opt-in to anonymous shared caching requires explicit consent and should never include PII or proprietary data.
 
 **Q: How do you handle LLM provider billing discrepancies where your token counts differ from the provider's invoice?**
+**Short:** Record the provider's own usage field per request, reconcile it against invoices monthly, and alert when the gap exceeds 5%; never bill tenants from your own token estimates.
 Token counting across providers is inconsistent: OpenAI uses tiktoken, Anthropic uses a different BPE, and both count system prompt tokens differently. Discrepancies of 3-8% are normal. Fix: (1) Track raw token counts from provider API responses (the `usage` field in the API response), not your own pre-tokenization estimates; (2) Reconcile provider invoices against your logged `usage` field monthly — alert if discrepancy > 5%; (3) Never bill tenants based on your token count estimates — always reconcile against actual provider invoices.
 
 **Q: What is the gateway's role in preventing data exfiltration via prompt injection?**
+**Short:** It is one defense layer: scan inputs for injection patterns, scan outputs for PII and credentials, and log everything per tenant and user for forensics.
 The gateway is a defense layer, not the only defense. Its role: (1) Input scanner: detect prompt injection patterns (`ignore previous instructions`, role-play overrides, data exfiltration templates) in the first 2,048 tokens of every request; (2) Output scanner: detect PII (regex + NER model), credential patterns (key regex), and atypically long base64 strings in output; (3) Log everything with `tenant_id` and `user_id` for forensic reconstruction if a breach is suspected. The gateway cannot prevent all prompt injections — it buys time and detection. The LLM application itself must enforce data access controls and not pass sensitive data to the LLM in the first place.
 
----
-
-### Multi-Provider Routing Architecture
-
-**Q: Provider capability matrix:**
-
-List prices as of 2026-07. TTFT figures are this deployment's own measurements, not vendor SLAs.
-
-| Provider | Strength | Context | Cost/1M tokens | p99 TTFT |
-|---|---|---|---|---|
-| Llama 3 8B (self-hosted) | Simple classification, extraction | 8k | ~$0.20 amortized GPU | 180ms |
-| GPT-4o mini | Cheap bulk generation | 128k | $0.15 (in) / $0.60 (out) | 250ms |
-| Claude Haiku 4.5 | Medium reasoning, summarization | 200k | $1 (in) / $5 (out) | 350ms |
-| GPT-4o | Complex reasoning, multi-step | 128k | $2.50 (in) / $10 (out) | 800ms |
-| Claude Sonnet 5 | Coding, analysis, long-form | 1M | $3 (in) / $15 (out) | 600ms |
-
-**Q: Routing decision logic (heuristic, first-match-wins):**
-
-```python
-def classify_and_route(messages: list[dict], tenant_config: dict) -> RoutingDecision:
-    prompt_tokens = count_tokens(messages)
-    code_fence = "`" * 3   # built, not literal: a bare ``` would close this fence
-    has_code = any(code_fence in m.get("content", "") for m in messages)
-    has_tool_calls = any("function" in m.get("role", "") for m in messages)
-
-    if tenant_config.get("force_model"):
-        return _build_decision(tenant_config["force_model"], prompt_tokens)
-
-    # $/token rates below are list prices as of 2026-07:
-    #   claude-sonnet-5  $3/MTok in,   $15/MTok out
-    #   gpt-4o           $2.50/MTok in, $10/MTok out
-    #   claude-haiku-4-5 $1/MTok in,    $5/MTok out
-    if prompt_tokens > 16_000 or has_tool_calls:       # long-context / tools → Claude Sonnet 5
-        return RoutingDecision("anthropic", "claude-sonnet-5",
-                               min(4096, 1_000_000 - prompt_tokens),
-                               prompt_tokens * 0.000003 + 1000 * 0.000015, "long_or_tools")
-    if has_code or prompt_tokens > 4_000:              # code / complex → GPT-4o
-        return RoutingDecision("openai", "gpt-4o", 1024,
-                               prompt_tokens * 0.0000025 + 1024 * 0.00001, "code_or_complex")
-    if prompt_tokens > 1_000:                          # medium → Claude Haiku 4.5
-        return RoutingDecision("anthropic", "claude-haiku-4-5-20251001", 512,
-                               prompt_tokens * 0.000001 + 512 * 0.000005, "medium")
-    return RoutingDecision("self_hosted", "llama-3-8b-instruct", 256,    # simple → Llama 3 8B
-                           prompt_tokens * 0.0000002, "simple_short")
-```
-
----
-
-### Provider Adapter Polymorphism
-
-The gateway must normalize calls to OpenAI, Anthropic, and self-hosted vLLM behind a single interface. A polymorphic adapter layer achieves this without if/else chains scattered across routing logic.
-
-```python
-from __future__ import annotations
-import asyncio
-import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any
-import httpx
-
-@dataclass
-class CompletionConfig:
-    model: str
-    max_tokens: int = 1024
-    temperature: float = 0.0
-    timeout_seconds: float = 30.0
-    stream: bool = False
-
-@dataclass
-class CompletionResult:
-    text: str
-    input_tokens: int
-    output_tokens: int
-    latency_ms: float
-    provider: str
-    model: str
-    raw_response: dict[str, Any] = field(default_factory=dict)
-
-
-class ProviderAdapter(ABC):
-    """Abstract base — every concrete provider must implement complete()."""
-
-    @abstractmethod
-    async def complete(
-        self, prompt: str, config: CompletionConfig
-    ) -> CompletionResult:
-        ...
-
-    @abstractmethod
-    def health_score(self) -> float:
-        """Return 0.0 (dead) to 1.0 (healthy) based on rolling error rate."""
-        ...
-
-
-class OpenAIAdapter(ProviderAdapter):
-    def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1"):
-        self._client = httpx.AsyncClient(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=60.0,
-        )
-        self._error_rate = 0.0     # updated by AdaptiveCircuitBreaker
-
-    async def complete(self, prompt: str, config: CompletionConfig) -> CompletionResult:
-        t0 = time.perf_counter()
-        payload = {
-            "model": config.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-        }
-        try:
-            resp = await self._client.post("/chat/completions", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return CompletionResult(
-                text=data["choices"][0]["message"]["content"],
-                input_tokens=data["usage"]["prompt_tokens"],
-                output_tokens=data["usage"]["completion_tokens"],
-                latency_ms=(time.perf_counter() - t0) * 1000,
-                provider="openai",
-                model=config.model,
-                raw_response=data,
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
-                raise RateLimitError("openai") from exc
-            raise ProviderError("openai", str(exc)) from exc
-
-    def health_score(self) -> float:
-        return max(0.0, 1.0 - self._error_rate * 5)   # 20% errors → score 0.0
-
-
-class AnthropicAdapter(ProviderAdapter):
-    def __init__(self, api_key: str):
-        self._client = httpx.AsyncClient(
-            base_url="https://api.anthropic.com/v1",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            timeout=60.0,
-        )
-        self._error_rate = 0.0
-
-    async def complete(self, prompt: str, config: CompletionConfig) -> CompletionResult:
-        t0 = time.perf_counter()
-        payload = {
-            "model": config.model,
-            "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        try:
-            resp = await self._client.post("/messages", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return CompletionResult(
-                text=data["content"][0]["text"],
-                input_tokens=data["usage"]["input_tokens"],
-                output_tokens=data["usage"]["output_tokens"],
-                latency_ms=(time.perf_counter() - t0) * 1000,
-                provider="anthropic",
-                model=config.model,
-                raw_response=data,
-            )
-        except httpx.HTTPStatusError as exc:
-            # 429 = rate_limit_error, 529 = overloaded_error (both shed load, both retryable)
-            if exc.response.status_code in (429, 529):
-                raise RateLimitError("anthropic") from exc
-            raise ProviderError("anthropic", str(exc)) from exc
-
-    def health_score(self) -> float:
-        return max(0.0, 1.0 - self._error_rate * 5)
-
-
-class VLLMAdapter(ProviderAdapter):
-    """Self-hosted vLLM uses the same OpenAI-compat /chat/completions endpoint."""
-    def __init__(self, base_url: str = "http://vllm-internal:8000/v1"):
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=120.0)
-        self._error_rate = 0.0
-
-    async def complete(self, prompt: str, config: CompletionConfig) -> CompletionResult:
-        t0 = time.perf_counter()
-        resp = await self._client.post("/chat/completions", json={
-            "model": config.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-        })
-        resp.raise_for_status()
-        data = resp.json()
-        return CompletionResult(
-            text=data["choices"][0]["message"]["content"],
-            input_tokens=data["usage"]["prompt_tokens"],
-            output_tokens=data["usage"]["completion_tokens"],
-            latency_ms=(time.perf_counter() - t0) * 1000,
-            provider="vllm_self_hosted", model=config.model, raw_response=data,
-        )
-
-    def health_score(self) -> float:
-        return max(0.0, 1.0 - self._error_rate * 5)
-
-
-@dataclass
-class GatewayRequest:
-    prompt: str
-    preferred_model: str | None = None
-    cost_tier: str = "balanced"    # "cheap" | "balanced" | "quality"
-    tenant_id: str = ""
-
-
-class AdaptiveRouter:
-    """
-    Selects provider adapter based on cost tier preference then health score.
-    Tier preference: cheap=[vllm,anthropic,openai]; balanced=[anthropic,openai,vllm];
-    quality=[openai,anthropic,vllm]. Skips providers with health_score < 0.3.
-    """
-
-    def __init__(self, openai: OpenAIAdapter, anthropic: AnthropicAdapter, vllm: VLLMAdapter):
-        self._adapters: dict[str, ProviderAdapter] = {
-            "openai": openai, "anthropic": anthropic, "vllm": vllm,
-        }
-        self._tier_preference: dict[str, list[str]] = {
-            "cheap":    ["vllm", "anthropic", "openai"],
-            "balanced": ["anthropic", "openai", "vllm"],
-            "quality":  ["openai", "anthropic", "vllm"],
-        }
-
-    def route(self, request: GatewayRequest) -> ProviderAdapter:
-        for name in self._tier_preference.get(request.cost_tier, ["openai", "anthropic", "vllm"]):
-            if self._adapters[name].health_score() >= 0.3:
-                return self._adapters[name]
-        return max(self._adapters.values(), key=lambda a: a.health_score())
-
-    async def complete_with_fallback(
-        self, request: GatewayRequest, config: CompletionConfig
-    ) -> CompletionResult:
-        last_exc: Exception | None = None
-        for name in self._tier_preference.get(request.cost_tier, ["openai"]):
-            try:
-                return await self._adapters[name].complete(request.prompt, config)
-            except RateLimitError:
-                continue
-            except ProviderError as exc:
-                last_exc = exc
-        raise ProviderError("all_providers", "all adapters failed") from last_exc
-
-
-class RateLimitError(Exception):
-    def __init__(self, provider: str) -> None:
-        super().__init__(f"Rate limited by {provider}")
-
-class ProviderError(Exception):
-    def __init__(self, provider: str, detail: str) -> None:
-        super().__init__(f"{provider}: {detail}")
-```
-
----
-
-### Additional Q&As
-
 **Q: How do you prevent vendor lock-in when one LLM provider handles 80% of your traffic?**
+**Short:** Normalize every provider behind one internal schema, avoid provider-specific prompt syntax, and route about 5% of traffic to secondary providers so they stay tested.
 Abstract the provider away at three levels so application code never names one. (1) Normalize all provider APIs to a single internal schema via the gateway adapter layer — application code never calls OpenAI or Anthropic directly; (2) avoid provider-specific syntax (Anthropic's XML tool format, OpenAI function calling schemas) unless necessary — use a unified tool schema that maps to each provider's format at the adapter boundary; (3) route 5% of traffic to secondary providers monthly to validate quality/latency parity and keep integrations tested. Lock-in occurs when prompts use provider-specific syntax, the secondary provider goes untested for 6+ months, or fine-tuned models exist on only one provider.
 
 **Q: How does the gateway handle provider API changes (e.g., OpenAI deprecating a model endpoint)?**
-Pin to specific model versions in routing config (`gpt-4o-2024-11-20`, not `gpt-4o`). Subscribe to provider deprecation announcements. Send a 10-token health ping to each model version every 15 minutes — version disappearing from responses gives 2-4 weeks of early warning before the official deadline. Validate the substitution against the internal golden dataset before updating the routing table.
+**Short:** Pin exact model IDs, poll each provider's published shutdown dates, and validate the named replacement on a golden set and shadow traffic before switching.
+Treat model retirement as a scheduled event, not a surprise. Pin exact model IDs in routing config (Anthropic IDs from the 4.6 generation on are pinned snapshots, such as `claude-sonnet-5-5`), and poll OpenAI's `GET /v1/models`, whose entries carry an optional `shutdown_date`, so the gateway raises a ticket the day a date appears. OpenAI's published floor is at least 6 months of notice for generally available models and as little as 2 weeks for `preview` models, so never route production traffic to a preview ID. When a replacement is named (GPT-4o's listed replacement is `gpt-6-luna`, shutdown 2027-01-14), run it against the internal golden dataset and shadow 5% of traffic before you update the routing table.
 
-**Q: Key architectural principles:**
+**Q: How do you keep the gateway's added latency under 10 ms?**
+**Short:** Keep only sub-millisecond checks such as Redis lookups on the synchronous path, push logging and deep safety analysis async, and pool provider connections.
+
+The 10ms latency requirement is challenging. Every synchronous check in the request path (auth, rate limit, cache, safety filter) adds latency. The solution: run fast checks synchronously (Redis lookup: < 1ms), async checks where possible (logging, detailed safety analysis), and use connection pooling to LLM providers to amortize connection setup.
+
+**Q: Why not just use LiteLLM or Portkey instead of building a gateway?**
+**Short:** Off-the-shelf gateways cover routing and format translation; build only when you need custom routing, strict VPC-only compliance, tuned semantic caching or deep observability.
+
+Open-source gateways ([LiteLLM](../agentic_frameworks/litellm_routing.md)) handle basic routing and format translation. Building in-house makes sense when you need: custom routing logic tightly integrated with your business rules, HIPAA/compliance requirements (data never leaves your VPC), custom semantic caching tuned to your query patterns, or deep integration with your observability stack.
+
+**Q: How do you stop a wrong cached answer from spreading to every similar query?**
+**Short:** Bound the blast radius with short TTLs, re-scan cached output on every read, A/B cache against fresh answers, and let a thumbs-down invalidate the entry.
+
+Semantic cache poisoning is the risk. If a cached response is wrong (hallucination) and many similar queries hit the cache, the wrong answer spreads. Mitigation: TTL ensures old responses expire, A/B test cache vs. fresh to measure quality, allow users to "thumbs down" which invalidates the cache entry.
+
+**Q: What latency penalty does failover add, and how do you shrink it?**
+**Short:** Detection plus switching costs 100-200 ms and retries can make requests 2-5x slower, so keep connections to backup providers warm with about 1% shadow traffic.
+
+Detecting failure + switching provider takes 100-200ms. Combined with retry logic, some requests might take 2-5× normal latency during provider incidents. For real-time applications, pre-warm connections to all providers and use shadow traffic (send 1% of requests to backup provider) to keep connections warm.
+
+**Q: At what granularity should the gateway enforce budgets?**
+**Short:** Hierarchically: tenant, then project, application and user, with each child limit capped by its parent; a tenant-wide monthly cap alone cannot stop one runaway agent.
+
+Per-tenant monthly budget is the minimum. Production systems also need per-project, per-application, per-user granularity. Hierarchical budgets: tenant limit > project limit > user limit. Each level can set its own limit (must be ≤ parent limit).
+
+**Q: A tenant's requests to Claude Opus 5.5 all fail with HTTP 400 after a routing change. What happened?**
+**Short:** The adapter sent a parameter Opus 5.5 rejects, such as temperature; send sampling parameters only when the model accepts them and keep 400s out of breaker math.
+
+The adapter forwarded a parameter the model rejects. Claude Opus 5.5 returns 400 for `temperature`, `top_p`, `top_k`, a thinking `budget_tokens`, forced `tool_choice`, and assistant prefill, so a gateway that injects a tenant-wide `temperature: 0` breaks every request routed there. Worse, the failover chain treats the 400 burst as provider failure and shifts traffic, which hides the bug behind a cost and quality change. Fix it at the adapter boundary (4.7): keep a per-model capability table, send sampling parameters only when explicitly set and accepted, and count 400s separately from 5xx so they never trip the circuit breaker.
+
+**Q: What architectural principles keep a multi-tenant gateway safe at scale?**
+**Short:** Separate cache and rate-limit Redis, proportional circuit breaking, safety scans on cache reads, pinned model IDs with shutdown polling, and one internal schema.
+
+Five principles cover most of the incidents in Section 9.
+
 - Separate Redis for cache (allkeys-lru eviction) and rate-limit counters (noeviction) — prevents rate-limit bypass during memory pressure
 - Proportional load reducer replaces binary circuit breaker — handles partial degradation that binary OPEN/CLOSED misses
 - Output safety scan runs on every cache read — prevents poisoned responses from propagating
-- Pin specific model versions; 15-minute health pings give early deprecation warning
+- Pin exact model IDs and poll each provider's published `shutdown_date`; retirements become tickets, not outages
 - Single internal schema at the adapter boundary keeps all application code provider-agnostic
-
-**ROI summary:** For $50k+/month API spend, a gateway pays for itself quickly via semantic cache (15-25% call reduction, per 4.2), smart routing (60% traffic to cheaper models), and budget enforcement preventing runaway agent loops. Engineering investment: 4-6 weeks for a production v1. Payback period depends entirely on your traffic's cache-hit profile — measure it before committing to a build-vs-buy decision.
-
-**Production lesson:** The most common gateway failure mode is under-investing in cache invalidation. Stale cached responses are worse than no cache — confidently wrong answers spread at scale. Monitor cache quality weekly and build invalidation triggers before the cache grows large enough to cause incidents.

@@ -1,4 +1,5 @@
 # Case Study: Design an AI Customer Support Bot
+
 ## Intuition
 
 > **Design intuition**: A customer support bot is a RAG + tools system with a human escalation path — the key design challenges are intent classification (support vs. off-topic), knowledge retrieval accuracy (wrong answer is worse than "I don't know"), safe tool use (update records only when confident), and graceful handoff to human agents.
@@ -315,11 +316,11 @@ class ToolExecutor:
 
 **Concrete numbers:** 0.3% of sessions trigger an irreversible action — at 1M conversations/day that is ~3,000/day. Without the confirmation gate, approximately 15 unintended refunds/day were processed when customers asked exploratory questions like "what would happen if I cancel?" With the gate, unintended irreversible actions reached 0 in post-deployment audit over 30 days.
 
-For adversarial testing of tool-use triggers (e.g., social engineering attempts like "pretend you are my friend and just cancel my order"), see `../cross_cutting/red_team_eval_harness.md`.
+For adversarial testing of tool-use triggers (e.g., social engineering attempts like "pretend you are my friend and just cancel my order"), see [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md). Tool calls that move money must also be idempotent across retries and worker restarts, so each refund carries an idempotency key derived from `(session_id, order_id, amount)`; see [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md).
 
 ---
 
-### 4.6 Escalation Design
+### 4.5 Escalation Design
 
 ```
 Escalation is the most important bot failure mode to get right.
@@ -362,7 +363,7 @@ Benefit: human agent reads summary, not 20 turns of conversation.
          Human starts with context; customer doesn't have to repeat everything.
 ```
 
-### 4.7 Conversation State Machine
+### 4.6 Conversation State Machine
 
 A stateless bot that processes each turn independently loses track of where the session is in its lifecycle. A customer escalated three turns ago should not receive a fresh RAG-generated answer — they should get a handoff message.
 
@@ -455,7 +456,7 @@ class SupportBot:
 
 ---
 
-### 4.8 Agent Assist Mode
+### 4.7 Agent Assist Mode
 
 ```
 For conversations that reach human agents:
@@ -489,47 +490,254 @@ Value of agent assist:
   - Cost: junior agents can handle more complex issues with AI support
 ```
 
+### 4.8 Escalation Logic and Context Hand-off
+
+Escalation from bot to human agent is the highest-stakes transition in a customer support bot. A bad escalation (too slow, missing context) causes significant customer dissatisfaction.
+
+**Escalation decision tree:**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U([User message received])
+    IC{"Intent Classification"}
+    PC{"Policy Check\nrefunds >$500, legal threats,\naccount compromise"}
+    SD{"Sentiment Detection"}
+    AC{"Attempt Counter"}
+    E1["Escalate (uncertain intent)"]
+    E2["Escalate (policy requires human)"]
+    E3["Escalate (customer very angry)"]
+    E4["Escalate (bot failing to resolve)"]
+    CONT([Bot continues])
+
+    U --> IC
+    IC -->|"intent confidence < 0.6"| E1
+    IC -->|"high confidence intent"| PC
+    PC -->|"intent in escalation_list: 'cancel account', 'I'm a lawyer', 'I'll sue'"| E2
+    PC -->|"bot can handle"| SD
+    SD -->|"sentiment score < -0.7"| E3
+    SD -->|"neutral/positive"| AC
+    AC -->|"resolution_attempts >= 3"| E4
+    AC --> CONT
+
+    class U,CONT io
+    class IC,PC,SD,AC mathOp
+    class E1,E2,E3,E4 lossN
+```
+
+Each gate is evaluated in order — intent confidence, policy, sentiment, then attempt count — and any single trigger exits to escalation; only messages passing all four checks stay with the bot.
+
+**Context handoff to human agent:**
+
+```python
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class EscalationContext:
+    conversation_id: str
+    user_id: str
+    account_tier: str
+    escalation_reason: str
+    sentiment_score: float
+    resolution_attempts: int
+    bot_summary: str          # LLM-generated summary of conversation
+    identified_intent: str
+    extracted_entities: dict  # order_id, product_sku, refund_amount, etc.
+    conversation_history: list[dict]
+    urgency_score: float      # 0-1: high urgency routes to senior agents
+
+def generate_handoff_summary(
+    conversation: list[dict],
+    client,
+    escalation_reason: str,
+) -> str:
+    """Generate a concise summary for the human agent to read in <30 seconds."""
+    history_text = "\n".join([
+        f"{msg['role'].upper()}: {msg['content']}"
+        for msg in conversation[-10:]  # last 10 turns
+    ])
+    response = client.messages.create(
+        model="claude-haiku-5-5",
+        max_tokens=256,
+        messages=[{
+            "role": "user",
+            "content": f"""Summarize this customer support conversation for a human agent.
+Include: customer's core issue, what was already tried, reason for escalation.
+Be concise (under 100 words).
+
+Escalation reason: {escalation_reason}
+
+Conversation:
+{history_text}"""
+        }]
+    )
+    return response.content[0].text
+```
+
+### 4.9 Sentiment Detection
+
+Real-time sentiment detection enables proactive escalation before the customer explicitly complains:
+
+```python
+from transformers import pipeline
+import numpy as np
+
+# Fine-tuned sentiment model: customer support domain (not general Twitter sentiment)
+# Trained on support transcripts with human-labeled sentiment -1.0 to +1.0
+sentiment_model = pipeline(
+    "sentiment-analysis",
+    model="./models/support-sentiment-v2",
+    device=0,  # GPU
+)
+
+def compute_conversation_sentiment(
+    messages: list[dict],
+    decay_factor: float = 0.8,  # recent messages weighted more
+) -> float:
+    """Compute exponentially weighted sentiment across conversation."""
+    user_messages = [m for m in messages if m["role"] == "user"]
+    if not user_messages:
+        return 0.0
+
+    sentiments = []
+    for msg in user_messages:
+        result = sentiment_model(msg["content"][:512])[0]
+        score = result["score"] if result["label"] == "POSITIVE" else -result["score"]
+        sentiments.append(score)
+
+    # Exponential decay: most recent message has highest weight
+    weights = [decay_factor ** (len(sentiments) - 1 - i) for i in range(len(sentiments))]
+    weighted_sum = sum(s * w for s, w in zip(sentiments, weights))
+    return weighted_sum / sum(weights)
+
+# Example: first message neutral (0.1), second frustrated (-0.4), third very angry (-0.9)
+# Weighted sentiment: dominant by last message → escalation threshold -0.7 triggered
+```
+
+### 4.10 Knowledge Base Freshness Pipeline
+
+The freshness pipeline keeps answers grounded in current product information: detect articles whose
+content hash changed or whose last index is older than 7 days, and re-embed only those.
+
+```python
+import hashlib
+from datetime import datetime, timedelta, timezone
+
+class KBFreshnessMonitor:
+    def __init__(self, db, vector_db, embed, stale_after: timedelta = timedelta(days=7)) -> None:
+        self.db, self.vector_db, self.embed, self.stale_after = db, vector_db, embed, stale_after
+
+    def articles_to_reindex(self) -> list[str]:
+        now = datetime.now(timezone.utc)
+        rows = self.db.query("SELECT id, content, content_hash, last_indexed FROM kb_articles")
+        return [r["id"] for r in rows
+                if now - r["last_indexed"] > self.stale_after
+                or hashlib.sha256(r["content"].encode()).hexdigest() != r["content_hash"]]
+
+    def reindex(self, article_ids: list[str]) -> int:
+        for article_id in article_ids:
+            content = self.db.get_article_content(article_id)
+            self.vector_db.upsert(article_id, self.embed(content),
+                                  metadata={"article_id": article_id,
+                                            "indexed_at": datetime.now(timezone.utc).isoformat()})
+            self.db.update("kb_articles", article_id, {
+                "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+                "last_indexed": datetime.now(timezone.utc)})
+        return len(article_ids)
+```
+
+Policy articles (refunds, warranties, cancellation terms) are re-indexed on every edit, not on the
+7-day sweep: a stale refund policy is the most expensive hallucination a support bot can make
+(Section 9).
+
+### 4.11 PII Redaction Pipeline
+
+Customer support transcripts contain dense PII — names, card numbers, phone numbers, SSNs — that must never reach raw log storage. Presidio (Microsoft) provides entity detection with custom recognisers tuned for support domains.
+
+```python
+from presidio_analyzer import AnalyzerEngine, RecognizerResult
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+from dataclasses import dataclass
+
+ENTITIES_TO_REDACT = [
+    "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
+    "CREDIT_CARD", "US_SSN", "IP_ADDRESS",
+    "LOCATION", "DATE_TIME",  # DATE_TIME only flagged near other PII (DOB context)
+]
+
+analyzer  = AnalyzerEngine()
+anonymizer = AnonymizerEngine()
+
+class PIIRedactor:
+    def redact_before_logging(self, transcript: str) -> str:
+        """
+        Input : "My name is John Smith and my card ending in 4242 was charged."
+        Output: "My name is [PERSON] and my card ending in [CREDIT_CARD] was charged."
+        """
+        results = analyzer.analyze(text=transcript, entities=ENTITIES_TO_REDACT, language="en")
+        ops     = {e: OperatorConfig("replace", {"new_value": f"[{e}]"}) for e in ENTITIES_TO_REDACT}
+        return anonymizer.anonymize(text=transcript, analyzer_results=results, operators=ops).text
+```
+
+**Concrete numbers:** Presidio processes a 500-character transcript in 12ms on a 2-vCPU pod. This adds 12ms per turn to the logging path (async, not in the critical response path). At 50K concurrent sessions the logging workers run at ~6K events/second; a pool of 4 workers handles this comfortably with p99 logging latency under 80ms. A GDPR erasure request nulls transcript content per session (billing metadata stays), deletes the object-store copy, schedules a hard delete after 30 days, and writes an audit record of what was erased.
+
+### 4.12 Multi-Language Support
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    MSG(["User message<br/>40+ supported languages"])
+    LD["Language Detection<br/>fastText langdetect, 3ms<br/>176 languages"]
+    CLARIFY["Ask user to clarify<br/>language preference"]
+    ROUTE["Route to language-specific<br/>KB index<br/>(EN, ES, FR, DE, JA, ZH, etc.)"]
+    RETRIEVE["Retrieve KB articles<br/>in detected language<br/>translated by localization team"]
+    GEN["Generate response<br/>in detected language<br/>system prompt: respond in lang_code"]
+    QC{"Quality check:<br/>response language matches<br/>CJK/Latin regex check"}
+
+    MSG --> LD
+    LD -->|"confidence < 0.8"| CLARIFY
+    LD -->|"confidence >= 0.8"| ROUTE
+    ROUTE --> RETRIEVE --> GEN --> QC
+
+    class MSG io
+    class LD,QC mathOp
+    class CLARIFY lossN
+    class ROUTE,RETRIEVE,GEN base
+```
+
+Language detection below 0.8 confidence asks the user to choose a language; short messages are the
+usual cause. CSAT is reported per language with the floor and alert from the CSAT pipeline (Section 8).
+
 ---
 
-## 5. Analytics and Continuous Improvement
+## 5. Design Decisions & Tradeoffs
 
-```
-Core metrics tracked:
+| Decision | Chosen | Alternative | Reason |
+|----------|--------|-------------|--------|
+| Bot-first vs. human-first | Bot-first (escalate as needed) | Human-first (opt-in bot) | 60% resolution savings; customers prefer instant response |
+| Escalation threshold | Multiple signals (confidence + sentiment + turns) | Fixed confidence only | Sentiment prevents frustrated customers getting wrong answers |
+| Action execution | Direct (process refunds) | Suggest (human approves) | For small amounts (<$100): direct is faster; builds trust |
+| Context window | 3-turn summary + full context | Full history | Summary avoids "lost in the middle" for long conversations |
+| Multilingual | Multilingual embedding model | Translate-first | Better semantic matching; lower latency |
+| LLM choice | gpt-6.2-sol for complex Tier-1 turns, gpt-6-luna for simple turns; Claude Haiku 5.5 for agent assist | Single model | The small tier is ~20x cheaper per token, so routing by intent complexity halves the LLM bill; pin exact model IDs in config, not code, because models retire on published schedules |
 
-Resolution rate:
-  Automated resolution / total conversations
-  By intent type (shows where bot excels vs. struggles)
-  Target: > 60% overall; iterate on worst-performing intents
-
-CSAT (Customer Satisfaction):
-  Post-conversation survey: "How satisfied are you? 1-5 stars"
-  Response rate: ~25% (prompt at conversation end)
-  Track: CSAT by intent, channel, language, model version
-
-First Contact Resolution (FCR):
-  % of issues resolved in one conversation without follow-up
-  High FCR → efficient support
-
-Escalation analysis:
-  Why is the bot escalating? (intent distribution)
-  If "technical" intent has 80% escalation rate → train on more tech KB articles
-  Manual review of escalated conversations → identify gaps
-
-Feedback loop:
-  Human agent marks each escalation: "bot was close" / "bot was wrong" / "right to escalate"
-  "Bot was close" cases → review conversation → add to KB or improve prompt
-  Weekly: KB article managers review low-performance articles → update content
-
-A/B testing:
-  Test prompt variations (different system prompts)
-  Test model versions (e.g. GPT-4o vs Claude Haiku 4.5 vs a current frontier model)
-  Test escalation thresholds (when to proactively escalate)
-  Statistical significance: 1,000 conversations per variant minimum
-```
-
----
-
-## 6. Prompts and Safety
+### Prompts and Safety
 
 ```
 System prompt design:
@@ -571,68 +779,38 @@ Safety filters:
 
 ---
 
-## 7. Trade-offs and Design Decisions
+## 6. Real-World Implementations
 
-| Decision | Chosen | Alternative | Reason |
-|----------|--------|-------------|--------|
-| Bot-first vs. human-first | Bot-first (escalate as needed) | Human-first (opt-in bot) | 60% resolution savings; customers prefer instant response |
-| Escalation threshold | Multiple signals (confidence + sentiment + turns) | Fixed confidence only | Sentiment prevents frustrated customers getting wrong answers |
-| Action execution | Direct (process refunds) | Suggest (human approves) | For small amounts (<$100): direct is faster; builds trust |
-| Context window | 3-turn summary + full context | Full history | Summary avoids "lost in the middle" for long conversations |
-| Multilingual | Multilingual embedding model | Translate-first | Better semantic matching; lower latency |
-| LLM choice | GPT-4o for Tier-1 bot; Claude Haiku 4.5 for agent assist | Single model | Cost optimization; agent assist is lower stakes → smaller model. Pin exact model IDs in config, not code: Claude 3 Haiku and Claude 3.5 Sonnet, the obvious picks when this pattern was first written, have both since been retired |
+| Company | Public fact | Lesson |
+|---------|-------------|--------|
+| Klarna (February 2024) | its AI assistant handled 2.3M conversations in its first month, two-thirds of customer service chats, the work of ~700 full-time agents; resolution time fell from 11 minutes to under 2 and repeat inquiries fell 25% | containment numbers can be large; by 2025 Klarna was again recruiting human agents, citing service quality, which is the CSAT-versus-resolution tension in Section 11 |
+| Air Canada (Moffatt v. Air Canada, February 2024) | the airline's chatbot misstated the bereavement-fare refund policy; British Columbia's Civil Resolution Tribunal held the airline responsible for what its chatbot said and ordered it to pay about C$812 | the company owns every statement its bot makes; policy answers must be grounded or templated (4.2) |
+| Intercom Fin | an AI support agent priced per resolution (US$0.99) rather than per seat or token | the market prices resolution, the same metric this design optimizes |
+| Cursor (April 2025) | its AI support agent told users a nonexistent "one device per subscription" policy explained their logouts; users cancelled before the company corrected it publicly | an ungrounded policy answer can trigger churn within hours |
 
 ---
 
-## 8. Cost Analysis
+## 7. Technologies & Tools
 
-```
-1M conversations/day, 4 bot turns average.
-Rates used (retail list, verified July 2026): GPT-4o $2.50/1M input, $10/1M output;
-Claude Haiku 4.5 $1/1M input, $5/1M output. Re-check both before budgeting — every
-number below is a direct function of them.
-
-LLM costs, single-model baseline (all GPT-4o):
-  4M bot turns × 2,200 tokens = 8.8B tokens/day (8B input, 0.8B output)
-  Input:  8,000 MTok × $2.50/M = $20,000/day
-  Output:   800 MTok × $10/M   =  $8,000/day
-  LLM total: $28,000/day
-
-Optimization — route by intent complexity:
-  Simple intents (50% of turns) to Claude Haiku 4.5:
-    input  2M × 2,000 =  4,000 MTok × $1/M = $4,000/day
-    output 2M ×   200 =    400 MTok × $5/M = $2,000/day  → $6,000/day
-  Complex intents (50% of turns) to GPT-4o:
-    input  2M × 2,000 =  4,000 MTok × $2.50/M = $10,000/day
-    output 2M ×   200 =    400 MTok × $10/M   =  $4,000/day → $14,000/day
-  Optimized LLM: $20,000/day (29% below the single-model baseline)
-
-  Note the ceiling on this lever: because the small model is only ~2.5x cheaper on
-  input than GPT-4o (not 10x, as the older Haiku generations were), tiered routing
-  buys less than it used to. Prompt caching on the shared system prompt and KB
-  preamble is now the bigger win — see the caching note below.
-
-Infrastructure:
-  Qdrant cluster + Elasticsearch: $500/day
-  Redis (session + cache): $200/day
-  Application servers: $300/day
-  Total infra: $1,000/day
-
-Total: ~$21,000/day = ~$630K/month
-
-ROI comparison:
-  Without AI bot: 1M conversations × 8 min average × $0.15/min agent cost = $1.2M/day
-  With AI bot: 60% resolved by bot
-              40% reach humans: 400K × 8 min × $0.15 = $480K/day
-  Total with AI: $21K (AI) + $480K (humans) = $501K/day vs $1.2M/day
-  Net savings: $699K/day ≈ $255M/year
-  ROI: ~33× — the AI spend is under 5% of the labour cost it displaces, which is
-  why resolution rate (not token price) is the metric that actually moves the P&L.
-```
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| Intent classifier | fine-tuned small encoder, < 20ms | cheap first routing decision on every turn | LLM classification on every turn |
+| Bot model | gpt-6.2-sol for complex turns, gpt-6-luna for simple ones | 20x price gap makes routing pay | single frontier model |
+| Agent assist | Claude Haiku 5.5 | fast suggestions where a human checks the output | frontier model |
+| Retrieval | Qdrant (dense) + Elasticsearch (BM25), multilingual embeddings | policy text needs exact terms and semantic match | single vector index |
+| Sentiment | support-domain fine-tuned classifier | proactive escalation before a complaint | generic social-media sentiment |
+| PII | Microsoft Presidio + custom recognisers | redaction before any log write | regex only |
+| State and sessions | Redis + PostgreSQL | conversation state machine, audit tables | in-memory only |
+| Ticketing hand-off | Zendesk or Salesforce APIs | agents keep their existing tools | custom agent UI |
+| Tracing | OpenTelemetry | per-turn intent, tool, escalation spans | vendor-only logs |
 
 ---
 
-## Operational Playbook
+## 8. Operational Playbook
+
+Multi-brand and multi-tenant deployments keep one KB index, one PII policy and one audit trail per
+brand, and an agent never sees another tenant's transcripts; see
+[Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md).
 
 ### Eval Pipeline
 
@@ -708,361 +886,92 @@ Symptom: Nightly audit scan (higher-recall second-pass detector) flags raw PII i
 
 1. Scope: query log store for all transcripts written during the exposure window; estimate affected session count.
 2. Remediation: run the high-recall scanner on affected transcripts and overwrite with redacted versions within 4 hours.
-3. Exposure assessment: check object store access logs for any read by internal tools, dashboards, or third-party vendors during the window.
-4. GDPR: if EU customer data was exposed, breach notification to supervisory authority required within 72 hours. Notify legal immediately.
-5. Root cause: identify which entity type Presidio missed (common: partial card numbers like "4242", non-E.164 phone numbers). Add a targeted recogniser; update test suite.
-6. Post-mortem: if the primary/secondary false-negative gap exceeds 2%, evaluate a higher-recall model (+8ms per turn) or a tertiary rule-based pass for high-risk patterns.
+3. Exposure assessment and GDPR: check object-store access logs for reads during the window; if EU data was exposed, notify the supervisory authority within 72 hours and involve legal immediately.
+4. Root cause: find the entity type Presidio missed (often partial card numbers or non-E.164 phone numbers), add a targeted recogniser, and extend the test suite.
 
----
+### Analytics and Continuous Improvement
 
-## 9. Interview Discussion Points
+```
+Core metrics tracked:
 
-**The escalation threshold is the most important product decision.** Too low → bot frustrates customers trying to help (answer quality suffers). Too high → expensive human agents handle issues bot could solve. The key insight: use sentiment as a primary signal, not just confidence. A confident but wrong answer to a frustrated customer is worse than an early escalation.
+Resolution rate:
+  Automated resolution / total conversations
+  By intent type (shows where bot excels vs. struggles)
+  Target: > 60% overall; iterate on worst-performing intents
 
-**Context handoff is where most bots fail.** The worst customer experience is a bot escalating to a human, and the human asks the customer to repeat everything. Full context handoff (conversation summary, customer data, escalation reason) eliminates this problem and is a significant differentiator.
+CSAT (Customer Satisfaction):
+  Post-conversation survey: "How satisfied are you? 1-5 stars"
+  Response rate: ~25% (prompt at conversation end)
+  Track: CSAT by intent, channel, language, model version
 
-**Tier-1 resolution rate is not the only metric.** A bot that achieves 80% resolution rate but leaves customers dissatisfied (low CSAT) is worse than one with 60% resolution and high satisfaction. Track resolution rate AND CSAT together. A "hard no" (bot confidently declining to help) might resolve an issue without customer satisfaction.
+First Contact Resolution (FCR):
+  % of issues resolved in one conversation without follow-up
+  High FCR → efficient support
 
-**Knowledge base quality is the primary lever for improvement.** When resolution rate is low for an intent, the fix is usually more/better KB content, not a better model. Hiring dedicated KB managers who continuously update articles based on failed conversations is often higher ROI than model improvements.
+Escalation analysis:
+  Why is the bot escalating? (intent distribution)
+  If "technical" intent has 80% escalation rate → train on more tech KB articles
+  Manual review of escalated conversations → identify gaps
 
-**Multilingual is harder than it looks.** Language detection fails on short messages. Cultural context affects communication style. The word "cancel" in German conversation might have different escalation signals than in English. Build language-specific test sets and measure CSAT separately by language.
+Feedback loop:
+  Human agent marks each escalation: "bot was close" / "bot was wrong" / "right to escalate"
+  "Bot was close" cases → review conversation → add to KB or improve prompt
+  Weekly: KB article managers review low-performance articles → update content
 
----
-
-## Escalation Logic Design
-
-Escalation from bot to human agent is the highest-stakes transition in a customer support bot. A bad escalation (too slow, missing context) causes significant customer dissatisfaction.
-
-**Escalation decision tree:**
-
-```mermaid
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    U([User message received])
-    IC{"Intent Classification"}
-    PC{"Policy Check\nrefunds >$500, legal threats,\naccount compromise"}
-    SD{"Sentiment Detection"}
-    AC{"Attempt Counter"}
-    E1["Escalate (uncertain intent)"]
-    E2["Escalate (policy requires human)"]
-    E3["Escalate (customer very angry)"]
-    E4["Escalate (bot failing to resolve)"]
-    CONT([Bot continues])
-
-    U --> IC
-    IC -->|"intent confidence < 0.6"| E1
-    IC -->|"high confidence intent"| PC
-    PC -->|"intent in escalation_list: 'cancel account', 'I'm a lawyer', 'I'll sue'"| E2
-    PC -->|"bot can handle"| SD
-    SD -->|"sentiment score < -0.7"| E3
-    SD -->|"neutral/positive"| AC
-    AC -->|"resolution_attempts >= 3"| E4
-    AC --> CONT
-
-    class U,CONT io
-    class IC,PC,SD,AC mathOp
-    class E1,E2,E3,E4 lossN
+A/B testing:
+  Test prompt variations (different system prompts)
+  Test model versions (e.g. gpt-6.2-sol vs gpt-6-luna vs Claude Haiku 5.5)
+  Test escalation thresholds (when to proactively escalate)
+  Statistical significance: 1,000 conversations per variant minimum
 ```
 
-Each gate is evaluated in order — intent confidence, policy, sentiment, then attempt count — and any single trigger exits to escalation; only messages passing all four checks stay with the bot.
+### CSAT Measurement
 
-**Context handoff to human agent:**
-
-```python
-from dataclasses import dataclass
-from datetime import datetime
-
-@dataclass
-class EscalationContext:
-    conversation_id: str
-    user_id: str
-    account_tier: str
-    escalation_reason: str
-    sentiment_score: float
-    resolution_attempts: int
-    bot_summary: str          # LLM-generated summary of conversation
-    identified_intent: str
-    extracted_entities: dict  # order_id, product_sku, refund_amount, etc.
-    conversation_history: list[dict]
-    urgency_score: float      # 0-1: high urgency routes to senior agents
-
-def generate_handoff_summary(
-    conversation: list[dict],
-    client,
-    escalation_reason: str,
-) -> str:
-    """Generate a concise summary for the human agent to read in <30 seconds."""
-    history_text = "\n".join([
-        f"{msg['role'].upper()}: {msg['content']}"
-        for msg in conversation[-10:]  # last 10 turns
-    ])
-    response = client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=256,
-        messages=[{
-            "role": "user",
-            "content": f"""Summarize this customer support conversation for a human agent.
-Include: customer's core issue, what was already tried, reason for escalation.
-Be concise (under 100 words).
-
-Escalation reason: {escalation_reason}
-
-Conversation:
-{history_text}"""
-        }]
-    )
-    return response.content[0].text
-```
-
----
-
-## Sentiment Detection
-
-Real-time sentiment detection enables proactive escalation before the customer explicitly complains:
+Survey design avoids selection bias: always survey escalations, sample resolved and random
+conversations deterministically by hash, and report CSAT (share of 4s and 5s) with its sample size.
 
 ```python
-from transformers import pipeline
-import numpy as np
-
-# Fine-tuned sentiment model: customer support domain (not general Twitter sentiment)
-# Trained on support transcripts with human-labeled sentiment -1.0 to +1.0
-sentiment_model = pipeline(
-    "sentiment-analysis",
-    model="./models/support-sentiment-v2",
-    device=0,  # GPU
-)
-
-def compute_conversation_sentiment(
-    messages: list[dict],
-    decay_factor: float = 0.8,  # recent messages weighted more
-) -> float:
-    """Compute exponentially weighted sentiment across conversation."""
-    user_messages = [m for m in messages if m["role"] == "user"]
-    if not user_messages:
-        return 0.0
-
-    sentiments = []
-    for msg in user_messages:
-        result = sentiment_model(msg["content"][:512])[0]
-        score = result["score"] if result["label"] == "POSITIVE" else -result["score"]
-        sentiments.append(score)
-
-    # Exponential decay: most recent message has highest weight
-    weights = [decay_factor ** (len(sentiments) - 1 - i) for i in range(len(sentiments))]
-    weighted_sum = sum(s * w for s, w in zip(sentiments, weights))
-    return weighted_sum / sum(weights)
-
-# Example: first message neutral (0.1), second frustrated (-0.4), third very angry (-0.9)
-# Weighted sentiment: dominant by last message → escalation threshold -0.7 triggered
-```
-
----
-
-## CSAT Measurement Pipeline
-
-Customer Satisfaction (CSAT) measurement for bot interactions requires careful survey design to avoid selection bias:
-
-```python
-import random
+import hashlib
 from enum import Enum
 
 class CSATTrigger(Enum):
-    RESOLUTION = "resolution"   # triggered when bot marks conversation resolved
-    ESCALATION = "escalation"   # triggered when escalating (was bot helpful before escalation?)
-    RANDOM = "random"           # 10% random sample for baseline measurement
+    RESOLUTION = "resolution"
+    ESCALATION = "escalation"
+    RANDOM = "random"              # baseline sample
 
-def should_trigger_csat_survey(
-    conversation_id: str,
-    trigger: CSATTrigger,
-    sampling_rate: float = 0.30,  # survey 30% of resolved conversations
-) -> bool:
-    """Deterministic sampling: same conversation always gets same decision."""
-    if trigger == CSATTrigger.RANDOM:
-        # Hash-based deterministic sampling: no database needed
-        hash_val = int(hashlib.md5(conversation_id.encode()).hexdigest(), 16)
-        return (hash_val % 100) < (sampling_rate * 100)
-    elif trigger == CSATTrigger.ESCALATION:
-        return True  # always survey escalations (high business value)
-    elif trigger == CSATTrigger.RESOLUTION:
-        hash_val = int(hashlib.md5(conversation_id.encode()).hexdigest(), 16)
-        return (hash_val % 100) < (sampling_rate * 100)
-    return False
+def should_survey(conversation_id: str, trigger: CSATTrigger, rate: float = 0.30) -> bool:
+    if trigger is CSATTrigger.ESCALATION:
+        return True                # high business value, always survey
+    bucket = int(hashlib.md5(conversation_id.encode()).hexdigest(), 16) % 100
+    return bucket < rate * 100     # deterministic: same conversation, same decision
 
-def compute_csat_score(responses: list[dict]) -> dict:
-    """CSAT = % of responses scoring 4 or 5 on a 5-point scale."""
-    if not responses:
-        return {"csat": None, "n": 0}
-    satisfied = sum(1 for r in responses if r["score"] >= 4)
-    return {
-        "csat": satisfied / len(responses),
-        "n": len(responses),
-        "score_distribution": {i: sum(1 for r in responses if r["score"] == i) for i in range(1, 6)},
-    }
+def csat(responses: list[dict], min_n: int = 20) -> dict:
+    n = len(responses)
+    if n < min_n:
+        return {"csat": None, "n": n}          # too few to report
+    return {"csat": sum(r["score"] >= 4 for r in responses) / n, "n": n}
 ```
+
+Report CSAT by language with the same `min_n = 20` floor; alert when any language falls more than 10
+points below English.
 
 ---
 
-## Knowledge Base Freshness Pipeline
+## 9. Common Pitfalls & War Stories
 
-The KB freshness pipeline ensures bot responses are based on current product information:
+**The bot invents a policy.** Air Canada's chatbot told a grieving customer he could claim a
+bereavement discount after travel; the tribunal held the airline to it (about C$812). Cursor's support
+agent invented a device-login policy in April 2025 and users cancelled before a correction. Fix: policy
+answers come only from retrieved KB text, use templates for amounts and deadlines, and a verifier
+checks every policy claim against the KB before sending.
 
-```python
-from datetime import datetime, timedelta
-import hashlib
+**Prompt injection through the chat box.** Public examples include a car dealership chatbot that a
+user talked into "agreeing" to sell a vehicle for $1, and a parcel company's bot that was coaxed into
+swearing at a customer and criticizing its own company. Neither moved money, but both went viral within
+days. Fix: tools, not text, make commitments; the model can only propose actions that server-side
+rules approve, and offensive-output classifiers run on every reply.
 
-class KBFreshnessMonitor:
-    def __init__(self, db, vector_db, stale_threshold_days: int = 7):
-        self.db = db
-        self.vector_db = vector_db
-        self.stale_threshold = timedelta(days=stale_threshold_days)
-
-    def check_freshness(self) -> dict:
-        """Return articles that are stale or have changed since last indexing."""
-        articles = self.db.query("SELECT id, content_hash, last_modified, last_indexed FROM kb_articles")
-        stale, changed = [], []
-        now = datetime.utcnow()
-        for article in articles:
-            if now - article["last_indexed"] > self.stale_threshold:
-                stale.append(article["id"])
-            current_hash = self._compute_hash(article["id"])
-            if current_hash != article["content_hash"]:
-                changed.append(article["id"])
-        return {"stale_count": len(stale), "changed_count": len(changed),
-                "stale_ids": stale, "changed_ids": changed}
-
-    def reindex_changed_articles(self, article_ids: list[str]) -> int:
-        reindexed = 0
-        for article_id in article_ids:
-            content = self.db.get_article_content(article_id)
-            embedding = embed(content)
-            self.vector_db.upsert(article_id, embedding, metadata={
-                "article_id": article_id,
-                "indexed_at": datetime.utcnow().isoformat(),
-            })
-            self.db.update("kb_articles", article_id, {
-                "content_hash": hashlib.md5(content.encode()).hexdigest(),
-                "last_indexed": datetime.utcnow(),
-            })
-            reindexed += 1
-        return reindexed
-```
-
----
-
-## Multi-Language Support Architecture
-
-```mermaid
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    MSG(["User message<br/>40+ supported languages"])
-    LD["Language Detection<br/>fastText langdetect, 3ms<br/>176 languages"]
-    CLARIFY["Ask user to clarify<br/>language preference"]
-    ROUTE["Route to language-specific<br/>KB index<br/>(EN, ES, FR, DE, JA, ZH, etc.)"]
-    RETRIEVE["Retrieve KB articles<br/>in detected language<br/>translated by localization team"]
-    GEN["Generate response<br/>in detected language<br/>system prompt: respond in lang_code"]
-    QC{"Quality check:<br/>response language matches<br/>CJK/Latin regex check"}
-
-    MSG --> LD
-    LD -->|"confidence < 0.8"| CLARIFY
-    LD -->|"confidence >= 0.8"| ROUTE
-    ROUTE --> RETRIEVE --> GEN --> QC
-
-    class MSG io
-    class LD,QC mathOp
-    class CLARIFY lossN
-    class ROUTE,RETRIEVE,GEN base
-```
-
-**Language-specific CSAT monitoring:**
-
-```python
-def monitor_csat_by_language(csat_responses: list[dict]) -> dict:
-    """Group CSAT scores by language to detect language-specific quality gaps."""
-    by_language: dict[str, list[float]] = {}
-    for response in csat_responses:
-        lang = response.get("detected_language", "unknown")
-        by_language.setdefault(lang, []).append(response["score"])
-    return {
-        lang: {
-            "csat": sum(1 for s in scores if s >= 4) / len(scores),
-            "n": len(scores),
-            "avg_score": sum(scores) / len(scores),
-        }
-        for lang, scores in by_language.items()
-        if len(scores) >= 20  # minimum sample size for reliable CSAT
-    }
-# Alert: if CSAT for any language drops >10% below English CSAT, flag for KB review
-```
-
----
-
-## PII Redaction Pipeline
-
-Customer support transcripts contain dense PII — names, card numbers, phone numbers, SSNs — that must never reach raw log storage. Presidio (Microsoft) provides entity detection with custom recognisers tuned for support domains.
-
-```python
-from presidio_analyzer import AnalyzerEngine, RecognizerResult
-from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
-from dataclasses import dataclass
-
-ENTITIES_TO_REDACT = [
-    "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-    "CREDIT_CARD", "US_SSN", "IP_ADDRESS",
-    "LOCATION", "DATE_TIME",  # DATE_TIME only flagged near other PII (DOB context)
-]
-
-analyzer  = AnalyzerEngine()
-anonymizer = AnonymizerEngine()
-
-class PIIRedactor:
-    def redact_before_logging(self, transcript: str) -> str:
-        """
-        Input : "My name is John Smith and my card ending in 4242 was charged."
-        Output: "My name is [PERSON] and my card ending in [CREDIT_CARD] was charged."
-        """
-        results = analyzer.analyze(text=transcript, entities=ENTITIES_TO_REDACT, language="en")
-        ops     = {e: OperatorConfig("replace", {"new_value": f"[{e}]"}) for e in ENTITIES_TO_REDACT}
-        return anonymizer.anonymize(text=transcript, analyzer_results=results, operators=ops).text
-
-class TranscriptStore:   # GDPR right to erasure
-    def __init__(self, db, object_store, audit_log):
-        self.db, self.object_store, self.audit_log = db, object_store, audit_log
-
-    def delete_user_data(self, user_id: str, reason: str = "gdpr_erasure") -> dict:
-        """Soft-delete content (keep billing metadata); hard-delete after 30 days."""
-        sessions = self.db.query("SELECT session_id FROM sessions WHERE customer_id = %s", (user_id,))
-        for row in sessions:
-            self.db.execute("UPDATE transcripts SET content = NULL, pii_erased_at = NOW() "
-                            "WHERE session_id = %s", (row["session_id"],))
-            self.object_store.delete(f"transcripts/{row['session_id']}.jsonl")
-        affected = len(sessions)
-        hard_delete_date = schedule_hard_delete(user_id, delay_days=30)
-        self.audit_log.write({"event": "gdpr_erasure", "user_id": user_id, "reason": reason,
-                              "sessions_erased": affected, "hard_delete_date": hard_delete_date,
-                              "timestamp": utcnow_iso()})
-        return {"sessions_erased": affected, "hard_delete_date": hard_delete_date}
-```
-
-**Concrete numbers:** Presidio processes a 500-character transcript in 12ms on a 2-vCPU pod. This adds 12ms per turn to the logging path (async, not in the critical response path). At 50K concurrent sessions the logging workers run at ~6K events/second; a pool of 4 workers handles this comfortably with p99 logging latency under 80ms.
-
----
-
-## Failure Scenarios and Recovery
+Earlier failures from this system:
 
 **Failure 1 — Intent Model Confidence Collapse During Product Launch Surge**
 
@@ -1080,14 +989,103 @@ The handoff context was constructed from the last 5 conversation turns. A custom
 
 ---
 
-## Additional Interview Questions
+## 10. Capacity Planning
 
-**Q: How do you design escalation routing to ensure high-priority customers reach senior agents faster?** Implement priority queue routing: assign each conversation a priority score at escalation time based on: customer lifetime value (CLV) tier, account age, churn risk score, escalation urgency (self-harm/legal/fraud routes immediately to senior agents), and conversation sentiment. The agent assignment system pops from the highest-priority queue first. Senior agents are pooled separately and receive only priority-flagged conversations. Track "time to first human response" segmented by priority tier as a key SLA metric.
+```
+1M conversations/day, 4 bot turns average, 2,000 input + 200 output tokens per turn.
+Rates (November 2026 list): gpt-6.2-sol $2/1M input, $10/1M output;
+gpt-6-luna $0.10/1M input, $0.50/1M output. Re-check before budgeting.
 
-**Q: What is the difference between resolution rate and containment rate in a customer support bot, and which matters more?** Resolution rate: the percentage of conversations where the customer's issue is resolved without escalation. Containment rate: the percentage of conversations that never reach a human agent (includes conversations where the bot said "I can't help" and the customer left without escalating). Containment rate is always higher than resolution rate. Resolution rate matters more for business impact — a bot that contains 80% of conversations but resolves only 40% (the other 40% leave unsatisfied) is worse than a bot that contains 60% but resolves 58% of total conversations. Track both and measure CSAT separately for contained vs escalated conversations.
+Single-model baseline (all gpt-6.2-sol):
+  4M turns x 2,200 tokens = 8.8B tokens/day (8B input, 0.8B output)
+  Input:  8,000 MTok x $2/M  = $16,000/day
+  Output:   800 MTok x $10/M =  $8,000/day
+  LLM total: $24,000/day
 
-**Q: How do you handle cases where the bot gives wrong information (hallucination) that causes customer harm, such as incorrect refund policy information?** Mitigation architecture: (1) all factual claims must come from the RAG KB, not the model's training data — use strict grounding with citation; (2) output validation against the KB: if the generated response contains a policy statement (refund, warranty, cancellation), a secondary check queries the KB for the policy and verifies the response matches; (3) response templating for critical policies (refund amounts, warranty terms) — use string interpolation from the KB into a template rather than free-form generation; (4) post-incident: implement "dead reckoning" — when a customer calls to dispute a policy the bot stated, log the discrepancy and audit the KB for outdated entries.
+Route by intent complexity:
+  Simple intents (50% of turns) to gpt-6-luna:
+    input 4,000 MTok x $0.10/M = $400; output 400 MTok x $0.50/M = $200 -> $600/day
+  Complex intents (50% of turns) to gpt-6.2-sol:
+    input 4,000 MTok x $2/M = $8,000; output 400 MTok x $10/M = $4,000 -> $12,000/day
+  Optimized LLM: $12,600/day (48% below the single-model baseline)
+  With a 20x price gap between tiers, routing is the biggest lever again;
+  prompt caching on the shared system prompt and KB preamble comes second.
 
-**Q: How do you measure and improve the bot's performance on rare intents (long-tail queries) that don't appear frequently enough for reliable CSAT measurement?** For rare intents (N < 20 responses per week), CSAT is statistically unreliable. Instead: (1) use human evaluation — route all rare intent conversations to a weekly expert review pool; reviewers label resolution quality (0-100) using a rubric; (2) track resolution attempt count — if rare intent conversations require >2 attempts before resolution or escalation, the bot is struggling; (3) use automated LLM-as-judge on 100% of rare intent conversations (feasible since volume is low) with a rubric specific to each intent type; (4) aggregate all rare intents into a "long-tail" bucket and set an overall long-tail resolution rate target (e.g., 65% vs 80% for common intents).
+Infrastructure: Qdrant + Elasticsearch $500, Redis $200, app servers $300 = $1,000/day
+Total: ~$13,600/day = ~$408K/month
 
-**Q: How would you architect a customer support bot to handle a sudden 10x traffic spike (e.g., a product recall or major outage)?** Design for elasticity at every layer: (1) intent classifier and embedding models on horizontally scalable container replicas (Kubernetes HPA, scale on queue depth metric, not CPU); (2) LLM API calls use a request queue with configurable throughput limits per tier — during spikes, free-tier customers see longer waits rather than errors; (3) pre-warm a static "outage mode" response template that bypasses RAG and LLM generation (serves a pre-written status page response in <50ms, no GPU needed); (4) circuit breaker on KB retrieval: if retrieval latency exceeds 2s, fall back to a cached "top 20 most common issues" response without live retrieval; (5) activate proactive communication (push email/SMS to affected users) to reduce inbound volume by 30-40% during known outages.
+Capacity:
+  Peak 3x average = ~140 turns/s; at ~4 s per bot turn that is ~560 turns in flight
+  Human queue: 40% escalated = 400K conversations x 8 min = 53,000 agent-hours/day,
+  ~6,700 agents on 8-hour shifts; a product-launch surge (Section 9) doubles it
+
+ROI:
+  Without the bot: 1M conversations x 8 min x $0.15/min = $1.2M/day
+  With the bot (60% resolved): $13.6K AI + 400K x 8 min x $0.15 = $493.6K/day
+  Net savings ~$706K/day (~$258M/year); AI spend is under 3% of the labour it
+  displaces, which is why resolution rate, not token price, moves the P&L
+```
+
+---
+
+## 11. Interview Discussion Points
+
+**Q: What is the most important product decision in a support bot's escalation design?**
+**Short:** The escalation threshold: use sentiment as a primary signal alongside confidence, because a confident wrong answer to a frustrated customer is worse than an early hand-off.
+
+Too low and the bot frustrates customers it cannot help; too high and expensive agents handle issues the bot could solve. Use sentiment as a primary signal, not just intent confidence, plus a resolution-attempt counter. A confident but wrong answer to a frustrated customer is worse than an early escalation.
+
+**Q: Where do most bot-to-human hand-offs fail?**
+**Short:** The agent asks the customer to repeat everything; a structured hand-off with summary, extracted entities and escalation reason removes that.
+
+The worst experience is an escalation where the human asks the customer to repeat everything. Pass a summary, customer data, the escalation reason and structured entities (`order_id`, `product_sku`, `requested_resolution`, resolutions already offered) extracted from the whole conversation, not just the last few turns (Section 9).
+
+**Q: Is resolution rate the metric to optimize?**
+**Short:** Not alone: track resolution rate and CSAT together, since a bot that resolves 80% but leaves customers unhappy is worse than one resolving 60% with high satisfaction.
+
+A "hard no" (the bot confidently declining to help) can count as resolved without satisfying anyone. Track resolution and CSAT together, segment CSAT by contained versus escalated conversations, and watch repeat contacts within 7 days as the honest check on "resolved".
+
+**Q: What is the main lever when resolution rate is low for an intent?**
+**Short:** Usually the knowledge base, not the model: missing or stale articles cause most failures, so KB managers updating content from failed conversations are often higher ROI.
+
+When an intent resolves poorly, inspect the failed conversations: most of the time the KB lacks the answer or has an outdated one. Dedicated KB owners who update articles from failed conversations, plus the freshness pipeline in 4.10, usually beat a model upgrade on cost and impact.
+
+**Q: Why is multilingual support harder than it looks?**
+**Short:** Language detection fails on short messages and escalation cues differ by language and culture, so you need per-language test sets and per-language CSAT.
+
+Short messages defeat language detection, cultural context changes how frustration is expressed, and KB coverage differs by language. Build language-specific test sets, measure CSAT separately per language, and ask the user when detection confidence is below 0.8.
+
+**Q: How do you route escalations so high-priority customers reach senior agents faster?**
+**Short:** Score each escalation by value tier, churn risk, urgency and sentiment, pop the highest-priority queue first, and track time to first human response per tier.
+
+Assign a priority at escalation time from customer lifetime value tier, account age, churn risk, urgency (self-harm, legal or fraud routes immediately to senior agents) and sentiment. Senior agents are pooled separately and receive only priority-flagged conversations. Track time to first human response by priority tier as an SLA.
+
+**Q: What is the difference between resolution rate and containment rate?**
+**Short:** Containment counts conversations that never reach a human, including customers who give up; resolution counts issues actually solved, which is what matters.
+
+Containment is always higher than resolution, because it includes conversations where the bot said "I can't help" and the customer left. A bot that contains 80% but resolves 40% is worse than one that contains 60% and resolves 58%. Track both, and measure CSAT separately for contained and escalated conversations.
+
+**Q: How do you stop the bot from stating a wrong policy that harms a customer?**
+**Short:** Ground every policy claim in retrieved KB text, template amounts and deadlines, verify policy statements against the KB before sending, and audit disputes.
+
+(1) Factual claims come only from the KB via retrieval with citations. (2) A secondary check finds policy statements (refund, warranty, cancellation) in the draft and verifies them against the KB. (3) Critical values (amounts, windows, fees) are interpolated into templates from the KB instead of generated. (4) Every customer dispute about a stated policy is logged and the KB audited. Air Canada shows the stakes: the company is liable for what the bot says.
+
+**Q: How do you measure performance on rare intents that lack enough CSAT responses?**
+**Short:** Use weekly expert review and an intent-specific LLM-as-judge on all rare-intent conversations, track attempts per resolution, and set a pooled long-tail target.
+
+Below ~20 responses a week, CSAT is noise. Route rare-intent conversations to weekly expert review with a rubric, run an LLM judge on 100% of them (cheap at low volume), track resolution attempts (more than 2 signals struggle), and set a pooled long-tail resolution target, for example 65% against 80% for common intents.
+
+**Q: How would you handle a sudden 10x traffic spike such as a recall or outage?**
+**Short:** Autoscale on queue depth, queue lower tiers, serve a pre-written outage response without the LLM, fall back to cached top issues, and notify affected users proactively.
+
+(1) Scale classifiers and embedding services on queue depth, not CPU. (2) Rate-limit LLM calls per customer tier so lower tiers wait rather than fail. (3) Serve a pre-written outage response in < 50ms, bypassing RAG and the LLM, for the known issue. (4) If retrieval latency exceeds 2 s, fall back to a cached "top 20 issues" answer. (5) Push email or SMS to affected users, which typically cuts inbound volume 30-40%.
+
+**Q: Who is liable when a support bot gives a customer wrong information?**
+**Short:** The company: tribunals treat the bot as part of the company's own website, so its statements bind the business, which is why policy answers must be grounded.
+
+In Moffatt v. Air Canada (2024) the airline argued its chatbot was responsible for its own statements; the tribunal rejected that and ordered the airline to honour what the bot said. Design for it: ground and template policy answers, keep an audit trail of exactly what the bot told each customer, and give agents authority to honour reasonable bot statements rather than fight them.
+
+**Q: How do you make refunds and cancellations safe to retry?**
+**Short:** Require explicit confirmation server-side, give each action an idempotency key from session, order and amount, and check that key before calling the payment provider.
+
+The model only proposes the action; a server-side gate requires that the previous bot turn contained the confirmation template and the customer's reply matched an explicit confirmation. The tool executor derives an idempotency key from `(session_id, order_id, amount)`, records it before calling the payment provider, and returns the stored result on any retry, so a worker restart or a duplicated message cannot refund twice.

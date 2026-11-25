@@ -60,8 +60,8 @@ LLM token usage per email:
   Generated email body:       ~120 tokens (target 80-120 words)
   Total per email:            ~720 tokens
 Daily token generation:       1.2M emails x 120 output tokens = 144M output tokens/day
-At gpt-4o-mini pricing ($0.60/M output tokens): $86/day output cost — platform-wide
-Adding input (1.2M x 600 = 720M tokens/day at $0.15/M = $108/day): ~$194/day total LLM cost
+At GPT-6 Luna pricing ($0.50/M output tokens): $72/day output cost — platform-wide
+Adding input (1.2M x 600 = 720M tokens/day at $0.10/M = $72/day): ~$144/day total LLM cost
 (all 500 customers blended — matches the Section 10 capacity plan; LLM cost is negligible
  next to email infrastructure and CRM API budgets)
 ```
@@ -213,12 +213,9 @@ runner.advance("prospect_abc")  # works until process dies
 ```
 
 ```python
-# FIX: durable state in Redis (hot, fast recovery) + Postgres (source of truth)
-
+# FIX: durable state in Postgres (source of truth) + Redis (read cache, fast recovery)
 from __future__ import annotations
-
 import json
-import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -228,22 +225,18 @@ import psycopg2
 
 
 class SequenceStatus(str, Enum):
-    ACTIVE = "ACTIVE"
-    PAUSED = "PAUSED"
-    COMPLETED = "COMPLETED"
-    OPTED_OUT = "OPTED_OUT"
-    MEETING_BOOKED = "MEETING_BOOKED"
-    HARD_NO = "HARD_NO"
+    ACTIVE = "ACTIVE"; PAUSED = "PAUSED"; COMPLETED = "COMPLETED"
+    OPTED_OUT = "OPTED_OUT"; MEETING_BOOKED = "MEETING_BOOKED"; HARD_NO = "HARD_NO"
 
 
 class SequenceEvent(str, Enum):
-    TOUCHPOINT_SENT = "TOUCHPOINT_SENT"
-    REPLY_RECEIVED = "REPLY_RECEIVED"
-    MEETING_BOOKED = "MEETING_BOOKED"
-    OPT_OUT = "OPT_OUT"
-    HARD_NO = "HARD_NO"
-    SEQUENCE_EXHAUSTED = "SEQUENCE_EXHAUSTED"
-    HUMAN_TAKEOVER = "HUMAN_TAKEOVER"
+    TOUCHPOINT_SENT = "TOUCHPOINT_SENT"; REPLY_RECEIVED = "REPLY_RECEIVED"
+    MEETING_BOOKED = "MEETING_BOOKED"; OPT_OUT = "OPT_OUT"; HARD_NO = "HARD_NO"
+    SEQUENCE_EXHAUSTED = "SEQUENCE_EXHAUSTED"; HUMAN_TAKEOVER = "HUMAN_TAKEOVER"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -251,165 +244,100 @@ class ProspectSequence:
     prospect_id: str
     account_id: str
     sequence_template_id: str
-    current_step: int = 0           # 0-indexed; max = len(touchpoints) - 1
+    current_step: int = 0
     touchpoints_sent: int = 0
     replies_received: int = 0
-    last_contact_datetime: Optional[str] = None  # ISO8601 UTC
-    next_scheduled_datetime: Optional[str] = None  # ISO8601 UTC
+    last_contact_datetime: Optional[str] = None
+    next_scheduled_datetime: Optional[str] = None   # stored once; NEVER recomputed on resume
     status: SequenceStatus = SequenceStatus.ACTIVE
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=_now)
 
 
-# State transition table: (current_status, event) -> next_status
+_S, _E = SequenceStatus, SequenceEvent
 _TRANSITIONS: dict[tuple[SequenceStatus, SequenceEvent], SequenceStatus] = {
-    (SequenceStatus.ACTIVE,  SequenceEvent.TOUCHPOINT_SENT):   SequenceStatus.ACTIVE,
-    (SequenceStatus.ACTIVE,  SequenceEvent.REPLY_RECEIVED):    SequenceStatus.ACTIVE,
-    (SequenceStatus.ACTIVE,  SequenceEvent.MEETING_BOOKED):    SequenceStatus.MEETING_BOOKED,
-    (SequenceStatus.ACTIVE,  SequenceEvent.OPT_OUT):           SequenceStatus.OPTED_OUT,
-    (SequenceStatus.ACTIVE,  SequenceEvent.HARD_NO):           SequenceStatus.HARD_NO,
-    (SequenceStatus.ACTIVE,  SequenceEvent.SEQUENCE_EXHAUSTED):SequenceStatus.COMPLETED,
-    (SequenceStatus.ACTIVE,  SequenceEvent.HUMAN_TAKEOVER):    SequenceStatus.PAUSED,
-    (SequenceStatus.PAUSED,  SequenceEvent.TOUCHPOINT_SENT):   SequenceStatus.ACTIVE,
+    (_S.ACTIVE, _E.TOUCHPOINT_SENT): _S.ACTIVE,      (_S.ACTIVE, _E.REPLY_RECEIVED): _S.ACTIVE,
+    (_S.ACTIVE, _E.MEETING_BOOKED): _S.MEETING_BOOKED, (_S.ACTIVE, _E.OPT_OUT): _S.OPTED_OUT,
+    (_S.ACTIVE, _E.HARD_NO): _S.HARD_NO,             (_S.ACTIVE, _E.SEQUENCE_EXHAUSTED): _S.COMPLETED,
+    (_S.ACTIVE, _E.HUMAN_TAKEOVER): _S.PAUSED,       (_S.PAUSED, _E.TOUCHPOINT_SENT): _S.ACTIVE,
 }
 
 
 class SequenceStateMachine:
-    """
-    Durable sequence state machine.
-    Write path: Redis (TTL 90 days) + Postgres (source of truth, permanent).
-    Read path: Redis first (2ms); fall back to Postgres on Redis miss (50ms).
-    Atomic transitions: Postgres write commits before Redis write.
-    If Redis write fails, the sequence is still correct — Redis is a read cache.
-    """
+    """Postgres commit first (authoritative), then best-effort Redis write.
+    Reads: Redis hit ~2 ms; miss falls back to Postgres ~50 ms and re-warms the cache."""
 
-    REDIS_KEY_PREFIX = "seq:"
-    REDIS_TTL_SECONDS = 90 * 24 * 3600  # 90 days; comfortably exceeds the 42-day max sequence
+    KEY = "seq:{}"
+    TTL = 90 * 24 * 3600            # 90 days; exceeds the 42-day maximum sequence
 
-    def __init__(self, redis_client: redis.Redis, pg_conn: psycopg2.extensions.connection) -> None:
-        self._redis = redis_client
-        self._pg = pg_conn
+    def __init__(self, r: redis.Redis, pg: psycopg2.extensions.connection) -> None:
+        self._redis, self._pg = r, pg
 
     def load(self, prospect_id: str) -> Optional[ProspectSequence]:
-        """Load sequence state: Redis hit = 2ms, Redis miss -> Postgres = 50ms."""
-        key = f"{self.REDIS_KEY_PREFIX}{prospect_id}"
-        raw = self._redis.get(key)
+        raw = self._redis.get(self.KEY.format(prospect_id))
         if raw:
-            data = json.loads(raw)
-            return ProspectSequence(**data)
-
-        # Redis miss — load from Postgres (recovery path after restart or eviction)
-        with self._pg.cursor() as cur:
-            cur.execute(
-                "SELECT state_json FROM prospect_sequences WHERE prospect_id = %s",
-                (prospect_id,)
-            )
+            return ProspectSequence(**json.loads(raw))
+        with self._pg.cursor() as cur:      # recovery path after restart or eviction
+            cur.execute("SELECT state_json FROM prospect_sequences WHERE prospect_id = %s",
+                        (prospect_id,))
             row = cur.fetchone()
-            if row is None:
-                return None
-            seq = ProspectSequence(**json.loads(row[0]))
-            # Warm Redis cache
-            self._redis.setex(key, self.REDIS_TTL_SECONDS, json.dumps(asdict(seq)))
-            return seq
-
-    def advance(self, prospect_id: str, event: SequenceEvent) -> ProspectSequence:
-        """
-        Transition sequence state.
-        Postgres write is authoritative; Redis write is best-effort cache update.
-        """
-        seq = self.load(prospect_id)
-        if seq is None:
-            raise ValueError(f"Sequence not found for prospect {prospect_id}")
-
-        next_status = _TRANSITIONS.get((seq.status, event))
-        if next_status is None:
-            raise ValueError(
-                f"Invalid transition: {seq.status} + {event}"
-            )
-
-        seq.status = next_status
-        seq.updated_at = datetime.now(timezone.utc).isoformat()
-
-        if event == SequenceEvent.TOUCHPOINT_SENT:
-            seq.touchpoints_sent += 1
-            seq.current_step += 1
-            seq.last_contact_datetime = datetime.now(timezone.utc).isoformat()
-            # next_scheduled_datetime set by schedule_next_touchpoint, not recalculated on resume
-        elif event == SequenceEvent.REPLY_RECEIVED:
-            seq.replies_received += 1
-
-        # 1. Persist to Postgres first (source of truth)
-        self._persist_to_postgres(seq)
-
-        # 2. Update Redis cache (best-effort; failure here is safe — Postgres is correct)
-        try:
-            key = f"{self.REDIS_KEY_PREFIX}{prospect_id}"
-            self._redis.setex(key, self.REDIS_TTL_SECONDS, json.dumps(asdict(seq)))
-        except redis.RedisError:
-            # Redis failure is non-fatal; next load will fall back to Postgres
-            pass
-
+        if row is None:
+            return None
+        seq = ProspectSequence(**json.loads(row[0]))
+        self._cache(seq)
         return seq
 
-    def schedule_next_touchpoint(self, seq: ProspectSequence, gap_days: int = 4) -> str:
-        """
-        Calculate next contact time respecting:
-        - Business hours only: 9am-5pm in recipient's timezone (default US/Eastern)
-        - Minimum gap: 3 days, maximum gap: 7 days
-        - No weekends (Saturday, Sunday)
-        - Stored as ISO8601 UTC string — never recalculated on resume to avoid drift
-        """
-        base = datetime.now(timezone.utc) + timedelta(days=max(3, min(gap_days, 7)))
-        # Advance to next business day at 10:00 AM local time (simplified to UTC-5)
-        # Production: use pytz with prospect's inferred timezone from domain/IP geolocation
-        while base.weekday() >= 5:  # 5=Saturday, 6=Sunday
-            base += timedelta(days=1)
-        scheduled = base.replace(hour=15, minute=0, second=0, microsecond=0)  # 10am EST = 15:00 UTC
-        iso = scheduled.isoformat()
+    def advance(self, prospect_id: str, event: SequenceEvent) -> ProspectSequence:
+        seq = self.load(prospect_id)
+        if seq is None:
+            raise ValueError(f"no sequence for {prospect_id}")
+        nxt = _TRANSITIONS.get((seq.status, event))
+        if nxt is None:
+            raise ValueError(f"invalid transition {seq.status} + {event}")
+        seq.status, seq.updated_at = nxt, _now()
+        if event is _E.TOUCHPOINT_SENT:
+            seq.touchpoints_sent += 1; seq.current_step += 1; seq.last_contact_datetime = _now()
+        elif event is _E.REPLY_RECEIVED:
+            seq.replies_received += 1
+        self._persist(seq)                  # 1. source of truth
+        self._cache(seq)                    # 2. best effort; Postgres is already correct
+        return seq
 
-        seq.next_scheduled_datetime = iso
-        self._persist_to_postgres(seq)
-        try:
-            key = f"{self.REDIS_KEY_PREFIX}{seq.prospect_id}"
-            self._redis.setex(key, self.REDIS_TTL_SECONDS, json.dumps(asdict(seq)))
-        except redis.RedisError:
-            pass
-        return iso
+    def schedule_next(self, seq: ProspectSequence, gap_days: int = 4) -> str:
+        """3-7 day gap, weekdays only, 10:00 US/Eastern (15:00 UTC); production uses the
+        prospect's inferred timezone. Stored once so a resume never drifts the schedule."""
+        at = datetime.now(timezone.utc) + timedelta(days=max(3, min(gap_days, 7)))
+        while at.weekday() >= 5:
+            at += timedelta(days=1)
+        seq.next_scheduled_datetime = at.replace(hour=15, minute=0, second=0, microsecond=0).isoformat()
+        self._persist(seq); self._cache(seq)
+        return seq.next_scheduled_datetime
 
     def pause_all_for_account(self, account_id: str) -> int:
-        """
-        Bulk pause all ACTIVE sequences for an account.
-        Used when a human rep takes over or compliance review is triggered.
-        Returns count of sequences paused.
-        """
+        """Bulk-pause every ACTIVE sequence for an account (rep takeover, TCPA complaint)."""
         with self._pg.cursor() as cur:
-            cur.execute(
-                """UPDATE prospect_sequences
-                   SET status = 'PAUSED', updated_at = NOW()
-                   WHERE account_id = %s AND status = 'ACTIVE'
-                   RETURNING prospect_id""",
-                (account_id,)
-            )
-            paused_ids = [row[0] for row in cur.fetchall()]
-            self._pg.commit()
+            cur.execute("""UPDATE prospect_sequences SET status = 'PAUSED', updated_at = NOW()
+                           WHERE account_id = %s AND status = 'ACTIVE' RETURNING prospect_id""",
+                        (account_id,))
+            paused = [row[0] for row in cur.fetchall()]
+        self._pg.commit()
+        if paused:
+            self._redis.delete(*(self.KEY.format(p) for p in paused))   # drop stale cache
+        return len(paused)
 
-        # Invalidate Redis cache for all paused sequences (batch delete)
-        if paused_ids:
-            keys = [f"{self.REDIS_KEY_PREFIX}{pid}" for pid in paused_ids]
-            self._redis.delete(*keys)
-
-        return len(paused_ids)
-
-    def _persist_to_postgres(self, seq: ProspectSequence) -> None:
+    def _persist(self, seq: ProspectSequence) -> None:
         with self._pg.cursor() as cur:
             cur.execute(
                 """INSERT INTO prospect_sequences (prospect_id, account_id, state_json, updated_at)
-                   VALUES (%s, %s, %s, NOW())
-                   ON CONFLICT (prospect_id) DO UPDATE
+                   VALUES (%s, %s, %s, NOW()) ON CONFLICT (prospect_id) DO UPDATE
                    SET state_json = EXCLUDED.state_json, updated_at = EXCLUDED.updated_at""",
-                (seq.prospect_id, seq.account_id, json.dumps(asdict(seq)))
-            )
-            self._pg.commit()
+                (seq.prospect_id, seq.account_id, json.dumps(asdict(seq))))
+        self._pg.commit()
+
+    def _cache(self, seq: ProspectSequence) -> None:
+        try:
+            self._redis.setex(self.KEY.format(seq.prospect_id), self.TTL, json.dumps(asdict(seq)))
+        except redis.RedisError:
+            pass                            # next load falls back to Postgres
 ```
 
 Concrete numbers: Redis hit takes 2ms; Postgres fallback takes 50ms. Redis key TTL is 90 days (maximum sequence length). On a process restart with 5M active sequences, recovery is passive — sequences are reloaded from Postgres on first access, not eagerly. `next_scheduled_datetime` is always stored in durable state; it is never recalculated on resume. This prevents the temporal drift failure described in Section 9.
@@ -578,153 +506,80 @@ Prospects ignore generic mail-merge emails. The personalization engine generates
 
 ```python
 from __future__ import annotations
-
+import asyncio
+import json
 from dataclasses import dataclass, field
-from typing import Optional
-import httpx
+
+INDUSTRY_PAINS: dict[str, list[str]] = {
+    "SaaS":       ["churn reduction", "trial-to-paid conversion", "expansion revenue"],
+    "eCommerce":  ["cart abandonment", "customer LTV", "returns reduction"],
+    "FinTech":    ["compliance overhead", "fraud detection latency", "KYC cost"],
+    "HealthTech": ["HIPAA compliance cost", "clinician time wasted", "EHR integration"],
+}
 
 
 @dataclass
 class ProspectContext:
-    prospect_id: str
     full_name: str
     title: str
     company_name: str
-    company_size: str           # "11-50", "51-200", "201-1000", "1001-5000", "5000+"
-    company_recent_news: list[str]   # top 3 news items (title + 1-sentence summary)
-    prospect_linkedin_summary: str   # current role, tenure, recent posts summary
-    company_pain_points: list[str]   # inferred from industry vertical + company size
-    talking_points: list[str]        # specific to this prospect based on role + news
-    past_interactions: list[str]     # prior CRM touchpoints from same vendor
+    company_size: str               # "11-50", "51-200", ...
+    company_recent_news: list[str]  # top 3, refreshed at every touchpoint
+    company_pain_points: list[str]  # inferred from vertical + size
+    talking_points: list[str]
+    past_interactions: list[str]    # prior CRM touchpoints
 
 
 @dataclass
 class Email:
     subject: str
     body: str
-    subject_variants: list[str] = field(default_factory=list)  # A/B test candidates
-    word_count: int = 0
+    subject_variants: list[str] = field(default_factory=list)   # A/B candidates
 
 
 class ProspectResearcher:
-    """
-    Enriches a prospect with data from Clay API, LinkedIn, and CRM.
-    Research is done once at sequence start; news is refreshed at each touchpoint.
-    """
+    """Clay waterfall + CRM history + news in parallel: latency = slowest call, 0.8-1.5 s."""
 
-    def __init__(self, clay_api_key: str, crm_client) -> None:
-        self._clay_api_key = clay_api_key
-        self._crm = crm_client
+    def __init__(self, clay, crm, news) -> None:
+        self._clay, self._crm, self._news = clay, crm, news
 
-    async def research(self, prospect_id: str, email: str, company_domain: str) -> ProspectContext:
-        """
-        Parallel enrichment from 3 sources (Clay waterfall, CRM history, news).
-        Total latency: max of 3 parallel calls, typically 800ms-1.5s.
-        """
-        import asyncio
-
-        clay_data, crm_history, news = await asyncio.gather(
-            self._call_clay_api(email, company_domain),
-            self._fetch_crm_history(email),
-            self._fetch_company_news(company_domain),
-            return_exceptions=True,
-        )
-
-        # Graceful degradation: if any source fails, continue with partial context
-        company_info = clay_data if not isinstance(clay_data, Exception) else {}
-        interactions = crm_history if not isinstance(crm_history, Exception) else []
-        recent_news = news if not isinstance(news, Exception) else []
-
+    async def research(self, email: str, domain: str) -> ProspectContext:
+        clay, history, news = await asyncio.gather(
+            self._clay.enrich(email, domain), self._crm.history(email),
+            self._news.recent(domain), return_exceptions=True)
+        info = clay if isinstance(clay, dict) else {}           # degrade, never fail the send
+        news = news if isinstance(news, list) else []
+        points = [f"Saw {info.get('company_name', 'your company')} announced: {news[0]}"] if news else []
         return ProspectContext(
-            prospect_id=prospect_id,
-            full_name=company_info.get("full_name", ""),
-            title=company_info.get("title", ""),
-            company_name=company_info.get("company_name", ""),
-            company_size=company_info.get("employee_count_range", ""),
-            company_recent_news=recent_news[:3],
-            prospect_linkedin_summary=company_info.get("linkedin_summary", ""),
-            company_pain_points=self._infer_pain_points(
-                company_info.get("industry", ""),
-                company_info.get("employee_count_range", ""),
-            ),
-            talking_points=self._derive_talking_points(company_info, recent_news),
-            past_interactions=interactions,
-        )
-
-    def _infer_pain_points(self, industry: str, size: str) -> list[str]:
-        # Rule-based + small model classification of likely pain points by vertical
-        INDUSTRY_PAINS: dict[str, list[str]] = {
-            "SaaS":         ["churn reduction", "trial-to-paid conversion", "expansion revenue"],
-            "eCommerce":    ["cart abandonment", "customer LTV", "returns reduction"],
-            "FinTech":      ["compliance overhead", "fraud detection latency", "KYC cost"],
-            "HealthTech":   ["HIPAA compliance cost", "clinician time wasted", "EHR integration"],
-        }
-        return INDUSTRY_PAINS.get(industry, ["operational efficiency", "cost reduction"])
-
-    def _derive_talking_points(self, company_info: dict, news: list[str]) -> list[str]:
-        talking_points = []
-        if news:
-            talking_points.append(f"Saw {company_info.get('company_name', 'your company')} announced: {news[0]}")
-        if company_info.get("recent_funding"):
-            talking_points.append(f"Congratulations on the recent {company_info['recent_funding']} round")
-        return talking_points
-
-    async def _call_clay_api(self, email: str, domain: str) -> dict: raise NotImplementedError
-    async def _fetch_crm_history(self, email: str) -> list[str]: raise NotImplementedError
-    async def _fetch_company_news(self, domain: str) -> list[str]: raise NotImplementedError
+            info.get("full_name", ""), info.get("title", ""), info.get("company_name", ""),
+            info.get("employee_count_range", ""), news[:3],
+            INDUSTRY_PAINS.get(info.get("industry", ""), ["operational efficiency", "cost reduction"]),
+            points, history if isinstance(history, list) else [])
 
 
 class EmailPersonalizer:
-    """
-    Generates fully bespoke cold outreach emails using LLM + ProspectContext.
-    Not mail-merge: the LLM writes the entire email body from scratch.
-    Target: 80-120 words (cold outreach optimal length per research).
-    A/B test: generates 3 subject line variants for statistical testing.
-    """
+    """Writes the whole email (not mail-merge): 80-120 word body, 3 subject variants."""
 
-    SYSTEM_PROMPT = """You are an expert B2B sales copywriter. Write cold outreach emails that:
-- Are 80-120 words in the body (strictly enforced)
-- Feel human and personal, not template-like
-- Reference one specific, credible fact about the prospect or their company
-- Have a single, low-friction call to action (a question, not a meeting demand)
-- Never use buzzwords like "synergy", "leverage", "game-changer", "revolutionary"
-Return JSON: {"subject": "...", "body": "...", "subject_variants": ["...", "...", "..."]}"""
+    SYSTEM = ("You are an expert B2B sales copywriter. Write a cold email with an 80-120 word "
+              "body that references ONE specific, verifiable fact about the prospect, ends with "
+              "a single low-friction question, and avoids buzzwords. Return JSON with keys "
+              "subject, body, subject_variants (3 items).")
 
-    def __init__(self, llm_client) -> None:
-        self._llm = llm_client
+    def __init__(self, llm_client, model: str = "gpt-6-luna") -> None:
+        self._llm, self._model = llm_client, model    # $0.10 / $0.50 per MTok
 
-    async def generate(
-        self, template_name: str, context: ProspectContext, touchpoint_number: int
-    ) -> Email:
-        user_prompt = f"""
-Prospect: {context.full_name}, {context.title} at {context.company_name} ({context.company_size} employees)
-Recent news about their company: {'; '.join(context.company_recent_news[:2])}
-Their likely challenges: {', '.join(context.company_pain_points[:2])}
-Key talking point: {context.talking_points[0] if context.talking_points else 'their growth stage'}
-This is touchpoint number {touchpoint_number} in the sequence.
-{"Acknowledge this is a follow-up without being pushy." if touchpoint_number > 1 else ""}
-
-Write the cold outreach email now.
-"""
-        response = await self._llm.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-        )
-
-        import json
-        data = json.loads(response.choices[0].message.content)
-        body = data.get("body", "")
-        return Email(
-            subject=data.get("subject", ""),
-            body=body,
-            subject_variants=data.get("subject_variants", []),
-            word_count=len(body.split()),
-        )
+    async def generate(self, ctx: ProspectContext, touchpoint: int) -> Email:
+        prompt = (f"Prospect: {ctx.full_name}, {ctx.title} at {ctx.company_name} "
+                  f"({ctx.company_size} employees)\nNews: {'; '.join(ctx.company_recent_news[:2])}\n"
+                  f"Likely challenges: {', '.join(ctx.company_pain_points[:2])}\n"
+                  f"Talking point: {ctx.talking_points[0] if ctx.talking_points else 'growth stage'}\n"
+                  f"Touchpoint {touchpoint}." + (" Acknowledge the follow-up without pressure." if touchpoint > 1 else ""))
+        resp = await self._llm.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "system", "content": self.SYSTEM}, {"role": "user", "content": prompt}],
+            response_format={"type": "json_object"})
+        data = json.loads(resp.choices[0].message.content)
+        return Email(data.get("subject", ""), data.get("body", ""), data.get("subject_variants", []))
 ```
 
 Concrete numbers: personalization generation takes 1.2s per email; at 10,000 prospects per account per day with sequential processing = 3.3 hours compute. With 50 parallel async workers: 10,000 / 50 = 200 batches x 1.2s = 4 minutes. Subject line A/B testing generates 3 variants per email and tracks open rate per variant over a 7-day window; the winning variant is promoted as the default for the next 1,000 sends to similar prospect profiles.
@@ -735,136 +590,73 @@ Every reply must be classified within 5 minutes of receipt. Misclassification ha
 
 ```python
 from __future__ import annotations
-
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
 
 class ReplyCategory(str, Enum):
-    POSITIVE_INTEREST = "POSITIVE_INTEREST"    # advance to meeting booking
-    SOFT_NO = "SOFT_NO"                        # "not now" — continue sequence (reduced cadence)
-    HARD_NO = "HARD_NO"                        # "never contact me" — stop immediately
-    OBJECTION = "OBJECTION"                    # specific objection to address
-    OOO = "OOO"                                # out of office — reschedule
-    UNSUBSCRIBE = "UNSUBSCRIBE"                # legal opt-out — honor within 100ms
-    REFERRAL = "REFERRAL"                      # directed to another contact
-    QUESTION = "QUESTION"                      # information request
+    POSITIVE_INTEREST = "POSITIVE_INTEREST"   # advance to meeting booking
+    SOFT_NO = "SOFT_NO"                       # "not now": continue at reduced cadence
+    HARD_NO = "HARD_NO"                       # stop immediately
+    OBJECTION = "OBJECTION"; OOO = "OOO"; REFERRAL = "REFERRAL"; QUESTION = "QUESTION"
+    UNSUBSCRIBE = "UNSUBSCRIBE"               # legal opt-out: honor within 100 ms
 
 
 @dataclass
 class ReplyClassification:
     category: ReplyCategory
-    confidence: float                 # 0.0-1.0
-    objection_type: Optional[str]     # populated if OBJECTION
-    ooo_return_date: Optional[str]    # populated if OOO
-    referral_contact: Optional[str]   # populated if REFERRAL
-    requires_human_review: bool       # True if confidence < 0.75 or opportunity_value > $50K
+    confidence: float
+    requires_human_review: bool = False
+    detail: Optional[str] = None              # objection type, OOO return date, or referral
 
 
 class ReplyClassifier:
-    """
-    Classifies prospect replies. UNSUBSCRIBE and HARD_NO trigger immediate DNC actions.
-    Human review queue for ambiguous replies (confidence < 0.75) or high-value opportunities.
-    Any variation of "not interested" is classified as HARD_NO — never SOFT_NO.
-    """
+    """Compliance-critical labels never depend on the LLM alone: hard-coded patterns run
+    first, and any LLM label that disagrees with an opt-out signal is overridden."""
 
-    HARD_NO_PATTERNS = [
-        "not interested", "no thanks", "please remove", "take me off",
-        "unsubscribe", "stop emailing", "do not contact", "not a fit",
-        "never contact", "remove me", "opt out", "leave me alone",
-    ]
+    HARD_NO_PATTERNS = ("not interested", "no thanks", "please remove", "take me off",
+                        "unsubscribe", "stop emailing", "do not contact", "not a fit",
+                        "never contact", "remove me", "opt out", "leave me alone")
 
-    def __init__(self, llm_client, dnc_scrubber: "DNCScrubber") -> None:
-        self._llm = llm_client
-        self._dnc = dnc_scrubber
+    def __init__(self, llm_client, dnc: "DNCScrubber") -> None:
+        self._llm, self._dnc = llm_client, dnc
 
-    async def classify(
-        self,
-        email_reply: str,
-        prospect: "Prospect",
-        sequence: "ProspectSequence",
-        opportunity_value_usd: float = 0.0,
-    ) -> ReplyClassification:
-        # Fast path: hard-coded HARD_NO patterns bypass LLM (prevents mis-classification)
-        lower = email_reply.lower()
-        if any(pattern in lower for pattern in self.HARD_NO_PATTERNS):
-            await self._handle_hard_no(prospect)
-            return ReplyClassification(
-                category=ReplyCategory.HARD_NO,
-                confidence=1.0,
-                objection_type=None,
-                ooo_return_date=None,
-                referral_contact=None,
-                requires_human_review=False,
-            )
-
-        # LLM classification for nuanced replies
-        result = await self._llm_classify(email_reply, sequence)
-
-        # Override: if LLM classified as SOFT_NO but reply contains unsubscribe signals,
-        # escalate to HARD_NO. Never trust LLM for compliance-critical classifications.
-        if result.category == ReplyCategory.SOFT_NO and "unsubscribe" in lower:
-            result.category = ReplyCategory.HARD_NO
-            await self._handle_hard_no(prospect)
-
-        # Trigger immediate opt-out for UNSUBSCRIBE
-        if result.category == ReplyCategory.UNSUBSCRIBE:
-            await self._handle_hard_no(prospect)
-
-        # Flag for human review: low confidence or high-value deal
-        if result.confidence < 0.75 or opportunity_value_usd > 50_000:
-            result.requires_human_review = True
-
+    async def classify(self, reply: str, prospect: "Prospect",
+                       opportunity_value_usd: float = 0.0) -> ReplyClassification:
+        lower = reply.lower()
+        if any(p in lower for p in self.HARD_NO_PATTERNS):       # fast path, no LLM
+            self._opt_out(prospect)
+            return ReplyClassification(ReplyCategory.HARD_NO, 1.0)
+        result = await self._llm_classify(reply)                  # structured-output call
+        if result.category is ReplyCategory.SOFT_NO and "unsubscribe" in lower:
+            result.category = ReplyCategory.HARD_NO               # never trust the LLM here
+        if result.category in (ReplyCategory.HARD_NO, ReplyCategory.UNSUBSCRIBE):
+            self._opt_out(prospect)                               # synchronous, before return
+        result.requires_human_review = result.confidence < 0.75 or opportunity_value_usd > 50_000
         return result
 
-    async def _handle_hard_no(self, prospect: "Prospect") -> None:
-        """Synchronously record opt-out before returning classification."""
-        self._dnc.record_opt_out(
-            prospect_id=prospect.prospect_id,
-            email=prospect.email,
-            channel=Channel.EMAIL,
-            reason="HARD_NO_OR_UNSUBSCRIBE",
-        )
+    def _opt_out(self, prospect: "Prospect") -> None:
+        self._dnc.record_opt_out(prospect_id=prospect.prospect_id, email=prospect.email,
+                                 channel=Channel.EMAIL, reason="HARD_NO_OR_UNSUBSCRIBE")
 
-    async def _llm_classify(self, reply: str, sequence: "ProspectSequence") -> ReplyClassification:
-        raise NotImplementedError  # LLM call with structured output schema
+    async def _llm_classify(self, reply: str) -> ReplyClassification:
+        raise NotImplementedError   # GPT-6 Luna with a JSON schema of ReplyCategory
 
 
 class MeetingBooker:
-    """
-    Proposes 3 calendar slots in the prospect's timezone when POSITIVE_INTEREST is detected.
-    Simultaneously alerts the human rep via Slack.
-    """
+    """On POSITIVE_INTEREST: propose 3 x 30-minute slots from the rep's next 5 business
+    days in the prospect's timezone, and alert the rep in Slack at the same moment."""
 
-    def __init__(self, calendar_client, slack_client) -> None:
-        self._calendar = calendar_client
-        self._slack = slack_client
+    def __init__(self, calendar, slack) -> None:
+        self._calendar, self._slack = calendar, slack
 
-    async def propose_times(
-        self, prospect: "Prospect", rep_id: str
-    ) -> list[dict]:
-        """
-        Fetches rep availability for next 5 business days.
-        Returns 3 x 30-minute slots in prospect's local timezone.
-        """
-        availability = await self._calendar.get_free_slots(
-            user_id=rep_id,
-            duration_minutes=30,
-            days_ahead=5,
-        )
-
-        # Convert to prospect timezone (inferred from company domain geo or LinkedIn location)
-        slots = availability[:3]
-
-        # Alert human rep immediately
+    async def propose_times(self, prospect: "Prospect", rep_id: str) -> list[dict]:
+        slots = (await self._calendar.get_free_slots(user_id=rep_id, duration_minutes=30,
+                                                     days_ahead=5))[:3]
         await self._slack.post_message(
             channel=f"#rep-{rep_id}",
-            text=(
-                f"MEETING SIGNAL: {prospect.full_name} at {prospect.company_name} "
-                f"showed positive interest. Proposed 3 slots — confirm or adjust."
-            ),
-        )
+            text=f"MEETING SIGNAL: {prospect.full_name} at {prospect.company_name}; 3 slots proposed.")
         return slots
 ```
 
@@ -986,7 +778,7 @@ Concrete numbers: a new sending domain is limited to 20 emails per day during th
 
 ---
 
-## 5. Design Decisions and Tradeoffs
+## 5. Design Decisions & Tradeoffs
 
 | Decision | Chosen Approach | Alternative | Rationale |
 |----------|----------------|-------------|-----------|
@@ -1038,7 +830,7 @@ selecting from a fixed set of canned objection handlers.
 
 ---
 
-## 7. Technologies and Tools
+## 7. Technologies & Tools
 
 ### Sequence State Storage Comparison
 
@@ -1144,7 +936,7 @@ Reference [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_app
 
 ---
 
-## 9. Common Pitfalls and War Stories
+## 9. Common Pitfalls & War Stories
 
 The five incidents below are **illustrative composites**, not verified public record. The
 failure mechanisms and the fixes are real and recurring in outbound tooling; the counts,
@@ -1188,18 +980,18 @@ With burst headroom (2x):              2 dedicated IPs per region
 ```
 Personalization generation:
   1.2M emails/day * 720 tokens (600 input + 120 output) = 864M tokens/day
-  At gpt-4o-mini: $0.15/M input tokens, $0.60/M output tokens
-    Input cost:  1.2M * 600 / 1M * $0.15 = $108/day
-    Output cost: 1.2M * 120 / 1M * $0.60 = $86/day
-    Daily LLM cost: $194 (platform total, all customers blended)
+  At gpt-6-luna: $0.10/M input tokens, $0.50/M output tokens
+    Input cost:  1.2M * 600 / 1M * $0.10 = $72/day
+    Output cost: 1.2M * 120 / 1M * $0.50 = $72/day
+    Daily LLM cost: $144 (platform total, all customers blended)
 
-  Latency budget per email:    1.2 seconds (gpt-4o-mini, 120 output tokens)
+  Latency budget per email:    1.2 seconds (gpt-6-luna, 120 output tokens)
   Parallel workers needed:     1.2M emails / 86,400s * 1.2s = 16.7 -> 20 workers
   With peak 3x factor:         60 workers (autoscale Kubernetes deployment)
 
 Reply classification:
   60,000 replies/day * 400 tokens avg (mostly input) = 24M tokens/day
-  Cost at gpt-4o-mini ($0.15/M input): ~$4/day (negligible)
+  Cost at gpt-6-luna ($0.10/M input): ~$2/day (negligible)
 ```
 
 ### State Storage Sizing
@@ -1248,45 +1040,56 @@ changes per prospect into a single API call per sync window.
 ## 11. Interview Discussion Points
 
 **Q: Why does sequence state durability matter more than LLM response quality for a sales agent?**
+**Short:** Sequences run for weeks, so one lost transition sends duplicate touchpoints or, worse, emails a prospect who already said no, which is a legal problem, not a copy problem.
 
 A sales sequence runs for 3-6 weeks. A single dropped state transition — failing to record that touchpoint 4 was sent — can result in the prospect receiving touchpoint 4 twice, which reads as "this AI has no memory." Worse, a lost HARD_NO state means a prospect who said "stop emailing me" receives more emails, which is a CAN-SPAM violation and a reputational disaster. LLM response quality affects reply rates marginally (the difference between a good and great email is 1-2 percentage points in reply rate). Lost state transitions affect legal compliance and brand reputation permanently. A sales AI agent that writes mediocre emails but never loses state is far more valuable than one that writes excellent emails and occasionally sends two touchpoints in one day.
 
 **Q: How is TCPA compliance enforced at the architecture level, not just at the policy level?**
+**Short:** The do-not-contact check blocks by default: any error or timeout means no send, opt-outs are written synchronously, and every channel passes the same scrubber.
 
 TCPA compliance is enforced by a block-by-default architecture in the `DNCScrubber`. Three design decisions make this architectural: first, any exception or Redis timeout in the DNC check returns `False` (block), never `True` (allow) — the error handling itself enforces compliance. Second, for SMS and phone channels, the check requires a positive TCPA consent key to be present in Redis — the absence of an opt-out record is not sufficient. Third, opt-outs are written to Redis synchronously before the function returns, ensuring that a concurrent send that starts 50ms later will read the opt-out. Policy documents say "do not contact opted-out prospects"; architecture means the software cannot contact them even if a bug exists in the calling code.
 
 **Q: Why must the opt-out be written to Redis before Postgres, rather than both simultaneously?**
+**Short:** A replica-read Postgres write leaves a 50-200 ms replication window in which another worker can still send; writing Redis first closes that window for all workers.
 
 The ordering matters because of replication lag. If the opt-out is written only to Postgres, a second concurrent send worker reading from a Postgres replica will not see the opt-out for 50-200ms (typical async replication lag). During that window, a second email or SMS can be dispatched. Redis is a single primary node; any value written to it is immediately visible to all readers (within the same data center). By writing to Redis first — synchronously before returning from `record_opt_out` — and then writing to Postgres for durability, the replication lag window is eliminated. Even if the Postgres write fails, the Redis write ensures no further contacts occur. The Postgres write can be retried asynchronously.
 
 **Q: How is email deliverability maintained at scale when sending 1.2 million emails per day?**
+**Short:** Warm each new domain over 30 days, cap 5,000-10,000 sends per domain per day, rotate domains when bounces pass 5%, and require SPF, DKIM and DMARC before sending.
 
 Four mechanisms work together. Domain warmup: new sending domains start at 20 emails per day and ramp over 30 days to 5,000 per day, establishing reputation with Gmail, Outlook, and Yahoo mail servers. Per-domain volume limits: even warmed domains are capped at 5,000-10,000 emails per day, so 500 customer accounts each have their own sending domain rather than sharing one platform domain. Bounce rate monitoring: a 15-minute automated health check detects when bounce rate exceeds 5% and triggers automatic rotation to a backup domain before Gmail deprioritizes the domain. Authentication: SPF, DKIM, and DMARC records are required before any sending domain is activated — not optional. The platform provides a DNS verification step during customer onboarding.
 
 **Q: What happens if a prospect who was classified as HARD_NO on touchpoint 1 sends a new inbound inquiry 3 months later?**
+**Short:** The opt-out never expires, so the inbound inquiry goes to a human rep as a new conversation and automated sequences stay blocked for that prospect.
 
 The HARD_NO classification and the opt-out record in Redis are permanent and have no TTL — they do not expire. However, an inbound inquiry is a new context: the prospect is proactively reaching out. The correct handling is to route the inbound inquiry to a human rep immediately, bypassing the AI agent entirely. The AI agent should never send outbound to this prospect again — the opt-out remains in effect. The human rep handles the inbound lead manually and can create a new CRM opportunity. The key distinction: the opt-out applies to outbound AI-initiated contact, not to the prospect's own inbound queries. This is why the handoff to human rep is triggered for inbound signals from HARD_NO prospects.
 
 **Q: What is the difference between a CAN-SPAM opt-out legal requirement and production best practice?**
+**Short:** CAN-SPAM allows 10 business days to honor an opt-out; production systems honor it within about 100 ms, because every later email in that gap damages trust and reputation.
 
 CAN-SPAM requires honoring opt-out requests within 10 business days. This is the legal minimum. Production best practice is immediate — opt-outs are honored within 100ms of receipt, which is when `record_opt_out` writes to Redis. The gap between the legal requirement and best practice is significant: an organization that takes 9 business days to honor opt-outs is technically compliant but will face consumer complaints, poor deliverability reputation, and potential regulatory scrutiny. At scale (1.2M emails per day), even a 1-day opt-out processing delay can result in dozens of additional unwanted contacts. The architecture makes immediate opt-out the default behavior, not a compliance checkbox.
 
 **Q: How are email subject lines A/B tested at the sequence platform level without contaminating the sequence state?**
+**Short:** Record the variant ID with each send in a separate analytics table, so the sequence advances the same way whichever variant was sent and the test never touches state.
 
 Each email send records the subject variant ID alongside the message ID and prospect ID in a separate analytics table. The send itself is independent of the A/B test outcome — the sequence advances to the next state regardless of which variant was sent. The A/B test evaluation happens in a separate analytics pipeline that joins the send records with delivery events (open webhooks from SendGrid). A winner is declared after a minimum of 500 sends per variant with a statistically significant difference (p < 0.05 using a two-proportion z-test). The winning variant is promoted by updating a feature flag in Redis that the email personalizer reads when selecting the subject template. The sequence state machine has no awareness of A/B testing — it only records that a touchpoint was sent, not which variant.
 
 **Q: Why does multi-domain sending improve deliverability compared to a single platform-wide sending domain?**
+**Short:** Mailbox providers score reputation per domain, so separate sending domains per customer stop one customer's bad list from damaging everyone else's delivery.
 
 Mailbox providers (Gmail, Outlook) rate deliverability signals per domain. If a single platform domain sends 500,000 emails per day across all customers, a single customer with a low-quality prospect list (high bounce rate) degrades the reputation of that domain for all other customers. With per-customer sending domains, one customer's deliverability problems are isolated to their own domain. The customer's domain reputation reflects their own list quality and content quality, not the quality of 499 other customers. Additionally, per-customer domains allow customers to use their own company domain (e.g., `outreach.acmecorp.com`) in the From address, which increases open rates by 20-30% versus a generic platform domain.
 
 **Q: How is the handoff from AI to human rep triggered, and what state is transferred?**
+**Short:** Positive interest, a booked meeting or a high deal value pauses the sequence and hands the rep the full thread, research context and classification history.
 
 Handoff is triggered by three signals: POSITIVE_INTEREST reply classification, a MEETING_BOOKED event, or the opportunity value exceeding the configured threshold (default $50K). When triggered, `SequenceStateMachine.advance(prospect_id, SequenceEvent.HUMAN_TAKEOVER)` transitions the sequence to `PAUSED` status, preventing any further automated touchpoints. Simultaneously, a Slack notification is sent to the assigned rep with a full context packet: prospect name, company, role, all prior touchpoints and their send dates, the prospect's reply verbatim, the reply classification and confidence, and a link to the Salesforce opportunity. The CRM is updated with a task assigned to the rep. The sequence remains in `PAUSED` status until the rep either marks it as won, lost, or explicitly restarts the AI sequence (which transitions back to `ACTIVE`).
 
 **Q: How do you evaluate sequence effectiveness when the B2B sales cycle is 6+ months?**
+**Short:** Use three horizons: open and reply rates weekly, meeting-booked rate monthly, and pipeline influence on closed-won deals quarterly, with alerts only on the weekly signals.
 
 Three evaluation horizons with different metrics. Short term (weekly): open rate and reply rate per sequence template and touchpoint number — these are leading indicators available within days of sending. Open rate target: 35-40%; reply rate target: 5-8%. Medium term (monthly): meeting booked rate — the fraction of entered prospects that result in a calendar meeting. This lags sends by 3-6 weeks and is the primary business metric. Long term (quarterly): pipeline influence — the fraction of closed-won deals that had an AI SDR touchpoint in the first 90 days of the deal lifecycle. This requires CRM attribution and lags by 6+ months. The eval pipeline tracks all three but only the short-term metrics can trigger automated alerts. Medium and long-term metrics are reviewed in monthly business reviews. Reference [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for multi-horizon eval pipeline design.
 
 **Q: What architectural change would you make if the customer base grew from 500 to 5,000 enterprise customers?**
+**Short:** Add PgBouncer for the Postgres connection pool, shard Redis with Redis Cluster, and at 50M active sequences move the state machine to Temporal.
 
 Two bottlenecks become critical at 10x scale. First, the Postgres instance handling 50M active sequences (10x current 5M) at 500 bytes of writes per state transition x 1.2M transitions per day x 10 = 6 GB of writes per day; Postgres handles this comfortably, but the connection pool becomes the bottleneck at 5,000 customers each with connection pool workers. Solution: introduce PgBouncer connection pooling in transaction mode, reducing Postgres connections from 5,000 to 50-100. Second, the Redis cluster holding 200GB of active sequence state (10x current 20GB) needs horizontal sharding. Redis Cluster with hash slots across 10 shard nodes handles this transparently. The bigger architectural question: at 50M active sequences, migrate the sequence state machine to Temporal, which provides built-in history, versioning, and recovery that the Redis+Postgres combination emulates manually. Temporal's operational overhead (Cassandra backend, Temporal server cluster) becomes justified when the state management engineering cost exceeds the Temporal operational cost.

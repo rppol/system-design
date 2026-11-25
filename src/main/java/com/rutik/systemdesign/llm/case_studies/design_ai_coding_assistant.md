@@ -1,4 +1,5 @@
 # Case Study: Design an AI Coding Assistant (Cursor/Devin-Style)
+
 ## Intuition
 
 > **Design intuition**: An AI coding assistant (Cursor/Devin-style) has three distinct interaction modes with fundamentally different latency requirements: inline completions (300ms), chat (2-5s), and autonomous agents (minutes). Each mode requires different models, different context assembly, and different serving infrastructure.
@@ -63,7 +64,7 @@ Codebase sizes:
 
 Strategy by codebase size:
   < 50K tokens: put entire codebase in long context. Frontier models now ship
-    1M-token context windows as standard (Claude Sonnet 5 / Opus 5, gpt-5.x),
+    1M-token context windows as standard (Claude Opus 5.5 / Sonnet 5.5, gpt-6.2),
     so "does it fit" is rarely the binding constraint any more — cost and the
     "lost in the middle" attention falloff are.
   50K-500K tokens: smart RAG selection (top-20 most relevant files)
@@ -326,8 +327,8 @@ Step 10: git_commit("Add comprehensive unit tests for auth module")
 Task complete. Summary: Added 10 unit tests, fixed fixture issue, all passing.
 
 Model for agent tasks:
-  Use a current frontier agentic-coding model: Claude Opus 5 / Sonnet 5, or
-    a gpt-5.x model. Adaptive-thinking models handle multi-step planning
+  Use a current frontier agentic-coding model: Claude Opus 5.5 / Sonnet 5.5,
+    or gpt-6.2-sol. Adaptive-thinking models handle multi-step planning
     better than a fast completion model at any size.
   Each agent step: 1-2 LLM calls
   Average task: 10-20 steps = 20-40 LLM calls per agent task
@@ -370,97 +371,7 @@ Output handling:
   Exit codes: non-zero triggers agent error analysis
 ```
 
----
-
-## 5. Privacy Architecture
-
-```
-Enterprise requirements: code never leaves the company network
-
-Deployment modes:
-  1. Cloud (default): code sent to API (encrypted in transit, not stored)
-  2. Private Cloud: deploy assistant in customer's VPC (AWS/GCP/Azure)
-  3. On-premise: full deployment in customer data center
-
-For on-premise / private cloud:
-  Self-hosted LLMs: a current open-weights code model (e.g. the Qwen Coder
-    line) served locally
-  Local inference: vLLM cluster inside customer network
-  Local index: FAISS index on developer's machine or local server
-  No external API calls: the web_search tool is repointed at an internal
-    docs index (self-hosted search over vendored docs and the company wiki)
-  Audit log: stored in customer's own storage
-
-Code handling policy:
-  - Code snippets: used for inference, not stored after response
-  - No training: user code never used to train or fine-tune models
-  - Embeddings: computed locally (IDE extension), not sent to cloud
-  - BAA available: for HIPAA-covered code (e.g., healthcare companies)
-```
-
----
-
-## 6. Quality Metrics
-
-```
-Completion quality:
-  Acceptance rate: accepted / shown (target > 30%)
-  Edit distance: chars changed in accepted suggestion (lower = better)
-  "Kept as is" rate: suggestion accepted without any edits (target > 20%)
-
-Chat quality:
-  Developer satisfaction: thumbs up/down feedback (target > 80% positive)
-  Code correctness: does suggested code compile/run? (tracked async)
-  Hallucination rate: code references non-existent functions
-
-Agent quality:
-  Task completion rate: % of agent tasks fully completed (target > 70%)
-  Human intervention rate: % that required developer fixes
-  Test pass rate: % of generated code that passes tests on first try
-  Lines of code generated per task: productivity metric
-
-Latency SLOs:
-  Completion P95 < 300ms
-  Chat first-token P95 < 2s
-  Agent step P95 < 10s
-
-Codebase index quality:
-  Index coverage: % of symbols indexed vs total
-  RAG recall: % of relevant files found for sample queries
-  Index freshness: time since last update < 5 seconds
-```
-
----
-
-## 7. Trade-offs and Design Decisions
-
-| Decision | Chosen | Alternative | Reason |
-|----------|--------|-------------|--------|
-| Completion model | Codestral (FIM-native) | General chat model without FIM | FIM-native gives better mid-file completions |
-| Context collection | Hybrid (local FAISS + LSP) | Pure embedding RAG | LSP gives precise type info; FAISS for semantic |
-| Repo index | Local (developer machine) | Remote server | Zero latency; privacy (code stays local) |
-| Agent model | Claude Opus 5 / Sonnet 5 or gpt-5.x | Smaller models | Agent tasks need strong reasoning; cost acceptable |
-| Sandbox | Docker (warm pool) | VM | Cold container start is 5-10s and a VM is ~30s; a warm pool amortizes that to a near-instant checkout from the pool |
-| Network access | IDE WebSocket persistent | HTTP polling | Low latency; instant push; efficient |
-| Privacy | On-premise option | Cloud only | Enterprise requirement; enables regulated industries |
-
----
-
-## 8. Interview Discussion Points
-
-**Why local embedding index beats remote for completions.** At < 300ms total budget, a round-trip to a remote vector DB (50ms+ latency) would consume 17% of the budget before inference. Local FAISS queries in < 5ms. The downside: index must be maintained on developer's machine and kept in sync. For code that changes frequently, incremental updates on file save keep the index fresh.
-
-**The agent reliability problem.** The hardest challenge isn't generating code — it's ensuring the agent doesn't make wrong assumptions, break working code, or loop endlessly. Mitigations: (1) always run tests after changes; (2) use git to checkpoint before each agent task (easy rollback); (3) surface all changes to developer before committing; (4) set hard limits (max steps, max file edits).
-
-**Why multi-model architecture?** Completions need speed (a FIM-native code model like Codestral); chat needs quality (a mid-tier frontier model); agent tasks need planning (a top-tier adaptive-thinking model). Using one model for all three would mean either too slow for completions or too weak for agent planning. The 10ms routing decision is what unlocks the order-of-magnitude cost spread between the tiers.
-
-**Latency-accuracy trade-off in FIM.** Providing more context (open tabs, dependency files) improves completion quality but adds tokens and increases latency. Cursor's empirical finding: beyond 1,500 tokens of context, completion quality improvement is marginal but latency increases linearly. The context budget is a product decision, not just a technical one.
-
-**Agent scope limitation.** Unlike Devin (tries to fully autonomously complete engineering tasks), a coding assistant should work in tight collaboration: propose changes → show diff → require approval → apply. This "human-in-the-loop" design sacrifices some autonomy for safety and trust. Most enterprise teams prefer assisted autonomy over full autonomy.
-
----
-
-## Context Window Management for Large Codebases
+### 4.6 Context Window Management for Large Codebases
 
 A coding assistant serving a monorepo with 500,000 files cannot embed the entire codebase in the context window. The challenge is selecting the right 1,500-4,000 tokens of code context from millions of available tokens.
 
@@ -515,9 +426,7 @@ def build_context_window(
     return slots
 ```
 
----
-
-## Tree-Sitter AST-Based Chunking
+### 4.7 Tree-Sitter AST-Based Chunking
 
 Standard text chunking (by character count or line count) splits code at syntactically meaningless points. Tree-sitter parses code into a concrete syntax tree and enables semantically-aware chunking:
 
@@ -562,9 +471,7 @@ def extract_semantic_chunks(
 # chunk size, and embedding model.
 ```
 
----
-
-## Code-Specific RAG Architecture
+### 4.8 Code-Specific RAG Architecture
 
 Code RAG differs from document RAG (baseline pipeline: [RAG Fundamentals](../rag_fundamentals/rag_fundamentals.md)) in three key ways: (1) code has structure (AST) not present in prose; (2) code has dependencies (imports, function calls) that cross file boundaries; (3) code changes frequently (every git commit may invalidate embeddings for modified files).
 
@@ -602,36 +509,70 @@ flowchart TD
 
 The indexing path (git hooks → tree-sitter → embeddings) keeps chunks syntactically complete; at query time hybrid retrieval merges BM25 identifier matches with dense semantic matches, then dependency expansion pulls in the definitions of called functions so the LLM never sees a call site without its callee.
 
-**Incremental re-indexing via git hooks:**
+**Incremental re-indexing via git hooks.** The first version looked right and broke on the first
+deleted file:
 
 ```python
-import subprocess
-from pathlib import Path
-
-def get_changed_files_since_last_index(last_indexed_commit: str) -> list[str]:
-    """Use git diff to find files modified since last index run."""
-    result = subprocess.run(
-        ["git", "diff", "--name-only", last_indexed_commit, "HEAD"],
-        capture_output=True, text=True,
-    )
-    return [f for f in result.stdout.strip().split("\n") if f.endswith((".py", ".ts", ".java", ".go"))]
-
+# BROKEN: `git diff --name-only` also lists deleted and renamed files, so read_text() raises
+# FileNotFoundError and the run aborts; extract_semantic_chunks() never sets chunk["id"], so
+# upsert raises KeyError; and a crash halfway leaves the index half-updated with no record of
+# where it stopped.
 def incremental_reindex(workspace_root: str, vector_db, last_indexed_commit: str) -> str:
-    changed = get_changed_files_since_last_index(last_indexed_commit)
+    changed = subprocess.run(["git", "diff", "--name-only", last_indexed_commit, "HEAD"],
+                             capture_output=True, text=True).stdout.split()
     for file_path in changed:
         source = Path(workspace_root, file_path).read_text()
-        chunks = extract_semantic_chunks(source, detect_language(file_path))
-        # Delete old chunks for this file, insert new ones
         vector_db.delete(filter={"file_path": file_path})
-        for chunk in chunks:
-            embedding = embed_code(chunk["content"])
-            vector_db.upsert(chunk["id"], embedding, metadata={**chunk, "file_path": file_path})
+        for chunk in extract_semantic_chunks(source, detect_language(file_path)):
+            vector_db.upsert(chunk["id"], embed_code(chunk["content"]), metadata=chunk)
     return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 ```
 
----
+```python
+# FIX: read change status, handle deletes and renames, derive deterministic chunk IDs, and pin
+# the target commit first so a crash simply re-runs the same range.
+import hashlib
+import subprocess
+from pathlib import Path
 
-## Security Scanning Integration
+CODE_SUFFIXES = (".py", ".ts", ".java", ".go")
+
+def changed_files(repo: str, old: str, new: str) -> list[tuple[str, str, str | None]]:
+    """Return (status, path, old_path) for code files changed between two commits."""
+    out = subprocess.run(["git", "-C", repo, "diff", "--name-status", "-M", old, new],
+                         capture_output=True, text=True, check=True).stdout
+    rows: list[tuple[str, str, str | None]] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        status = parts[0][0]                      # A, M, D or R (R100 -> R)
+        path = parts[-1]
+        old_path = parts[1] if status == "R" else None
+        if path.endswith(CODE_SUFFIXES) or (old_path or "").endswith(CODE_SUFFIXES):
+            rows.append((status, path, old_path))
+    return rows
+
+def chunk_id(path: str, chunk: dict) -> str:
+    digest = hashlib.sha1(chunk["content"].encode()).hexdigest()[:12]
+    return f"{path}:{chunk['start_line']}:{digest}"
+
+def incremental_reindex(repo: str, vector_db, last_indexed_commit: str) -> str:
+    head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    for status, path, old_path in changed_files(repo, last_indexed_commit, head):
+        vector_db.delete(filter={"file_path": old_path or path})
+        if status == "D":
+            continue
+        source = Path(repo, path).read_text(errors="replace")
+        for chunk in extract_semantic_chunks(source, detect_language(path)):
+            vector_db.upsert(chunk_id(path, chunk), embed_code(chunk["content"]),
+                             metadata={**chunk, "file_path": path, "commit": head})
+    return head  # the caller persists this only after the loop completes
+```
+
+Deleting by `file_path` before re-inserting makes each file's update idempotent, so re-running the
+same commit range after a crash converges to the same index.
+
+### 4.9 Security Scanning Integration
 
 A coding assistant that can generate and apply code must not introduce security vulnerabilities. Integrating security scanning into the generation pipeline:
 
@@ -697,7 +638,153 @@ def generate_code_with_security_check(prompt: str, client) -> dict:
 
 ---
 
-## Failure Scenarios and Recovery
+## 5. Design Decisions & Tradeoffs
+
+| Decision | Chosen | Alternative | Reason |
+|----------|--------|-------------|--------|
+| Completion model | Codestral (FIM-native) | General chat model without FIM | FIM-native gives better mid-file completions |
+| Context collection | Hybrid (local FAISS + LSP) | Pure embedding RAG | LSP gives precise type info; FAISS for semantic |
+| Repo index | Local (developer machine) | Remote server | Zero latency; privacy (code stays local) |
+| Agent model | Claude Opus 5.5 / Sonnet 5.5 or gpt-6.2-sol | Smaller models | Agent tasks need strong reasoning; cost acceptable |
+| Sandbox | Docker (warm pool) | VM | Cold container start is 5-10s and a VM is ~30s; a warm pool amortizes that to a near-instant checkout from the pool |
+| Network access | IDE WebSocket persistent | HTTP polling | Low latency; instant push; efficient |
+| Privacy | On-premise option | Cloud only | Enterprise requirement; enables regulated industries |
+
+### Privacy Architecture
+
+```
+Enterprise requirements: code never leaves the company network
+
+Deployment modes:
+  1. Cloud (default): code sent to API (encrypted in transit, not stored)
+  2. Private Cloud: deploy assistant in customer's VPC (AWS/GCP/Azure)
+  3. On-premise: full deployment in customer data center
+
+For on-premise / private cloud:
+  Self-hosted LLMs: a current open-weights code model (e.g. the Qwen Coder
+    line) served locally
+  Local inference: vLLM cluster inside customer network
+  Local index: FAISS index on developer's machine or local server
+  No external API calls: the web_search tool is repointed at an internal
+    docs index (self-hosted search over vendored docs and the company wiki)
+  Audit log: stored in customer's own storage
+
+Code handling policy:
+  - Code snippets: used for inference, not stored after response
+  - No training: user code never used to train or fine-tune models
+  - Embeddings: computed locally (IDE extension), not sent to cloud
+  - BAA available: for HIPAA-covered code (e.g., healthcare companies)
+```
+
+---
+
+## 6. Real-World Implementations
+
+| Product | Shape | Technical detail worth citing |
+|---------|-------|-------------------------------|
+| GitHub Copilot | IDE completions, chat and agent mode | GitHub's 2023 engineering write-up: the fast completion model saw ~6,000 characters of prompt; "neighboring tabs" (matching snippets from open files) raised acceptance by 5% relative; fill-in-the-middle raised it by 10% relative, both measured by A/B test |
+| Cursor (Anysphere) | AI-native editor forked from VS Code | Instant Grep builds and queries its search index on the developer's machine and does not upload paths or code or store embeddings for search; an Explore subagent runs broad searches in its own context window with a faster model and returns only findings; Privacy Mode means no training on your data; SOC 2 Type II plus ISO 27001 and ISO 42001 |
+| Claude Code (Anthropic) | Terminal and IDE coding agent | Generally available May 2025; navigates the repo with agentic search (grep, glob, file reads) instead of a prebuilt vector index; every file edit and shell command is gated by a permission mode, which is the "show diff, require approval" loop of 4.4 |
+| Devin (Cognition) | Autonomous agent in a cloud sandbox | At launch in March 2024 Cognition reported 13.86% of SWE-bench issues resolved end to end, against a 1.96% prior best; it represents the "full autonomy" end of the spectrum discussed in Section 11 |
+
+The trend across 2025-2026 is visible in the table: the IDE products moved from a remote embedding
+index toward local grep plus subagents for search, while keeping a fast FIM model for completions.
+Embedding RAG (4.8) is still the right tool for "find code that does X" across a 500K-file monorepo;
+exact-symbol lookups go to grep and LSP.
+
+---
+
+## 7. Technologies & Tools
+
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| Completion model | Self-hosted FIM code model (3B-7B) on vLLM | < 300ms P95 needs a small model next to the user; prefix caching on the file outline | hosted API (adds 80-150ms network) |
+| Chat model | gpt-6.1-terra or Claude Sonnet 5.5 | quality per dollar for 2-5 s interactions | top-tier model (2-8x the price) |
+| Agent model | Claude Opus 5.5 or gpt-6.2-sol | long-horizon planning and tool use | small models (loop and stall) |
+| Parsing | Tree-sitter | incremental, error-tolerant parse for 40+ languages | regex chunking (splits functions) |
+| Symbol resolution | LSP `textDocument/definition` | exact cross-file types | embeddings (fuzzy) |
+| Search | local grep index + FAISS HNSW | exact identifiers in < 50ms, semantic intent in < 5ms | remote vector DB (50ms+ per hop) |
+| Sandbox | Docker warm pool, gVisor for untrusted repos | 5-10s cold start amortized to near zero | Firecracker microVMs (stronger isolation, more ops) |
+| Static analysis | Semgrep, Bandit, gitleaks | block insecure generated code before it is shown | trust the model |
+| Transport | IDE WebSocket with cancellation | stale completion requests are cancelled on the next keystroke | HTTP polling |
+
+---
+
+## 8. Operational Playbook
+
+**Completion canary.** Every completion-model or prompt change ships to 5% of seats first and must
+hold the acceptance rate within 1 percentage point of control for 48 hours. The agent tier runs a
+nightly suite of 300 internal tasks with hidden tests; a > 3-point drop blocks promotion. See
+[LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
+
+**Tracing.** One OTel trace per request with `gen_ai.request.model`, `gen_ai.usage.input_tokens`,
+the context-assembly breakdown (cursor, outline, tabs, dependencies) and an `accepted` attribute
+written back when the user keeps or rejects the suggestion. Agent tasks get one span per step and
+per tool call. See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md).
+
+**Chat streaming.** Chat responses stream over the IDE WebSocket; first-token P95 < 2s is the SLO,
+and a cancelled request must free its decode slot within 100ms. See
+[Streaming at Scale](./cross_cutting/streaming_at_scale.md).
+
+**Durable agent tasks.** A 2-30 minute agent task checkpoints after every step (git commit on a
+scratch branch plus the step log), so a worker crash resumes from the last step instead of
+replaying tool calls. See [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md).
+
+**Tenant isolation and GPU pools.** Each enterprise tenant gets its own index namespace and audit
+log; the completion GPU pool is shared but sized per region from the FLOP math in Section 10. See
+[Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md) and
+[GPU Pool Economics](./cross_cutting/gpu_pool_economics.md).
+
+**Runbook: completion latency spike.** Symptom: P95 > 300ms for 10 minutes. Check prefix-cache hit
+rate first (a prompt-template change that reorders the outline drops it from ~70% to ~0%), then
+GPU queue depth. Fix: revert the template or add replicas; never raise the debounce to hide it.
+
+### Quality Metrics and SLOs
+
+```
+Completion quality:
+  Acceptance rate: accepted / shown (target > 30%)
+  Edit distance: chars changed in accepted suggestion (lower = better)
+  "Kept as is" rate: suggestion accepted without any edits (target > 20%)
+
+Chat quality:
+  Developer satisfaction: thumbs up/down feedback (target > 80% positive)
+  Code correctness: does suggested code compile/run? (tracked async)
+  Hallucination rate: code references non-existent functions
+
+Agent quality:
+  Task completion rate: % of agent tasks fully completed (target > 70%)
+  Human intervention rate: % that required developer fixes
+  Test pass rate: % of generated code that passes tests on first try
+  Lines of code generated per task: productivity metric
+
+Latency SLOs:
+  Completion P95 < 300ms
+  Chat first-token P95 < 2s
+  Agent step P95 < 10s
+
+Codebase index quality:
+  Index coverage: % of symbols indexed vs total
+  RAG recall: % of relevant files found for sample queries
+  Index freshness: time since last update < 5 seconds
+```
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+**Prompt injection through the repository.** A README in a cloned dependency told the agent to "run
+the setup script" that piped a remote shell script into bash. The agent ran it inside the sandbox,
+which had outbound network access; 1 developer token was exfiltrated before egress alerts fired
+22 minutes later. Fix: sandbox egress is deny-by-default with an allowlist of package registries,
+and shell commands that fetch and execute remote content always require approval.
+
+**Stale completions from un-cancelled requests.** Firing a request per keystroke without
+cancelling the previous one tripled GPU load at peak and showed suggestions for text the developer
+had already typed past. Fix: 75ms debounce plus cancellation of the in-flight request on every
+keystroke; GPU load fell by ~60%.
+
+Three more incidents, each with the fix that stuck:
 
 **Failure 1 — Agent Infinite Loop Overwriting Production Configuration Files**
 
@@ -713,27 +800,9 @@ The team upgraded from SQLAlchemy 1.3 to 2.0. The code RAG index still contained
 
 **Fix:** Added a dependency hash to the index metadata. When `requirements.txt` or `pyproject.toml` changes, invalidate all chunks that reference changed packages by re-indexing all files that import those packages.
 
----
-
-## Additional Interview Questions
-
-**Q: How do you design context window management for an agent that needs to operate on a file that is longer than the context window?** Use a sliding window with overlap: divide the file into chunks with 20% overlap between adjacent chunks (so that code at chunk boundaries appears in both chunks). The agent processes each chunk independently but maintains a persistent "state object" across chunks: a running summary of: (1) functions and classes seen; (2) variables modified; (3) pending tasks. At each chunk, the state object is prepended to the context window as a compact summary (~200 tokens). This allows the agent to maintain coherence across a 100,000-token file using a 4,000-token context window, at the cost of multiple LLM passes.
-
-**Q: How does tree-sitter AST-based chunking improve code RAG quality compared to character-based chunking?** Character-based chunking cuts at arbitrary positions — potentially in the middle of a function, between a method signature and its body, or between a class definition and its methods. When these malformed chunks are embedded and retrieved, the embedding model cannot produce a meaningful representation of an incomplete code fragment, measurably reducing retrieval accuracy on code search — though the size of the gap depends heavily on language, chunk size, and embedding model, so treat any single headline percentage with suspicion. Tree-sitter ensures every chunk is a syntactically complete unit (a function, a class, a method), which produces coherent embeddings and prevents context fragments from being retrieved that are meaningless in isolation.
-
-**Q: What is the agent reliability gap between "Devin-style" full autonomy and "Copilot Chat-style" assisted generation, and when should each be used?** Full autonomy agents can complete multi-step engineering tasks without human checkpoints, but they still introduce subtle bugs that only surface at runtime, and their headline benchmark numbers overstate real-world reliability. Be careful quoting SWE-bench here: SWE-bench Verified now sits at 85-95% for frontier models, close enough to saturation that the major labs lead with harder agentic suites instead (Anthropic's Opus 5 launch, for instance, reports Frontier-Bench, CursorBench, Terminal-Bench-style agent indices and OSWorld rather than SWE-bench), while SWE-bench Pro's public set tops out near 60%. Quote the benchmark you actually ran, with its date. Assisted generation (Copilot Chat, Cursor) shows the diff before applying changes, requires human approval, and achieves near-100% accuracy on the specific change the human requested because the human validates it. In production codebases, full autonomy is appropriate for low-risk tasks (writing tests for existing functions, generating boilerplate, updating documentation); assisted generation is required for any change that modifies business logic, database schemas, or security-sensitive code.
-
-**Q: How do you implement "explain this code" across multiple files with dependency traversal?** When the user highlights a function and asks "explain this," the system: (1) extracts the function's AST using tree-sitter; (2) identifies all external symbols called within the function (function calls, class references, global variables); (3) resolves each symbol to its definition file via the language server protocol (LSP) using `textDocument/definition`; (4) retrieves the signatures (not full bodies) of all direct dependencies; (5) builds a context window with the target function + dependency signatures. This produces an explanation that correctly describes what `process_payment()` does even when it calls `stripe_client.charge()` from a third-party library — the function's signature is retrieved and included, so the LLM understands the interface even without the implementation.
-
-**Q: How would you handle code generation for a user who is a beginner vs an expert, and can the system auto-detect the user's level?** Auto-detect expertise from: (1) query vocabulary (beginners use natural language descriptions; experts use technical terms like "O(n log n)" or "thread-safe"); (2) code they've written in open tabs (indentation style, comment density, naming conventions, use of advanced constructs like generators, decorators); (3) acceptance patterns (beginners accept longer, more commented explanations; experts accept concise completions and edit them). Generate different outputs per segment: beginners get code with inline comments explaining each step; experts get idiomatic, concise code with no explanatory comments. Fine-tune the output style by storing per-user expertise score (0-100) in the user profile, updated with each interaction.
-
----
-
-## Production Failure Scenarios
-
 ### Incident: Agent Overwrites Correct Code with Regression
 
-**What happened:** A SWE-agent tasked with "fix the failing unit tests in the auth module" identified a test that asserted `token_expiry = 3600` seconds. The test was failing because a recent PR had changed expiry to 7200 seconds. The agent, treating the test as the source of truth, reverted the code to 3600 seconds — reintroducing a security bug that had been intentionally fixed (shorter tokens are less secure per the security team's updated policy). The agent had no way to know that the test was stale, not the code.
+**What happened:** A SWE-agent tasked with "fix the failing unit tests in the auth module" found a test asserting `token_expiry = 7200` seconds. The test was failing because a recent PR had deliberately cut expiry to 900 seconds under the security team's new session policy, and nobody had updated the test. The agent, treating the test as the source of truth, reverted the code to 7200 seconds, which silently re-lengthened every session token by 8x. The agent had no way to know that the test was stale, not the code.
 
 **Root cause:** The agent was given test failures as the ground truth without the ability to consult the PR history or security team's decision rationale.
 
@@ -766,7 +835,10 @@ def should_modify_production_code_to_pass_test(
 
 ---
 
-### Capacity Planning Math (4,000 engineers, internal deployment)
+## 10. Capacity Planning
+
+Internal deployment for 4,000 engineers: self-hosted completion tier, hosted chat and agent tiers.
+Prices are November 2026 list rates.
 
 ```
 Request rate estimation:
@@ -795,24 +867,24 @@ Completion serving (self-hosted FIM model)
   1,500 prefill tokens is 21 TFLOP per request, so 350/sec would demand
   7.4 PFLOPS from a single card — more than any single accelerator shipped.
 
-Chat serving (frontier API model, gpt-5.6 Terra at $2.50/M in, $15/M out):
-  Output: 160,000 × 2,000 tok = 320M tok/day × $15/M = $4,800/day
-  Input:  160,000 × 3,000 tok = 480M tok/day × $2.50/M = $1,200/day
-  Chat total: $6,000/day = $2.19M/year
+Chat serving (hosted API model, gpt-6.1-terra at $1/M in, $5/M out):
+  Output: 160,000 × 2,000 tok = 320M tok/day × $5/M = $1,600/day
+  Input:  160,000 × 3,000 tok = 480M tok/day × $1/M  = $480/day
+  Chat total: $2,080/day = $759K/year
 
-Agent serving (Claude Sonnet 5 at $3/M in, $15/M out; 15k tokens/task
+Agent serving (Claude Sonnet 5.5 at $2/M in, $10/M out; 15k tokens/task
   split ~12k input / 3k output):
-  Input:  8,000 × 12,000 = 96M tok/day × $3/M  = $288/day
-  Output: 8,000 ×  3,000 = 24M tok/day × $15/M = $360/day
-  Agent total: $648/day = $237K/year
+  Input:  8,000 × 12,000 = 96M tok/day × $2/M  = $192/day
+  Output: 8,000 ×  3,000 = 24M tok/day × $10/M = $240/day
+  Agent total: $432/day = $158K/year
 
-Total AI infrastructure cost: $438K + $2.19M + $237K = ~$2.87M/year
-Cost per engineer: $716/year ($60/month) vs $19/month Copilot Business
-  — a 3.1× premium
+Total AI infrastructure cost: $438K + $759K + $158K = ~$1.36M/year
+Cost per engineer: $339/year ($28/month) vs a $19/month Copilot Business seat
+  — a 1.5× premium
 Justification: self-hosting the completion tier means no code leaves the VPC.
-  Note the premium sits almost entirely in the two hosted tiers: chat alone is
-  76% of the bill. If the goal is a defensible cost story, the lever is
-  routing chat to a cheaper tier, not squeezing the self-hosted GPUs.
+  The premium sits mostly in the hosted chat tier (56% of the bill). If the
+  goal is a defensible cost story, the lever is routing simple chat turns to
+  gpt-6-luna ($0.10/$0.50), not squeezing the self-hosted GPUs.
 
 Semantic cache for completions (identical context within 60-second window):
   Hit rate: 12% (coders repeat similar patterns within a session)
@@ -824,10 +896,64 @@ Semantic cache for completions (identical context within 60-second window):
 
 ---
 
-### Additional Interview Q&As
+## 11. Interview Discussion Points
 
-**Q: How do you ensure the coding assistant does not suggest deprecated APIs or insecure patterns?**
-Three-layer approach: (1) fine-tuning exclusion: filter training data to exclude files that use deprecated APIs or known insecure patterns (e.g., `eval()`, `MD5`, `DES` cipher, `pickle.load` from untrusted sources); (2) output post-processing: a static analysis pass on every generated code block using tools like semgrep or Bandit (Python), SpotBugs (Java) — if a security rule fires, the suggestion is blocked and a warning is returned; (3) retrieval-augmented generation with an internal "secure coding guidelines" knowledge base — the prompt includes the team's security standards, which the model uses to prefer secure alternatives. Layer (2) is mandatory; layers (1) and (3) are enhancements that improve proactive avoidance.
+**Q: Why does a local index beat a remote vector database for inline completions?**
+**Short:** At a 300ms budget a 50ms+ remote hop burns 17% before inference; a local index answers in under 5ms and keeps code on the machine.
 
-**Q: How would you build a feedback loop that improves the coding assistant from user corrections?**
-RLHF-style feedback collection: (1) when a user accepts a completion then immediately modifies it within 10 keystrokes, log the `{original_completion, user_edit, context}` as a training signal; (2) when a user edits a completion, the diff between the completion and the final user version is the "preference" — the edited version is preferred; (3) collect at least 50,000 such preference pairs before fine-tuning; (4) use DPO (Direct Preference Optimization) to fine-tune the FIM model on this preference data — no reward model needed, lower training cost than PPO-based RLHF; (5) validate with A/B test: compare acceptance rate of fine-tuned model vs. base model on a holdout set of users. Expected improvement: 3-5 pp acceptance rate gain per fine-tuning cycle with high-quality preference data.
+At < 300ms total budget, a round-trip to a remote vector DB (50ms+ latency) would consume 17% of the budget before inference. Local FAISS queries in < 5ms, and Cursor's Instant Grep shows the same choice for exact matches: the index is built and queried on the developer's machine. The downside: the index must be maintained on the developer's machine and kept in sync. For code that changes frequently, incremental updates on file save keep the index fresh.
+
+**Q: What makes a coding agent unreliable, and how do you contain it?**
+**Short:** It makes wrong assumptions, breaks working code or loops; run tests after each change, checkpoint in git, show every diff, and cap steps and file edits.
+
+The hardest challenge is not generating code; it is ensuring the agent does not make wrong assumptions, break working code, or loop endlessly. Mitigations: (1) always run tests after changes; (2) use git to checkpoint before each agent task (easy rollback); (3) surface all changes to the developer before committing; (4) set hard limits (max steps, max file edits).
+
+**Q: Why use three different models instead of one?**
+**Short:** Completions need a fast FIM model, chat a mid-tier model and agents a top-tier planner; one model is either too slow for completions or too weak for agents.
+
+Completions need speed (a FIM-native code model like Codestral); chat needs quality (a mid-tier frontier model); agent tasks need planning (a top-tier adaptive-thinking model). Using one model for all three would mean either too slow for completions or too weak for agent planning. The 10ms routing decision is what unlocks the order-of-magnitude cost spread between the tiers.
+
+**Q: How much context should an inline completion get?**
+**Short:** About 1,500-4,000 tokens: quality gains flatten quickly while prefill latency grows linearly, so the budget is a product decision as much as a technical one.
+
+Providing more context (open tabs, dependency files) improves completion quality but adds tokens and increases latency. The gain per extra token falls off quickly while prefill time grows linearly; GitHub's own 2023 write-up shows how much a small, well-chosen prompt can do (about 6,000 characters, with neighboring tabs adding 5% relative acceptance). The context budget is a product decision, not just a technical one.
+
+**Q: Should a coding assistant act autonomously or propose changes for approval?**
+**Short:** Propose, show the diff and require approval for anything touching business logic; reserve full autonomy for low-risk work like tests, boilerplate and docs.
+
+Unlike Devin, which tries to complete engineering tasks fully autonomously, a coding assistant should work in tight collaboration: propose changes, show the diff, require approval, apply. This human-in-the-loop design sacrifices some autonomy for safety and trust. Most enterprise teams prefer assisted autonomy over full autonomy.
+
+**Q: How does an agent work on a file longer than its context window?**
+**Short:** Slide over the file in chunks with 20% overlap and carry a ~200-token state summary of symbols seen, variables changed and pending tasks.
+
+Use a sliding window with overlap: divide the file into chunks with 20% overlap between adjacent chunks (so that code at chunk boundaries appears in both chunks). The agent processes each chunk independently but maintains a persistent "state object" across chunks: a running summary of (1) functions and classes seen; (2) variables modified; (3) pending tasks. At each chunk, the state object is prepended to the context window as a compact summary (~200 tokens). This lets the agent stay coherent across a 100,000-token file using a 4,000-token window, at the cost of multiple LLM passes.
+
+**Q: How does tree-sitter AST chunking improve code retrieval over character chunking?**
+**Short:** Every chunk is a complete function, class or method, so embeddings represent coherent units instead of fragments cut mid-signature.
+
+Character-based chunking cuts at arbitrary positions: in the middle of a function, between a method signature and its body, or between a class definition and its methods. When these malformed chunks are embedded and retrieved, the embedding model cannot produce a meaningful representation of an incomplete fragment, which measurably reduces retrieval accuracy on code search; the size of the gap depends heavily on language, chunk size, and embedding model, so treat any single headline percentage with suspicion. Tree-sitter ensures every chunk is a syntactically complete unit (a function, a class, a method), which produces coherent embeddings and prevents meaningless fragments from being retrieved.
+
+**Q: How should you quote benchmark numbers when comparing autonomous and assisted coding agents?**
+**Short:** Quote the benchmark you ran, with its date; SWE-bench Verified is contaminated and OpenAI stopped reporting it in February 2026 in favour of SWE-bench Pro.
+
+Full-autonomy agents can complete multi-step engineering tasks without human checkpoints, but they still introduce subtle bugs that only surface at runtime, and headline benchmark numbers overstate real-world reliability. OpenAI stopped reporting SWE-bench Verified on 2026-02-23: frontier models can reproduce many gold patches from training data, and at least 59.4% of the hard tasks it audited had tests that reject correct fixes. It recommends SWE-bench Pro instead. Assisted generation (Copilot Chat, Cursor) shows the diff before applying changes and requires approval, so the change the human asked for is validated by the human. In production codebases, full autonomy fits low-risk tasks (writing tests for existing functions, boilerplate, documentation); assisted generation is required for changes to business logic, database schemas, or security-sensitive code.
+
+**Q: How do you implement "explain this code" across multiple files?**
+**Short:** Parse the function with tree-sitter, resolve each external symbol via LSP go-to-definition, and add dependency signatures, not bodies, to the context.
+
+When the user highlights a function and asks "explain this," the system: (1) extracts the function's AST using tree-sitter; (2) identifies all external symbols called within it (function calls, class references, globals); (3) resolves each symbol to its definition via LSP `textDocument/definition`; (4) retrieves the signatures (not full bodies) of all direct dependencies; (5) builds a context with the target function plus dependency signatures. This explains what `process_payment()` does even when it calls `stripe_client.charge()` from a third-party library, because the signature is included and the LLM understands the interface without the implementation.
+
+**Q: How would you adapt output for beginners versus experts, and can you detect the level automatically?**
+**Short:** Infer level from query vocabulary, the user's own code and acceptance patterns, store a per-user score, and vary comment density and verbosity.
+
+Auto-detect expertise from: (1) query vocabulary (beginners use natural-language descriptions; experts use terms like "O(n log n)" or "thread-safe"); (2) code in open tabs (comment density, naming, use of generators or decorators); (3) acceptance patterns (beginners accept longer, commented explanations; experts accept concise completions and edit them). Beginners get code with inline comments explaining each step; experts get idiomatic, concise code. Store a per-user expertise score (0-100) in the profile, updated with each interaction.
+
+**Q: How do you keep the assistant from suggesting deprecated APIs or insecure patterns?**
+**Short:** Run static analysis such as Semgrep on every generated block and block on a hit; add secure-coding guidelines to the prompt and filter training data.
+
+Three layers: (1) training-data exclusion of files that use deprecated APIs or insecure patterns (`eval()`, MD5, DES, `pickle.load` on untrusted input); (2) output post-processing with static analysis on every generated block (Semgrep, Bandit, SpotBugs): if a security rule fires, the suggestion is blocked and a warning is returned; (3) retrieval of an internal secure-coding guidelines knowledge base into the prompt so the model prefers secure alternatives. Layer (2) is mandatory; layers (1) and (3) improve proactive avoidance. Re-index after dependency upgrades, or the retrieval layer keeps feeding the old API back (Section 9).
+
+**Q: How would you build a feedback loop that improves the assistant from user corrections?**
+**Short:** Log accepted-then-edited completions as preference pairs, collect 50K or more, fine-tune the FIM model with DPO, and A/B test acceptance before rollout.
+
+(1) When a user accepts a completion and modifies it within 10 keystrokes, log `{original_completion, user_edit, context}`; (2) the edited version is the preferred one; (3) collect at least 50,000 such pairs before fine-tuning; (4) use DPO to fine-tune the FIM model: no reward model, lower cost than PPO-based RLHF; (5) A/B test acceptance of the tuned model against the base model on held-out users. Expect a 3-5 point acceptance gain per cycle with high-quality pairs. Only tenants that opted in contribute pairs, which keeps the "no training on user code" promise intact for everyone else.

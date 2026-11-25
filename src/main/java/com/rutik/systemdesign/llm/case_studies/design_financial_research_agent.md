@@ -73,10 +73,10 @@ Multi-doc queries (avg 10 docs):
   Tokens in LLM context:  200 chunks x 512 tokens = ~102,400 tokens raw
   After reranking top-40: ~20,000 tokens input to LLM
 
-LLM cost (GPT-5.4 pricing, July 2026: $2.50/1M input, $15/1M output):
-  Input:  50,000 x 20,000 x $0.0000025 = $2,500/day
-  Output: 50,000 x  2,000 x $0.0000150 = $1,500/day
-  Total LLM cost:                        $4,000/day
+LLM cost (gpt-6.2-sol, November 2026 list pricing: $2/1M input, $10/1M output):
+  Input:  50,000 x 20,000 x $0.000002 = $2,000/day
+  Output: 50,000 x  2,000 x $0.000010 = $1,000/day
+  Total LLM cost:                       $3,000/day
 
 XBRL lookup (PostgreSQL, fast path):
   Hits ~60% of queries for standard GAAP metrics
@@ -776,7 +776,7 @@ Context:
 {context}
 """
         response = await self._llm.chat.completions.create(
-            model="gpt-5.4",
+            model="gpt-6.2-sol",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.0,
@@ -881,7 +881,7 @@ class PrivilegeAwareAccessController:
 |----------|-------------|-------------|-----------|-------------|
 | GAAP metric source | XBRL from SEC EDGAR (authoritative) | LLM extraction from PDF | XBRL is machine-readable, exact, zero hallucination risk for standard concepts | XBRL coverage is ~80% of needed metrics; non-GAAP items still need LLM extraction |
 | Vector index isolation | Per-tenant Qdrant collection | Shared collection with metadata filter | Complete data isolation; no risk of filter bypass; simpler compliance story | Higher operational overhead; 50 collections vs 1 |
-| Long-context vs RAG for 10-K | RAG default; long-context on demand | Always use Gemini 3.1 Pro 1M context | RAG: $0.05/query (20K tokens), 8s latency; long-context: $0.30/query (150K tokens at $2/1M input), 45s latency — 6× cost difference | First-pass analysis can use long-context; follow-up queries use cached RAG chunks |
+| Long-context vs RAG for 10-K | RAG default; long-context on demand | Always send the full filing to a 1M-token-context model | RAG: ~$0.06/query (20K input tokens), 8s latency; long-context: ~$0.32/query (150K input tokens at $2/1M on gpt-6.2-sol), 45s latency, about 5x the cost | First-pass analysis can use long-context; follow-up queries use cached RAG chunks |
 | Extraction mode | [Structured JSON output](../inference_and_decoding/constrained_decoding_and_structured_outputs.md) (strict schema) | Free-form prose with embedded numbers | JSON schema forces the LLM to separate field names from values; citation verifier can match fields precisely | LLM occasionally refuses complex multi-metric extractions; requires fallback prompt |
 | XBRL-first query routing | Route to XBRL if query contains known GAAP concept | Always do vector retrieval first | XBRL lookup: 8ms, zero hallucination; vector retrieval: 800ms avg | If XBRL concept mapping is wrong, wrong data is returned silently; need concept normalization layer |
 | Chunk size for financial docs | 512 tokens with 64-token overlap, table-aware | Fixed 256 or 1024 tokens | Tables must not be split mid-row; 512 tokens fits most financial table rows in a single chunk | Overlap increases storage by ~12%; worth it for citation precision |
@@ -971,16 +971,12 @@ financial_query (root span)
 - Resolution: Identify root cause — usually a new filing format, a new XBRL concept mapping gap, or a prompt regression. Deploy fix, rerun golden dataset, re-enable delivery.
 
 **Runbook: XBRL_PARSE_ERROR**
-- Symptom: XBRL hit rate drops below 40%; `xbrl_lookup` spans show parse errors for recent filings.
-- Diagnosis: SEC occasionally changes iXBRL namespace versions. Check `XBRLFactExtractor` logs for namespace parsing failures.
-- Mitigation: Fall back to PDF-only extraction for affected filings. Increase citation verifier threshold logging.
-- Resolution: Update XBRL namespace mappings; reprocess affected filings.
+- Symptom: XBRL hit rate drops below 40%; `xbrl_lookup` spans show parse errors for recent filings. Diagnosis: SEC occasionally changes iXBRL namespace versions; check `XBRLFactExtractor` logs for namespace failures.
+- Mitigation: fall back to PDF-only extraction for affected filings. Resolution: update the namespace mappings and reprocess those filings.
 
 **Runbook: RETRIEVAL_LATENCY_SPIKE**
-- Symptom: `semantic_retrieval` span p99 > 5 s; Qdrant dashboard shows HNSW index degradation.
-- Diagnosis: Check collection size vs. shard configuration. Large document ingestion batches can cause HNSW rebuild contention.
-- Mitigation: Route read traffic to read replica. Throttle ingestion pipeline.
-- Resolution: Trigger Qdrant shard rebalance during off-peak. Tune `m` and `ef_construction` HNSW parameters for larger collection sizes.
+- Symptom: `semantic_retrieval` p99 > 5 s with HNSW degradation on the Qdrant dashboard, usually from large ingestion batches contending with index rebuilds. Mitigation: route reads to a replica and throttle ingestion.
+- Resolution: rebalance shards off-peak and retune HNSW `m` and `ef_construction` for the larger collection.
 
 **Runbook: MNPI_BOUNDARY_BREACH**
 - Symptom: Compliance alert fires; MNPI-tagged document chunk appears in an external-scope response.
@@ -1013,107 +1009,92 @@ After switching to a 1M-context model for full 10-K analysis (150K token input),
 
 ### Primary Bottleneck: LLM Context Cost
 
-The primary per-query cost driver is LLM input token volume. This scales with the number of documents retrieved and the quality of reranking (better reranking = fewer tokens needed at the same recall level).
+The per-query cost driver is LLM input volume, which scales with the documents retrieved and with
+reranking quality (better reranking means fewer tokens at the same recall).
 
 ```
-Daily LLM cost formula:
+daily_cost = Q x (T_in x P_in + T_out x P_out)
 
-  daily_cost = Q × (T_in × P_in + T_out × P_out)
+Baseline (gpt-6.2-sol, November 2026 list pricing):
+  Q = 50,000 queries/day
+  T_in  = 20,000 tokens (top-40 chunks x 512, minus overlap); P_in  = $2 / 1M
+  T_out =  2,000 tokens (structured JSON + memo);            P_out = $10 / 1M
+  Input:  50,000 x 20,000 x $0.000002 = $2,000/day
+  Output: 50,000 x  2,000 x $0.000010 = $1,000/day
+  Total: $3,000/day = $90,000/month
 
-  where:
-    Q      = queries per day
-    T_in   = avg input tokens per query
-    T_out  = avg output tokens per query
-    P_in   = price per token (input)
-    P_out  = price per token (output)
+XBRL fast path: 60% of queries skip ~5,000 input tokens of extraction
+  60% x 50,000 x 5,000 x $0.000002 = $300/day saved -> ~$2,700/day
 
-Current baseline (GPT-5.4, July 2026 pricing):
-  Q      = 50,000
-  T_in   = 20,000 tokens  (top-40 chunks × 512 tokens, minus overlap)
-  T_out  = 2,000 tokens   (structured JSON extraction + memo)
-  P_in   = $2.50 / 1M tokens = $0.0000025/token
-  P_out  = $15.00 / 1M tokens = $0.0000150/token
-
-  Input cost:   50,000 × 20,000 × $0.0000025 = $2,500/day
-  Output cost:  50,000 × 2,000  × $0.0000150 = $1,500/day
-  Total:                                        $4,000/day = $120,000/month
-
-XBRL fast-path savings:
-  60% of queries hit XBRL for primary metric → skip LLM extraction entirely for that metric
-  Estimated savings: 60% × 50,000 × 5,000 tokens avg saved × $0.0000025 = $375/day
-  Effective daily cost after XBRL: ~$3,625/day
-
-Revenue model sanity check:
-  Revenue: 5,000 users × $500/user/month = $2,500,000/month
-  LLM + infra cost: $120,000/month LLM + $45,000/month infra = $165,000/month
-  Gross margin: ($2.5M - $165K) / $2.5M = 93%
+Revenue sanity check: 5,000 users x $500/month = $2.5M/month
+  LLM $90K + infrastructure $45K = $135K/month -> gross margin ~95%
 ```
 
-### Scaling to 10× Query Volume
-
-At 500,000 queries/day (10× growth):
+### Scaling to 10x Query Volume
 
 ```
-Gross LLM cost: input $25,000/day + output $15,000/day = $40,000/day
-                minus XBRL fast path (−$3,750/day)      = $36,250/day
+At 500,000 queries/day: input $20,000 + output $10,000 - XBRL $3,000 = $27,000/day
 
-Optimization levers — applied IN SEQUENCE. The savings are NOT additive: each
-lever shrinks the base the next one acts on, so summing standalone estimates
-is the classic way to "prove" a negative cost.
+Levers applied IN SEQUENCE. Each shrinks the base the next acts on, so their
+standalone savings never add up; summing them is how people "prove" a negative cost.
+  1. Better reranking (top-40 -> top-20 via ColBERT on 80% of queries):
+     40% less input volume                                  $27,000 -> $19,000/day
+  2. Small model for single-ticker, single-metric queries (~40% of traffic):
+     gpt-6-luna at $0.10/$0.50, 5% of flagship rates        $19,000 -> $11,780/day
+  3. Prompt caching on the system prompt and filing headers (~20% of the
+     remaining input; a cache read assumed at 50% of a fresh token)
+                                                            $11,780 -> ~$11,100/day
 
-  1. Better reranking:  cut top-k from 40 chunks to 20 via a ColBERT reranker
-                        50% fewer input tokens on 80% of queries = 40% less
-                        input volume overall
-                        $36,250 → $26,250/day
-  2. Smaller model for simple queries: route single-ticker, single-metric
-                        queries to a mini tier ($0.75/1M in, $4.50/1M out —
-                        ~30% of flagship rates); ~40% of queries qualify
-                        $26,250 → $17,850/day
-  3. Prompt caching:    system prompt + filing headers repeat across queries;
-                        ~20% of the remaining input tokens are cacheable, and a
-                        cache read is assumed to cost 50% of a fresh input token
-                        $17,850 → $16,800/day
-
-Effective daily cost at 10×: ~$16,800/day — 4.6× the 1× cost for 10× the
-volume. Sub-linear, not negative: no stack of optimizations makes inference free.
+~$11,100/day at 10x volume is 4.1x the 1x cost: sub-linear, never negative.
 ```
 
-For GPU pool economics and hosted inference cost modeling, see `./cross_cutting/gpu_pool_economics.md`.
-For agent durability across long-running multi-document extraction jobs, see `./cross_cutting/agent_durability_patterns.md`.
+Self-hosting pays only once hosted spend clears the break-even in [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md);
+long multi-document extraction jobs checkpoint per document as in [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md).
 
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: Why should a financial AI system query XBRL before falling back to LLM extraction for GAAP metrics?**
+**Short:** XBRL gives exact, typed values for standard GAAP concepts in about 8ms, while LLM extraction from PDFs takes seconds and can misread rows or pick projections.
 XBRL is machine-readable, exact, and zero-hallucination-risk for the ~200 standard GAAP concepts that SEC requires companies to tag since 2009. LLM extraction of the same numbers from PDF text adds unnecessary risk: the model might misread a number, confuse adjacent rows in a table, or pick up a projected number rather than a reported one. The XBRL lookup takes 8ms and returns a typed float; LLM extraction takes 5-15s and requires citation verification afterward. XBRL-first is both faster and safer. Use LLM only for non-GAAP metrics, narrative explanation, and items that XBRL does not cover.
 
 **Q: How does the CitationVerifier prevent hallucinated numbers from reaching users?**
+**Short:** It extracts every number in the draft, matches each within 1% against XBRL facts or retrieved chunks, and blocks the whole response for human review if any fails.
 After the LLM produces a response, the verifier scans it for all numeric tokens using a regex that handles formatting variants (commas, currency symbols, magnitude suffixes). Each number is normalized to a float and compared against two sources: the XBRL fact store (sub-millisecond) and the retrieved source chunks (linear scan). If a number is within 1% of a value in either source, it is marked verified. Any number that cannot be matched is flagged as unverified, and the entire response is blocked from delivery — it enters a human review queue instead. This is a post-generation gate, not a hallucination prevention mechanism. Prevention happens through structured extraction prompts; the gate catches what slips through.
 
 **Q: Why is per-tenant Qdrant collection isolation non-negotiable for financial AI?**
+**Short:** A metadata filter is a software control that one bug can bypass; a per-tenant collection is a system boundary you can show an auditor holds no other firm's data.
 Financial firms operate under strict data segregation requirements. A private equity firm's deal flow documents, if retrievable by another firm due to a metadata filter bug, is a catastrophic compliance failure. Metadata filters in shared collections are a software control; per-collection isolation is a system boundary. In a SOC 2 audit, per-collection isolation is demonstrably stronger than a filter — you can show that firm A's collection literally does not contain firm B's data, versus asserting that a WHERE clause always runs correctly. Financial AI buyers require this assurance as a contract term.
 
 **Q: How does fiscal year misalignment break multi-company comparisons, and how do you fix it?**
+**Short:** Companies end fiscal years in different months, so "FY2023" can differ by up to 11 months; normalize every period to calendar quarters before comparing.
 Most US companies end their fiscal year December 31, but major exceptions include NVIDIA (January), Microsoft (June), and Apple (September). A naive query for "FY2023 gross margin" across these companies would include NVIDIA's FY2023 data (ending January 2023) alongside Microsoft's FY2023 data (ending June 2023) and Apple's FY2023 data (ending September 2023). These three "FY2023" figures end up to 8 months apart. The fix is calendar normalization: convert every fiscal quarter to a calendar quarter (CQ1-2024, CQ2-2024, etc.) using the company's known fiscal year end month, then align comparisons on calendar quarter. This is stored in a `FISCAL_CALENDARS` lookup table and applied in the `MultiDocumentOrchestrator` before assembling comparison tables.
 
 **Q: What makes PDF table extraction hard in financial documents, and why is pdfplumber better than PyPDF2 for this?**
+**Short:** Financial tables are visual layouts; PyPDF2 flattens columns into a stream, while pdfplumber's lattice and stream modes keep row and column structure.
 Financial PDFs contain tables as visual layouts (positioned text elements and drawn lines) rather than semantic table structures. PyPDF2 extracts text in reading order (left-to-right, top-to-bottom) which destroys column alignment: a 5-column income statement becomes a flat stream where column headers and values are interleaved with no structural signal. pdfplumber uses two strategies: lattice (detects table grid lines as drawn objects) and stream (infers columns from whitespace gaps between text runs). This preserves row/column relationships. The remaining challenge is rotated pages (landscape orientation for wide tables) — pdfplumber reads these as garbled single columns unless you apply a 90-degree page rotation before extraction.
 
-**Q: When is using Gemini 3.1 Pro with a 1M token context window worse than RAG for 10-K analysis?**
-Long-context is worse on two dimensions: cost ($0.30/query vs $0.05/query — 6× more expensive) and latency (45s vs 8s median). For most follow-up queries where the user is drilling into a specific section the system has already processed, RAG can reuse cached chunk embeddings and serve answers in 8s at a fraction of the cost. The optimal pattern is hybrid: use long-context for the first comprehensive analysis of a new filing to build a structured extraction cache, then serve follow-up queries from the RAG index. Long-context also has practical limits: LLMs exhibit ["lost in the middle"](../context_windows_and_long_context/context_windows_and_long_context.md) degradation for very long inputs — performance on questions about content in the middle of a 150K token document is measurably worse than on content near the beginning or end.
+**Q: When is a 1M-token context window worse than RAG for 10-K analysis?**
+**Short:** For follow-up queries: sending a 150K-token filing costs about 5x more and takes ~45 s versus ~8 s, and lost-in-the-middle effects hurt mid-document questions.
+Long-context is worse on two dimensions: cost (~$0.32/query for a 150K-token filing on gpt-6.2-sol versus ~$0.06 for a 20K-token RAG context, about 5x) and latency (45s vs 8s median). For most follow-up queries where the user is drilling into a section the system has already processed, RAG reuses cached chunk embeddings and answers in 8s at a fraction of the cost. The optimal pattern is hybrid: use long-context for the first comprehensive analysis of a new filing to build a structured extraction cache, then serve follow-ups from the RAG index. Long-context also has practical limits: models show ["lost in the middle"](../context_windows_and_long_context/context_windows_and_long_context.md) degradation on very long inputs, so questions about content in the middle of a 150K-token document are answered measurably worse than questions about its beginning or end.
 
 **Q: How do you measure citation accuracy in production, not just in offline eval?**
+**Short:** Automatically measure citation recall and hallucination rate on every response via the verifier, and citation precision by weekly analyst review of 200 responses.
 Three metrics: citation recall (what fraction of numeric claims in the response have a verified source?), citation precision (what fraction of the cited sources actually contain the claimed information on the stated page?), and hallucination rate (what fraction of complete responses contain at least one unverified number?). In production, recall and hallucination rate are measured automatically by the `CitationVerifier` for every response. Precision requires a sample-based human review process: a weekly sample of 200 responses is reviewed by a financial analyst who clicks through each citation to verify it points to the right page and table. Both metrics feed into the eval harness described in `./cross_cutting/llm_eval_harness_in_production.md`.
 
 **Q: What is MNPI and how does it change LLM query routing in a financial AI system?**
+**Short:** MNPI is material non-public information; chunks tagged MNPI at ingestion are filtered out of the context for any query whose output can leave the firm.
 Material Non-Public Information is information about a public company that is not yet publicly disclosed and that a reasonable investor would consider important to an investment decision. Examples: draft merger documents, pre-announcement earnings figures, unannounced major contracts. Trading on MNPI is illegal (insider trading laws). In a financial AI system, clients may upload MNPI documents (e.g., a deal room for an ongoing M&A transaction) for internal analysis. The system must ensure these documents never appear in the LLM context for any query whose output will leave the firm — external reports, client memos, public-facing content. The `PrivilegeAwareAccessController` enforces this by tagging each chunk with a sensitivity level at ingestion time and filtering MNPI chunks from context when `query_scope == "external"`. A breach triggers an immediate compliance incident with a 15-minute notification SLA.
 
 **Q: How does Hebbia's matrix UI change the interaction paradigm compared to chat-based financial AI?**
+**Short:** It turns due diligence into a grid job: documents as rows, extraction fields as columns, filled in parallel with a citation per cell, so gaps are visible at a glance.
 A chat interface assumes the user asks one question and gets one answer. For financial due diligence, the actual workflow is: given 200 documents and 15 extraction fields, produce a 200×15 table. Chat requires 3,000 sequential queries; Hebbia's matrix UI parallelizes them into a single job. The user defines the extraction schema (rows = documents, columns = fields like "revenue," "EBITDA margin," "key risk factors") and Hebbia fills in the grid asynchronously. This also changes how citations work: each cell in the matrix is individually cited, so a partner reviewing the output can click any cell to see the exact source paragraph. The matrix paradigm is also better for identifying exceptions — a cell that cannot be extracted is visually obvious in a grid, whereas in chat it would require re-asking each question to notice a gap.
 
 **Q: Why does financial AI command 10× the price of general-purpose AI assistants?**
+**Short:** Buyers pay for liability controls, proprietary financial data and workflow integration, not for the model: citation verification, audits and MNPI boundaries.
 Three reasons: liability, data, and workflow integration. Liability: if a financial AI hallucinates a number that ends up in an investment memo, the firm's compliance team, the regulators, and potentially the courts become involved. The buyer is paying for citation verification infrastructure, SOC 2 Type II audits, and MNPI boundary controls — not just the LLM. Data: financial AI vendors ingest and parse tens of thousands of SEC filings, broker research reports, and earnings transcripts that are not available to general LLMs. The proprietary structured XBRL index and the quality of PDF table extraction represent years of engineering. Workflow: the product must integrate into existing workflows — deal rooms, investment memoranda templates, Bloomberg Terminal adjacency — and the switching cost keeps customers locked in at enterprise contract terms ($50K-$500K/year per firm).
 
 **Q: How would you design the evaluation harness for a financial research agent to catch regressions before promotion?**
+**Short:** Gate every model or prompt change on a 500-pair golden set: citation recall, hallucination rate, XBRL hit rate and p50 latency must all hold before promotion.
 The golden dataset needs 500+ query+answer pairs with ground-truth citations — actual page numbers and table rows from real 10-K filings. Every candidate model or prompt change must pass four regression gates before promotion: (1) citation recall must not drop below 98.5% on the golden set, (2) hallucination rate must not exceed 1% on a held-out test set of ambiguous queries, (3) XBRL hit rate must not drop below 55% (a drop indicates XBRL routing logic regressed), (4) p50 latency must not exceed 35s. The eval harness runs automatically on every pull request and blocks merge if any gate fails. For deeper detail on the eval infrastructure, see `./cross_cutting/llm_eval_harness_in_production.md`.

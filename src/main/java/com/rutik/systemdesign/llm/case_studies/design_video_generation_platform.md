@@ -6,7 +6,7 @@
 
 **Key insight for this design**: Video generation is a compute-density problem masquerading as an AI problem. The model quality improvements matter, but the platform's commercial viability depends on reducing cost-per-second-of-video: through better GPU scheduling, speculative generation pipelines, output caching for similar prompts, and tiered quality offerings (draft in 2 minutes, HD in 15 minutes). Unlike LLM inference — which is a continuous stream of small batched requests — video generation is a batch-of-one job that monopolizes 8 H100s for 3 minutes straight. Every queue, scheduler, and cost model must be designed around this unit.
 
-Real systems: OpenAI Sora, Google Veo 2/3, Runway Gen-3, Pika Labs, Luma Dream Machine, Kling (Kuaishou), Hailuo (MiniMax).
+Real systems: Google Veo 2/3, OpenAI Sora (its Videos API and `sora-2` API models shut down 2026-09-24), Runway Gen-3, Pika Labs, Luma Dream Machine, Kling (Kuaishou), Hailuo (MiniMax).
 
 ---
 
@@ -595,7 +595,7 @@ Content safety runs in two stages to balance cost and coverage. Pre-generation c
 ```python
 from __future__ import annotations
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -604,123 +604,69 @@ class SafetyDecision(Enum):
     APPROVED = "approved"
     FLAGGED_NSFW = "flagged_nsfw"
     FLAGGED_DEEPFAKE = "flagged_deepfake"
-    FLAGGED_COPYRIGHT = "flagged_copyright"
     NEEDS_HUMAN_REVIEW = "needs_human_review"
 
 
 @dataclass
 class SafetyResult:
     decision: SafetyDecision
-    nsfw_score: float            # 0.0 to 1.0; threshold 0.70 → flag
-    face_detected: bool
-    recognized_face_name: Optional[str]  # None if no known face detected
-    deepfake_score: float        # 0.0 to 1.0; threshold 0.80 → flag
-    flagged_frames: list[int]    # frame indices that triggered flags
+    nsfw_score: float = 0.0              # threshold 0.70
+    deepfake_score: float = 0.0          # threshold 0.80
+    recognized_face_name: Optional[str] = None
+    flagged_frames: list[int] = field(default_factory=list)
 
 
 class VideoSafetyScorer:
-    """
-    Two-stage content safety:
-    Stage 1 (pre-generation, CPU, < 50ms): text NSFW classifier + celebrity name detection.
-    Stage 2 (post-generation, GPU, ~3s per video): per-frame NSFW + deepfake detection.
+    """Stage 1 (pre-generation, CPU, < 50 ms): text NSFW + celebrity-name check, before
+    any GPU is allocated. Stage 2 (post-generation, ~3 s/video): every 4th frame gets
+    NSFW scoring and face identity; a recognized face (ArcFace cosine > 0.85) that does
+    NOT match the user's authorized reference is a potential deepfake."""
 
-    Deepfake logic: if face recognized (ArcFace cosine similarity > 0.85)
-    AND face not in user's authorized reference image → flag as potential deepfake.
-    """
-
-    NSFW_THRESHOLD = 0.70
-    DEEPFAKE_THRESHOLD = 0.80
-    FACE_SIMILARITY_THRESHOLD = 0.85
+    NSFW, DEEPFAKE, FACE_MATCH = 0.70, 0.80, 0.85
 
     def classify_prompt(self, prompt: str) -> SafetyResult:
-        """Stage 1: text-only check before GPU allocation."""
-        nsfw_score = self._text_nsfw_classifier(prompt)
-        recognized = self._detect_celebrity_names(prompt)
-        if nsfw_score >= self.NSFW_THRESHOLD:
-            return SafetyResult(
-                decision=SafetyDecision.FLAGGED_NSFW,
-                nsfw_score=nsfw_score,
-                face_detected=False,
-                recognized_face_name=None,
-                deepfake_score=0.0,
-                flagged_frames=[],
-            )
-        if recognized:
-            return SafetyResult(
-                decision=SafetyDecision.NEEDS_HUMAN_REVIEW,
-                nsfw_score=nsfw_score,
-                face_detected=True,
-                recognized_face_name=recognized,
-                deepfake_score=0.0,
-                flagged_frames=[],
-            )
-        return SafetyResult(SafetyDecision.APPROVED, nsfw_score, False, None, 0.0, [])
+        nsfw = self._text_nsfw(prompt)
+        if nsfw >= self.NSFW:
+            return SafetyResult(SafetyDecision.FLAGGED_NSFW, nsfw)
+        if (name := self._celebrity_in(prompt)):
+            return SafetyResult(SafetyDecision.NEEDS_HUMAN_REVIEW, nsfw, recognized_face_name=name)
+        return SafetyResult(SafetyDecision.APPROVED, nsfw)
 
-    def classify_video(
-        self,
-        frames: list[np.ndarray],
-        reference_face_embedding: Optional[np.ndarray] = None,
-    ) -> SafetyResult:
-        """Stage 2: frame-level NSFW + deepfake scan on generated output."""
-        flagged_frames: list[int] = []
-        max_nsfw = 0.0
-        max_deepfake = 0.0
-        face_name: Optional[str] = None
+    def classify_video(self, frames: list[np.ndarray],
+                       authorized_face: Optional[np.ndarray] = None) -> SafetyResult:
+        res = SafetyResult(SafetyDecision.APPROVED)
+        for idx in range(0, len(frames), 4):      # 240 frames at 24 fps -> 60 checks
+            nsfw = self._frame_nsfw(frames[idx])
+            res.nsfw_score = max(res.nsfw_score, nsfw)
+            if nsfw >= self.NSFW:
+                res.flagged_frames.append(idx)
+            emb = self._face_embedding(frames[idx])
+            if emb is None:
+                continue
+            name, sim = self._identify(emb)
+            authorized = authorized_face is not None and _cos(emb, authorized_face) >= self.FACE_MATCH
+            if name and sim >= self.FACE_MATCH and not authorized:
+                res.deepfake_score, res.recognized_face_name = max(res.deepfake_score, sim), name
+                if sim >= self.DEEPFAKE:
+                    res.flagged_frames.append(idx)
+        if res.nsfw_score >= self.NSFW:
+            res.decision = SafetyDecision.FLAGGED_NSFW
+        elif res.deepfake_score >= self.DEEPFAKE:
+            res.decision = SafetyDecision.FLAGGED_DEEPFAKE
+        res.flagged_frames = sorted(set(res.flagged_frames))
+        return res
 
-        # Sample every 4th frame for efficiency (10s @ 24fps = 240 frames → 60 checks)
-        sampled = list(range(0, len(frames), 4))
-        for idx in sampled:
-            frame = frames[idx]
+    # Model hooks: DistilBERT text NSFW, NER + celebrity list, ResNet-50 frame NSFW,
+    # RetinaFace + ArcFace embeddings, FAISS search over the celebrity embedding index.
+    def _text_nsfw(self, prompt: str) -> float: raise NotImplementedError
+    def _celebrity_in(self, prompt: str) -> Optional[str]: raise NotImplementedError
+    def _frame_nsfw(self, frame: np.ndarray) -> float: raise NotImplementedError
+    def _face_embedding(self, frame: np.ndarray) -> Optional[np.ndarray]: raise NotImplementedError
+    def _identify(self, emb: np.ndarray) -> tuple[Optional[str], float]: raise NotImplementedError
 
-            # NSFW frame classification
-            nsfw = self._frame_nsfw_classifier(frame)
-            max_nsfw = max(max_nsfw, nsfw)
-            if nsfw >= self.NSFW_THRESHOLD:
-                flagged_frames.append(idx)
 
-            # Deepfake detection: face detection + identity recognition
-            face_emb = self._extract_face_embedding(frame)
-            if face_emb is not None:
-                name, similarity = self._identify_face(face_emb)
-                if (similarity >= self.FACE_SIMILARITY_THRESHOLD
-                        and name is not None):
-                    # Known face detected; check if user authorized this reference
-                    if (reference_face_embedding is None
-                            or self._cosine_similarity(face_emb, reference_face_embedding)
-                            < self.FACE_SIMILARITY_THRESHOLD):
-                        deepfake_score = similarity
-                        max_deepfake = max(max_deepfake, deepfake_score)
-                        face_name = name
-                        if deepfake_score >= self.DEEPFAKE_THRESHOLD:
-                            flagged_frames.append(idx)
-
-        decision = SafetyDecision.APPROVED
-        if max_nsfw >= self.NSFW_THRESHOLD:
-            decision = SafetyDecision.FLAGGED_NSFW
-        elif max_deepfake >= self.DEEPFAKE_THRESHOLD:
-            decision = SafetyDecision.FLAGGED_DEEPFAKE
-
-        return SafetyResult(
-            decision=decision,
-            nsfw_score=max_nsfw,
-            face_detected=face_name is not None,
-            recognized_face_name=face_name,
-            deepfake_score=max_deepfake,
-            flagged_frames=list(set(flagged_frames)),
-        )
-
-    def _text_nsfw_classifier(self, prompt: str) -> float:
-        raise NotImplementedError  # DistilBERT-based text NSFW classifier
-    def _detect_celebrity_names(self, prompt: str) -> Optional[str]:
-        raise NotImplementedError  # NER + celebrity allowlist lookup
-    def _frame_nsfw_classifier(self, frame: np.ndarray) -> float:
-        raise NotImplementedError  # ResNet-50 NSFW binary classifier
-    def _extract_face_embedding(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        raise NotImplementedError  # RetinaFace detect → ArcFace embed
-    def _identify_face(self, emb: np.ndarray) -> tuple[Optional[str], float]:
-        raise NotImplementedError  # FAISS search over celebrity embedding index
-    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
-        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 ```
 
 See also: [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for adversarial prompt testing methodology and jailbreak classification datasets used to evaluate the pre-generation classifier.
@@ -731,98 +677,54 @@ Because generation takes 3-15 minutes, polling alone is insufficient UX. The pla
 
 ```python
 from __future__ import annotations
-import httpx
+import asyncio
+import hashlib
+import hmac
 import json
 import time
-import asyncio
-from dataclasses import dataclass, asdict
 from typing import Optional
+import httpx
 
 
-@dataclass
 class VideoJobNotifier:
-    """
-    Dual delivery: webhook HTTP POST + SSE progress stream.
-    Webhook: fire-and-forget with 3 retries (1s, 4s, 16s exponential backoff).
-    SSE: streams step-level progress events during generation; final event
-         carries pre-signed URL valid 24 hours.
-    """
+    """Webhook (HMAC-signed POST, retries at 1 s, 4 s, 16 s) plus SSE progress events at
+    steps 1, 10, 25, 40, 50; the final event carries a pre-signed URL valid 24 hours."""
 
-    async def send_progress(
-        self,
-        sse_connection_id: Optional[str],
-        job_id: str,
-        step: int,
-        total_steps: int,
-        preview_frame_url: Optional[str] = None,
-    ) -> None:
-        """Publish SSE progress event. Sent at step 1, 10, 25, 40, 50."""
-        if sse_connection_id is None:
-            return
-        event = {
-            "type": "progress",
-            "job_id": job_id,
-            "step": step,
-            "total_steps": total_steps,
-            "progress_pct": round(step / total_steps * 100, 1),
-            "preview_frame_url": preview_frame_url,
-            "timestamp": time.time(),
-        }
-        await self._publish_sse(sse_connection_id, event)
+    def __init__(self, sse_bus, tenant_secret: bytes) -> None:
+        self._bus, self._secret = sse_bus, tenant_secret      # Redis pub/sub behind the SSE gateway
 
-    async def send_completion(self, job: "CompletedVideoJob") -> None:
-        """Send completion notification via both webhook and SSE."""
-        payload = {
-            "type": "completed",
-            "job_id": job.job_id,
-            "tier": job.tier.value,
-            "s3_uri": job.s3_uri,
-            "presigned_url": job.presigned_url,
-            "presigned_url_expires_at": time.time() + 86400,  # 24h
-            "completed_at": job.completed_at,
-        }
+    async def progress(self, conn_id: Optional[str], job_id: str, step: int, total: int,
+                       preview_url: Optional[str] = None) -> None:
+        if conn_id:
+            await self._bus.publish(conn_id, {"type": "progress", "job_id": job_id, "step": step,
+                                              "progress_pct": round(step / total * 100, 1),
+                                              "preview_frame_url": preview_url, "ts": time.time()})
+
+    async def finish(self, job: "VideoJob", reason: Optional[str] = None) -> None:
+        payload = ({"type": "failed", "job_id": job.job_id, "reason": reason} if reason else
+                   {"type": "completed", "job_id": job.job_id, "presigned_url": job.presigned_url,
+                    "presigned_url_expires_at": time.time() + 86400})
         tasks = []
         if job.webhook_url:
-            tasks.append(self._send_webhook(job.webhook_url, payload))
+            tasks.append(self._webhook(job.webhook_url, payload))
         if job.sse_connection_id:
-            tasks.append(self._publish_sse(job.sse_connection_id, payload))
-        await asyncio.gather(*tasks, return_exceptions=True)
+            tasks.append(self._bus.publish(job.sse_connection_id, payload))
+        await asyncio.gather(*tasks, return_exceptions=True)   # one channel failing never blocks the other
 
-    async def send_failure(self, job: "CompletedVideoJob", reason: str) -> None:
-        payload = {
-            "type": "failed",
-            "job_id": job.job_id,
-            "reason": reason,
-            "timestamp": time.time(),
-        }
-        tasks = []
-        if job.webhook_url:
-            tasks.append(self._send_webhook(job.webhook_url, payload))
-        if job.sse_connection_id:
-            tasks.append(self._publish_sse(job.sse_connection_id, payload))
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _send_webhook(self, url: str, payload: dict) -> None:
-        """Exponential backoff: 1s → 4s → 16s. 3 attempts total."""
-        for attempt, delay in enumerate([0, 1, 4, 16]):
-            await asyncio.sleep(delay)
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.post(url, json=payload,
-                        headers={"Content-Type": "application/json",
-                                 "X-Vgen-Signature": self._sign(payload)})
-                    if response.status_code < 500:
-                        return   # 2xx or 4xx (don't retry client errors)
-            except (httpx.TimeoutException, httpx.ConnectError):
-                if attempt == 3:
-                    # Log failed delivery; user must poll status endpoint
+    async def _webhook(self, url: str, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        sig = hmac.new(self._secret, body, hashlib.sha256).hexdigest()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for delay in (0, 1, 4, 16):
+                await asyncio.sleep(delay)
+                try:
+                    resp = await client.post(url, content=body, headers={
+                        "Content-Type": "application/json", "X-Vgen-Signature": sig})
+                    if resp.status_code < 500:
+                        return            # 2xx done; 4xx is the caller's bug, never retry it
+                except (httpx.TimeoutException, httpx.ConnectError):
                     pass
-
-    async def _publish_sse(self, connection_id: str, event: dict) -> None:
-        raise NotImplementedError  # Publish to Redis pub/sub channel for SSE gateway
-
-    def _sign(self, payload: dict) -> str:
-        raise NotImplementedError  # HMAC-SHA256 of JSON payload with tenant secret
+        # all attempts failed: the client falls back to polling GET /v1/videos/{job_id}
 ```
 
 SSE preview frames: at denoising step 25 (halfway through), the partially denoised latent is decoded to a low-resolution preview frame (128x72 for 1080p jobs) and uploaded to S3. This preview is included in the step-25 SSE event, giving users visual feedback that generation is proceeding correctly, which is the single cheapest way to suppress "is it actually running?" support tickets on a multi-minute job. (Any specific percentage reduction you see quoted for this is a vendor-internal figure that has never been published; measure it on your own ticket volume.)
@@ -831,7 +733,7 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE co
 
 ---
 
-## 5. Design Decisions and Tradeoffs
+## 5. Design Decisions & Tradeoffs
 
 | Decision | Chosen Approach | Alternative Considered | Rationale |
 |----------|----------------|------------------------|-----------|
@@ -857,7 +759,7 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE co
 
 ## 6. Real-World Implementations
 
-**OpenAI Sora** (demo Feb 2024, first release Dec 2024; Sora 2 since late 2025): Uses a DiT architecture where video is represented as "spacetime patches" — the video equivalent of image patches in Vision Transformers. Each patch spans multiple frames, forcing the model to learn temporal structure directly in its attention layers. Sora 2 **is** available in the OpenAI API as `sora-2` and `sora-2-pro`, billed per second of generated video ($0.10/s and $0.30/s respectively) at 1280x720 landscape or 720x1280 portrait, and it generates **synchronized audio** with the video — the "ChatGPT-only, silent video" description of the original Sora is no longer accurate. Consumer access remains bundled with ChatGPT subscriptions. Training compute for the original model was never disclosed; the widely repeated "10,000 H100s for months" figure is an outside estimate, not an OpenAI statement.
+**OpenAI Sora** (demo Feb 2024, first release Dec 2024; Sora 2 late 2025; API shut down 2026-09-24): Uses a DiT architecture where video is represented as "spacetime patches" — the video equivalent of image patches in Vision Transformers. Each patch spans multiple frames, forcing the model to learn temporal structure directly in its attention layers. Sora 2 shipped in the OpenAI API as `sora-2` and `sora-2-pro`, billed per second of generated video ($0.10/s and $0.30/s) with **synchronized audio**. OpenAI then shut down the Videos API and every `sora-2` / `sora-2-pro` model on **2026-09-24**, with no one-to-one replacement listed on its deprecations page (notice given 2026-03-24). Any product built on that endpoint had six months to move to Veo, Runway, Kling or a self-hosted model, which is the strongest argument in this market for keeping the generation backend behind your own provider abstraction. Training compute for the original model was never disclosed; the widely repeated "10,000 H100s for months" figure is an outside estimate, not an OpenAI statement.
 
 **Google Veo 2/3** (2024-2025): Veo 2 shipped through consumer surfaces and Vertex AI (enterprise). Veo 3, announced at Google I/O in May 2025, was the first major commercial model to generate video and synchronized audio together in a single pass. Google's structural training-data advantage is its own licensed video library, which no competitor can match; published corpus sizes for it do not exist, so no figure is given here. Vertex AI bills Veo per second of generated video, with separate rates per model variant and for audio-on versus video-only — the rates change often enough that a number written down in a case study will be wrong by the time it is read; check the Vertex AI pricing page. Veo 3's photorealism drove a wave of deepfake incidents through 2025 and sharpened regulatory attention on synthetic-media labelling.
 
@@ -871,7 +773,7 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE co
 
 ---
 
-## 7. Technologies and Tools
+## 7. Technologies & Tools
 
 ### Diffusion Model Architectures
 
@@ -913,54 +815,29 @@ Daily automated quality check runs at 02:00 UTC on a fixed benchmark set of 20 p
 
 ```python
 from dataclasses import dataclass
+from statistics import mean
+
+# Targets: FVD < 100 (lower is better), mean SSIM > 0.85, latency < 900 s for 1080p 10 s.
+# Alerts: FVD regression > 10%, SSIM drop > 0.03, latency spike > 20%.
 
 
 @dataclass
 class VideoEvalResult:
     prompt_id: str
-    model_version: str
-    fvd_score: float          # Frechet Video Distance; lower is better, target < 100
-    fid_score: float          # Frechet Inception Distance; target < 50
-    mean_ssim: float          # temporal consistency; target > 0.85
-    human_preference_score: float  # 1.0-10.0 scale; target > 7.5
-    generation_latency_sec: float  # wall-clock; target < 900s for 1080p 10s
-    regression_pct: float     # vs. baseline; positive = degradation
+    fvd: float
+    mean_ssim: float
+    latency_sec: float
+    fvd_regression_pct: float     # positive = degradation vs. baseline
 
 
-def run_daily_eval(model_version: str, benchmark_prompts: list[dict]) -> list[VideoEvalResult]:
-    """
-    Run each benchmark prompt 5 times; compute FVD, FID, SSIM metrics.
-    Alert on: FVD regression > 10%, mean_ssim drop > 0.03, latency spike > 20%.
-    See: ./cross_cutting/llm_eval_harness_in_production.md for eval harness setup.
-    """
-    results = []
-    for prompt in benchmark_prompts:
-        fvd_scores, ssim_scores, latencies = [], [], []
-        for _ in range(5):
-            output = _generate_video(model_version, prompt["text"], prompt["config"])
-            fvd_scores.append(_compute_fvd(output["frames"], prompt["reference_frames"]))
-            ssim_scores.append(_compute_mean_ssim(output["frames"]))
-            latencies.append(output["latency_sec"])
-        avg_fvd = sum(fvd_scores) / len(fvd_scores)
-        regression = (avg_fvd - prompt["baseline_fvd"]) / prompt["baseline_fvd"] * 100
-        results.append(VideoEvalResult(
-            prompt_id=prompt["id"], model_version=model_version,
-            fvd_score=avg_fvd, fid_score=_compute_fid(output["frames"]),
-            mean_ssim=sum(ssim_scores) / len(ssim_scores),
-            human_preference_score=0.0,
-            generation_latency_sec=sum(latencies) / len(latencies),
-            regression_pct=regression,
-        ))
-        if regression > 10.0:
-            _fire_alert(f"FVD regression {regression:.1f}% on {prompt['id']}")
-    return results
-
-
-def _generate_video(model: str, prompt: str, config: dict) -> dict: raise NotImplementedError
-def _compute_fvd(generated: list, reference: list) -> float: raise NotImplementedError
-def _compute_fid(frames: list) -> float: raise NotImplementedError
-def _compute_mean_ssim(frames: list) -> float: raise NotImplementedError
-def _fire_alert(msg: str) -> None: raise NotImplementedError
+def eval_prompt(model_version: str, prompt: dict, runs: int = 5) -> VideoEvalResult:
+    outs = [generate_video(model_version, prompt["text"], prompt["config"]) for _ in range(runs)]
+    fvd = mean(compute_fvd(o["frames"], prompt["reference_frames"]) for o in outs)
+    ssim = mean(compute_mean_ssim(o["frames"]) for o in outs)
+    regression = (fvd - prompt["baseline_fvd"]) / prompt["baseline_fvd"] * 100
+    if regression > 10.0 or ssim < prompt["baseline_ssim"] - 0.03:
+        fire_alert(f"{prompt['id']}: FVD +{regression:.1f}%, SSIM {ssim:.3f}")
+    return VideoEvalResult(prompt["id"], fvd, ssim, mean(o["latency_sec"] for o in outs), regression)
 ```
 
 See also: [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for golden dataset management, regression gating CI/CD integration, and LLM-as-judge rubric for evaluating video prompt adherence.
@@ -983,8 +860,8 @@ Trace: video_generation_job (trace_id: vid_abc123)
   |
   +-- Span: dit_inference               (180,000 ms for 1080p 10s)
   |     attrs:
-  |       gen_ai.system = "video_dit"
-  |       gen_ai.request.model = "sora-v2-internal"
+  |       gen_ai.provider.name = "self-hosted"   (replaced gen_ai.system)
+  |       gen_ai.request.model = "video-dit-v2-internal"
   |       vgen.resolution = "1080p"
   |       vgen.duration_sec = 10
   |       vgen.num_steps = 50
@@ -1049,7 +926,7 @@ Resolution: (1) Drain affected nodes and replace with healthy instances. (2) Imp
 
 ---
 
-## 9. Common Pitfalls and War Stories
+## 9. Common Pitfalls & War Stories
 
 The incidents below mix one real, publicly reported phenomenon (synthetic-video virality after
 Veo 3) with **illustrative composites** for the operational failures. Where a company is named,
@@ -1167,36 +1044,47 @@ Scale headroom (1.5x for 6-month growth):
 ## 11. Interview Discussion Points
 
 **Q: Why can video generation not be batched across jobs the way LLM inference batches requests?**
+**Short:** Each job's video latent occupies 20-70 GB of HBM for all 50 denoising steps, so one 1080p job fills a GPU and there is no spare memory to share across requests.
 Video generation cannot batch across jobs because each job's intermediate latent tensor — the entire video represented as a 4D tensor of shape (16, F, H, W) across 50 denoising steps — occupies 20-70 GB of HBM depending on resolution and duration. A 1080p 10-second video latent at 24 fps requires approximately 70 GB of HBM just for the latent computation, which is the full capacity of one H100. LLM inference batches by interleaving KV cache pages across sequences in a shared pool; video generation cannot share this pool because each job's latent tensors are structurally incompatible (different spatial and temporal dimensions). The practical implication: GPU utilization is hard-capped by the number of active pods, not by batching efficiency as in LLM serving. Improving utilization requires increasing throughput within each job (faster denoising, fewer steps) rather than packing more jobs per GPU.
 
 **Q: How does temporal consistency get enforced at the model architecture level in DiT?**
+**Short:** 3D causal temporal attention lets each frame's tokens attend to the same positions in the preceding frames during every denoising step, so frames are denoised jointly.
 Temporal consistency in DiT models is enforced through 3D causal temporal attention layers that attend across frames within each denoising step. Each spatial token in frame N attends to corresponding tokens in the k=4 preceding frames via a sliding causal window. This forces the model to denoise each frame conditioned on its spatial neighbors in time, creating natural coherence. UNet-based video models (AnimateDiff, SVD) add temporal attention as a separate module between spatial layers, resulting in weaker coupling. The architectural difference is significant: DiT's spacetime patches treat video as a unified spatiotemporal sequence, while UNet treats it as spatial frames with temporal bridges. For production systems, this means DiT models require less post-processing to achieve acceptable temporal consistency, reducing the retry rate (< 5% vs 10-15% for UNet at equivalent SSIM thresholds).
 
 **Q: Why is async job submission mandatory for video generation, not just preferred?**
+**Short:** Generation takes 3-15 minutes, longer than proxy, gateway and mobile connection timeouts, so jobs must return an ID immediately and deliver by webhook, SSE or polling.
 Three independent reasons make synchronous video generation impractical regardless of user preference. First, HTTP connections across proxies, mobile networks, and load balancers have default timeouts of 30-120 seconds — well below the 180-second minimum generation time for standard jobs; the connection would drop before the response is ready. Second, web servers and API gateways (nginx, Kong, AWS API Gateway) have per-connection thread/goroutine costs; under synchronous generation every queued job would hold a connection too, so the gateway would need to hold roughly 100,000 connections open for 3-15 minutes each — not the ~470 that are actually executing — which exhausts the connection pool of any standard gateway. Third, mobile clients and browsers aggressively suspend background network connections; a user who minimizes the browser tab or locks their phone mid-generation would receive no result. The async model (submit → job_id → webhook/SSE) is not a convenience optimization — it is the only architecture that works across the realistic client diversity of a consumer product.
 
 **Q: What is the economic challenge that makes video generation harder to monetize than LLM serving?**
+**Short:** LLM serving shares each GPU across hundreds of requests, while each video job monopolizes 8 GPUs for minutes, so cost per output stays high and utilization depends on queueing.
 LLM serving achieves high GPU utilization through continuous batching: hundreds of concurrent requests share KV cache pages on each GPU, achieving 65-85% HBM utilization with marginal cost near zero per additional token once the model is loaded. Video generation achieves 0% batching across jobs — each job monopolizes 8 GPUs for 3-15 minutes. The resulting unit economics: $1.00 GPU cost per standard 10-second video means the platform needs to charge at least $3-5/video to achieve 3-5x gross margin (vs LLM inference at $0.80/M tokens against $0.20 GPU cost). At $3-5/video, volume is limited (users generate far fewer videos than LLM queries), making fixed infrastructure costs harder to amortize. The only escape: either dramatically reduce per-job compute (faster models, quantization, fewer steps) or build into a subscription where the video feature drives retention for a broader product. This is why all major video generation platforms (Sora, Veo, Runway) are either subscription-bundled or enterprise-priced rather than offered purely on per-video pay-as-you-go.
 
 **Q: How do you detect deepfakes in your own generated content without creating a recursive safety arms race?**
+**Short:** Scope detection to identity misuse: detect faces, match them against a public-figure index, and flag any recognized face the user is not authorized to depict.
 The deepfake detection is scoped specifically to identity fraud — generating video of a real recognized person without their consent — rather than detecting synthetic video in general. The two-stage approach: (1) face detection via RetinaFace on sampled frames (every 4th frame); (2) if a face is detected, ArcFace embedding similarity against a celebrity/public figure index. If cosine similarity > 0.85 and the person was not referenced in an authorized reference image provided by the user, the job is flagged. This avoids the recursive problem (you do not need to detect that a video is synthetic — you need to detect that it contains a specific person's unauthorized likeness). The limitation: the celebrity index must be curated and updated; new public figures are not immediately covered. Practical guidance: pair identity detection with a robust pre-generation text classifier that catches celebrity name usage in prompts — blocking at text stage costs < 1% of the GPU cost of post-generation detection.
 
 **Q: Why does the CFG batching optimization save 30% latency rather than 50% (the theoretical maximum)?**
+**Short:** Running conditional and unconditional passes as one batch of 2 removes a pass, but higher memory-bandwidth demand and unbatched overheads cap the gain at about 27-30%.
 CFG batching stacks the conditional and unconditional forward passes on the batch dimension, running them as a single forward pass of batch size 2 instead of two sequential forward passes of batch size 1. The theoretical gain is 50% latency reduction. In practice, the gain is 27-30% for three reasons: (1) the doubled batch size increases memory bandwidth demand, causing the GPU to operate slightly below peak MFU (Model FLOP Utilization) due to HBM bandwidth saturation; (2) all-reduce communication overhead for tensor parallelism across 8 GPUs scales with batch size — doubled batch means slightly more data in the all-reduce; (3) the T5 text encoder and VAE decoder (which do not participate in CFG batching) contribute fixed overhead to the total job time, diluting the per-step savings. Practical guidance: CFG batching is the single highest-ROI inference optimization for video generation; implement it before any other decoding optimization.
 
 **Q: How do you prevent PREMIUM queue starvation from FREE tier volume?**
+**Short:** Dedicated premium GPU pools, strict premium-first drain order, and a breaker that pauses free-tier work when the premium queue passes 20 jobs.
 Three independent mechanisms guarantee PREMIUM SLA isolation: (1) dedicated GPU pod pools per tier — PREMIUM pods are never shared with STANDARD or FREE jobs; even if PREMIUM queue is empty, those pods idle rather than serving FREE jobs (protecting capacity for PREMIUM bursts); (2) scheduler drain order — the scheduler always checks PREMIUM before STANDARD before FREE, so a PREMIUM job that arrives while STANDARD jobs are running preempts the next STANDARD dispatch slot; (3) circuit breaker — if PREMIUM queue depth exceeds 20 jobs (well under a 2-minute backlog against 188 PREMIUM pods), the scheduler immediately pauses FREE tier processing and redirects all spare capacity to PREMIUM. The combination means a FREE tier volume spike — even 10x expected volume — cannot delay a PREMIUM job by more than 30 seconds.
 
 **Q: Why does DiT scale better than UNet for video generation at large model sizes?**
+**Short:** DiT follows transformer scaling laws with predictable gains from parameters, data and compute, while UNet skip connections create fixed bottlenecks that flatten gains at scale.
 DiT (Diffusion Transformer) applies the standard Transformer scaling laws: performance improves predictably with parameters, data, and compute following a power law relationship similar to language model scaling laws. UNet's hierarchical encoder-decoder structure with skip connections introduces architectural bottlenecks: the skip connections between encoder and decoder stages create fixed-width information highways that do not scale with parameter count. At > 1B parameters, UNet quality gains flatten while compute costs continue increasing. DiT eliminates skip connections entirely — video is processed as a flat sequence of spacetime patches through uniform Transformer layers. Empirically: OpenAI's Sora (DiT; parameter count never disclosed) produces qualitatively better output than Stable Video Diffusion (UNet, ~1.5B parameters) not primarily because of parameter count but because of architectural scalability. Practical guidance: for production video generation at quality competitive with Sora or Veo, DiT architecture is the correct choice; UNet is appropriate only for lower-compute or community fine-tuned use cases.
 
 **Q: What does FVD measure, and why is FID alone insufficient for video quality evaluation?**
+**Short:** FID scores frames independently and ignores motion, while FVD compares video-level features, so it catches flicker and incoherent motion that per-frame FID misses.
 FID (Frechet Inception Distance) measures the distributional distance between the feature embeddings of generated and real images using an Inception V3 network trained on ImageNet. For video, FID measures only per-frame quality — it is computed on a sample of individual frames and has no concept of temporal structure. Two models can achieve identical FID scores with completely different temporal coherence: one model might produce smooth, consistent motion; the other might generate each frame independently (flickering) but with identical per-frame quality distribution. FVD (Frechet Video Distance) addresses this by using a video-specific 3D convolutional network (I3D, trained on Kinetics-400) that captures both spatial and temporal features in its embeddings. The 3D feature space penalizes temporal inconsistency directly. In practice: track both FVD (temporal quality) and FID (spatial quality) in your eval pipeline; a model can have good FID but bad FVD if temporal attention is misconfigured, which corresponds exactly to the "visually sharp but flickering" failure mode users most frequently complain about.
 
 **Q: How do you handle a production model that generates temporally inconsistent outputs at the SSIM < 0.85 threshold?**
+**Short:** Retry with stronger temporal weighting first, then interpolate flagged frames, and in the rare remaining case return a truncated video with a full credit refund.
 The three-layer response in order of cost: (1) Retry with increased `temporal_weight` parameter (1.0 → 1.5 → 2.25) — forces stronger temporal attention in the DiT, resolving 85% of consistency failures with 1 retry at +$1.00 GPU cost; (2) Apply FILM frame interpolation post-processing to smooth transitions between flagged frame pairs — effective for low-frequency inconsistency (< 10% of frames flagged), adds 180ms per frame pair, no additional GPU job required; (3) If both fail (< 2% of jobs), return partial video (truncated at the last consistent frame) with user notification and full credit refund. The key operational insight: track `retry_count` in your job metrics. If retry_count > 0 exceeds 10% of jobs, it indicates a model regression or configuration issue — not normal variance. The retry mechanism is a safety valve, not a substitute for model quality.
 
 **Q: What is the ethical concern with prompt caching in video generation, and how do you resolve it?**
+**Short:** Two users with near-identical prompts would silently get the same video, so vary cached results per user, honor opt-outs, and disclose cache hits in the response.
 Prompt caching returns a previously generated video when a new prompt has cosine similarity > 0.97 with a prompt generated within the past hour. The ethical concern: two different users who independently submit nearly identical prompts receive the exact same video, without knowing this. This violates the implicit expectation that "my generated video is unique to me." The concern is strongest in creative contexts (users who are creating content for publication) and weakest in utility contexts (generating a stock-footage-style clip). Resolution approach: make caching opt-in for paid tiers (default off) and opt-out for free tier (default on, disclosed in terms). For opt-in caching, inject a per-user random seed component into the generation before the similarity check, ensuring even cached results are lightly varied. For opt-out caching, always generate fresh. Disclose clearly in the API response when a cached result is returned: `X-Vgen-Cached: true` header. The business case for caching is compelling — viral prompts (e.g., "a cat playing piano in the style of a 1920s silent film") can hit 10,000 requests in an hour; caching saves $10,000 in GPU cost per viral event.
 
 ---

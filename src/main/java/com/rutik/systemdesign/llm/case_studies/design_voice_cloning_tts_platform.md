@@ -360,170 +360,72 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class ConsentError(Exception):
+    pass
+
+
 @dataclass
 class EnrollmentResult:
     voice_id: str
-    quality_score: float        # cosine similarity of embedding vs reference, 0.0-1.0
-    enrollment_ms: float        # total wall-clock time for enrollment
+    quality_score: float        # embedding self-consistency vs a held-out segment, 0.0-1.0
+    enrollment_ms: float
     warning: str | None         # e.g. "Low recording quality (SNR 18 dB). Clone may be poor."
 
 
 class ConsentVerifier:
-    """
-    Verifies that requesting_user_id is authorized to use voice_id.
-    voice_id can be used only if:
-      (a) the consenting user IS the requesting user (own voice), OR
-      (b) the consenting user has explicitly granted access to requesting_user_id.
-    """
+    """A voice_id is usable only by its consenting owner or users the owner explicitly granted."""
 
     def __init__(self, redis: Any) -> None:
         self._redis = redis
 
     async def check(self, voice_id: str, requesting_user_id: str) -> bool:
-        record_raw = await self._redis.get(f"voice:{voice_id}:meta")
-        if record_raw is None:
-            return False
-        record = json.loads(record_raw)
-
-        consenter_user_id: str = record["consenter_user_id"]
-
-        # Case (a): own voice
-        if consenter_user_id == requesting_user_id:
-            return True
-
-        # Case (b): explicit grant
-        granted_users: list[str] = record.get("granted_users", [])
-        return requesting_user_id in granted_users
-
-    async def grant_access(
-        self, voice_id: str, owner_user_id: str, grantee_user_id: str
-    ) -> None:
-        """Voice owner can share their clone with another user_id (e.g., a team account)."""
-        record_raw = await self._redis.get(f"voice:{voice_id}:meta")
-        if record_raw is None:
-            raise ValueError(f"voice_id not found: {voice_id}")
-        record = json.loads(record_raw)
-        if record["consenter_user_id"] != owner_user_id:
-            raise PermissionError("Only the voice owner can grant access.")
-        granted = set(record.get("granted_users", []))
-        granted.add(grantee_user_id)
-        record["granted_users"] = list(granted)
-        await self._redis.set(f"voice:{voice_id}:meta", json.dumps(record))
+        raw = await self._redis.get(f"voice:{voice_id}:meta")
+        if raw is None:
+            return False                                   # unknown voice: deny
+        meta = json.loads(raw)
+        return requesting_user_id == meta["consenter_user_id"] or \
+            requesting_user_id in meta.get("granted_users", [])
 
 
 class VoiceEnrollment:
-    """
-    Full enrollment pipeline: consent → audio QC → speaker encoder → store → return voice_id.
-    Total pipeline target: < 8 s wall-clock.
-    Speaker encoder: ECAPA-TDNN, 45 MB weights, 1.8 s on CPU for 30-60 s audio.
-    """
+    """consent -> audio QC -> ECAPA-TDNN embedding (512-dim, ~1.8 s on CPU) -> store.
+    Target < 8 s end to end; the voice_id is usable the moment this returns."""
 
-    MIN_DURATION_S = 30.0
-    MAX_DURATION_S = 60.0
     MIN_SNR_DB = 20.0
 
-    def __init__(
-        self,
-        speaker_encoder: Any,          # ECAPA-TDNN wrapper
-        redis: Any,
-        s3: Any,
-        consent_token_verifier: Any,   # JWT verifier
-    ) -> None:
-        self._encoder = speaker_encoder
-        self._redis = redis
-        self._s3 = s3
-        self._consent_verifier = consent_token_verifier
+    def __init__(self, encoder: Any, redis: Any, s3: Any, jwt_verifier: Any) -> None:
+        self._encoder, self._redis, self._s3, self._jwt = encoder, redis, s3, jwt_verifier
 
-    async def upload_voice_sample(
-        self,
-        audio_bytes: bytes,
-        user_id: str,
-        consent_token: str,             # single-use JWT
-    ) -> EnrollmentResult:
-        """
-        Returns voice_id immediately after storing embedding.
-        The voice_id is usable for TTS generation within milliseconds of return.
-        """
-        import time as _time
-        t0 = _time.monotonic()
-
-        # Step 1: Validate consent token (< 50 ms)
-        # Single-use: Redis SETEX ensures each JWT can only be used once.
-        # Prevents replay attack: capture a consent token and reuse it to clone another session.
-        jti = await self._validate_and_consume_consent_token(consent_token, user_id)
-
-        # Step 2: Audio quality check (< 200 ms on CPU)
-        duration_s, snr_db = await self._check_audio_quality(audio_bytes)
-        warning: str | None = None
-        if snr_db < self.MIN_SNR_DB:
-            warning = f"Low recording quality (SNR {snr_db:.1f} dB). Clone may be poor."
-
-        # Step 3: Extract speaker embedding — ECAPA-TDNN (1.8 s on CPU)
-        # 512-dim float32 d-vector uniquely characterizes the speaker's voice
-        embedding: bytes = await self._encoder.extract_embedding(audio_bytes)
-
-        # Compute cosine similarity of embedding against itself as baseline
-        # (real quality check: compare against held-out segment of the same audio)
-        quality_score = await self._encoder.compute_self_consistency_score(audio_bytes)
-
-        # Step 4: Store embedding + consent metadata
+    async def upload_voice_sample(self, audio: bytes, user_id: str, consent_token: str) -> EnrollmentResult:
+        t0 = time.monotonic()
+        jti = await self._consume_consent(consent_token, user_id)       # < 50 ms
+        _duration_s, snr_db = await self._check_audio(audio)             # 30-60 s required
+        warning = f"Low recording quality (SNR {snr_db:.1f} dB). Clone may be poor." \
+            if snr_db < self.MIN_SNR_DB else None
+        embedding = await self._encoder.extract_embedding(audio)
+        quality = await self._encoder.compute_self_consistency_score(audio)
         voice_id = str(uuid.uuid4())
-        audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
-
-        meta = {
-            "consenter_user_id": user_id,
-            "timestamp_utc": time.time(),
-            "audio_sha256": audio_sha256,
-            "consent_jwt_jti": jti,
-            "granted_users": [],
-        }
-
-        # Redis: embedding for fast lookup during TTS; no TTL (user owns this voice)
-        await self._redis.set(f"voice:{voice_id}:embedding", embedding)
+        meta = {"consenter_user_id": user_id, "timestamp_utc": time.time(),
+                "audio_sha256": hashlib.sha256(audio).hexdigest(),     # dispute evidence
+                "consent_jwt_jti": jti, "granted_users": []}
+        await self._redis.set(f"voice:{voice_id}:embedding", embedding)  # no TTL: user owns it
         await self._redis.set(f"voice:{voice_id}:meta", json.dumps(meta))
+        await self._s3.put_object(Bucket="voice-samples",               # 90-day lifecycle rule
+                                  Key=f"{user_id}/{voice_id}/sample.wav", Body=audio)
+        return EnrollmentResult(voice_id, quality, (time.monotonic() - t0) * 1000, warning)
 
-        # S3: original audio for dispute resolution (90-day lifecycle rule on bucket)
-        await self._s3.put_object(
-            Bucket="voice-samples",
-            Key=f"{user_id}/{voice_id}/sample.wav",
-            Body=audio_bytes,
-        )
-
-        enrollment_ms = (_time.monotonic() - t0) * 1_000
-        return EnrollmentResult(
-            voice_id=voice_id,
-            quality_score=quality_score,
-            enrollment_ms=enrollment_ms,
-            warning=warning,
-        )
-
-    async def _validate_and_consume_consent_token(
-        self, token: str, user_id: str
-    ) -> str:
-        """
-        Verifies JWT signature and claims. Marks as used in Redis (single-use enforcement).
-        Raises ConsentError if token is invalid, expired, or already used.
-        """
-        claims = self._consent_verifier.verify(token)  # raises on invalid signature
+    async def _consume_consent(self, token: str, user_id: str) -> str:
+        claims = self._jwt.verify(token)                  # raises on bad signature or expiry
         if claims["sub"] != user_id:
-            raise ConsentError("Consent token user_id does not match authenticated user.")
-        jti: str = claims["jti"]
+            raise ConsentError("consent token does not belong to the authenticated user")
+        # Single use: SET NX with a 10-minute TTL. A captured token cannot be replayed
+        # to clone a voice from a second session.
+        if not await self._redis.set(f"consent_used:{claims['jti']}", "1", nx=True, ex=600):
+            raise ConsentError("consent token already used (replay attempt)")
+        return claims["jti"]
 
-        # Single-use: SET NX with 10-min TTL. If key already exists, token was already used.
-        already_used = not await self._redis.set(
-            f"consent_used:{jti}", "1", nx=True, ex=600
-        )
-        if already_used:
-            raise ConsentError("Consent token already used (replay attack attempt).")
-        return jti
-
-    async def _check_audio_quality(self, audio_bytes: bytes) -> tuple[float, float]:
-        """Returns (duration_seconds, snr_db). Raises AudioQualityError if outside bounds."""
-        raise NotImplementedError  # librosa.get_duration + SNR estimation
-
-
-class ConsentError(Exception):
-    pass
+    async def _check_audio(self, audio: bytes) -> tuple[float, float]:
+        raise NotImplementedError   # librosa duration + SNR estimate; raise outside 30-60 s
 ```
 
 ### 4.3 Audio Watermarking
@@ -787,72 +689,38 @@ Automated MOS proxy without human listeners: cosine similarity of speaker embedd
 
 ```python
 from __future__ import annotations
-import numpy as np
 from dataclasses import dataclass
+from typing import Any
+import numpy as np
 
 
 @dataclass
 class SimilarityReport:
-    cosine_similarity: float    # 0.0-1.0; target > 0.85 for high-quality clone
-    quality_tier: str           # "excellent" / "good" / "acceptable" / "poor"
+    cosine_similarity: float    # target > 0.85 for a high-quality clone
+    quality_tier: str
     recommendation: str
 
 
 class VoiceSimilarityEval:
-    """
-    Automated voice clone quality check using speaker embedding cosine similarity.
-    Replaces MOS (Mean Opinion Score, requires human listeners) for automated pipelines.
+    """MOS proxy without listeners: cosine similarity of ECAPA-TDNN speaker embeddings
+    (0.87% EER on VoxCeleb1-O, Desplanques et al., 2020). The similarity-to-MOS mapping
+    below is this platform's own calibration against a quarterly listening panel; no
+    vendor publishes one. Runs after every enrollment: < 0.70 warns, < 0.50 blocks."""
 
-    EqualErrorRate (EER) for speaker verification: ECAPA-TDNN reports 0.87% EER on the
-    VoxCeleb1-O test set (Desplanques et al., 2020), so a < 1.5% operating point is
-    comfortable. The mapping from cosine similarity to perceptual MOS below is this
-    platform's own calibration against its quarterly human listening panel; no TTS vendor
-    publishes such a mapping, so do not attribute these thresholds to one.
-    """
-
-    TIER_THRESHOLDS = [
-        (0.90, "excellent", "Clone is production-ready. MOS > 4.4 expected."),
-        (0.85, "good",      "Clone is suitable for most use cases. MOS > 4.2 expected."),
-        (0.70, "acceptable","Clone is usable but noticeable differences may exist."),
-        (0.00, "poor",      "Clone quality is low. Re-enroll with a cleaner 30-60 s recording."),
-    ]
+    TIERS = [(0.90, "excellent", "Production-ready; MOS > 4.4 expected."),
+             (0.85, "good", "Suitable for most uses; MOS > 4.2 expected."),
+             (0.70, "acceptable", "Usable, with noticeable differences."),
+             (0.00, "poor", "Re-enroll with a cleaner 30-60 s recording.")]
 
     def __init__(self, speaker_encoder: Any) -> None:
         self._encoder = speaker_encoder
 
-    async def score(
-        self, clone_audio: bytes, reference_audio: bytes
-    ) -> SimilarityReport:
-        """
-        Computes cosine similarity between speaker embeddings of clone output
-        and the original reference audio sample.
-
-        Called automatically after every enrollment. If score < 0.70, a warning
-        is returned to the user; enrollment is not blocked (user may still use the voice).
-        If score < 0.50, enrollment is blocked (recording quality too poor to be useful).
-        """
-        clone_emb: np.ndarray = await self._encoder.extract_embedding(clone_audio)
-        ref_emb: np.ndarray = await self._encoder.extract_embedding(reference_audio)
-
-        # L2-normalize embeddings before cosine similarity
-        clone_norm = clone_emb / (np.linalg.norm(clone_emb) + 1e-8)
-        ref_norm = ref_emb / (np.linalg.norm(ref_emb) + 1e-8)
-        similarity = float(np.dot(clone_norm, ref_norm))
-
-        # Determine quality tier
-        quality_tier = "poor"
-        recommendation = "Re-enroll with a cleaner recording."
-        for threshold, tier, rec in self.TIER_THRESHOLDS:
-            if similarity >= threshold:
-                quality_tier = tier
-                recommendation = rec
-                break
-
-        return SimilarityReport(
-            cosine_similarity=similarity,
-            quality_tier=quality_tier,
-            recommendation=recommendation,
-        )
+    async def score(self, clone_audio: bytes, reference_audio: bytes) -> SimilarityReport:
+        a = await self._encoder.extract_embedding(clone_audio)
+        b = await self._encoder.extract_embedding(reference_audio)
+        sim = float(np.dot(a / (np.linalg.norm(a) + 1e-8), b / (np.linalg.norm(b) + 1e-8)))
+        tier, rec = next((t, r) for th, t, r in self.TIERS if sim >= th)
+        return SimilarityReport(sim, tier, rec)
 ```
 
 ---
@@ -993,7 +861,7 @@ Trace: tts_synthesis_request (trace_id: f7e2...)
   +-- Span: tts.synthesize_chunk[0]           (173 ms)  <- TTFB measured here
   |     attrs: chunk_index=0, text="Hello, how are you today?",
   |            chars=26, audio_bytes=24576, synthesis_ms=173,
-  |            gen_ai.system="cartesia", voice_id=..., language="en"
+  |            gen_ai.provider.name="cartesia", voice_id=..., language="en"
   |
   +-- Span: tts.synthesize_chunk[1]           (210 ms)  [overlaps with playback of chunk 0]
   |     attrs: chunk_index=1, chars=18, audio_bytes=18432, synthesis_ms=210
@@ -1144,45 +1012,56 @@ S3 cost at 45 TB: 45 TB x $0.023/GB = $1,035/month (S3 Standard)
 ## 11. Interview Discussion Points
 
 **Q: Why does TTFB matter more than RTF (Real-Time Factor) for voice UX?**
+**Short:** Users perceive the silence before speech starts, not synthesis speed, so a system with 180 ms TTFB feels faster than one with a better RTF but 800 ms TTFB.
 
 TTFB is the time until the user hears the first sound; RTF is the ratio of synthesis time to audio duration. A user cannot perceive RTF directly — what they perceive is silence before speech begins. An RTF of 0.1 means 35 s of audio generates in 3.5 s, but if the system waits for all 3.5 s before streaming the first byte, the user hears 3.5 s of silence. That feels like a hung call. With sentence-level streaming, the first chunk (1-2 s of audio) starts playing at 180 ms, and subsequent chunks arrive during playback. RTF governs whether the synthesis can keep up with real-time playback (RTF < 1.0 required; < 0.3 gives comfortable headroom). TTFB governs whether the experience feels natural. A system with RTF 0.05 (very fast) but TTFB 800 ms will feel slower than a system with RTF 0.2 (slower) but TTFB 180 ms.
 
 **Q: How does sentence-level chunking affect the prosody vs latency tradeoff?**
+**Short:** Sentence chunks give the model a full thought for natural intonation at a modest TTFB cost, and passing the previous chunk's last 2 s as context smooths the joins.
 
 Sentence boundaries give the TTS model a natural prosodic unit to generate — it can predict appropriate intonation for a complete thought. Word-level chunking gives TTFB of 50-100 ms (a 5-character word synthesizes in ~30 ms) but the model cannot predict prosody across word boundaries, producing a robotic staccato effect (23% perceptible artifact rate in listening tests). Paragraph-level chunking produces natural prosody for the full paragraph but TTFB of 400-800 ms. Sentence-level is the Pareto-optimal point: 150-200 ms TTFB with natural prosody. The residual prosody issue at sentence boundaries — abrupt pitch or tempo change — is addressed by passing the last 2 s of the previous chunk as conditioning context to the next chunk's synthesis call.
 
 **Q: How does consent verification work for voice cloning, and what prevents abuse?**
+**Short:** Verified identity before a consent token, a single-use token that cannot be replayed, and an ownership check on every generation; social engineering still needs human review.
 
 Three layers: (1) Authentication: the user must be logged in with a verified email and phone number before receiving a consent token. (2) Single-use consent JWT: the token is invalidated in Redis on first use (NX SET), so capturing and replaying it is useless after the original user has enrolled. (3) Ownership enforcement at generation time: `ConsentVerifier.check(voice_id, requesting_user_id)` ensures that only the consenting user (or explicitly granted users) can generate audio using a voice. These layers prevent the most common attacks: unauthenticated enrollment (blocked by auth), replay attack on consent token (blocked by single-use Redis NX), and voice theft for generation (blocked by ownership check). What is not prevented: social engineering the legitimate user into enrolling someone else's voice. That requires human review workflows, which ElevenLabs added for Professional Voice Clones after the Biden incident.
 
 **Q: Why does Cartesia's SSM (Mamba) architecture achieve lower TTFB than transformer-based TTS?**
+**Short:** An SSM carries a fixed-size state instead of a growing KV cache, so per-token latency stays constant and streaming is predictable even for long outputs.
 
 Transformer TTS uses a KV-cache that grows linearly with output length: generating audio token N requires attending to all N-1 previous tokens, with KV-cache consuming O(N) memory and per-token latency increasing as O(N) or O(N log N). For a 15-second audio output (thousands of tokens), the per-token generation time increases noticeably toward the end of the sequence. Mamba (SSM) replaces the attention mechanism with a recurrent state machine of fixed size: each output token depends only on the current compressed state (typically 16 × d-model dimensions), not all previous tokens. Memory per step is O(1); per-step latency is constant throughout generation. This means the 1,000th audio token takes the same compute as the 1st — enabling predictable, constant-latency streaming. The tradeoff: SSMs sometimes have slightly lower quality on very long-range dependencies (rare in TTS, where context is primarily prosody within a sentence).
 
 **Q: How do you detect AI-generated audio? Watermarking vs acoustic fingerprinting — when to use each?**
+**Short:** Watermark audio at generation time to detect your own output later, and add C2PA signed manifests for attribution; fingerprinting only finds copies of known audio.
 
 Watermarking embeds a signal at generation time; detection later recovers it. It works if the watermark was embedded (platform-generated audio) and survives post-processing. Acoustic fingerprinting (Shazam-style) identifies audio by its unique acoustic signature — it works only if you have a copy of the original to match against. For platform-generated synthetic audio detection, watermarking is strictly superior: you can detect any generated audio without needing to store the original; the detection is cryptographic (tied to your platform key); and it works on never-before-seen audio. Fingerprinting only helps if you already have the audio (useful for DMCA matching, not for detecting unauthorized synthetic audio in the wild). In practice, platforms use both: watermarking for proactive detection and C2PA signed manifests for cryptographic attribution.
 
 **Q: What do the C2PA metadata requirements mean in practice for a TTS platform?**
+**Short:** Attach a cryptographically signed provenance manifest that labels the audio as AI-generated, and pair it with a watermark because re-encoding strips container metadata.
 
 C2PA (Coalition for Content Provenance and Authenticity) defines a standard for embedding cryptographically signed provenance metadata in media files. For a TTS platform, EU AI Act Article 50 (applicable from August 2026) requires that synthetic audio be labeled as AI-generated. C2PA implementation: at audio generation time, create a C2PA manifest (JSON block containing: generation timestamp, AI system identifier, model version, generation_id) and sign it with the platform's RSA-2048 or ECDSA P-384 private key. Embed the signed manifest in the audio file container (ID3 tag for MP3, RIFF INFO chunk for WAV, metadata box for MP4 audio). Any C2PA-aware tool (browser, social media platform, CMS) can verify the signature against the platform's public certificate and display "AI-generated" to the user. The manifest cannot be stripped via audio processing — it is in the container metadata, not the audio stream — but re-encoding to a different format with a new container will strip it (watermarking complements C2PA for format-agnostic detection).
 
 **Q: How do you handle barge-in (user speaks while TTS is playing) in a voice agent?**
+**Short:** Use a bidirectional WebSocket so microphone audio flows up while TTS flows down; when speech is detected, finish the current chunk and drop all queued chunks.
 
 Barge-in requires bidirectional communication, which is why voice agents prefer WebSocket over SSE. The flow: (1) TTS streams audio to the client via WebSocket. (2) The client simultaneously sends STT audio from the microphone back to the server via the same WebSocket connection (or a second WebSocket). (3) VAD (Voice Activity Detection) on the server (or client) detects that the user has started speaking. (4) The server sends a `tts_cancel` message on the WebSocket; the TTS synthesis task for the current turn is cancelled; the audio buffer is flushed; the client mutes playback. (5) The STT stream is elevated to priority. Total barge-in latency (detection to silence): 80-150 ms with client-side VAD (Silero VAD). The key implementation detail: TTS synthesis tasks must be cancellable at chunk boundaries — synthesis of the current chunk completes (cannot interrupt mid-GPU-forward-pass), but queued chunks are dropped.
 
 **Q: Why is A10G more economical than H100 for TTS serving?**
+**Short:** TTS models of 1-1.5B parameters use only 2-3 GB of HBM and are bandwidth-bound, so an H100's extra capacity sits idle while costing several times more per hour.
 
 TTS models (Cartesia Sonic: ~1B active params; XTTS v2: 1.5B params) are small by modern LLM standards. On an H100 (80 GB HBM, 3.35 TB/s HBM3 bandwidth), the TTS model is memory-bandwidth-bound: it consumes 2-3 GB of HBM, leaving 77 GB unused. The extra HBM bandwidth and tensor cores of H100 provide < 10% speedup over A10G for models this small, because the compute intensity (FLOPs/byte) of small autoregressive TTS is low — memory bandwidth, not compute, is the bottleneck. A10G (24 GB HBM, 600 GB/s bandwidth) provides sufficient bandwidth for 10-20 concurrent TTS streams and costs about $0.60/hr against about $2.50/hr for H100 at comparable spot/reserved terms — a 4.2x cost advantage with < 10% throughput penalty. (Both are spot/reserved rates; A10G on-demand on g5.xlarge is around $1.00/hr, and H100 on-demand is several times higher again, which widens the gap rather than narrowing it.) H100 becomes relevant only if serving very large TTS models (hypothetical 7B+ param voice models) or batching 100+ concurrent streams per GPU.
 
 **Q: How do you evaluate voice clone quality without human MOS scores?**
+**Short:** Use cosine similarity of speaker embeddings between clone and reference as an automated proxy, recalibrated quarterly against a human MOS listening panel.
 
 Human MOS evaluation requires recruiting listeners, paying them, and waiting 24-48 hours for results — incompatible with automated deployment pipelines. The automated proxy: cosine similarity of speaker embeddings. Extract a 512-dim ECAPA-TDNN embedding from the cloned output audio and from the original reference audio; compute cosine similarity. Correlation with human MOS: cosine similarity 0.85-1.00 → MOS 4.2-4.7; 0.70-0.85 → MOS 3.5-4.2; below 0.70 → MOS below 3.5. EqualErrorRate (EER) for speaker verification: < 1.5% on VoxCeleb1 test set for ECAPA-TDNN. In production: run the cosine similarity check at enrollment time (alert user if < 0.70, block enrollment if < 0.50); run daily on a held-out enrollment set to detect model regression. Human MOS evaluation (100 listeners, 5-point scale) is run quarterly to recalibrate the cosine similarity thresholds.
 
 **Q: What is the regulatory landscape for voice deepfakes, and how does it affect platform design?**
+**Short:** FCC rules ban AI voices in robocalls, the EU AI Act requires labeling synthetic audio, and state laws add likeness rights, so platforms need screening, labeling and fast suspension.
 
 Three regulatory regimes currently in force or imminent: (1) US FCC (February 2024): emergency ruling banning AI voice deepfakes in political robocalls; platforms that knowingly enable political deepfakes face enforcement. Practical impact: platforms must screen synthesis requests for political campaign content and require additional verification. (2) EU AI Act Article 50 (August 2026): AI-generated audio must be labeled as AI-generated using machine-readable standards (C2PA). Platforms serving EU users must embed C2PA metadata in all generated audio. (3) Various US state laws. California AB 2602 (2024) requires specific, informed consent in contracts before a digital replica of a performer's voice or likeness may be used, and AB 1836 (2024) requires estate consent for digital replicas of deceased personalities; Texas SB 751 (2019) targets deepfake video made to influence elections. (Note that California AB 602 is about non-consensual deepfake pornography, not commercial voice licensing — it is frequently mis-cited in this context.) Platform design implications: consent verification is not a product feature but a legal requirement; single-use consent tokens, consent audit logs (stored separately from voice embeddings, for legal discovery), and watermarking are all compliance artifacts; the voice_id suspension workflow must be operable within hours of a legal complaint, since attribution and account suspension in the Biden robocall case took days, not weeks.
 
 **Q: How do you handle cross-lingual voice cloning (clone an English speaker, generate French)?**
+**Short:** Multilingual models separate speaker timbre from phonemes, so cross-lingual output works but loses quality, most severely between distant phoneme sets such as English and Mandarin.
 
 Cross-lingual cloning is a harder problem than same-language cloning: the model must separate the speaker's acoustic characteristics (voice quality, timbre, rhythm) from the phoneme set of the source language. Modern multilingual TTS models (XTTS v2, Cartesia Sonic multilingual) learn language-independent speaker embeddings by training on paired multilingual data from the same speakers. The enrollment step is language-independent: the ECAPA-TDNN speaker encoder extracts a d-vector from any language's audio; the d-vector encodes voice characteristics, not phoneme patterns. At synthesis time, the TTS model conditions on both the d-vector (who) and the target language code (which phonemes). Quality degradation for cross-lingual: MOS drops from 4.2 (same language) to ~3.7 (cross-lingual) due to accent transfer (the source speaker's prosodic patterns bleed into the target language). Current mitigation: train with accent-diverse speakers per language; use language-conditioned prosody normalization to reduce accent transfer. For languages with very different phoneme inventories (English→Mandarin), degradation is more severe (MOS ~3.2); some platforms restrict cross-lingual to Latin-script languages only.

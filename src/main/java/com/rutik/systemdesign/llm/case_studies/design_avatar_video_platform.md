@@ -425,126 +425,60 @@ of disk write/read on a cold NVMe at 1080p).
 
 ```python
 import asyncio
-import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass
 class CompositorInput:
-    lipsync_frames_dir: Path          # directory of PNG frames, 0001.png...
+    lipsync_frames_dir: Path          # PNG frames 0001.png...
     audio_path: Path                  # final merged WAV
     background_path: Path | None      # image or video; None = solid black
     chroma_key_color: str | None      # hex e.g. "#00FF00"; None = no keying
-    subtitle_ass_path: Path | None    # ASS subtitle file; None = no subs
+    subtitle_ass_path: Path | None    # ASS subtitles; None = no subs
     watermark_path: Path | None       # PNG watermark; None = paid tier
     output_path: Path
     resolution: str = "1920x1080"
-    crf: int = 23
+    cq: int = 23                      # nvenc quality level; h264_nvenc ignores -crf
 
 
 class VideoCompositor:
-
     async def compose(self, inp: CompositorInput) -> None:
-        """
-        Single FFmpeg invocation: avoids writing intermediate files.
-        GPU-accelerated encode via h264_nvenc.
-        """
-        filter_chains: list[str] = []
-        input_args: list[str] = []
-        stream_idx: int = 0
-
-        # Input 0: frame sequence
-        input_args += ["-framerate", "30", "-i", f"{inp.lipsync_frames_dir}/%04d.png"]
-        video_stream = f"[{stream_idx}:v]"
-        stream_idx += 1
-
-        # Input 1: audio
-        input_args += ["-i", str(inp.audio_path)]
-        audio_stream = f"[{stream_idx}:a]"
-        stream_idx += 1
-
-        # Background: overlay avatar on background if provided
+        """One FFmpeg pass with GPU encode (h264_nvenc) and no intermediate files."""
+        inputs = ["-framerate", "30", "-i", f"{inp.lipsync_frames_dir}/%04d.png",
+                  "-i", str(inp.audio_path)]
+        filters: list[str] = []
+        video, n = "[0:v]", 2
         if inp.background_path is not None:
-            input_args += ["-i", str(inp.background_path)]
-            bg_stream = f"[{stream_idx}:v]"
-            stream_idx += 1
-
+            inputs += ["-i", str(inp.background_path)]
+            bg, n = f"[{n}:v]", n + 1
             if inp.chroma_key_color:
-                r, g, b = self._hex_to_rgb(inp.chroma_key_color)
-                filter_chains.append(
-                    f"{video_stream}chromakey=color={inp.chroma_key_color}:"
-                    f"similarity=0.1:blend=0.0[avatar_keyed]"
-                )
-                filter_chains.append(
-                    f"{bg_stream}[avatar_keyed]overlay=0:0[composited]"
-                )
-                video_stream = "[composited]"
-            else:
-                filter_chains.append(
-                    f"{bg_stream}{video_stream}overlay=0:0[composited]"
-                )
-                video_stream = "[composited]"
-
-        # Subtitles
+                filters.append(f"{video}chromakey=color={inp.chroma_key_color}:"
+                               "similarity=0.1:blend=0.0[keyed]")
+                video = "[keyed]"
+            filters.append(f"{bg}{video}overlay=0:0[comp]")
+            video = "[comp]"
         if inp.subtitle_ass_path is not None:
-            filter_chains.append(
-                f"{video_stream}subtitles={inp.subtitle_ass_path}[subbed]"
-            )
-            video_stream = "[subbed]"
-
-        # Watermark
+            filters.append(f"{video}subtitles={inp.subtitle_ass_path}[subbed]")
+            video = "[subbed]"
         if inp.watermark_path is not None:
-            input_args += ["-i", str(inp.watermark_path)]
-            wm_stream = f"[{stream_idx}:v]"
-            stream_idx += 1
-            filter_chains.append(
-                f"{wm_stream}format=rgba,colorchannelmixer=aa=0.6[wm_alpha]"
-            )
-            filter_chains.append(
-                f"{video_stream}[wm_alpha]overlay=W-w-20:H-h-20[watermarked]"
-            )
-            video_stream = "[watermarked]"
-
-        filter_chain_str = ";".join(filter_chains) if filter_chains else "null"
-
-        cmd: list[str] = [
-            "ffmpeg", "-y",
-            *input_args,
-            "-filter_complex", filter_chain_str,
-            "-map", video_stream,
-            "-map", audio_stream,
-            "-c:v", "h264_nvenc",   # GPU encode
-            # h264_nvenc does NOT implement -crf. Rate control is -rc/-cq.
-            # Passing -crf to nvenc is silently ignored, so every output
-            # lands at the default bitrate regardless of the tier setting.
-            "-rc", "vbr", "-cq", str(inp.crf),
-            "-s", inp.resolution,
-            "-c:a", "aac",
-            "-b:a", "192k",
-            str(inp.output_path),
-        ]
-
+            inputs += ["-i", str(inp.watermark_path)]
+            filters.append(f"[{n}:v]format=rgba,colorchannelmixer=aa=0.6[wm]")
+            filters.append(f"{video}[wm]overlay=W-w-20:H-h-20[marked]")
+            video = "[marked]"
+        # -map takes a bracketed label only for a filtergraph output (a raw input is 0:v),
+        # and -filter_complex must be omitted, not set to "null", when no filter runs.
+        graph = ["-filter_complex", ";".join(filters)] if filters else []
+        cmd = ["ffmpeg", "-y", *inputs, *graph,
+               "-map", video if filters else "0:v", "-map", "1:a",
+               # h264_nvenc silently ignores -crf; rate control is -rc/-cq.
+               "-c:v", "h264_nvenc", "-rc", "vbr", "-cq", str(inp.cq),
+               "-s", inp.resolution, "-c:a", "aac", "-b:a", "192k", str(inp.output_path)]
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"FFmpeg failed: {stderr.decode()[:500]}")
-
-    # Two ffmpeg gotchas this builder has to respect and which bite in prod:
-    #  1. `-map` takes a bracketed label ONLY for filtergraph outputs. A raw
-    #     input stream is `-map 0:v`, never `-map [0:v]`. When no filter runs,
-    #     strip the brackets before mapping.
-    #  2. `-filter_complex null` is not a no-op you can pass unconditionally --
-    #     omit `-filter_complex` entirely when `filter_chains` is empty.
-
-    def _hex_to_rgb(self, hex_color: str) -> tuple[int, int, int]:
-        h = hex_color.lstrip("#")
-        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 ```
 
 ---
@@ -1010,6 +944,7 @@ Cross-reference: [./cross_cutting/streaming_at_scale.md](./cross_cutting/streami
 ## 11. Interview Discussion Points
 
 **Q: Why is an avatar video pipeline inherently sequential rather than parallelizable?**
+**Short:** Each stage needs the previous stage's output, so the fix is pipelining: lip-sync renders each 3-second audio chunk while TTS produces the next.
 Each stage consumes the output of the previous stage as a required input: the lip-sync renderer
 needs the audio waveform (from TTS) to know what mouth positions to generate, and the compositor
 needs the lip-synced frame sequence to overlay on the background. There is no way to run these
@@ -1019,6 +954,7 @@ chunk, the lip-sync stage immediately begins rendering that segment while TTS co
 the next chunk.
 
 **Q: How does streaming TTS enable pipeline pipelining, and what is the latency benefit?**
+**Short:** Lip-sync starts after the first 3-second chunk instead of the full 10 s of TTS, saving about 7 s and cutting p50 from ~30 s to ~23 s for a 60-second video.
 Without streaming, a 60-second video requires 10 seconds of TTS compute to complete before
 lip-sync can begin. With streaming in 3-second chunks, lip-sync starts rendering the first chunk
 after only 3 seconds of TTS compute. The two stages overlap for the remaining 57 seconds of audio.
@@ -1026,6 +962,7 @@ For a 60-second video the wall-clock saving is approximately 7 seconds (70% of t
 duration), reducing p50 pipeline time from ~30s to ~23s.
 
 **Q: Why is the choice between Wav2Lip and SadTalker a business tier decision, not a quality decision?**
+**Short:** The licence decides first (Wav2Lip is non-commercial without a paid licence); after that, a 5x cheaper model for free users is an economics and upsell lever.
 It is both, and the licence decides it before the economics do. Wav2Lip is source-available for
 personal/research/non-commercial use only, so putting it in a free tier of a commercial product
 requires a paid licence from its authors — that gate comes first. Given a licence, the economics
@@ -1037,6 +974,7 @@ platform acquire users at low marginal cost while using the quality gap as an up
 compression quality tiers in image platforms (JPEG quality 60 vs 90).
 
 **Q: How do C2PA watermarks enable deepfake attribution rather than just prevention?**
+**Short:** C2PA does not stop stripping or sharing; its signed manifest gives investigators a job ID that traces a found deepfake back to the generating account.
 C2PA does not prevent a deepfake from being created or shared — a bad actor can strip the manifest
 with standard video editing tools. Its value is in the chain of custody it provides to investigators:
 a C2PA manifest records the platform identity, job ID, timestamp, and model version in a
@@ -1046,6 +984,7 @@ to identify the account that generated the content. This shifts deepfake account
 "impossible to trace" to "traceable to a specific user account within seconds."
 
 **Q: Why does consent verification require a live selfie match rather than just face detection on the uploaded video?**
+**Short:** Face detection only proves a face exists; a session-bound live selfie matched to the video's face (cosine > 0.85) proves the uploader is the subject.
 Face detection on the uploaded video only confirms there is a human face in the video. It does not
 confirm that the person uploading the video is the person in the video. A bad actor could upload a
 video of a celebrity (detected face: celebrity) and pass detection trivially. The selfie match adds
@@ -1055,6 +994,7 @@ uploaded video. A cosine similarity score > 0.85 between the two FaceNet embeddi
 reasonable confidence that the uploader and the video subject are the same person.
 
 **Q: How does chroma key compositing fail when clothing matches the key color, and how is it detected?**
+**Short:** Chroma key removes every pixel near the key hue, including green clothing; sample the avatar region's hue and warn when it is within 15 degrees of the key.
 The FFmpeg chromakey filter removes pixels whose HSV hue falls within a configurable similarity
 radius of the key color. It has no concept of "foreground" vs "background" — it removes any pixel
 matching the key color regardless of position. If a user wears green clothing against a green screen,
@@ -1064,6 +1004,7 @@ the angular distance between that hue and the chroma key color on the HSV wheel.
 if the distance is less than 15 degrees.
 
 **Q: What causes lip-sync drift on long videos and how does re-anchoring fix it?**
+**Short:** Truncating fractional frames per audio chunk drops ~1.3 s per 5 minutes; re-anchoring to audio onsets every 30 s resets the accumulated error.
 Drift accumulates from floating-point rounding in frame-count arithmetic. Each 3-second audio chunk
 maps to exactly `3.0 * 30 = 90 frames`. But if the TTS duration for a sentence is 3.013 seconds,
 the segment is 90.39 frames. Integer truncation discards 0.39 frames per segment. Over 100 segments
@@ -1073,6 +1014,7 @@ uses audio onset detection (librosa) to find the nearest hard onset point (a con
 start) and realigns the frame pointer to that timestamp, resetting the accumulated error to zero.
 
 **Q: When does CDN egress rival GPU compute for a video generation platform, and does it here?**
+**Short:** Not here: at ~$0.0007 per 35 MB download, egress is ~$1,050/day against ~$24,000/day of GPU, so it only rivals compute with huge files or many re-watches.
 For this design it does not — GPU dominates by roughly 30x, and the arithmetic is worth doing rather
 than assuming. At $0.02/GB (committed CloudFront volume; the on-demand first-10TB rate is $0.085/GB)
 and a realistic 35 MB per 60-second 1080p talking-head file, each download costs $0.0007. At 1.5M
@@ -1087,6 +1029,7 @@ reduces visual quality), tiering CDN regions to serve EU traffic from eu-west-1 
 transfer rates, or pushing enterprise bulk consumers to use S3 direct download.
 
 **Q: How does a hosted avatar platform justify its valuation against open-source lip-sync models?**
+**Short:** The licence removes most self-hosting arguments, and the rest is integrated platform value: pipeline ops, safety, compliance, quality and CRM switching costs.
 Start with the licence, because it removes most of the "just self-host Wav2Lip" argument outright:
 Wav2Lip is source-available for personal, research, and non-commercial use only, so a commercial
 product needs a paid licence from its authors. The commercially usable open options (SadTalker,
@@ -1103,6 +1046,7 @@ integrations with Salesforce, HubSpot, and major CRM platforms create switching 
 open-source tools cannot replicate.
 
 **Q: What makes Synthesia's enterprise avatar video defensible against consumer tools like HeyGen?**
+**Short:** Enterprise procurement: SOC 2 and ISO 27001 compliance, LMS integration via SCORM and xAPI, and a large studio-quality stock avatar library.
 Synthesia's defensibility rests on three pillars: compliance posture (SOC 2 Type II, ISO 27001,
 GDPR data residency, no voice cloning on standard plans — all required for enterprise procurement),
 LMS integration depth (SCORM and xAPI output that slots directly into Workday Learning and
@@ -1113,6 +1057,7 @@ like HeyGen optimize for feature velocity and user virality, which creates a dif
 will block). This market segmentation means both can grow simultaneously targeting different buyers.
 
 **Q: What is the correct autoscaling signal for avatar video GPU fleets, and why is raw GPU utilization misleading?**
+**Short:** GPU utilization swings between 100% and idle per job; scale on queue depth over per-GPU throughput, and pre-warm 20% capacity before the daily peak.
 Raw GPU utilization is misleading because it spikes to 100% during active rendering segments and
 drops to near 0% between jobs (during S3 upload, job state transitions, Python orchestration).
 The correct signal is job queue depth divided by average throughput per GPU, which predicts the time

@@ -70,20 +70,20 @@ Peak-hour demand:        60% of encounters land in a 10h window = 30M tokens/h,
                          vs a 20.8M tokens/h flat average (1.4x); apply the same
                          2x intra-window burst factor as above for sizing
 
-LLM cost at GPT-4o list pricing ($2.50/M input, $10/M output, as of 2026-07):
-  Input:  100K x 4,200 = 420M tokens = 420 MTok x $2.50 = $1,050/day
+LLM cost at GPT-6.2 Sol list pricing ($2/M input, $10/M output, as of 2026-11-25):
+  Input:  100K x 4,200 = 420M tokens = 420 MTok x $2     =   $840/day
   Output: 100K x   800 =  80M tokens =  80 MTok x $10   =   $800/day
-  Total LLM cost: ~$1,850/day = ~$55,500/month
+  Total LLM cost: ~$1,640/day = ~$49,200/month
 ```
 
 ### Revenue and Storage
 ```
 Revenue:
   $150/physician/month x 5,000 = $750,000/month
-  LLM cost: $55,500/month
+  LLM cost: $49,200/month
   Infra (STT GPU fleet, storage, networking): $60,000/month
-  Total COGS: ~$115,500/month
-  Gross margin: ($750K - $115.5K) / $750K = 84.6%
+  Total COGS: ~$109,200/month
+  Gross margin: ($750K - $109.2K) / $750K = 85.4%
 
 Storage:
   Audio: deleted within 24h (HIPAA minimum necessary) — peak 2 TB in-flight
@@ -113,7 +113,7 @@ flowchart TD
     vault[("PHI Vault<br/>Audio encrypted AES-256-GCM<br/>Transcript archive, 7yr retention<br/>S3 Object Lock")]
     stt("STT Pipeline<br/>Self-hosted Whisper large-v3<br/>on A10G fleet, in-VPC, no egress<br/>Medical fine-tune + confidence")
     diar("Speaker Diarization<br/>Pyannote.audio / NeMo<br/>2-speaker segmentation<br/>Physician voice matching")
-    nlp("Clinical NLP Pipeline<br/>SOAP note generation<br/>LLM: GPT-4o via Azure OpenAI BAA<br/>Multilingual translation")
+    nlp("Clinical NLP Pipeline<br/>SOAP note generation<br/>LLM: GPT-6.2 Sol via Azure OpenAI BAA<br/>Multilingual translation")
     icd("ICD-10/CPT Validator<br/>current FY code database<br/>Reject hallucinated codes")
     review("Physician Review UI<br/>Note display + edit<br/>Code confirmation<br/>Sign-off with biometric")
     ehr("EHR Integration Layer<br/>FHIR R4 DocumentReference<br/>SMART on FHIR OAuth2<br/>Epic / Cerner / Athena")
@@ -163,7 +163,7 @@ def transcribe_encounter_broken(audio_bytes: bytes) -> str:
     import openai
     client = openai.OpenAI()
     # audio_bytes contains patient name, symptoms, diagnosis discussion
-    # OpenAI's standard Whisper API has no HIPAA BAA
+    # No BAA covers this account (and whisper-1 itself shuts down 2027-02-26)
     response = client.audio.transcriptions.create(
         model="whisper-1",
         file=("encounter.wav", audio_bytes, "audio/wav"),
@@ -355,187 +355,106 @@ The clinical NLP pipeline converts a diarized transcript into a structured SOAP 
 ```python
 from __future__ import annotations
 import json
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass
 class EncounterContext:
     patient_age: int
-    patient_sex: str          # "M" / "F" / "O"
-    chief_complaint: str      # from appointment scheduling system
-    prior_visit_summary: str  # pulled from EHR via FHIR read, max 500 tokens
-    physician_specialty: str  # "internal_medicine", "cardiology", "psychiatry", etc.
-    clinic_documentation_style: str  # "verbose", "concise" — clinic preference
+    patient_sex: str                 # "M" / "F" / "O"
+    chief_complaint: str             # from appointment scheduling system
+    prior_visit_summary: str         # FHIR read, max 500 tokens (minimum necessary)
+    physician_specialty: str         # "internal_medicine", "cardiology", ...
+    clinic_documentation_style: str  # "verbose" | "concise"
 
 
 @dataclass
-class ICD10Code:
-    code: str          # e.g. "E11.9"
-    description: str   # e.g. "Type 2 diabetes mellitus without complications"
-    confidence: float  # 0.0-1.0 from LLM logprobs
-
-
-@dataclass
-class CPTCode:
-    code: str          # e.g. "99213"
-    description: str   # e.g. 99213 = office/outpatient visit, established patient,
-                       # LOW level of medical decision making (99214 is moderate)
-    confidence: float
+class Code:
+    code: str          # ICD-10 "E11.9" or CPT "99213" (99213 = LOW MDM; 99214 = moderate)
+    description: str
+    confidence: float  # 0.0-1.0
 
 
 @dataclass
 class SOAPNote:
-    encounter_id: str
-    subjective: str    # Patient's chief complaint in their own words, symptom history
-    objective: str     # Physician's exam findings, vitals, test results discussed
-    assessment: str    # Physician's clinical impression and reasoning
-    plan: str          # Treatment plan, prescriptions, referrals, follow-up
-    icd10_codes: list[ICD10Code]
-    cpt_codes: list[CPTCode]
+    subjective: str    # patient's words, symptom history
+    objective: str     # exam findings the physician stated
+    assessment: str    # clinical impression and reasoning
+    plan: str          # dosages, referrals, follow-up
+    icd10_codes: list[Code]
+    cpt_codes: list[Code]
     generation_latency_sec: float
     input_tokens: int
     output_tokens: int
 
 
 class ICD10Validator:
-    """
-    Validates every LLM-suggested ICD-10 code against the official ICD-10-CM release
-    that was current on the encounter date. CMS/NCHS publish a new FY edition each
-    October 1, so the validator is version-pinned per encounter, never "latest" --
-    revalidating a 2-year-old note against today's code set produces false rejects.
-    Rejects hallucinated codes (codes that do not exist in the database).
-    Flags specialty-context mismatches (e.g. T1DM code in pediatric endocrinology
-    visit labeled as T2DM — valid code but clinically wrong for the encounter).
-    """
+    """Validates codes against the ICD-10-CM release current on the ENCOUNTER date
+    (new FY edition every October 1), never "latest": revalidating a 2-year-old note
+    against today's code set produces false rejects."""
 
     def __init__(self, icd10_db_path: str) -> None:
         with open(icd10_db_path) as f:
-            raw = json.load(f)
-        # dict: code -> {"description": str, "valid_specialties": list[str]}
-        self._db: dict[str, dict[str, Any]] = raw
+            self._db: dict[str, dict[str, Any]] = json.load(f)
 
-    def validate(
-        self,
-        codes: list[ICD10Code],
-        specialty: str,
-    ) -> list[ICD10Code]:
-        """
-        Returns only valid codes. Rejects:
-          - codes not in the current ICD-10-CM release (hallucinated)
-          - codes flagged as high-risk specialty mismatches (requires physician confirmation flag)
-        """
-        validated: list[ICD10Code] = []
-        for code in codes:
-            record = self._db.get(code.code)
+    def validate(self, codes: list[Code], specialty: str) -> list[Code]:
+        out: list[Code] = []
+        for c in codes:
+            record = self._db.get(c.code)
             if record is None:
-                # Hallucinated code — silently drop; never surface to physician
-                continue
-            # Flag T1/T2 DM distinction for mandatory physician confirmation in endocrinology
-            if code.code.startswith("E11") and specialty == "endocrinology":
-                code.description = f"[CONFIRM T2DM vs T1DM] {record['description']}"
-            else:
-                code.description = record["description"]
-            validated.append(code)
-        return validated
+                continue          # hallucinated code: drop, never surface to the physician
+            prefix = "[CONFIRM T2DM vs T1DM] " if c.code.startswith("E11") and specialty == "endocrinology" else ""
+            out.append(Code(c.code, prefix + record["description"], c.confidence))
+        return out
 
 
 class SOAPNoteGenerator:
-    """
-    Generates SOAP note from diarized transcript using GPT-4o via Azure OpenAI.
-    Azure OpenAI has HIPAA BAA — PHI transmitted to Azure within BAA boundary.
-    Average generation latency: 22 seconds for 20-minute encounter transcript.
-    ICD-10 code accuracy: 94% vs physician-coded gold standard.
-    """
+    """GPT-6.2 Sol deployed in Azure OpenAI under Microsoft's HIPAA BAA (confirm model
+    availability in your Azure region). ~22 s for a 20-minute encounter; ICD-10 accuracy
+    94% vs physician-coded gold standard."""
 
-    SYSTEM_PROMPT_TEMPLATE = (
-        "You are an expert medical scribe for a {specialty} physician. "
-        "Patient: age {patient_age}, sex {patient_sex}, chief complaint: {chief_complaint}. "
-        "Prior visit: {prior_visit_summary}. Style: {documentation_style}. "
-        "Output JSON: subjective (patient words, symptoms, pain 0-10), "
-        "objective (exam findings physician stated only), "
-        "assessment (clinical impression, never invent diagnoses), "
-        "plan (exact drug dosages, referrals, follow-up), "
-        "icd10_codes [{code, description, confidence}], "
-        "cpt_codes [{code, description, confidence}]. "
-        "NEVER fabricate findings not present in the conversation."
+    SYSTEM = (
+        "You are an expert medical scribe for a {specialty} physician. Patient: age {age}, "
+        "sex {sex}, chief complaint: {cc}. Prior visit: {prior}. Style: {style}. Output JSON "
+        "with keys subjective, objective, assessment, plan, icd10_codes, cpt_codes "
+        "(each code: code, description, confidence). Objective contains ONLY findings the "
+        "physician stated. NEVER fabricate findings or diagnoses not in the conversation."
     )
 
-    def __init__(
-        self,
-        azure_openai_endpoint: str,
-        azure_api_key: str,
-        icd10_validator: ICD10Validator,
-    ) -> None:
-        import openai
-        self._client = openai.AzureOpenAI(
-            azure_endpoint=azure_openai_endpoint,
-            api_key=azure_api_key,
-            api_version="2024-02-01",
-        )
-        self._validator = icd10_validator
+    def __init__(self, azure_endpoint: str, api_key: str, deployment: str,
+                 validator: ICD10Validator) -> None:
+        from openai import OpenAI
+        # Azure OpenAI v1 API: the standard OpenAI client with an Azure base_url.
+        self._client = OpenAI(base_url=f"{azure_endpoint}/openai/v1/", api_key=api_key)
+        self._deployment = deployment       # Azure deployment name, pinned per release
+        self._validator = validator
 
-    def generate(
-        self,
-        transcript: list[SpeakerSegment],
-        context: EncounterContext,
-    ) -> SOAPNote:
-        import time
-
-        # Build conversation text preserving speaker roles
-        conversation = "\n".join(
-            f"{seg.role}: {seg.text}"
-            for seg in transcript
-            if seg.role in ("PHYSICIAN", "PATIENT") and seg.text.strip()
-        )
-
-        system_prompt = self.SYSTEM_PROMPT_TEMPLATE.format(
-            specialty=context.physician_specialty,
-            patient_age=context.patient_age,
-            patient_sex=context.patient_sex,
-            chief_complaint=context.chief_complaint,
-            prior_visit_summary=context.prior_visit_summary,
-            documentation_style=context.clinic_documentation_style,
-        )
-
+    def generate(self, transcript: list[SpeakerSegment], ctx: EncounterContext) -> SOAPNote:
+        conversation = "\n".join(f"{s.role}: {s.text}" for s in transcript
+                                 if s.role in ("PHYSICIAN", "PATIENT") and s.text.strip())
+        system = self.SYSTEM.format(specialty=ctx.physician_specialty, age=ctx.patient_age,
+                                    sex=ctx.patient_sex, cc=ctx.chief_complaint,
+                                    prior=ctx.prior_visit_summary,
+                                    style=ctx.clinic_documentation_style)
         start = time.monotonic()
-        response = self._client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": conversation},
-            ],
+        resp = self._client.chat.completions.create(
+            model=self._deployment,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": conversation}],
             response_format={"type": "json_object"},
-            temperature=0.2,      # low temperature for clinical accuracy
-            seed=42,              # reproducibility for re-generation on correction
         )
-        latency = time.monotonic() - start
-
-        raw = json.loads(response.choices[0].message.content)
-
-        icd10_codes = [
-            ICD10Code(c["code"], c.get("description", ""), c.get("confidence", 0.5))
-            for c in raw.get("icd10_codes", [])
-        ]
-        cpt_codes = [
-            CPTCode(c["code"], c.get("description", ""), c.get("confidence", 0.5))
-            for c in raw.get("cpt_codes", [])
-        ]
-
-        # Validate ICD-10 codes — reject hallucinated codes before physician sees them
-        validated_icd10 = self._validator.validate(icd10_codes, context.physician_specialty)
-
+        raw = json.loads(resp.choices[0].message.content)
+        codes = lambda key: [Code(c["code"], c.get("description", ""), c.get("confidence", 0.5))
+                             for c in raw.get(key, [])]
         return SOAPNote(
-            encounter_id=transcript[0].speaker_id if transcript else "unknown",
-            subjective=raw.get("subjective", ""),
-            objective=raw.get("objective", ""),
-            assessment=raw.get("assessment", ""),
-            plan=raw.get("plan", ""),
-            icd10_codes=validated_icd10,
-            cpt_codes=cpt_codes,
-            generation_latency_sec=latency,
-            input_tokens=response.usage.prompt_tokens,
-            output_tokens=response.usage.completion_tokens,
+            subjective=raw.get("subjective", ""), objective=raw.get("objective", ""),
+            assessment=raw.get("assessment", ""), plan=raw.get("plan", ""),
+            icd10_codes=self._validator.validate(codes("icd10_codes"), ctx.physician_specialty),
+            cpt_codes=codes("cpt_codes"),
+            generation_latency_sec=time.monotonic() - start,
+            input_tokens=resp.usage.prompt_tokens, output_tokens=resp.usage.completion_tokens,
         )
 ```
 
@@ -768,7 +687,7 @@ Concrete: full PHI deletion pipeline completes in under 60 seconds for a patient
 |----------|----------------|----------------------|-----------|
 | STT hosting | Self-hosted Whisper-large-v3 on A10G fleet within VPC | Azure STT API with BAA | Self-hosted: $0.003/min vs $0.017/min (82% cheaper); zero egress risk even if BAA lapses; medical fine-tune possible |
 | Transcription timing | Post-encounter batch (note ready 30s after end) | Real-time in-encounter transcription | Post-encounter: physician focuses on patient, not screen; 30s wait is acceptable UX vs real-time adding encounter duration |
-| LLM provider | GPT-4o via Azure OpenAI with HIPAA BAA | Self-hosted Llama-3-70B | Azure BAA covers PHI in transit to LLM; self-hosted adds $50K+/month GPU cost with marginal quality difference for English clinical notes |
+| LLM provider | GPT-6.2 Sol via Azure OpenAI with HIPAA BAA | Self-hosted Llama 3.3 70B | Azure BAA covers PHI in transit to LLM; self-hosted adds $50K+/month GPU cost with marginal quality difference for English clinical notes |
 | Clinic data isolation | Logical (per-clinic KMS key + S3 prefix) for SMB; physical (dedicated RDS + S3 bucket) for enterprise | Shared database with row-level security | Enterprise hospitals require physical isolation by contract; SMB clinics: logical isolation sufficient and 10x cheaper per tenant |
 | ICD-10 code handling | AI suggestion + ICD-10-CM database validation + physician confirmation | Physician-selected only | AI suggestion reduces documentation time 70%; validation prevents hallucinated codes from reaching physician; physician has final authority |
 | EHR integration pattern | FHIR R4 write-back via SMART on FHIR OAuth2 (async with retry queue) | Direct HL7 v2 interface | FHIR R4: standard across Epic/Cerner/Athena; HL7 v2 requires custom integration per EHR; async queue handles Epic downtime without losing signed notes |
@@ -893,7 +812,7 @@ Trace: encounter_pipeline (root span)
   +-- Span: soap.generation.gpt4o       (22,400ms)
   |     attrs:
   |       gen_ai.provider.name = "azure_openai"
-  |       gen_ai.request.model = "gpt-4o"
+  |       gen_ai.request.model = "gpt-6.2-sol"
   |       gen_ai.usage.input_tokens = 4187
   |       gen_ai.usage.output_tokens = 823
   |       soap.icd10_codes_suggested = 3
@@ -1075,7 +994,7 @@ Cost (AWS g5.xlarge = 1x A10G, us-east-1: $1.006/hr on-demand, $0.647/hr spot):
   LLM (SOAP generation): $55,500/month
   STT + LLM subtotal: ~$85,500/month
   Plus storage, networking, audit and app tier: ~$30,000/month
-  Total COGS: ~$115,500/month (matches Section 2)
+  Total COGS: ~$109,200/month (matches Section 2)
   Revenue (5,000 x $150): $750,000/month → gross margin 84.6%
 
 10x scale (500,000 enc/day) needs ~1,000 A10Gs and ~$555K/month of LLM spend,
@@ -1091,45 +1010,56 @@ tier amortizes.
 ## 11. Interview Discussion Points
 
 **Q: Why is self-hosted STT often required for HIPAA rather than using the OpenAI Whisper API?**
+**Short:** Any vendor that processes PHI needs a signed BAA; self-hosting STT inside your VPC removes that dependency and costs about $0.003/min versus $0.017/min for Azure STT.
 
 HIPAA requires a signed Business Associate Agreement (BAA) with any vendor that processes Protected Health Information. OpenAI does not offer a HIPAA BAA on its standard self-serve API tier (BAAs are handled through enterprise agreements, so confirm the terms covering your own account rather than assuming either way). Without a BAA, sending patient audio to the OpenAI Whisper API is a HIPAA violation regardless of encryption in transit. Azure OpenAI Service does offer a HIPAA BAA, which is why Suki AI uses Google Cloud Speech (also with BAA) and why Azure-hosted Whisper is a valid alternative. Self-hosted Whisper within your own VPC eliminates the BAA requirement entirely because PHI never leaves your infrastructure — and at scale, the self-hosted cost at $0.003/min is 82% cheaper than Azure STT at $0.017/min.
 
 **Q: How does speaker diarization determine which voice is the physician versus the patient?**
+**Short:** Diarization only separates voices; roles come from comparing each speaker's embedding with the physician's enrolled 30-second voice sample by cosine similarity.
 
 Diarization assigns arbitrary labels (SPEAKER_0, SPEAKER_1) based purely on voice distinctiveness — it does not know roles. Role assignment requires a second step: physician voice enrollment. During onboarding, the physician records a 30-second voice sample that is converted to a speaker embedding (typically a 256-dimensional d-vector from SpeechBrain ECAPA-TDNN). At inference time, embeddings extracted from SPEAKER_0 and SPEAKER_1 segments are compared against the enrolled physician embedding using cosine similarity. The speaker with similarity above 0.82 is labeled PHYSICIAN; the other is labeled PATIENT. Accuracy is 97.3% when the enrollment sample is 30 seconds or longer. Accuracy drops below 90% for physicians who did not complete enrollment — those encounters fall back to keyword-based heuristics (medical jargon density per speaker segment).
 
 **Q: Why is physician sign-off a legal requirement rather than just a UX feature?**
+**Short:** CMS rules (42 CFR 482.24(c)) require every record entry to be authenticated by the responsible practitioner, so an unsigned AI draft has no standing in the record.
 
 Medical-record authentication is required by the CMS Conditions of Participation, by state medical-record law, and by payer documentation rules. Specifically, 42 CFR 482.24(c) requires every entry in the medical record to be dated, timed and authenticated by the responsible practitioner. It is **not** 21 CFR Part 11 — Part 11 governs electronic records FDA itself relies on (clinical trial data, manufacturing records), not routine EHR clinical notes; citing it here is a common and incorrect shorthand. An unsigned AI-generated draft therefore has no standing in the record. The signature is what establishes medical-legal responsibility: if the note contains an error that leads to patient harm, the physician who signed is answerable for it. That is why sign-off cannot be optional or auto-accepted, and why the FHIR write path in 4.4 refuses to write without a verified signature. The product's value proposition is reducing review time from 15 minutes to 35 seconds, not eliminating review.
 
 **Q: How do you handle ICD-10 code hallucinations where the AI suggests a valid code that is clinically wrong?**
+**Short:** Drop codes missing from the current ICD-10-CM release, and force physician confirmation for valid-but-risky codes such as Type 2 diabetes in pediatric endocrinology.
 
 Two-layer validation: first, every suggested code is checked against the current ICD-10-CM release — truly hallucinated codes (nonexistent) are silently dropped before reaching the physician. Second, specialty-context validation catches valid-but-wrong codes: for example, any E11.x (Type 2 DM) code suggested in a pediatric endocrinology encounter triggers a mandatory physician confirmation dialog ("This code indicates Type 2 DM — please confirm vs Type 1 DM"). The 94% accuracy figure measures whether the AI's suggested codes appear in the physician's final signed note; it does not measure whether the correct T1/T2 distinction was made — a separate metric tracks code amendment rate by specialty.
 
 **Q: What is the difference between FDA SaMD Class I, II, and III and which class does an AI medical scribe fall under?**
+**Short:** Classes rise with risk from exempt to 510(k) to PMA; a scribe that drafts notes for physician sign-off generally sits outside the device pathway until it suggests diagnoses.
 
 SaMD classes are determined by intended use and the risk of harm if the software fails. Class I: low risk, generally exempt (e.g. a step counter). Class II: moderate risk, requires 510(k) premarket notification (e.g. computer-aided detection that flags findings on imaging). Class III: high risk, requires Premarket Approval (PMA) — e.g. software that autonomously diagnoses from imaging with no clinician in the loop. An ambient scribe that drafts a note for physician review generally sits **outside** the device pathway rather than in Class II: it is administrative documentation support, the licensed physician reviews and signs before anything enters the record, and it makes no diagnostic claim. No ambient scribe is known to hold a 510(k) — the openFDA 510(k) database returns no records for the major vendors in this category. The design consequence is that the moment a scribe starts *suggesting diagnoses* rather than transcribing what the clinician said, it moves toward the device pathway — which is exactly why diagnostic suggestion is listed as out of scope in Section 1. Do not state a regulatory classification for any product without checking the FDA databases directly.
 
 **Q: How does FHIR R4 write-back work technically, and what authenticates the write?**
+**Short:** The platform acts as a SMART on FHIR app, gets a short-lived OAuth2 token, and POSTs DocumentReference, Condition and Procedure resources tied to the patient and encounter.
 
 FHIR R4 (Fast Healthcare Interoperability Resources) is the HL7 standard REST API for healthcare data. Write-back uses SMART on FHIR OAuth2: the platform registers as a SMART app with the EHR system (Epic/Cerner), obtaining a client_id and client_secret through the EHR's app marketplace process. At write time, the platform exchanges credentials for a short-lived access token (1-hour TTL from Epic). The note is packaged as a FHIR DocumentReference resource containing base64-encoded SOAP note content, linked to the patient's FHIR Patient resource ID and the encounter's FHIR Encounter resource ID. ICD-10 codes become separate FHIR Condition resources with ClinicalStatus = confirmed. CPT codes become FHIR Procedure resources. All resources are submitted via POST to the EHR's FHIR R4 base URL. Epic validates the token, checks that the patient ID and encounter ID belong to the authenticated physician's authorized patients, and either creates the resources or returns a 422 Unprocessable Entity with a detailed error body.
 
 **Q: What is the HIPAA minimum necessary principle and how does it shape the data architecture?**
+**Short:** Use only the PHI a task needs: delete audio after transcription, send the LLM only the encounter plus a short prior summary, and evaluate on de-identified data.
 
 The HIPAA minimum necessary standard (45 CFR 164.502(b)) requires that covered entities and business associates use, disclose, or request only the minimum PHI necessary to accomplish the intended purpose. In this system, it drives three architectural decisions: (1) audio is deleted within 24 hours of transcription because the transcript is the minimum necessary artifact — retaining audio adds risk with no clinical benefit; (2) the SOAP note generator receives only the current encounter transcript plus a 500-token prior visit summary from the EHR, not the full patient record — the full record is not necessary for note generation; (3) the eval pipeline uses de-identified transcripts, not real patient audio, because real audio is not necessary for WER measurement.
 
 **Q: How do you evaluate transcription quality in a HIPAA environment without using real patient audio?**
+**Short:** Use synthetic clinical conversations, IRB-approved de-identified recordings, per-word confidence as a production proxy, and physician correction rates.
 
 Four approaches: (1) De-identified synthetic data — generate clinical conversations using LLMs with drug names, symptoms, and physician-style language; human clinical experts review for realism. (2) IRB-approved de-identification — partner with academic medical centers to de-identify real encounters (name, DOB, MRN, location removed by trained annotators + NLP) under IRB protocol; use for WER benchmarking. (3) Production confidence score proxy — Whisper emits per-word confidence scores; words with confidence below 0.6 correlate with transcription errors; track this proxy metric in production on real audio without storing audio. (4) Physician correction rate — track which words physicians correct in the note review step; corrections in the Subjective section (patient statements) correlate with transcription errors. All four approaches avoid using raw patient audio in the eval pipeline.
 
 **Q: What happens when EHR write-back fails after the physician has already signed?**
+**Short:** The signed note is committed to the platform's durable store first, then retried with backoff and escalated to manual delivery, so a signed note is never lost.
 
 The signed note and the physician signature event are committed to the platform's own durable store (SQS + DynamoDB) before the FHIR write attempt begins. If the FHIR write fails, the physician sees "Note queued for EHR delivery" in the app — not a failure message. The retry queue attempts re-delivery with exponential backoff (2s, 4s, 8s, 16s, 32s — max 5 retries). If all retries fail (EHR extended outage), the on-call team is paged and the note is placed in a manual delivery queue. The physician can also export the note as a PDF from the platform app and upload it to the EHR manually as a last resort. The critical invariant: a signed note is never lost. The signature and note content are retained in the platform's PHI Vault for 7 years regardless of EHR delivery status.
 
 **Q: Why is per-encounter billing better than per-seat (physician) billing for hospital systems?**
+**Short:** It aligns price with usage, since 40-60% of hospital physicians are low-volume, and it tracks the vendor's cost of under $0.10 per note; minimum commits smooth revenue.
 
-Per-seat billing charges a fixed monthly fee per physician account. Hospital systems have 40-60% of physicians who are low-volume users (part-time, research, administrative roles) — a $150/physician/month per-seat model charges equally for a physician who sees 3 patients per week and one who sees 40. Per-encounter billing ($4-8/note) aligns cost with value: high-volume physicians generate proportional revenue; low-volume physicians remain economical. For the vendor, per-encounter billing also accurately reflects infrastructure costs. Per note that is about $0.02 of LLM (4,200 input + 800 output tokens at GPT-4o's $2.50/$10 per 1M) plus roughly $0.06 of self-hosted STT for a 20-minute encounter — call it under $0.10 marginal, which is why a $4-8 per-note price carries a wide margin. The risk of per-encounter billing is revenue volatility — a physician vacation reduces monthly revenue. Hospital systems typically prefer predictable budgets, so enterprise contracts often use a minimum-commit model: 1,000 encounters/month guaranteed, overage at per-encounter rate.
+Per-seat billing charges a fixed monthly fee per physician account. Hospital systems have 40-60% of physicians who are low-volume users (part-time, research, administrative roles) — a $150/physician/month per-seat model charges equally for a physician who sees 3 patients per week and one who sees 40. Per-encounter billing ($4-8/note) aligns cost with value: high-volume physicians generate proportional revenue; low-volume physicians remain economical. For the vendor, per-encounter billing also accurately reflects infrastructure costs. Per note that is about $0.02 of LLM (4,200 input + 800 output tokens at GPT-6.2 Sol's $2/$10 per 1M) plus roughly $0.06 of self-hosted STT for a 20-minute encounter — call it under $0.10 marginal, which is why a $4-8 per-note price carries a wide margin. The risk of per-encounter billing is revenue volatility — a physician vacation reduces monthly revenue. Hospital systems typically prefer predictable budgets, so enterprise contracts often use a minimum-commit model: 1,000 encounters/month guaranteed, overage at per-encounter rate.
 
 **Q: How would you handle a patient who speaks Spanish while their physician speaks English?**
+**Short:** Translate patient-role segments into English after diarization, tag them as translated, keep key original phrasing in the note, and disclose the higher error rate.
 
 The multilingual pipeline adds a translation step between diarization and SOAP generation. After diarization assigns PHYSICIAN and PATIENT roles, patient-role segments in non-English languages are translated to English using a medical-aware translation model (either Whisper's multilingual transcription mode, which simultaneously transcribes and translates to English, or a separate NMT model fine-tuned on medical terminology). The translated patient statements are tagged `[Translated from Spanish]` in the transcript. The SOAP note is generated in English from the mixed transcript. The Subjective section includes the patient's original Spanish phrasing for key symptoms alongside the English translation — preserving nuance that may affect clinical interpretation. ICD-10 code suggestion is not affected by language because it operates on the physician's English assessment statements. WER for Spanish-to-English translation on Whisper-large-v3 is approximately 8.3% — higher than monolingual English (4.2%) — and is disclosed in the product's accuracy documentation.

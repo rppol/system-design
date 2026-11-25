@@ -1,4 +1,5 @@
 # Case Study: Design GitHub Copilot
+
 ## Intuition
 
 > **Design intuition**: Copilot is a real-time system with < 300ms latency requirements — this means aggressive caching, small fast models for completions, debouncing to avoid wasting calls, and Fill-in-the-Middle (FIM) model architecture. The engineering challenge is delivering sub-second IDE-integrated AI while managing cost and maintaining quality.
@@ -16,7 +17,7 @@
 - Support for 30+ programming languages
 - Accept/reject/cycle through suggestions
 - Copilot Chat: conversational code assistance in IDE
-- Agent mode: autonomous multi-file edits (Copilot Workspace)
+- Agent mode and coding agent: autonomous multi-file edits, returned as diffs or draft PRs
 
 ### Non-Functional Requirements
 - **Latency**: Inline completions < 300ms (imperceptible to typing pace)
@@ -154,7 +155,7 @@ Priority 2 (if budget allows):
   Total: additional ~500 tokens
 
 Priority 3 (if budget still allows):
-  - Repository-level context (Copilot Workspace)
+  - Repository-level context (agent mode)
   - Project README, configuration files
   - Recently viewed but not open files
 
@@ -200,7 +201,7 @@ FIM training (StarCoder, InCoder, and the original Codex FIM work):
   - Model learns to complete any position, not just end-of-file
 ```
 
-### 4.3 Repository-Level Context (Copilot Workspace)
+### 4.3 Repository-Level Context (Agent Mode)
 
 ```
 Challenge: Modern codebases are 100K-1M tokens. Can't fit everything in context.
@@ -237,7 +238,7 @@ Performance:
 ### 4.4 Speculative Decoding for Low Latency
 
 ```
-Problem: A frontier chat model emitting 40 tokens takes 150ms+ on an A100.
+Problem: A frontier chat model emitting 40 tokens takes 150ms+ even on an H100.
          Developers feel >300ms total latency.
 
 Solution: Speculative decoding
@@ -317,9 +318,7 @@ Setting: "Suggestions matching public code"
 Legal note: This remains an active area of litigation (GitHub Copilot class action).
 ```
 
----
-
-## 5. Copilot Chat Architecture
+### 4.6 Copilot Chat Architecture
 
 ```
 Chat is different from inline completions:
@@ -347,205 +346,33 @@ Special commands:
 These are just prompt templates, not special model fine-tuning
 ```
 
----
-
-## 6. Data Privacy Design
+### 4.7 Agent Mode and Coding Agent
 
 ```
-Concerns:
-  - Developer code is proprietary IP
-  - Code may contain credentials, API keys
-  - Company code may be under NDA
+Two agent surfaces sit on top of the completion stack:
 
-Mitigations:
+Agent mode (in the IDE):
+  User: "Add input validation to all API endpoints"
+  -> plan: add validate_input() to utils.py, import it in api/users.py,
+     api/products.py, api/orders.py, decorate each handler
+  -> for each file: read, generate edit, show diff, apply on approval
+  -> run tests and linters in the workspace terminal, iterate on failures
 
-1. Data transmission:
-   - TLS 1.3 in transit (end-to-end encryption)
-   - No code stored on GitHub servers beyond request (Copilot Business)
-   - Code used only for completion, not for model training (opt-out)
-
-2. Training data control (Copilot Business vs Individual):
-   Individual: code snippets may be used to improve Copilot models
-   Business/Enterprise: snippets never retained, never used for training
-
-3. Secret detection:
-   - Before sending to API: scan for patterns matching secrets
-     (AWS_ACCESS_KEY, private key headers, JWT tokens)
-   - Either redact or warn developer
-   - Doesn't send raw credentials to model
-
-4. Organizational policies:
-   - Enterprise can block specific repositories from Copilot
-   - Can enforce "no suggestions from public code"
-   - Audit logs of all Copilot usage
-```
-
----
-
-## 7. Observability and Quality
-
-```
-Key metrics:
-
-Acceptance rate (primary quality metric):
-  accepted_completions / shown_completions
-  Target: > 30% (reported ~34% for GitHub Copilot)
-  Breakdown by: language, file type, time of day, model version
-
-Completion quality tracking:
-  - A/B test model versions (5% of traffic to new model)
-  - Track: acceptance rate, edit distance of accepted completions
-  - Edit distance: how much developer modified suggestion (lower = better)
-  - "Kept as is" rate: suggestion accepted without any edits
-
-Latency SLOs:
-  P50 < 150ms (median feels instant)
-  P95 < 300ms (near-instant for 95% of completions)
-  P99 < 600ms (slow but acceptable for 1% of requests)
-
-Error tracking:
-  - Authentication failures (expired tokens)
-  - Timeout rate (> 300ms → completion cancelled)
-  - Model errors (context too long, unsafe content)
-
-Usage analytics:
-  - Lines of code suggested vs accepted vs edited
-  - Languages most used
-  - Time-of-day patterns (engineer productivity patterns)
-```
-
----
-
-## 8. Trade-offs and Design Decisions
-
-| Decision | Chosen | Alternative | Reason |
-|----------|--------|-------------|--------|
-| Debounce | 75ms | 0ms (every keystroke) | 10× fewer requests; within typing flow UX |
-| Context | FIM (prefix + suffix) | Prefix only | FIM generates more accurate completions |
-| Cache | Local LRU (IDE) | Server-side cache | Privacy; instant retrieval for recent completions |
-| Repo indexing | Local FAISS | Remote vector DB | Zero latency; no code leaves machine |
-| License filter | Training-time hash index | Runtime search | Millisecond lookup vs seconds |
-| Chat model | Frontier tier (Claude Sonnet 5 / GPT-5.6 Terra) | Cheap tier (GPT-5.6 Luna) | Quality requires the best model; chat latency budget tolerates it |
-| Multi-line | Generate up to N lines | Always single line | Better UX for boilerplate; trim on mismatch |
-
----
-
-## 9. Copilot Workspace (Agent Mode)
-
-```
-Goes beyond single-file completions to autonomous multi-file edits:
-
-User: "Add input validation to all API endpoints"
-         |
-         v
-[Intent understanding]
-  Parse task: what files? what changes? what constraints?
-         |
-         v
-[Repository analysis]
-  Identify: all files with API endpoint handlers
-  Understand: current validation patterns, frameworks used
-         |
-         v
-[Plan generation]
-  1. Add validate_input() helper to utils.py
-  2. Import in api/users.py, api/products.py, api/orders.py
-  3. Add @validate decorator to each endpoint handler
-         |
-         v
-[Multi-file execution]
-  For each planned change:
-    Read file → generate edit → show diff → apply on approval
-         |
-         v
-[Human review]
-  Show all diffs in PR-like view
-  Developer accepts/modifies/rejects each change
-         |
-         v
-Apply accepted changes to repository
+Coding agent (asynchronous, on github.com):
+  An issue is assigned to Copilot; the agent works in an ephemeral
+  GitHub Actions-powered environment, pushes commits to a branch, and
+  opens a draft PR for human review. Humans merge; the agent never does.
 
 Key challenge: repository coherence
-  Edits across files must be consistent
-  Solution: shared context (recent edits) passed to each subsequent edit
+  Edits across files must be consistent, so each subsequent edit gets the
+  diffs already made in this task as context, and the final diff is
+  reviewed as one PR rather than file by file.
 ```
 
----
+Copilot Workspace, the earlier technical preview of this idea, ended in 2025; its plan-then-edit
+flow lives on in agent mode and the coding agent.
 
-## Operational Playbook
-
-### Eval Pipeline
-
-Weekly acceptance-rate regression check against a golden set of 500 code completion scenarios spanning Python, TypeScript, Java, Go, and Rust. Each scenario provides a fixed prefix/suffix pair and an expected completion class (exact match, fuzzy token match, or semantic equivalence via LLM-as-judge). If the acceptance rate on the golden set drops more than 5 percentage points from the prior week's baseline, the pipeline fires a P1 alert and blocks deployment of the new model checkpoint. Cross-reference: See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
-
-```
-Golden eval pipeline (runs every Sunday 02:00 UTC):
-  1. Freeze model candidate checkpoint
-  2. Replay 500 golden scenarios against candidate via shadow traffic
-  3. Score: exact-match, fuzzy-match (token F1 > 0.8), LLM-as-judge for multi-line
-  4. Compare acceptance_rate_candidate vs acceptance_rate_baseline
-  5. If delta < -5pp → alert + block → human review required before deploy
-  6. If delta >= 0 → auto-promote checkpoint to canary (1% traffic)
-  7. Monitor live acceptance rate for 24h; if stable → full rollout
-```
-
-### Observability
-
-Every completion request carries a single OTel root span with child spans mirroring the latency budget:
-
-```
-completion_request [root]  lang, file_ext, cursor_position_type
-  +-- fim_assembly          prefix_tokens, suffix_tokens, neighbor_tokens, rag_tokens, total_tokens  <5ms
-  +-- speculative_decode    draft_tokens_generated, accepted_tokens, acceptance_rate, fallback_count  <185ms P50
-  +-- prefix_cache          cache_hit, prefix_tokens_saved, kv_cache_reuse_ratio                     <5ms
-  +-- license_filter        ngrams_checked, match_found, matched_license                             <5ms
-  +-- streaming             TTFT_ms, tokens_per_sec, completion_tokens, finish_reason   TTFT <200ms P50
-```
-
-Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md) for span schema standards and sampling strategy.
-
-### Incident Runbooks
-
-**Runbook 1 — Latency Spike (P99 TTFT > 500ms)**
-
-Symptom: `completion_latency_p99 > 500ms` sustained 3 minutes.
-Diagnosis: (1) Check `speculative_decode.duration` — is inference the bottleneck? (2) Check `prefix_cache.kv_cache_reuse_ratio` — if dropped from 0.85 to <0.5, the system prompt may have changed; check recent config deploys. (3) If `acceptance_rate < 0.4`, draft model is on a degraded node; reroute. (4) If `fim_assembly.total_tokens > 3,500`, budget guard may have regressed.
-Mitigation: Scale out replicas if GPU utilization > 80%; disable RAG context (Priority 4) to shed 280 input tokens/request.
-Resolution: Root cause to — (a) system prompt change breaking prefix cache affinity, (b) draft model node failure, or (c) FIM context budget regression. Verify P99 < 400ms before close.
-
-**Runbook 2 — Acceptance Rate Drop (rolling 7-day average down >5pp)**
-
-Symptom: Weekly eval fires or live panel shows acceptance rate < 29% (baseline 34%).
-Diagnosis: (1) Replay golden 500 scenarios against last 3 checkpoints to isolate regression commit. (2) Check `fim_assembly` spans for malformed FIM token order — `<PRE>`, `<SUF>`, `<MID>` must appear in sequence. (3) Verify FIMContextAssembler budget ratios unchanged. (4) Segment by language: if only Rust/Go regresses, check tokenizer-model mismatch.
-Mitigation: Roll back to last known-good checkpoint; revert FIMContextAssembler budget ratios if changed.
-Resolution: Add per-language acceptance rate baselines to eval gate before next checkpoint promotion.
-
-**Runbook 3 — License Filter False Positive Spike**
-
-Symptom: `license_filter.match_found` jumps from 0.1% baseline to >2%; users report "Suggestion blocked" spike.
-Diagnosis: (1) Sample 100 blocked completions; identify common triggering pattern. (2) Check if a recently indexed library introduced idiomatic code (`__init__(self, config: Config)`) that now matches the n-gram Bloom filter. (3) Confirm false positive vs. true verbatim copy.
-Mitigation: Temporarily raise n-gram match threshold from 50% to 70% — reduces false positives ~60% with <1% increase in true-positive miss rate.
-Resolution: Retrain Bloom filter excluding patterns appearing in >10,000 distinct repos (idiomatic, not licensable expression); re-deploy; monitor false positive rate.
-
-Cross-reference: See [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for GPU utilization math and cost attribution during incidents.
-
----
-
-## 10. Interview Discussion Points
-
-**Why is 300ms the target latency?** Human typing speed is ~200ms between keystrokes. If completions appear within 300ms of stopping typing, they feel instantaneous. Above 500ms, developers notice the delay. Above 1s, developers move on before the suggestion appears.
-
-**Key bottleneck: GPU inference.** At 18,500 req/sec with 120ms inference time, you need 18,500 × 0.12 = 2,220 concurrent requests in flight at once. A100s with continuous batching can handle ~100 concurrent code completions = 22 A100s minimum, with safety margin → 50+ A100s.
-
-**Context window trade-off:** More context = better completions, but longer prompts = higher latency + cost. Copilot's 1,500 token context is a deliberate balance: empirically, most useful context is in the current file and recently opened tabs. Additional repository context provides diminishing returns for inline completions.
-
-**Privacy tension:** Individual developers want personalized completions (requiring code context). Enterprise customers want zero data retention (requiring stateless API). GitHub handles this with two tiers: Copilot Individual (may use code) vs Business (no retention, higher price).
-
-**Acceptance rate as product health metric:** If acceptance rate drops from 34% to 25%, it could mean model degraded, or context collection broke, or a language-specific regression. Tracking acceptance rate by language, file type, and model version enables rapid root cause analysis.
-
----
-
-## FIM Architecture Deep-Dive
+### 4.8 FIM Architecture Deep Dive
 
 **Fill-in-Middle Token Layout:**
 
@@ -584,7 +411,7 @@ Ghost text visible to user                   : 150ms + keystroke delay
 User-perceived latency (with ghost text UX)  : ~300ms (acceptable: <400ms)
 ```
 
-### FIM Context Assembler — Production Python
+#### FIM Context Assembler — Production Python
 
 The prose above describes the priority ordering conceptually. The code below enforces it with strict token budget accounting. Without budget enforcement the FIM completion slot is crowded out and the model silently truncates from the suffix end, producing partial or syntactically broken completions.
 
@@ -684,9 +511,7 @@ class FIMContextAssembler:
 
 **Concrete numbers:** Average FIM prompt = 2,800 tokens (prefix 1,120 + suffix 560 + neighbor 840 + RAG 280); context assembly completes in <5ms client-side measured on a MacBook M2. Without the budget guard the overflow scenario pushes the FIM completion slot to 0 usable tokens, causing the model to emit `<EOT>` immediately — manifesting as blank ghost text with no error reported.
 
----
-
-## Multi-Language Tokenizer Trade-offs
+### 4.9 Multi-Language Tokenizer Trade-offs
 
 Copilot serves Python, JavaScript, TypeScript, Java, Go, Rust, C++, and 20+ other languages with a single model and tokenizer (BPE-based, vocabulary size 50,000-100,000). Trade-offs by language:
 
@@ -701,29 +526,9 @@ Copilot serves Python, JavaScript, TypeScript, Java, Go, Rust, C++, and 20+ othe
 
 **Implication for context window usage:** A Rust function of 200 characters consumes 90 tokens vs a Python function of the same length consuming 50 tokens. For languages with high tokens-per-character ratios, the same context budget (1,500 tokens) covers 40% less code. Copilot's context selection is token-budget-aware, not character-budget-aware — it always computes token counts before constructing the FIM prompt.
 
----
+### 4.10 Speculative Decoder Implementation
 
-## Ghost-Text UX Latency War Story
-
-Copilot's ghost text (inline completion suggestion shown in grey) has an acceptance rate that drops sharply with TTFT:
-
-```mermaid
-xychart-beta
-    title "Ghost-text acceptance rate vs TTFT"
-    x-axis ["under 100ms", "100-200ms", "200-400ms", "400-600ms", "over 600ms"]
-    y-axis "Acceptance rate (%)" 0 --> 40
-    bar [38, 34, 28, 19, 11]
-```
-
-Acceptance falls from 38% below 100ms to 11% above 600ms; the 100-200ms bucket (34%) is the P50 target zone.
-
-During a datacenter network maintenance window in 2023 (unreported publicly), Copilot's P50 TTFT spiked from 150ms to 520ms for 2 hours. Acceptance rate dropped from 34% to 20%. Because Copilot monetizes on usage (accepted completions drive engagement and retention), the 14-point acceptance rate drop directly correlated with increased churn risk. Post-incident: Copilot added a second inference cluster in a different AWS region for failover, targeting <300ms TTFT even during single-region degradation. For multi-region active-active deployment of the inference cluster, see [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md).
-
-**Speculative decoding for ghost text — why it matters more for code than for chat:**
-
-Code completions are highly predictable: after `for i in range(`, the next 4-6 tokens are almost always `10):` or `len(arr)):`. Speculative decoding exploits this: a small draft model (130M parameters, 20x cheaper per token) generates 4 candidate tokens in parallel; the large verification model accepts all 4 in a single forward pass if they match. For code completions, draft model acceptance rate is 78% (vs ~55% for general text), making speculative decoding 3.2x more efficient than standard decoding for FIM completions.
-
-### Speculative Decoder — Production Python
+Code completions are highly predictable: after `for i in range(`, the next 4-6 tokens are almost always `10):` or `len(arr)):`. Speculative decoding exploits this: a small draft model (130M parameters, 20x cheaper per token) generates 4 candidate tokens; the large verification model checks all 4 in a single forward pass. For code completions the draft acceptance rate is ~72-78% (vs ~55% for general text), which is why speculative decoding pays off more for FIM than for chat.
 
 ```python
 from __future__ import annotations
@@ -801,206 +606,47 @@ class SpeculativeDecoder:
 
 **Concrete numbers:** P50 latency with speculative decoding = 185ms vs 310ms without (40% reduction). Acceptance rate in code completion context = 72% (higher than general text's 55% because code is locally predictable). At p = 0.72 with gamma = 5 drafts, expected tokens per cycle = (1 - 0.72^6)/0.28 = 3.1, so the target model runs ~3.1x fewer forward passes than plain autoregressive decoding — lowering GPU spend from an estimated $30,900/day to roughly $10,100/day on inference alone. (The tempting shorthand "0.72 × 5 = 3.6x" is wrong for the same reason as above: acceptance is sequential, not independent per slot.)
 
----
+### 4.11 Prefix Cache Hit Ratio
 
-### Prefix Cache Hit Ratio
-
-vLLM prefix caching (Automatic Prefix Caching, APC) allows Copilot to avoid recomputing KV cache for the system-prompt and language-context header on every request. Because the language instruction block (`# Python file, complete the following:` + file-type metadata) is identical across all completions for the same file type, it is prefix-cached at the inference engine layer.
+vLLM Automatic Prefix Caching (APC) avoids recomputing the KV cache for the language instruction and
+file-type header, which is identical across completions for the same file type. Of a 2,800-token
+prompt, ~2,380 tokens are this cacheable prefix; the FIM prefix and suffix change per request and are
+never cached.
 
 ```python
-from __future__ import annotations
-from dataclasses import dataclass
-from collections import deque
 import time
+from collections import deque
+from dataclasses import dataclass, field
+
+PREFIX_TOKENS, TOTAL_TOKENS = 2_380, 2_800
 
 @dataclass
 class PrefixCacheTracker:
-    # Rolling 1-hour hit rate. 2,380 of 2,800 input tokens are prefix-cacheable.
-    # At 85% hit rate on a 20M req/day shard: ~40.5B prefill tokens/day avoided.
-    # Dollarize with YOUR measured cost per prefill token, not a vendor list price.
-    window_seconds: int = 3600
-
-    def __post_init__(self) -> None:
-        self._events: deque[tuple[float, bool]] = deque()  # (timestamp, hit)
+    window_seconds: int = 3600                       # rolling 1-hour hit rate
+    _events: deque = field(default_factory=deque)    # (timestamp, hit)
 
     def record(self, hit: bool) -> None:
         now = time.monotonic()
         self._events.append((now, hit))
-        self._evict(now)
-
-    def _evict(self, now: float) -> None:
-        cutoff = now - self.window_seconds
-        while self._events and self._events[0][0] < cutoff:
+        while self._events and self._events[0][0] < now - self.window_seconds:
             self._events.popleft()
 
     @property
     def hit_rate(self) -> float:
-        if not self._events:
-            return 0.0
-        hits = sum(1 for _, h in self._events if h)
-        return hits / len(self._events)
+        return sum(h for _, h in self._events) / len(self._events) if self._events else 0.0
 
     @property
-    def prefix_tokens_saved_per_request(self) -> float:
-        """Expected prefix tokens saved per request given current hit rate."""
-        PREFIX_TOKENS = 2_380
-        return self.hit_rate * PREFIX_TOKENS
-
-    @property
-    def cost_reduction_pct(self) -> float:
-        """Percentage reduction in effective input token cost from prefix caching."""
-        TOTAL_TOKENS = 2_800
-        return (self.prefix_tokens_saved_per_request / TOTAL_TOKENS) * 100
+    def prefill_saved_pct(self) -> float:
+        return self.hit_rate * PREFIX_TOKENS / TOTAL_TOKENS * 100
 ```
 
-**Formula:** `hit_ratio = hits / (hits + misses)` tracked over a rolling 1-hour window. At 85% hit rate on a 20M-request/day shard: effective input tokens drop from 2,800 to 420 per request (2,380 prefix tokens skipped on cache hit), i.e. 20M × 0.85 × 2,380 = **40.5B prefill tokens/day avoided**.
+At an 85% hit rate on a 20M-request/day shard, 20M x 0.85 x 2,380 = **40.5B prefill tokens/day are
+avoided**. Copilot self-hosts this model, so there is no per-token invoice: convert the saving with
+your own measured cost per prefill token (GPU-seconds per token x instance rate). At an assumed $1
+per million prefill tokens that is ~$40,500/day; the token figure is measured, the dollar figure is
+an assumption. See [Token Economics and Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md).
 
-Convert that to money carefully. Copilot self-hosts this model, so there is no per-token invoice — the saving is prefill GPU-time, and the conversion rate is your own amortized cost per prefill token, not a vendor list price. At an internal cost of $1 per million prefill tokens (a modelling assumption you should replace with your measured GPU-seconds-per-token × instance rate), 40.5B tokens/day ≈ $40,500/day. State the token saving as the primary result and the dollar figure as derived — the token number is a measured property of the workload, the dollar number is an assumption about your fleet.
-
-The system prompt (language instruction + file-type context block) is the cacheable prefix; the FIM prefix/suffix content changes per request and is never cached.
-
-See [Token Economics and Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) for the full provider prompt caching analysis.
-
----
-
-## Failure Scenarios and Recovery
-
-**Failure 1 — Repository-Level Context Retrieval Adding 800ms Latency to All Completions**
-
-A Copilot feature experiment added repository-level context retrieval (embedding-based search over the full codebase) to every inline completion request. In local testing, retrieval added 80ms. In production with a codebase of 2M files, the retrieval index returned results in 450ms at P95, pushing total TTFT to 650ms — well above the 400ms threshold where acceptance rate drops sharply.
-
-**Detection:** Acceptance rate monitoring dashboard showed a 9-point drop the day the feature launched in canary. Correlated with TTFT P95 metric spike.
-
-**Recovery:** Immediate rollback of repository context retrieval for inline completions (keep for agent mode only). Rebuilt retrieval pipeline with ANN index (HNSW, 50ms P95) and a pre-filter that skips retrieval for files under 200 tokens of context (inline completions where local context is sufficient).
-
-**Failure 2 — Language Detection Mismatch Sending Python Prompts to JavaScript-Tuned Model**
-
-Copilot maintained separate model checkpoints fine-tuned for Python/JS/TS vs systems languages (C, C++, Rust, Go). Language detection used file extension: `.py` → Python model, `.ts` → JS model, `.cpp` → systems model. A user with a `.py` file containing embedded C extension code (via `ctypes`) triggered the Python model, which produced syntactically incorrect C pointer arithmetic. File-extension-based detection was replaced with a lightweight language classifier (12ms inference) that analyzed the content, not the filename.
-
----
-
-## Capacity Planning
-
-```
-GitHub Copilot (estimated public scale, 2024):
-- 1.8M paying subscribers × average 5 active coding hours/day
-- Completion trigger rate: 1 trigger per 8 seconds of coding = 7.5 triggers/minute
-- Active user triggers: 1.8M × (5h × 60m/h × 7.5/m) = 4,050M triggers/day
-- Accepted completions: 4,050M × 0.34 acceptance rate = 1,377M accepted/day
-
-But most completions are rejected in <1 second (user keeps typing):
-- 66% rejected within 1s: no model call needed (debounce absorbs)
-- Only 34% of triggers result in a model call: 4,050M × 0.34 = 1,377M model calls/day
-
-Model call throughput:
-= 1,377M / 86,400 seconds = 15,938 req/second average
-= 47,814 req/second at 3x peak (business hours)
-
-Compute per request:
-- Input: 1,500 tokens × BF16 FIM model (Codestral-22B equivalent)
-- Output: 65 tokens average (P50 completion length)
-- Throughput per A100: ~120 req/second (continuous batching, FIM, 22B FP8)
-
-GPUs at peak: ceil(47,814 / 120) = 399 A100s
-With 65% utilization target: 614 A100s
-
-Cost:
-- Reserved A100 at $2.10/GPU-hour: $614 × $2.10 × 24 = $30,945/day
-- Revenue: 1.8M subscribers × $10/month / 30 days = $600,000/day
-- GPU inference is ~5% of revenue — sustainable unit economics
-```
-
----
-
-## Additional Interview Questions
-
-**Q: Why does GitHub Copilot use a separate FIM-trained model rather than a general instruction-tuned model?** Instruction-tuned chat models are trained to follow natural language instructions and generate complete responses, optimizing for coherence across a full reply. FIM training specifically teaches the model to predict a middle span given prefix and suffix, which is the exact task of inline code completion. Instruction-tuned models perform poorly on FIM tasks (they tend to generate preamble text or complete functions when the cursor is mid-line) because their pretraining objective never required predicting a bounded middle span. The FIM objective also teaches the model to terminate at natural code boundaries (end of statement, end of block) rather than generating until a stop token.
-
-**Q: How does Copilot handle multi-cursor and multi-selection completions in editors that support them?** Multi-cursor completions are treated as independent requests, one per cursor, submitted in parallel. The completions are generated independently (no shared state between cursors) and displayed simultaneously. This means two cursors in different parts of the file may generate inconsistent completions (e.g., different variable names for the same concept). Advanced editors (VS Code with a Copilot Labs experiment) attempted "consistent multi-cursor" where cursor 1's accepted completion was added to cursor 2's context, but this increased latency by 200-300ms and was not pursued in production. The latency cost of consistency outweighed the rare benefit.
-
-**Q: What is the difference between Copilot's inline completion mode and Copilot Chat, and how does the architecture differ?** Inline completions optimize for TTFT (target <200ms), use FIM models, process short contexts (<2,000 tokens), stream the first token immediately, and are ephemeral (no conversation history). Copilot Chat uses instruction-tuned frontier models (Claude Sonnet 5, GPT-5.6, Gemini 3.1 Pro are all selectable in the model picker), processes long contexts (up to 128k tokens for full workspace context), maintains conversation history, and accepts TTFT up to 3s because the user explicitly submitted a query. Inline completions use a separate inference cluster with A100s optimized for high-throughput short requests; Chat uses a shared API (OpenAI API or Azure OpenAI) with less strict latency requirements. The shared latency SLAs are fundamentally incompatible — they must be separated.
-
-**Q: How would you design Copilot's telemetry pipeline to measure acceptance rate at 15,000 completions/second?** Client-side telemetry: each completion is assigned a UUID at generation time. When the user accepts (Tab) or dismisses (Esc/continues typing), the client sends an event with `{completion_id, accepted: bool, language, trigger_context, latency_ms}`. Events are batched client-side (send every 30 seconds or every 20 events) and sent to a Kafka topic. A Flink streaming job aggregates acceptance rate per language, file type, and model version in 1-minute windows. The acceptance rate metric is available in Grafana with a 90-second lag. The pipeline handles 15,000 completions/second × 1 event each = 15,000 events/second — modest for Kafka (which handles millions/second), but the batching (30-second window) reduces actual event rate to ~500/second.
-
-**Q: What happens to Copilot completions when the user's internet connection drops mid-typing?** The IDE extension queues the trigger event locally. If the network is restored within the 400ms debounce window, the request is submitted normally. If the network is down during inference, the request times out (2s timeout per the extension's default), and the ghost text is never shown — the user sees no completion, same as if the completion had been rejected. The extension maintains a local "offline mode" indicator; when offline, it skips triggering requests entirely to avoid queuing up stale completions that will arrive after the user has continued typing. There is no local model fallback in the standard Copilot product (unlike some IDE plugins that support on-device small models as fallback).
-
----
-
-## Production Failure Scenarios and Capacity Math
-
-### Incident: Completion Latency Regression from IDE Extension Memory Leak
-
-**What happened:** After a VS Code extension update, memory consumption of the Copilot extension process grew by 3 MB per hour due to a reference cycle in the completion history buffer (used to debounce duplicate completions). After 4 hours of continuous use, the extension process consumed 800 MB, causing VS Code's extension host to restart it. The restart cleared the debounce state and re-triggered completions that had already been dismissed. More importantly, the restart added 2-4 seconds of cold-start latency before completions resumed. Users reported "Copilot stopped working" despite the server-side being healthy.
-
-**Root cause:** The `CompletionHistory` object held strong references to `TextDocument` objects via closures. When the document was closed, the TextDocument was not garbage collected because CompletionHistory still held a reference.
-
-**Fix applied:**
-```typescript
-// BROKEN: strong reference to TextDocument prevents GC
-class CompletionHistory {
-    private history: Map<TextDocument, string[]> = new Map();
-    // When document closes, TextDocument reference kept alive in Map
-}
-
-// FIX: WeakMap allows TextDocument to be GC'd when document closes
-class CompletionHistory {
-    // WeakMap: key is garbage collected when no other strong reference exists
-    private history: WeakMap<TextDocument, string[]> = new WeakMap();
-    // Keys (TextDocuments) are released automatically when VS Code closes the document
-}
-```
-
-**Prevention:** Extension memory profiling in CI: run VS Code extension host with `--inspect` for 2 hours of simulated usage, capture heap snapshots at t=0 and t=120min. Alert if retained heap grows > 50 MB over the session. WeakRef/WeakMap usage is mandatory for any extension data keyed on VS Code API objects (documents, editors, terminals).
-
----
-
-### Incident: Acceptance Rate Drop from Tokenization Change
-
-**What happened:** The BPE tokenizer was updated to add 2,048 code-specific tokens. Completion acceptance rate dropped from 31% to 24% overnight. Root cause: the new tokenizer produced different token boundaries for common patterns (e.g., `self.` was previously 3 tokens, now 1 token). The completion model was fine-tuned with the old tokenizer. The new tokenizer's token IDs were out-of-distribution — the model generated correct code structurally but with incorrect indentation (Python) and bracket placement (JS/TS) because the attention patterns were calibrated to old token boundaries.
-
-**Fix:** Rolled back tokenizer update. Established the rule: tokenizer changes require full model retraining, not just a vocabulary update. Model and tokenizer are a coupled artifact and must be versioned together.
-
----
-
-### Capacity Planning Math (1.4M paying users)
-
-```
-Completion request rate:
-  1.4M users × avg 120 active minutes/day = 168M user-minutes/day
-  Completions triggered: 1 per 3 seconds of typing = 20 per active minute
-  Daily completions: 168M × 20 = 3.36B completions/day
-  Accepted (31%): 1.04B completions accepted/day
-
-Peak rate (business hours, 5× average):
-  3.36B / (86,400s) = 38,889 completions/sec average
-  Peak: 38,889 × 5 = 194,444 completions/sec
-
-FIM model inference requirements:
-  Model: 13B-class FIM-trained code model, on A100 80GB
-  Throughput: A100 handles ~400 FIM completions/sec at p99 < 200ms
-  Required A100s: 194,444 / 400 = 486 A100s at peak
-  With 40% utilization headroom: 810 A100s
-  Cost at $2.50/hr: 810 × $2.50 × 24 × 365 = $17.7M/year GPU cost alone
-
-GitHub Copilot revenue (1.4M × $19/month): $26.6M/month = $319M/year
-GPU cost as % of revenue: $17.7M / $319M = 5.5% — well within typical ML SaaS unit economics
-Cache (completion dedup): identical trigger contexts cached for 60s → 15% hit rate
-Effective GPU cost after caching: $17.7M × 0.85 = $15M/year
-```
-
----
-
-### Additional Q&As (Reliability and Business)
-
-**Q: How does Copilot's completion model stay current with new frameworks and APIs released after training?**
-Three mechanisms: (1) Retrieval augmentation: Copilot indexes open GitHub repositories weekly; new libraries committed to public repos are indexed and available for retrieval-augmented completion within 7 days of their first commit; (2) Fine-tuning cadence: the base FIM model is retrained quarterly on the latest 6 months of GitHub code, capturing framework evolution; (3) User correction signals: when users consistently modify Copilot's suggestions for a new API pattern, these corrections are fed back into the fine-tuning dataset (with PII scrubbing). The lag is inherent — a new API released today will not be well-supported for 4-8 weeks. This is disclosed in Copilot's documentation.
-
-**Q: What is Copilot's strategy for avoiding completion of copyrighted code verbatim?**
-Duplication filter: before returning a completion, Copilot checks the completion against an index of GitHub code with restrictive licenses. If the completion matches a verbatim sequence of > 150 characters from a licensed repository, the completion is suppressed. The filter is implemented as a Bloom filter of n-grams from known-licensed code — false positive rate < 0.1%, false negative rate < 2%. The filter adds 5ms to the p99 completion path. This is the "public code filter" that users can enable in Copilot settings — it defaults to on for Enterprise customers and off for individual subscribers.
-
----
-
-### IDE Extension Architecture Deep Dive
+### 4.12 IDE Extension Architecture
 
 **VS Code extension request lifecycle:**
 ```
@@ -1062,18 +708,48 @@ class CompletionDebouncer {
 
 ---
 
-### Additional Reliability and Scale Q&As
+## 5. Design Decisions & Tradeoffs
 
-**Q: How does Copilot handle the cold start problem when a user opens a new file in an unfamiliar codebase?**
-On file open: (1) the extension scans the project's directory structure and imports the first 200 lines of the 5 most recently modified files as "project context"; (2) reads the package manifest (package.json, pom.xml, requirements.txt) to understand the tech stack; (3) includes the current file's imports as the highest-priority context. This gives the model enough signal to produce relevant completions within the first keystrokes. Quality for cold-start completions is 15-20% lower acceptance rate than completions in familiar files, which improves as the model accumulates session context over 10-15 minutes.
+| Decision | Chosen | Alternative | Reason |
+|----------|--------|-------------|--------|
+| Debounce | 75ms | 0ms (every keystroke) | 10× fewer requests; within typing flow UX |
+| Context | FIM (prefix + suffix) | Prefix only | FIM generates more accurate completions |
+| Cache | Local LRU (IDE) | Server-side cache | Privacy; instant retrieval for recent completions |
+| Repo indexing | Local FAISS | Remote vector DB | Zero latency; no code leaves machine |
+| License filter | Training-time hash index | Runtime search | Millisecond lookup vs seconds |
+| Chat model | Frontier tier from a model picker (Claude Sonnet 5.5, gpt-6.2-sol, Gemini 4 Neon) | Cheap tier only (gpt-6-luna) | Quality requires a strong model; chat latency budget tolerates it; premium models are metered per request |
+| Multi-line | Generate up to N lines | Always single line | Better UX for boilerplate; trim on mismatch |
 
-**Q: How does Copilot's "Copilot for Business" ensure enterprise code never leaves the company's infrastructure?**
-Three technical controls: (1) API isolation: enterprise traffic routes through a dedicated Azure OpenAI deployment (not shared with individual users), hosted in the customer's Azure tenant for regulated industries; (2) no training data use: enterprise prompts are contractually excluded from training data — enforced by tagging requests with `X-Copilot-Enterprise: true` header and filtering these from the training pipeline; (3) no prompt logging on Copilot's side: GitHub logs metadata (response latency, acceptance rate) but not prompt content for enterprise accounts. Customers can verify this via GitHub's enterprise audit log API, which shows what metadata is collected. For highest-security environments, GitHub Copilot Enterprise supports a proxy mode where all requests go through the customer's own API gateway, which can inspect and log all traffic before forwarding to GitHub.
+### Data Privacy Design
 
-**Q: What is the strategy for handling Copilot in a monorepo with 10,000 files and 5M lines of code?**
-Context selection is the key challenge — the model's context window cannot hold 5M lines. Strategy: (1) file relevance ranking using BM25 on file content vs. current cursor context, returning the top 5 most similar files; (2) symbol-level retrieval: parse the current file's unresolved symbols and retrieve only the declarations that define them (function signatures, class definitions), not full file bodies; (3) git history proximity: files that were frequently modified together (co-change analysis on git log) with the current file are weighted higher in context selection; (4) test file pairing: if editing `payment_service.py`, auto-include `test_payment_service.py` in context — tests encode expected behavior. The combined context is pruned to 2,048 tokens with the above priority ordering.
+```
+Concerns:
+  - Developer code is proprietary IP
+  - Code may contain credentials, API keys
+  - Company code may be under NDA
 
----
+Mitigations:
+
+1. Data transmission:
+   - TLS 1.3 in transit (end-to-end encryption)
+   - No code stored on GitHub servers beyond request (Copilot Business)
+   - Code used only for completion, not for model training (opt-out)
+
+2. Training data control (Copilot Business vs Individual):
+   Individual: code snippets may be used to improve Copilot models
+   Business/Enterprise: snippets never retained, never used for training
+
+3. Secret detection:
+   - Before sending to API: scan for patterns matching secrets
+     (AWS_ACCESS_KEY, private key headers, JWT tokens)
+   - Either redact or warn developer
+   - Doesn't send raw credentials to model
+
+4. Organizational policies:
+   - Enterprise can block specific repositories from Copilot
+   - Can enforce "no suggestions from public code"
+   - Audit logs of all Copilot usage
+```
 
 ### Privacy and Code Security Architecture
 
@@ -1088,50 +764,302 @@ Context selection is the key challenge — the model's context window cannot hol
 | Latency telemetry | Yes | Infrastructure | 90 days |
 | User code (opened files) | Never | Never | Never |
 
-**Prompt construction privacy:**
-```typescript
-// Code context is processed client-side; only a fingerprint is sent for dedup
-function buildSecurePrompt(
-    document: TextDocument,
-    cursorPosition: Position,
-): { prompt: string; contextFingerprint: string } {
-    const prefix = document.getText(new Range(new Position(0, 0), cursorPosition));
-    const suffix = document.getText(new Range(cursorPosition, document.lineAt(document.lineCount - 1).range.end));
-
-    // Hash the context for server-side dedup — actual code is never stored
-    const contextFingerprint = sha256(prefix.slice(-500) + suffix.slice(0, 200));
-
-    return {
-        prompt: buildFIMPrompt(prefix, suffix),  // sent to inference, not stored
-        contextFingerprint,                        // stored for rate-limit dedup
-    };
-}
-```
-
-**Why Copilot does not train on private repo code by default:** Private repository code is covered by GitHub's terms of service — users retain copyright. Copilot Individual trains on public GitHub repositories (pre-2022) only. Copilot Business and Enterprise are contractually prohibited from using any customer code for training. The technical enforcement: requests tagged `X-Copilot-Enterprise: true` are filtered from the training pipeline before any data ever reaches the training infrastructure.
+**Why training on private code is off by default in this design:** private repository code stays
+the customer's copyright, so Business and Enterprise prompts are contractually excluded from
+training, and the server logs completion metadata (latency, acceptance) rather than prompt content.
+Code context is assembled client-side, sent for inference, and not stored; only a fingerprint of the
+last 500 characters of prefix and first 200 of suffix is kept, for rate-limit dedup.
 
 ---
 
-### Final Metrics Summary
+## 6. Real-World Implementations
 
-Two figures below are public disclosures; the rest are estimates derived from the
-capacity math in this document. Where an earlier section used a different scenario
-(1M vs 1.4M vs 1.8M users), this table follows the **1.4M-user** scenario so the
-throughput, GPU, and revenue rows are mutually consistent — read the other sections
-as alternative scalings of the same model, not as competing claims about GitHub.
+| System | Public fact | Design lesson |
+|--------|-------------|---------------|
+| GitHub Copilot inline completions (2023 engineering write-up) | the fast completion model saw ~6,000 characters of prompt; "neighboring tabs" raised acceptance by 5% relative and fill-in-the-middle by 10% relative, both by A/B test | context selection and prompt layout move acceptance as much as the model does |
+| GitHub Copilot model picker (2026) | chat, agent mode, the CLI and the coding agent let users choose among providers; Gemini 4 Neon became generally available on 2026-11-18 for Pro+, Max, Business and Enterprise, billed at provider list pricing under usage-based billing | the chat tier is a multi-provider gateway with per-model policy, not one model |
+| GitHub Copilot code review | generally available on 2025-04-04; over 1 million developers used it in the month of public preview | the same completion and chat stack extends to review with little new infrastructure |
+| GitHub Copilot coding agent | issues assigned to Copilot run in an ephemeral GitHub Actions-powered environment and come back as draft PRs | asynchronous agents reuse the PR review gate instead of inventing a new approval UI |
+| StarCoder2, Qwen3-Coder, Codestral | open FIM code models with documented sentinel tokens or a separate suffix field | self-hosting the inline tier is realistic; the FIM format is model-specific (4.8) |
 
-| Metric | Value | Notes |
+---
+
+## 7. Technologies & Tools
+
+| Layer | Choice | Why | Alternative |
+|-------|--------|-----|-------------|
+| IDE client | VS Code inline completions API, JetBrains, Visual Studio, Xcode, Eclipse plugins | ghost text where developers already work | a separate editor |
+| Debounce and cancel | 75ms debounce + request cancellation | ~10x fewer requests, no stale suggestions | request per keystroke |
+| Context assembly | token-budgeted FIM assembler (4.8), Tree-sitter, LSP symbols | the budget guard prevents blank ghost text | character-based truncation |
+| Inline model | 13B-class FIM model, FP8, self-hosted | < 200ms p99 at ~800 completions/s per H100 | hosted general chat model (no FIM, slower) |
+| Serving | vLLM with prefix caching and speculative decoding | ~85% prefix-cache hits; ~3x fewer target forward passes | TensorRT-LLM |
+| Chat and agents | multi-provider gateway (Claude Sonnet 5.5, gpt-6.2-sol, Gemini 4 Neon) | per-model policy and usage-based billing | single provider |
+| Duplication filter | n-gram index of public code | suppress verbatim matches > 150 chars | no filter |
+| Telemetry | client batching -> Kafka -> Flink -> Grafana | acceptance per language and model in ~90 s | log scraping |
+
+---
+
+## 8. Operational Playbook
+
+Release gates, tracing and runbooks for the inline tier. Chat and agent traffic flow through the
+multi-provider gateway, whose model policy (which models each organization may use) is enforced per
+tenant; see [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md).
+
+### Eval Pipeline
+
+Weekly acceptance-rate regression check against a golden set of 500 code completion scenarios spanning Python, TypeScript, Java, Go, and Rust. Each scenario provides a fixed prefix/suffix pair and an expected completion class (exact match, fuzzy token match, or semantic equivalence via LLM-as-judge). If the acceptance rate on the golden set drops more than 5 percentage points from the prior week's baseline, the pipeline fires a P1 alert and blocks deployment of the new model checkpoint. Cross-reference: See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
+
+```
+Golden eval pipeline (runs every Sunday 02:00 UTC):
+  1. Freeze model candidate checkpoint
+  2. Replay 500 golden scenarios against candidate via shadow traffic
+  3. Score: exact-match, fuzzy-match (token F1 > 0.8), LLM-as-judge for multi-line
+  4. Compare acceptance_rate_candidate vs acceptance_rate_baseline
+  5. If delta < -5pp → alert + block → human review required before deploy
+  6. If delta >= 0 → auto-promote checkpoint to canary (1% traffic)
+  7. Monitor live acceptance rate for 24h; if stable → full rollout
+```
+
+### Observability
+
+Every completion request carries a single OTel root span with child spans mirroring the latency budget:
+
+```
+completion_request [root]  lang, file_ext, cursor_position_type
+  +-- fim_assembly          prefix_tokens, suffix_tokens, neighbor_tokens, rag_tokens, total_tokens  <5ms
+  +-- speculative_decode    draft_tokens_generated, accepted_tokens, acceptance_rate, fallback_count  <185ms P50
+  +-- prefix_cache          cache_hit, prefix_tokens_saved, kv_cache_reuse_ratio                     <5ms
+  +-- license_filter        ngrams_checked, match_found, matched_license                             <5ms
+  +-- streaming             TTFT_ms, tokens_per_sec, completion_tokens, finish_reason   TTFT <200ms P50
+```
+
+Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md) for span schema standards and sampling strategy.
+
+### Incident Runbooks
+
+**Runbook 1 — Latency Spike (P99 TTFT > 500ms)**
+
+Symptom: `completion_latency_p99 > 500ms` sustained 3 minutes.
+Diagnosis: (1) Check `speculative_decode.duration` — is inference the bottleneck? (2) Check `prefix_cache.kv_cache_reuse_ratio` — if dropped from 0.85 to <0.5, the system prompt may have changed; check recent config deploys. (3) If `acceptance_rate < 0.4`, draft model is on a degraded node; reroute. (4) If `fim_assembly.total_tokens > 3,500`, budget guard may have regressed.
+Mitigation: Scale out replicas if GPU utilization > 80%; disable RAG context (Priority 4) to shed 280 input tokens/request.
+Resolution: Root cause to — (a) system prompt change breaking prefix cache affinity, (b) draft model node failure, or (c) FIM context budget regression. Verify P99 < 400ms before close.
+
+**Runbook 2 — Acceptance Rate Drop (rolling 7-day average down >5pp)**
+
+Symptom: Weekly eval fires or live panel shows acceptance rate < 29% (baseline 34%).
+Diagnosis: (1) Replay golden 500 scenarios against last 3 checkpoints to isolate regression commit. (2) Check `fim_assembly` spans for malformed FIM token order — `<PRE>`, `<SUF>`, `<MID>` must appear in sequence. (3) Verify FIMContextAssembler budget ratios unchanged. (4) Segment by language: if only Rust/Go regresses, check tokenizer-model mismatch.
+Mitigation: Roll back to last known-good checkpoint; revert FIMContextAssembler budget ratios if changed.
+Resolution: Add per-language acceptance rate baselines to eval gate before next checkpoint promotion.
+
+**Runbook 3 — License Filter False Positive Spike**
+
+Symptom: `license_filter.match_found` jumps from 0.1% baseline to >2%; users report "Suggestion blocked" spike.
+Diagnosis: (1) Sample 100 blocked completions; identify common triggering pattern. (2) Check if a recently indexed library introduced idiomatic code (`__init__(self, config: Config)`) that now matches the n-gram Bloom filter. (3) Confirm false positive vs. true verbatim copy.
+Mitigation: Temporarily raise n-gram match threshold from 50% to 70% — reduces false positives ~60% with <1% increase in true-positive miss rate.
+Resolution: Retrain Bloom filter excluding patterns appearing in >10,000 distinct repos (idiomatic, not licensable expression); re-deploy; monitor false positive rate.
+
+Cross-reference: See [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for GPU utilization math and cost attribution during incidents.
+
+### Quality Metrics and SLOs
+
+```
+Key metrics:
+
+Acceptance rate (primary quality metric):
+  accepted_completions / shown_completions
+  Target: > 30% (reported ~34% for GitHub Copilot)
+  Breakdown by: language, file type, time of day, model version
+
+Completion quality tracking:
+  - A/B test model versions (5% of traffic to new model)
+  - Track: acceptance rate, edit distance of accepted completions
+  - Edit distance: how much developer modified suggestion (lower = better)
+  - "Kept as is" rate: suggestion accepted without any edits
+
+Latency SLOs:
+  P50 < 150ms (median feels instant)
+  P95 < 300ms (near-instant for 95% of completions)
+  P99 < 600ms (slow but acceptable for 1% of requests)
+
+Error tracking:
+  - Authentication failures (expired tokens)
+  - Timeout rate (> 300ms → completion cancelled)
+  - Model errors (context too long, unsafe content)
+
+Usage analytics:
+  - Lines of code suggested vs accepted vs edited
+  - Languages most used
+  - Time-of-day patterns (engineer productivity patterns)
+```
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+**Acceptance falls with latency.** Ghost text is only useful if it arrives before the next keystroke,
+so latency incidents show up as acceptance and retention drops, not as errors:
+
+Ghost text (the inline suggestion shown in grey) has an acceptance rate that drops sharply with TTFT. The buckets below are illustrative of the shape, not a published GitHub breakdown:
+
+```mermaid
+xychart-beta
+    title "Ghost-text acceptance rate vs TTFT"
+    x-axis ["under 100ms", "100-200ms", "200-400ms", "400-600ms", "over 600ms"]
+    y-axis "Acceptance rate (%)" 0 --> 40
+    bar [38, 34, 28, 19, 11]
+```
+
+Acceptance falls from 38% below 100ms to 11% above 600ms; the 100-200ms bucket (34%) is the P50 target zone.
+
+**Illustrative scenario (not a disclosed GitHub incident):** a network maintenance window pushes P50
+TTFT from 150ms to 520ms for 2 hours, and acceptance falls from 34% to 20%. Because accepted
+completions drive engagement and retention, a 14-point drop is a churn signal, not a cosmetic one.
+The fix is a second inference region with latency-aware failover, so a single-region degradation
+never pushes TTFT past 300ms. For multi-region active-active inference, see
+[Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md).
+
+**Failure 1 — Repository-Level Context Retrieval Adding 800ms Latency to All Completions**
+
+A Copilot feature experiment added repository-level context retrieval (embedding-based search over the full codebase) to every inline completion request. In local testing, retrieval added 80ms. In production with a codebase of 2M files, the retrieval index returned results in 450ms at P95, pushing total TTFT to 650ms — well above the 400ms threshold where acceptance rate drops sharply.
+
+**Detection:** Acceptance rate monitoring dashboard showed a 9-point drop the day the feature launched in canary. Correlated with TTFT P95 metric spike.
+
+**Recovery:** Immediate rollback of repository context retrieval for inline completions (keep for agent mode only). Rebuilt retrieval pipeline with ANN index (HNSW, 50ms P95) and a pre-filter that skips retrieval for files under 200 tokens of context (inline completions where local context is sufficient).
+
+**Failure 2 — Language Detection Mismatch Sending Python Prompts to JavaScript-Tuned Model**
+
+Copilot maintained separate model checkpoints fine-tuned for Python/JS/TS vs systems languages (C, C++, Rust, Go). Language detection used file extension: `.py` → Python model, `.ts` → JS model, `.cpp` → systems model. A user with a `.py` file containing embedded C extension code (via `ctypes`) triggered the Python model, which produced syntactically incorrect C pointer arithmetic. File-extension-based detection was replaced with a lightweight language classifier (12ms inference) that analyzed the content, not the filename.
+
+### Incident: Completion Latency Regression from IDE Extension Memory Leak
+
+**What happened:** After a VS Code extension update, memory consumption of the Copilot extension process grew by 3 MB per hour due to a reference cycle in the completion history buffer (used to debounce duplicate completions). After 4 hours of continuous use, the extension process consumed 800 MB, causing VS Code's extension host to restart it. The restart cleared the debounce state and re-triggered completions that had already been dismissed. More importantly, the restart added 2-4 seconds of cold-start latency before completions resumed. Users reported "Copilot stopped working" despite the server-side being healthy.
+
+**Root cause:** The `CompletionHistory` object held strong references to `TextDocument` objects via closures. When the document was closed, the TextDocument was not garbage collected because CompletionHistory still held a reference.
+
+**Fix applied:**
+```typescript
+// BROKEN: strong reference to TextDocument prevents GC
+class CompletionHistory {
+    private history: Map<TextDocument, string[]> = new Map();
+    // When document closes, TextDocument reference kept alive in Map
+}
+
+// FIX: WeakMap allows TextDocument to be GC'd when document closes
+class CompletionHistory {
+    // WeakMap: key is garbage collected when no other strong reference exists
+    private history: WeakMap<TextDocument, string[]> = new WeakMap();
+    // Keys (TextDocuments) are released automatically when VS Code closes the document
+}
+```
+
+**Prevention:** Extension memory profiling in CI: run VS Code extension host with `--inspect` for 2 hours of simulated usage, capture heap snapshots at t=0 and t=120min. Alert if retained heap grows > 50 MB over the session. WeakRef/WeakMap usage is mandatory for any extension data keyed on VS Code API objects (documents, editors, terminals).
+
+---
+
+### Incident: Acceptance Rate Drop from Tokenization Change
+
+**What happened:** The BPE tokenizer was updated to add 2,048 code-specific tokens. Completion acceptance rate dropped from 31% to 24% overnight. Root cause: the new tokenizer produced different token boundaries for common patterns (e.g., `self.` was previously 3 tokens, now 1 token). The completion model was fine-tuned with the old tokenizer. The new tokenizer's token IDs were out-of-distribution — the model generated correct code structurally but with incorrect indentation (Python) and bracket placement (JS/TS) because the attention patterns were calibrated to old token boundaries.
+
+**Fix:** Rolled back tokenizer update. Established the rule: tokenizer changes require full model retraining, not just a vocabulary update. Model and tokenizer are a coupled artifact and must be versioned together.
+
+---
+
+## 10. Capacity Planning
+
+```
+Scenario: 1.4M paying seats (a modelling assumption; Microsoft last broke out
+paid Copilot subscribers at 1.8M in early 2024)
+
+Completion request rate:
+  1.4M users x 120 active minutes/day = 168M user-minutes/day
+  One trigger per 3 s of typing after debounce = 20 per active minute
+  Daily completions: 168M x 20 = 3.36B/day; accepted at 31% = 1.04B/day
+  Average 38,889/s; business-hours peak 5x = 194,444/s
+
+Serving (13B-class FIM model, FP8, ~1,500 input + 65 output tokens):
+  Planning throughput: ~800 completions/s per H100 at p99 < 200ms, with
+    prefix caching making ~85% of input tokens free (benchmark it)
+  Peak GPUs: 194,444 / 800 = 243 H100s; with 40% headroom = ~405 H100s
+  Cost at $2.50/GPU-hour: 405 x $2.50 x 8,760 h = ~$8.9M/year
+  60 s completion dedup cache (15% hit rate): ~$7.5M/year
+
+Revenue at the $19/seat Business price: 1.4M x $19 x 12 = ~$319M/year
+  Inline-completion GPUs are ~2-3% of that; at a $10 Pro price (~$168M/year)
+  ~5%. The seat mix moves margin more than the GPU fleet does.
+
+Chat and agents are the expensive tier: premium models are metered against
+per-plan request allowances and, beyond them, billed at provider list
+pricing under usage-based billing, so their cost passes through.
+```
+
+| Metric | Value | Basis |
 |---|---|---|
-| GitHub Copilot paid subscribers | 1.3M (Oct 2023) → 1.8M (early 2024) | Public Microsoft disclosures; GitHub has since reported tens of millions of all-time users and stopped breaking out a current paid count |
-| Copilot list pricing | Free $0 · Pro $10/mo · Pro+ $39/mo · Max $100/mo · Business and Enterprise priced separately per seat | Verified against GitHub's plans page, July 2026 |
-| Daily completion requests served | ~3.4B | Estimate, 1.4M-user scenario (§ Capacity Planning Math) |
-| Global acceptance rate | 30–35% | Varies by language and developer experience |
-| p50 completion latency | 95ms | IDE to first ghost-text character; design target |
-| p99 completion latency | 195ms | SLA target |
-| Highest acceptance rate | TypeScript | ~38% (strong typing aids FIM) — illustrative, not a published breakdown |
-| Lowest acceptance rate | Shell scripting | ~18% (high ambiguity) — illustrative |
-| A100-class GPUs (FIM serving) | ~810 at peak | Estimate; derived from 194K completions/sec peak at 400/sec/GPU with 40% headroom |
-| Annual revenue (modelled) | ~$319M | 1.4M seats × $19/mo × 12, i.e. modelled at the Business seat price. At the $10 Pro price the same seat count yields ~$168M — the seat mix, not the seat count, dominates this line |
-| GPU cost as % revenue | ~5% | Self-hosted FIM model efficiency |
+| Global acceptance rate | 30-35% | reported range; varies by language and developer |
+| p50 / p99 completion latency | 95ms / 195ms | design targets, IDE to first ghost-text character |
+| Completions served | ~3.4B/day | estimate above |
+| FIM serving GPUs | ~405 H100 at peak | estimate above |
+| Inline GPU cost as % of revenue | ~2-5% | depends on seat mix |
 
-**Copilot competitive moat:** The primary moat is not model quality (open-source FIM models are within 5% of Copilot quality) — it is IDE integration depth. Copilot has 4 years of VS Code integration work: ghost text rendering, multi-file context awareness, inline diff review, terminal command suggestions, voice input, and workspace search. A new entrant with a better model still needs 12–18 months of integration engineering to match the user experience. The product-distribution moat (built into GitHub, used by 4M+ GitHub users without a separate purchase decision for enterprise) is the second moat.
+---
+
+## 11. Interview Discussion Points
+
+**Q: Why is ~300ms the latency target for inline completions?**
+**Short:** Keystrokes come roughly every 200ms; a suggestion within ~300ms of a pause feels instant, while above 500ms developers notice and above 1s they have moved on.
+
+Human typing speed is ~200ms between keystrokes. If completions appear within 300ms of stopping typing, they feel instantaneous. Above 500ms developers notice the delay; above 1s they move on before the suggestion appears, which is why acceptance falls sharply with TTFT (Section 9).
+
+**Q: How much context should an inline completion use?**
+**Short:** About 1,500-2,800 tokens, mostly from the current file and recently opened tabs; more repository context helps agents but adds latency for little inline gain.
+
+More context gives better completions, but longer prompts mean higher latency and cost. A ~1,500-token budget (GitHub's 2023 model saw ~6,000 characters) is a deliberate balance: most useful context is in the current file and recently opened tabs, and repository-level retrieval has diminishing returns for inline completions while adding hundreds of milliseconds (Section 9).
+
+**Q: How do you reconcile personalization with enterprise privacy requirements?**
+**Short:** Split by plan: individual plans may allow snippet use, while Business and Enterprise get no retention and no training on their code, enforced by contract and logging policy.
+
+Individual developers want personalized completions, which needs code context; enterprises want zero data retention. The design handles this with plan-level policy: Business and Enterprise prompts are never retained or used for training, and only metadata (latency, acceptance) is logged. Secret detection runs client-side before any request, and organizations can exclude repositories and enforce the public-code filter.
+
+**Q: Why is acceptance rate the primary health metric, and how do you debug a drop?**
+**Short:** It measures whether suggestions are useful; segment a drop by language, file type and model version to separate a model regression from a broken context or tokenizer change.
+
+If acceptance drops from 34% to 25%, the model may have degraded, context collection may have broken, or one language may have regressed. Tracking acceptance by language, file type and model version, and replaying a golden set against recent checkpoints, isolates the cause. The tokenizer incident in Section 9 shows why: a vocabulary change looked like a model regression until it was segmented.
+
+**Q: Why use a FIM-trained model rather than a general instruction-tuned model for inline completion?**
+**Short:** FIM training teaches the model to fill a bounded middle span given prefix and suffix and to stop at code boundaries; chat models add preamble or finish whole functions.
+
+Instruction-tuned chat models are trained to follow natural-language instructions and produce complete replies. FIM training specifically teaches the model to predict a middle span given prefix and suffix, which is exactly inline completion. Chat models perform poorly here (they emit preamble or complete whole functions when the cursor is mid-line), and FIM training also teaches termination at natural boundaries: end of statement, end of block.
+
+**Q: How do inline completions and Copilot Chat differ architecturally?**
+**Short:** Inline uses a small self-hosted FIM model with ~2K-token context and < 200ms TTFT; chat uses frontier models from a picker with long context, history and a multi-second budget.
+
+Inline completions optimize for TTFT (< 200ms), use FIM models, short contexts (< 3,000 tokens) and no conversation history. Chat uses instruction-tuned frontier models selectable in a model picker (for example Claude Sonnet 5.5, gpt-6.2-sol, Gemini 4 Neon), long contexts with workspace retrieval, conversation history, and accepts a TTFT of up to ~3 s because the user explicitly asked. The two latency SLOs are incompatible, so they run on separate serving paths: a dedicated high-throughput FIM cluster for inline, and a multi-provider gateway for chat.
+
+**Q: How would you measure acceptance rate at 15,000+ completions per second?**
+**Short:** Tag each completion with an ID, send accept or dismiss events in client-side batches to Kafka, and aggregate per language and model in one-minute Flink windows.
+
+Each completion gets a UUID at generation time. On accept (Tab) or dismiss (Esc or continued typing) the client records `{completion_id, accepted, language, trigger_context, latency_ms}`, batches events (every 30 seconds or 20 events), and sends them to Kafka. A Flink job aggregates acceptance per language, file type and model version in 1-minute windows, visible in Grafana with ~90 seconds of lag. Batching reduces 15,000 completion events per second to ~500 requests per second.
+
+**Q: What happens to completions when the connection drops mid-typing?**
+**Short:** Requests time out after ~2 s and no ghost text appears; the extension detects offline state and stops triggering so stale suggestions never arrive late.
+
+If the network returns within the debounce window, the request goes out normally. If it is down during inference, the request times out and no ghost text is shown, the same as a rejected completion. The extension shows an offline indicator and skips triggering while offline, so it never queues stale completions that would arrive after the developer has moved on.
+
+**Q: How does the completion model stay current with new frameworks and APIs?**
+**Short:** Retrieval over recently indexed code covers new APIs within days, periodic retraining folds them into the model, and user edits to suggestions flag gaps.
+
+(1) Retrieval: newly indexed public code and the user's own workspace are available as context within days, without retraining. (2) Retraining on a regular cadence captures framework evolution in the weights. (3) Consistent user corrections to suggestions for a new API pattern flag gaps for the next training set. A brand-new API will be weakly supported for weeks; workspace context is the bridge.
+
+**Q: How do you avoid suggesting copyrighted code verbatim?**
+**Short:** Check each completion against an index of public code and suppress verbatim matches longer than ~150 characters, as an organization-enforceable setting.
+
+Before returning a completion, check it against an n-gram index of public code; a verbatim match above ~150 characters is suppressed. A Bloom-filter implementation adds ~5ms at p99 with a false-positive rate around 0.1%. Organizations can enforce the filter for all members. When idiomatic code starts triggering it (Section 8 runbook), exclude patterns that appear in thousands of distinct repositories, since those are not distinctive expression.
+
+**Q: How do you handle the cold start when a user opens an unfamiliar codebase?**
+**Short:** Seed context from the package manifest, the current file's imports and recently modified files, then let session context improve suggestions over the first minutes.
+
+On file open the extension reads the package manifest (package.json, pom.xml, requirements.txt) for the stack, the current file's imports as the highest-priority context, and the first lines of recently modified files. That gives the model enough signal for useful completions in the first keystrokes. Expect cold-start acceptance 15-20% below familiar files, recovering over 10-15 minutes as session context accumulates.
+
+**Q: How do you select context in a monorepo with 10,000 files and 5M lines?**
+**Short:** Rank files by similarity to the cursor context, retrieve only declarations of unresolved symbols, boost co-changed files and paired tests, then prune to the token budget.
+
+The window cannot hold 5M lines, so: (1) rank files by BM25 similarity to the cursor context and keep the top 5; (2) resolve unresolved symbols in the current file and include only their declarations (signatures, class definitions); (3) weight files frequently changed together with this one in git history; (4) pair `payment_service.py` with `test_payment_service.py`, because tests encode expected behaviour. The result is pruned to ~2,048 tokens in that priority order.

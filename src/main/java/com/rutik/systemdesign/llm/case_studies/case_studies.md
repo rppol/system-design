@@ -10,7 +10,7 @@ Each case study is 900–1,100 lines: scale math, architecture diagrams (ASCII a
 
 | Order | File | Why start here |
 |-------|------|----------------|
-| 1 | [design_chatgpt.md](./design_chatgpt.md) | Canonical reference — covers the core LLM serving loop, streaming, RLHF, prefix-cache economics. All other case studies assume you know this foundation. |
+| 1 | [design_chatgpt.md](./design_chatgpt.md) | Canonical reference — covers the core LLM serving loop, streaming, tiered model routing, prefix-cache economics. All other case studies assume you know this foundation. |
 | 2 | [design_rag_pipeline.md](./design_rag_pipeline.md) | The backbone of 80% of enterprise LLM applications. Covers chunking, embedding, hybrid retrieval, and reranking end-to-end. |
 | 3 | [design_gpu_inference_platform.md](./design_gpu_inference_platform.md) | Infrastructure layer that every product sits on top of. Covers multi-tenant GPU scheduling, cold-start, LoRA multiplexing, autoscaling. |
 
@@ -24,7 +24,7 @@ Read these before anything else. They define the vocabulary and patterns every s
 
 | File | Primary Engineering Concern | What It Teaches |
 |------|-----------------------------|-----------------|
-| [design_chatgpt.md](./design_chatgpt.md) | Conversation serving at scale | Streaming SSE pipeline, RLHF reward model, prefix-cache hit economics, multi-region active-active routing, abuse detection without false positives |
+| [design_chatgpt.md](./design_chatgpt.md) | Conversation serving at scale | SSE streaming with disconnect abort, tiered model routing, MoE serving on B200/GB200 with prefill/decode disaggregation, prefix-cache hit economics, multi-region routing, abuse detection without false positives |
 | [design_rag_pipeline.md](./design_rag_pipeline.md) | Retrieval-Augmented Generation | Chunking strategies, embedding model selection, BM25 + dense hybrid retrieval, cross-encoder reranking, answer grounding and hallucination detection |
 | [design_llm_gateway.md](./design_llm_gateway.md) | Provider abstraction and control plane | Semantic cache with threshold tuning, provider-adapter pattern, Lua sliding-window rate limiting, cost-aware model routing, per-tenant quota enforcement |
 
@@ -66,7 +66,7 @@ Read [agent_durability_patterns.md](./cross_cutting/agent_durability_patterns.md
 | File | Primary Engineering Concern | What It Teaches |
 |------|-----------------------------|-----------------|
 | [design_computer_use_agent.md](./design_computer_use_agent.md) | VLM-driven UI control | Screenshot tokenization economics (~1,500 tokens/frame), action confirmation gates, OS-level sandboxing (VM vs container), trajectory replay for debugging, CAPTCHA/auth-wall handling |
-| [design_autonomous_swe_agent.md](./design_autonomous_swe_agent.md) | Long-horizon durable execution | 50+ tool call planning, hour-scale task checkpointing, repo-level context engineering, test-driven self-correction loop, per-task cost ceiling ($2–20), SWE-bench scoring infra |
+| [design_autonomous_swe_agent.md](./design_autonomous_swe_agent.md) | Long-horizon durable execution | 50+ tool call planning, hour-scale task checkpointing, repo-level context engineering, test-driven self-correction loop, per-task cost ceiling ($2–20), SWE-bench Pro + internal-set eval harness |
 | [design_browser_research_agent.md](./design_browser_research_agent.md) | Multi-source synthesis | Sub-question decomposition, source deduplication across 100+ URLs, citation provenance graph, mid-process plan revision, paywall/JS-rendering handling, report-grade vs chat-grade output |
 | [design_ai_data_analyst.md](./design_ai_data_analyst.md) | Sandboxed code execution | Schema inference, iterative SQL/Python generation, sandboxed execution with memory limits, chart rendering pipeline, ambiguous query clarification loop |
 | [design_sales_ai_agent.md](./design_sales_ai_agent.md) | Multi-week stateful agents | Prospect sequence state across weeks (Temporal/Postgres checkpoints), CRM integration, email/LinkedIn tool orchestration, personalization without hallucinating company facts |
