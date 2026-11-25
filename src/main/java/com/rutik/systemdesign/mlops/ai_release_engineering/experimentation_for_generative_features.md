@@ -2,8 +2,9 @@
 
 > **Version anchor (2026-11-25).** **Langfuse v4.86.0** (2026-11-24) stores the per-trace scores
 > and **MLflow 3.18.0** (2026-11-04) runs the judges that score each arm in the examples. The
-> rule that Claude Opus 4.7 and later models reject a non-default `temperature`, `top_p` or `top_k`
-> was read from the Anthropic model deprecations page on 2026-10-18. Statsig, LaunchDarkly,
+> rule that Claude 4.7 and later models reject a non-default `temperature`, `top_p` or `top_k`,
+> and that API version `2026-10-21` rejects all three on every model, was read from the Anthropic
+> model deprecations page on 2026-11-25. Statsig, LaunchDarkly,
 > GrowthBook, Optimizely and OpenFeature have no pin in this section and are named without a
 > version.
 
@@ -308,7 +309,7 @@ batch-invariant kernels all 1,000 completions matched.
 |---|---|---|
 | Sampling randomness | Adds within-unit variance; averages out across units | More units; never re-run a request to "confirm" an arm |
 | Batch nondeterminism | Same as above, even at temperature 0 | Treat outputs as random; do not assume replays match |
-| Hosted models that reject sampling params | `temperature: 0` returns a 400 on Claude Opus 4.7 and later | Remove the field from the bundle; size for the variance |
+| Hosted models that reject sampling params | `temperature: 0` returns a 400 on Claude 4.7 and later, and any `temperature` does on API version `2026-10-21` | Remove the field from the bundle; size for the variance |
 | Judge randomness | Attenuates the measured effect | Pin the judge; score each output once with a fixed seed where the engine supports it; calibrate flip rate |
 
 Measuring the judge's flip rate is a one-hour job: re-score 500 outputs from last week with the
@@ -749,7 +750,33 @@ Review found three problems:
 
 **Attempt 2: a fixed A/B.** Unit: agent (user), since agents learn a draft style. Workspace-level
 randomization was considered and rejected: 3,000 workspaces are too few units for a 1.5-point
-effect once between-workspace variance is counted, and running longer does not add workspaces. Design:
+effect once between-workspace variance is counted, and running longer does not add workspaces.
+
+The assignment code, before and after:
+
+```python
+# BROKEN: the draft is the unit. One agent sees both arms within the hour, compares them, and
+# the arms stop being independent. Exposure is logged at assignment, not when a draft is shown.
+def assign(draft_id: str) -> str:
+    arm = "candidate" if hash(draft_id) % 2 else "champion"
+    log_exposure(draft_id, arm)
+    return arm
+```
+
+```python
+# FIX: the agent is the unit, the hash is salted per experiment so arms do not correlate across
+# tests, and exposure is logged on display with the digest that actually served the draft.
+import hashlib
+
+def assign(agent_id: str, salt: str = "reply-draft-exp-14") -> str:
+    h = int(hashlib.sha256(f"{salt}:{agent_id}".encode()).hexdigest(), 16)
+    return "candidate" if h % 100 < 50 else "champion"
+
+def on_draft_displayed(agent_id: str, draft) -> None:
+    log_exposure(agent_id, assign(agent_id), served_digest=draft.bundle_digest)
+```
+
+Design:
 
 - Arms: champion (v8, mid-size model) against candidate (v9c, larger model), 50/50 by
   `hash(agent_id)`.

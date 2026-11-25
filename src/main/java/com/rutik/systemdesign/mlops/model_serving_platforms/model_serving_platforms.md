@@ -286,7 +286,7 @@ the image.
 ### 4.10 Decision-model routes behind a platform
 
 Decision models return typed labels, probabilities and scores instead of generated text, and engines
-expose them on new paths: vLLM v0.32.0 added `POST /v1/systemone`, and SGLang v0.5.21 serves
+expose them on new paths: vLLM v0.32.0 added `POST /v1/systemone`, and SGLang (since v0.5.21, pinned v0.5.23) serves
 `/v1/decisions` and `/v1/systemone`. A platform in front of the engine has to route those paths:
 
 - KServe `LLMInferenceService` at v0.21.0 sends `/v1/completions`, `/v1/chat/completions`,
@@ -981,7 +981,25 @@ of 4 vCPU (FIL backend for tree models) behind one `InferenceService` per risk t
 fell from 440 to 122 vCPU (98 dedicated plus 24 Triton). p99 latency for tail models rose from 18 ms to 24 ms, inside their 50 ms SLO.
 
 **Decision 2: the 8B assistant.** The low throughput was `max_ongoing_requests` at its default of 5.
-Raising it to 64 alone moved throughput to 139 tokens/s per GPU. The team still moved the assistant
+Raising it to 64 alone moved throughput to 139 tokens/s per GPU.
+
+```python
+# BROKEN: the hand-written deployment kept Ray Serve's default of 5 ongoing requests per
+# replica. vLLM batches only what reaches it, so the GPU decoded 5 sequences at a time.
+@serve.deployment(ray_actor_options={"num_gpus": 1})
+class Assistant:
+    ...
+```
+
+```python
+# FIX: set the cap from the engine's measured concurrency at the latency SLO, and let the
+# engine batch. 64 held p95 TTFT inside the SLO in the load test.
+@serve.deployment(ray_actor_options={"num_gpus": 1}, max_ongoing_requests=64)
+class Assistant:
+    ...
+```
+
+The team still moved the assistant
 off Ray Serve, because its only Ray use was this one deployment and it wanted the same engine image
 across all LLMs. It became an `LLMInferenceService` with the llm-d scheduler, 3 replicas on one L40S
 each, and KEDA scaling on `vllm:num_requests_waiting`.

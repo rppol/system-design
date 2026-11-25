@@ -24,6 +24,16 @@ Placement is link-only. No existing module moves into `mlops/`. KServe, llm-d, K
 Volcano and KAI Scheduler are owned here, so there is no `technologies/kserve`. Triton and
 OpenVINO stay in `technologies/` as a recorded pre-mlops exception.
 
+**GPU scheduling ownership (owner decision, 2026-11-25).** `mlops/` owns GPU schedulers and
+quota policy (Kueue, Volcano, KAI Scheduler, gang admission, cohorts and borrowing, MIG versus
+MPS versus time-slicing as a capacity policy) in `gpu_cluster_scheduling_and_quotas`, and
+inference autoscaling (the engine signal that drives the scaler, KEDA and HPA configs for model
+servers, capacity planning) in `inference_autoscaling_and_capacity_planning`. `devops/` keeps
+the mechanism and the generic layer: the device plugin, DRA, MIG, MPS and time-slicing
+mechanics, node provisioning, and generic autoscaling (HPA, VPA, Cluster Autoscaler, Karpenter,
+generic KEDA). Never hand off scheduler policy or inference autoscaling to a `devops/` page;
+link `devops/` only for the mechanism or the generic layer.
+
 ---
 
 ## Non-overlap boundary
@@ -54,10 +64,10 @@ listed in the right column, link to it. Do not repeat it.
 | `distributed_inference_and_disaggregation` | `llm/inference_and_decoding/kv_cache_optimization.md`, `technologies/nvidia_triton_inference_server/dynamo_and_the_nvidia_serving_stack.md` |
 | `lora_adapter_serving_and_lifecycle` | `llm/fine_tuning/lora.md` |
 | `model_storage_loading_and_cold_start` | `devops/container_runtimes_and_oci/oci_image_formats_and_lazy_pulling.md` |
-| `inference_autoscaling_and_capacity_planning` | `devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md`, `devops/ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md`; cost of idle capacity: `ai_cost_engineering_and_unit_economics` |
+| `inference_autoscaling_and_capacity_planning` | generic HPA, VPA, Cluster Autoscaler, Karpenter and KEDA mechanics: `devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md`; GPU node-pool provisioning and Capacity Blocks: `devops/ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md`; cost of idle capacity: `ai_cost_engineering_and_unit_economics` |
 | `progressive_delivery_for_model_servers` | generic Argo Rollouts and Flagger: `devops/deployment_strategies/deployment_strategies.md`; the release decision: `ai_release_engineering` |
 | `edge_and_on_device_deployment` | `llm/small_language_models_and_edge_ai/small_language_models_and_edge_ai.md`; compression: `ml/model_compression_and_efficiency/model_compression_and_efficiency.md` |
-| `gpu_cluster_scheduling_and_quotas` | device plugin, DRA, MIG, MPS, time-slicing mechanism: `devops/kubernetes_scheduling_and_autoscaling/device_scheduling_and_dra.md`, `devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md` |
+| `gpu_cluster_scheduling_and_quotas` | device plugin, DRA, MIG, MPS, time-slicing mechanism: `devops/kubernetes_scheduling_and_autoscaling/device_scheduling_and_dra.md`, `devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md` (scheduler and quota policy stays here) |
 | `ai_networking_and_storage_fabric` | programming view: `cuda/multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md`; `llm/training_infrastructure/training_infrastructure.md` |
 | `training_infrastructure_operations` | parallelism theory: `llm/training_infrastructure/training_infrastructure.md`; `ml/distributed_training/distributed_training.md`; `devops/case_studies/cross_cutting/gpu_node_lifecycle.md` |
 | `gpu_observability_and_fleet_health` | `cuda/profiling_and_performance_analysis/profiling_and_performance_analysis.md`, `devops/cloud_cost_optimization_finops/gpu_and_ai_finops.md` |
@@ -79,7 +89,10 @@ product fact not in this table is fetched from its primary source before it is w
 the fetch fails, cut the fact. No "verify" marker ships. Re-fetch the table before an audit
 pass. llm-d, GIE, KServe, vLLM and the decision-model APIs change monthly: between the
 2026-10-18 and 2026-11-25 fetches, llm-d, vLLM, dcgm-exporter and the OpenAI Decisions API
-each changed taught behavior, so schedule the next re-fetch within 30 days.
+each changed taught behavior, so schedule the next re-fetch within 30 days. Every fact that module
+pages and case studies dated "checked" or "read" 2026-10-18 was re-fetched and re-dated 2026-11-25
+(one unconfirmable claim, the ML Kit unlocked-bootloader restriction, was cut). A 2026-10-18 date
+that remains is a release date, sample data or deliberate history, not a check date.
 
 | Tool | Pin | Date | Source |
 |---|---|---|---|
@@ -158,14 +171,16 @@ source before it is written, or left out.
 
 | Fact | State | Source |
 |---|---|---|
-| KServe is a CNCF incubating project, accepted 2025-09-29 | Confirmed 2026-10-18 | https://www.cncf.io/projects/ |
-| KAI Scheduler is a CNCF Sandbox project, accepted 2025-12-21; license Apache-2.0 | Confirmed 2026-10-18 | https://www.cncf.io/sandbox-projects/, GitHub repo license |
+| KServe is a CNCF incubating project, accepted 2025-09-29 | Confirmed 2026-11-25 | https://www.cncf.io/projects/kserve/ |
+| ModelPack is a CNCF Sandbox project, accepted 2025-05-13 | Confirmed 2026-11-25 | https://www.cncf.io/projects/modelpack/ |
+| KitOps is a CNCF Sandbox project, accepted 2025-03-04 | Confirmed 2026-11-25 | https://www.cncf.io/projects/kitops/ |
+| KAI Scheduler is a CNCF Sandbox project, accepted 2025-12-21; license Apache-2.0 | Confirmed 2026-11-25 | https://www.cncf.io/projects/kai-scheduler/, GitHub repo license |
 | llm-d is a CNCF Sandbox project, accepted 2026-03-12 | Confirmed 2026-11-25 (still Sandbox after v1.0.0) | https://www.cncf.io/projects/llm-d/ |
-| Kueue is not a CNCF project (Kubernetes SIG project) | Confirmed 2026-10-18: absent from both CNCF lists | https://www.cncf.io/projects/ |
-| ClickHouse acquired Langfuse, announced 2026-01-16 | Confirmed 2026-10-18 | https://langfuse.com/blog/joining-clickhouse |
-| OpenAI agreed to acquire promptfoo, announced 2026-03-09; repo license MIT | Confirmed 2026-10-18 | https://www.promptfoo.dev/blog/, GitHub repo license |
-| DVC lives under the `treeverse` org | Confirmed 2026-10-18 | GitHub redirect `iterative/dvc` to `treeverse/dvc` |
-| Model Streamer repo moved to `dsx-ai-factory/model-streamer` | Confirmed 2026-10-18 (repo redirect); the rename date is not confirmed, so content gives no date | GitHub redirect |
+| Kueue is not a CNCF project (Kubernetes SIG project) | Confirmed 2026-11-25: absent from both CNCF lists | https://www.cncf.io/projects/ |
+| ClickHouse acquired Langfuse, announced 2026-01-16 | Confirmed 2026-11-25 | https://langfuse.com/blog/joining-clickhouse |
+| OpenAI agreed to acquire promptfoo, announced 2026-03-09; repo license MIT | Confirmed 2026-11-25 | https://www.promptfoo.dev/blog/, GitHub repo license |
+| DVC lives under the `treeverse` org | Confirmed 2026-11-25 | GitHub redirect `iterative/dvc` to `treeverse/dvc` |
+| Model Streamer repo moved to `dsx-ai-factory/model-streamer` | Confirmed 2026-11-25 (repo redirect); the rename date is not confirmed, so content gives no date | GitHub redirect |
 | TGI repo is archived | Confirmed 2026-11-25 (archived 2026-03-21) | GitHub repo page |
 | KAI Scheduler repo moved to `kai-scheduler/KAI-Scheduler` | Confirmed 2026-11-25 (redirect from `NVIDIA/KAI-Scheduler`); the move date is not confirmed, so content gives no date | GitHub redirect |
 | Agent Router repo moved to `theagentrouter/agent-router` | Confirmed 2026-11-25 (redirect from `envoyproxy/ai-gateway`); the API group stays `aigateway.envoyproxy.io`; the move date is not confirmed | GitHub redirect, v1.3.0 release notes |
@@ -269,7 +284,7 @@ in §4; named companies in §6; quantified impact in §9; 10+ Q&As in §11 under
 | `case_studies/design_an_on_device_model_delivery_system.md` | - | a 3B model plus adapters to 50M phones: OTA deltas, cohort rollout, device matrix, hybrid fallback |
 | `case_studies/design_a_continuous_training_and_champion_challenger_system.md` | principal | CT for a scoring model with 30-day label delay: challenger shadowing, promotion rules, decision-policy versioning |
 | `case_studies/design_an_ai_quality_incident_response_program.md` | principal | a silent provider model update cuts task success by 8%: quality SLOs, detection, kill switch, re-qualification |
-| `case_studies/design_an_ai_governance_and_model_inventory_platform.md` | principal | a bank with 1,200 models and 300 GenAI use cases: inventory, risk tiers, approvals, EU AI Act and SR 11-7 evidence |
+| `case_studies/design_an_ai_governance_and_model_inventory_platform.md` | principal | a bank with 1,200 models and 300 GenAI use cases: inventory, risk tiers, approvals, EU AI Act and SR 26-2 evidence |
 | `case_studies/cross_cutting/ai_release_bundle_and_lineage.md` | not listed | the release-bundle manifest as a worked example (14-section reference note) |
 
 Case-study Q&As never enter the main bank. `extract.py` puts them in the reader-only
@@ -295,9 +310,19 @@ Studies must not duplicate `llm/case_studies/design_gpu_inference_platform.md`,
 
 Senior is the craft: build it, debug it, say why it broke. Principal is the judgment: which
 approach at what cost, what migration, what not to build. They are different cuts, not
-nested depths. 7 of the 13 principal files (11 module pages plus 2 sub-files) are material
-the senior path never sees.
+nested depths. 6 of the 13 principal files (11 module pages plus 2 sub-files) are material
+the senior path never sees: four module pages (`continuous_training_and_refresh_policy`,
+`ai_governance_and_model_risk_operations`, `ai_cost_engineering_and_unit_economics`,
+`ml_platform_architecture_and_build_vs_buy`) and two sub-files
+(`statistics_of_release_gates.md`, `multi_region_and_multi_tenant_serving.md`).
 Do not promote a module to principal because it is advanced.
+
+Tier decision (2026-11-25): `ml_pipelines_and_orchestration`, `edge_and_on_device_deployment`
+and `ai_networking_and_storage_fabric` were on no tier; all three are craft (step caching on input
+digests and batch inference, OTA and device-matrix delivery, NCCL triage and fabric acceptance tests), so they
+joined the senior tier. `gpu_cluster_scheduling_and_quotas` moved from principal to senior and
+principal, because its §6 (MIG relayout, Kueue YAML, KAI sharing modes) is craft while its quota
+design stays principal judgment. Senior is now 28 modules, principal 11 modules and 13 files.
 
 Membership is declared once, in the `<!-- study-paths -->` block in `README.md`. Order comes
 from `STUDY_ORDER.mlops` in `game/app.js`. There is no path array in `app.js` to edit.

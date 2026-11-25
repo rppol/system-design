@@ -14,8 +14,8 @@
 > and `--port` defaults to 9931 (was 8080, changed in PR #30159, listed in the v0.7.0 notes).
 > **Ollama v0.40.18** (2026-11-24). **TGI** was archived on 2026-03-21; its README points to vLLM,
 > SGLang, llama.cpp and MLX. GuideLLM, AIPerf, GenAI-Perf, LLMPerf and lm-evaluation-harness have no
-> pin in this section; their CLI syntax was read from their READMEs on 2026-10-18. MLPerf Inference latency limits were read from the MLCommons
-> `inference_rules.adoc` on 2026-10-18.
+> pin in this section; their CLI syntax was read from their READMEs on 2026-11-25. MLPerf Inference latency limits were read from the MLCommons
+> `inference_rules.adoc` on 2026-11-25.
 
 ## 1. Concept Overview
 
@@ -503,7 +503,8 @@ budget with accuracy inside the gate is investigated, not waived: it usually poi
 **The belief to correct.** "Edge engines serialize requests" is wrong for `llama-server`. With the
 defaults at v1.0.0 and b12722, `-np/--parallel` is -1, which the server resolves to 4 slots with a unified KV
 buffer, and continuous batching (`-cb`) is on. Four requests decode in the same step. It is true
-for Ollama's defaults: `OLLAMA_NUM_PARALLEL` defaults to 1 per model, extra requests queue up to
+for Ollama's defaults on a GPU server: `OLLAMA_NUM_PARALLEL` defaults to 1 per model on CUDA and CPU
+(MLX on Metal picks a memory-based value when it is unset), extra requests queue up to
 `OLLAMA_MAX_QUEUE` (default 512), and beyond that Ollama returns 503.
 
 **Context per slot.** The KV layout decides how much context each slot gets. `--kv-unified` is on
@@ -770,7 +771,7 @@ histograms.
 | SGLang | Inference engine with serving benchmark | v0.5.23. `python -m sglang.benchmark.serving`; old `bench_serving` path is a shim |
 | TensorRT-LLM | NVIDIA engine with `trtllm-bench` and `trtllm-serve` | Stable v1.3.0; v1.4.0rc4 pre-release |
 | llama.cpp | GGUF engine; `llama-server` and `llama-bench` | Stable v1.0.0, rolling b12722. Slots, unified KV, `/slots`, `/metrics` with `--metrics` |
-| Ollama | Local model runner over llama.cpp | v0.40.18. `OLLAMA_NUM_PARALLEL` default 1, `OLLAMA_MAX_QUEUE` default 512 |
+| Ollama | Local model runner over llama.cpp | v0.40.18. `OLLAMA_NUM_PARALLEL` default 1 on CUDA and CPU (memory-based on MLX), `OLLAMA_MAX_QUEUE` default 512 |
 | HuggingFace TGI | Archived inference server | Archived 2026-03-21; 3.3.7 is final |
 | GuideLLM | Engine-neutral load generator | `guidellm run`, profiles synchronous to sweep |
 | AIPerf | NVIDIA load generator, successor to GenAI-Perf | `aiperf profile`, `--goodput` |
@@ -839,13 +840,14 @@ qualification, measure this A-vs-A disagreement first and judge the candidate by
 A-vs-B disagreement to that floor, not against zero.
 
 **Q: Is it true that llama.cpp serves one request at a time?**
-**Short:** Not for llama-server: with defaults it opens 4 slots with a unified KV buffer and continuous batching, so 4 requests decode together; Ollama defaults to 1 parallel request per model.
+**Short:** Not for llama-server: with defaults it opens 4 slots with a unified KV buffer and continuous batching, so 4 requests decode together; Ollama on CUDA or CPU defaults to 1 parallel request per model.
 
 At v1.0.0, as since v0.7.0, `-np/--parallel` defaults to -1 (auto), which the server resolves to 4 slots, `-cb` is
 on, and `--kv-unified` is on when slots are auto. Each `llama_decode` call processes every busy
 slot. Raise `-np` for more concurrency, pass `--kv-unified` with it (an explicit `-np` turns the
-unified buffer off), and size `-c` or `--kv-unified-per-slot` for the context those slots need. Ollama is the case where the belief holds: `OLLAMA_NUM_PARALLEL` defaults to 1,
-so a shared Ollama endpoint queues users unless that variable is raised.
+unified buffer off), and size `-c` or `--kv-unified-per-slot` for the context those slots need. Ollama is the case where the belief holds: `OLLAMA_NUM_PARALLEL` defaults to 1 on CUDA and CPU
+(MLX on Metal chooses a memory-based value when the variable is unset, per the Ollama FAQ checked
+2026-11-25), so a shared Ollama endpoint on a GPU server queues users unless that variable is raised.
 
 **Q: Why does a llama-server started with `-c 32768 -np 4` reject 10,000-token prompts?**
 **Short:** An explicit -np turns the unified KV buffer off, so the 32,768-token context is split into 4 slots of 8,192 tokens each and longer prompts do not fit.
@@ -1013,6 +1015,27 @@ kernels: vLLM's `--generation-config auto` applied the model's `generation_confi
 requests that sent no sampling fields, while TGI had used its own defaults. Two internal clients
 relied on server defaults. The team set explicit sampling in the gateway for every route, and the
 refunds slice returned to 97.3%.
+
+```python
+# BROKEN: the gateway forwards whatever the client sent. Clients that send no sampling fields
+# get the engine's defaults, which changed with the engine (vLLM applies generation_config.json).
+def forward(route, body):
+    return engine.post("/v1/chat/completions", json=body)
+```
+
+```python
+# FIX: every route owns its sampling, pinned in the release bundle, so an engine change cannot
+# change it silently. Client values are overridden, and the applied values go into the trace.
+ROUTE_SAMPLING = {
+    "refunds": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 600},
+    "chat":    {"temperature": 0.3, "top_p": 0.9, "max_tokens": 800},
+}
+
+def forward(route, body):
+    body = {**body, **ROUTE_SAMPLING[route]}
+    trace.set_attributes({"sampling": ROUTE_SAMPLING[route], "route": route})
+    return engine.post("/v1/chat/completions", json=body)
+```
 
 **Step 5: ops checks.** Cold start to ready was 3 min 40 s with CUDA graph capture, inside the
 5-minute budget. The `tgi_*` recording rules were rewritten to the `engine:*` names, and the HPA

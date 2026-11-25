@@ -66,11 +66,13 @@ mechanics live in
 [Device Scheduling and DRA](../../devops/kubernetes_scheduling_and_autoscaling/device_scheduling_and_dra.md)
 and its companion note
 [DRA and Device Plugins](../../devops/case_studies/cross_cutting/dra_and_device_plugins.md).
-MIG versus time-slicing isolation and partial gang admission on Kubernetes are in
+This page owns the scheduler and quota policy on top of that mechanism: Kueue, Volcano and KAI
+Scheduler, gang admission, and MIG versus MPS versus time-slicing as a capacity policy. Karpenter
+Capacity Blocks and GPU node-pool provisioning are in
 [GPU Scheduling and Inference Ops](../../devops/ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md).
 Fleet-level GPU operations, node pools and GPU node bring-up live in
 [ML Platform and GPU Infrastructure](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md).
-A worked cluster design with Kueue gang admission and DRA is
+A substrate-level cluster build that uses Kueue and DRA is
 [Design a GPU Training and Inference Cluster](../../devops/case_studies/design_gpu_training_and_inference_cluster.md).
 Generic tenant isolation patterns are in
 [Multi-Tenancy and Isolation](../../backend/multi_tenancy_and_isolation/multi_tenancy_and_isolation.md).
@@ -728,6 +730,22 @@ average of 40 minutes since checkpoint plus a 10-minute restart, losing about 21
 every weekday, 8% of the
 2,560 GPU-hours the band provided. Fix: jobs in the lendable band must checkpoint every 10
 minutes with async writes, and a pre-reclaim signal at 07:45 triggers a checkpoint.
+
+**Lent quota that never came back.** Research and product shared a Kueue cohort; product's
+ClusterQueue had a nominal quota of 64 GPUs and lent them while idle. Research borrowed all 64 for
+week-long jobs. When product submitted an urgent fine-tune, it sat Pending for 5 days, because
+`reclaimWithinCohort` defaults to `Never` and no workload in the cohort was preempted to return
+the quota. Fix: `reclaimWithinCohort: Any` (or `LowerPriority`) on lender queues, a
+`borrowingLimit` on borrowers, and a rule that borrowed capacity runs only jobs that checkpoint
+often enough to be preempted.
+
+**Two schedulers on one node pool.** A team installed Volcano for gang scheduling next to the
+default scheduler and pointed both at the same 32 GPU nodes. Each scheduler kept its own view of
+free GPUs, so both sometimes bound a pod to the same last free device. The kubelet rejected the
+later pod at admission and it went to `Failed`, so gang jobs lost one member, timed out and
+restarted, about 40 times a day. Fix: one scheduler per node pool, enforced by taints and node
+labels, or one scheduler (Kueue in front of the default scheduler, or KAI) for every GPU workload
+on those nodes.
 
 ---
 

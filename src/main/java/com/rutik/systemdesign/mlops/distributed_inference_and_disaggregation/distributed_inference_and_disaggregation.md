@@ -1033,6 +1033,27 @@ not by error rates. Fixes: both roles moved under one DisaggregatedSet; pods car
 `model-digest` and `kv-dtype` labels, and the EPP filters candidates on them; a canary sends a
 fixed prompt through every new P/D pair and compares the answer hash with the previous release.
 
+```bash
+# BROKEN: two Deployments on two clocks. Decode rolled first to an args change with an FP8 KV
+# cache; prefill still writes BF16 blocks, and decode reads them with the wrong layout.
+# prefill (old revision)
+vllm serve /models/llama-3.3-70b --tensor-parallel-size 4 \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+# decode (new revision)
+vllm serve /models/llama-3.3-70b --tensor-parallel-size 4 --kv-cache-dtype fp8 \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+```
+
+```bash
+# FIX: both roles render from one DisaggregatedSet revision with one image digest and one KV
+# dtype, and every pod is labelled so the EPP never pairs mismatched roles.
+KV_DTYPE=fp8   # a single value per revision, also written to the pod label kv-dtype=fp8
+vllm serve /models/llama-3.3-70b --tensor-parallel-size 4 --kv-cache-dtype "$KV_DTYPE" \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+vllm serve /models/llama-3.3-70b --tensor-parallel-size 4 --kv-cache-dtype "$KV_DTYPE" \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+```
+
 **Results.**
 
 | Metric | Before (48 colocated) | After (18P14D) |

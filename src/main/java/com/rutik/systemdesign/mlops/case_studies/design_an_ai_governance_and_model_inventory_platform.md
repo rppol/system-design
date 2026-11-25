@@ -8,7 +8,7 @@
 > GenAI traces stamped with the bundle digest. Sigstore cosign, OPA, Kyverno, OpenLineage,
 > PostgreSQL and Apache Iceberg are named without a version.
 >
-> **Guidance anchor (fetched 2026-10-18).** SR 26-2 "Revised Guidance on Model Risk Management"
+> **Guidance anchor (fetched 2026-11-25).** SR 26-2 "Revised Guidance on Model Risk Management"
 > (issued 2026-04-17) supersedes SR 11-7 (2011-04-04) and SR 21-8, and states it is most relevant
 > to banking organizations with over $30 billion in total assets
 > ([federalreserve.gov SR 26-2](https://www.federalreserve.gov/supervisionreg/srletters/SR2602.htm)).

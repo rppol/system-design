@@ -7,7 +7,7 @@
 > (2026-11-19) and **Kubernetes 1.37** host dedicated tenant deployments and their quotas.
 > **Agent Router v1.3.0** (`theagentrouter/agent-router`, 2026-11-18) and **LiteLLM v1.111.0**
 > (2026-11-25) are the gateway options in the examples. Provider facts read from primary docs on
-> 2026-10-18: Amazon Bedrock cross-Region inference (geographic profiles route within a geography
+> 2026-11-25: Amazon Bedrock cross-Region inference (geographic profiles route within a geography
 > such as US or EU at standard pricing; global profiles route to any supported commercial Region
 > at about 10% lower cost; CloudTrail records the processing Region in
 > `additionalEventData.inferenceRegion`); Microsoft Foundry deployment types (Global, Data Zone
@@ -452,13 +452,13 @@ after every import.
 
 ## 7. Real-World Examples
 
-- **Amazon Bedrock cross-Region inference** (docs read 2026-10-18) offers geographic profiles that
+- **Amazon Bedrock cross-Region inference** (docs read 2026-11-25) offers geographic profiles that
   route within a geography such as US or EU, and global profiles that route to any supported
   commercial Region at about 10% lower cost. There is no extra routing charge, data stays on the
   AWS network, and CloudTrail records the processing Region in
   `additionalEventData.inferenceRegion`. The docs advise bounded retries and multi-Region or
   multi-model fallback in the application to meet an availability target.
-- **Microsoft Foundry deployment types** (docs read 2026-10-18) separate Global (any Azure
+- **Microsoft Foundry deployment types** (docs read 2026-11-25) separate Global (any Azure
   region), Data Zone (processing within the US, EU or APAC zone; the EU zone follows the EU Data
   Boundary) and geography-based Standard and Regional Provisioned deployments. The docs note that
   with Global Standard and Data Zone Standard, an interruption in the primary region affects all

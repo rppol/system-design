@@ -5,8 +5,8 @@
 > restarts. Model Streamer 0.17.3 (2026-11-11), repo `dsx-ai-factory/model-streamer`. KServe
 > v0.21.0 (2026-09-25) with `LocalModelCache`. LeaderWorkerSet v1.0.0 (2026-10-16). Kubernetes 1.37
 > (1.37.2 on 2026-10-13); the OCI image volume source has been GA since 1.36. ModelPack model-spec
-> v0.0.7 (git tag of 2025-07-21). OpenSSF model-transparency v1.1.1 (2025-10-10). Dragonfly v2.5.2
-> (2026-09-14) and Kraken v0.1.32 (2026-10-12), both checked on their release pages on 2026-10-18.
+> v0.0.7 (git tag of 2025-07-21). OpenSSF model-transparency v1.1.1 (2025-10-10). Dragonfly v2.5.4
+> (2026-11-13) and Kraken v0.1.37 (2026-11-16), both checked on their release pages on 2026-11-25.
 > KitOps v1.17.0 (2026-11-06), Kueue v0.20.7 (2026-11-19), Mooncake v0.3.14 (2026-11-03) and
 > NIXL v1.5.2 (2026-10-29). Moonshot AI's checkpoint-engine has no GitHub release objects and is
 > named without a version.
@@ -787,8 +787,8 @@ itself is down.
 | ModelPack model-spec | OCI media types for the weights artifact | v0.0.7 |
 | KitOps | Optional packer that writes ModelPack with `kit pack --use-model-pack` | v1.17.0 |
 | OCI registry (Harbor or cloud registry) | Origin, backed by the object-store bucket | named without a version |
-| Dragonfly | P2P layer, seed peers, per-zone scheduler | v2.5.2 |
-| Kraken | Alternative P2P registry, evaluated | v0.1.32 |
+| Dragonfly | P2P layer, seed peers, per-zone scheduler | v2.5.4 |
+| Kraken | Alternative P2P registry, evaluated | v0.1.37 |
 | LeaderWorkerSet | Two-pod replica groups, group restart | v1.0.0 |
 | Kubernetes | Image volume source for small models | 1.37 |
 | KServe | `LocalModelCache` for single-node models | v0.21.0 |

@@ -70,6 +70,12 @@ calls, retries, failed attempts, retrieval, guardrails, judges, idle GPU hours. 
 the unit the business values: a resolved ticket, an accepted change, a correct decision. Most cost
 mistakes leave something out of the numerator or count calls instead of successes below the line.
 
+**Why it matters.** AI spend scales with traffic and with every retry, judge and agent step, so a
+bill can double with no deploy. A team that tracks cost per call sees $0.004 and approves a
+cheaper model. If tasks now take 1.5 calls on average and only 60% succeed, the cost per successful
+task is $0.004 x 1.5 / 0.6 = $0.010, 2.5 times the dashboard number, and the "saving" may be a
+loss. Budgets, chargeback and build-vs-buy calls made on the wrong unit are wrong in the same way.
+
 **Key insight.** Cost and quality are one decision. Every lever in §6.6 trades some quality risk
 for money, so every lever ships behind an eval gate, and every quality gate reports cost per
 successful task next to the quality score.
@@ -703,7 +709,7 @@ over a heavy-tailed per-token cost needs limits set on high percentiles and stat
 dollars, not requests.
 
 **Anthropic, Claude Code plan limits.** Claude Pro and Max plans carry a five-hour session limit
-and a weekly limit on Claude Code use (Anthropic support article, checked 2026-10-18). A weekly cap
+and a weekly limit, shared across Claude and Claude Code (Anthropic support article, checked 2026-11-25). A weekly cap
 bounds agent sessions that run for hours, which move the top percentile of cost per active user
 much further than chat does.
 
@@ -976,6 +982,27 @@ The cache step: input was 46% of $344,000, or $158,200. At a 22% hit rate input 
 `0.78 + 0.22 x 0.1 = 0.802` of uncached; at 78% it costs `0.22 + 0.78 x 0.1 = 0.298`. New input
 spend is $158,200 x 0.298 / 0.802 = $58,800. The reasoning step: output spend was $185,800,
 reasoning 55% of it ($102,200), the easy band 60% of that ($61,300), cut by 70%: $42,900.
+
+The prompt-assembly change behind the cache step:
+
+```python
+# BROKEN: the first bytes change on every run (timestamp) and the tool list comes from a set,
+# so its order varies. No two runs share a cacheable prefix, and the hit rate sits at 22%.
+def build_request(task, tools: set):
+    system = f"Run started {datetime.now().isoformat()}.\n" + AGENT_RULES
+    return {"system": system, "tools": list(tools), "messages": [task.as_message()]}
+```
+
+```python
+# FIX: static content first and byte-identical across runs; per-run values go last.
+# CI asserts that two builds for different tasks share the same prefix bytes.
+def build_request(task, tools: set):
+    system = AGENT_RULES
+    ordered = sorted(tools, key=lambda t: t.name)
+    run_note = f"Run started {datetime.now().isoformat()}."
+    return {"system": system, "tools": ordered,
+            "messages": [task.as_message(), {"role": "user", "content": run_note}]}
+```
 
 **Budgets and SLO (weeks 6-8).** Team budgets with soft limits on production keys and hard limits on
 CI and eval keys; a cost SLO of $0.18 per accepted task; burn-rate alerts on every key with

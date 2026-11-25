@@ -989,6 +989,30 @@ stable fleet. The fix was not a looser threshold: a 30-minute pause after each w
 a second TTFT query restricted to requests with no prefix hit, which read 1.02 even in the first
 run.
 
+```yaml
+# BROKEN: analysis starts the moment the weight moves. The canary's prefix cache is empty (11%
+# hit rate against 74%), so its TTFT ratio reads 1.31 and the step fails on cache warmth alone.
+steps:
+  - setCanaryScale: {replicas: 1}
+  - setWeight: 5
+  - analysis: {templates: [{templateName: llm-guardrails}]}
+```
+
+```yaml
+# FIX: pause 30 minutes after every weight change, and add a metric that compares TTFT only on
+# requests with no prefix hit (a histogram the gateway emits with a prefix_hit label), so a cold
+# cache cannot fail the step and a slower model cannot hide behind a warm one.
+steps:
+  - setCanaryScale: {replicas: 1}
+  - setWeight: 5
+  - pause: {duration: 30m}
+  - analysis: {templates: [{templateName: llm-guardrails}, {templateName: ttft-no-prefix-hit}]}
+  - setCanaryScale: {matchTrafficWeight: true}
+  - setWeight: 25
+  - pause: {duration: 30m}
+  - analysis: {templates: [{templateName: llm-guardrails}, {templateName: ttft-no-prefix-hit}]}
+```
+
 **Rollback drill.** On day 3, at the 50% step and off-peak, the team set the v15 weight to 0 and
 removed the v15 header rule. Traffic returned to the 6 v14 replicas within 8 seconds, and no
 stream was cut: in-flight v15 streams finished on the v15 pods, which stayed up. After 100%, a full

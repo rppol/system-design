@@ -7,14 +7,14 @@
 > defaults to 1.0, §6.1) and adds `vllm:admission_rejections`. KEDA v2.21.1
 > (2026-11-15). KServe v0.21.0 (2026-09-25), which adds direct KEDA scaling to
 > `LLMInferenceService` (`spec.scaling.keda`) and accepts `idleReplicaCount: 0`. Ray 2.60.1
-> (2026-11-23); Ray Serve autoscaling defaults read from the Ray Serve docs on 2026-10-18. llm-d
+> (2026-11-23); Ray Serve autoscaling defaults read from the Ray Serve docs on 2026-11-25. llm-d
 > v1.0.0 (2026-10-20). `llm-d/llm-d-autoscaling` v1.0.0 (2026-10-13, read from its release page)
 > made the repository KEDA-first and deprecated the Workload Variant Autoscaler (WVA); the last
 > supported WVA release is v0.9.0. AIBrix v0.8.0 (2026-10-13) adds scheduled replica bounds
 > (`spec.schedules`) and a predictive autoscaling API (`spec.predictive`) to `PodAutoscaler`; in
 > v0.8.0 the predictive block validates but does not act, because the controller change (PR #2804)
-> was still open on 2026-10-18. Kubernetes 1.37. Knative KPA defaults read from the Knative docs
-> on 2026-10-18.
+> was still open on 2026-11-25. Kubernetes 1.37. Knative KPA defaults read from the Knative docs
+> on 2026-11-25.
 
 An LLM endpoint has a cost floor measured in whole GPUs and a cold start measured in minutes.
 This page covers the arithmetic from traffic and benchmark to replica count, the signals that show
@@ -53,9 +53,12 @@ route.
 **Not here.** HPA, VPA, Cluster Autoscaler, Karpenter and the generic KEDA mechanics, including
 the `queueLength` replica formula, live in
 [Kubernetes Scheduling and Autoscaling](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).
-The first broken-then-fixed KEDA config for vLLM (CPU HPA replaced by queue depth and KV usage),
-gang admission and Capacity Blocks in a Karpenter NodePool live in
-[GPU Scheduling and Inference Operations](../../devops/ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md).
+This page owns inference autoscaling: which engine signal drives the scaler, the KEDA and HPA
+configs for model servers, and capacity planning. Karpenter Capacity Blocks and GPU node-pool
+provisioning are in
+[GPU Scheduling and Inference Operations](../../devops/ml_platform_and_gpu_infrastructure/gpu_scheduling_and_inference_ops.md);
+gang admission and GPU quota policy are in
+[GPU Cluster Scheduling and Quotas](../gpu_cluster_scheduling_and_quotas/gpu_cluster_scheduling_and_quotas.md).
 The cost of idle capacity, reserved-vs-on-demand break-even and cost per 1M tokens belong to
 [AI Cost Engineering and Unit Economics](../ai_cost_engineering_and_unit_economics/ai_cost_engineering_and_unit_economics.md).
 Queueing theory (utilization law, Kingman, M/M/c) is in
@@ -144,7 +147,7 @@ it says nothing about how many replicas the current load needs.
 | Prompt token rate | `rate(vllm:prompt_tokens_total[1m])` | No | Coincident | Capacity planning, prefill pool trigger |
 | Admission rejections | `vllm:admission_rejections_total{reason=...}` | No | Leads | Overflow routing, alert |
 | Running requests alone | `vllm:num_requests_running` | Yes, at `--max-num-seqs` | Coincident | Not a scale trigger |
-| GPU utilization | `DCGM_FI_DEV_GPU_UTIL_RATIO` from dcgm-exporter 4.9.0 (`DCGM_FI_DEV_GPU_UTIL` in percent before 4.9.0) | Yes, at 1.0 | Coincident | Not a scale trigger |
+| GPU utilization | `DCGM_FI_DEV_GPU_UTIL_RATIO` from dcgm-exporter 4.9.0 | Yes, at 1.0 | Coincident | Not a scale trigger |
 | CPU utilization | cAdvisor | Yes | Misleading | Not a scale trigger |
 | Requests per second | Gateway | No | Coincident | Valid only for fixed-cost classic models (a 30 ms XGBoost call) |
 
@@ -617,7 +620,7 @@ from zero.
 `horizonSeconds` is 1 to 3600, default 120. The webhook rejects the block on the HPA strategy.
 `status.predictive` is defined with `reactiveReplicas` and `wouldBeReplicas` side by side, so an
 operator can see whether `Auto` would change anything. In v0.8.0 only the API is in: the
-controller change (PR #2804) was open on 2026-10-18, so the block validates, nothing fills the
+controller change (PR #2804) was still open on 2026-11-25, so the block validates, nothing fills the
 status, and nothing acts. Whatever the product, a horizon shorter than the cold start is no
 use: set it to at least the scale-up lag.
 
@@ -758,6 +761,27 @@ time, and long ones were cut. Fix: a preStop hook that fails readiness first, th
 saturation the waiting count tripled, the autoscaler added 6 replicas, and the retry load vanished
 before they were ready. Fix: `Retry-After` on 503 and 429, jittered client backoff, and a
 scale-up rate limit of 1-2 pods per minute.
+
+**GPU utilization as the HPA target.** A team set an HPA on `DCGM_FI_DEV_GPU_UTIL_RATIO` with a
+target of 0.8. A vLLM replica keeps a kernel running for every decode step, so each replica read
+1.0 as soon as it served a single stream. The HPA scaled to `maxReplicas` 40 at 03:00 with traffic
+at 10% of peak and stayed there, about 30 idle replicas every night of the month. Fix: scale on
+`vllm:num_requests_waiting` or KV-cache usage per replica, and keep GPU utilization as a
+dashboard signal, as the §4.1 signal table says.
+
+**Scale-down faster than a cold start.** To cut cost, a team set the HPA scale-down
+`stabilizationWindowSeconds` to 0 on a 70B deployment whose replicas took 4 minutes to load.
+Bursty traffic added a replica, removed it 2 minutes later, and added it again on the next burst.
+About a third of the fleet's GPU-hours went to loading weights, and p95 TTFT doubled during the
+bursts. Fix: a scale-down window longer than the cold start (10 minutes here), a scale-down rate
+of one pod per few minutes, and a warm floor sized from the daily trough.
+
+**Scale-from-zero behind a 60 s gateway timeout.** An internal assistant ran with
+`minReplicaCount: 0` to save GPUs overnight. The first morning request waited for a node, the
+image and 140 GB of weights, about 6 minutes, while the gateway timed out at 60 s and clients
+retried 5 times. Users saw errors for the first 10 minutes of each day. Fix: keep at least one warm
+replica for interactive routes, scale to zero only for batch or async routes, and return a
+`Retry-After` while the first replica loads.
 
 ---
 
@@ -1032,6 +1056,35 @@ traffic ramped before the cron window; holidays now go into the schedule review.
 cron trigger and kept the default `ignoreNullValues: true`, read 0 load and dropped to 2. In week 3 a model rename left a trigger
 filtering on `model_name="support-chat-v2"`. The query errored, fallback pinned the fleet at 10
 through a night, about 80 extra replica-hours, until the scaler-error alert was routed to on-call.
+
+The staging trigger that read a broken scrape as zero load, and the fix applied to every
+environment:
+
+```yaml
+# BROKEN: ignoreNullValues defaults to true, so an empty query result is read as 0 and the
+# fallback never fires; with no cron floor, staging scaled down to minReplicaCount.
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring:9090
+      query: sum(vllm:num_requests_running{model_name="support-chat"})
+      threshold: "60"
+```
+
+```yaml
+# FIX: an empty result is an error, errors trigger the fallback replica count, and the alert on
+# scaler errors pages on-call. The model name comes from the bundle, not a hand-typed string.
+fallback:
+  failureThreshold: 3
+  replicas: 10
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring:9090
+      query: sum(vllm:num_requests_running{model_name="support-chat"})
+      threshold: "60"
+      ignoreNullValues: "false"
+```
 
 **Lessons.**
 

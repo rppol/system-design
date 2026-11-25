@@ -5,7 +5,7 @@
 > traces, the online-eval scores and the cohort queries. The OTel GenAI semantic conventions moved
 > to `open-telemetry/semantic-conventions-genai`, which states no stability level, so this page
 > claims none. Azure OpenAI deployment upgrade policies are quoted from Microsoft Learn, checked
-> 2026-10-18. PagerDuty, Statuspage and OpenFeature have no pin in this section and are named
+> 2026-11-25. PagerDuty, Statuspage and OpenFeature have no pin in this section and are named
 > without a version. Provider A and Provider B are anonymized hosted-model vendors; their model
 > ids (`pa-large-0611`, `pa-large-latest`) are scenario names, not real products.
 
@@ -810,13 +810,13 @@ and found large changes in accuracy and in format-following. It is the reference
 a hosted model name as a moving dependency, and the reason probes check format validity as well as
 correctness.
 
-**Microsoft Azure OpenAI.** Azure deployments carry a version upgrade policy chosen per deployment:
-"Opt out of automatic model version upgrades", "Upgrade once new default version becomes
-available", and "Once the current version expires". Azure documents at least two weeks of notice
-before a new version becomes the default, and a deployment that opts out stops working at
-retirement (Microsoft Learn, checked 2026-10-18). For this program, the auto-upgrade policies are
-aliases by another name and are banned; the opt-out policy is the pinned snapshot, and the
-retirement date feeds the calendar in §4.4.
+**Microsoft Azure OpenAI.** Each Azure deployment carries a `versionUpgradeOption`:
+`OnceNewDefaultVersionAvailable` upgrades the deployment within two weeks of a new default version,
+`OnceCurrentVersionExpired` upgrades it to the default at the retirement date, and `NoAutoUpgrade`
+never upgrades, so the deployment stops working at retirement. An unset option is treated as
+`OnceCurrentVersionExpired` (Microsoft Learn, checked 2026-11-25). For this program, the two
+auto-upgrade options are aliases by another name and are banned, including the unset default;
+`NoAutoUpgrade` is the pinned snapshot, and the retirement date feeds the calendar in §4.4.
 
 **OpenAI and Anthropic dated snapshots.** Both providers publish dated or versioned model ids and
 retirement schedules. Anthropic deprecated `claude-sonnet-4-5-20250929` on September 30, 2026,

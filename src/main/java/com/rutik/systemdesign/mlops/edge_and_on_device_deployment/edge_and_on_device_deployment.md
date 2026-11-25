@@ -9,11 +9,11 @@
 > for several Snapdragon SoCs), and the MediaTek backend temporarily unsupported. The v1.5.x line
 > added a C++ SDK inside the Python wheels, multi-method export, and schema-version checks for
 > `.pte` and `.ptd` files. Facts
-> read from primary docs on 2026-10-18: Google Play size limits (base module 500 MB, one asset
+> read from primary docs on 2026-11-25: Google Play size limits (base module 500 MB, one asset
 > pack 1.5 GB, install-time total 4 GB, fast-follow plus on-demand total 30 GB, all compressed);
 > Apple Background Assets (managed asset packs, Apple-hosted or self-hosted); Apple Foundation
 > Models `SystemLanguageModel.availability` (iOS 26.0 and macOS 26.0); ML Kit GenAI Prompt API
-> `FeatureStatus` (beta, Android API 26+, unsupported on an unlocked bootloader); Firebase AI Logic
+> `FeatureStatus` (beta, Android API 26+); Firebase AI Logic
 > hybrid inference (Experimental); Chrome built-in
 > AI requirements (22 GB free, more than 4 GB VRAM or 16 GB RAM with 4 cores, model removed below
 > 10 GB free); WebLLM cache backends. LiteRT, Core ML, ONNX Runtime GenAI, MLC LLM, MLX and
@@ -572,8 +572,7 @@ removes your control of the model version.
 - **Android ML Kit GenAI** runs Gemini Nano in the AICore system service. `checkStatus()` returns
   `UNAVAILABLE`, `DOWNLOADABLE`, `DOWNLOADING` or `AVAILABLE`; `download()` streams
   `DownloadStarted`, `DownloadProgress`, `DownloadCompleted` or `DownloadFailed`. The Prompt API
-  is beta, needs API level 26 or higher, and does not run on devices with an unlocked
-  bootloader.
+  is beta and needs API level 26 or higher.
 - **Chrome built-in AI** needs 22 GB free on the profile volume, a GPU with more than 4 GB VRAM
   or 16 GB RAM with 4 CPU cores, and an unmetered connection for the first download. If free
   space falls below 10 GB after download, Chrome removes the model.
@@ -892,7 +891,7 @@ metric split by path and evaluate both paths on the same suite.
 
 Apple Foundation Models, ML Kit GenAI with Gemini Nano, and Chrome built-in AI cost no download or
 storage for you. In exchange the OS chooses the model and updates it, eligibility follows the OS
-rules (for example `deviceNotEligible`, an unlocked bootloader, or 22 GB free for Chrome), and
+rules (for example `deviceNotEligible`, an `UNAVAILABLE` status from ML Kit, or 22 GB free for Chrome), and
 behavior can change with an OS update. Pin what you control: prompt template, output validation,
 and an eval suite run against each OS release. Keep a cloud fallback for ineligible devices.
 
@@ -989,6 +988,37 @@ ran a manually copied GGUF, and nobody could say which store ran which version.
 in an app release. On the 6 GB tablets it raised peak memory by 300 MB; the OS killed the app
 during dictation, losing the note. Rollback needed another app release, which took 9 days to reach
 80% of tablets, and 2,100 work orders were re-typed by hand.
+
+```kotlin
+// BROKEN: the model is a file inside the APK. It loads unconditionally, a model change needs an
+// app release, and rollback waits for the next release to reach the fleet.
+val module = Module.load(context.filesDir.resolve("extractor_1b_q4.pte").path)
+```
+
+FIX: the model ships through a signed manifest. The app reads it before each load, checks live
+memory and thermal state against `requires`, refuses an adapter on the wrong base, falls back to
+queuing the raw note, and rolls back when a new `manifest_version` is published, with no app
+release:
+
+```json
+{
+  "feature": "work_order_extract",
+  "manifest_version": 37,
+  "enable_ttl_hours": 120,
+  "rollout": {"cohort_salt": "depot-2026-q3", "percent": 10},
+  "variants": [
+    {
+      "id": "woe-1b-q4-pte-v4",
+      "runtime": "executorch",
+      "requires": {"avail_mem_mb": 1100, "thermal_max": "moderate"},
+      "base": {"digest": "sha256:3a8f...", "size": 644245094},
+      "adapter": {"digest": "sha256:c41e...", "size": 23068672, "base_digest": "sha256:3a8f..."}
+    }
+  ],
+  "fallback": {"mode": "queue_raw_note"},
+  "signature": "ed25519:..."
+}
+```
 
 **Decisions.**
 

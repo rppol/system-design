@@ -5,11 +5,12 @@
 > batch examples. **llama.cpp** stable **v1.0.0** (2026-11-13) and rolling build **b12722**
 > (2026-11-25): `llama-server` defaults to auto slots (`-np -1`), continuous batching on, one
 > unified KV buffer when slots are auto, `/metrics` only with `--metrics`, and port 9931 (8080
-> before v0.7.0). **Ollama v0.40.18** (2026-11-24). Facts read from primary docs on 2026-10-18:
+> before v0.7.0). **Ollama v0.40.18** (2026-11-24). Facts read from primary docs on 2026-11-25:
 > OpenAI Batch API (50% discount, 24-hour window, up to 50,000 requests and 200 MB per batch);
 > SageMaker Asynchronous Inference (payloads up to 1 GB, processing up to one hour, scale to
 > zero); Cloud Run GPUs (NVIDIA L4 with 24 GB and RTX PRO 6000 Blackwell with 96 GB, scale to
-> zero); Ollama FAQ defaults (`OLLAMA_NUM_PARALLEL` 1, `OLLAMA_MAX_QUEUE` 512, 5-minute
+> zero); Ollama FAQ defaults (`OLLAMA_NUM_PARALLEL` 1 except MLX on Metal, which picks a
+> memory-based value, `OLLAMA_MAX_QUEUE` 512, 5-minute
 > keep-alive, port 11434); Flink async I/O timeout and capacity semantics. Modal, Baseten and
 > RunPod are named without versions or prices.
 
@@ -615,7 +616,7 @@ Ollama is easier to install and manage models with, and its defaults favor one u
 
 | Setting | Default | Effect on a shared box |
 |---|---|---|
-| `OLLAMA_NUM_PARALLEL` | 1 | One request per model at a time; others queue |
+| `OLLAMA_NUM_PARALLEL` | 1 on CUDA and CPU; MLX on Metal picks a memory-based value | One request per model at a time on a GPU server; others queue |
 | `OLLAMA_MAX_QUEUE` | 512 | Requests beyond 512 are rejected |
 | `OLLAMA_MAX_LOADED_MODELS` | 3 x GPU count, or 3 on CPU | A fourth model evicts one |
 | keep-alive | 5 minutes | Idle models unload; the next request pays the load |
@@ -672,7 +673,7 @@ GPU; and log probabilities, not only the chosen label, so threshold changes can 
 - **DoorDash Sibyl** (2020 engineering post) is a prediction service that serves many models
   behind one API and supports shadow predictions for candidate models: a shared-endpoint design.
 - **OpenAI Batch API and Azure Global Batch** both price batch at 50% of the synchronous rate with
-  a 24-hour window (checked 2026-10-18). For any workload whose input is known a day ahead, that
+  a 24-hour window (checked 2026-11-25). For any workload whose input is known a day ahead, that
   halves the API bill before any engineering.
 - **Cloud Run GPUs** document scale-to-zero with L4 and RTX PRO 6000 Blackwell GPUs, which makes
   a container-based serverless GPU target available on Google Cloud without managing nodes.
@@ -841,10 +842,13 @@ decode is capped by memory bandwidth, so beyond roughly 20-50 concurrent active 
 dedicated cluster. Pin `--port`, `--host` and slot settings, and turn on `--metrics`.
 
 **Q: Why does an Ollama server that answers one user quickly stall with ten users?**
-**Short:** `OLLAMA_NUM_PARALLEL` defaults to 1, so each model serves one request at a time and the rest wait in a queue of up to 512.
+**Short:** On CUDA and CPU servers `OLLAMA_NUM_PARALLEL` defaults to 1, so each model serves one request at a time and the rest wait in a queue of up to 512.
 
 Ollama's defaults suit a single user on a laptop. With ten users, nine wait for the first to
-finish, and a 30 s answer becomes a 5-minute wait at the back of the queue. Raising
+finish, and a 30 s answer becomes a 5-minute wait at the back of the queue. The default of 1
+holds for the CUDA, ROCm and CPU backends; on Apple silicon, when the variable is unset or zero,
+MLX on Metal picks a conservative value from available memory and the model's cache needs (Ollama
+FAQ, checked 2026-11-25). Raising
 `OLLAMA_NUM_PARALLEL` lets requests share decode steps, but parallel requests multiply the
 context (2K with 4 parallel becomes 8K), which can push layers off the GPU. Also check the
 5-minute keep-alive, which unloads idle models and makes the next request pay the load.
@@ -986,6 +990,27 @@ Data job overnight, writing to staging, then overwriting partitions with `model_
 row. Triage replaced a generative classification prompt with a decision question set (severity
 levels 0-9, routing choice among 6 queues), called from Flink async I/O with `capacity` 50, a 1.5
 s timeout overridden to a rules-based fallback, and an output log keyed by claim event id.
+
+```java
+// BROKEN: a 60 s timeout copied from the load balancer and the default timeout() behavior,
+// which fails the job. During a chat peak a call times out, Flink restarts the job from the last
+// checkpoint and replays every event since then, 6-10 times a day.
+AsyncDataStream.unorderedWait(claims, new TriageCall(endpoint),
+    60_000, TimeUnit.MILLISECONDS, 100);
+```
+
+```java
+// FIX: a timeout inside the 2 s budget, capacity sized from p99 latency times the event rate,
+// and a timeout() override that completes with the rules-based score instead of failing.
+AsyncDataStream.unorderedWait(claims, new TriageCall(endpoint),
+    1_500, TimeUnit.MILLISECONDS, 50);
+
+// in TriageCall
+@Override
+public void timeout(ClaimEvent e, ResultFuture<Triage> out) {
+    out.complete(List.of(Triage.fallback(e, "model_timeout", RULES_VERSION)));
+}
+```
 
 **After eight weeks.**
 

@@ -957,6 +957,24 @@ warm start with a from-scratch reset each quarter. Challengers shadow-score 10% 
 lead. In the first quarter, 13 challengers trained, 9 promoted, 3 failed the paired gate, and 1
 was blocked by the anchor budget after three small losses in a row.
 
+The promotion rule, before and after:
+
+```python
+# BROKEN: nightly auto-promotion when the challenger is not worse than the champion on offline
+# NDCG. Each promotion can lose a little inside the noise, and the losses add up night after night.
+def promote(challenger, champion) -> bool:
+    return challenger.offline_ndcg20 >= champion.offline_ndcg20
+```
+
+```python
+# FIX: a paired comparison on the same shadow-scored searches with matured labels, a margin the
+# challenger must clear, and a cumulative budget against a fixed quarterly anchor.
+def promote(ch, champ, anchor, margin=0.2, budget=1.0) -> bool:
+    diff = paired_ndcg20_diff(ch, champ)          # points, with a 95% interval
+    vs_anchor = paired_ndcg20_diff(ch, anchor)
+    return diff.lower_95 > -margin and vs_anchor.point > -budget and ch.labels_matured_days >= 7
+```
+
 **Listing LLM and adapters.** Refresh became monthly with 25% replay, gated per category and on
 German, French and Spanish slices. A trial run without replay gained 2.4 points on new categories
 and lost 5.1 on French attribute extraction; with replay the loss was 0.5. Promotion is

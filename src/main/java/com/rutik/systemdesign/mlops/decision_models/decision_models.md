@@ -17,7 +17,7 @@
 > decision models on `/v1/systemone` since v0.35.0 (2026-09-28), Clef models since v0.35.1
 > (2026-09-29), CLI and MLX support since v0.40.4 (2026-10-12). **llama.cpp** rolling build b12722
 > (2026-11-25, pre-release; stable v1.0.0 is 2026-11-13); the llama-server README (checked
-> 2026-10-18) marks native decision models with a `decisions` output modality and serves them on
+> 2026-11-25) marks native decision models with a `decisions` output modality and serves them on
 > `/v1/systemone`. **MLflow 3.18.0** (2026-11-04); 3.17.1 (2026-10-13) added OpenAI's Decision API
 > to `make_judge()` and 3.17.0 (2026-10-07) added TypeSafe judges. **Langfuse v4.86.0** (2026-11-24); OpenAI decision-model
 > evaluators in v4.55.0 (2026-10-08), graduated in v4.57.0 (2026-10-12). **vLLM Semantic Router
@@ -155,7 +155,7 @@ score split between distant levels.
 | SGLang v0.5.23 | GPU servers | Validated on Qwen3.8-27B and Qwen3.5-35B-A3B; decision checkpoints (PPLX-Decider-v1-27B, Clef) answer on `/v1/systemone` only | Both routes since v0.5.21. Refuses decisions with `--enable-mis`, `--dllm-algorithm`, `--skip-tokenizer-init` or a built-in conversation template; a LoRA `base:adapter` model name returns 400 (behavior read at v0.5.21) |
 | vLLM v0.34.0 | GPU servers | Decision-capable checkpoints | `POST /v1/systemone` (since v0.32.0) with `choice`, `noul`, `score` |
 | Ollama v0.40.18 | Laptop, workstation, small server | Nimble (Bespoke Labs), Tev1 (Together AI), Clef 27B and Clef Flash 9B (Cloudflare, multimodal) | `ollama show` reports only the `decision` capability, so chat clients do not offer these models |
-| llama.cpp b12722 | CPU or GPU, GGUF | Native decision models only (for example Clef, Granite Switch); option limit set per model, 52 to 255 | `/v1/models` marks them with a `decisions` output modality; served on `/v1/systemone`, which returns 501 for a model that is not a decision model |
+| llama.cpp b12722 | CPU or GPU, GGUF | Native decision models only (for example Clef, Granite Switch); option limit set per model, 2 to 255 | `/v1/models` marks them with a `decisions` output modality; served on `/v1/systemone`, which returns 501 for a model that is not a decision model |
 
 ### 4.3 Classic decision models
 
@@ -486,7 +486,8 @@ Porting traps the adapter does not hide:
   (other refusals) on `/v1/systemone`. llama.cpp returns 501 when the model is not a decision
   model. The TypeSafe Python SDK times out after 10 seconds by default and retries, so raise the
   timeout for large inputs.
-- **Images.** OpenAI takes `input_image` parts as inline base64 data URLs only. SGLang refuses image
+- **Images.** OpenAI takes `input_image` parts as inline base64 data URLs or public HTTP or HTTPS
+  URLs (checked 2026-11-25). SGLang refuses image
   requests under `--allow-auto-truncate`.
 
 ### 6.5 Calibration on your own labels
@@ -569,7 +570,7 @@ same set at threshold 0.50:  FP 190 ($570), FN 118 ($4,720)    expected cost $5,
 The lower threshold flags almost 6 times as many false positives and still costs 23% less, because a miss
 costs 13 times as much as a false alarm. A gate that reports only accuracy would pick 0.50.
 
-**Decision models as judges.** MLflow 3.17.0 runs TypeSafe judges through `make_judge()`: with
+**Decision models as judges.** MLflow (since 3.17.0; pinned 3.18.0) runs TypeSafe judges through `make_judge()`: with
 `feedback_value_type=bool` the judge asks a `noul` question and returns True at probability 0.5 or
 above; with a `Literal[...]` type it asks a `choice` question. There is no generated rationale.
 3.17.1 adds the OpenAI Decision API as a `make_judge()` backend through
@@ -592,7 +593,7 @@ Self-hosted SGLang needs no extra flag. The docs' launch command:
 python -m sglang.launch_server --model-path Qwen/Qwen3.8-27B --host 127.0.0.1 --port 30000
 ```
 
-Server flags that turn decisions off or break them on SGLang v0.5.21:
+Server flags that turn decisions off or break them on SGLang v0.5.23 (unchanged since v0.5.21; decision-model docs checked 2026-11-25):
 
 | Flag or request | Effect |
 |---|---|
@@ -677,7 +678,7 @@ against 8.566 s for an LLM under a "193.6x Faster" headline; the chart's own num
 75x. The same chart shows $0.000081 against $0.013880, about 171x, under "444.6x Cheaper". Vendor
 multipliers come from vendor workloads. Benchmark on yours.
 
-**SGLang.** The decision-model docs (checked 2026-10-18, validated-model list re-checked 2026-11-25) document the mechanism, the limits and the
+**SGLang.** The decision-model docs (checked 2026-11-25) document the mechanism, the limits and the
 refusing flags: Qwen3.8-27B (with and without NEXTN speculative decoding) and Qwen3.5-35B-A3B validated
 on one H200 in BF16, no calibration claim, and the published cold-vs-cached shifts. Dedicated
 decision checkpoints such as `PPLX-Decider-v1-27B` and Clef answer only through `/v1/systemone`.
@@ -760,6 +761,34 @@ traffic the model was overconfident by 0.15 in the 0.6 to 0.8 bin, and wrongful 
 Brazilian creators ran at 3 times the English rate. Fix: per-slice ECE in the gate, per-slice
 thresholds where a slice has enough labels, and a slice floor that blocks release when a slice
 lacks labels.
+
+### 10.4 A score mean routed as a level
+
+A moderation flow asked a `score` question on a 0 to 4 severity scale and routed on the rounded
+`score` value. Posts that the model split between "benign" and "severe" (probability about 0.5 on
+level 0 and 0.5 on level 4) came back as 2.0 and went to the level 2 queue, which reviewers worked
+within 72 hours instead of 1. Over a quarter, about 600 severe posts waited in the slow queue.
+Fix: the `score` field is a probability-weighted mean, not a level. Route on the level
+probabilities (for example, "probability of level 3 or 4 above a validated threshold"), and send
+a wide split to review.
+
+### 10.5 A shared engine flag took the decision route down
+
+A platform team added `--skip-tokenizer-init` to the shared SGLang profile for a token-in,
+token-out RL client. Every decision request on that profile returned 400. The gateway retried
+each 400 three times, so decision load on the cluster quadrupled while it served nothing, and the
+fallback chain sent the traffic to a generative model with string parsing for 6 hours. Fix: a
+server profile pinned for decision traffic, no retries on 400 for decision routes, and a startup
+smoke test that sends one decision request before the pod reports ready.
+
+### 10.6 Probabilities looked normal while `label_mass` collapsed
+
+A chat-template update changed how a self-hosted model wrote its answers, and probability moved
+from the lowercase `yes` and `no` tokens to `Yes` and `No`. The returned probabilities still summed
+to 1 over the labels, so every dashboard looked healthy, but mean `label_mass` on a `yes_no`
+question fell from 0.9 to 0.3 and the renormalized scores became noisy. Fix: monitor `label_mass`
+per question next to the probability histogram, gate a template or engine change on it, and
+re-run the calibration set before the change ships.
 
 ---
 
@@ -923,7 +952,7 @@ Re-size after every calibration refit.
 **Q: Your self-hosted decision requests return 400 after a platform change. What do you check first?**
 **Short:** Whether requests now name a LoRA adapter or the server gained a flag such as skip-tokenizer-init, enable-mis or dllm-algorithm, which SGLang refuses for decisions.
 
-On SGLang v0.5.21 a `model` of the form `base:adapter` returns 400, and servers launched with
+On SGLang v0.5.23 a `model` of the form `base:adapter` returns 400, and servers launched with
 `--skip-tokenizer-init`, `--enable-mis` or `--dllm-algorithm`, or with a built-in conversation
 template, refuse decisions. A shared engine
 config that added one of these for chat traffic breaks the decision route. Image requests are also
@@ -1020,6 +1049,30 @@ Portuguese tickets jumped from 81% to 95%. Rollback to the previous bundle diges
 **Fix.** The model id moved into the artifact so the change could not bypass the gate. The second
 attempt refitted calibration on the same 12,000 labels, re-derived thresholds, and passed the gate
 with misroute rate 4.3% at a lower GPU count.
+
+```yaml
+# BROKEN: the model is chosen in the engine's Helm values, outside the decision artifact.
+# Swapping it changes no artifact byte, so the digest-keyed gate never runs.
+# deploy/sglang-decisions/values.yaml
+modelPath: Qwen/Qwen3.5-35B-A3B
+# decision/triage.yaml
+route: sglang_decisions
+calibration: {method: isotonic, fitted_on: labels/triage_2026_09@sha256:5c19e2...}
+```
+
+```yaml
+# FIX: the artifact names the model and the calibration fitted for that model. A model swap is
+# now an artifact change with a new digest, so it re-runs calibration and the per-team gate.
+# decision/triage.yaml
+route: sglang_decisions
+model: Qwen/Qwen3.5-35B-A3B
+calibration:
+  method: isotonic
+  fitted_for_model: Qwen/Qwen3.5-35B-A3B
+  fitted_on: labels/triage_2026_09@sha256:5c19e2...
+  ece_after: 0.021
+# the engine values read modelPath from this file at deploy; a mismatch fails the rollout
+```
 
 **Lessons.**
 

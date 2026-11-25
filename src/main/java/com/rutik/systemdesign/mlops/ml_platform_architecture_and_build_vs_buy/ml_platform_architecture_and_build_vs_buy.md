@@ -120,7 +120,7 @@ Building components that already exist upstream rarely wins at any scale.
 
 ### 4.1 Reference stacks
 
-Product names below were checked against vendor documentation on 2026-10-18. Amazon
+Product names below were checked against vendor documentation on 2026-11-25. Amazon
 SageMaker was renamed Amazon SageMaker AI on 2024-12-03; "Amazon SageMaker" now names the
 wider data and AI suite. Azure AI Foundry is now Microsoft Foundry. Vertex AI is now Gemini
 Enterprise Agent Platform (short form Agent Platform), with products such as Agent Platform
@@ -522,7 +522,7 @@ The CNCF Kubernetes AI Conformance program certifies that a Kubernetes platform 
 capabilities AI workloads need. The repository keeps one directory per Kubernetes minor
 version, v1.33 to v1.37. A platform must already be Kubernetes Conformant, submits a
 completed checklist with evidence as a pull request, and a certification is valid for one
-year. The v1.37 checklist (checked 2026-10-18) has 15 requirements, 8 MUST and 7 SHOULD:
+year. The v1.37 checklist (checked 2026-11-25) has 15 requirements, 8 MUST and 7 SHOULD:
 
 | Requirement id | Category | Level |
 |---|---|---|
@@ -971,6 +971,21 @@ when training demand passes 200 GPUs or the cloud cannot supply committed H100 c
 
 1. Weeks 1 to 8: gateway aliases in front of all 74 endpoints. 31 services changed from SDK
    calls to the gateway; product teams did no further work after this step.
+
+   ```python
+   # BROKEN: product code names the managed platform's endpoint, region and SDK. Every serving
+   # move becomes a code change in 31 services.
+   client = managed_ml_sdk.EndpointClient(region="eu-west-1")
+   resp = client.predict(endpoint="fraud-gbdt-v31-prod", body=payload)
+   ```
+
+   ```python
+   # FIX: product code names a stable alias on the internal gateway. The platform team moves the
+   # alias from the managed endpoint to KServe (shadow, then canary) with no product change, and
+   # rolls back by moving it again.
+   resp = http.post("https://ml-gateway.internal/v1/models/fraud-scorer:predict",
+                    json=payload, headers={"X-Team": "payments-risk"}, timeout=0.2)
+   ```
 2. Weeks 6 to 12: registry API over the managed registry; release bundles reference digests.
 3. Weeks 10 to 30: serving moves per model, shadow then canary, starting with the 12 models
    that had the lowest utilization.

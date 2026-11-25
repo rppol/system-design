@@ -139,7 +139,7 @@ for a regulator's sign-off. Fixed stages cannot express that.
 
 | Registry | Naming | Promotion primitive | Notes |
 |---|---|---|---|
-| MLflow 3.17 (open source) | `name`, integer versions | Aliases plus version tags | `LoggedModel` links a model to its traces and evals; `models:/name@alias` URIs |
+| MLflow 3.18 (open source) | `name`, integer versions | Aliases plus version tags | `LoggedModel` links a model to its traces and evals; `models:/name@alias` URIs |
 | Databricks Unity Catalog | `catalog.schema.model` | Aliases; no stages | Access control and lineage come from the catalog; MLflow client with `databricks-uc` registry URI |
 | SageMaker Model Registry | Model package group, numbered packages | `ModelApprovalStatus` | Approval changes can trigger EventBridge rules that start deployment |
 | Vertex AI Model Registry | Model resource, version ids | Version aliases; a `default` alias | Endpoints deploy a specific model version |
@@ -289,7 +289,7 @@ to the weights that passed evals.
 
 ## 6. How It Works - Detailed Mechanics
 
-### 6.1 Registering a version with its evidence (MLflow 3.17)
+### 6.1 Registering a version with its evidence (MLflow 3.18)
 
 ```python
 import mlflow
@@ -967,6 +967,26 @@ flowchart LR
    Humans have no alias-write permission.
 4. Deployment: the Argo CD manifests render digests, not aliases. A deploy job resolves
    `@champion` once and commits the digest, so Git history is the record of what ran where.
+
+   ```yaml
+   # BROKEN: the first draft of the new manifests used a mutable tag. It repeats the S3 incident:
+   # each node pulls whatever the tag means that day, and a node with a cached copy keeps it.
+   volumes:
+     - name: base
+       image:
+         reference: registry.prod/models/support-base:latest
+         pullPolicy: IfNotPresent
+   ```
+
+   ```yaml
+   # FIX: the deploy job resolves @champion once and commits the digest. Every region pulls the
+   # same bytes, a rollback is a Git revert, and the adapter check compares against this digest.
+   volumes:
+     - name: base
+       image:
+         reference: registry.prod/models/support-base@sha256:5e0b7c...
+         pullPolicy: IfNotPresent
+   ```
 5. Serving: pods mount the base with an image volume. Adapters load through the server's adapter
    API after `check_adapter()` compares digests. The server logs both digests at load.
 6. Retention: the registry keeps every version holding an alias or `@previous`, plus 10 more per

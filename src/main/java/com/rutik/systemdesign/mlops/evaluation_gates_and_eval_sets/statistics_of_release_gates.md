@@ -705,7 +705,7 @@ compute the standard error from the run's own b and c, and record psi with every
 | NumPy | Vectorised paired bootstrap and A/A simulation | Simulate the gate before trusting it |
 | MLflow | 3.18.0: store b, c, n, psi, bounds and the decision with the gate run | Recompute decisions from stored counts |
 | Langfuse | v4.86.0: dataset runs with per-item scores for both arms | Per-item scores are what pairing needs |
-| OpenAI Decisions API | Decision-model judge with no sampling noise | Lowers judge-induced discordance; $0.10 per 1M uncached input tokens (checked 2026-11-25) |
+| OpenAI Decisions API | Decision-model judge with no sampling noise; probabilities can still shift between cache states (up to about 0.07 on self-hosted SGLang, see [Decision Models](../decision_models/decision_models.md) §12), so measure judge variance instead of assuming zero | Lowers judge-induced discordance; $0.10 per 1M uncached input tokens (checked 2026-11-25) |
 
 ---
 

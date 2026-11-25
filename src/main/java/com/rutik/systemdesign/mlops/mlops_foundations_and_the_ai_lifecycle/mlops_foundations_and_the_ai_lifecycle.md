@@ -710,7 +710,7 @@ rescore production on every new version before comparing.
 
 ## 11. Technologies & Tools
 
-| Tool | Version (2026-10-18) | Role in the lifecycle |
+| Tool | Version (2026-11-25) | Role in the lifecycle |
 |---|---|---|
 | MLflow | 3.18.0 | Experiment tracking, model registry, `LoggedModel` for a bundle, LLM judges via `make_judge()` |
 | DVC | 3.67.1 | Data and model versioning in Git; repo is `treeverse/dvc` |
@@ -981,6 +981,23 @@ are about 9% of traffic, which matches a drop of about 5 points.
    calls; a required-field addition now fails their build.
 4. The support bundle pins refunds-mcp by version; a new version is a bundle bump with a full
    eval run.
+
+   ```yaml
+   # BROKEN: the bundle pins the prompt and the index but names the tool server only by URL,
+   # so payments' 2.4.0 deploy changed the assistant with no support-side release.
+   tools:
+     - server: https://refunds-mcp.internal/mcp
+   ```
+
+   ```yaml
+   # FIX: the tool server is a pinned artifact of the bundle. 2.4.0 reaches the assistant only
+   # through a bundle bump that runs the full 1,200-case eval and the refund-success slice.
+   tools:
+     - server: refunds-mcp
+       version: 2.3.0
+       listing_sha256: 0c7d1e...b22f
+       on_listing_change: fail_closed
+   ```
 5. An hourly probe hashes the tool list and alerts both teams on change.
 6. A new eval slice of 150 refund conversations checks that a refund tool call succeeded
    before the agent claims it did.

@@ -6,7 +6,7 @@
 > catalogs added in v0.3.14 and v0.3.16; Kubernetes 1.37 (1.37.2 2026-10-13) for admission;
 > OpenSSF Model Signing (`sigstore/model-transparency`) v1.1.1 (2025-10-10) for signed approvals.
 >
-> **Guidance anchor (fetched 2026-10-18).** SR 26-2 "Revised Guidance on Model Risk Management"
+> **Guidance anchor (fetched 2026-11-25).** SR 26-2 "Revised Guidance on Model Risk Management"
 > (Federal Reserve, OCC and FDIC, issued 2026-04-17) supersedes SR 11-7 (2011-04-04) and SR 21-8.
 > NIST AI RMF 1.0 (2023-01-26; NIST states it is being revised) and its Generative AI Profile,
 > NIST AI 600-1 (2024-07-26). PRA SS1/23, current version effective 2026-04-23. OSFI Guideline
@@ -832,7 +832,7 @@ core: inventory, validation through conceptual soundness, outcomes analysis and 
 monitoring, effective challenge, and vendor model validation. It frames model risk as inherent
 risk set against materiality (exposure and purpose), lets validation timing vary with the model,
 excludes spreadsheets and deterministic rules from the model definition, and says non-compliance
-alone does not bring supervisory criticizm. SR 11-7 asked for a periodic review at least annually.
+alone does not bring supervisory criticism. SR 11-7 asked for a periodic review at least annually.
 
 **Q: How do you assign a risk tier to an AI system?**
 **Short:** From recorded answers on decision impact and autonomy, raised by modifiers such as sensitive data, vendor dependence and scale, with legal categories forcing the top tier.
@@ -935,6 +935,36 @@ more often. Complaints rose 30% in that category over five weeks. The investigat
 weeks to establish that a provider alias had moved to a new snapshot and that a prompt edit two
 weeks earlier had removed an instruction about property damage. Neither change had passed any
 governance step, and the inventory listed the assistant as "pilot".
+
+The inventory record for the assistant, before and after:
+
+```yaml
+# BROKEN: typed by hand, an alias for the vendor model and a mutable prompt label. Both moved
+# with no governance step, and the record still read "pilot".
+inventory_id: ai-0877
+name: claims-triage-assistant
+tier: {internal: pilot}
+components:
+  vendors: [{provider: anthropic, model: claude-sonnet-4-5}]   # an alias, not a snapshot
+  prompt: claims-triage@production
+```
+
+```yaml
+# FIX: components are written by the release pipeline from the live bundle, the vendor model is a
+# dated snapshot, the prompt is a version, and the tier is computed. Changing any of them means a
+# new bundle digest, which needs a new approval before admission lets it run.
+inventory_id: ai-0877
+name: claims-triage-assistant
+tier:
+  internal: high
+  computed_from: {impact: money_reversible, autonomy: decides_with_human_queue, people_per_year: 2.1e5}
+components:                        # derived from the live bundle, never typed
+  bundle_digest: sha256:91ad3e...
+  vendors: [{provider: anthropic, model: claude-sonnet-4-5-20250929, fingerprint_suite: hourly}]
+  prompt: {name: claims-triage, version: 23}
+monitoring:
+  revalidation_triggers: [per_peril_routing_shift_gt_10pct, vendor_snapshot_change, prompt_change]
+```
 
 **Discovery results.** The first discovery pass joined gateway keys, egress logs, expense data,
 OAuth grants and repository scans.

@@ -6,7 +6,7 @@
 > provides the registry aliases that promotion moves. OpenFeature, LaunchDarkly AI Configs,
 > Statsig and Unleash have no pin in this section and are described without a version. Anthropic
 > retirement dates, the 60-day notice policy and the parameter deprecation table were read from the
-> Anthropic model deprecations page on 2026-10-18.
+> Anthropic model deprecations page on 2026-11-25.
 
 ## 1. Concept Overview
 
@@ -963,6 +963,31 @@ was fixed before the A/B began. The gateway allow list dropped `claude-sonnet-4-
 Nov 5, 25 days before the provider retirement and 18 days before the freeze.
 
 **Release B: the refund tool.** Because refunds are irreversible, the ladder adds a dark launch.
+
+The first draft of the tool flag, and the one that shipped for the dry-run week:
+
+```yaml
+# BROKEN: live on approval, for every bundle, with no caps. A wrong-order-line refund on a split
+# shipment executes at once, and a retried turn can refund twice.
+tools:
+  issue_refund:
+    mode: live
+```
+
+```yaml
+# FIX: dry_run on the champion first (the tool validates and returns a simulated result), scoped
+# to one bundle, with caps and an idempotency key ready for the live canary.
+tools:
+  issue_refund:
+    mode: dry_run
+    applies_to_bundles: [sha256:9c41]
+    caps:
+      per_call_max_usd: 50
+      per_bundle_daily_max_usd: 2000
+      per_user_daily_calls: 1
+    idempotency_key: "{conversation_id}:{order_id}"
+    on_cap: route_to_human
+```
 
 1. **Dry run, Nov 2-6.** `issue_refund` in `dry_run` for 100% of conversations on the champion.
    The model proposed 3,100 refunds a day. Human agents reviewed a 400-refund sample: 91% matched

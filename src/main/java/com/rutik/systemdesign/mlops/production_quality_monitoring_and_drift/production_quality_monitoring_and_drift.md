@@ -896,7 +896,7 @@ minimum sample count (for example 400) before it can fire. Too few samples raise
 **Short:** Decision-model judges are cheap and give probabilities, so use them for pass rates on large samples; add a generative judge with a rationale on the failures for reviewers.
 
 For 20,000 judgments a day at 1,800 input tokens, the OpenAI Decisions API costs $3.60 a day at the
-price checked on 2026-10-18, against about $140 for a generative judge at §6.3's assumed rates. The
+uncached price checked on 2026-11-25, against about $140 for a generative judge at §6.3's assumed rates. The
 decision judge returns a probability to threshold and monitor, but no rationale. Run it on the full
 sample and a generative judge on the failures. Pin both and check both against the human canary
 set; measure calibration on your labels.

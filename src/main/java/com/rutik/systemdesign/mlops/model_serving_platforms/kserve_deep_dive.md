@@ -805,5 +805,22 @@ TTFT and an online quality score as the gates.
 of the release pipeline, not by hand: the first version bump re-downloaded 142 GB to 12 nodes during
 a rollout because the new cache object was created at the same time as the new service.
 
+```yaml
+# BROKEN: one commit, one sync. The new service's pods are scheduled while the node agents are
+# still downloading 142 GB to 12 nodes, so the rollout waits on the download it should not see.
+steps:
+  - apply: [localmodelcache-llama-70b-2026-11-20.yaml, llmisvc-assistant-v2.yaml]
+```
+
+```yaml
+# FIX: the release pipeline creates the cache object for the new version first, waits until
+# every node in the group holds it, then rolls the service whose storageUri matches it.
+steps:
+  - apply: [localmodelcache-llama-70b-2026-11-20.yaml]   # sourceModelUri is the new version
+  - wait_until: model cached on every node in nodeGroup h100-nvme
+    timeout: 2h
+  - apply: [llmisvc-assistant-v2.yaml]                   # storageUri equals sourceModelUri
+```
+
 A full design for distributing weights to many nodes at once is in [Design a Model Weight
 Distribution System](../case_studies/design_a_model_weight_distribution_system.md).

@@ -7,8 +7,8 @@
 > 1.37. NVLink figures come from NVIDIA's NVLink specifications page (checked 2026-11-25), which
 > quotes per-GPU bandwidth as a bidirectional total; every bandwidth on this page is per direction,
 > the convention NIC line rates use. Tools outside the section pin table were fetched from their release pages and docs on
-> 2026-10-18: NCCL v2.32.3-1 (2026-09-17), where `NCCL_IB_GID_INDEX`, `NCCL_IB_SL` and
-> `NCCL_IB_TC` default to `AUTO` since 2.32; aws-ofi-nccl v1.21.1 (2026-08-20); PyTorch 2.14 docs,
+> 2026-11-25: NCCL v2.32.7-1 (2026-11-24), where `NCCL_IB_GID_INDEX`, `NCCL_IB_SL` and
+> `NCCL_IB_TC` default to `AUTO` since 2.32; aws-ofi-nccl v1.23.0 (2026-11-22); PyTorch 2.15 docs,
 > where the NCCL process-group timeout defaults to 10 minutes. Cloud limits (FSx for Lustre, EFA,
 > S3 Express One Zone, GPUDirect-TCPX) come from the provider docs on the same date.
 
@@ -730,7 +730,7 @@ service, or checkpoint flushes rate-limited below the gap between collectives.
 
 | Tool | Role | Notes |
 |---|---|---|
-| NCCL | Collective communication library | v2.32.3-1 (2026-09-17); `NCCL_IB_GID_INDEX`, `NCCL_IB_SL`, `NCCL_IB_TC` default `AUTO` since 2.32 |
+| NCCL | Collective communication library | v2.32.7-1 (2026-11-24); `NCCL_IB_GID_INDEX`, `NCCL_IB_SL`, `NCCL_IB_TC` default `AUTO` since 2.32 |
 | nccl-tests | Collective bandwidth tests | `all_reduce_perf`, `all_gather_perf`; record `busbw` per node type |
 | NVIDIA Network Operator | NIC drivers and RDMA plumbing on Kubernetes | v26.10.0; one `NicClusterPolicy` named `nic-cluster-policy` |
 | NVIDIA GPU Operator | GPU stack on Kubernetes | v26.7.3; DMA-BUF GPUDirect RDMA, `gds.enabled` for GPUDirect Storage |
@@ -740,7 +740,7 @@ service, or checkpoint flushes rate-limited below the gap between collectives.
 | RoCEv2 | RDMA over routed Ethernet | Needs PFC, ECN, correct GID and traffic class |
 | Ultra Ethernet | Ethernet transport specification | Specification 1.1; UET, NSCC and RCCC congestion control, In-Network Collectives |
 | Amazon EFA | AWS RDMA-style interface | SRD protocol; libfabric; not routable across AZs |
-| aws-ofi-nccl | NCCL net plugin for EFA | v1.21.1 (2026-08-20) |
+| aws-ofi-nccl | NCCL net plugin for EFA | v1.23.0 (2026-11-22) |
 | GPUDirect-TCPX | Google A3 GPU networking | TCPX on A3 High and A3 Edge, TCPXO on A3 Mega |
 | GPUDirect Storage | Storage to GPU memory DMA | cuFile API, `nvidia-fs`, `gdscheck -p` |
 | Amazon FSx for Lustre | Managed Lustre | Throughput per TiB tiers; EFA and GDS on EFA-enabled file systems |
@@ -989,6 +989,21 @@ expected bus bandwidth, step time varies by 30% from step to step, and checkpoin
    each now saturate the 40 GB/s file system), and the save made asynchronous.
    The checkpoint pause drops from 3 minutes to about 2 seconds of device-to-host copy, and the
    flush completes in 25 s, well inside the 30-minute checkpoint interval.
+
+   ```bash
+   # BROKEN: the run directory inherits the file system default (stripe count 1), so each
+   # shard lives on one storage target and 8 writers top out near 0.6 GB/s each.
+   mkdir -p /lustre/ckpt/run-0412
+   lfs getstripe -d -c /lustre/ckpt/run-0412   # stripe count 1
+   ```
+
+   ```bash
+   # FIX: set the layout on the directory before the first save; new shard files inherit
+   # 16 stripes. Check it in the job's pre-flight, not after a slow checkpoint.
+   mkdir -p /lustre/ckpt/run-0412
+   lfs setstripe -c 16 /lustre/ckpt/run-0412
+   test "$(lfs getstripe -d -c /lustre/ckpt/run-0412)" -eq 16 || exit 1
+   ```
 5. A new-node gate: per-rail `ib_write_bw`, a two-node `nccl-tests` run, ACS state and
    `gdscheck -p`, all compared with the stored baseline before the node is schedulable.
 

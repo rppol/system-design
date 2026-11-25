@@ -1,6 +1,6 @@
 # AI Gateway Operations
 
-> **Version anchor (2026-11-25).** LiteLLM v1.111.0 (2026-11-25); since v1.106.0 (2026-10-18) it disables stdio MCP servers by default (PR #44066), and only `LITELLM_ENABLE_MCP_STDIO=true` in the proxy's process environment turns them back on. Agent Router v1.3.0 (2026-11-18), repo `theagentrouter/agent-router` (`envoyproxy/ai-gateway` redirects to it). v1.2.0 (2026-10-07) was the first release under the project's new name (formerly Envoy AI Gateway); the API group `aigateway.envoyproxy.io` and the CRD kinds (`AIGatewayRoute`, `AIServiceBackend`, `BackendSecurityPolicy`, `GatewayConfig`, `MCPRoute`, `QuotaPolicy`) are unchanged. v1.3.0 makes `QuotaPolicy` a token-budget system (§6.2), passes the OpenAI Decisions and Files APIs through, and moves to Envoy Gateway v1.10.0 with Envoy Proxy v1.40.2. vLLM Semantic Router v0.4.0 (2026-09-27) routes by signal-driven decisions; its Router Replay plugin has shipped since v0.2.0. Checked 2026-10-18 from vendor docs: the Azure API Management `llm-token-limit` policy, and Amazon Bedrock cross-Region inference, where AWS lists global profiles at approximately 10% below geographic pricing. Every version-tagged claim on this page is checked against these rows.
+> **Version anchor (2026-11-25).** LiteLLM v1.111.0 (2026-11-25); since v1.106.0 (2026-10-18) it disables stdio MCP servers by default (PR #44066), and only `LITELLM_ENABLE_MCP_STDIO=true` in the proxy's process environment turns them back on. Agent Router v1.3.0 (2026-11-18), repo `theagentrouter/agent-router` (`envoyproxy/ai-gateway` redirects to it). v1.2.0 (2026-10-07) was the first release under the project's new name (formerly Envoy AI Gateway); the API group `aigateway.envoyproxy.io` and the CRD kinds (`AIGatewayRoute`, `AIServiceBackend`, `BackendSecurityPolicy`, `GatewayConfig`, `MCPRoute`, `QuotaPolicy`) are unchanged. v1.3.0 makes `QuotaPolicy` a token-budget system (§6.2), passes the OpenAI Decisions and Files APIs through, and moves to Envoy Gateway v1.10.0 with Envoy Proxy v1.40.2. vLLM Semantic Router v0.4.0 (2026-09-27) routes by signal-driven decisions; its Router Replay plugin has shipped since v0.2.0. Checked 2026-11-25 from vendor docs: the Azure API Management `llm-token-limit` policy, and Amazon Bedrock cross-Region inference, where AWS lists global profiles at approximately 10% below geographic pricing. Every version-tagged claim on this page is checked against these rows.
 
 ---
 
@@ -697,7 +697,7 @@ Residency is a routing constraint that must be checked before any cost or latenc
 
 Amazon Bedrock makes the trade-off explicit in its two cross-Region inference profile types:
 
-| Profile | Routing | Residency | Price (checked 2026-10-18) |
+| Profile | Routing | Residency | Price (checked 2026-11-25) |
 |---|---|---|---|
 | Geographic (prefixes such as `us`, `eu`, `apac`, `in`) | within the Regions listed in the profile | requests stay inside the geography | standard pricing |
 | Global | any supported AWS commercial Region | no geographic boundary | approximately 10% savings |
@@ -731,7 +731,7 @@ Gateway config changes behavior for every consumer. It gets the same pipeline as
 
 **LiteLLM v1.106.0 (2026-10-18).** The release made stdio MCP servers opt-in through a process environment variable. A platform that runs internal tools as stdio servers on the proxy loses them from every agent's listing on upgrade; the listing skips them quietly, so agents get no error and answer without the tools. The gateway is a dependency of every agent and its upgrades need the agent trajectory gate.
 
-**Amazon Bedrock cross-Region inference.** AWS documents global profiles at approximately 10% below geographic ones (checked 2026-10-18), with routing to any supported commercial Region. A platform that switched its default Bedrock profile to global for the saving would have moved EU tenants' prompts out of the EU. Residency-tagged routing in the gateway turns that into a per-tenant choice.
+**Amazon Bedrock cross-Region inference.** AWS documents global profiles at approximately 10% below geographic ones (checked 2026-11-25), with routing to any supported commercial Region. A platform that switched its default Bedrock profile to global for the saving would have moved EU tenants' prompts out of the EU. Residency-tagged routing in the gateway turns that into a per-tenant choice.
 
 **Azure API Management in multi-region deployments.** The `llm-token-limit` policy tracks usage separately at each gateway, including regional gateways in a multi-region deployment. A subscription limited to 100,000 TPM on an instance with three regional gateways can use up to three times that. Teams that need a global limit set per-region limits that sum to the target, or enforce the limit in a layer with a shared counter.
 

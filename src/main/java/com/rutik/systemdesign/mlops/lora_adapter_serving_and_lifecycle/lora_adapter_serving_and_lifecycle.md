@@ -12,7 +12,7 @@
 > `kserve/modelmesh-serving`) are archived; the last ModelMesh Serving release is v0.12.0
 > (2024-07-09). vLLM flag defaults below come from `vllm/config/lora.py` at the v0.34.0 tag
 > (`max_loras` 1, `max_lora_rank` 16, `max_cpu_loras` equal to `max_loras`) and the engine-args
-> docs, checked 2026-10-18.
+> docs, checked 2026-11-25.
 
 A LoRA adapter is a few tens of megabytes of low-rank weight deltas that only make sense on top
 of one exact base model. Serving one adapter is easy: merge it and deploy a normal model.

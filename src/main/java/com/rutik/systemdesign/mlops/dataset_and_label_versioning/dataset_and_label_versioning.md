@@ -4,7 +4,7 @@
 > released 2026-03-31; the repo is `treeverse/dvc` and `iterative/dvc` redirects to it, so DVC
 > and lakeFS sit in the same GitHub org. Label Studio 1.23.2, released 2026-09-29. All three were
 > still the latest releases on 2026-11-25. Every other tool on this page is either named without
-> a version or carries its release, checked 2026-10-18, in the §11 table.
+> a version or carries its release, checked 2026-11-25, in the §11 table.
 
 A model is a function of its code, its data, its labels, and the feature definitions that turned raw records into inputs. Code is versioned in git. The other three usually have an S3 prefix, a spreadsheet of annotation guidelines, and a table that someone overwrites every night. This page treats each of them as a release input: something with an immutable id, a contract that is checked before it is used, and provenance that survives an audit or an erasure request.
 
@@ -612,7 +612,7 @@ The dataset card is the human-readable view of the same facts: intended use, sou
 
 ## 11. Technologies & Tools
 
-Releases below were read from each project's GitHub releases on 2026-10-18.
+Releases below were read from each project's GitHub releases on 2026-11-25.
 
 | Tool | Category | Release | Notes |
 |---|---|---|---|
@@ -620,13 +620,13 @@ Releases below were read from each project's GitHub releases on 2026-10-18.
 | DVC | data versioning in git | 3.67.1 (2026-03-31) | repo `treeverse/dvc`; `.dvc` pointer files, remotes, `dvc import` from other repos |
 | Apache Iceberg | table format | 1.12.0 (2026-09-30) | snapshots, branches, tags with `RETAIN`; see [apache_iceberg](../../technologies/apache_iceberg/apache_iceberg.md) |
 | Delta Lake | table format | v4.4.1 (2026-10-05) | `VERSION AS OF`, `TIMESTAMP AS OF`, `RESTORE`; see [lakehouse_and_table_formats](../../database/lakehouse_and_table_formats/lakehouse_and_table_formats.md) |
-| Hugging Face | Hub dataset repos and the `datasets` library | `datasets` 5.1.0 (2026-10-05) | `revision=` pins a Hub commit; loading scripts removed in `datasets` 4.0.0 |
+| Hugging Face | Hub dataset repos and the `datasets` library | `datasets` 5.2.0 (2026-11-09) | `revision=` pins a Hub commit; loading scripts removed in `datasets` 4.0.0 |
 | Label Studio | annotation | 1.23.2 (2026-09-29) | XML labeling configs, JSON export with annotator and timing fields |
 | Argilla | annotation and feedback | v2.8.0 (2025-03-11), no later release | Python-defined datasets with fields, questions, and guidelines; Hub export |
 | Snorkel | weak supervision, open-source library | v0.10.0 (2024-02-27), no later release | labeling functions and a label model; see the active-learning page |
-| Great Expectations | data contracts (GX Core) | 1.24.0 (2026-10-07) | repo `fivetran/great_expectations`; `great-expectations/great_expectations` redirects to it |
-| Pandera | DataFrame contracts | v0.34.1 (2026-10-06) | `DataFrameModel` schemas, `import pandera.pandas as pa` |
-| OpenLineage | lineage events | 1.54.0 (2026-10-13) | run-level lineage; graph design is in [artifact_versioning_and_lineage](../artifact_versioning_and_lineage/artifact_versioning_and_lineage.md) |
+| Great Expectations | data contracts (GX Core) | 1.25.0 (2026-11-12) | repo `fivetran/great_expectations`; `great-expectations/great_expectations` redirects to it |
+| Pandera | DataFrame contracts | v0.36.0 (2026-11-10) | `DataFrameModel` schemas, `import pandera.pandas as pa` |
+| OpenLineage | lineage events | 1.55.0 (2026-10-30) | run-level lineage; graph design is in [artifact_versioning_and_lineage](../artifact_versioning_and_lineage/artifact_versioning_and_lineage.md) |
 
 Privacy mechanics that sit beside erasure (differential privacy, federated learning) are in [privacy_preserving_ml](../../ml/privacy_preserving_ml/privacy_preserving_ml.md) and, for LLM data, [privacy_and_data_governance](../../llm/llm_security/privacy_and_data_governance.md).
 

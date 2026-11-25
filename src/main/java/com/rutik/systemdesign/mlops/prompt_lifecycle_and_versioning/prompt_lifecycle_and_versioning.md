@@ -6,7 +6,7 @@
 > (2026-11-24) ships prompt management with the built-in `production` and `latest` labels and a
 > per-version `config` object. LaunchDarkly AI Configs has no public release page; it is
 > described without a version. Provider facts (model ids, retirement dates, cache prices) were
-> read from the Anthropic and OpenAI documentation on 2026-10-18 and carry that date where
+> read from the Anthropic and OpenAI documentation on 2026-11-25 and carry that date where
 > they appear.
 
 ## 1. Concept Overview
@@ -86,7 +86,7 @@ passed the gate.
   states that every Claude model id is a pinned snapshot, including the dateless ids used from
   the 4.6 generation on. A moving alias such as a `-latest` name is a deploy you did not make.
 - **Pin defaults you rely on.** Default reasoning effort is `high` on `claude-sonnet-5-5` and
-  `medium` on `claude-opus-5-5` (Anthropic models overview, 2026-10-18); an unset field turns a
+  `medium` on `claude-opus-5-5` (Anthropic effort docs, checked 2026-11-25); an unset field turns a
   model swap into a cost change.
 - **Gate against a pinned eval set and a pinned judge.** A gate whose eval set or judge moved
   since the last run measures the change in the gate, not the change in the prompt.
@@ -480,7 +480,7 @@ anyone knowing.
 
 ### 6.5 Prompt-cache cost of a system-prompt change
 
-Anthropic prices on 2026-10-18 for `claude-sonnet-5-5`: $2.00 per million input tokens; cache
+Anthropic prices on 2026-11-25 for `claude-sonnet-5-5`: $2.00 per million input tokens; cache
 reads at 5% of base ($0.10); 5-minute cache writes at 1.25x base ($2.50). The cache prefix order
 is tools, system, messages, and a system change invalidates system and messages.
 
@@ -539,7 +539,9 @@ The campaign:
    slice gain can be attributed.
 5. **Fix the parameters the new model rejects.** Anthropic's deprecation page states that
    `temperature`, `top_p` and `top_k` return HTTP 400 when set to a non-default value on Claude
-   4.7 and later models, and that its Python SDK v1.0 and later removes those parameters. A unit
+   4.7 and later models under API version `2023-06-01`, and that API version `2026-10-21` (the
+   default of the Python SDK 2.0.0 and later) removes all three, so sending any of them returns 400
+   even at its default value (checked 2026-11-25). A unit
    that carried `temperature: 0.2` on `claude-sonnet-4-5-20250929` fails on `claude-sonnet-5-5`
    until the field is removed and effort is set explicitly.
 6. **Re-gate** the new unit against the champion on the old snapshot.
@@ -725,7 +727,7 @@ snapshot and judge prompt; compare deltas against a champion rescored by the sam
 
 **Retirement day 400s.** A unit pinned to a retired snapshot started returning errors on the
 retirement date because the inventory had model ids but no retirement dates. In a second team, a
-re-qualification swapped only the model id; on Claude Opus 4.7 and later models a non-default
+re-qualification swapped only the model id; on Claude 4.7 and later models a non-default
 `temperature` returns HTTP 400, so every canary request failed. Fix: join the inventory with the
 providers' deprecation tables weekly, and validate decoding parameters against the target model
 in CI.
@@ -835,7 +837,8 @@ template uses equals the declared set. Treat variable schema changes as expand a
 Find every unit pinned to the retiring id and order by traffic. Run the unchanged unit on both
 snapshots against the same eval set and judge, three repeats, and diff by slice. Re-tune only
 failing slices, one version per change. Check parameters the new model rejects; non-default
-`temperature` returns HTTP 400 on Claude Opus 4.7 and later. Re-gate against the champion, dual-run
+`temperature` returns HTTP 400 on Claude 4.7 and later, and API version `2026-10-21` rejects the
+field on every model. Re-gate against the champion, dual-run
 with sticky assignment from 5% to 100%, then remove the old id. Anthropic gives at least 60 days
 of notice, so a five-week campaign leaves buffer.
 
@@ -952,10 +955,28 @@ with `claude-sonnet-5-5` as the recommended replacement.
 **Week 1: inventory and baseline.** The registry query returns 14 units on the retiring id; three
 carry 91% of traffic. The team runs each unit unchanged on both snapshots against its pinned eval
 set with three repeats. Ten units fail immediately with HTTP 400: they carry `temperature: 0.0`
-or `0.2`, which Claude Opus 4.7 and later models reject at non-default values. The fix is a new unit
+or `0.2`, which Claude 4.7 and later models reject at non-default values. The fix is a new unit
 version per prompt with `temperature` removed and `effort: medium` set explicitly, because the new
 model's default effort is `high` and the cost model assumed less reasoning. After the fix, the
 answer prompt passes overall (+0.5) and fails the refunds slice (-4.7).
+
+```yaml
+# BROKEN: only the model id was changed. The unit still sends a non-default temperature, which
+# the new model rejects with HTTP 400, and it relies on a default effort that changed.
+model: {provider: anthropic, id: claude-sonnet-5-5}
+decoding:
+  temperature: 0.2
+  max_tokens: 1200
+```
+
+```yaml
+# FIX: a new unit version. Decoding fields the target model rejects are removed, and the
+# default the cost model depends on is set explicitly.
+model: {provider: anthropic, id: claude-sonnet-5-5}
+decoding:
+  max_tokens: 1200
+  effort: medium                 # this model's default is high
+```
 
 **Week 2: re-tune.** The refunds failures cluster on partial refunds: the new model follows the
 policy text more literally and refuses partial refunds the old model granted. The team adds the

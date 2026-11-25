@@ -841,6 +841,28 @@ flowchart LR
 - Each shard writes to an attempt-scoped prefix and commits with a conditional put. The warehouse load reads committed shards only and checks `(run_id, listing_id)` uniqueness.
 - The monthly fine-tune is a KFP pipeline: snapshot by commit id, 8-GPU training with checkpoints every 500 steps, eval on eval set v9 with the pinned judge, and registration under `dsl.If(verdict == "pass")`.
 
+```python
+# BROKEN: the notebook that shipped the 2.6-point regression. "latest" was a stale prefix,
+# nothing recorded which snapshot trained the model, and registration had no gate.
+df = read_parquet("s3://listings/latest/")
+model_uri = fine_tune(df)
+mlflow.register_model(model_uri, "listing-classifier")
+```
+
+```python
+# FIX: the snapshot is a lakeFS commit id passed in as a parameter, and registration runs only
+# when the eval step's verdict is "pass" on eval set v9 with the pinned judge.
+from kfp import dsl
+
+@dsl.pipeline(name="listing-classifier-finetune")
+def finetune(lakefs_commit: str, bundle_digest: str):
+    data = snapshot_op(commit=lakefs_commit)
+    trained = train_op(dataset=data.outputs["dataset"], ckpt_every=500)
+    ev = eval_op(model=trained.outputs["model"], eval_set="v9", judge_digest=bundle_digest)
+    with dsl.If(ev.outputs["verdict"] == "pass"):
+        register_op(model=trained.outputs["model"], data_commit=lakefs_commit)
+```
+
 **Numbers.**
 
 | Metric | Before | After |

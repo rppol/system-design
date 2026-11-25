@@ -6,11 +6,11 @@
 > stable **v1.0.0** (2026-11-13) and rolling build **b12722** (2026-11-25, pre-release).
 > **model-transparency v1.1.1** (OpenSSF Model Signing, 2025-10-10); v1.1.0 added PKCS#11 signing,
 > private Sigstore instances and BLAKE3 hashing. **vLLM v0.34.0** (2026-11-16) for the cloud fallback pool.
-> Facts read from primary docs on 2026-10-18: Google Play for On-device AI (beta; AI packs up to
+> Facts read from primary docs on 2026-11-25: Google Play for On-device AI (beta; AI packs up to
 > 1.5 GB compressed, 4 GB cumulative per app version, device targeting by SoC, RAM, device model
 > and system features); Apple Foundation Models adapter toolkit (one adapter per system model
 > version, about 160 MB each, toolkit 26.0.0 not compatible with OS 27); Microsoft Phi Silica
-> page (updated 2026-10-12). Core ML, LiteRT and Qualcomm QNN are named without versions.
+> page (checked 2026-11-25). Core ML, LiteRT and Qualcomm QNN are named without versions.
 
 ## Intuition
 
@@ -729,7 +729,7 @@ delegate set Quill's T1 and T2 variants use.
 **Microsoft.** Phi Silica is pre-installed on Copilot+ PCs and runs on the NPU; on supported
 GPUs the model is downloaded on demand through Windows Update the first time an app calls
 `LanguageModel.EnsureReadyAsync`, and the app is told to ask for consent first because the
-download is several gigabytes. The page (updated 2026-10-12) states that Phi Silica is being
+download is several gigabytes. The page (checked 2026-11-25) states that Phi Silica is being
 replaced by Aion Instruct and tells developers to re-train their LoRAs, with Windows Controlled
 Feature Rollout choosing the active model during the transition. Every adapter owner pays for a
 base change, even when the platform ships the base.

@@ -15,7 +15,7 @@
 > `GPUCluster` CR, and v26.7.1 shipped device plugin v0.20.1 and MIG Manager v0.15.1. **AMD GPU Operator v1.5.1**
 > (2026-07-21). **Intel Device Plugins Operator v0.37.1** (2026-10-02). AMD Device Metrics Exporter
 > and Intel XPU Manager have no pin row; their metric names, the Xid Catalog actions and the
-> `dcgmi diag` durations were read from vendor docs on 2026-10-18.
+> `dcgmi diag` durations were read from vendor docs on 2026-11-25.
 
 ## 1. Concept Overview
 
@@ -287,7 +287,7 @@ RMA outcomes each quarter.
 
 `nvidia-smi` "GPU-Util" reports the percentage of the sample period during which one or more
 kernels were executing, and `DCGM_FI_DEV_GPU_UTIL_RATIO` reports the same quantity as a 0 to 1
-ratio (dcgm-exporter 4.8.x exported it as `DCGM_FI_DEV_GPU_UTIL` in percent). The sample period
+ratio. The sample period
 depends on the product and is between 1/6 s and 1 s. It does not look at how many SMs the kernel
 used or which pipes it issued to.
 
@@ -1069,6 +1069,19 @@ SLO (p95 TTFT 800 ms). The fleet produced 36% of that.
 - **Batch cap.** The chat deployment had `--max-num-seqs 16` from an early latency experiment.
   `DRAM_UTIL_RATIO` sat at 0.31 and `vllm:num_requests_waiting` was nonzero at peak. Raising it to 64
   kept p95 TTFT at 610 ms and lifted decode MBU from 0.29 to 0.64.
+
+  ```bash
+  # BROKEN: a latency-experiment cap left in production. Requests wait in the engine queue while
+  # memory bandwidth sits at 0.31, and the dashboard still reads 93% "utilized".
+  vllm serve /models/chat-70b --tensor-parallel-size 4 --max-num-seqs 16
+  ```
+
+  ```bash
+  # FIX: size the cap from the benchmark knee at the SLO, and alert when requests wait while
+  # DRAM_UTIL_RATIO stays low, the signature of an engine cap rather than a busy GPU.
+  vllm serve /models/chat-70b --tensor-parallel-size 4 --max-num-seqs 64
+  # alert: vllm:num_requests_waiting > 0 for 10m and DCGM_FI_PROF_DRAM_UTIL_RATIO < 0.5
+  ```
 - **MIG drift.** 12 nodes meant for 1g.10gb embedding slices had `mig.config.state=failed` after a
   driver upgrade without a reboot, with XID 119 in the logs. The embedding service ran one pod per
   whole H100 at 0.06 `SM_UTIL_RATIO`. After a reboot and reapply, embeddings fit on 2 nodes of MIG

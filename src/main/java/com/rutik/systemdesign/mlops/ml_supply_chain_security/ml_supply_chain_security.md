@@ -5,7 +5,7 @@
 > 2026-09-17). LiteLLM v1.111.0 (2026-11-25); stdio MCP servers have been disabled by default
 > since v1.106.0 (#44066). Kubernetes 1.37 (1.37.2 on 2026-10-13); the OCI image volume source has been GA
 > since 1.36. Scanner, PyTorch and cosign versions in §11 were read from their GitHub release
-> pages on 2026-10-18; Kyverno v1.20.0 (2026-11-12) was read on 2026-11-25. Every version claim below is checked against this anchor.
+> pages on 2026-11-25; Kyverno v1.20.0 (2026-11-12) was read on 2026-11-25. Every version claim below is checked against this anchor.
 
 An AI feature runs on bytes that nobody on the team wrote: base weights from a hub, adapters from
 a fine-tuning job, a dataset scraped two years ago, a Python dependency tree with 300 packages,
@@ -784,10 +784,10 @@ Fix: adapter provenance records `base_model_digest`, and the loader refuses a mi
 |---|---|---|
 | model-transparency | OpenSSF Model Signing library and CLI | v1.1.1; `model_signing sign` and `verify`; Sigstore, key, certificate, PKCS #11 |
 | Sigstore | Keyless signing infrastructure | Fulcio issues short-lived certs, Rekor logs signatures |
-| cosign | Container and blob signing | v3.1.3 (2026-08-06); v2.6.5 maintained in parallel |
+| cosign | Container and blob signing | v3.1.5 (2026-11-24); v2.6.5 (2026-08-06) is the newest v2 release |
 | Kyverno | Kubernetes policy engine | v1.20.0 (2026-11-12); `ImageValidatingPolicy` with keyless attestors; 1.20 removed the legacy `ClusterPolicy` engine and blocks new legacy policies |
 | safetensors | Data-only tensor format | v0.8.0 (2026-06-09); v0.9.0 at rc |
-| PyTorch | Training and loading | `weights_only=True` default since 2.6.0; v2.14.1 (2026-09-30) |
+| PyTorch | Training and loading | `weights_only=True` default since 2.6.0; v2.15.0 (2026-10-28) |
 | picklescan | Pickle opcode scanner | v1.0.5 (2026-07-01) |
 | ModelScan | Model file scanner by Protect AI | v0.8.8 (2026-02-18) |
 | fickling | Pickle decompiler and analyzer by Trail of Bits | Static analysis of pickle files |

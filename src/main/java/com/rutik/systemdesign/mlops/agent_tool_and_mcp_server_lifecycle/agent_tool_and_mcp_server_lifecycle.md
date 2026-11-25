@@ -771,6 +771,30 @@ A composite scenario based on common incident patterns. A company runs three age
 | Traces tagged with agent version, server version, digest, flag bucket | one query answers "what changed" | trace storage up about 3% |
 | Gateway version in the bundle | gateway upgrades run the gate | one extra gated change per month |
 
+The config change that closed root causes 1 and 2:
+
+```yaml
+# BROKEN: the support agent names the billing server and nothing else. It gets whatever listing
+# the server publishes next, including the new `goodwill` reason it was never evaluated with.
+agent: support-tier1
+servers:
+  - name: com.acme/billing
+```
+
+```yaml
+# FIX: pin the server version and the listing digest (drift fails closed), allow only the tools
+# this agent was evaluated with, and restrict the enum to the values its gate covered.
+agent: support-tier1
+servers:
+  - name: com.acme/billing
+    version: 2.4.1
+    listing_sha256: 9f2c4e...a71b
+    tools: [get_invoice, list_invoices, refund_invoice]
+    restrict:
+      refund_invoice:
+        reason: [duplicate_charge, service_outage]   # `goodwill` stays finance-only
+```
+
 **Result after one quarter.** 37 tool changes went through the pipeline: 21 classified `behavior`, 9 `additive`, 5 `breaking`, 2 `cosmetic`. The trajectory gate blocked 4, of which 3 were description changes the classifier's first version would have marked `none`. Mean time from tool merge to all agents on the new version went from about 5 minutes (uncontrolled) to 2.5 days (controlled), which the billing team accepted after the refund incident. No tool change reached a customer-facing agent without a gate.
 
 **Discussion points.**

@@ -6,7 +6,7 @@
 > quota for the backfill. **KEDA v2.21.1** (2026-11-15) scales the dual-write embed workers.
 > **lakeFS v1.88.0** (2026-10-01) holds the corpus snapshot. **MLflow 3.18.0** (2026-11-04)
 > holds the encoder registry alias. OpenAI embedding model facts come from the OpenAI embeddings
-> guide, checked 2026-10-18. Vector databases (Qdrant, Weaviate, Milvus, OpenSearch) are named
+> guide, checked 2026-11-25. Vector databases (Qdrant, Weaviate, Milvus, OpenSearch) are named
 > without a version.
 >
 > **On prices.** GPU-hour, node-hour and judge-token rates on this page are stated assumptions,
@@ -745,7 +745,7 @@ about 8x smaller. The capacity lesson matches §2: a new model can shrink the in
 migration plan has a cost peak during the window and a lasting saving after it. The post does not
 describe how the index was rebuilt or rolled out.
 
-**OpenAI** lists its embedding models in the API embeddings guide (checked 2026-10-18).
+**OpenAI** lists its embedding models in the API embeddings guide (checked 2026-11-25).
 `text-embedding-ada-002` scores 61.0% on MTEB, `text-embedding-3-small` 62.3% and
 `text-embedding-3-large` 64.6%. The guide gives cost as pages per dollar at about 800 tokens per
 page: 12,500 for ada-002, 62,500 for 3-small and 9,615 for 3-large, which works out to $0.10,

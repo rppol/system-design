@@ -14,7 +14,7 @@
 > (1.37.2 on 2026-10-13); the OCI image volume source has been GA since 1.36. ModelPack
 > model-spec v0.0.7 (git tag of 2025-07-21). Every version claim below is checked against this
 > anchor; versions of tools outside it (fastsafetensors, Dragonfly, Kraken, Modal) were fetched
-> from their release pages and docs on 2026-10-18 and are dated where they appear.
+> from their release pages and docs on 2026-11-25 and are dated where they appear.
 
 A GPU replica is useless until its weights sit in HBM, its kernels are compiled and its first
 batch has run. For a 70B model that path moves 140 GB through four or five storage tiers and
@@ -772,9 +772,9 @@ record the parallel layout in the registry entry and build shard sets per layout
 | KServe | Model serving platform | v0.21.0; `LocalModelCache`, `LocalModelNamespaceCache`, `LocalModelNodeGroup` |
 | Kubernetes | Image volume source | GA since 1.36, pinned 1.37 |
 | ModelPack | OCI model artifact spec | model-spec v0.0.7 |
-| Dragonfly | P2P distribution | v2.5.2 (2026-09-14); CNCF graduated; images, OCI artifacts, models |
-| Kraken | P2P registry | v0.1.32 (2026-10-12); built at Uber |
-| Modal | Serverless GPU platform | Memory snapshots; GPU memory snapshots alpha as of 2026-10-18 |
+| Dragonfly | P2P distribution | v2.5.4 (2026-11-13); CNCF graduated; images, OCI artifacts, models |
+| Kraken | P2P registry | v0.1.37 (2026-11-16); built at Uber |
+| Modal | Serverless GPU platform | Memory snapshots; GPU memory snapshots alpha as of 2026-11-25 |
 | Amazon FSx for Lustre | Parallel file system | Throughput provisioned per TiB |
 | Amazon S3 | Object store | Per-prefix request limits apply during fan-out |
 | Karpenter | Node autoscaler | `NodeClaim` timings give the node provisioning stage |
