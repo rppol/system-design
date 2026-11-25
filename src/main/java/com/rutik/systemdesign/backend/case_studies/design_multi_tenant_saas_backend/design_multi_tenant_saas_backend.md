@@ -24,6 +24,8 @@ this case study — the router, the registry, the quota enforcement, the provisi
 the live migration — exists to keep that promise true at 100x the tenant count with the same
 number of forks in the codebase: zero.
 
+> **See also:** [Privacy Engineering & Data Lifecycle](../../privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) and [Design a GDPR Erasure Pipeline](../design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) for erasing a single data subject, rather than a whole tenant, across every store.
+
 ---
 
 ## 1. Requirements Clarification

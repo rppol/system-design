@@ -794,6 +794,8 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 | [GraphQL](src/main/java/com/rutik/systemdesign/backend/graphql/graphql.md) | Schema-first design, DataLoader N+1 fix, persisted queries, complexity limiting, federation |
 | [WebSockets and SSE](src/main/java/com/rutik/systemdesign/backend/websockets_and_sse/websockets_and_sse.md) | WebSocket upgrade, frame structure, SSE reconnection, STOMP, Redis pub/sub fan-out |
 | [Webhooks & Event Delivery](src/main/java/com/rutik/systemdesign/backend/webhooks_and_event_delivery/webhooks_and_event_delivery.md) | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence |
+| [Email & Notification Delivery](src/main/java/com/rutik/systemdesign/backend/email_and_notification_delivery/email_and_notification_delivery.md) | SPF/DKIM/DMARC, bulk-sender rules, send-pipeline idempotency, bounce and complaint suppression, provider failover, one-click unsubscribe |
+| [File Upload & Media Handling](src/main/java/com/rutik/systemdesign/backend/file_upload_and_media_handling/file_upload_and_media_handling.md) | Presigned and multipart uploads, resumable protocols, content sniffing, malware scanning, quarantine-then-promote, quotas |
 
 #### Phase 3 — Performance Engineering
 | Module | Key Concepts |
@@ -819,6 +821,7 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 | [Database Migrations](src/main/java/com/rutik/systemdesign/backend/database_migrations/database_migrations.md) | Flyway vs Liquibase, expand-contract pattern, CREATE INDEX CONCURRENTLY, gh-ost |
 | [Distributed Transactions and Consistency](src/main/java/com/rutik/systemdesign/backend/distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | 2PC failure modes, Saga (choreography vs orchestration), outbox pattern, idempotency keys |
 | [Database Types Deep Dive](src/main/java/com/rutik/systemdesign/backend/database_types_deep_dive/database_types_deep_dive.md) | Relational/Document/Key-Value/Wide-Column/Time-Series/Search/Graph/NewSQL — internals, tradeoffs, when to use |
+| [Search Integration Patterns](src/main/java/com/rutik/systemdesign/backend/search_integration_patterns/search_integration_patterns.md) | Dual write vs outbox vs CDC into a search index, version-gated indexing, alias-swap reindex, freshness UX, ranking feedback |
 
 #### Phase 5 — Resilience & Reliability
 | Module | Key Concepts |
@@ -833,6 +836,7 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 |--------|-------------|
 | [Backend Security (OWASP)](src/main/java/com/rutik/systemdesign/backend/backend_security_owasp/backend_security_owasp.md) | OWASP Top 10 2021, SQL injection fix, CSRF/XSS/SSRF, secret management, security headers |
 | [Auth and Authorization Systems](src/main/java/com/rutik/systemdesign/backend/auth_and_authorization_systems/auth_and_authorization_systems.md) | JWT internals, OAuth2 flows + PKCE, OIDC, opaque vs JWT, refresh rotation, RBAC vs ABAC |
+| [Privacy Engineering & Data Lifecycle](src/main/java/com/rutik/systemdesign/backend/privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) | PII inventory, GDPR/DPDP/CCPA rights pipelines, erasure across stores, crypto-shredding, retention as code, consent, audit |
 
 #### Phase 7 — Testing & Quality
 | Module | Key Concepts |
@@ -852,12 +856,14 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 | [RabbitMQ Deep Dive](src/main/java/com/rutik/systemdesign/backend/rabbitmq_deep_dive/rabbitmq_deep_dive.md) | AMQP 0-9-1 object model, exchange/binding matching, confirms vs transactions, quorum queues (Raft), streams and replay, prefetch, DLX, Khepri |
 | [Event Sourcing and CQRS](src/main/java/com/rutik/systemdesign/backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | Events as source of truth, aggregate design, snapshots, projections, event upcasting, Axon Framework |
 | [Durable Execution and Workflows](src/main/java/com/rutik/systemdesign/backend/durable_execution_and_workflows/durable_execution_and_workflows.md) | Deterministic replay, event-history workflows, Temporal/Restate, activity retries, versioning a running workflow |
+| [Batch Processing & Scheduling](src/main/java/com/rutik/systemdesign/backend/batch_processing_and_scheduling/batch_processing_and_scheduling.md) | Cron traps, single-runner guarantees, run identity, idempotent output, chunking, backfills, cron vs Airflow vs Temporal |
 | [Messaging Patterns](src/main/java/com/rutik/systemdesign/backend/messaging_patterns/messaging_patterns.md) | Outbox pattern (polling + Debezium CDC), transactional inbox, DLQ handling, Avro schema evolution |
 
 #### Phase 9 — Microservices Architecture
 | Module | Key Concepts |
 |--------|-------------|
 | [Microservices Fundamentals](src/main/java/com/rutik/systemdesign/backend/microservices_fundamentals/microservices_fundamentals.md) | When NOT to decompose, DDD bounded contexts, strangler fig, data ownership, distributed monolith |
+| [Modular Monolith & Service Boundaries](src/main/java/com/rutik/systemdesign/backend/modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) | Boundary vs deployment unit, enforced module boundaries, data ownership, API composition, when and how to extract a service |
 | [API Gateway Patterns](src/main/java/com/rutik/systemdesign/backend/api_gateway_patterns/api_gateway_patterns.md) | Gateway responsibilities, BFF pattern, API composition, Spring Cloud Gateway, Kong, AWS API GW |
 | [Service Mesh and Service Discovery](src/main/java/com/rutik/systemdesign/backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | Istio/Envoy, mTLS zero-trust, xDS protocol, Eureka vs DNS vs mesh discovery, probe design |
 | [Distributed System Operational Patterns](src/main/java/com/rutik/systemdesign/backend/distributed_system_operational_patterns/distributed_system_operational_patterns.md) | Bulkhead, sidecar, ACL, strangler fig steps, correlation ID, distributed config, graceful shutdown |
@@ -876,6 +882,9 @@ A deep-dive guide to building, optimizing, inspecting, and testing production ba
 | [Design a Rate Limiter Service](src/main/java/com/rutik/systemdesign/backend/case_studies/design_rate_limiter_service/design_rate_limiter_service.md) | Distributed token bucket, Redis Lua atomicity, cell-local vs global counters |
 | [Design a Multi-Tenant SaaS Backend](src/main/java/com/rutik/systemdesign/backend/case_studies/design_multi_tenant_saas_backend/design_multi_tenant_saas_backend.md) | Pooled/bridge/silo tiers, shuffle sharding, per-tenant quotas, tenant offboarding |
 | [Design a Continuous Performance Platform](src/main/java/com/rutik/systemdesign/backend/case_studies/design_continuous_performance_platform/design_continuous_performance_platform.md) | Benchmark result stores, change-point detection, statistical bisect, canary analysis |
+| [Design a Media Upload API](src/main/java/com/rutik/systemdesign/backend/case_studies/design_media_upload_api/design_media_upload_api.md) | Upload sessions, direct-to-store multipart, server-driven file state machine, sniff-then-scan, quota reservation, orphan reconciler |
+| [Design a Search-Backed Catalog API](src/main/java/com/rutik/systemdesign/backend/case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) | Outbox to an ordered indexer, version-gated writes, alias-swap reindex, seller read-your-writes, click feedback |
+| [Design a GDPR Erasure Pipeline](src/main/java/com/rutik/systemdesign/backend/case_studies/design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) | Data map as code, identity resolution, durable erasure orchestration, crypto-shredding, suppression, evidence |
 
 See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/README.md) for the full 9-phase learning path, version matrix (Java 21, Spring Boot 3.2+, Kafka 3.6+), and cross-reference map.
 

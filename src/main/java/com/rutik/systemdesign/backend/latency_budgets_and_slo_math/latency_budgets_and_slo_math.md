@@ -8,6 +8,8 @@ A latency budget is a design document, not a monitoring artifact. It is written 
 
 This module is the arithmetic. How latency composes serially and in parallel, what physics charges you and why no engineering buys it back, how to decompose an SLO into per-hop line items that actually sum, what you have already spent before your handler starts, what to cut when the budget is overspent, how to enforce a budget in code with deadline propagation and a timeout ladder that adds up, and how to pick an SLI that is not a lie. Error budgets — the availability analogue — are covered in [`devops/sre_principles_and_slos`](../../devops/sre_principles_and_slos/sre_principles_and_slos.md); here we only wire the two together.
 
+> **See also:** [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for how extracting modules into serial network hops multiplies availability and latency.
+
 ---
 
 ## 2. Intuition

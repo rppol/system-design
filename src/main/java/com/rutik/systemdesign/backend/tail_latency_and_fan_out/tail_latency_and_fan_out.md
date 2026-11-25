@@ -15,6 +15,8 @@ The canonical reference is Jeff Dean and Luiz André Barroso, *The Tail at Scale
 
 **Coordinated omission, in one paragraph, because it is taught twice already.** A closed-model load generator holds concurrency fixed, so when the system slows the generator issues *fewer* requests instead of letting them queue, and the long waits that real users would experience are never timed. Little's Law forces this: with `L` pinned at 100 virtual users, a slowdown from 50ms to 2s drops applied load from 2,000 req/s to 50 req/s, a 40x reduction the tool never reports. The fix is an open-model, constant-arrival-rate executor. It is worked in full, with the 40x arithmetic and the k6 broken/fixed configs, in [Load and Performance Testing §5 and §10](../load_and_performance_testing/load_and_performance_testing.md) and [DevOps Performance and Load Testing §5](../../devops/performance_and_load_testing/performance_and_load_testing.md) — read those, and assume from here on that your measurement is honest. Everything below is what still goes wrong when it is.
 
+> **See also:** [Design a Search-Backed Catalog API](../case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) for shard fan-out on a search cluster and degrading to partial results.
+
 ---
 
 ## 2. Intuition

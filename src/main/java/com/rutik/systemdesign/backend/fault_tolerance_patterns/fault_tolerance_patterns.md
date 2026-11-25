@@ -12,6 +12,8 @@ The core patterns covered here are:
 - **Timeout Hierarchy** — enforce explicit time limits at every integration boundary
 - **Fallback** — return a degraded but acceptable response when the primary path fails
 
+> **See also:** [Email & Notification Delivery](../email_and_notification_delivery/email_and_notification_delivery.md) for the circuit breaker behind an email provider router; [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for the timeouts, retries and breaker a module gains when it is extracted into a service.
+
 ---
 
 ## 2. Intuition

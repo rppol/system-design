@@ -6,6 +6,8 @@ Writing a correct SQL query is the beginning. Writing a query that scales to mil
 
 This module covers EXPLAIN ANALYZE plan reading, the N+1 detection and fix workflow, pagination strategies at scale, batch insert patterns, and prepared statement plan caching.
 
+> **See also:** [Batch Processing & Scheduling](../batch_processing_and_scheduling/batch_processing_and_scheduling.md) for keyset pagination and chunked reads in batch jobs that run against the OLTP database.
+
 ---
 
 ## 2. Intuition

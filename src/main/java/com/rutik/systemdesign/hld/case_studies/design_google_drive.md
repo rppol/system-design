@@ -869,3 +869,4 @@ A: **Both** accounts are charged the **full logical size** of the file, independ
 - **Conflicted-copy creation rate limiting (§9 War Story 2)** -> [`../rate_limiting/rate_limiting.md`](../rate_limiting/rate_limiting.md)
 - **The general large-blob pattern: presigned and resumable uploads, chunking and dedup** -> [`../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md`](../large_blobs_and_media_pipelines/large_blobs_and_media_pipelines.md)
 - **Photo upload sessions and renditions, the media-product neighbour of file sync** -> [`./design_instagram_photo_sharing.md`](./design_instagram_photo_sharing.md)
+- **Backend upload mechanics: resumable protocols, content verification, malware scanning, quotas** -> [`../../backend/file_upload_and_media_handling/file_upload_and_media_handling.md`](../../backend/file_upload_and_media_handling/file_upload_and_media_handling.md)

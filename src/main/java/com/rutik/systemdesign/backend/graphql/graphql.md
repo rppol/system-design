@@ -6,6 +6,8 @@ GraphQL is a query language for APIs and a runtime for executing those queries, 
 
 GraphQL defines a strongly-typed schema as the contract between client and server. Clients send queries declaring the shape of data they want, mutations to change data, and subscriptions for real-time updates. The server executes queries by calling field resolvers and assembles the response matching the query shape.
 
+> **See also:** [File Upload & Media Handling](../file_upload_and_media_handling/file_upload_and_media_handling.md) for the presigned, multipart and resumable upload mechanics a GraphQL mutation hands off to.
+
 ---
 
 ## 2. Intuition

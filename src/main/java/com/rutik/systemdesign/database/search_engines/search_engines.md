@@ -6,6 +6,8 @@
 > features tied to each release, are kept in the version anchor of
 > [Elasticsearch Internals](../elasticsearch_internals/elasticsearch_internals.md). This page
 > covers behaviour common to all Lucene-based engines and names a version only where it matters.
+> The backend side (keeping an index in sync with the database, zero-downtime reindex, freshness
+> UX) is in [Search Integration Patterns](../../backend/search_integration_patterns/search_integration_patterns.md).
 
 Search engine databases (Elasticsearch, OpenSearch, Solr) are built on top of Apache Lucene and provide full-text search, relevance ranking, aggregations, and near-real-time indexing at scale. They are not general-purpose databases — they excel at text search, log analytics, and faceted navigation use cases where precision recall and relevance matter more than ACID compliance.
 

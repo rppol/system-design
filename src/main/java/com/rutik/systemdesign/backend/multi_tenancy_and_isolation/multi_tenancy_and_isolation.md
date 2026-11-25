@@ -44,6 +44,8 @@ conflating them is the single most common design-review mistake:
 | Failure mode | A query returns another tenant's row | A stale/forged tenant ID serves the wrong data, or one tenant's spike degrades everyone |
 | Owning doc | `design_multitenant_saas_database` case study | This module |
 
+> **See also:** [Privacy Engineering & Data Lifecycle](../privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) and [Design a GDPR Erasure Pipeline](../case_studies/design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) for erasing one person (not a whole tenant) across every store; [Search Integration Patterns](../search_integration_patterns/search_integration_patterns.md) for per-tenant index aliases.
+
 ---
 
 ## 2. Intuition

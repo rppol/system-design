@@ -6,6 +6,8 @@ A connection pool maintains a set of pre-established database connections that a
 
 HikariCP is the fastest, most widely used JDBC connection pool for Java. Spring Boot auto-configures HikariCP. Understanding its internals — the ConcurrentBag pool data structure, pool sizing formulas, connection validation, and leak detection — is essential for avoiding connection exhaustion, timeout cascades, and subtle connection bugs.
 
+> **See also:** [Batch Processing & Scheduling](../batch_processing_and_scheduling/batch_processing_and_scheduling.md) for capping batch-job concurrency so parallel workers do not open a connection storm; [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for per-module pools that multiply across instances.
+
 ---
 
 ## 2. Intuition

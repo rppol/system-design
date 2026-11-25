@@ -6,6 +6,8 @@ REST (Representational State Transfer) is an architectural style for distributed
 
 Getting REST right means more than mapping CRUD to HTTP methods. It requires thoughtful resource modeling, consistent versioning, idempotency for safe retries, proper HTTP caching headers, standard error responses, and pagination strategies that scale. Each of these has subtleties that separate well-designed APIs from ones that cause client integration pain for years.
 
+> **See also:** [File Upload & Media Handling](../file_upload_and_media_handling/file_upload_and_media_handling.md) and [Design a Media Upload API](../case_studies/design_media_upload_api/design_media_upload_api.md) for upload APIs (upload sessions, presigned and multipart grants, resumable uploads); [Design a Search-Backed Catalog API](../case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) for a search API contract with opaque cursors and freshness signals.
+
 ---
 
 ## 2. Intuition

@@ -10,6 +10,8 @@ The core promise is organizational and operational: teams can develop, deploy, a
 
 Understanding microservices means understanding when NOT to use them as much as when to use them.
 
+> **See also:** [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for finding and enforcing boundaries inside one deployable, and the extraction steps that keep a split reversible.
+
 ---
 
 ## 2. Intuition

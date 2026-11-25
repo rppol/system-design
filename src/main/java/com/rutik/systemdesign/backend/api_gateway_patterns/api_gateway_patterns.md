@@ -8,6 +8,8 @@ An API gateway is a server that acts as the single entry point for all client re
 
 The gateway externalizes cross-cutting concerns — authentication, rate limiting, SSL termination, logging — that would otherwise be duplicated in every service. It also abstracts the internal topology of the backend: clients see a stable surface while services can be split, merged, or relocated behind the gateway.
 
+> **See also:** [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for API composition across modules and services, and where composition code may live.
+
 ---
 
 ## 2. Intuition

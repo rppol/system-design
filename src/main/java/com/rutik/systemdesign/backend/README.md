@@ -23,30 +23,30 @@ flowchart TD
         p1_osi(["OSI Model"]) --> p1_tcp(["TCP/IP Deep Dive"]) --> p1_udp(["UDP & QUIC"]) --> p1_http(["HTTP Protocols"])
     end
     subgraph P2["Phase 2 - API Design & Protocols"]
-        p2_rest(["REST Design"]) --> p2_grpc(["gRPC/Protobuf"]) --> p2_graphql(["GraphQL"]) --> p2_ws(["WS & SSE"])
+        p2_rest(["REST Design"]) --> p2_grpc(["gRPC/Protobuf"]) --> p2_graphql(["GraphQL"]) --> p2_ws(["WS & SSE"]) --> p2_mail(["Email Delivery"]) --> p2_upload(["File Uploads"])
     end
     subgraph P3["Phase 3 - Performance Engineering"]
         p3_prof(["Profiling"]) --> p3_pool(["Connection Pooling"]) --> p3_cache(["Caching Deep Dive"]) --> p3_async(["Async Patterns"])
     end
 
     subgraph P4["Phase 4 - Database Engineering"]
-        p4_dbint(["DB Internals"]) --> p4_query(["Query Opt."]) --> p4_migr(["Migrations"]) --> p4_dtx(["Dist. Transactions"]) --> p4_dbtypes(["DB Types Deep Dive"])
+        p4_dbint(["DB Internals"]) --> p4_query(["Query Opt."]) --> p4_migr(["Migrations"]) --> p4_dtx(["Dist. Transactions"]) --> p4_dbtypes(["DB Types Deep Dive"]) --> p4_search(["Search Integration"])
     end
     subgraph P5["Phase 5 - Resilience & Reliability"]
         p5_cb(["Circuit Breaker"]) --> p5_rl(["Rate Limiting"]) --> p5_obs(["Observability"])
     end
     subgraph P6["Phase 6 - Security"]
-        p6_owasp(["OWASP Top 10"]) --> p6_auth(["Auth & AuthZ"])
+        p6_owasp(["OWASP Top 10"]) --> p6_auth(["Auth & AuthZ"]) --> p6_priv(["Privacy Engineering"])
     end
 
     subgraph P7["Phase 7 - Testing & Quality"]
         p7_test(["Testing Strategy"]) --> p7_load(["Load Testing"]) --> p7_chaos(["Chaos Engineering"])
     end
     subgraph P8["Phase 8 - Event-Driven Architecture"]
-        p8_eda(["EDA Fundamentals"]) --> p8_kafka(["Kafka Deep Dive"]) --> p8_rabbit(["RabbitMQ Deep Dive"]) --> p8_es(["Event Sourcing"]) --> p8_msg(["Messaging Patterns"])
+        p8_eda(["EDA Fundamentals"]) --> p8_kafka(["Kafka Deep Dive"]) --> p8_rabbit(["RabbitMQ Deep Dive"]) --> p8_es(["Event Sourcing"]) --> p8_batch(["Batch & Scheduling"]) --> p8_msg(["Messaging Patterns"])
     end
     subgraph P9["Phase 9 - Microservices Architecture"]
-        p9_ms(["MS Fundamentals"]) --> p9_gw(["API Gateway"]) --> p9_mesh(["Service Mesh"]) --> p9_ops(["Operational Patterns"]) --> p9_container(["Container Patterns"])
+        p9_ms(["MS Fundamentals"]) --> p9_modmono(["Modular Monolith"]) --> p9_gw(["API Gateway"]) --> p9_mesh(["Service Mesh"]) --> p9_ops(["Operational Patterns"]) --> p9_container(["Container Patterns"])
     end
 
     cs(["Case Studies<br/>Booking, Feed, Payment,<br/>Order System, Migration"])
@@ -55,9 +55,9 @@ flowchart TD
     P2 --> P5 --> P8 --> cs
     P3 --> P6 --> P9 --> cs
 
-    class p1_osi,p1_tcp,p1_udp,p1_http,p2_rest,p2_grpc,p2_graphql,p2_ws,p3_prof,p3_pool,p3_cache,p3_async io
-    class p4_dbint,p4_query,p4_migr,p4_dtx,p4_dbtypes,p5_cb,p5_rl,p5_obs,p6_owasp,p6_auth train
-    class p7_test,p7_load,p7_chaos,p8_eda,p8_kafka,p8_es,p8_msg,p9_ms,p9_gw,p9_mesh,p9_ops,p9_container mathOp
+    class p1_osi,p1_tcp,p1_udp,p1_http,p2_rest,p2_grpc,p2_graphql,p2_ws,p2_mail,p2_upload,p3_prof,p3_pool,p3_cache,p3_async io
+    class p4_dbint,p4_query,p4_migr,p4_dtx,p4_dbtypes,p4_search,p5_cb,p5_rl,p5_obs,p6_owasp,p6_auth,p6_priv train
+    class p7_test,p7_load,p7_chaos,p8_eda,p8_kafka,p8_rabbit,p8_es,p8_batch,p8_msg,p9_ms,p9_modmono,p9_gw,p9_mesh,p9_ops,p9_container mathOp
     class cs req
 ```
 
@@ -110,6 +110,8 @@ distributed_transactions_and_consistency
   distributed_transactions_and_consistency.md  senior, principal
 database_types_deep_dive
   database_types_deep_dive.md  principal
+search_integration_patterns
+  search_integration_patterns.md  senior, principal
 fault_tolerance_patterns
   fault_tolerance_patterns.md  senior, principal
 rate_limiting_in_depth
@@ -122,6 +124,8 @@ backend_security_owasp
 auth_and_authorization_systems
   auth_and_authorization_systems.md  senior, principal
   authorization_frontier.md  senior, principal
+privacy_engineering_and_data_lifecycle
+  privacy_engineering_and_data_lifecycle.md  principal
 backend_testing_strategies
   backend_testing_strategies.md  principal
 load_and_performance_testing
@@ -141,6 +145,8 @@ messaging_patterns
   messaging_patterns.md  principal
 microservices_fundamentals
   microservices_fundamentals.md  principal
+modular_monolith_and_service_boundaries
+  modular_monolith_and_service_boundaries.md  principal
 api_gateway_patterns
   api_gateway_patterns.md  principal
   gateway_api_and_modern_proxies.md  principal
@@ -162,14 +168,23 @@ case_studies
   design_rate_limiter_service/design_rate_limiter_service.md  senior
   design_multi_tenant_saas_backend/design_multi_tenant_saas_backend.md  principal
   design_continuous_performance_platform/design_continuous_performance_platform.md  principal
+  design_media_upload_api/design_media_upload_api.md  senior
+  design_search_backed_catalog_api/design_search_backed_catalog_api.md  senior
+  design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md  principal
 api_contracts_and_schema_governance
   api_contracts_and_schema_governance.md  senior, principal
 webhooks_and_event_delivery
   webhooks_and_event_delivery.md  senior, principal
+email_and_notification_delivery
+  email_and_notification_delivery.md  senior
+file_upload_and_media_handling
+  file_upload_and_media_handling.md  senior
 serving_ai_workloads
   serving_ai_workloads.md  senior, principal
 durable_execution_and_workflows
   durable_execution_and_workflows.md  principal
+batch_processing_and_scheduling
+  batch_processing_and_scheduling.md  senior
 multi_tenancy_and_isolation
   multi_tenancy_and_isolation.md  principal
 performance_engineering_method
@@ -195,14 +210,14 @@ performance_incident_playbook
 -->
 ## Learning Paths
 
-This section is exhaustive by design — 50 modules across 9 phases, from OSI-layer networking through performance engineering, microservices architecture and container orchestration. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 56 modules across 9 phases, from OSI-layer networking through performance engineering, microservices architecture and container orchestration. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (50 modules)
+### Full Path (56 modules)
 
-The complete curriculum in the order above — see [9-Phase Learning Path](#9-phase-learning-path). Use it for genuine mastery: every networking layer (OSI, TCP/IP, UDP/QUIC), the full API surface (GraphQL, WebSockets/SSE), the ten-module performance-engineering cluster, database migrations and the full database-types survey, the testing trio, event sourcing/CQRS and messaging patterns, service mesh, and container/deployment patterns. Nothing is dropped.
+The complete curriculum in the order above — see [9-Phase Learning Path](#9-phase-learning-path). Use it for genuine mastery: every networking layer (OSI, TCP/IP, UDP/QUIC), the full API surface (GraphQL, WebSockets/SSE, email delivery, file uploads), the ten-module performance-engineering cluster, database migrations, search integration and the full database-types survey, privacy engineering, the testing trio, event sourcing/CQRS, batch jobs and messaging patterns, modular monoliths, service mesh, and container/deployment patterns. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (32 modules)
+### Senior Path (36 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -213,33 +228,37 @@ The complete curriculum in the order above — see [9-Phase Learning Path](#9-ph
 | 7 | [grpc_and_protobuf](grpc_and_protobuf/grpc_and_protobuf.md) | 2 files |
 | 9 | [websockets_and_sse](websockets_and_sse/websockets_and_sse.md) | module page only |
 | 10 | [webhooks_and_event_delivery](webhooks_and_event_delivery/webhooks_and_event_delivery.md) | module page only |
-| 11 | [performance_engineering_method](performance_engineering_method/performance_engineering_method.md) | module page only |
-| 13 | [tail_latency_and_fan_out](tail_latency_and_fan_out/tail_latency_and_fan_out.md) | module page only |
-| 15 | [benchmarking_methodology](benchmarking_methodology/benchmarking_methodology.md) | module page only |
-| 16 | [performance_profiling](performance_profiling/performance_profiling.md) | module page only |
-| 17 | [off_cpu_and_ebpf_analysis](off_cpu_and_ebpf_analysis/off_cpu_and_ebpf_analysis.md) | module page only |
-| 18 | [os_and_io_performance](os_and_io_performance/os_and_io_performance.md) | module page only |
-| 19 | [connection_pooling_deep_dive](connection_pooling_deep_dive/connection_pooling_deep_dive.md) | module page only |
-| 20 | [caching_strategies_deep_dive](caching_strategies_deep_dive/caching_strategies_deep_dive.md) | module page only |
-| 21 | [async_and_concurrency_patterns](async_and_concurrency_patterns/async_and_concurrency_patterns.md) | module page only |
-| 22 | [serving_ai_workloads](serving_ai_workloads/serving_ai_workloads.md) | module page only |
-| 23 | [database_internals_and_indexing](database_internals_and_indexing/database_internals_and_indexing.md) | module page only |
-| 24 | [query_optimization](query_optimization/query_optimization.md) | module page only |
-| 25 | [database_migrations](database_migrations/database_migrations.md) | module page only |
-| 26 | [distributed_transactions_and_consistency](distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | module page only |
-| 28 | [fault_tolerance_patterns](fault_tolerance_patterns/fault_tolerance_patterns.md) | module page only |
-| 29 | [rate_limiting_in_depth](rate_limiting_in_depth/rate_limiting_in_depth.md) | module page only |
-| 31 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | 2 files |
-| 32 | [backend_security_owasp](backend_security_owasp/backend_security_owasp.md) | module page only |
-| 33 | [auth_and_authorization_systems](auth_and_authorization_systems/auth_and_authorization_systems.md) | 2 files |
-| 35 | [load_and_performance_testing](load_and_performance_testing/load_and_performance_testing.md) | module page only |
-| 36 | [workload_characterization_and_load_modelling](workload_characterization_and_load_modelling/workload_characterization_and_load_modelling.md) | module page only |
-| 38 | [performance_incident_playbook](performance_incident_playbook/performance_incident_playbook.md) | module page only |
-| 41 | [kafka_deep_dive](kafka_deep_dive/kafka_deep_dive.md) | module page only |
-| 42 | [rabbitmq_deep_dive](rabbitmq_deep_dive/rabbitmq_deep_dive.md) | 2 files |
-| 50 | [container_and_deployment_patterns](container_and_deployment_patterns/container_and_deployment_patterns.md) | module page only |
+| 11 | [email_and_notification_delivery](email_and_notification_delivery/email_and_notification_delivery.md) | module page only |
+| 12 | [file_upload_and_media_handling](file_upload_and_media_handling/file_upload_and_media_handling.md) | module page only |
+| 13 | [performance_engineering_method](performance_engineering_method/performance_engineering_method.md) | module page only |
+| 15 | [tail_latency_and_fan_out](tail_latency_and_fan_out/tail_latency_and_fan_out.md) | module page only |
+| 17 | [benchmarking_methodology](benchmarking_methodology/benchmarking_methodology.md) | module page only |
+| 18 | [performance_profiling](performance_profiling/performance_profiling.md) | module page only |
+| 19 | [off_cpu_and_ebpf_analysis](off_cpu_and_ebpf_analysis/off_cpu_and_ebpf_analysis.md) | module page only |
+| 20 | [os_and_io_performance](os_and_io_performance/os_and_io_performance.md) | module page only |
+| 21 | [connection_pooling_deep_dive](connection_pooling_deep_dive/connection_pooling_deep_dive.md) | module page only |
+| 22 | [caching_strategies_deep_dive](caching_strategies_deep_dive/caching_strategies_deep_dive.md) | module page only |
+| 23 | [async_and_concurrency_patterns](async_and_concurrency_patterns/async_and_concurrency_patterns.md) | module page only |
+| 24 | [serving_ai_workloads](serving_ai_workloads/serving_ai_workloads.md) | module page only |
+| 25 | [database_internals_and_indexing](database_internals_and_indexing/database_internals_and_indexing.md) | module page only |
+| 26 | [query_optimization](query_optimization/query_optimization.md) | module page only |
+| 27 | [database_migrations](database_migrations/database_migrations.md) | module page only |
+| 28 | [distributed_transactions_and_consistency](distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | module page only |
+| 30 | [search_integration_patterns](search_integration_patterns/search_integration_patterns.md) | module page only |
+| 31 | [fault_tolerance_patterns](fault_tolerance_patterns/fault_tolerance_patterns.md) | module page only |
+| 32 | [rate_limiting_in_depth](rate_limiting_in_depth/rate_limiting_in_depth.md) | module page only |
+| 34 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | 2 files |
+| 35 | [backend_security_owasp](backend_security_owasp/backend_security_owasp.md) | module page only |
+| 36 | [auth_and_authorization_systems](auth_and_authorization_systems/auth_and_authorization_systems.md) | 2 files |
+| 39 | [load_and_performance_testing](load_and_performance_testing/load_and_performance_testing.md) | module page only |
+| 40 | [workload_characterization_and_load_modelling](workload_characterization_and_load_modelling/workload_characterization_and_load_modelling.md) | module page only |
+| 42 | [performance_incident_playbook](performance_incident_playbook/performance_incident_playbook.md) | module page only |
+| 45 | [kafka_deep_dive](kafka_deep_dive/kafka_deep_dive.md) | module page only |
+| 46 | [rabbitmq_deep_dive](rabbitmq_deep_dive/rabbitmq_deep_dive.md) | 2 files |
+| 49 | [batch_processing_and_scheduling](batch_processing_and_scheduling/batch_processing_and_scheduling.md) | module page only |
+| 56 | [container_and_deployment_patterns](container_and_deployment_patterns/container_and_deployment_patterns.md) | module page only |
 
-**Not in this path** (18 of 50, Full Path only): `osi_model_and_networking`, `udp_and_quic`, `graphql`, `latency_budgets_and_slo_math`, `queueing_theory_for_capacity`, `database_types_deep_dive`, `multi_tenancy_and_isolation`, `backend_testing_strategies`, `performance_regression_detection`, `chaos_engineering`, `event_driven_fundamentals`, `event_sourcing_and_cqrs`, `durable_execution_and_workflows`, `messaging_patterns`, `microservices_fundamentals`, `api_gateway_patterns`, `service_mesh_and_service_discovery`, `distributed_system_operational_patterns`
+**Not in this path** (20 of 56, Full Path only): `osi_model_and_networking`, `udp_and_quic`, `graphql`, `latency_budgets_and_slo_math`, `queueing_theory_for_capacity`, `database_types_deep_dive`, `multi_tenancy_and_isolation`, `privacy_engineering_and_data_lifecycle`, `backend_testing_strategies`, `performance_regression_detection`, `chaos_engineering`, `event_driven_fundamentals`, `event_sourcing_and_cqrs`, `durable_execution_and_workflows`, `messaging_patterns`, `microservices_fundamentals`, `modular_monolith_and_service_boundaries`, `api_gateway_patterns`, `service_mesh_and_service_discovery`, `distributed_system_operational_patterns`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior backend engineering interview** actually probes — the protocols, performance levers, database internals, resilience patterns, security, and distributed-systems building blocks that come up in nearly every loop. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -255,42 +274,45 @@ A ruthless cut to what a **senior backend engineering interview** actually probe
 | Microservices Architecture | Bounded contexts, the strangler fig pattern, and gateway/BFF responsibilities are the default frame for "design X at scale" |
 
 <!-- study-path-table principal -->
-### Principal Path (30 modules)
+### Principal Path (33 modules)
 
 | # | Module | Files |
 |---|--------|-------|
 | 5 | [rest_api_design](rest_api_design/rest_api_design.md) | module page only |
 | 6 | [api_contracts_and_schema_governance](api_contracts_and_schema_governance/api_contracts_and_schema_governance.md) | module page only |
 | 10 | [webhooks_and_event_delivery](webhooks_and_event_delivery/webhooks_and_event_delivery.md) | module page only |
-| 11 | [performance_engineering_method](performance_engineering_method/performance_engineering_method.md) | module page only |
-| 12 | [latency_budgets_and_slo_math](latency_budgets_and_slo_math/latency_budgets_and_slo_math.md) | module page only |
-| 13 | [tail_latency_and_fan_out](tail_latency_and_fan_out/tail_latency_and_fan_out.md) | module page only |
-| 14 | [queueing_theory_for_capacity](queueing_theory_for_capacity/queueing_theory_for_capacity.md) | module page only |
-| 15 | [benchmarking_methodology](benchmarking_methodology/benchmarking_methodology.md) | module page only |
-| 20 | [caching_strategies_deep_dive](caching_strategies_deep_dive/caching_strategies_deep_dive.md) | module page only |
-| 22 | [serving_ai_workloads](serving_ai_workloads/serving_ai_workloads.md) | module page only |
-| 25 | [database_migrations](database_migrations/database_migrations.md) | module page only |
-| 26 | [distributed_transactions_and_consistency](distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | module page only |
-| 27 | [database_types_deep_dive](database_types_deep_dive/database_types_deep_dive.md) | module page only |
-| 28 | [fault_tolerance_patterns](fault_tolerance_patterns/fault_tolerance_patterns.md) | module page only |
-| 30 | [multi_tenancy_and_isolation](multi_tenancy_and_isolation/multi_tenancy_and_isolation.md) | module page only |
-| 31 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | module page only |
-| 32 | [backend_security_owasp](backend_security_owasp/backend_security_owasp.md) | module page only |
-| 33 | [auth_and_authorization_systems](auth_and_authorization_systems/auth_and_authorization_systems.md) | 2 files |
-| 34 | [backend_testing_strategies](backend_testing_strategies/backend_testing_strategies.md) | module page only |
-| 37 | [performance_regression_detection](performance_regression_detection/performance_regression_detection.md) | module page only |
-| 38 | [performance_incident_playbook](performance_incident_playbook/performance_incident_playbook.md) | module page only |
-| 39 | [chaos_engineering](chaos_engineering/chaos_engineering.md) | module page only |
-| 40 | [event_driven_fundamentals](event_driven_fundamentals/event_driven_fundamentals.md) | module page only |
-| 43 | [event_sourcing_and_cqrs](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | module page only |
-| 44 | [durable_execution_and_workflows](durable_execution_and_workflows/durable_execution_and_workflows.md) | module page only |
-| 45 | [messaging_patterns](messaging_patterns/messaging_patterns.md) | module page only |
-| 46 | [microservices_fundamentals](microservices_fundamentals/microservices_fundamentals.md) | module page only |
-| 47 | [api_gateway_patterns](api_gateway_patterns/api_gateway_patterns.md) | 2 files |
-| 48 | [service_mesh_and_service_discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | 2 files |
-| 49 | [distributed_system_operational_patterns](distributed_system_operational_patterns/distributed_system_operational_patterns.md) | module page only |
+| 13 | [performance_engineering_method](performance_engineering_method/performance_engineering_method.md) | module page only |
+| 14 | [latency_budgets_and_slo_math](latency_budgets_and_slo_math/latency_budgets_and_slo_math.md) | module page only |
+| 15 | [tail_latency_and_fan_out](tail_latency_and_fan_out/tail_latency_and_fan_out.md) | module page only |
+| 16 | [queueing_theory_for_capacity](queueing_theory_for_capacity/queueing_theory_for_capacity.md) | module page only |
+| 17 | [benchmarking_methodology](benchmarking_methodology/benchmarking_methodology.md) | module page only |
+| 22 | [caching_strategies_deep_dive](caching_strategies_deep_dive/caching_strategies_deep_dive.md) | module page only |
+| 24 | [serving_ai_workloads](serving_ai_workloads/serving_ai_workloads.md) | module page only |
+| 27 | [database_migrations](database_migrations/database_migrations.md) | module page only |
+| 28 | [distributed_transactions_and_consistency](distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | module page only |
+| 29 | [database_types_deep_dive](database_types_deep_dive/database_types_deep_dive.md) | module page only |
+| 30 | [search_integration_patterns](search_integration_patterns/search_integration_patterns.md) | module page only |
+| 31 | [fault_tolerance_patterns](fault_tolerance_patterns/fault_tolerance_patterns.md) | module page only |
+| 33 | [multi_tenancy_and_isolation](multi_tenancy_and_isolation/multi_tenancy_and_isolation.md) | module page only |
+| 34 | [observability_and_monitoring](observability_and_monitoring/observability_and_monitoring.md) | module page only |
+| 35 | [backend_security_owasp](backend_security_owasp/backend_security_owasp.md) | module page only |
+| 36 | [auth_and_authorization_systems](auth_and_authorization_systems/auth_and_authorization_systems.md) | 2 files |
+| 37 | [privacy_engineering_and_data_lifecycle](privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) | module page only |
+| 38 | [backend_testing_strategies](backend_testing_strategies/backend_testing_strategies.md) | module page only |
+| 41 | [performance_regression_detection](performance_regression_detection/performance_regression_detection.md) | module page only |
+| 42 | [performance_incident_playbook](performance_incident_playbook/performance_incident_playbook.md) | module page only |
+| 43 | [chaos_engineering](chaos_engineering/chaos_engineering.md) | module page only |
+| 44 | [event_driven_fundamentals](event_driven_fundamentals/event_driven_fundamentals.md) | module page only |
+| 47 | [event_sourcing_and_cqrs](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | module page only |
+| 48 | [durable_execution_and_workflows](durable_execution_and_workflows/durable_execution_and_workflows.md) | module page only |
+| 50 | [messaging_patterns](messaging_patterns/messaging_patterns.md) | module page only |
+| 51 | [microservices_fundamentals](microservices_fundamentals/microservices_fundamentals.md) | module page only |
+| 52 | [modular_monolith_and_service_boundaries](modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) | module page only |
+| 53 | [api_gateway_patterns](api_gateway_patterns/api_gateway_patterns.md) | 2 files |
+| 54 | [service_mesh_and_service_discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | 2 files |
+| 55 | [distributed_system_operational_patterns](distributed_system_operational_patterns/distributed_system_operational_patterns.md) | module page only |
 
-**Not in this path** (20 of 50, Full Path only): `osi_model_and_networking`, `tcp_ip_deep_dive`, `udp_and_quic`, `http_protocols`, `grpc_and_protobuf`, `graphql`, `websockets_and_sse`, `performance_profiling`, `off_cpu_and_ebpf_analysis`, `os_and_io_performance`, `connection_pooling_deep_dive`, `async_and_concurrency_patterns`, `database_internals_and_indexing`, `query_optimization`, `rate_limiting_in_depth`, `load_and_performance_testing`, `workload_characterization_and_load_modelling`, `kafka_deep_dive`, `rabbitmq_deep_dive`, `container_and_deployment_patterns`
+**Not in this path** (23 of 56, Full Path only): `osi_model_and_networking`, `tcp_ip_deep_dive`, `udp_and_quic`, `http_protocols`, `grpc_and_protobuf`, `graphql`, `websockets_and_sse`, `email_and_notification_delivery`, `file_upload_and_media_handling`, `performance_profiling`, `off_cpu_and_ebpf_analysis`, `os_and_io_performance`, `connection_pooling_deep_dive`, `async_and_concurrency_patterns`, `database_internals_and_indexing`, `query_optimization`, `rate_limiting_in_depth`, `load_and_performance_testing`, `workload_characterization_and_load_modelling`, `kafka_deep_dive`, `rabbitmq_deep_dive`, `batch_processing_and_scheduling`, `container_and_deployment_patterns`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes the judgment calls a staff backend engineer owns: which protocol and consistency model a system can afford, how it degrades under partial failure, and what you tell a team **not** to build. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
@@ -321,6 +343,12 @@ The highest-frequency backend *knowledge* questions mapped to the module that an
 | How does Kafka guarantee exactly-once semantics, and what happens when a consumer group rebalances mid-batch? | [Kafka Deep Dive](kafka_deep_dive/kafka_deep_dive.md) |
 | How do you decompose a monolith into microservices using bounded contexts, and what is the strangler fig pattern? | [Microservices Fundamentals](microservices_fundamentals/microservices_fundamentals.md) |
 | What does an API gateway centralize that shouldn't live in every service, and what is a BFF? | [API Gateway Patterns](api_gateway_patterns/api_gateway_patterns.md) |
+| Why should large uploads go directly to object storage, and why can't you trust the client's Content-Type? | [File Upload & Media Handling](file_upload_and_media_handling/file_upload_and_media_handling.md) |
+| Why can a message pass SPF and DKIM yet still fail DMARC? | [Email & Notification Delivery](email_and_notification_delivery/email_and_notification_delivery.md) |
+| Why is a dual write to the database and the search index a bad sync strategy, and how do you stop out-of-order updates? | [Search Integration Patterns](search_integration_patterns/search_integration_patterns.md) |
+| Why is a `deleted_at` column not erasure, and when is crypto-shredding the right technique? | [Privacy Engineering & Data Lifecycle](privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) |
+| Why must a scheduled batch job be idempotent even when the scheduler forbids concurrent runs? | [Batch Processing & Scheduling](batch_processing_and_scheduling/batch_processing_and_scheduling.md) |
+| What is a distributed monolith, and when should a module in a modular monolith become a separate service? | [Modular Monolith & Service Boundaries](modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) |
 
 ---
 
@@ -338,7 +366,7 @@ A 5-week plan over the Senior Path. Each week pairs modules with one case study 
 
 ---
 
-## Module Table — 50 Modules
+## Module Table — 56 Modules
 
 The **Q&As** column is the module total: the module page plus every deep-dive sub-file it owns.
 
@@ -361,6 +389,8 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 | [GraphQL](graphql/graphql.md) | Schema design, DataLoader N+1, subscriptions, depth limiting | 16 | Intermediate |
 | [WebSockets & SSE](websockets_and_sse/websockets_and_sse.md) | WS upgrade, frame structure, SSE, long polling, scaling WS | 16 | Intermediate |
 | [Webhooks & Event Delivery](webhooks_and_event_delivery/webhooks_and_event_delivery.md) | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence | 20 | Advanced |
+| [Email & Notification Delivery](email_and_notification_delivery/email_and_notification_delivery.md) | SPF/DKIM/DMARC, bulk-sender rules, send pipeline idempotency, bounce and complaint suppression, provider failover, one-click unsubscribe, preference center | 18 | Advanced |
+| [File Upload & Media Handling](file_upload_and_media_handling/file_upload_and_media_handling.md) | Presigned and multipart uploads, resumable protocols (tus, IETF draft), content sniffing, malware scanning, quarantine-then-promote, quotas, orphan cleanup | 20 | Advanced |
 
 ### Phase 3 — Performance Engineering
 
@@ -388,6 +418,7 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 | [Database Migrations](database_migrations/database_migrations.md) | Flyway vs Liquibase, zero-downtime patterns, expand-contract | 16 | Intermediate |
 | [Distributed Transactions & Consistency](distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | 2PC problems, Saga, outbox pattern, idempotency keys | 15 | Expert |
 | [Database Types Deep Dive](database_types_deep_dive/database_types_deep_dive.md) | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL — internals, tradeoffs, selection criteria | 15 | Expert |
+| [Search Integration Patterns](search_integration_patterns/search_integration_patterns.md) | Dual write vs outbox vs CDC into a search index, version-gated idempotent indexing, zero-downtime reindex with alias swap, freshness UX, ranking feedback | 18 | Advanced |
 
 > For deeper coverage of every database topic above — storage engine internals, NoSQL deep dives, distributed consensus, polyglot persistence, production operations, and end-to-end case studies, see the [Database Engineering](../database/README.md) section (7 phases, principal-engineer level).
 
@@ -406,6 +437,7 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 |--------|-------|------|------------|
 | [Backend Security & OWASP](backend_security_owasp/backend_security_owasp.md) | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 | Advanced |
 | [Auth & Authorization Systems](auth_and_authorization_systems/auth_and_authorization_systems.md) | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 24 | Advanced |
+| [Privacy Engineering & Data Lifecycle](privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) | PII inventory, GDPR/DPDP/CCPA rights pipelines, erasure across stores, crypto-shredding, retention as code, pseudonymisation, consent, audit | 21 | Expert |
 
 ### Phase 7 — Testing & Quality
 
@@ -427,6 +459,7 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 | [RabbitMQ Deep Dive](rabbitmq_deep_dive/rabbitmq_deep_dive.md) | AMQP object model, confirms vs transactions, quorum queues, streams, prefetch, DLX, Khepri | 42 | Expert |
 | [Event Sourcing & CQRS](event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | Event store, aggregates, snapshots, CQRS read models, Axon | 16 | Expert |
 | [Durable Execution & Workflows](durable_execution_and_workflows/durable_execution_and_workflows.md) | Deterministic replay, event-history workflows, Temporal/Restate, activity retries, versioning a running workflow | 20 | Expert |
+| [Batch Processing & Scheduling](batch_processing_and_scheduling/batch_processing_and_scheduling.md) | Cron traps, single-runner guarantees, run identity, idempotent output, chunking and checkpoints, late data and backfills, cron vs Airflow vs Temporal | 18 | Advanced |
 | [Messaging Patterns](messaging_patterns/messaging_patterns.md) | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 18 | Advanced |
 
 ### Phase 9 — Microservices Architecture (MAJOR DEEP DIVE)
@@ -434,6 +467,7 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 | Module | Topic | Q&As | Difficulty |
 |--------|-------|------|------------|
 | [Microservices Fundamentals](microservices_fundamentals/microservices_fundamentals.md) | Decomposition, bounded contexts, data ownership, strangler fig | 15 | Intermediate |
+| [Modular Monolith & Service Boundaries](modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) | Boundary vs deployment unit, enforcing module boundaries, data ownership, API composition and BFF, co-change analysis, when and how to extract a service | 18 | Expert |
 | [API Gateway Patterns](api_gateway_patterns/api_gateway_patterns.md) | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong; `gateway_api_and_modern_proxies.md` | 31 | Advanced |
 | [Service Mesh & Service Discovery](service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | Istio/Envoy, mTLS, service discovery mechanisms, health probes; `ambient_mesh_and_workload_identity.md` | 33 | Advanced |
 | [Distributed System Operational Patterns](distributed_system_operational_patterns/distributed_system_operational_patterns.md) | Bulkhead, sidecar, ACL, correlation ID, feature flags, graceful shutdown | 16 | Advanced |
@@ -441,7 +475,7 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 
 ---
 
-## Case Studies — 10
+## Case Studies — 13
 
 | Case Study | Scenario | Key Concepts |
 |------------|----------|-------------|
@@ -455,6 +489,9 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 | [Design a Rate Limiter Service](case_studies/design_rate_limiter_service/design_rate_limiter_service.md) | Shared limiter for many callers | Distributed token bucket, Redis Lua atomicity, cell-local vs global counters |
 | [Design a Multi-Tenant SaaS Backend](case_studies/design_multi_tenant_saas_backend/design_multi_tenant_saas_backend.md) | Tenant isolation across tiers | Pooled/bridge/silo, shuffle sharding, per-tenant quotas and offboarding |
 | [Design a Continuous Performance Platform](case_studies/design_continuous_performance_platform/design_continuous_performance_platform.md) | Regression detection in CI | Benchmark result stores, change-point detection, statistical bisect, canary analysis |
+| [Design a Media Upload API](case_studies/design_media_upload_api/design_media_upload_api.md) | File attachments up to 5 GiB in a collaboration SaaS | Upload sessions, direct-to-store multipart, resume from store state, sniff-then-scan, quota reservation, orphan reconciliation |
+| [Design a Search-Backed Catalog API](case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) | Marketplace listing search | Outbox to one ordered indexer, version-gated writes, alias-swap reindex, seller read-your-writes, click feedback |
+| [Design a GDPR Erasure Pipeline](case_studies/design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) | Erase one person across 12 data stores | Data map as code, identity resolution, durable orchestration, per-store strategies, crypto-shredding, evidence |
 
 ---
 
@@ -485,6 +522,10 @@ The **Q&As** column is the module total: the module page plus every deep-dive su
 | Caching Strategies Deep Dive | [spring/spring_caching](../spring/spring_caching/spring_caching.md) |
 | Backend Testing Strategies | [spring/spring_testing](../spring/spring_testing/spring_testing.md) |
 | Query Optimization | [spring/spring_data_jpa](../spring/spring_data_jpa/spring_data_jpa.md), [java/jdbc_and_database](../java/jdbc_and_database/jdbc_and_database.md) |
+| Batch Processing & Scheduling | [spring/spring_batch](../spring/spring_batch/spring_batch.md), [spring/spring_events_and_scheduling](../spring/spring_events_and_scheduling/spring_events_and_scheduling.md) |
+| Modular Monolith & Service Boundaries | [spring/spring_modulith](../spring/spring_modulith/spring_modulith.md) |
+| Search Integration Patterns | [database/search_engines](../database/search_engines/search_engines.md), [database/elasticsearch_internals](../database/elasticsearch_internals/elasticsearch_internals.md) |
+| Privacy Engineering & Data Lifecycle | [database/database_security_and_compliance](../database/database_security_and_compliance/database_security_and_compliance.md) |
 
 ---
 

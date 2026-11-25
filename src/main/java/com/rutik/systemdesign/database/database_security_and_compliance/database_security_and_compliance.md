@@ -1,12 +1,14 @@
 # Database Security and Compliance
 
+> **See also:** [Temporal and Bitemporal Data](../temporal_and_bitemporal_data/temporal_and_bitemporal_data.md) (valid time vs transaction time, SQL:2011 periods and as-of queries); [Design a Data Warehouse and Semantic Layer](../case_studies/design_data_warehouse_and_semantic_layer/design_data_warehouse_and_semantic_layer.md) (case study: order-line-grain star schema, SCD2 dimensions and one governed metric layer).
+
 ## 1. Concept Overview
 
 Database security protects data from unauthorized access, modification, and leakage. Compliance ensures the database meets regulatory requirements (GDPR, PCI DSS, HIPAA, SOC 2) around data handling, access control, audit logging, and data lifecycle management. Security and compliance overlap extensively: most compliance requirements translate directly to technical security controls.
 
 The threat model spans internal threats (privilege escalation by engineers, accidental data exposure), external threats (SQL injection, credential theft, network attacks), and systemic threats (vendor compromise, cloud misconfiguration). Defense in depth — multiple independent layers — is the guiding principle.
 
-For PCI DSS scope, SAQ eligibility and tokenization, see [PCI DSS Scope and Tokenization](../../fintech/pci_dss_scope_and_tokenization/pci_dss_scope_and_tokenization.md) in `fintech/`.
+For PCI DSS scope, SAQ eligibility and tokenization, see [PCI DSS Scope and Tokenization](../../fintech/pci_dss_scope_and_tokenization/pci_dss_scope_and_tokenization.md) in `fintech/`. For erasure across every store a backend writes to (search indexes, caches, Kafka, the lake, backups, vendors), crypto-shredding and retention as code, see [Privacy Engineering & Data Lifecycle](../../backend/privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) and the [GDPR Erasure Pipeline](../../backend/case_studies/design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) case study in `backend/`.
 
 ---
 

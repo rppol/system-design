@@ -23,6 +23,8 @@ The ten categories in OWASP Top 10:2025 are:
 
 Every `A0x` label in the rest of this module is a **2025** ID. Interviewers still quote the 2021 numbering from memory, so the mapping column is worth knowing: the two traps are that Injection is no longer A03 and that SSRF no longer has a slot of its own.
 
+> **See also:** [File Upload & Media Handling](../file_upload_and_media_handling/file_upload_and_media_handling.md) for the upload trust boundary (content sniffing, polyglots, decompression bombs, malware scanning); [Privacy Engineering & Data Lifecycle](../privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) for personal-data inventory, erasure and retention.
+
 ---
 
 ## 2. Intuition

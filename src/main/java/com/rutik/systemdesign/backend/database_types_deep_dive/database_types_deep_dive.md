@@ -4,6 +4,8 @@
 
 Modern backend systems use multiple database types, each optimized for different access patterns, data models, and consistency requirements. Relational databases excel at complex queries with strong consistency. Document stores handle flexible schemas and hierarchical data. Key-value stores provide sub-millisecond lookups. Wide-column stores scale writes horizontally. Time-series databases compress and query temporal data. Search engines support full-text and faceted search. Graph databases traverse relationships in O(1) per hop. NewSQL provides relational semantics with horizontal scalability. Understanding the internal mechanics of each type is essential for choosing correctly and debugging performance problems.
 
+> **See also:** [Search Integration Patterns](../search_integration_patterns/search_integration_patterns.md) and [Design a Search-Backed Catalog API](../case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) for keeping a search store in sync with the system of record.
+
 ---
 
 ## 2. Intuition

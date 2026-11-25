@@ -14,6 +14,8 @@ The five canonical algorithms are:
 - **Sliding window log** — exact, but memory-intensive
 - **Sliding window counter** — hybrid approximation, practical for high-scale systems
 
+> **See also:** [Email & Notification Delivery](../email_and_notification_delivery/email_and_notification_delivery.md) for per-provider send-rate token buckets; [File Upload & Media Handling](../file_upload_and_media_handling/file_upload_and_media_handling.md) for rate limits on upload grants.
+
 ---
 
 ## 2. Intuition

@@ -184,16 +184,16 @@ const modulePage = (mod) => String(mod).replace(/\/+$/, "").split("/").pop() + "
 const STUDY_ORDER = {
   backend: [
     "backend/osi_model_and_networking","backend/tcp_ip_deep_dive","backend/udp_and_quic","backend/http_protocols",
-    "backend/rest_api_design","backend/api_contracts_and_schema_governance","backend/grpc_and_protobuf","backend/graphql","backend/websockets_and_sse","backend/webhooks_and_event_delivery",
+    "backend/rest_api_design","backend/api_contracts_and_schema_governance","backend/grpc_and_protobuf","backend/graphql","backend/websockets_and_sse","backend/webhooks_and_event_delivery","backend/email_and_notification_delivery","backend/file_upload_and_media_handling",
     "backend/performance_engineering_method","backend/latency_budgets_and_slo_math","backend/tail_latency_and_fan_out","backend/queueing_theory_for_capacity","backend/benchmarking_methodology",
     "backend/performance_profiling","backend/off_cpu_and_ebpf_analysis","backend/os_and_io_performance",
     "backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns","backend/serving_ai_workloads",
-    "backend/database_internals_and_indexing","backend/query_optimization","backend/database_migrations","backend/distributed_transactions_and_consistency","backend/database_types_deep_dive",
+    "backend/database_internals_and_indexing","backend/query_optimization","backend/database_migrations","backend/distributed_transactions_and_consistency","backend/database_types_deep_dive","backend/search_integration_patterns",
     "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/multi_tenancy_and_isolation","backend/observability_and_monitoring",
-    "backend/backend_security_owasp","backend/auth_and_authorization_systems",
+    "backend/backend_security_owasp","backend/auth_and_authorization_systems","backend/privacy_engineering_and_data_lifecycle",
     "backend/backend_testing_strategies","backend/load_and_performance_testing","backend/workload_characterization_and_load_modelling","backend/performance_regression_detection","backend/performance_incident_playbook","backend/chaos_engineering",
-    "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/rabbitmq_deep_dive","backend/event_sourcing_and_cqrs","backend/durable_execution_and_workflows","backend/messaging_patterns",
-    "backend/microservices_fundamentals","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
+    "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/rabbitmq_deep_dive","backend/event_sourcing_and_cqrs","backend/durable_execution_and_workflows","backend/batch_processing_and_scheduling","backend/messaging_patterns",
+    "backend/microservices_fundamentals","backend/modular_monolith_and_service_boundaries","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
   ],
   book: [
     "book/designing_data_intensive_applications/00_preface_and_book_map",

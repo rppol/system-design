@@ -11,11 +11,11 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ---
 
-## Module List — 50 modules (9 Phases)
+## Module List — 56 modules (9 Phases)
 
 The **Q&As** column is the **module total**: the module page plus every deep-dive sub-file
 the module owns. Counts here must match `<section>/README.md`'s `<!-- study-paths -->`
-inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
+inventory and `STUDY_ORDER.backend` — all three list the same 56 modules.
 
 ### Phase 1 — Networking Fundamentals
 
@@ -36,6 +36,8 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 | `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 16 |
 | `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 16 |
 | `webhooks_and_event_delivery/` | Outbox dispatch, HMAC signing and rotation, retry ladders, per-endpoint isolation, SSRF defence | 20 |
+| `email_and_notification_delivery/` | SPF/DKIM/DMARC, bulk-sender rules, send-pipeline idempotency, bounce and complaint suppression, provider failover, one-click unsubscribe, preference center | 18 |
+| `file_upload_and_media_handling/` | Presigned and multipart uploads, resumable protocols, content sniffing, malware scanning, quarantine-then-promote, quotas, orphan cleanup | 20 |
 
 ### Phase 3 — Performance Engineering
 
@@ -63,6 +65,7 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 | `database_migrations/` | Flyway vs Liquibase, zero-downtime patterns, expand-contract | 16 |
 | `distributed_transactions_and_consistency/` | 2PC problems, Saga, outbox pattern, idempotency keys | 15 |
 | `database_types_deep_dive/` | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL | 15 |
+| `search_integration_patterns/` | Dual write vs outbox vs CDC into a search index, version-gated indexing, alias-swap reindex, freshness UX, ranking feedback | 18 |
 
 > For deeper coverage: see [`../database/README.md`](../database/README.md) - 7 phases, principal-engineer level.
 
@@ -81,6 +84,7 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 |--------|-------|------|
 | `backend_security_owasp/` | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 |
 | `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation; `authorization_frontier.md` (PAR, RAR, token exchange, CIBA, SD-JWT, SCIM, agent auth) | 40 |
+| `privacy_engineering_and_data_lifecycle/` | PII inventory, GDPR/DPDP/CCPA rights pipelines, erasure across stores, crypto-shredding, retention as code, consent, audit | 21 |
 
 ### Phase 7 — Testing & Quality
 
@@ -102,6 +106,7 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 | `rabbitmq_deep_dive/` | AMQP object model, confirms vs transactions, quorum queues (Raft), streams, prefetch, DLX, Khepri | 42 |
 | `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 16 |
 | `durable_execution_and_workflows/` | Deterministic replay, event-history workflows, Temporal/Restate, activity retries, versioning a running workflow | 20 |
+| `batch_processing_and_scheduling/` | Cron traps, single-runner guarantees, run identity, idempotent output, chunking, backfills, cron vs Airflow vs Temporal | 18 |
 | `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 18 |
 
 ### Phase 9 — Microservices Architecture
@@ -109,6 +114,7 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `microservices_fundamentals/` | Decomposition, bounded contexts, data ownership, strangler fig | 15 |
+| `modular_monolith_and_service_boundaries/` | Boundary vs deployment unit, enforced module boundaries, data ownership, API composition, when and how to extract a service | 18 |
 | `api_gateway_patterns/` | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong; `gateway_api_and_modern_proxies.md` | 31 |
 | `service_mesh_and_service_discovery/` | Istio/Envoy, mTLS, service discovery mechanisms, health probes; `ambient_mesh_and_workload_identity.md` | 33 |
 | `distributed_system_operational_patterns/` | Bulkhead, sidecar, ACL, correlation ID, feature flags, graceful shutdown | 16 |
@@ -118,8 +124,8 @@ inventory and `STUDY_ORDER.backend` — all three list the same 50 modules.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 50 modules = the "9-Phase Learning Path")
-plus two curated tiers: **Senior** (32 modules) and **Principal** (30). They are
+`README.md` documents the **Full Path** (all 56 modules = the "9-Phase Learning Path")
+plus two curated tiers: **Senior** (36 modules) and **Principal** (33). They are
 different cuts, not nested depths — senior is the craft (build it, debug it at 3am),
 principal is the judgment (which approach at what cost, what you tell a team *not* to
 do), so principal is usually the smaller list and much of it is material senior never
@@ -136,14 +142,14 @@ The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` ma
 are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
 hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
 are tiered the same way, from the same block in `README.md` under the `case_studies`
-entry (6 senior / 5 principal) — `case_studies/case_studies.md` has no block of its own;
+entry (8 senior / 6 principal) — `case_studies/case_studies.md` has no block of its own;
 it is the learning-path index only. The tiers drive the Level filter on the game's Case
 Studies tab. The README also
 carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact).
 
 ---
 
-## Case Studies — 10 Total
+## Case Studies — 13 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
@@ -159,6 +165,9 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | `design_rate_limiter_service/` | Distributed token bucket, Redis Lua atomicity, cell-local vs global counters |
 | `design_multi_tenant_saas_backend/` | Pooled/bridge/silo tiers, shuffle sharding, per-tenant quotas, tenant offboarding |
 | `design_continuous_performance_platform/` | Benchmark result stores, change-point detection, statistical bisect, canary analysis |
+| `design_media_upload_api/` | Upload sessions, direct-to-store multipart, server-driven file state machine, sniff-then-scan, quota reservation, orphan reconciler |
+| `design_search_backed_catalog_api/` | Outbox to an ordered indexer, version-gated writes, alias-swap reindex, seller read-your-writes, click feedback |
+| `design_gdpr_erasure_pipeline/` | Data map as code, identity resolution, durable erasure orchestration, crypto-shredding, suppression, evidence |
 
 ---
 
@@ -181,6 +190,12 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 | `event_sourcing_and_cqrs/` | `../hld/` — architectural overview |
 | `benchmarking_methodology/`, `performance_profiling/`, `grpc_and_protobuf/`, `async_and_concurrency_patterns/` | `../rust/`: `profiling_and_benchmarking/`, `grpc_with_tonic/`, `async_cancellation_and_pitfalls/`. This section keeps the protocol, the pattern and the method; `rust/` owns the crates and the Rust-specific traps and links here |
 | `distributed_transactions_and_consistency/`, `messaging_patterns/`, `webhooks_and_event_delivery/`, `case_studies/design_payment_processor/` | `../fintech/idempotency_and_exactly_once_money_movement/`, `../fintech/reconciliation_and_settlement_files/`. This section keeps the patterns. `fintech/` owns the rail semantics, the per-rail retry rules and the dated rule facts |
+| `privacy_engineering_and_data_lifecycle/`, `case_studies/design_gdpr_erasure_pipeline/` | `../database/database_security_and_compliance/` (single-database erasure SQL, RLS, pgAudit), `../llm/llm_security/privacy_and_data_governance.md`, `../hld/multi_region_and_data_residency/`. The module owns the cross-store discipline (PII map, rights pipelines, crypto-shredding, retention as code); the case study owns the one-subject erasure pipeline. Pages elsewhere in this section that touch erasure point here rather than re-teaching it |
+| `search_integration_patterns/`, `case_studies/design_search_backed_catalog_api/` | `../database/search_engines/`, `../database/elasticsearch_internals/`, `../hld/search_systems/`, `../ml/information_retrieval_and_search/`. This section owns the DB-to-index sync pipeline, reindex runbook and API contract; `database/` owns the engine, `hld/` the cluster architecture, `ml/` ranking |
+| `file_upload_and_media_handling/`, `case_studies/design_media_upload_api/` | `../hld/large_blobs_and_media_pipelines/`, `../hld/case_studies/design_object_storage_s3.md`, `../fastapi/case_studies/design_file_upload_and_media_api.md`. This section owns the upload API contract, grants, scanning and the file state machine; `hld/` owns storage tiers, CDN and transcoding at architecture level |
+| `batch_processing_and_scheduling/` | `durable_execution_and_workflows/` (workflow-engine model), `../spring/spring_batch/`, `../spring/spring_events_and_scheduling/`, `../technologies/apache_airflow/`, `../hld/stream_processing/` |
+| `modular_monolith_and_service_boundaries/` | `microservices_fundamentals/` (decomposition basics, strangler fig), `../spring/spring_modulith/`, `../book/building_microservices/` |
+| `email_and_notification_delivery/` | `webhooks_and_event_delivery/`, `../hld/case_studies/design_email_service.md` (the mailbox-provider side), `../hld/case_studies/design_notification_system.md` |
 
 ---
 

@@ -12,6 +12,8 @@ Cluster metadata lives inside Kafka itself, in KRaft (Kafka Raft Metadata) mode.
 
 **This module targets Kafka 4.x** (latest release at time of writing: 4.3.1, June 2026). Every default quoted below is the Kafka 4.x default — several are commonly misremembered (`acks` is `all`, `enable.idempotence` is `true`, `linger.ms` is `5`).
 
+> **See also:** [Privacy Engineering & Data Lifecycle](../privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) for erasure in Kafka (compacted-topic tombstones, bounded retention); [Search Integration Patterns](../search_integration_patterns/search_integration_patterns.md) for an ordered, idempotent consumer that feeds a search index.
+
 ---
 
 ## 2. Intuition

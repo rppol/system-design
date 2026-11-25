@@ -4,6 +4,8 @@
 
 Messaging patterns solve the fundamental challenges of reliable asynchronous communication between services: how to ensure a message is published exactly when a business operation completes, how to avoid processing the same message twice, how to handle messages that repeatedly fail processing, and how to evolve message schemas without breaking consumers. The outbox pattern, transactional inbox, dead letter queue, and schema evolution strategies address these challenges systematically.
 
+> **See also:** [Search Integration Patterns](../search_integration_patterns/search_integration_patterns.md) for the outbox and CDC feeding a search index; [Email & Notification Delivery](../email_and_notification_delivery/email_and_notification_delivery.md) for the outbox in front of a notification service; [File Upload & Media Handling](../file_upload_and_media_handling/file_upload_and_media_handling.md) for inbox and DLQ handling of media-processing jobs; [Batch Processing & Scheduling](../batch_processing_and_scheduling/batch_processing_and_scheduling.md) for when work is a batch rather than a queue.
+
 ---
 
 ## 2. Intuition

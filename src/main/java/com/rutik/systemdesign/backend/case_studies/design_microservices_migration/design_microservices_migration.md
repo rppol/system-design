@@ -25,6 +25,8 @@ symptoms are 3-hour deploys, 25 engineers colliding, and scaling checkout to sca
 a coordinated release, the distributed monolith has been built. Measure deployment frequency and
 lead time from day zero, because those are the numbers the migration is actually for.
 
+> **See also:** [Modular Monolith & Service Boundaries](../../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for the modular-monolith alternative and for hardening boundaries before (or instead of) extracting services.
+
 ---
 
 ## 1. Requirements Clarification

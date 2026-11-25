@@ -898,3 +898,4 @@ it first.
 - [`distributed_transactions`](../../distributed_transactions/distributed_transactions.md) — idempotency for at-least-once job execution (§1).
 - [`fault_tolerance_patterns`](../../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md) — exponential backoff, generalized beyond job queues.
 - [`messaging_patterns`](../../../backend/messaging_patterns/messaging_patterns.md) — dead-letter queues, generalized beyond this single-table design.
+- [`batch_processing_and_scheduling`](../../../backend/batch_processing_and_scheduling/batch_processing_and_scheduling.md) — scheduled and batch work on top of a queue like this one: single-runner guarantees, run identity, idempotent output, backfills.

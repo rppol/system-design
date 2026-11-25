@@ -4,6 +4,8 @@
 
 Backend testing encompasses multiple complementary approaches to verify correctness, reliability, and behavior of server-side systems. The testing pyramid defines the ideal distribution: unit tests (70%) for fast feedback on individual components, integration tests (20%) for verifying interactions with infrastructure (databases, caches, queues), contract tests for verifying API compatibility across service boundaries, and end-to-end tests (10%) for critical user journeys. Each layer provides different confidence at different cost.
 
+> **See also:** [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for module-boundary tests inside a monolith, and contract tests once a module becomes a service.
+
 ---
 
 ## 2. Intuition

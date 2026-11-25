@@ -24,6 +24,8 @@ Key concerns:
 
 For idempotency across payment rails, where a timeout leaves the outcome of a payment unknown, see [Idempotency and Exactly-Once Money Movement](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md) in `fintech/`.
 
+> **See also:** [Search Integration Patterns](../search_integration_patterns/search_integration_patterns.md) for the dual-write problem applied to a search index, and the outbox or CDC fix.
+
 ---
 
 ## 2. Intuition

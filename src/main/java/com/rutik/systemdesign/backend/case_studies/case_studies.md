@@ -1,6 +1,6 @@
 # Backend Engineering — Case Studies
 
-Ten end-to-end backend design case studies, each covering a real-world scenario with production-grade architecture, implementation tradeoffs, and interview discussion points.
+Thirteen end-to-end backend design case studies, each covering a real-world scenario with production-grade architecture, implementation tradeoffs, and interview discussion points.
 
 ---
 
@@ -44,6 +44,24 @@ Grouped by primary engineering concern, not product category:
 |------------|----------------|----------------|
 | [Design a Feed Service](design_feed_service/design_feed_service.md) | Fan-out strategy, Redis sorted sets, cursor pagination | Fan-out-on-write vs fan-out-on-read: how follower count determines the crossover point; Redis ZADD for ranked feeds; cursor-based pagination that avoids COUNT(*) and OFFSET. |
 
+### Derived Data & Search
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design a Search-Backed Catalog API](design_search_backed_catalog_api/design_search_backed_catalog_api.md) | Keeping a search index a correct, eventually consistent projection of the catalogue database | The index as derived data: an outbox feeding one ordered indexer per lane, version-gated writes that stop late events resurrecting delisted listings, zero-downtime reindex by alias swap plus replay, read-your-writes for sellers, degrade-not-fail query paths, and the click-log feedback loop into ranking. |
+
+### Uploads & Media
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design a Media Upload API](design_media_upload_api/design_media_upload_api.md) | Two systems of record (metadata DB and object store) for one fact: "file F exists and is safe" | Upload sessions with direct-to-store multipart grants, a server-driven file state machine (never trust the client's "done"), resume by asking the store, sniff-then-scan before promotion, quota reserve/adjust/release, downloads from a separate user-content origin, and orphan cleanup with lifecycle rules plus a reconciler. |
+
+### Privacy & Data Lifecycle
+
+| Case Study | Primary Concern | What It Teaches |
+|------------|----------------|----------------|
+| [Design a GDPR Erasure Pipeline](design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) | Erasing one person from 12 stores with no rollback and a legal deadline | A data map enforced in CI, identity resolution before any deletion, a durable orchestrator that drives every store to a verified receipt, per-store strategies (hard delete, pseudonymisation, crypto-shredding, bounded expiry), suppression so restores and replays cannot bring data back, legal holds, and an evidence record that is not itself a copy of the data. |
+
 ### Service Decomposition & Migration
 
 | Case Study | Primary Concern | What It Teaches |
@@ -84,7 +102,7 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 | Primitive | Used By | Deep Dive | Phase |
 |---|---|---|---|
 | Idempotency keys | Booking, Payment, Event-Driven Order, Webhook Delivery | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 — Database Engineering |
-| Transactional outbox | Payment, Event-Driven Order, Webhook Delivery | `../messaging_patterns/messaging_patterns.md` | 8 — Event-Driven |
+| Transactional outbox | Payment, Event-Driven Order, Webhook Delivery, Search-Backed Catalog | `../messaging_patterns/messaging_patterns.md` | 8 — Event-Driven |
 | Saga + compensation | Payment (orchestrated), Event-Driven Order | `../distributed_transactions_and_consistency/distributed_transactions_and_consistency.md` | 4 |
 | Optimistic vs pessimistic locking, distributed locks | Booking | `../database_internals_and_indexing/database_internals_and_indexing.md`, `../../database/concurrency_control_and_locking/concurrency_control_and_locking.md` | 4 |
 | Kafka EOS / DLQ / consumer idempotency | Event-Driven Order | `../kafka_deep_dive/kafka_deep_dive.md`, `../messaging_patterns/messaging_patterns.md` | 8 |
@@ -96,6 +114,10 @@ No `cross_cutting/` directory here — the shared primitives live as deep-dive m
 | Benchmark noise floor, A/A validation, sample sizing | Continuous Performance Platform | `../benchmarking_methodology/benchmarking_methodology.md` | 3 |
 | Change-point detection, statistical bisect, the ratchet | Continuous Performance Platform | `../performance_regression_detection/performance_regression_detection.md` | 3 |
 | Off-CPU and eBPF stack capture | Continuous Performance Platform | `../off_cpu_and_ebpf_analysis/off_cpu_and_ebpf_analysis.md` | 3 |
+| Presigned and multipart grants, resumable upload, sniff-then-scan quarantine | Media Upload API | `../file_upload_and_media_handling/file_upload_and_media_handling.md` | 2 — API Design |
+| Index sync via outbox or CDC, version-gated indexing, alias-swap reindex, freshness UX | Search-Backed Catalog | `../search_integration_patterns/search_integration_patterns.md` | 4 — Database Engineering |
+| PII data map, crypto-shredding, retention as code, pseudonymisation | GDPR Erasure Pipeline | `../privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md` | 6 — Security |
+| Durable workflow orchestration with per-step receipts | GDPR Erasure Pipeline | `../durable_execution_and_workflows/durable_execution_and_workflows.md` | 8 — Event-Driven |
 
 ---
 
@@ -120,17 +142,25 @@ flowchart LR
     ratelimit(["design_rate_limiter_service<br/>(standalone: token bucket as a shared service)"])
     saas(["design_multi_tenant_saas_backend<br/>(standalone: tenant isolation + noisy neighbour)"])
     perfplat(["design_continuous_performance_platform<br/>(standalone: profile ingest + change-point detection)"])
+    catalog(["design_search_backed_catalog_api<br/>(outbox + ordered indexer)"])
+    media(["design_media_upload_api<br/>(upload state machine + reconciler)"])
+    gdpr(["design_gdpr_erasure_pipeline<br/>(data map + durable erasure)"])
+
+    eventOrder -->|"outbox + ordered consumer"| catalog
+    webhook -->|"file.ready webhooks"| media
+    webhook -->|"signed erasure callbacks"| gdpr
+    saas -->|"offboarding narrowed to one person"| gdpr
 
     class booking,feed base
     class llmapi,webhook req
     class payment,migration train
-    class eventOrder io
+    class eventOrder,catalog io
     class msFund frozen
-    class ratelimit,saas mathOp
-    class perfplat lossN
+    class ratelimit,saas,media mathOp
+    class perfplat,gdpr lossN
 ```
 
-Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain. Everything else is standalone: `design_feed_service`, `design_microservices_migration`, `design_llm_serving_api`, `design_webhook_delivery_service`, `design_rate_limiter_service`, `design_multi_tenant_saas_backend` and `design_continuous_performance_platform` share no patterns with the others and can each be read on their own. `design_continuous_performance_platform` is the odd one out in a second way as well: it is not a product design at all but an internal platform, and it reads best alongside the section's Performance Engineering modules rather than alongside the other case studies.
+Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` → `design_search_backed_catalog_api` is the longest chain: the catalogue reuses the outbox and the ordered, idempotent consumer to keep a search index in step with Postgres. `design_webhook_delivery_service` feeds two later designs: `design_media_upload_api` emits `file.ready` / `file.quarantined` webhooks, and `design_gdpr_erasure_pipeline` propagates erasure to processors through signed, deadline-bound callbacks. `design_gdpr_erasure_pipeline` also narrows `design_multi_tenant_saas_backend`'s tenant offboarding to a single data subject. Everything else is standalone: `design_feed_service`, `design_microservices_migration`, `design_llm_serving_api`, `design_rate_limiter_service` and `design_continuous_performance_platform` share no patterns with the others and can each be read on their own. `design_continuous_performance_platform` is the odd one out in a second way as well: it is not a product design at all but an internal platform, and it reads best alongside the section's Performance Engineering modules rather than alongside the other case studies.
 
 ---
 
@@ -157,6 +187,12 @@ Arrows point from the case study that originates a pattern to the one that reuse
 | Design a performance / profiling platform | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
 | Design a continuous profiling system (Google-Wide Profiling style) | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
 | Design a CI performance-regression detection system | [design_continuous_performance_platform](design_continuous_performance_platform/design_continuous_performance_platform.md) |
+| Design a file upload / media attachment API | [design_media_upload_api](design_media_upload_api/design_media_upload_api.md) |
+| Design resumable large-file upload (Dropbox / Drive ingestion) | [design_media_upload_api](design_media_upload_api/design_media_upload_api.md) — combine with hld/design_google_drive |
+| Design product / marketplace catalogue search | [design_search_backed_catalog_api](design_search_backed_catalog_api/design_search_backed_catalog_api.md) |
+| Keep a search index in sync with the database | [design_search_backed_catalog_api](design_search_backed_catalog_api/design_search_backed_catalog_api.md) |
+| Design a GDPR right-to-erasure / account-deletion pipeline | [design_gdpr_erasure_pipeline](design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) |
+| Delete a user's data across every service and backup | [design_gdpr_erasure_pipeline](design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) |
 
 ---
 

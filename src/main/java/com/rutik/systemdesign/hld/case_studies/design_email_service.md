@@ -892,6 +892,7 @@ Threading (§4.c) operates on the References/In-Reply-To graph within one mailbo
 - **Blob storage durability and erasure-coding mechanism underlying the attachment tier (§3, §4.b, §10)** -> [`./design_object_storage_s3.md`](./design_object_storage_s3.md)
 - **Content-addressed chunking and cross-account deduplication, reused directly for attachments (§4.b, §10)** -> [`./design_google_drive.md`](./design_google_drive.md)
 - **The multi-channel notification dispatcher that treats an email provider as a black-box channel (§1's Out of Scope)** -> [`./design_notification_system.md`](./design_notification_system.md)
+- **The sending side of the same protocol: domain authentication, bulk-sender rules, bounce and complaint handling, one-click unsubscribe** -> [`../../backend/email_and_notification_delivery/email_and_notification_delivery.md`](../../backend/email_and_notification_delivery/email_and_notification_delivery.md)
 - **WebSocket/connection-fleet sizing pattern reused for the sync tier's connection budget (§10)** -> [`./design_whatsapp.md`](./design_whatsapp.md)
 - **Change-log-with-a-cursor pattern shared with consumer offsets (§4.e)** -> [`../message_queues/message_queues.md`](../message_queues/message_queues.md)
 - **Append-only event log and projection-replay shape underlying the sync cursor model (§4.e)** -> [`../event_sourcing_cqrs/event_sourcing_cqrs.md`](../event_sourcing_cqrs/event_sourcing_cqrs.md)

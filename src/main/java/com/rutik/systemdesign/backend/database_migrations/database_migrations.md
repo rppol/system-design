@@ -6,6 +6,8 @@ Database migrations are version-controlled schema changes that transform the dat
 
 Zero-downtime migration is the hardest part: deploying a schema change while old and new application code runs simultaneously requires backward-compatible changes. The expand-contract (parallel change) pattern is the professional approach for renaming columns, changing types, or restructuring data.
 
+> **See also:** [Batch Processing & Scheduling](../batch_processing_and_scheduling/batch_processing_and_scheduling.md) for large data backfills run as chunked, checkpointed, idempotent jobs; [Modular Monolith & Service Boundaries](../modular_monolith_and_service_boundaries/modular_monolith_and_service_boundaries.md) for module-owned tables evolved with expand-contract inside one deployable.
+
 ---
 
 ## 2. Intuition

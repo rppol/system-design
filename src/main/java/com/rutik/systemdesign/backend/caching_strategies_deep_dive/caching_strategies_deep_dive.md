@@ -6,6 +6,8 @@ A cache stores the results of expensive operations so subsequent requests can be
 
 This module covers the full spectrum: cache placement strategies (aside, read-through, write-through, write-behind, refresh-ahead), Redis data structures and their optimal use cases, cache stampede prevention, eviction policies, and the practical tradeoffs between local and distributed caches.
 
+> **See also:** [Privacy Engineering & Data Lifecycle](../privacy_engineering_and_data_lifecycle/privacy_engineering_and_data_lifecycle.md) for caches as one of the stores an erasure request must reach; [Design a Search-Backed Catalog API](../case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) for result caching of popular search queries.
+
 ---
 
 ## 2. Intuition

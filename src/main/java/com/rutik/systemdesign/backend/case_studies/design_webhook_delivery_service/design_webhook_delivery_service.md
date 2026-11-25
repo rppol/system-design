@@ -7,6 +7,8 @@
 
 The second insight is that delivery is a promise with a shelf life, not a guarantee. At-least-once is the only honest contract a network boundary you don't control allows, so correctness is pushed to the edges: a signature the receiver can verify, an event ID the receiver can dedupe on, and a delivery log precise enough that when a customer says "we never got event `evt_9f2a`" you can show them the three attempts, the three response codes, and the exact millisecond each one happened.
 
+> **See also:** [Email & Notification Delivery](../../email_and_notification_delivery/email_and_notification_delivery.md) for the email channel; [Design a Media Upload API](../design_media_upload_api/design_media_upload_api.md) and [Design a GDPR Erasure Pipeline](../design_gdpr_erasure_pipeline/design_gdpr_erasure_pipeline.md) for two designs that deliver through webhooks like these.
+
 ---
 
 ## 1. Requirements Clarification

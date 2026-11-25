@@ -2759,6 +2759,7 @@ rather than triggered.
 | Consistent hashing, shard keys, resharding strategy | [Sharding and Partitioning](../sharding_and_partitioning/sharding_and_partitioning.md) |
 | Raft, quorums, linearizability | [Consistency Models and Consensus](../consistency_models_and_consensus/consistency_models_and_consensus.md) |
 | CDC, outbox, projecting a primary store into a search index | [Polyglot Persistence Patterns](../polyglot_persistence_patterns/polyglot_persistence_patterns.md) |
+| The backend sync pipeline: external versioning against late events, alias-swap reindex, `refresh=wait_for` and freshness UX | [Search Integration Patterns](../../backend/search_integration_patterns/search_integration_patterns.md), [Design a Search-Backed Catalog API](../../backend/case_studies/design_search_backed_catalog_api/design_search_backed_catalog_api.md) |
 | A product-internals page in the same shape, one level down | [Redis Internals](../redis_internals/redis_internals.md) |
 | The system around the engine: indexing pipeline, freshness, query fan-out, ranking stages | [Search Systems](../../hld/search_systems/search_systems.md) |
 | Elasticsearch in end-to-end designs: geosharded discovery, per-store catalogue search | [Design Tinder](../../hld/case_studies/design_tinder.md), [Design a Local Delivery Service](../../hld/case_studies/design_local_delivery_service.md) |

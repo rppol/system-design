@@ -14,6 +14,8 @@ The corollary is that a webhook platform is really two systems wearing one name:
 
 For how a payment platform checks a PSP webhook against the PSP's own record before it moves money, see [Idempotency and Exactly-Once Money Movement](../../fintech/idempotency_and_exactly_once_money_movement/idempotency_and_exactly_once_money_movement.md) in `fintech/`.
 
+> **See also:** [Email & Notification Delivery](../email_and_notification_delivery/email_and_notification_delivery.md) for the email channel (domain authentication, bounces, suppression); [File Upload & Media Handling](../file_upload_and_media_handling/file_upload_and_media_handling.md) for reusing the same SSRF defences on "import from URL"; [Search Integration Patterns](../search_integration_patterns/search_integration_patterns.md) for the same outbox-plus-relay backbone feeding a search index; [Design a Media Upload API](../case_studies/design_media_upload_api/design_media_upload_api.md) for `file.ready` webhooks.
+
 ---
 
 ## 2. Intuition

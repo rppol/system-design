@@ -1111,5 +1111,6 @@ A: (1) Order Service publishes an `OrderShippedEvent` with a stable `event_id` (
 - **RED-method monitoring, SLI/SLO framing, and the alert-fatigue war story referenced in §9** -> [`../observability/observability.md`](../observability/observability.md)
 - **Async messaging patterns (pub/sub, DLQ, outbox) underlying the producer/consumer pipeline** -> [`../../backend/messaging_patterns/messaging_patterns.md`](../../backend/messaging_patterns/messaging_patterns.md)
 - **Kafka internals (partitions, consumer groups, offset management, rebalancing)** -> [`../../backend/kafka_deep_dive/kafka_deep_dive.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- **The email channel in depth: SPF/DKIM/DMARC, bulk-sender rules, bounce and complaint suppression, provider failover, preference center** -> [`../../backend/email_and_notification_delivery/email_and_notification_delivery.md`](../../backend/email_and_notification_delivery/email_and_notification_delivery.md)
 - **Outbid and won notifications** -> [`./design_online_auction.md`](./design_online_auction.md)
 - **Match and like notifications** -> [`./design_tinder.md`](./design_tinder.md)
