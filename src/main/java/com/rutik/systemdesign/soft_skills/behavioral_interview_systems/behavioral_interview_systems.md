@@ -1,5 +1,11 @@
 # Behavioural Interview Systems
 
+> **Currency anchor (2026-11-25).** Loop structures, value lists and AI-era changes were
+> checked on this date: Amazon's 16 Leadership Principles (unchanged since 2021), Stripe's
+> and Meta's published values, and the 2025-26 return to in-person rounds after
+> AI-assisted cheating. Company loops change without notice; re-check a company's own
+> careers pages before quoting its process.
+
 ## 1. Concept Overview
 
 A behavioural interview loop is not a conversation, it is a scoring system with an input
@@ -267,9 +273,11 @@ structured interviews — same questions, same rubric, scored independently — 
 free-form conversation, and this is backed by decades of published I/O psychology outside
 Google as well: the most widely cited meta-analysis (Schmidt & Hunter, 1998, aggregating
 85 years of personnel-selection research) found structured interviews at roughly .51
-predictive validity against unstructured interviews at roughly .38; a more recent 2023
-update (Sackett et al.) puts structured interview validity around .42, still near the top
-of the list of studied predictors. The claim being tested in a behavioural round is
+predictive validity against unstructured interviews at roughly .38. Sackett, Zhang, Berry
+and Lievens (*Journal of Applied Psychology*, 2022) then showed the older corrections for
+range restriction overcorrected; with that removed, structured interviews sit at about .42,
+unstructured at about .19 and general mental ability at .31, which makes structured
+interviews the top-ranked predictor they studied. The claim being tested in a behavioural round is
 therefore not "is this a pleasant person," it's "is there specific evidence this person
 has already produced the outcome we need at this level" — the entire loop exists because
 that question, asked in a structured way, correlates with future performance far better
@@ -669,7 +677,7 @@ recalculation.
 | Google re:Work, "A guide to structured interviewing for better hiring practices" | Google's own published rationale for structured over unstructured interviewing |
 | Laszlo Bock, *Work Rules!: Insights from Inside Google That Will Transform How You Live and Lead* (2015) | The original public source describing Google's four-attribute hiring framework, including "Googleyness" |
 | Frank Schmidt & John Hunter, "The Validity and Utility of Selection Methods in Personnel Psychology," *Psychological Bulletin* (1998) | The landmark 85-year meta-analysis behind the .51 vs .38 structured-vs-unstructured validity figures |
-| Paul Sackett et al., meta-analytic update on selection-method validity (2023) | A more recent estimate (~.42) for structured interview validity |
+| Paul Sackett, Charlene Zhang, Christopher Berry & Filip Lievens, *Journal of Applied Psychology* (2022), doi:10.1037/apl0000994 | Removes the range-restriction overcorrection: structured ~.42 (top-ranked), unstructured ~.19, general mental ability ~.31 |
 | metacareers.com, "Our Culture" | Meta's current six official company values |
 | jobs.netflix.com/culture, "Netflix Culture Memo" (2024 revision) | Netflix's four principles, eight Dream Team values, and the keeper test in the company's own words |
 | stripe.com/jobs/culture, "How we operate" | Stripe's six official operating principles |
@@ -712,11 +720,13 @@ make is treating the Bar Raiser slot as a lower-stakes "culture fit chat" late i
 day, when in the reported process it is closer to the opposite.
 
 **Q: Give the real reason companies moved to structured behavioural interviews instead of free-form conversation.**
-**Short:** Structured interviews predict job performance meaningfully better; the research is decades old.
+**Short:** Structured interviews predict job performance better than free-form chats, and are the top-ranked predictor in the 2022 re-analysis.
 The most widely cited evidence is Schmidt and Hunter's 1998 meta-analysis of 85 years of
 personnel-selection research, which found structured interviews at roughly .51 predictive
-validity against roughly .38 for unstructured interviews — a large, reliable gap, later
-essentially reconfirmed by newer work (Sackett et al., 2023, around .42). Google's own
+validity against roughly .38 for unstructured interviews. Sackett, Zhang, Berry and Lievens
+(2022) revised every figure down by removing an overcorrection for range restriction —
+structured to about .42, unstructured to about .19 — and the gap widened: structured
+interviews came out as the top-ranked predictor. Google's own
 re:Work guidance argues the same thing from its internal hiring data. The claim being
 tested is never "is this person likeable," it's "is there evidence this specific person
 has already produced this kind of outcome" — and that question, asked the same way of

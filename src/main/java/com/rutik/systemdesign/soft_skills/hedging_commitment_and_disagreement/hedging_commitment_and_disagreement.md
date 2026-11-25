@@ -144,17 +144,17 @@ flowchart LR
 
 *ICD 203 (the U.S. Intelligence Community's current standard, successor to Sherman
 Kent's 1964 bands) maps estimative words to percentage ranges. Kent's original problem,
-verified across secondary sources describing his 1964 paper: readers interpreted
-"probable" anywhere from roughly 25% to 90% likely — the word alone carried almost no
-information. A number in the sentence removes that entire argument.*
+from his own 1964 paper: the board that wrote "a serious possibility" into a 1951 estimate
+had meant anything from 20% to 80% by it — the phrase alone carried almost no information.
+A number in the sentence removes that entire argument.*
 
 ```mermaid
 quadrantChart
     title Confidence vs Evidence
     x-axis Low Evidence --> High Evidence
     y-axis Low Confidence --> High Confidence
-    quadrant-1 "Overconfident: the dangerous quadrant"
-    quadrant-2 "Calibrated: confidence tracks evidence"
+    quadrant-1 "Calibrated: confidence tracks evidence"
+    quadrant-2 "Overconfident: the dangerous quadrant"
     quadrant-3 "Appropriately unsure"
     quadrant-4 "Underconfident: hedging past the evidence"
     "Flat claim, no data": [0.15, 0.85]
@@ -164,8 +164,8 @@ quadrantChart
 ```
 
 *The diagonal from bottom-left to top-right is the calibrated line — confidence tracking
-evidence as it accumulates. Both off-diagonal quadrants are failure modes: quadrant 1 is
-the flat overclaim from Section 1, quadrant 4 is the reflexive hedge holding on past the
+evidence as it accumulates. Both off-diagonal quadrants are failure modes: the top-left is
+the flat overclaim from Section 1, the bottom-right is the reflexive hedge holding on past the
 point the evidence justified it.*
 
 ---
@@ -183,17 +183,17 @@ confidence, about 70% of them come true. Calibration is scored with a Brier scor
 (mean squared error between stated probability and outcome), which rewards being both
 right and correctly confident, and punishes overconfidence more than honest uncertainty.
 
-**Sherman Kent's "Words of Estimative Probability"** (1964, written while he led the
-CIA's Office of National Estimates) is the origin document for this whole discipline in
-professional forecasting. Kent's problem, as reported across secondary sources
-describing the paper (the primary CIA document is not reliably reachable to verify
-directly, so treat the specific numbers below as commonly reproduced rather than
-independently confirmed): readers of intelligence estimates interpreted the word
-"probable" across a huge range — some read it as roughly 25% likely, others as 90% —
-meaning the same sentence told different readers different things. Kent proposed
-attaching numeric bands to standard words, commonly reproduced as: Certain 100%, Almost
-certain ~93%, Probable ~75%, Chances about even ~50%, Probably not ~30%, Almost
-certainly not ~7%, Impossible 0%. His scheme itself was not formally adopted, but the
+**Sherman Kent's "Words of Estimative Probability"** (1964, published in the CIA's *Studies
+in Intelligence*; the declassified text is on the CIA Center for the Study of Intelligence
+site) is the origin document for this whole discipline in professional forecasting. Kent's
+problem came from NIE 29-51 (March 1951), which judged an attack on Yugoslavia "a serious
+possibility". When Kent asked his colleagues on the Board of National Estimates what odds
+they had meant by those words, "the low man was thinking of about 20 to 80, the high of 80
+to 20" — the same sentence told different readers different things. Kent proposed
+attaching numeric bands to a few standard words: Certainty 100%; Almost certain 93%, give
+or take about 6%; Probable 75%, give or take about 12%; Chances about even 50%, give or
+take about 10%; Probably not 30%, give or take about 10%; Almost certainly not 7%, give or
+take about 5%; Impossibility 0%. His scheme itself was not formally adopted, but the
 idea shaped everything that followed.
 
 **ICD 203** (Intelligence Community Directive 203) is the modern, current U.S.
@@ -533,7 +533,7 @@ performing openness while refusing to move.
 | Source | Covers |
 |--------|--------|
 | Philip Tetlock & Dan Gardner, *Superforecasting: The Art and Science of Prediction* (2015) | calibration, Brier scoring, the Good Judgment Project |
-| Sherman Kent, *"Words of Estimative Probability"* (CIA, Studies in Intelligence, 1964) | the origin problem and his proposed word-to-percentage bands |
+| Sherman Kent, *"Words of Estimative Probability"* (CIA, Studies in Intelligence, 1964; text at cia.gov/resources/csi) | the origin problem ("a serious possibility" read as 20% to 80%) and his word-to-percentage bands with their ± ranges |
 | Intelligence Community Directive 203 (ICD 203) | the current U.S. intelligence-community calibrated-language standard |
 | RFC 2119, *"Key words for use in RFCs to Indicate Requirement Levels"* (IETF, 1997) | MUST/SHOULD/MAY as commitment vocabulary |
 | RFC 8174, *"Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words"* (IETF, 2017) | the uppercase-only clarification |
@@ -687,14 +687,15 @@ the mistake was reasonable, before the admission lands, reads as still arguing t
 rather than owning it.
 
 **Q: Why is "impossible" at one end of Kent's probability bands and "certain" at the other, rather than 0% and 100% just being implied?**
-**Short:** Because the whole point of the exercise is replacing an ambiguous word with an explicit number, including at the extremes.
+**Short:** Because the whole point is replacing ambiguous words with explicit numbers, and fixed endpoints stop "almost certain" drifting into "certain".
 
-Kent's finding was that words carry a *range* of interpretation even at what feel like
-the extremes — "certain" said casually can mean anything from "very likely" to
-"absolutely." Assigning explicit percentages, even to the words that feel unambiguous,
-is what makes the whole scale usable: it removes the reader's guesswork at every point
-on the scale, not just the middle ones like "probable" where Kent's original problem was
-most visible.
+Kent's chart is bounded by "100% certainty" and "0% impossibility", and every word in
+between gets a centre value and a spread (Almost certain is 93%, give or take about 6%),
+because his finding was that a word on its own carries a *range* of interpretation. The
+explicit endpoints make the scale usable: they say where the words stop, so "almost
+certain" cannot drift into "certain" in the reader's head. That removes the reader's
+guesswork at every point on the scale, not just in the middle, where Kent's original
+problem — "a serious possibility" read as anything from 20% to 80% — was most visible.
 
 ---
 

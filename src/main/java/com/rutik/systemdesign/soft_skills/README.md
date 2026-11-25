@@ -97,21 +97,21 @@ sponsorship, behavioural interviewing on both sides of the table, and promotion 
 
 | # | Module | Phase | Key Topics |
 |---|--------|-------|-----------|
-| 1 | [engineering_career_ladders](engineering_career_ladders/engineering_career_ladders.md) | 1 | Dropbox / Rent the Runway / CircleCI / Square / Monzo ladders; Google L3-L8, Meta E3-E8, Amazon SDE I-Principal, Microsoft bands, Apple ICT, Netflix's flat model; scope / ambiguity / autonomy as the three axes; level inflation; the dual ladder |
+| 1 | [engineering_career_ladders](engineering_career_ladders/engineering_career_ladders.md) | 1 | Dropbox / Rent the Runway / CircleCI / Square / Monzo ladders; Google L3-L8, Meta E3-E8, Amazon SDE I-Principal, Microsoft bands, Apple ICT, Netflix's 2022 E3-E7 grid (and the single flat title it replaced); scope / ambiguity / autonomy as the three axes; level inflation; the dual ladder |
 | 2 | [scope_impact_and_ownership](scope_impact_and_ownership/scope_impact_and_ownership.md) | 1 | blast radius, time horizon, ambiguity; ownership vs assignment vs accountability; counterfeit impact; leading vs lagging impact measures; the brag doc; additive vs multiplier impact and the glue-work trap |
 | 3 | [staff_plus_archetypes](staff_plus_archetypes/staff_plus_archetypes.md) | 1 | Larson's Tech Lead / Architect / Solver / Right Hand; Reilly's three pillars and map metaphors; "Being Glue"; the IC-management fork; archetype anti-patterns |
 | 4 | [precise_technical_vocabulary](precise_technical_vocabulary/precise_technical_vocabulary.md) | 2 | SLI/SLO/SLA/error budget; idempotent vs safe vs pure; the three "consistent"s; linearizability vs serializability; race condition vs data race; bug/fault/error/failure; risk vs issue; technical debt as coined; MTTR family; availability vs durability |
 | 5 | [business_and_finance_vocabulary](business_and_finance_vocabulary/business_and_finance_vocabulary.md) | 2 | gross / contribution / net margin; COGS and cloud spend; runway and burn; TCO, ROI, NPV, payback; capex vs opex; unit economics, CAC, LTV, ARR, churn, Rule of 40; software capitalisation; showback vs chargeback |
-| 6 | [leadership_and_org_vocabulary](leadership_and_org_vocabulary/leadership_and_org_vocabulary.md) | 2 | sponsorship vs mentorship vs coaching; delegation levels; escalation anatomy; commitment vs concurrence vs consensus; RACI / DACI / RAPID; Conway's Law and the inverse manoeuvre; Team Topologies; psychological safety; Cynefin; Radical Candor |
+| 6 | [leadership_and_org_vocabulary](leadership_and_org_vocabulary/leadership_and_org_vocabulary.md) | 2 | sponsorship vs mentorship vs coaching vs allyship; delegation levels; escalation anatomy; commitment vs concurrence vs consensus; RACI / DACI / RAPID; Conway's Law and the inverse manoeuvre; Team Topologies; psychological safety; Cynefin; Radical Candor; Situational Leadership vs SLII |
 | 7 | [hedging_commitment_and_disagreement](hedging_commitment_and_disagreement/hedging_commitment_and_disagreement.md) | 2 | when a hedge is dishonest and when it is the only honest option; calibrated probability language; Sherman Kent's estimative bands; Paul Graham's DH0-DH6; Rapoport's Rules; steelmanning; "strong opinions weakly held" and its critics; the Chatham House Rule |
 | 8 | [technical_writing_for_engineers](technical_writing_for_engineers/technical_writing_for_engineers.md) | 3 | BLUF; Minto's pyramid, SCQA, MECE; the F-pattern and writing for skim; passive voice, nominalisation, hedges, vague quantifiers, the buried ask; the revision pass |
 | 9 | [design_docs_rfcs_and_adrs](design_docs_rfcs_and_adrs/design_docs_rfcs_and_adrs.md) | 3 | Google's design doc and its non-goals section; Amazon's six-pager, PR/FAQ and the silent-reading ritual; RFC processes; RFC 2119 / 8174 keywords; Nygard's ADR and MADR; getting a doc actually reviewed |
 | 10 | [executive_communication](executive_communication/executive_communication.md) | 3 | the engineering-to-business translation table; the exec question set; the one-page brief; being interrupted at minute one; escalation; delivering bad news early; saying "I don't know" correctly |
-| 11 | [upward_and_async_communication](upward_and_async_communication/upward_and_async_communication.md) | 3 | the weekly update that gets read; red/yellow/green and the watermelon; "no surprises"; managing up; handbook-first async (GitLab, P2, Doist); chat vs doc vs meeting |
+| 11 | [upward_and_async_communication](upward_and_async_communication/upward_and_async_communication.md) | 3 | the weekly update that gets read; red/yellow/green and the watermelon; "no surprises"; managing up; handbook-first async (GitLab, P2, Doist); async writing inside a five-day-office company (Amazon from January 2025); communicating through a layoff; chat vs doc vs meeting |
 | 12 | [incident_communication_and_postmortems](incident_communication_and_postmortems/incident_communication_and_postmortems.md) | 3 | Incident Commander / Scribe / Deputy / SME; severity definitions; status-page cadence and register; blameless postmortems, Just Culture and the second story; why 5 Whys is weak; named public postmortems |
 | 13 | [influence_without_authority](influence_without_authority/influence_without_authority.md) | 4 | Cialdini's principles; pre-wiring a decision; coalition and talk order; making the other person's win visible; disagree-and-commit as a protocol with an exit |
 | 14 | [giving_and_receiving_feedback](giving_and_receiving_feedback/giving_and_receiving_feedback.md) | 4 | SBI and SBI-I; Radical Candor's quadrants; why the feedback sandwich fails; the Kluger and DeNisi finding; the truth / relationship / identity triggers; soliciting feedback people will actually give |
-| 15 | [difficult_conversations_and_conflict](difficult_conversations_and_conflict/difficult_conversations_and_conflict.md) | 4 | the three conversations (What Happened, Feelings, Identity); STATE and contrasting; conflict styles; the postponed conversation and what the delay costs; verbatim scripts |
+| 15 | [difficult_conversations_and_conflict](difficult_conversations_and_conflict/difficult_conversations_and_conflict.md) | 4 | the three conversations (What Happened, Feelings, Identity); STATE and contrasting; conflict styles; the postponed conversation and what the delay costs; cross-cultural and cross-time-zone disagreement; verbatim scripts |
 | 16 | [negotiation_for_engineers](negotiation_for_engineers/negotiation_for_engineers.md) | 4 | Fisher and Ury's four principles, BATNA, ZOPA; Voss's labelling, mirroring, calibrated questions, accusation audit; negotiating headcount, deadlines, on-call and compensation |
 | 17 | [scope_prioritization_and_saying_no](scope_prioritization_and_saying_no/scope_prioritization_and_saying_no.md) | 4 | the iron triangle; "yes, and here is what moves"; the counter-offer instead of the refusal; opportunity cost made concrete; protecting focus without becoming the department of no |
 | 18 | [mentorship_and_sponsorship](mentorship_and_sponsorship/mentorship_and_sponsorship.md) | 5 | the distinction and why sponsorship is the scarce one; the IC's 1:1; growing a junior into an owner; the sponsorship ledger; what you owe someone you sponsored |
@@ -120,9 +120,9 @@ sponsorship, behavioural interviewing on both sides of the table, and promotion 
 | 21 | [cross_functional_collaboration](cross_functional_collaboration/cross_functional_collaboration.md) | 5 | what PM, design, data science, sales engineering, support, legal and finance are each measured on, what they need from you, and the specific translation each requires |
 | 22 | [team_health_and_sustainable_pace](team_health_and_sustainable_pace/team_health_and_sustainable_pace.md) | 5 | psychological safety in practice; on-call load, page budgets and toil; burnout as a systems failure; the retro that changes something; the quiet signals |
 | 23 | [behavioral_interview_systems](behavioral_interview_systems/behavioral_interview_systems.md) | 6 | Amazon's Leadership Principles and the Bar Raiser loop; Google's hiring attributes and committee; Meta's leadership round; Netflix, Stripe, Airbnb; how a loop actually scores you |
-| 24 | [story_portfolio_and_star_frameworks](story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md) | 6 | STAR, SBI, CARL, SOAR and which fits which question; the twelve-story portfolio against a competency grid; the numbers a story needs; full weak-to-strong story rewrites |
+| 24 | [story_portfolio_and_star_frameworks](story_portfolio_and_star_frameworks/story_portfolio_and_star_frameworks.md) | 6 | STAR, SBI, CARL, SOAR and which fits which question; the twelve-story portfolio against a competency grid; the numbers a story needs; full weak-to-strong story rewrites, including the "how do you use AI" story |
 | 25 | [interviewing_as_the_interviewer](interviewing_as_the_interviewer/interviewing_as_the_interviewer.md) | 6 | writing a question that discriminates; scoring rubrics; structured-interviewing evidence; bias and calibration; the debrief write-up; the hiring bar and when to say no |
-| 26 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | 6 | the weekly brag doc; the self-review; the promotion packet as scope evidence not activity; calibration and what happens in the room; being told no; the conversation to have twelve months early |
+| 26 | [performance_reviews_and_promotions](performance_reviews_and_promotions/performance_reviews_and_promotions.md) | 6 | the weekly brag doc; the self-review; the promotion packet as scope evidence not activity; calibration and what happens in the room; being told no; being put on a PIP; the conversation to have twelve months early |
 | 27 | [ai_era_engineering_leadership](ai_era_engineering_leadership/ai_era_engineering_leadership.md) | 7 | review load and the reviewer bottleneck; judgment as the scarce input; AI-assisted interview cheating and the countermeasures; rewritten ladders; the soft skills that got more valuable |
 
 ---
@@ -257,18 +257,18 @@ Two curated tiers sit over the Full Path above. They are **different cuts, not n
 depths**.
 
 **Senior is the craft.** Can you write the design doc, give the feedback, run the incident
-channel, answer the behavioural question, keep the brag doc. Seventeen modules.
+channel, answer the behavioural question, keep the brag doc. Eighteen modules.
 
 **Principal is the judgment.** Which rung is this really, what does it cost the business,
 who do you talk to first and in what order, what do you tell a team *not* to do. Also
-seventeen modules — and **nine of them are material senior never sees**: the whole
+eighteen modules — and **nine of them are material senior never sees**: the whole
 business-and-finance register, the org vocabulary, scope and archetypes, influence,
 negotiation, executive communication, team health, and interviewing from the other side of
 the table.
 
-Eight modules are in both, because they are genuinely two different readings of the same
+Nine modules are in both, because they are genuinely two different readings of the same
 topic: the ladder, the language of commitment, design docs, incident work, saying no,
-sponsorship, promotions, and the 2026 delta.
+sponsorship, technical strategy, promotions, and the 2026 delta.
 
 <!-- study-path-table senior -->
 ### Senior Path (18 modules)

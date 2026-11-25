@@ -96,8 +96,8 @@ quadrantChart
     title Stakeholder map -- influence vs current position
     x-axis "Skeptical" --> "Supportive"
     y-axis "Low influence on outcome" --> "High influence on outcome"
-    quadrant-1 "Win first, in private"
-    quadrant-2 "Keep informed, low effort"
+    quadrant-1 "Keep informed, low effort"
+    quadrant-2 "Win first, in private"
     quadrant-3 "Monitor only"
     quadrant-4 "Natural allies, sequence last"
     "Mikael Voss": [0.15, 0.92]
@@ -124,6 +124,10 @@ by the time anyone read a document, the outcome was no longer in doubt.
 
 ```mermaid
 flowchart LR
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+
     passport(["Passport<br/>monolith"]) --> identity(Identity Core)
     passport --> tokens(Token Service)
     passport --> entitle(Entitlements Service)

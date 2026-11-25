@@ -146,8 +146,8 @@ quadrantChart
     title Value vs Effort
     x-axis Low Effort --> High Effort
     y-axis Low Value --> High Value
-    quadrant-1 Do it now
-    quadrant-2 Worth the investment
+    quadrant-1 Worth the investment
+    quadrant-2 Do it now
     quadrant-3 Question why it is on the list
     quadrant-4 Say no or descope hard
     "Auth migration": [0.7, 0.9]

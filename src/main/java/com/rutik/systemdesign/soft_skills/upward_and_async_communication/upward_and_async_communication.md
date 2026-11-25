@@ -381,12 +381,15 @@ company, across a network that grew to more than a thousand internal P2 spaces. 
 mechanism: a decision discussed on a P2 post is visible to someone who joins the team two
 years later, in a way a Slack thread from two years ago effectively is not.
 
-**Doist** (Todoist, Twist) reports roughly 70-95% of internal communication as async and
-transcript-based rather than live, built around the idea that async-first means
+**Doist** (Todoist, and the Twist chat app) describes its own mix in CEO Amir
+Salihefendić's "What is asynchronous communication?" (Doist blog, May 17, 2022): roughly
+**70% async** (Twist, GitHub, Google Docs, Figma, Todoist), **25% sync** video calls, and
+**5% in-person** retreats. The company builds around the idea that async-first means
 writing-first: you write a complete thought, not a live back-and-forth, because a complete
-thought survives being read by someone nine hours out of sync with you. Their product,
-Twist, is explicitly built to discourage the always-on presence indicators that make chat
-tools feel like they demand an immediate reply.
+thought survives being read by someone nine hours out of sync with you. Twist was built to
+discourage the always-on presence indicators that make chat tools feel like they demand an
+immediate reply; Doist is now replacing it with Todoist Comms, and Twist closes on
+March 1, 2027.
 
 **Basecamp / 37signals** treats meetings as the last resort, not the first option, and
 runs a daily async check-in ("what did you work on today," answered in writing by every
@@ -512,8 +515,17 @@ conversations and legal discussions are not the place for an always-on note-take
   by 1,200+ employees across a fully distributed workforce with no central office.
 - **Doist** built its own chat product, Twist, specifically to remove the presence
   indicators and always-on expectation that Slack encourages, on the argument that a tool
-  optimized for "read now, reply now" is the wrong tool for a team spread across 30+
-  countries.
+  optimized for "read now, reply now" is the wrong tool for a team spread across 38
+  countries (its careers page lists 108 people in 94 cities). Twist closes on March 1,
+  2027, replaced by Todoist Comms.
+- **The counter-trend: Amazon's five-day office mandate.** Andy Jassy's September 16, 2024
+  memo moved Amazon from three office days a week to five, effective January 2, 2025. An
+  engineer there still writes the six-field decision record and the weekly update, but
+  the audience changes: a decision can now be made in a hallway by the people who happen
+  to be in the building, and the teammate in another office, or another time zone, is the
+  one who never hears about it. Async-first writing inside a five-day-office company is
+  less about time zones and more about making sure the hallway decision reaches the
+  people who were not in the hallway.
 - **37signals/Basecamp's** "What did you work on today" daily check-in replaces a
   synchronous standup with an async, written, company-wide-visible equivalent, collected
   automatically at a fixed time each workday and posted to a shared page.
@@ -533,6 +545,7 @@ conversations and legal discussions are not the place for an always-on note-take
 | Reporting green until certain | Feels safer week to week | Watermelon risk; the eventual correction costs more than the sum of the early discomforts |
 | Hinting at a need | Feels less demanding | Usually read as "no action needed"; the need goes unmet |
 | Asking directly for what you need | Gets answered | Requires naming the ask, which some engineers experience as exposure |
+| Async-first writing inside a five-day-office company (Amazon since January 2025) | Hallway decisions reach remote and other-site teammates; the record survives | Feels redundant to the people who were in the room; needs one owner per decision or nobody writes it |
 
 ---
 
@@ -602,8 +615,11 @@ before anyone starts building against it.
   handbook-first, all-remote operating.
 - Automattic — P2, the internal (later productized) async communication platform that
   replaced email at the company for over a decade.
-- Doist — public "how we work" writing on async-first practice at Todoist/Twist; Amir
-  Salihefendić (CEO) has spoken and written extensively on scaling a fully async company.
+- Doist — Amir Salihefendić, "What is asynchronous communication? Plus, how to implement
+  it" (Doist blog, May 17, 2022), the source of the 70% async / 25% sync / 5% in-person
+  split; Twist is being replaced by Todoist Comms and closes March 1, 2027.
+- Andy Jassy, "Strengthening our culture and teams" (aboutamazon.com, September 16, 2024)
+  — Amazon's return to five office days a week from January 2, 2025.
 - 37signals/Basecamp — "The 37signals Guide to Internal Communication," the company's
   published internal-communication playbook, and the REWORK podcast episodes on writing
   culture and meeting-reduction.
@@ -749,12 +765,12 @@ avoids a live meeting.
 
 **Q: What does it mean that Doist is "writing-first," not just "async-first"?**
 **Short:** Async-first at Doist specifically means composing a complete written thought, not a live back-and-forth in text.
-Doist reports roughly 70-95% of internal communication happening asynchronously, and their
-own framing is that async-first, for them, functionally means writing-first — sending one
-complete thought rather than a rapid-fire chat exchange that just delays a live
-conversation by a few seconds per message. Their product Twist is deliberately built
-without the always-on presence indicators that push chat tools toward expecting an
-immediate reply. The distinction matters because a lot of "async" communication is really
+Doist's CEO puts the company's mix at roughly 70% async, 25% sync and 5% in person (Doist
+blog, May 2022), and their own framing is that async-first, for them, functionally means
+writing-first — sending one complete thought rather than a rapid-fire chat exchange that
+just delays a live conversation by a few seconds per message. Their chat product Twist
+(closing March 1, 2027, replaced by Todoist Comms) was deliberately built without the
+always-on presence indicators that push chat tools toward expecting an immediate reply. The distinction matters because a lot of "async" communication is really
 just a slow-motion live conversation, which keeps the interruption cost of chat without
 gaining the durability of a document.
 
@@ -790,6 +806,20 @@ where the discussion happened for anyone who wants the "why." The "rules out" fi
 one people skip most often, and it's the one that prevents the same debate from
 restarting every time someone new encounters the decision. Strip any field and the remote
 reader either has to guess or has to interrupt someone's night to ask.
+
+**Q: Your company has just announced a layoff and your team is anxious. As a senior IC, what do you write to them, and what do you leave out?**
+**Short:** Say what you know, what you don't, and when you'll know more; never speculate about further cuts or promise there won't be any.
+A layoff is the case where the "no surprises" rule meets the limits of what an IC is
+allowed or able to know. Post one short written note in the team channel the same day,
+after the official announcement, not before: what has been announced (with a link to the
+official message), what you do not know, where the official answers will come from (HR's
+FAQ, the manager's one-to-ones), and when you will next post even if nothing changes. Then
+offer a time to talk live, because tone matters more than speed here and §9 says that is a
+sync conversation. Leave out three things: any guess about "more cuts" in either direction,
+any detail about named people who left beyond what they chose to share, and "I'm sure
+we're safe", which you cannot know and which costs all your credibility if it turns out to
+be false. A short, true note that admits its gaps does more for the team than a confident
+one that has to be retracted.
 
 ---
 

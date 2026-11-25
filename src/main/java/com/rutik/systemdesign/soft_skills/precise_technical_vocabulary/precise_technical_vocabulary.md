@@ -116,14 +116,15 @@ quadrantChart
     title Fowler's Technical Debt Quadrant
     x-axis Reckless --> Prudent
     y-axis Inadvertent --> Deliberate
-    quadrant-1 "Worst debt: no plan, no excuse"
-    quadrant-2 "Ship now, repay later, on purpose"
-    quadrant-3 "Best-effort mistake, found later"
-    quadrant-4 "Knew better, did it anyway"
-    "Skip tests, no design, deadline": [0.15, 0.2]
+    quadrant-1 "Prudent, deliberate: ship now, repay on purpose"
+    quadrant-2 "Reckless, deliberate: no time for clean code"
+    quadrant-3 "Reckless, inadvertent: unaware of good design"
+    quadrant-4 "Prudent, inadvertent: now we know the better design"
+    "Skip tests, no design, deadline": [0.12, 0.88]
     "Ship the MVP, refactor after signal": [0.85, 0.85]
     "Learned the right pattern too late": [0.8, 0.15]
-    "Knew the shortcut was wrong": [0.2, 0.8]
+    "Knew the shortcut was wrong": [0.3, 0.7]
+    "Never heard of layering": [0.15, 0.2]
 ```
 
 *The quadrant is Fowler's, not Cunningham's — Cunningham coined the debt metaphor in 1992

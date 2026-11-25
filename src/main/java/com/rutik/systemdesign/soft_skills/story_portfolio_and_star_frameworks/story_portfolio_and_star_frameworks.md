@@ -255,7 +255,7 @@ collapses and a real one gets stronger:
 - **"How do you know it worked?"** — the number, or the named alternative when there
   isn't one (see §7.3).
 
-### 6.3 Six full weak-to-strong story rewrites
+### 6.3 Seven full weak-to-strong story rewrites
 
 This is the core of the module. Each pair shows the story a candidate actually tells the
 first time they try it out loud, and the version after a real rewrite pass, with a note on
@@ -414,6 +414,34 @@ scope progression (IC to cross-team lead to de facto tech lead), and a specific,
 reason for interviewing now — giving the interviewer a concrete, memorable hook rather than
 a résumé read aloud.
 
+**7. "How do you use AI in your work?" / "Tell me about a time AI got it wrong"**
+
+**Weak version**
+
+> I use Copilot and ChatGPT pretty much every day, they make me a lot faster. Sometimes
+> they hallucinate, so I always double-check the output.
+
+**Strong version**
+
+> Last quarter I used an AI agent to draft the 40 backfill scripts for our ledger-table
+> split — about two days of work it turned into an afternoon. My rule is that anything
+> touching money runs against a restored copy of production first, so I ran all 40
+> against last Sunday's snapshot before review. Three of them joined on `account_id`
+> where the new schema needed `account_id` plus `currency`; on multi-currency accounts
+> they would have double-counted balances. The diff looked clean and the unit tests
+> passed, because the fixtures were all single-currency. I fixed the three, added a
+> multi-currency fixture so the suite would catch it next time, and wrote the check into
+> our backfill runbook. Net: the backfill shipped a week early, zero balance corrections,
+> and the agent is still how we draft these — with the snapshot run as a required step.
+
+**What changed:** the weak version claims speed and diligence with nothing to check. The
+strong version names the tool's job (drafting 40 scripts), the size of the gain (two days
+to an afternoon), the specific check the engineer ran and why that check existed, the
+exact way the output was wrong, why normal review missed it, and the process change that
+outlived the incident — the same outcome-size-check structure a promotion packet uses for
+AI-assisted work (see
+[Performance Reviews & Promotions](../performance_reviews_and_promotions/performance_reviews_and_promotions.md)).
+
 ### 6.4 The numbers a story needs
 
 Every story in the portfolio should carry at least one hard number: scale before, scale
@@ -540,6 +568,8 @@ levels old; limited recent evidence at current scope."
 | Development Dimensions International (DDI), "Targeted Selection" and the STAR method | The original 1974 structured-interviewing methodology STAR comes from |
 | Center for Creative Leadership, the SBI (Situation-Behavior-Impact) feedback model | The origin and intended feedback-delivery use of SBI, and why it suits short answers |
 | John Flanagan, "The Critical Incident Technique," *Psychological Bulletin* (1954) | The earlier academic technique (specific, recalled incidents as data) that structured behavioural interviewing broadly descends from |
+| CARL, SOAR and PAR — provenance note | No originating author or date could be confirmed for any of the three as interview frameworks; they are practitioner variants of STAR, and the interview-prep CARL is distinct from the academic "CARL" reflection model. Cite them as conventions, not as anyone's framework |
+| Paul Sackett, Charlene Zhang, Christopher Berry & Filip Lievens, *Journal of Applied Psychology* (2022) | Why the structured format these frameworks serve is worth the effort: structured interviews are the top-ranked selection method in the current meta-analysis |
 
 Related modules in this section:
 [Behavioural Interview Systems](../behavioral_interview_systems/behavioral_interview_systems.md),
@@ -726,6 +756,17 @@ earlier implicitly signals that nothing at their current level and scope has pro
 comparably strong material — even a well-told old story earns the note "best evidence is
 years and levels old; limited recent evidence at current scope," which is a different and
 more damaging read than the story simply being less polished.
+
+**Q: How should you answer "How do you use AI in your work?" in a behavioural round?**
+**Short:** Tell one specific story: what the tool did, how much time it saved, the check you ran, what it got wrong, and the process change that followed.
+The question is now standard, and the weak answer ("I use it every day, and I always
+double-check") is the one every candidate gives, so it scores nothing. The interviewer is
+testing judgment, not adoption: do you know where the tool is reliable, what you verify,
+and who owns the result. Answer with one prepared story in CARL shape: the task you gave
+the tool, the size of the gain (two days to an afternoon), the specific verification you
+ran and why it existed, the concrete way the output was wrong if it was, and the lasting
+change — a new test fixture, a runbook step. Prepare a second, shorter story where you
+chose not to use AI and can say why. See §6.3, rewrite 7, for a full worked version.
 
 ---
 

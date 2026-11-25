@@ -147,10 +147,32 @@ they are the section's direct interview-prep surface.
 
 ## Case Studies — 8 Total
 
-`case_studies/` — flat files, 11-section principal template with §4/§7/§10 titles adapted
-the same way the module template is (numbering untouched). Quality bar: 700-1100 lines,
-verbatim transcripts in §4, named companies in §6, quantified consequence in §9, 10+ Q&As
-in §11.
+`case_studies/` — flat files on the repo's 11-section principal case-study skeleton (an
+unnumbered `## Intuition`, then `## 1.` to `## 11.`), with numbering untouched and **every
+title from §1 to §10 retitled** for this domain; only `## Intuition` and
+`## 11. Interview Discussion Points` keep the repo titles. All 8 files use exactly these:
+
+```
+## Intuition
+## 1. Situation & Stakes
+## 2. The People and What Each One Wants
+## 3. The Approach
+## 4. The Artifacts and Conversations
+## 5. Decisions & Tradeoffs
+## 6. Real-World Parallels
+## 7. Frameworks Applied
+## 8. Playbook
+## 9. What Went Wrong & What It Cost
+## 10. Variations
+## 11. Interview Discussion Points
+```
+
+A new case study uses the same twelve headings. Quality bar: 700-1100 lines, verbatim
+transcripts in §4, named companies in §6, quantified consequence in §9, 10+ Q&As in §11.
+Any financial model in a case study (NPV, payback, TCO) must cost the build period and any
+parallel run before it books savings — `translating_a_platform_bet_to_the_cfo.md` §4.3 is
+the worked pattern, and the version that booked savings from day one overstated NPV by
+about $1.4M.
 
 | File | Concern |
 |------|---------|
@@ -190,9 +212,25 @@ working, not a bug. Do not "rescue" one by moving it under an interview heading.
 - **Diagrams appeal-first**: Mermaid preferred (`flowchart LR` by default,
   `quadrantChart` for the many two-axis models in this domain, `stateDiagram-v2` for
   lifecycles, `sequenceDiagram` for conversations). Every node coloured with the One-Dark
-  `classDef` palette. Validate with `node scripts/check_render.mjs <file>` before
+  `classDef` palette — a `class` line with no matching `classDef` in the same fence colours
+  nothing. Validate with `node scripts/check_render.mjs <file>` before
   committing — a fence that does not parse exits 1 in `scripts/build_diagrams.mjs` and
   takes the Pages deploy and the APK red.
+- **`quadrantChart`: `quadrant-1` is TOP-RIGHT**, then `quadrant-2` top-left, `quadrant-3`
+  bottom-left, `quadrant-4` bottom-right (Mermaid's numbering, not reading order). The
+  2026-11-25 audit found 8 of 22 charts here with labels in the wrong cell, including one
+  where "Flat claim, no data" rendered inside "Calibrated". The chart still parses, so no
+  build check sees it. After writing one, read each point's cell label aloud against its
+  coordinates and the caption.
+- **Line bar for module pages is 700-1100 lines, with one sanctioned exception**:
+  `precise_technical_vocabulary` and `business_and_finance_vocabulary` run past 1,100
+  (about 1,200 each) because the four-part glossary record above is long by design. Do not
+  pad a short module to reach 700; deepen §6 with a worked example instead.
+- **Volatile modules carry a dated anchor** under the H1 — a `> **Currency anchor
+  (YYYY-MM-DD).**` blockquote naming the sources the figures were checked against:
+  `ai_era_engineering_leadership`, `behavioral_interview_systems`,
+  `interviewing_as_the_interviewer`, `performance_reviews_and_promotions`. Update the date
+  and the source list whenever a pass re-checks them.
 - `---` horizontal rules between every top-level section.
 - Cross-link to the module PAGE (`../executive_communication/executive_communication.md`),
   never to a bare directory.

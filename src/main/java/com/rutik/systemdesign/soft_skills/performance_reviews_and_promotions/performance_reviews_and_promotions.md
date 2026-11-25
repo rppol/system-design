@@ -1,5 +1,10 @@
 # Performance Reviews & Promotions
 
+> **Currency anchor (2026-11-25).** The AI-in-reviews policies (Shopify, April 2025;
+> Microsoft's developer division, June 2025; Meta, November 2025, for the 2026 cycle) and
+> the performance-cut examples were checked on this date. Review policy changes every
+> cycle; re-check before quoting a company's current rules.
+
 ## 1. Concept Overview
 
 Most engineers learn how promotion actually works by losing a cycle first — writing a
@@ -771,6 +776,22 @@ three cycles running, with no next-level scope ever actually offered to close it
 qualitatively different signal, and so is discovering the next level genuinely doesn't
 exist at the company; both are legitimate reasons to look elsewhere rather than assuming a
 fourth cycle will differ from the previous three.
+
+**Q: You have just been put on a performance improvement plan. What do you do in the first week?**
+**Short:** Get the success criteria, check-in dates and end date in writing, decide honestly whether you want to stay, and work both tracks in parallel.
+A PIP is a written plan with a fixed end date, and what you do in the first week decides
+whether it is a real chance or a paper trail. First, make the criteria testable: if the
+plan says "improve code quality", ask in writing for what will be measured ("no more than
+one revert per sprint over six weeks"?), who judges it and on what dates you will check in.
+Second, write a short reply restating the criteria as you understand them and any
+constraints the plan ignores (an on-call week, a dependency you do not own), so the record
+shows both views. Third, decide honestly whether you want to stay: if the gap is real and
+fixable, treat the plan like any other project with weekly written progress against each
+criterion; if the plan reads as a decision already made, start a job search the same week,
+because the plan's end date is also your runway. Doing both at once is normal, not
+disloyal. If the plan raises a legal question, such as a recent leave or a complaint you
+made, that is a conversation for an employment lawyer in your jurisdiction, not your
+manager.
 
 ---
 

@@ -47,10 +47,13 @@ the reader parse the whole implementation to find out what it returns.
 ## 3. Core Principles
 
 - **Put the conclusion first, always.** This is BLUF (Bottom Line Up Front), formalized in
-  the US Army's AR 25-50, "Preparing and Managing Correspondence." AR 25-50 distinguishes a
-  BLUF from a topic sentence explicitly: "This memo addresses the proposed budget revision"
-  states the subject; "I recommend we cut the Q3 marketing budget by $200,000 to cover the
-  facilities overrun" states the decision. Every other section of the document — background,
+  the US Army's AR 25-50, "Preparing and Managing Correspondence" (current edition dated
+  10 October 2020), whose standards for Army writing make "putting the main point at the
+  beginning of the correspondence (bottom line up front)" one of two essential
+  requirements, the other being the active voice. A BLUF is not a topic sentence. For
+  example (an illustration, not AR 25-50 text): "This memo addresses the proposed budget
+  revision" states the subject; "I recommend we cut the Q3 marketing budget by $200,000 to
+  cover the facilities overrun" states the decision. Every other section of the document — background,
   evidence, method, caveats — comes after the reader already knows what you want.
 - **The governing thought comes before the supporting arguments, which come before the
   data.** This is Barbara Minto's Pyramid Principle, developed at McKinsey and published in
@@ -574,9 +577,9 @@ the path that must not change, and how that path gets rewritten.
 - Barbara Minto, *The Pyramid Principle: Logic in Writing, Thinking, and Problem Solving*
   — the governing-thought-first structure, SCQA, and MECE, developed originally at
   McKinsey & Company.
-- US Army Regulation 25-50, "Preparing and Managing Correspondence" — the formal source of
-  BLUF; first published 1988, with the specific "bottom line up front" phrasing added in
-  the 2001 revision.
+- US Army Regulation 25-50, "Preparing and Managing Correspondence" (current edition
+  10 October 2020, Army Publishing Directorate) — the formal source of BLUF, which its
+  standards for Army writing list as an essential requirement alongside the active voice.
 - Jakob Nielsen / Nielsen Norman Group, "F-Shaped Pattern for Reading Web Content" (original
   eyetracking research, first published 2006, revisited in later NNG studies) — the
   empirical basis for writing-for-skim structure.
@@ -634,13 +637,13 @@ failed task every time until someone fixes it.
 **Q: What is BLUF, and why does most engineering writing violate it?**
 **Short:** Bottom Line Up Front — state the conclusion or ask first; most docs bury it because writers think in discovery order.
 BLUF, formalized in the US Army's AR 25-50, requires the main point, recommendation, or
-requested action in the first paragraph, with everything else — background, evidence,
+requested action at the beginning of the correspondence, with everything else — background, evidence,
 caveats — as supporting detail that comes after. Most engineering docs violate it because
 they are written in the order the author discovered the answer: background, then
 investigation, then finally the conclusion at the end, which is also usually the most
-important sentence and the one a skimming reader is least likely to reach. The gotcha AR
-25-50 is explicit about: a BLUF is not a topic sentence — "this memo addresses the proposed
-budget revision" describes the subject, not the decision.
+important sentence and the one a skimming reader is least likely to reach. The gotcha: a
+BLUF is not a topic sentence. For example (an illustration, not AR 25-50 text), "this memo
+addresses the proposed budget revision" describes the subject, not the decision.
 
 **Q: What's a nominalization, and why does it weaken a sentence?**
 **Short:** A verb turned into a noun ("performed an evaluation of" instead of "evaluated") that adds words without adding information.

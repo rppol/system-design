@@ -574,9 +574,9 @@ quadrantChart
     x-axis Local Blast Radius --> Cross-Team Blast Radius
     y-axis Additive Output --> Multiplier Output
     quadrant-1 Sets the standard
-    quadrant-2 Ships the feature
+    quadrant-2 Unblocks the team
     quadrant-3 Fixes the ticket
-    quadrant-4 Unblocks the team
+    quadrant-4 Ships the feature
     "Library built on own service": [0.2, 0.35]
     "Refunds migration shipped": [0.55, 0.6]
     "Fulfillment-tracking redirected": [0.5, 0.75]

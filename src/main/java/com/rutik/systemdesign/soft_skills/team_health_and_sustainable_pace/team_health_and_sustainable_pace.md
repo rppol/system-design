@@ -31,7 +31,7 @@ what people think it does.
 > until the day a withdrawal bounces and your best engineer quits.
 
 **Mental model.** Every unfixed thing that erodes a team — the alert nobody has time to
-tune, the retro item with no owner, the on-call rotation that pages twice a week — behaves
+tune, the retro item with no owner, the on-call rotation that pages every night — behaves
 like compound interest on a debt, not like a static cost. It does not stay the same size
 while you ignore it; the alert fires again next week, the same item gets raised a third
 sprint running, the on-call engineer who got paged Tuesday and Thursday starts screening
@@ -67,8 +67,8 @@ what you fix in the on-call rotation, the review queue, and the retro.
   retro or a review thread diverge, and the divergence itself is the signal — a team that
   rates psychological safety 4/5 on a survey but has had zero substantive retro items in
   eight weeks is telling you the safety score is the polite answer, not the true one.
-- **On-call load is a system property, not a person property.** A rotation that wakes
-  someone twice in one week is a signal that the alerting, the runbooks, or the
+- **On-call load is a system property, not a person property.** A rotation that pages
+  someone every day is a signal that the alerting, the runbooks, or the
   architecture is broken — the fix is never "toughen up," because toughening up the human
   does not reduce the number of pages the system generates.
 - **Toil that never gets budgeted time never gets fixed**, because it always loses the
@@ -225,9 +225,12 @@ than **25%** of total time on-call, leaving up to another 25% for other non-proj
 operational work. When the operational load exceeds the cap, the book's prescribed
 response is to redirect the excess back to product development — reassigning tickets,
 re-integrating developers into the pager rotation — until the load drops back under 50%,
-not to simply ask the SRE team to absorb more. Within a shift, the book targets a maximum
-of roughly **two incidents per on-call shift**, specifically to leave enough slack for
-proper follow-up on each one rather than triage-and-move-on.
+not to simply ask the SRE team to absorb more. Within a shift, the book sets a ceiling of
+**two incidents per 12-hour on-call shift**. It derives that from a measured average: one
+incident, with root-cause analysis, remediation, the postmortem and the bug fixes, takes
+about six hours. The ceiling is not the target. The book wants pages "very flat over time,
+with a likely median value of 0", and warns that a component that pages every day (a median
+above one incident a day) means something else is likely to break soon.
 
 **Actionable vs. non-actionable pages** is the distinction that determines whether a
 rotation is sustainable or corrosive. An actionable page has a clear, human-necessary
@@ -240,9 +243,9 @@ delaying or half-attending to the next page is the locally sensible response to 
 that has taught them pages lie. The fix is never "respond faster despite the fatigue" — it
 is tuning or deleting the alert that is not actionable.
 
-A rotation that wakes someone twice in a single week is not a person having a bad week;
-it is a system generating twice the load the SRE book's own guidance treats as a
-functioning ceiling. Treat it as an incident about the on-call system itself, with the
+A rotation that pages someone every day is not a person having a bad week; it is a
+system running far above the median of zero the SRE book expects, and the book's answer
+to sustained overload is corrective work on the load, not on the person. Treat it as an incident about the on-call system itself, with the
 same seriousness as a production incident, because unaddressed it produces the same
 outcome production incidents do when ignored — someone eventually leaves.
 
@@ -253,8 +256,8 @@ outcome production incidents do when ignored — someone eventually leaves.
 
 **Strong version**
 
-> The backend rotation paged 11 times last week against a target of roughly 2 per shift
-> per the SRE guidance we're using — 3 of those were the same non-actionable disk-alert
+> The backend rotation paged 11 times last week, on all 7 days, against the SRE guidance
+> we use of a median of zero pages a day — 3 of those were the same non-actionable disk-alert
 > firing at 40% headroom, which the runbook says to ignore. I can raise that threshold and
 > silence the redundant alert in about an hour. I'd like that prioritized this sprint,
 > ahead of the reporting-UI polish, because at this rate someone on the rotation is going
@@ -287,12 +290,14 @@ the debt itself.
 ### 6.5 Sustainable pace and the arithmetic of crunch
 
 "Sustainable pace" originates in Kent Beck's Extreme Programming, first codified in
-*Extreme Programming Explained* (1999) as one of the original thirteen practices under the
+*Extreme Programming Explained* (1999) as one of the original twelve practices under the
 name **"40 hour week."** Beck's original rule was specific and modest: plan for a 40-hour
 week, and if overtime is genuinely required, never work it two weeks in a row — a direct
 reaction to the software industry's then-common "death march" culture of open-ended
-crunch. The practice was later renamed **sustainable pace** as the idea generalized beyond
-a literal hour count to the broader claim: a team's throughput over a quarter is higher
+crunch. The XP community later called the practice **Sustainable Pace** (Ron Jeffries'
+"What is Extreme Programming?" lists it under that name), and the 2004 second edition by
+Beck and Cynthia Andres recast it as the primary practice **"Energized Work"**. Both names
+generalize beyond a literal hour count to the broader claim: a team's throughput over a quarter is higher
 under a pace it can hold indefinitely than under a pace it periodically collapses from.
 
 Stanford economist John Pencavel's 2014/2015 study in *The Economic Journal*, using
@@ -616,7 +621,7 @@ at which point velocity did not decline gradually — it collapsed in a single s
 | Google People Analytics, Project Aristotle (2012–2015) | The empirical ranking of psychological safety as the top predictor among five team dynamics |
 | Google, *Site Reliability Engineering* (2016), chapters on being on-call and eliminating toil | The 50% operational-work cap, the on-call sub-budget, and the six-part definition of toil |
 | Esther Derby & Diana Larsen, *Agile Retrospectives: Making Good Teams Great* (2006) | The five-stage retrospective structure and the mechanics of a retro that actually decides something |
-| Kent Beck, *Extreme Programming Explained* (1999; 2nd ed. 2004) | The origin of "40 hour week," renamed sustainable pace in the second edition |
+| Kent Beck, *Extreme Programming Explained* (1999; 2nd ed. 2004) | The origin of "40 hour week" (1st ed.), later called Sustainable Pace in the XP community and "Energized Work" in the 2nd edition (with Cynthia Andres) |
 | John Pencavel, "The Productivity of Working Hours," *The Economic Journal* 125(589), 2015 | The empirical case that output per hour collapses well before 70 hours, and total output at 70 barely beats output at 56 |
 | Christina Maslach & Susan Jackson, the Maslach Burnout Inventory and its three-dimension model | Exhaustion, cynicism, and reduced professional efficacy as separable, measurable dimensions |
 | World Health Organization, ICD-11 (2022), "Burn-out" | The occupational-phenomenon classification and its own three-dimension description |
@@ -704,12 +709,12 @@ cap, the prescribed response is to redirect the excess load back to product deve
 reassigning tickets, adding developers to the pager rotation — until the load returns
 under 50%, rather than asking the team to simply absorb more.
 
-**Q: Why does a rotation paging someone twice in one week count as a system failure rather than a person problem?**
-**Short:** Twice a week exceeds the guidance ceiling and reflects a broken alert or architecture, not a weak responder.
-Google's own SRE guidance targets roughly two incidents per on-call *shift*, with the
-explicit goal of leaving time for real follow-up on each one — a rotation generating that
-volume in a single week is running well past a level the industry's own reference
-treats as sustainable. The fix is never telling the person to toughen up, because the
+**Q: Why does an on-call rotation that pages someone every day count as a system failure rather than a person problem?**
+**Short:** The SRE book expects a median of zero incidents a day, so daily paging points to broken alerting or architecture, not a weak responder.
+Google's SRE book caps on-call at two incidents per 12-hour shift, because one incident and
+its follow-up take about six hours, and it wants pages "very flat over time, with a likely
+median value of 0". A component that pages every day is, in the book's reading, a sign that
+something else is likely to break soon. The fix is never telling the person to toughen up, because the
 person did not generate the pages — the alerting configuration, runbooks, or underlying
 architecture did, and only fixing those reduces the count.
 
@@ -733,12 +738,13 @@ never given sprint time to automate it will watch that task's cost grow with the
 indefinitely.
 
 **Q: Where does "sustainable pace" originate, and what was its original, more specific name?**
-**Short:** Kent Beck's Extreme Programming, originally called the "40 hour week" practice.
+**Short:** Kent Beck's Extreme Programming, where it began as the "40 hour week" practice and became Energized Work in the 2004 edition.
 Kent Beck's *Extreme Programming Explained* (1999) codified it as one of the original
-thirteen XP practices under the literal name "40 hour week," with a specific rule: plan
-for 40 hours, and if overtime is genuinely necessary, never work it two weeks running. It
-was renamed sustainable pace as the idea generalized past a literal hour count to the
-broader claim that a pace the team can hold indefinitely outproduces one it periodically
+twelve XP practices under the literal name "40 hour week," with a specific rule: plan
+for 40 hours, and if overtime is genuinely necessary, never work it two weeks running. The XP
+community later called it Sustainable Pace, and the 2004 second edition (Beck and Cynthia
+Andres) names the primary practice Energized Work. Both generalize past a literal hour count
+to the broader claim that a pace the team can hold indefinitely outproduces one it periodically
 collapses from.
 
 **Q: What did Pencavel's research find about the relationship between hours worked and total output?**
@@ -824,8 +830,8 @@ emergency rather than a planned vacation.
 
 - Read behavioral signals — review silence, PR latency, retro participation — as more
   reliable than survey sentiment, and cross-check the two against each other.
-- Track page volume per rotation per week against a stated target (roughly two per shift,
-  per SRE guidance) and treat exceeding it as an incident about the system, not the person.
+- Track page volume per rotation per day against the SRE book's baseline (a median of zero a
+  day, a ceiling of two incidents per 12-hour shift) and treat daily paging as an incident about the system, not the person.
 - Distinguish actionable from non-actionable pages explicitly, and delete or tune anything
   in the second category before it teaches the team to distrust every page.
 - Give toil a named budget in planning, the same way a feature gets one, or it will always

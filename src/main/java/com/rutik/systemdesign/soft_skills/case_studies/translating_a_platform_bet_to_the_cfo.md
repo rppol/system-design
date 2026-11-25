@@ -11,7 +11,7 @@ Lumen Metrics, Inc. — the same 450-engineer, $180M-ARR observability company f
 variations of the same job: move event data from ingest to somewhere useful. Two run on
 a paid vendor. The third is a single engineer's Python script. This case study follows
 Priyanka "Pri" Rao, a Staff Engineer on the Data Platform team, through two attempts to
-get an eighteen-month, $1.82M platform investment approved — the first attempt, argued
+get an eighteen-month, $1.55M platform investment approved — the first attempt, argued
 correctly in engineering language, that went nowhere for two quarters, and the second,
 argued in the CFO's own units, that got a decision in one meeting.
 
@@ -107,7 +107,7 @@ borrowed directly from [business_and_finance_vocabulary](../business_and_finance
 1. **Every claim gets a number, and every number gets a unit Owen already uses** — dollars,
    percent of gross margin, months of payback, not "significant" or "dramatic."
 2. **Lead with the ask, not the architecture.** Owen does not need to understand Kafka to
-   approve $1.82M; he needs to understand what it buys and what it costs to not buy it.
+   approve $1.55M; he needs to understand what it buys and what it costs to not buy it.
 3. **Prepare for the two questions every CFO asks and nobody schedules time to prepare
    for**: what happens if we wait, and what's the cheapest version that still works. Pri
    prepared for the first. Pri did not prepare for the second, and it showed.
@@ -150,7 +150,7 @@ no unit Owen could rank.
 |---|---|
 | "fragmented... creating significant technical debt" | Technical debt is not a line on any financial statement; "significant" has no unit to compare against a dollar-denominated ask |
 | "limits our ability to customize... locks us into their release cadence" | A flexibility complaint with no cost attached — Owen cannot price what "limited customization" is worth |
-| "brittle, single-engineer-maintained... serious bus-factor risk" | Reads as a staffing gap, which sounds solvable by hiring one more engineer for $180K, not an 18-month, $1.8M program |
+| "brittle, single-engineer-maintained... serious bus-factor risk" | Reads as a staffing gap, which sounds solvable by hiring one more engineer for $180K, not an 18-month, $1.55M program |
 | "dramatically improve developer velocity" | "Dramatically" and "velocity" are both unitless — nothing here can sit in the same model as a $2.1M region ask with a defined revenue unlock |
 | "architecturally clean foundation for future data products" | This is option value the pitch never prices, and it signals more money will be asked for later against a foundation nobody has seen yet |
 | "the kind of foundational investment that separates companies that scale gracefully" | An assertion with no comparable named and no number attached — a mission statement wearing a business case's clothes |
@@ -165,12 +165,12 @@ Project Confluence turns a $1.4M/year vendor line -- growing 20%
 annually with our own ingest volume -- plus roughly $255K/year in
 unbudgeted engineering toil and incident cost, into one $610K/year
 internally-run platform whose cost does not scale with volume the same
-way. Fully loaded, including an 18-month build and a four-month
-parallel-run cutover, the total cash outlay is $1.82M.
+way. It takes an 18-month build and a four-month parallel run before
+the first dollar of savings; the cash out before then is $1.55M.
 
-At a 10% discount rate, this is NPV-positive by $4.47M over five years,
-and it pays back in 19 months -- about a month after the build itself
-finishes. Every year we do not do this, the number we are walking away
+At a 10% discount rate, this is NPV-positive by $3.06M over five years
+(+$2.43M at 15%), and it pays back in month 34 -- about a year after
+cutover. Every year we do not do this, the number we are walking away
 from compounds at roughly 20%, which is the vendor's own growth rate,
 not ours to control.
 ```
@@ -191,68 +191,83 @@ Y4     $2,419,200            $95,000           $160,000        $2,674,200
 Y5     $2,903,040            $95,000           $160,000        $3,158,040
 ```
 
-**Build cost — upfront, at project start (Year 0, undiscounted since it lands immediately):**
+**Build cost — spread across the 18-month build, not paid on day one:**
 
 ```text
 Build:      5 engineers x 18 months = 7.5 engineer-years x $180,000
-            loaded cost/engineer-year                       = $1,350,000
-Migration:  4-month parallel-run cutover -- PipeStream fee
-            continues while the new platform is already live
-            and being validated against it (the cost every
-            model like this forgets to add)              = $  467,000
-                                                    TOTAL  = $1,817,000
+            loaded cost/engineer-year = $1,350,000, or $75,000/month,
+            months 1-18. PipeStream and the homegrown pipeline keep
+            running (and billing) the whole time -- nothing is saved yet.
 ```
 
-**Ongoing run cost — internal platform, modeled flat across the 5-year horizon** (people
-$270K + infrastructure $340K = $610,000/year; flat because the platform is provisioned
-with headroom, unlike PipeStream's per-GB metering, which is the entire point):
+**Ongoing run cost — internal platform, modeled flat once it is live** (people $270K +
+infrastructure $340K = $610,000/year, or $50,833/month; flat because the platform is
+provisioned with headroom, unlike PipeStream's per-GB metering, which is the entire point).
+It starts at month 19, when the platform goes live in parallel with PipeStream.
+
+**The parallel run — months 19-22, the cost every model like this forgets:**
 
 ```text
-Year 1-5 ongoing run cost, each year: $610,000
+Internal platform running, not yet carrying traffic:  4 x $50,833 = $  203,333
+PipeStream still billing at the Year-2 rate:          4 x $140,000 = $  560,000
 ```
 
-**Annual savings (do-nothing cost minus build-option ongoing cost):**
+The $560,000 is not new spend — Lumen pays it in the do-nothing case too — but a naive
+model that stops the vendor bill at go-live books it as savings. Savings start at month 23,
+after cutover.
+
+**Incremental cash flow — build option minus do-nothing, by year:**
 
 ```text
-Year   Do-nothing      Build option    Savings
-Y1     $1,655,000      $610,000        $1,045,000
-Y2     $1,935,000      $610,000        $1,325,000
-Y3     $2,271,000      $610,000        $1,661,000
-Y4     $2,674,200      $610,000        $2,064,200
-Y5     $3,158,040      $610,000        $2,548,040
+Year  What happens                              Incremental cash flow
+Y1    build months 1-12 (12 x $75,000)                    -$  900,000
+Y2    build months 13-18          -$450,000
+      parallel run months 19-22   -$203,333
+      savings months 23-24        +$220,833
+        (2 x [$1,935,000/12 - $50,833])                  -$  432,500
+Y3    $2,271,000 - $610,000                               +$1,661,000
+Y4    $2,674,200 - $610,000                               +$2,064,200
+Y5    $3,158,040 - $610,000                               +$2,548,040
+
+Cash out before the first dollar of savings: $1,350,000 + $203,333
+                                           = $1,553,333 (~$1.55M)
 ```
 
-**NPV at a 10% discount rate over five years:**
+**NPV at a 10% discount rate over five years** (year-end convention, every flow
+discounted, including the build years):
 
 ```text
-Year   Savings        Discount factor (1/1.10^n)   Discounted savings
-Y1     $1,045,000     0.9091                        $  950,000
-Y2     $1,325,000     0.8264                        $1,095,041
-Y3     $1,661,000     0.7513                        $1,247,922
-Y4     $2,064,200     0.6830                        $1,410,072
-Y5     $2,548,040     0.6209                        $1,582,220
-                                    Sum, discounted  $6,285,255
+Year   Cash flow       Discount factor (1/1.10^n)   Discounted
+Y1     -$  900,000     0.9091                        -$  818,182
+Y2     -$  432,500     0.8264                        -$  357,438
+Y3     +$1,661,000     0.7513                        +$1,247,934
+Y4     +$2,064,200     0.6830                        +$1,409,876
+Y5     +$2,548,040     0.6209                        +$1,582,132
 
-NPV = -$1,817,000 (upfront, Year 0, undiscounted) + $6,285,255
-    = +$4,468,255  (roughly +$4.47M over five years)
+NPV = +$3,064,322  (roughly +$3.06M over five years)
+At a 15% rate the same flows give roughly +$2.43M.
 ```
 
 **Payback period (undiscounted, simple):**
 
 ```text
-Upfront outflow:           $1,817,000
-Year 1 savings:             $1,045,000  -> cumulative $1,045,000 (short $772,000)
-Year 2 savings:              $1,325,000, or ~$110,417/month
-$772,000 / $110,417/month ≈ 7 months into Year 2
+Cumulative cash at month 22 (end of parallel run):  -$1,553,333
+Months 23-24 savings: 2 x $110,417 = $220,833   -> -$1,332,500
+Year-3 savings: $1,661,000 / 12 = $138,417/month
+$1,332,500 / $138,417/month = 9.6 -> 10 months into Year 3
 
-Payback ≈ 12 + 7 = 19 months from project start
+Payback = month 34 from project start, about a year after cutover
 ```
 
 A reader can check every line above: the do-nothing column compounds PipeStream at 20%
-and holds the other two costs flat; the build option is a flat $610K/year against a
-$1.817M upfront; the discount factors are 1/1.10^n for n = 1..5; NPV is the discounted
-savings minus the undiscounted upfront outlay; and payback is the month at which
-cumulative undiscounted savings first exceeds the upfront outlay.
+and holds the other two costs flat; the build is spent $75,000 a month for 18 months while
+every do-nothing cost keeps running; the internal platform's $610K/year starts at go-live
+in month 19; savings start only after the four-month parallel run; the discount factors are
+1/1.10^n for n = 1..5; and payback is the month at which cumulative undiscounted cash first
+turns positive. The model that takes the full saving from day one — the obvious first draft
+— reports NPV +$4.47M and payback in 19 months. That draft is the one a CFO's team takes
+apart in ten minutes, because it saves $1M in Year 1 on a platform that does not exist
+until month 19.
 
 ### 4.4 The one-page brief, verbatim
 
@@ -262,7 +277,7 @@ FROM: Priyanka Rao (Staff Eng, Data Platform), Marcus Chen (VP Eng)
 RE: Project Confluence -- decision requested by October 3
 
 THE ASK
-Approve $1.82M in build and migration spend, over 18 months, to replace
+Approve $1.55M in build and parallel-run spend, over 22 months, to replace
 our PipeStream vendor contract and our single-engineer ML data pipeline
 with one internally-owned streaming platform.
 
@@ -277,13 +292,14 @@ THREE FACTS
    scale with ingest volume the way the vendor fee does.
 
 COST
-$1.82M total cash outlay (build + a 4-month parallel-run cutover),
-against a status-quo cost curve of $1.66M this year rising to $3.16M in
-year five.
+$1.55M cash out before savings start ($1.35M build over 18 months +
+$203K to run the new platform through a 4-month parallel run), against
+a status-quo cost curve of $1.66M this year rising to $3.16M in year
+five. Status-quo costs keep running until cutover in month 22.
 
 RETURN
-NPV +$4.47M over five years at a 10% discount rate. Payback in 19
-months -- about a month after the build itself finishes.
+NPV +$3.06M over five years at a 10% discount rate (+$2.43M at 15%).
+Payback in month 34 -- about a year after cutover.
 
 RISK
 Migration risk during the 4-month parallel-run window; mitigated by
@@ -306,20 +322,21 @@ Owen:  I read the one-pager, thanks for keeping it to a page. Walk me
 Pri:   PipeStream is $1.4M this year, growing about 20% a year with our
        own ingest volume. Add the homegrown pipeline's maintenance and
        incident cost and status quo is $1.655M this year, rising to
-       $3.16M in year five if we do nothing. The build is $1.82M
-       upfront, all-in with a four-month cutover, and the internal
-       platform runs at $610K a year afterward, flat. At your 10%
-       hurdle rate, that's NPV-positive by $4.47M over five years, and
-       it pays back in 19 months.
+       $3.16M in year five if we do nothing. The build is $1.35M over
+       eighteen months, then a four-month parallel run, and the
+       internal platform runs at $610K a year after that, flat. All in,
+       $1.55M goes out before the first dollar comes back. At your 10%
+       hurdle rate, that's NPV-positive by $3.06M over five years, and
+       it pays back in month 34.
 
 Owen:  Good. Two questions. First -- what happens if I just tell you to
        come back in a year.
 
 Pri:   Delay doesn't freeze that $1.655M, it compounds it -- waiting a
-       year doesn't save us the $1.82M, it adds roughly another $1.66M
-       of vendor and incident spend before we've even started, and it
-       pushes the whole discounted return out a year, which costs us
-       about $950K of the $4.47M NPV just from the wait. Whatever we
+       year doesn't save us the build cost, it just moves it, and the
+       year of savings we give up is a Year-3 year, about $1.66M before
+       discounting. Inside the same five-year window that's roughly
+       $1.1M of the $3.06M NPV, gone just from the wait. Whatever we
        decide, delay isn't free. It's just the option with no line item
        on anyone's budget.
 
@@ -338,7 +355,7 @@ Pri:   Probably, yeah, I just haven't priced it that way.
 Owen:  [not hostile] That's fine, that's homework, not a no. Get me a
        phased number by Friday and we'll talk about it again. I want to
        say yes to something here, I don't know yet if it's this whole
-       $1.82M in one shot.
+       $1.55M in one shot.
 
 Marcus: We'll have it to you Friday.
 
@@ -374,23 +391,25 @@ PHASE 1 (requesting approval now): Migrate the two PipeStream-hosted
 pipelines -- billing/usage metering and product analytics -- onto the
 internal platform. Leaves the ML training pipeline on its current
 homegrown script for now.
-  Upfront: $1.36M ($1.01M build + $350K migration)
+  Cash out before savings: $1.02M ($900K build -- 5 engineers x 12
+  months -- + $115K to run the new platform through a 3-month
+  parallel run)
   Ongoing: $460K/year
-  Retires the full $1.4M/year PipeStream contract
-  Payback: under 18 months
+  Retires the full PipeStream contract at month 15
+  NPV over five years at 10%: +$3.87M. Payback: month 25
   Does NOT resolve: the $255K/year homegrown-pipeline cost or its
   four-incidents-a-year risk to Anomaly Copilot retraining
 
 PHASE 2 (revisit at the Q1 2027 budget review, contingent on Phase 1
 tracking to its savings target): migrate the ML training pipeline off
 the single-engineer script and onto the same platform.
-  Incremental cost: ~$460K (build + smaller migration)
+  Incremental cost: ~$540K (build + its own short parallel run)
   Resolves the remaining $255K/year cost and the bus-factor risk
 
-This gets PipeStream off the books in full for $460K less upfront cash
-than the combined ask, with Phase 2 reviewed against real numbers from
-Phase 1 rather than projections. Happy to walk through the split in
-more detail if useful before Friday.
+This gets PipeStream off the books in full for ~$540K less cash than
+the combined ask, seven months sooner, with Phase 2 reviewed against
+real numbers from Phase 1 rather than projections. Happy to walk
+through the split in more detail if useful before Friday.
 
 Pri
 ```
@@ -407,24 +426,31 @@ numbers instead of another projection.
 
 ```mermaid
 xychart-beta
-    title "Five-year cost: doing nothing vs. Project Confluence"
+    title "Five-year cost: doing nothing (bars) vs. Project Confluence (line)"
     x-axis [Y1, Y2, Y3, Y4, Y5]
     y-axis "Annual cost, dollars" 0 --> 3500000
     bar [1655000, 1935000, 2271000, 2674200, 3158040]
-    line [610000, 610000, 610000, 610000, 610000]
+    line [2555000, 2367500, 610000, 610000, 610000]
 ```
 
 *Caption: the bars are the status-quo cost, compounding at PipeStream's 20% growth rate;
-the line is Project Confluence's flat $610K/year run cost once the $1.817M upfront is
-spent. The gap between them, discounted, is the $4.47M NPV.*
+the line is the full cost of the build path. For the first two years the line sits ABOVE
+the bars, because Lumen pays for the build and the parallel run on top of every
+status-quo cost. Only after cutover in month 22 does it drop to the flat $610K/year run
+cost. The gap between the two, net of those first two years and discounted, is the
+$3.06M NPV.*
 
-| Option | Upfront | Ongoing/yr | 5-yr NPV @10% | Payback | What's still unresolved |
+| Option | Cash out before savings | Ongoing/yr | 5-yr NPV @10% | Payback | What's still unresolved |
 |---|---|---|---|---|---|
 | Do nothing | $0 | grows 20%/yr | — (baseline) | — | Bus-factor risk, incident cost, growing vendor fee |
-| Full build (both pitches, same project) | $1.82M | $610K flat | +$4.47M | 19 months | Nothing — full scope |
-| **Phase 1 only (approved)** | $1.36M | $460K | not fully recomputed; retires full vendor fee | under 18 months | ML pipeline's $255K/yr and bus-factor risk, deferred to Phase 2 |
+| Full build (both pitches, same project) | $1.55M | $610K flat | +$3.06M | month 34 | Nothing — full scope |
+| **Phase 1 only (approved)** | $1.02M | $460K | +$3.87M | month 25 | ML pipeline's $255K/yr and bus-factor risk, deferred to Phase 2 |
 
-The number that actually moved Owen was not the $4.47M NPV — it was the single sentence
+Phase 1 beats the full build on five-year NPV because it cuts PipeStream over seven months
+sooner; the full build's extra value is the $255K/year and the bus-factor risk, which is
+exactly what Phase 2 has to justify on its own.
+
+The number that actually moved Owen was not the NPV — it was the single sentence
 that reframed "no decision yet" as a cost rather than a neutral default: delay was never
 free, it was simply the one option with no line item anyone had written down.
 
@@ -451,13 +477,14 @@ free, it was simply the one option with no line item anyone had written down.
   public case is argued entirely in cash outlay, ongoing run cost, and a stated payback
   horizon — never in "architectural cleanliness" — which is the same translation Pri had
   to make between §4.1 and §4.2.
-- **The FinOps Foundation's 2026 State of FinOps report** found cloud waste rose to
-  **29%** of spend industry-wide, reversing a five-year downward trend, while adoption of
-  **unit-economics metrics** (cost per transaction, cost per customer) reached **49%** of
-  organizations, up from 40% the year before. Framing PipeStream's cost as "dollars per
-  GB processed" rather than a flat vendor line is exactly this practice — it is what
-  makes visible that the vendor's bill scales with Lumen's own success while the internal
-  platform's does not. [data.finops.org, State of FinOps 2026.]
+- **Flexera's 2026 State of the Cloud report** (a self-reported survey of cloud decision
+  makers) found respondents' estimated wasted cloud spend rose to **29%**, reversing a
+  five-year downward trend, while adoption of **unit economics** (cost per service, aligned
+  with outcomes) reached **49%** of organizations, up from 40% the year before. Framing
+  PipeStream's cost as "dollars per GB processed" rather than a flat vendor line is exactly
+  this practice — it is what makes visible that the vendor's bill scales with Lumen's own
+  success while the internal platform's does not. [info.flexera.com, State of the Cloud
+  Report 2026.]
 - **US GAAP's internal-use software rules (ASC 350-40)** let a company capitalize
   certain software-development costs incurred during the "application development
   stage" rather than expensing them immediately — which is why Nadia's review, not
@@ -469,32 +496,34 @@ free, it was simply the one option with no line item anyone had written down.
 
 ## 7. Frameworks Applied
 
-- **TCO (Total Cost of Ownership).** TCO alone compares $1.82M-then-$610K/year against
+- **TCO (Total Cost of Ownership).** TCO alone compares $1.55M-then-$610K/year against
   a growing $1.4M+/year vendor line, but a TCO comparison with no benefit side is, per
   [business_and_finance_vocabulary §4.3](../business_and_finance_vocabulary/business_and_finance_vocabulary.md),
   "a weak standalone decision tool" — it says the internal option is cheaper but not
   whether it is cheaper *enough*, soon *enough*, to beat the other three asks for the
   same budget. TCO set up the comparison; it did not close the decision.
-- **NPV and the discount rate.** The $4.47M five-year NPV at a 10% discount rate is the
+- **NPV and the discount rate.** The $3.06M five-year NPV at a 10% discount rate is the
   number that actually closes the decision, because it is the only one that accounts for
   the time value of money and produces a single figure directly comparable to the
   revenue unlock behind the EMEA region ask. Raising the discount rate to a riskier 15%
-  hurdle (a reasonable stress test for an unproven internal build) would still leave this
-  NPV-positive, which is worth checking before presenting a number this large — see §11.
-- **Payback period.** Nineteen months mattered to Owen as a risk gut-check independent of
+  hurdle (a reasonable stress test for an unproven internal build) leaves it at about
+  +$2.43M, still NPV-positive, which is worth checking before presenting a number this
+  large — see §10. The NPV is only honest because the build years carry their own negative
+  cash flows; a model that books savings from day one reports +$4.47M for the same project.
+- **Payback period.** Month 34 mattered to Owen as a risk gut-check independent of
   the NPV — a positive NPV with an eight-year payback is a much harder sell to a CFO
-  managing near-term cash than the same NPV paid back in under two years. Payback cannot
+  managing near-term cash than the same NPV paid back in under three years. Payback cannot
   distinguish "barely profitable, fast" from "hugely profitable, fast" the way NPV can;
   the two numbers answer different questions and both were needed in the room.
 - **Opportunity cost.** This is the single framework that answered Owen's first hard
   question. "What happens if we wait a year" has no answer in a spreadsheet that only
   models the build option — it requires explicitly pricing the do-nothing path as its own
-  option with its own cost, which is what let Pri say delay costs roughly $950K of the
+  option with its own cost, which is what let Pri say delay costs roughly $1.1M of the
   NPV rather than "it would be worse to wait."
 - **Capex vs. opex.** This framework helped Finance, not Pri's pitch directly — ASC
   350-40's software-capitalization rules meant part of the $1.35M build cost could be
   capitalized and depreciated rather than expensed immediately, which changed how the
-  project affected Lumen's reported opex in year one without changing the $1.82M cash
+  project affected Lumen's reported opex in year one without changing the $1.55M cash
   decision Owen was actually making. Conflating the two — as the misuse example in
   [business_and_finance_vocabulary](../business_and_finance_vocabulary/business_and_finance_vocabulary.md)
   warns against — would have overstated how much the accounting treatment actually
@@ -515,7 +544,7 @@ free, it was simply the one option with no line item anyone had written down.
    "how much," "is it worth it," and "what could go wrong," in the order a reader deciding
    between four competing asks actually needs them.
 3. **Show your arithmetic, not just your conclusion.** A reader who can check "$1.4M
-   growing 20%/year" against the year-five figure of $2.9M trusts the $4.47M NPV more
+   growing 20%/year" against the year-five figure of $2.9M trusts the $3.06M NPV more
    than one who is asked to take it on faith.
 4. **Prepare for "what if we wait" as its own priced option**, not a rhetorical aside —
    it is close to the single most common CFO question about any multi-year investment.
@@ -525,9 +554,12 @@ free, it was simply the one option with no line item anyone had written down.
 6. **State the discount rate and the horizon out loud.** An NPV with no stated rate is not
    a number, it is a claim; stating "10%, five years" invites exactly the kind of scrutiny
    that makes the number more credible, not less.
-7. **Price the thing everyone forgets: the overlap.** The four-month parallel-run cutover
-   cost $467,000 that a naive "vendor bill stops the day we cut over" model would have
-   missed entirely.
+7. **Price the thing everyone forgets: the build period and the overlap.** Savings do not
+   start when the build starts. For 22 months Lumen pays every status-quo cost plus the
+   build, and for the last four of them PipeStream keeps billing about $560,000 at
+   Year-2 rates while the new platform (another $203,000) is already running. A naive
+   "vendor bill stops the day we start" model would have overstated the NPV by about
+   $1.4M and pulled payback in from month 34 to month 19.
 8. **When a "no" is really "not sized right," rescope instead of re-pitching the same
    number.** Phase 1 was not a smaller ask presented as a concession — it was the same
    arithmetic applied to a smaller, still fully-priced, scope.
@@ -541,19 +573,22 @@ free, it was simply the one option with no line item anyone had written down.
 
 **What the Q1 engineering-language pitch cost.** It was not rejected — it was shelved,
 which is a slower and more expensive failure than a clean no, because nothing forced a
-decision either way. Two quarters passed with the pitch sitting in "revisit later." In
-that window, PipeStream's cost grew on its normal 20% trajectory — roughly $140,000 of
-additional spend that a decision six months earlier would have started avoiding sooner.
-More costly: in Q2 2026, Lumen lost a competitive deal with Cascade Foods, a $600,000 ARR
-prospect, specifically because a rival observability vendor could demonstrate real-time
-anomaly correlation in a live bake-off — the same category of pipeline-latency problem
-Anomaly Copilot's correlation engine depends on (see
+decision either way. Two quarters passed with the pitch sitting in "revisit later." With
+an 18-month build and a four-month parallel run, a Q1 decision would have cut over in
+roughly Q4 2027; the Q3 decision cuts over two quarters later. Those six months of
+post-cutover savings are worth roughly **$830,000** at Year-3 prices (6 x $138,417), and
+they are not deferred, they fall out of the window for good, because PipeStream keeps
+billing for those six months either way.
+The Q2 2026 loss of Cascade Foods, a $600,000 ARR prospect, belongs in a pitch but not
+in the delay cost. A rival observability vendor won a live bake-off on real-time anomaly
+correlation — the same category of pipeline-latency problem Anomaly Copilot's correlation
+engine depends on (see
 [Saying No to a VP §1](saying_no_to_a_vp.md#1-situation--stakes)), and one that Lumen's
-fragmented, vendor-metered pipeline could not match on data freshness. The Q1 pitch was
-not wrong about the underlying problem; it simply never got funded in time to matter for
-that deal. Between the extra vendor spend and the lost deal, the two quarters of delay
-cost Lumen conservatively **$740,000** and hand a competitor a proof point sales reps
-still hear about in later cycles.
+fragmented, vendor-metered pipeline could not match on data freshness. Even a Q1 approval
+would not have shipped a new platform in time for a Q2 deal. What the lost deal prices is
+the underlying problem, which is why it belongs in a pitch as evidence, not as the cost of
+waiting. Counting it as a delay cost is the kind of overclaim a CFO's team catches, and
+it would have cost Pri the credibility the rest of the model earned.
 
 **What the fumbled "cheapest 80%" question cost.** Nothing catastrophic — Owen's response
 was patient, and the Friday follow-up closed the gap within days rather than months. But
@@ -571,14 +606,15 @@ a three-option memo ready before a scope conversation starts.
 
 - **If Owen had asked for the cheapest 50%, not 80%** — a much smaller foothold, say
   migrating only the billing/usage-metering pipeline — the honest answer is that the
-  project's NPV degrades faster than its scope shrinks, because the $467K parallel-run
-  migration cost is largely fixed regardless of how many pipelines move; a 50% option
-  likely would not have cleared payback inside 24 months, and the honest pitch says so
+  project's NPV degrades faster than its scope shrinks, because the platform's base build
+  and the parallel run are largely fixed regardless of how many pipelines move, while the
+  savings shrink with every pipeline left on PipeStream; a 50% option would likely pay
+  back well after Phase 1's month 25, and the honest pitch says so
   rather than shading the number to look better.
 - **If the discount rate had been 15%, not 10%** — a reasonable stress test for an
-  unproven internal build versus a known vendor — the five-year NPV would fall
-  meaningfully but stay positive; presenting that sensitivity unprompted, rather than
-  waiting to be asked, is a stronger version of this pitch than the one in §4.5.
+  unproven internal build versus a known vendor — the five-year NPV falls from +$3.06M to
+  about +$2.43M and stays positive; presenting that sensitivity unprompted, as the Q3 pitch
+  does, is what makes the 10% figure believable.
 - **If PipeStream's fee were flat instead of growing 20%/year**, the entire "what happens
   if we wait" answer collapses — waiting would cost only the ongoing $255K/year of
   homegrown-pipeline toil, not a compounding vendor line, and the urgency argument would
@@ -614,21 +650,21 @@ TCO comparison with no benefit side and no time value of money can show one opti
 cheaper without showing whether it is cheaper *enough*, *soon* enough, to beat other
 uses of the same capital. In this case study, TCO established that Project Confluence
 was cheaper than the status quo; NPV is what proved it was cheaper by enough, discounted,
-to justify $1.82M in cash today.
+to justify $1.55M in cash before the first dollar of savings.
 
 **Q: What is NPV, and why does the discount rate matter to the answer?**
 **Short:** NPV discounts future cash flows to today's dollars; a higher rate shrinks the value of later years.
 Net Present Value sums future cash flows after discounting each one back to today's
-dollars at a rate representing the return available elsewhere, then subtracts the
-upfront cost. At Lumen's 10% rate, Project Confluence's five-year NPV is +$4.47M; raising
-the rate to a riskier 15% would shrink that figure because it discounts the later,
-larger years of savings more heavily — stating the rate explicitly, rather than leaving
+dollars at a rate representing the return available elsewhere, including the negative
+flows of the build years. At Lumen's 10% rate, Project Confluence's five-year NPV is
++$3.06M; at a riskier 15% it falls to about +$2.43M because the later, larger years of
+savings are discounted more heavily — stating the rate explicitly, rather than leaving
 it implicit, is what lets a CFO trust or challenge the number on its own terms.
 
 **Q: What is the payback period, and why isn't a fast payback the whole answer?**
 **Short:** Payback is the time to recover the upfront cost; it ignores everything that happens after.
-Payback period is the point at which cumulative savings first exceed the upfront outlay —
-19 months here. It is a useful risk gut-check independent of NPV, because a CFO managing
+Payback period is the point at which cumulative cash first turns positive — month 34
+here, about a year after cutover. It is a useful risk gut-check independent of NPV, because a CFO managing
 near-term cash cares how fast money comes back regardless of the ultimate return. But
 payback cannot distinguish a barely-profitable fast payback from a hugely-profitable
 one, which is why NPV and payback were both presented rather than either alone.
@@ -637,8 +673,9 @@ one, which is why NPV and payback were both presented rather than either alone.
 **Short:** Price doing nothing as its own option and show that delay compounds cost rather than freezing it.
 The honest answer requires modeling the status-quo cost as its own line, not treating
 "wait" as a free, neutral default — in this case, PipeStream's 20% annual growth meant a
-year of waiting added roughly $1.66M of additional spend before the build even started
-and pushed the discounted return out a year, costing about $950K of the total NPV. The
+year of waiting did not save the build cost, it moved it, and gave up a year of
+post-cutover savings at Year-3 prices (about $1.66M undiscounted), costing roughly $1.1M of
+the $3.06M five-year NPV. The
 gotcha interviewers listen for is whether the candidate treats delay as costless or
 prices it explicitly.
 
@@ -658,25 +695,26 @@ Capital expenditure buys an asset whose value is spread over its useful life; op
 expenditure is expensed in the period it's incurred. Under US GAAP's internal-use
 software rules (ASC 350-40), a portion of a build like Project Confluence's $1.35M
 engineering cost can be capitalized rather than expensed immediately, changing how the
-project reads on the income statement without changing the $1.82M cash decision itself —
+project reads on the income statement without changing the $1.55M cash decision itself —
 conflating the accounting treatment with the underlying cash reality is a common,
 correctable mistake.
 
-**Q: What did the parallel-run migration cost, and why does that cost usually get left
+**Q: What did the parallel run and the build period cost, and why do they usually get left
 out of a build-vs-buy model?**
-**Short:** $467,000 for four months of paying the vendor fee while the new system already runs, easy to omit if only steady-state costs are modeled.
-Most build-vs-buy comparisons naively assume the vendor bill stops the instant the new
-system exists, when in practice both systems have to run side by side while output is
-validated — here, four months of continued PipeStream billing while the internal
-platform was already live and being checked against it. Naming and pricing that overlap
-explicitly, rather than letting it hide inside a rounding error, is what keeps the total
-upfront figure ($1.817M) honest.
+**Short:** Every status-quo cost keeps running through the 18-month build and 4-month overlap; booking savings from day one overstated NPV by about $1.4M.
+Most build-vs-buy comparisons naively take the full saving from the day the project
+starts, when in practice the vendor keeps billing through the whole build and then through
+a parallel run while output is validated — here, 18 months of build at $75,000 a month,
+then four months in which PipeStream billed about $560,000 at Year-2 rates while the
+internal platform ($203,000) was already running. Modeling that honestly moves payback from
+month 19 to month 34 and the five-year NPV from +$4.47M to +$3.06M, and it is the version a
+CFO's team cannot take apart.
 
 **Q: What is FinOps unit economics, and how did it strengthen this specific pitch?**
 **Short:** It ties spend to a business unit like cost-per-GB, making a vendor's growth-linked pricing visible and checkable.
 Unit economics reframes a cost as a rate — dollars per transaction, per customer, or in
-this case per gigabyte processed — rather than a flat annual figure, which the FinOps
-Foundation's 2026 State of FinOps report found roughly half of organizations now use to
+this case per gigabyte processed — rather than a flat annual figure, which Flexera's 2026
+State of the Cloud survey found 49% of organizations now use to
 tie spend to outcomes. Framing PipeStream's bill this way made the 20% year-over-year
 growth assumption a direct, checkable extrapolation of the vendor's own metered pricing
 against Lumen's known ingest growth, rather than an asserted number nobody could verify.
@@ -696,7 +734,7 @@ pitch and the finance-language pitch, given that both describe the same project?
 **Short:** The finance version replaces every unitless adjective with a dollar figure, a percentage, or a month count.
 Both versions describe the identical eighteen-month build with the identical scope; the
 only change is that "significant technical debt" becomes "$1.4M growing 20%/year," and
-"dramatically improve velocity" becomes "NPV +$4.47M, payback 19 months." Nothing about
+"dramatically improve velocity" becomes "NPV +$3.06M, payback in month 34." Nothing about
 the underlying engineering changed between Q1 and Q3 — only the currency the argument was
 made in, which is the entire lesson of this case study.
 

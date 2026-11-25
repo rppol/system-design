@@ -438,12 +438,18 @@ time."
 
 #### `Situational Leadership, Tuckman, and Dreyfus — briefly`
 
-**Situational Leadership** (Hersey and Blanchard) argues management style should shift by
-task and by person's readiness for that specific task, not by personality: **S1
+**Situational Leadership** comes in two lineages, and the labels differ. Paul Hersey and
+Ken Blanchard introduced it in 1969 as the "Life Cycle Theory of Leadership", renamed it
+Situational Leadership in the mid-1970s, and named the four styles Telling, Selling,
+Participating and Delegating, against the follower's "readiness". Blanchard's later
+**SLII** (Blanchard, Zigarmi and Zigarmi, *Leadership and the One Minute Manager*, 1985) relabels them and the follower's
+"development level" (competence plus commitment), and the two versions are now separately
+trademarked. The SLII labels most engineering managers learn are: **S1
 Directing** (high direction, low support — for low competence, high commitment), **S2
 Coaching** (high direction, high support — building competence), **S3 Supporting** (low
 direction, high support — competence is there, confidence isn't), **S4 Delegating** (low
-direction, low support — full autonomy). **Misuse:** treating a report as permanently
+direction, low support — full autonomy). Either way, style shifts by task and by the
+person's readiness for that specific task, not by personality. **Misuse:** treating a report as permanently
 "S2" or "S4" as a fixed trait rather than a per-task assessment — the same person can be
 S4 on their core specialty and S1 on a domain they're new to. **Correct use:** "you're S4
 on backend, full autonomy — but S1 on the new payments domain, so let's pair on it first."
@@ -455,9 +461,10 @@ Storming after any membership change, a reorg, or a new high-stakes project, whi
 normal, not a sign the team regressed permanently. **Correct use:** "we're back in
 Storming after the reorg — expected, not a regression; let's rebuild norms deliberately."
 
-**The Dreyfus model** of skill acquisition names five stages: Novice, Advanced Beginner,
-Competent, Proficient, Expert (the original 1980 labels reportedly differed slightly;
-treat these five as the now-standard terms). **Misuse:** equating "senior engineer" with
+**The Dreyfus model** of skill acquisition (Stuart and Hubert Dreyfus, first set out in a
+1980 report for the US Air Force Office of Scientific Research, elaborated in *Mind Over
+Machine*, 1986) names five stages: Novice, Advanced Beginner, Competent, Proficient, Expert,
+with a sixth, Mastery, added later. **Misuse:** equating "senior engineer" with
 Dreyfus "Expert" — many strong senior and even staff engineers are accurately Proficient,
 which is a normal, respectable place to be, not a deficiency the title should have
 already fixed. **Correct use:** "being Proficient, not Expert, on this stack is normal
@@ -847,16 +854,18 @@ a probe-and-adapt response was needed instead.
 
 ## 12. Interview Questions with Answers
 
-**Q: What's the actual difference between a mentor and a sponsor?**
-**Short:** A mentor advises you; a sponsor spends their own political capital advocating for you when you're not present.
-Sylvia Ann Hewlett's formula is "mentors advise; sponsors act" — a mentor shares
-knowledge and advice, while a sponsor is senior and powerful enough to advocate for,
-name, and place a more junior person in a visible role, spending real credibility to do
-it. Ibarra, Carter, and Silva's 2010 HBR study found mentorship predicted promotion for men two years
-later but had no such effect for women, largely because women's mentors tended to be less
-senior and lacked the clout to actually advocate. The practical gotcha: an engineer who
-has plenty of mentors and no sponsors can be well-advised and still stuck, because advice
-alone doesn't put your name in a room you're not in.
+**Q: What separates a sponsor from an ally, and why does the difference matter in a calibration meeting?**
+**Short:** A sponsor is a senior person who names you and spends their own credibility on your case; an ally supports people more broadly without that direct advocacy.
+Hewlett's formula defines the sponsor by action: a senior, powerful person who advocates
+for, names, and places a more junior person in a visible role, spending real credibility to
+do it. Allyship has no definition that tight; it is generally used for someone using their
+own position to support people from a less-represented group — amplifying their ideas in a
+meeting, flagging a biased word in a packet review — without the named, person-specific
+advocacy sponsorship implies. In a calibration meeting the difference is concrete: an ally
+can make the room fairer, but only someone who says "I have seen this work and I am putting
+my name behind it" moves a borderline packet. The practical gotcha: an engineer with
+plenty of allies and mentors and no sponsor can be well-supported and still stuck, because
+nobody is spending credibility on their name in a room they are not in.
 
 **Q: What are levels 1 and 7 of Appelo's Seven Levels of Delegation, and why does the
 model apply per-decision rather than per-person?**

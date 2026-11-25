@@ -173,7 +173,7 @@ business noun without losing the truth of the underlying claim. A partial workin
 | Engineering noun | Business noun | Example translation |
 |---|---|---|
 | Refactor the auth service | Incident-class removal | "Three of our last five customer-facing incidents traced to one component; two engineers for a quarter removes that class of incident." |
-| Technical debt | Change failure rate | "Our change failure rate is 18%, against an industry benchmark closer to 5-10%; every fifth deploy needs a follow-up fix." |
+| Technical debt | Change failure rate | "Our change failure rate is 18%, up from 9% two quarters ago; nearly one deploy in five now needs a follow-up fix." |
 | P99 latency | Checkout abandonment | "P99 checkout latency is 4.2s; each additional second of load time is correlated with measurable cart abandonment." |
 | We're on an EOL library version | Unpatched CVE exposure + audit finding | "We're carrying a known CVE class our last security audit flagged, and the vendor stopped shipping patches for it in March." |
 | Flaky test suite | Release cadence | "We ship every 3 weeks instead of weekly because a flaky suite adds two days of manual verification per release." |

@@ -370,8 +370,9 @@ commitment, easy to scale down. The FinOps counter-argument: reserved instances 
 savings plans "behave like fixed investments but fluctuate like variable costs" —
 committed-use discounts reintroduce a capex-like multi-year commitment inside what still
 looks like an opex line. Mature FinOps treats the capex/opex label as secondary to the
-real question, unit economics and eliminated waste (an industry-wide estimate put roughly
-a third of 2023 cloud spend as wasted) — a wasted opex dollar and a wasted capex dollar
+real question, unit economics and eliminated waste (Flexera's self-reported 2026 State of
+the Cloud survey puts estimated wasted IaaS and PaaS spend at 29%, up after five years of
+decline) — a wasted opex dollar and a wasted capex dollar
 are equally wasted.
 **Misuse.** "The cloud is opex, so it's automatically cheaper and better than capex." Some
 finance and tax positions genuinely prefer capex: capitalized assets can be depreciated in
@@ -939,8 +940,10 @@ raw total trains its leadership to react to noise instead of the number that mat
   Proc. 2025-28: the tax treatment of R&E expenditure, separate from the GAAP rules above.
 - Intercom Fin pricing page and Salesforce's Agentforce Flex Credits announcement (2025):
   worked public examples of outcome- and action-based pricing for AI agents.
-- FinOps Foundation (finops.org) — the Inform/Optimize/Operate framework, and the source
-  of the widely-cited estimate that roughly a third of 2023 cloud spend was wasted.
+- FinOps Foundation (finops.org) — the Inform/Optimize/Operate framework.
+- Flexera, *State of the Cloud Report 2026* (info.flexera.com) — the self-reported
+  estimate of wasted cloud spend (29%, up after five years of decline) and unit-economics
+  adoption (49%).
 - [Executive Communication](../executive_communication/executive_communication.md) — how
   to lead with the numbers this module defines when the audience is a CFO or a VP with
   five minutes.

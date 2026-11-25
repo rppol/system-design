@@ -344,7 +344,10 @@ attention, not minutes — the escalation has to be readable, and actionable, in
 
 **What "blameless" actually means.** John Allspaw's 2012 Etsy post "Blameless PostMortems
 and a Just Culture" — one of the most cited pieces of writing in the SRE literature —
-builds directly on Sidney Dekker's concept of a "second story": the first story is what a
+builds directly on the "second story" idea that Sidney Dekker popularized for software and
+safety audiences, and which Cook, Woods and Miller set out in *A Tale
+of Two Stories: Contrasting Views of Patient Safety* (National Patient Safety Foundation,
+1998): the first story is what a
 retrospective, hindsight-equipped reviewer sees ("they should have checked the config
 before deploying"); the second story is what the situation looked like to the person
 inside it, in real time, with the information, workload, and incentives they actually had.
@@ -679,6 +682,9 @@ nothing rather than trigger a process they've watched turn into blame before.
   2014 — the direct critique behind §6.5.
 - Sidney Dekker — *Just Culture: Balancing Safety and Accountability* — the "second story"
   concept that Allspaw's postmortem philosophy builds on.
+- Cook, Woods & Miller — *A Tale of Two Stories: Contrasting Views
+  of Patient Safety* (National Patient Safety Foundation, 1998) — the earlier first-story /
+  second-story framing from patient safety.
 - Google — *Site Reliability Engineering*, "Postmortem Culture: Learning from Failure"
   chapter — the source for defining postmortem trigger criteria in advance.
 - PagerDuty — public incident-response documentation (response.pagerduty.com) — the

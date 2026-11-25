@@ -100,6 +100,10 @@ diagram below captures both options and the failure mode each one accepts.
 
 ```mermaid
 flowchart LR
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     order(Order<br/>Service) -->|"checkout request"| decide{Stock check<br/>path}
     decide -->|"Option A: async"| queue([Kafka topic:<br/>OrderPlaced])
     queue --> inv1(Inventory<br/>Service consumer)
@@ -476,7 +480,12 @@ actual difference between the two runs visible in a way "Part B communicated bet
 not.
 
 ```mermaid
-flowchart TD
+flowchart LR
+    classDef good   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef bad    fill:#e06c75,stroke:#c0392b,color:#fff
+    classDef info   fill:#61afef,stroke:#2e86c1,color:#1a1a1a
+    classDef warn   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     dh0(DH0: Name-calling) --> dh1(DH1: Ad Hominem)
     dh1 --> dh2(DH2: Responding to Tone)
     dh2 --> dh3(DH3: Contradiction)

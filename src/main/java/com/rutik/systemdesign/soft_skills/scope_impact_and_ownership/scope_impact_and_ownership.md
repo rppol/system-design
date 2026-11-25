@@ -177,9 +177,9 @@ quadrantChart
     x-axis Local Blast Radius --> Fleet-Wide Blast Radius
     y-axis Additive Output --> Multiplier Output
     quadrant-1 Sets the standard
-    quadrant-2 Ships the feature
+    quadrant-2 Unblocks the team
     quadrant-3 Fixes the ticket
-    quadrant-4 Unblocks the team
+    quadrant-4 Ships the feature
     "Fix one endpoint": [0.15, 0.2]
     "Ship team feature": [0.35, 0.3]
     "Unblock a peer": [0.3, 0.65]

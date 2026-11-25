@@ -55,7 +55,7 @@ This module covers the IC side of the ladder — how it is built, how the same t
 A repeatable checklist for a document you've never seen before — a competing offer's ladder, a target company's public framework, or your own company's ladder on the first day you actually read it closely:
 
 1. **Find the fork point.** Where does IC split from management, and is it explicit (Square: L3 vs. L5) or informal?
-2. **Count the rungs above Senior.** One extra rung (Amazon: straight to Principal) behaves very differently from three (Google: Staff, Senior Staff, Principal) — more rungs usually means more calibration overhead but finer-grained recognition.
+2. **Count the rungs above Senior.** No Staff rung (Amazon: L6 SDE III, the senior rung, goes straight to L7 Principal SDE, with L8 and L10 above it) behaves very differently from Google's Staff, Senior Staff, Principal sequence — more rungs usually means more calibration overhead but finer-grained recognition.
 3. **Find the terminal level the document itself implies.** Look for language like "most engineers," "the majority," or an explicit statement that the next level isn't guaranteed (Monzo's "not a given" language for Principal is the clearest example in this module).
 4. **Translate each level's language back to the three axes in this section.** Ignore the company's own vocabulary; ask what it says about scope, ambiguity, and autonomy specifically.
 5. **Check whether there's a published or implied calibration process behind it,** or whether the document is aspirational with no committee actually reading packets against it — see §6 for what a real process looks like.
@@ -311,18 +311,53 @@ flowchart LR
 
 This is why two candidates with identical resumes sometimes land at different levels at the same company: the loop surfaced different evidence about scope and ambiguity, not different raw skill — and it is also why the prior title, sitting at the far left of the diagram, feeds the process only as a weak starting prior rather than as an input the committee treats as binding.
 
+### Same evidence, three ladders: a worked comparison
+
+Take one engineer's year and read it against three grids from §4.2. The evidence does not
+change; only the scope statement it is measured against does.
+
+> **The evidence.** Designed and led the move of four product teams (about 30 engineers)
+> from a shared Postgres instance to per-team databases. Wrote the RFC, got sign-off from
+> all four tech leads, built the migration tooling, and ran the cutover over two quarters
+> with zero customer-visible downtime. Two other engineers did most of the per-team work.
+> The goal ("stop the shared-database incidents") came from a director; the approach was
+> the engineer's.
+
+| Ladder | The rung's scope statement (§4.2) | How the evidence reads against it | Likely outcome |
+|---|---|---|---|
+| **Google** | L6 — Staff: leads a large project or product area | Four teams, own RFC, others executing — a large project, led | Strong L6 evidence; for L7 a committee would ask what changed beyond this one project |
+| **Apple** | ICT5 — leads the technology for a whole area across several teams | "A whole area" is the test: is per-team databases an area, or one project inside the storage area? | Strong ICT4 that is ICT5-shaped; the packet must show ownership of the area's direction, not one migration |
+| **Microsoft** | 65-67 — Principal Software Engineer (community-reported bands) | Multi-team technical leadership with a self-chosen approach is the usual Principal-band argument | Plausible 65; because the band map is community-reported, check the team's own written expectations first |
+
+**Weak version** (the packet line written once, for every ladder)
+
+> Led the database migration for four teams with zero downtime.
+
+**Strong version** (the same fact, written against Apple's "whole area" test)
+
+> Set the direction for how product teams own data in the storage area: wrote the
+> per-team-database RFC adopted by all four teams (about 30 engineers), chose the approach
+> against a goal-only brief, and built the tooling two other engineers used to run the
+> cutover — zero customer-visible downtime over two quarters. The pattern is now the
+> default for new teams in the area.
+
+**What changed:** the strong version answers the specific rung's question — "a whole area,
+across several teams" — instead of describing an activity. The last sentence is the
+area-level evidence; without it, the same work reads as one large project, which is the
+rung below.
+
 ---
 
 ## 7. Real-World Examples
 
-**Netflix's 2022 leveling reveal.** For roughly 25 years, Netflix ran essentially the entire engineering org — around 2,000 engineers — under a single title, "Senior Software Engineer," relying instead on market-rate pay (matching outside offers) and the "keeper test" (would your manager fight to keep you on the team?) rather than a leveling ladder. On August 10, 2022, Netflix rolled out a five-level grid, E3 through E7, and made everyone's assigned level visible in the corporate directory the same day. The stated reasons, per Netflix leadership at the time: the flat model didn't work for new-grad hiring (no intermediate rungs to grow through), wasn't sustainable to pay everyone at senior rates as headcount grew, and cost Netflix Staff+ candidates who assumed a company with no visible senior titles didn't value or reward advanced roles. The rollout was rocky — anonymous internal surveys reported 76% of engineers leveled at E5 said they intended to look for other jobs, and 68% said they were unhappy with their assigned level — because a level that used to be implicit and personal became a number stamped on a directory entry overnight, and most existing engineers were leveled at E5 regardless of how differentiated their actual scope had been under the old flat title.
+**Netflix's 2022 leveling reveal.** For roughly 25 years, Netflix ran essentially the entire engineering org — around 2,000 engineers — under a single title, "Senior Software Engineer," relying instead on market-rate pay (matching outside offers) and the "keeper test" (would your manager fight to keep you on the team?) rather than a leveling ladder. On August 10, 2022, Netflix rolled out a five-level grid, E3 through E7, and made everyone's assigned level visible in the corporate directory the same day. The stated reasons, per Netflix leadership at the time: the flat model didn't work for new-grad hiring (no intermediate rungs to grow through), wasn't sustainable to pay everyone at senior rates as headcount grew, and cost Netflix Staff+ candidates who assumed a company with no visible senior titles didn't value or reward advanced roles. The rollout was rocky — in self-selected polls on Netflix's anonymous Blind channel, only 24% of E5s who answered "now that levels are out, how many of you are leaving" said they planned to stay, and 68% answered "No" to "Are you happy with the level you are recognized with?" (The Pragmatic Engineer, which reported the polls, warns that Blind "tends to over-index on negative emotions") — because a level that used to be implicit and personal became a number stamped on a directory entry overnight, and most existing engineers were leveled at E5 regardless of how differentiated their actual scope had been under the old flat title.
 
 ```mermaid
 timeline
     title Netflix's Shift From Flat Titles to Levels
     2000 to 2022 : One title company-wide, "Senior Software Engineer," for roughly 2,000 engineers
     Aug 10, 2022 : E3-E7 levels revealed company-wide via the corporate directory
-    Weeks after : 76% of new E5s report intent to leave, 68% unhappy with assigned level
+    Weeks after : Blind polls - only 24% of new E5s say they will stay, 68% unhappy with assigned level
 ```
 
 The chart's shape is the lesson, not just the dates: 22 years of stability, one visibility change, immediate and measurable friction — the risk isn't introducing levels, it's introducing them without a gradual on-ramp onto a culture that was never built around comparing them.
@@ -370,7 +405,7 @@ The recruiter's framing is doing real work here: naming the specific axis the lo
 | **Loosely worded ladder** ("shows good judgment," few concrete examples) | Stays current without constant rewriting; harder to game mechanically | Recreates the exact inconsistency-across-managers problem the ladder was supposed to fix, just one level removed |
 | **Publishing the ladder externally** (Monzo, Square, CircleCI, Rent the Runway) | Recruiting signal, negotiation leverage for candidates, public accountability that the internal document matches the internal reality | Legal and comp-band exposure; a public commitment is harder to quietly redefine when the business changes |
 | **Keeping the ladder private** | Flexibility to recalibrate without a public paper trail; avoids candidates negotiating against your own document | Opacity that candidates and even employees read as evasiveness, and a comp/leveling gap that only outside aggregators (levels.fyi) end up documenting instead |
-| **Numbered levels everywhere** (Google, Meta, Amazon, Microsoft, Apple, post-2022 Netflix) | Legible, quantifiable, comparable in bulk (this is exactly what makes levels.fyi possible) | Turns level into a visible, comparable status marker — which is precisely the dynamic Netflix's 76%-want-to-leave number shows can backfire when introduced onto a culture that wasn't built around it |
+| **Numbered levels everywhere** (Google, Meta, Amazon, Microsoft, Apple, post-2022 Netflix) | Legible, quantifiable, comparable in bulk (this is exactly what makes levels.fyi possible) | Turns level into a visible, comparable status marker — which is precisely the dynamic Netflix's Blind polls (only 24% of new E5s planning to stay) show can backfire when introduced onto a culture that wasn't built around it |
 | **One flat title for everyone** (pre-2022 Netflix) | No status ladder to game internally; hiring and pay decoupled from a level number | No intermediate rungs for growing engineers, and — per Netflix's own stated reasoning — a signal to Staff+ candidates that advanced scope isn't recognized |
 | **Frequent calibration cycles** (quarterly-style committees) | Faster recognition of genuine scope growth; less time spent doing work at a level before it's acknowledged | More committee overhead per year; more opportunities for a packet to be rushed or under-evidenced because the next cycle always feels close |
 | **Infrequent calibration cycles** (annual or semi-annual) | Deeper, better-evidenced packets — a full six or twelve months to accumulate real translated evidence | Longer stretches of doing next-level work without recognition, which is exactly the gap the §12 Q&A on "doing staff work for two years" describes |
@@ -400,7 +435,7 @@ A useful proxy question for "is it time yet": can the two most senior engineerin
 
 ## 10. Common Pitfalls
 
-**The Netflix E5 shock (2022).** Covered in §7 with the numbers: 76% of newly-leveled E5 engineers said they intended to leave, 68% were unhappy with their assigned level. The mechanism worth internalizing: a level that used to be *invisible and personal* ("I know I'm doing good work") became *visible and comparative* ("I am now provably the same level as the person next to me who I always assumed was more senior") in a single day, with no gradual adjustment period. Any org introducing levels onto a previously flat or informal culture should expect this exact failure mode, not treat Netflix's outcome as a one-off.
+**The Netflix E5 shock (2022).** Covered in §7 with the numbers: in self-selected Blind polls, only 24% of newly-leveled E5 engineers said they planned to stay, and 68% were unhappy with their assigned level (Blind over-indexes on negative sentiment, so read these as direction, not prevalence). The mechanism worth internalizing: a level that used to be *invisible and personal* ("I know I'm doing good work") became *visible and comparative* ("I am now provably the same level as the person next to me who I always assumed was more senior") in a single day, with no gradual adjustment period. Any org introducing levels onto a previously flat or informal culture should expect this exact failure mode, not treat Netflix's outcome as a one-off.
 
 **Comparing offers by title instead of scope statement.**
 
@@ -438,7 +473,7 @@ A useful proxy question for "is it time yet": can the two most senior engineerin
 - **progression.fyi** — aggregator of dozens of public company ladders in a comparable, structured format.
 - **levels.fyi** — crowdsourced compensation-by-level aggregator; the custom level-mapping tool is the practical way to line up unfamiliar companies' numbering against each other.
 - **The Pragmatic Engineer (Gergely Orosz)** — reporting on Netflix's 2022 leveling introduction, including the internal survey figures cited in §7.
-- **Will Larson, *Staff Engineer: Leadership Beyond the Management Track* (2021)** — the primary reference for what changes once an engineer is past the Senior rung; the archetype taxonomy it introduces belongs to [Scope, Impact & Ownership](../scope_impact_and_ownership/scope_impact_and_ownership.md) rather than this module.
+- **Will Larson, *Staff Engineer: Leadership Beyond the Management Track* (2021)** — the primary reference for what changes once an engineer is past the Senior rung; the archetype taxonomy it introduces is covered in [Staff+ Archetypes](../staff_plus_archetypes/staff_plus_archetypes.md) rather than this module.
 
 **Which source to reach for, by question:**
 
@@ -448,7 +483,7 @@ A useful proxy question for "is it time yet": can the two most senior engineerin
 | "What does this level pay?" | `levels.fyi` |
 | "How do I compare an unfamiliar company's numbering to one I know?" | `levels.fyi`'s custom level-mapping tool, read as an estimate (§10, §12) |
 | "How do IC and management tracks actually diverge?" | Camille Fournier, *The Manager's Path* |
-| "What actually changes at Staff, beyond a bigger scope statement?" | Will Larson, *Staff Engineer*; see [Scope, Impact & Ownership](../scope_impact_and_ownership/scope_impact_and_ownership.md) |
+| "What actually changes at Staff, beyond a bigger scope statement?" | Will Larson, *Staff Engineer*; see [Staff+ Archetypes](../staff_plus_archetypes/staff_plus_archetypes.md) |
 | "What happens when a flat, title-free culture introduces levels?" | The Pragmatic Engineer's Netflix reporting, §7 |
 
 ---
@@ -485,7 +520,7 @@ A manager first maps the candidate's evidence onto the ladder's own scope-statem
 
 **Q: What changed when Netflix introduced formal engineering levels in 2022?**
 **Short:** Netflix replaced one flat "Senior Software Engineer" title with E3-E7 levels on August 10, 2022.
-Netflix replaced roughly 25 years of a single flat title — "Senior Software Engineer" for essentially the entire engineering org — with a five-level grid (E3 through E7), making the change visible company-wide in the corporate directory on August 10, 2022. The stated reasons were new-grad hiring (no intermediate rungs previously existed), cost sustainability (paying everyone at senior rates didn't scale), and losing Staff+ candidates who assumed a title-flat company didn't value advanced roles. The rollout produced real internal friction — 76% of newly-leveled E5 engineers reported intending to leave, 68% were unhappy with their level — because a status that used to be invisible became a number stamped on a directory entry overnight.
+Netflix replaced roughly 25 years of a single flat title — "Senior Software Engineer" for essentially the entire engineering org — with a five-level grid (E3 through E7), making the change visible company-wide in the corporate directory on August 10, 2022. The stated reasons were new-grad hiring (no intermediate rungs previously existed), cost sustainability (paying everyone at senior rates didn't scale), and losing Staff+ candidates who assumed a title-flat company didn't value advanced roles. The rollout produced real internal friction — in self-selected polls on Blind, only 24% of newly-leveled E5 engineers said they planned to stay and 68% were unhappy with their level, figures the reporting source cautions over-index on negative sentiment — because a status that used to be invisible became a number stamped on a directory entry overnight.
 
 **Q: Why do most ladders make Staff an optional, competitive step rather than an automatic one after Senior?**
 **Short:** Staff is optional after Senior because it requires a role and problem of that scope to exist, not just skill.

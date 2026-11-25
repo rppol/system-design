@@ -219,12 +219,13 @@ as its own full statement, not a wrapper.
 
 ### 6.3 The research that should make you humble
 
-Kluger and DeNisi's 1996 meta-analysis in *Psychological Bulletin*, covering 131
-experiments and 607 effect sizes, found that feedback interventions improved performance on
-average — but in roughly 38% of the individual studies, the feedback *decreased*
-performance. That number is widely cited; treat it as an order-of-magnitude finding
-("well over a third") rather than a precise universal constant, since it's an average across
-a wide range of feedback types and contexts, not a fixed rate for any single kind of
+Kluger and DeNisi's 1996 meta-analysis in *Psychological Bulletin*, covering 131 papers
+(the 5% of those they reviewed that met their inclusion criteria), 607 effect sizes and
+23,663 observations, found that feedback interventions improved performance on average
+(d = .41) — but **over 38% of the 607 effect sizes were negative**: in those cases the
+feedback *decreased* performance. The abstract rounds this to "over 1/3 of the FIs". The
+unit matters: it is 38% of effect sizes, not 38% of studies, and it is an average across a
+wide range of feedback types and contexts, not a fixed rate for any single kind of
 feedback. Their explanation, Feedback Intervention Theory, is the load-bearing part for this
 module: feedback that shifts the recipient's attention toward the **self** — how am I doing,
 what does this say about me — tends to hurt performance, while feedback that keeps attention
@@ -521,7 +522,7 @@ conversation to surface what had really happened.
 | Center for Creative Leadership / various practitioners, SBI-I | SBI plus an explicit step asking the other person's intent before concluding |
 | Kim Scott, *Radical Candor: Be a Kick-Ass Boss Without Losing Your Humanity* (2017) | The Care Personally / Challenge Directly axes and the four named quadrants |
 | Douglas Stone & Sheila Heen, *Thanks for the Feedback: The Science and Art of Receiving Feedback Well* (2014) | The three triggers — truth, relationship, identity — and how to work each |
-| Avraham Kluger & Angelo DeNisi, "The Effects of Feedback Interventions on Performance," *Psychological Bulletin* 119(2), 1996 | The meta-analysis showing feedback interventions decreased performance in roughly a third to 38% of studies, and Feedback Intervention Theory (self-focus hurts, task-focus helps) |
+| Avraham Kluger & Angelo DeNisi, "The Effects of Feedback Interventions on Performance," *Psychological Bulletin* 119(2), 1996 | The meta-analysis (131 papers, 607 effect sizes) in which over 38% of feedback effect sizes were negative, and Feedback Intervention Theory (self-focus hurts, task-focus helps) |
 | Ed Catmull with Amy Wallace, *Creativity, Inc.* (2014) | Pixar's Braintrust — candid, non-mandatory peer feedback as an organizational structure |
 
 Related modules in this section: [Influence Without Authority](../influence_without_authority/influence_without_authority.md),
@@ -568,11 +569,11 @@ separate, complete conversations, sequenced rather than stapled, with the correc
 while attention is sharpest if both are needed in one sitting.
 
 **Q: What did Kluger and DeNisi's 1996 meta-analysis find, and what does it imply about how to give feedback?**
-**Short:** Feedback interventions decreased performance in roughly a third of the studies reviewed.
-Their meta-analysis of 131 experiments in *Psychological Bulletin* found feedback improved
-performance on average but made it worse in a substantial share of cases — commonly cited
-around 38%, though treat that as an order-of-magnitude figure rather than a precise
-universal rate. Their explanation, Feedback Intervention Theory, is the actionable part:
+**Short:** Feedback improved performance on average but decreased it in over 38% of 607 effect sizes, mostly when it pulled attention onto the self.
+Their meta-analysis of 131 papers in *Psychological Bulletin* (607 effect sizes, 23,663
+observations) found feedback improved performance on average (d = .41) but made it worse
+in over 38% of the effect sizes — a share of effect sizes, not of studies, and an average
+across very different feedback types rather than a universal rate. Their explanation, Feedback Intervention Theory, is the actionable part:
 feedback that shifts attention to the self — what this says about me — tends to hurt
 performance, while feedback that keeps attention on the task tends to help it. It's the
 research case for staying on the SBI side of the line.

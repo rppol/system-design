@@ -1,5 +1,11 @@
 # Interviewing as the Interviewer
 
+> **Currency anchor (2026-11-25).** The legal table and the AI-in-interview policies were
+> checked on this date: NYC Local Law 144, Illinois HB 3773 (notice rules proposed and
+> withdrawn in 2026), the EU AI Act as amended by Regulation (EU) 2026/1744, Canva's
+> AI-required round (June 2025) and Meta's AI-assisted coding pilot (2025). Hiring law
+> moves fast; re-check the "In force" column before relying on it.
+
 ## 1. Concept Overview
 
 A staff engineer who runs interviews for three years at a normal hiring pace sits on 40-80
@@ -203,15 +209,19 @@ meta-analysis in *Psychological Bulletin*, "The Validity and Utility of Selectio
 Personnel Psychology," which aggregated 85 years of personnel-selection research and put
 structured interviews at roughly .51 predictive validity against roughly .38 for
 unstructured interviews — a large, durable gap by the standards of that literature. Treating
-those exact figures as the final word would be dishonest: a more recent meta-analytic update
-(Sackett et al., "Revisiting the Design of Selection Systems in Light of New Findings
-Regarding the Validity of Widely Used Predictors," 2023) revised the structured-interview
-estimate down to roughly .42 once newer studies and corrections for range restriction and
-other statistical artifacts were incorporated. The direction of the finding — structured
-clearly and reliably beats unstructured — has held up for over two decades of
-re-examination; the exact magnitude has been revised downward, and an interviewer citing
-this research should say so rather than quoting 1998 as if it were still the current
-number.
+those exact figures as the final word would be dishonest. Paul Sackett, Charlene Zhang,
+Christopher Berry and Filip Lievens ("Revisiting Meta-Analytic Estimates of Validity in
+Personnel Selection: Addressing Systematic Overcorrection for Restriction of Range,"
+*Journal of Applied Psychology*, 2022) showed that the range-restriction corrections used in
+the older meta-analyses were often inappropriate and **overcorrected**, inflating many
+validity estimates by .10 to .20. Removing the overcorrection put structured interviews at
+about **.42** (80% credibility interval .18 to .66), unstructured interviews at about
+**.19**, and general mental ability at **.31** (down from .51). Their 2023 follow-up in
+*Industrial and Organizational Psychology* ("Revisiting the Design of Selection Systems in
+Light of New Findings Regarding the Validity of Widely Used Predictors") draws the stronger
+conclusion: structured interviews are now the **top-ranked** predictor of the ones studied.
+So every magnitude fell, and the structured-over-unstructured gap widened rather than closed.
+An interviewer citing this research should quote the 2022 numbers, not 1998's.
 
 Google's own re:Work materials (rework.withgoogle.com, "A guide to structured interviewing
 for better hiring practices") make the same case from a different angle: same questions
@@ -566,7 +576,7 @@ data-protection basis.
 | Illinois HB 3773 (amends the Illinois Human Rights Act) | any AI use in recruitment, hiring, promotion, discipline or discharge | bans AI use that has a discriminatory effect, bans zip code as a proxy for a protected class, requires notice to employees | January 1, 2026; IDHR proposed notice rules in May 2026 and withdrew them in June 2026, so the notice format is still undefined |
 | Illinois Artificial Intelligence Video Interview Act | AI analysis of recorded video interviews | explain the AI to the applicant and get consent before use | January 1, 2020 |
 | EU AI Act, Art. 5(1)(f) | emotion recognition in the workplace | prohibited, outside medical or safety uses | February 2, 2025 |
-| EU AI Act, Annex III point 4 | AI for recruitment, filtering applications, evaluating candidates | high-risk system: risk management, human oversight, logging, transparency to the people assessed | December 2, 2027, after the AI Omnibus, Regulation (EU) 2026/1744, moved it from August 2, 2026 |
+| EU AI Act, Annex III point 4 | AI for recruitment, filtering applications, evaluating candidates | high-risk system: risk management, human oversight, logging, transparency to the people assessed | December 2, 2027, after the AI Omnibus, Regulation (EU) 2026/1744 (in force July 27, 2026), moved it from August 2, 2026 |
 
 What this means for the interviewer, not the legal team:
 
@@ -706,12 +716,12 @@ there wasn't one.
 |---|---|
 | Google re:Work, "A guide to structured interviewing for better hiring practices" (rework.withgoogle.com) | Google's own published rationale and practical guidance for structured over unstructured interviewing |
 | Frank Schmidt & John Hunter, "The Validity and Utility of Selection Methods in Personnel Psychology," *Psychological Bulletin* (1998) | The canonical 85-year meta-analysis behind the .51 vs .38 structured-vs-unstructured validity figures |
-| Paul Sackett et al., meta-analytic update on selection-method validity (2023) | A more recent, lower (~.42) estimate for structured interview validity — the honest revision of the 1998 numbers |
+| Paul Sackett, Charlene Zhang, Christopher Berry & Filip Lievens, *Journal of Applied Psychology* (2022), doi:10.1037/apl0000994; follow-up in *Industrial and Organizational Psychology* (2023) | Removes the range-restriction overcorrection: structured interviews ~.42 (now top-ranked), unstructured ~.19, general mental ability ~.31 |
 | Daniel Kahneman, Olivier Sibony, Cass Sunstein, *Noise: A Flaw in Human Judgment* (2021) | The "mediating assessments protocol" — independent judgment before group discussion — and the broader case for why unstructured group decisions are noisier than most people assume |
 | Paul C. Smith & Lorne M. Kendall, "Retranslation of expectations: An approach to the construction of unambiguous anchors for rating scales," *Journal of Applied Psychology* (1963) | The original Behaviorally Anchored Rating Scale (BARS) method behind §6.3's rubric format |
 | John C. Flanagan, "The Critical Incident Technique," *Psychological Bulletin* (1954) | The research lineage behind building interview questions around specific, describable past behaviour |
 | NYC Department of Consumer and Worker Protection, "Automated Employment Decision Tools" (Local Law 144 of 2021 and its rules) | The bias-audit, public-summary and 10-business-day notice rules for automated hiring tools |
-| Regulation (EU) 2024/1689 (AI Act), Art. 5 and Annex III, as amended by Regulation (EU) 2026/1744 | The workplace emotion-recognition ban and the high-risk status of recruitment AI, with its December 2, 2027 application date |
+| Regulation (EU) 2024/1689 (AI Act), Art. 5 and Annex III, as amended by Regulation (EU) 2026/1744 (the "AI Omnibus", in force July 27, 2026, per the Commission's AI Act policy page at digital-strategy.ec.europa.eu) | The workplace emotion-recognition ban and the high-risk status of recruitment AI, with its December 2, 2027 application date |
 | Simon Newton (Canva), "Yes, you can use AI in our interviews. In fact, we insist." (June 2025) | A worked example of an AI-required technical round and what it scores |
 | aboutamazon.com, "What is an Amazon bar raiser?" | Official framing of an independent, outside-the-hiring-team interviewer role — see the companion module's §6.1 for full detail |
 

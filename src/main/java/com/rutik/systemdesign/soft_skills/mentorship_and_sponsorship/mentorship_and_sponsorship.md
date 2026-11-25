@@ -221,10 +221,7 @@ providing "air cover" when something goes wrong on their watch, and — the phra
 uses that captures the scope of it — not stopping at getting someone one promotion, but
 "seeing them to the threshold of power." A single good word in a hallway is not
 sponsorship under this definition; a sustained, repeated pattern of spending your own
-standing on someone's behalf, across more than one decision, is. Hewlett's research also
-found a concrete downstream effect: among employees who asked for a raise, nearly half of
-men with a sponsor got it, versus 38% of women with a sponsor — sponsorship correlates
-with the ask actually landing, but not equally for everyone who has one.
+standing on someone's behalf, across more than one decision, is.
 
 Lara Hogan, the management consultant behind Wherewithall and author of *Resilient
 Management* (A Book Apart, 2019), frames the practical difference the same way from the

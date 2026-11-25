@@ -1,5 +1,12 @@
 # Engineering Leadership in the AI Era
 
+> **Currency anchor (2026-11-25).** Every figure here was checked against: the DORA 2024
+> report and the 2025 "State of AI-assisted Software Development" report (no 2026 DORA
+> report had been published on this date), METR's 2025 randomized trial and its February
+> and May 2026 follow-ups, the Stack Overflow 2026 Developer Survey (30,903 responses, 169
+> countries), GitHub Octoverse 2025, and Faros AI's 2025 telemetry report. When a newer
+> edition of any of these exists, re-check the matching paragraph before quoting it.
+
 ## 1. Concept Overview
 
 By August 2026, AI-assisted coding is no longer a pilot program at most engineering
@@ -30,8 +37,9 @@ absence is reported as a finding, not silently dropped.
 **Mental model.** Before this era, the bottleneck in most engineering orgs was writing code:
 someone had to type the implementation, and everything downstream — review, test, ship —
 waited on that. The bottleneck has measurably moved. GitHub's own 2025 platform data shows
-commit volume up over 25% year over year while comments on those commits fell 27% — more
-gets written, proportionally less of it gets looked at closely. The scarce resource in 2026
+commits up 25% and pull requests created up 20.4% year over year, while comments on issues
+and PRs stayed essentially flat (+0.35%) — more gets written, and the conversation around
+it did not grow with it. The scarce resource in 2026
 is not code generation; it is verified judgment about whether the generated code is actually
 correct, and someone willing to be accountable for it.
 
@@ -46,7 +54,7 @@ careful writing were close to the same activity.
 **Key insight.** The evidence in this module points at an uncomfortable, well-corroborated
 finding: AI tooling reliably makes people *feel* faster more consistently than it makes them
 *measurably* faster, and the gap between those two things is exactly where a team's real
-risk accumulates. Section 6.3 covers a randomized controlled trial where this gap was
+risk accumulates. Section 6.4 covers a randomized controlled trial where this gap was
 directly measured, not inferred.
 
 ---
@@ -106,7 +114,7 @@ flowchart LR
     classDef calm   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
 
     spec(Spec or issue<br/>written by a human) --> gen(AI generates<br/>a full draft PR)
-    gen --> volume(PR volume up<br/>~98% at high-AI teams)
+    gen --> volume(Merged PRs up<br/>~98% at high-AI teams)
     volume --> bottleneck{Reviewer capacity<br/>roughly flat}
     bottleneck --> deep(Careful review<br/>gets rarer per PR)
     bottleneck --> rubber(Rubber-stamp merge)
@@ -123,32 +131,34 @@ flowchart LR
     class risk bad
 ```
 
-The bottleneck did not disappear when generation got cheap — it relocated. §6.6 gives the
+The bottleneck did not disappear when generation got cheap — it relocated. §6.7 gives the
 vendor-reported numbers behind the volume and review-time figures in this diagram, flagged
 for what they are: real, but published by companies selling tools into this exact problem.
 
 ```mermaid
 xychart-beta
     title "High-AI-adoption teams vs baseline, % change (Faros AI, 2025, vendor-reported, n 10,000+ devs)"
-    x-axis [PR Volume, PRs Merged, Review Time, Tasks Completed]
+    x-axis [PRs Merged, Review Time, Tasks Completed]
     y-axis "percent change vs baseline" 0 --> 100
-    bar [98, 98, 91, 21]
+    bar [98, 91, 21]
 ```
 
-Every bar in this chart moved in the direction more-is-more — more PRs opened, more merged,
-more tasks completed — except that review time grew nearly as fast as volume, meaning the
-proportional depth of any single review did not obviously improve, and by GitHub's
-independently measured comment-count data (§6.5) it went the other way.
+Every bar in this chart moved in the direction more-is-more — more PRs merged, more tasks
+completed — except that PR review time grew almost as fast as merged volume, while tasks
+completed rose only 21%. Faros reads that gap as the bottleneck moving to human approval.
+GitHub's platform data (§6.6) does not show review conversation keeping pace either:
+comments on issues and PRs were essentially flat (+0.35%) in a year when PRs created rose
+20.4%.
 
 ```mermaid
 quadrantChart
     title Skill value vs AI substitution, 2026
     x-axis Low AI Substitution --> High AI Substitution
     y-axis Low Value Increase --> High Value Increase
-    quadrant-1 Rising judgment work
-    quadrant-2 Commodity, low leverage
+    quadrant-1 Automated, still valuable
+    quadrant-2 Rising judgment work
     quadrant-3 Stable craft
-    quadrant-4 Automated, still valuable
+    quadrant-4 Commodity, low leverage
     "Writing an unambiguous spec": [0.2, 0.9]
     "Deciding which problem is worth solving": [0.15, 0.95]
     "Boilerplate CRUD implementation": [0.9, 0.15]
@@ -325,21 +335,28 @@ positioned to benefit from a rosy AI-adoption narrative — read the numbers on 
 terms rather than the framing GitHub puts around them. Developers pushed **nearly 1 billion
 commits in 2025, up 25.1% year over year**, with a single-month record of roughly 100
 million commits in August. Pull request merges averaged **43.2 million a month, up 23% year
-over year**. In the same period, **comments on commits fell 27% year over year** — more
-code changed hands, and proportionally less of it drew a written response from another
-human. GitHub's own Copilot coding agent authored **over one million pull requests between
-May and September 2025** — real, platform-counted evidence of delegated-mode adoption at
-scale (§4).
+over year**. In the same table, **pull requests created rose 20.4%** (47.5M against 39.5M),
+**comments on issues and PRs were "essentially flat (+0.35%)"**, and **comments on commits
+fell 27%**. Read those two comment figures precisely. Code review happens on pull requests,
+so the review-relevant number is the flat one: PR volume grew by a fifth while the
+conversation on issues and PRs did not grow at all. The −27% is comments attached directly
+to commits, a channel few teams review in, and it is not a measure of review depth. GitHub
+itself labels all of these "observational signals rather than causal claims". GitHub's own
+Copilot coding agent created **over one million pull requests between May and September
+2025** — real, platform-counted evidence of delegated-mode adoption at scale (§4).
 
 The report separately flags a security signal worth naming precisely: **Broken Access
-Control overtook Injection as the most common vulnerability class flagged on GitHub, found
-in over 151,000 repositories, a 172% year-over-year increase** — GitHub's own explanation is
-that AI-generated code scaffolds frequently produce endpoints that look structurally correct
-while omitting the authentication check that would have caught the class of bug, which is a
-direct, concrete instance of the "confidently wrong rather than obviously broken" failure
-mode this module keeps returning to.
+Control overtook Injection as the most common CodeQL alert, flagged in over 151,000
+repositories, a 172% year-over-year increase**. GitHub names two causes: "misconfigured
+permissions in CI/CD pipelines and AI-generated scaffolds that skip critical auth checks".
+Part of the jump is also new measurement: CodeQL gained coverage for GitHub Actions in the
+same period, and that coverage "revealed widespread misconfigured permissions and token
+scopes". The AI-scaffold share is therefore one cause among several, not the whole spike.
+That share is still a direct, concrete instance of the "confidently wrong rather than
+obviously broken" failure mode this module keeps returning to: an endpoint that looks
+structurally correct and omits the authentication check.
 
-### 6.7 The reviewer bottleneck — vendor-reported magnitude, independently corroborated direction
+### 6.7 The reviewer bottleneck — vendor-reported magnitude, corroborated direction
 
 Faros AI, an engineering-analytics vendor, reports from telemetry across more than 10,000
 developers that teams with high AI adoption completed 21% more tasks and merged 98% more
@@ -352,11 +369,14 @@ faster than it is being safely integrated.
 
 **Treat the exact magnitudes with real caution — these are all vendors whose products are
 sold as the fix for exactly the problem their own data describes.** What is not merely a
-vendor claim is the *direction*: it agrees with GitHub's own independently measured -27%
-comment-count figure in §6.6 and with the DORA 2024/2025 findings in §6.2-6.3. Three
-differently-motivated, differently-methodologied sources converging on "review did not scale
-with generation" is a stronger basis for believing the direction of the effect than any one
-of them alone, even while none of the specific percentages should be treated as precise.
+vendor claim is the *direction*, and it rests on two independent lines of evidence, not
+three: the DORA 2024/2025 findings in §6.2-6.3, and the vendor telemetry above. GitHub's
+Octoverse data (§6.6) is consistent with the direction (PRs created +20.4% against flat
+issue and PR comments) but GitHub calls it observational, and its −27% commit-comment
+figure does not measure review at all, so it is not counted as a third corroboration. Two
+differently-motivated sources converging on "review did not scale with generation" is a
+better basis for believing the direction than either alone, even while none of the specific
+percentages should be treated as precise.
 
 ### 6.8 The verification burden — why "looks right" is worse than "doesn't compile"
 
@@ -543,7 +563,7 @@ no ambiguity for either kind of executor to confidently fill in the wrong way.
 | Adoption mode | Individual productivity (reported) | Delivery stability (reported, DORA) | Review load (measured + vendor-reported) |
 |---|---|---|---|
 | **Assistive** (autocomplete, chat) | High reported gains (DORA 2024/2025, Stack Overflow) | Least implicated in the 2024 stability finding — batch size changes less | Closest to pre-AI baseline |
-| **Delegated** (agent authors full PRs) | Highest reported task-completion gains (Faros AI: +21% tasks) | Most exposed to the 2024/2025 batch-size and amplifier findings | Sharpest measured increase — Faros AI +91% review time, GitHub -27% comment depth |
+| **Delegated** (agent authors full PRs) | Highest reported task-completion gains (Faros AI: +21% tasks) | Most exposed to the 2024/2025 batch-size and amplifier findings | Sharpest measured increase — Faros AI +91% review time; GitHub issue and PR comments flat (+0.35%) while PRs created rose 20.4% |
 | **Autonomous** (minimal human review) | Reported as fastest, least verified | Untested at scale in the sources this module could verify | Effectively externalizes verification onto whoever discovers the failure downstream |
 
 **The honest tension.** Every mode that increases reported individual speed also increases
@@ -586,9 +606,11 @@ as a failed rollout.
 **Measuring engineers on lines of code or PR count in 2026.** Both are now trivially
 inflated by a tool that can generate a large, structurally plausible diff on request — a
 metric that was already a weak proxy for engineering value a decade ago is a materially
-worse one now that generation cost has collapsed. GitHub's own -27%-comments-per-commit
-figure (§6.6) is the visible symptom of exactly this: volume metrics kept climbing while the
-signal a human actually reviewed anything carefully fell.
+worse one now that generation cost has collapsed. GitHub's own 2025 platform data (§6.6)
+shows the shape of the problem: pull requests created rose 20.4% while comments on issues and
+PRs stayed flat, so volume metrics kept climbing while the human conversation around each
+change did not grow with them. GitHub calls this observational, not causal, and so should
+any manager who quotes it.
 
 **Ranking engineers on AI usage or token spend.** Token leaderboards ("tokenmaxxing") spread
 through large tech companies in early 2026. DORA's June 2, 2026 analysis ("Finding balance
@@ -670,7 +692,7 @@ specific team rather than importing someone else's number.
 | Stack Overflow, "2026 Developer Survey" (survey.stackoverflow.co/2026) | 30,903 responses: 80% use AI at least an hour a day, 62% favorable, 48% trust AI when they can verify it, 69.9% ask an AI agent for answers |
 | Evan Conaway, "Finding balance in the era of tokenmaxxing" (dora.dev/insights, 2026-06-02) | DORA's case against token leaderboards as a vanity metric, and the outcome metrics it recommends instead |
 | DORA, "ROI of AI-assisted Software Development" (dora.dev/research/publications) | Calculations and conversation starters for the rollout productivity dip and for defending the AI budget |
-| GitHub, "Octoverse 2025" (github.blog/news-insights/octoverse) | Platform-measured commit, PR, and comment-volume data; the Broken Access Control security finding |
+| GitHub, "Octoverse 2025" (github.blog/news-insights/octoverse) | Platform-measured commit, PR and comment-volume data (labelled by GitHub as observational, not causal); the Broken Access Control CodeQL finding and its two named causes |
 | Erik Brynjolfsson, Bharat Chandar, Ruyu Chen, "Canaries in the Coal Mine? Six Facts about the Recent Employment Effects of Artificial Intelligence" (Stanford Digital Economy Lab, 2025, updated 2026) | The quasi-causal evidence on young-worker employment in AI-exposed occupations |
 | SignalFire, "State of Talent Report" (2026) | Named-company entry-level hiring figures (venture-firm-published, reported not measured) |
 | Salesforce Engineering, "Scaling Code Reviews: Adapting to a Surge in AI-Generated Code" (engineering.salesforce.com) | A real company's own account of restructuring review process for AI-generated volume |
@@ -763,32 +785,35 @@ and rework rate. In an interview, name the metric you would use instead, not jus
 would drop.
 
 **Q: What did GitHub's Octoverse 2025 report measure about code review specifically, and why is this data different in kind from the DORA and Stack Overflow figures?**
-**Short:** Commits rose 25% while comments on them fell 27% — platform-measured, not self-reported.
+**Short:** PRs created rose 20.4% while issue and PR comments stayed flat (+0.35%), measured on the platform, not self-reported.
 Unlike DORA and Stack Overflow, which are surveys, Octoverse reports GitHub's own platform
-telemetry: nearly 1 billion commits pushed in 2025 (+25.1% YoY) against a 27% year-over-year
-drop in comments on those commits, and 43.2 million average monthly PR merges (+23% YoY).
-It's measured rather than self-reported, though it's worth noting GitHub also sells the
-Copilot product driving much of this trend, so the framing GitHub puts around the numbers
-deserves the same scrutiny even though the raw counts are real.
+telemetry: nearly 1 billion commits pushed in 2025 (+25.1% YoY), 43.2 million average
+monthly PR merges (+23% YoY), pull requests created up 20.4%, and comments on issues and PRs
+"essentially flat (+0.35%)". The often-quoted −27% is comments on commits, not on PRs, so it
+says little about code review. GitHub itself calls these "observational signals rather than
+causal claims", and it also sells the Copilot product driving much of the trend, so read the
+raw counts as real and the framing with scrutiny.
 
 **Q: What is Broken Access Control's rise in GitHub's 2025 security data, and why is it a good example of the "confidently wrong" failure mode?**
-**Short:** It overtook Injection as GitHub's top flagged vulnerability, up 172% YoY.
+**Short:** It overtook Injection as the top CodeQL alert, up 172% YoY, partly from AI scaffolds that skip auth checks.
 GitHub's 2025 report found Broken Access Control flagged in over 151,000 repositories, a
-172% year-over-year increase, overtaking Injection as the most common vulnerability class —
-GitHub's own explanation is that AI-generated code scaffolds frequently produce endpoints
-that look structurally correct while quietly omitting the authentication check, which is the
-precise shape of a confidently-wrong failure: it passes a casual read and fails only once
+172% year-over-year increase, overtaking Injection as the most common CodeQL alert. GitHub
+names two causes: misconfigured permissions in CI/CD pipelines, and AI-generated scaffolds
+that skip critical auth checks; new CodeQL coverage for GitHub Actions also surfaced many of
+the CI/CD cases. The AI-scaffold share is the precise shape of a confidently-wrong failure:
+an endpoint that looks structurally correct, passes a casual read, and fails only once
 something exploits the missing check.
 
 **Q: How reliable are the vendor-reported "reviewer bottleneck" numbers (Faros AI, CodeRabbit, CircleCI), and how should they be used?**
-**Short:** Treat exact numbers with caution — all three vendors sell fixes for what they report.
+**Short:** Treat exact numbers with caution, since all three vendors sell fixes for what they report; trust only the corroborated direction.
 Faros AI reports 91% higher review time and 98% more merged PRs on high-AI-adoption teams;
 CodeRabbit reports AI-written code surfaces 1.7x more flagged issues; CircleCI reports
 feature-branch throughput up 59% YoY against flat main-branch throughput. All three are
 vendors selling tools that address exactly the problem their own telemetry describes, so the
-specific magnitudes deserve real skepticism — but the *direction* is independently
-corroborated by GitHub's own -27% comment-count figure and by DORA's correlational findings,
-which is a stronger basis for believing the trend than any single vendor's number alone.
+specific magnitudes deserve real skepticism — but the *direction* is corroborated by DORA's
+correlational findings, and GitHub's observational platform data (PRs created +20.4%, issue
+and PR comments flat) is consistent with it. That convergence is a better basis for believing
+the trend than any single vendor's number alone.
 
 **Q: What is "the verification burden," and why is it a different problem than the review load engineers had before AI?**
 **Short:** Reviewing output optimized to look plausible, not necessarily to be correct.
@@ -855,8 +880,8 @@ is a code reviewer's question or an interviewer's probe.
 **Q: What is the module's central argument for why judgment became the scarce input rather than code generation?**
 **Short:** Producing a plausible implementation got cheap; knowing if it's right did not.
 Every measured and reported data source in this module points the same direction: DORA's
-batch-size mechanism, METR's verification-overhead result, GitHub's comment-count collapse,
-and the vendor reviewer-bottleneck telemetry all describe the same underlying shift — the
+batch-size mechanism, METR's verification-overhead result, GitHub's flat PR-comment volume
+against rising PR counts, and the vendor reviewer-bottleneck telemetry all describe the same underlying shift — the
 cost of writing a plausible-looking diff has collapsed toward zero, while the cost of
 knowing whether that diff is actually correct has not moved, and in several measured ways
 has gone up. The scarce, differentiating skill in 2026 is not typing code, it's deciding
@@ -916,8 +941,8 @@ range Faros AI's vendor telemetry reports for high-AI-adoption teams (§6.7). Re
 headcount did not change. Within a month, the team's own internal metrics — tracked
 independently of any vendor dashboard — showed median time-to-first-review climbing from
 roughly four hours to over a day, and a growing fraction of reviews consisted of a single
-"LGTM" comment with no inline discussion, mirroring the exact pattern described in §6.6's
-GitHub comment-count data.
+"LGTM" comment with no inline discussion, the team-level version of what §6.6's GitHub
+platform data hints at: PR counts climbing while the conversation around them stays flat.
 
 **The incident that forced a change.** A delegated-mode PR added a new internal reporting
 endpoint. It compiled cleanly, passed the existing test suite (which had no test for the new
@@ -926,9 +951,9 @@ single "LGTM" after roughly ninety seconds on the reviewer's clock — timestamp
 history. Two weeks later, the endpoint was found, during a routine access audit rather than
 an incident, to be missing the authorization check that every comparable endpoint in the
 service had. No confirmed exploitation occurred, and the team explicitly flagged this as
-lucky rather than as evidence the process had been fine — precisely the same failure
-pattern GitHub's own Broken Access Control finding (§6.6) describes as a systemic AI-era
-trend, not a one-off mistake by one careless reviewer.
+lucky rather than as evidence the process had been fine — the same failure shape as the
+AI-scaffold share of GitHub's Broken Access Control finding (§6.6), not a one-off mistake by
+one careless reviewer.
 
 **What the team changed.** Following the postmortem — run blamelessly, per this section's
 own conventions — the team did not walk back AI adoption; they applied the DORA 2025

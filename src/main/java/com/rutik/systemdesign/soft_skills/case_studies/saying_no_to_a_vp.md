@@ -44,8 +44,9 @@ link to the press release.
   against a GA that ships on time.
 - The Alerting Platform on-call rotation — six engineers, weekly rotation — was already
   running close to the edge the team's own health metrics treat as a warning line: 2.1
-  pages per engineer per week, against a target of roughly two incidents per on-call
-  *shift* from Google's Site Reliability Engineering guidance (see
+  pages per engineer per on-call week, against a team target of 2. The team set that
+  target from Google's Site Reliability Engineering guidance, which expects pages to be
+  rare (a median of zero a day) and caps on-call at two incidents per 12-hour shift (see
   [`team_health_and_sustainable_pace`](../team_health_and_sustainable_pace/team_health_and_sustainable_pace.md)).
   Any option that pushed correlation into production unguarded would land directly on that
   rotation.
@@ -408,9 +409,9 @@ quadrantChart
     x-axis Low schedule risk --> High schedule risk
     y-axis Low operational risk --> High operational risk
     quadrant-1 "Worst of both"
-    quadrant-2 "Late but safe"
-    quadrant-3 "The zone nobody wants to admit exists"
-    quadrant-4 "Fast but fragile"
+    quadrant-2 "Fast but fragile"
+    quadrant-3 "Smaller scope, both risks low"
+    quadrant-4 "Late but safe"
     "A - full scope, Dec 14": [0.78, 0.18]
     "B - detection only, Nov 2": [0.12, 0.14]
     "C - full scope, cut corners": [0.1, 0.9]
@@ -418,7 +419,8 @@ quadrantChart
 
 *Caption: Option C looks fastest on a Gantt chart and worst on this chart — it is the
 option that trades a schedule number everyone can see for an on-call number nobody
-budgets for until the pages start.*
+budgets for until the pages start. Option B is the only point in the bottom-left, and it
+gets there by cutting scope, which is why nobody proposed it before the memo did.*
 
 | Option | Engineer-weeks | Date | What's true on that date | Hidden cost |
 |---|---|---|---|---|
@@ -455,10 +457,13 @@ facts instead of three different stories about the same facts.
   starts, not a scope list assumed to be fixed. Lumen's Anomaly Copilot decision is a
   fixed-time-variable-scope call made under much more public pressure than Basecamp's
   internal six-week cycles usually face.
-- **Google's Site Reliability Engineering** (Betsy Beyer et al., O'Reilly, 2016) guidance
-  of roughly two incidents per on-call shift is the reference point the memo in §4.4 prices
-  Option C against — the point isn't that 9 extra pages a week is merely uncomfortable, it
-  is roughly five times a documented, widely-cited operational ceiling.
+- **Google's Site Reliability Engineering** (Betsy Beyer et al., O'Reilly, 2016) is the
+  reference point the memo in §4.4 prices Option C against. The book caps on-call at two
+  incidents per 12-hour shift, but its real guidance is that pages should be rare, with a
+  median of zero a day, and that a component paging every day signals more breakage to
+  come. At ~11 pages a week the on-call engineer is paged every day, and the load is more
+  than five times the team's own 2-a-week warning line. The point isn't that 9 extra pages
+  a week is merely uncomfortable; it is the pattern the book says predicts the next outage.
 
 ---
 
@@ -646,8 +651,8 @@ matters.
 non-engineer can weigh it?**
 **Short:** Convert it into pages per week against a stated on-call ceiling, not a vague severity label.
 "High risk" and "not ideal" are not comparable to a dollar figure or a date; "predicted
-+9 pages/week on top of a 2.1/week baseline, against a documented ceiling of roughly two
-incidents per shift" is. The memo in §4.4 translates every option into engineer-weeks,
++9 pages/week on top of a 2.1/week baseline, against the team's 2-a-week warning line and
+the SRE book's expectation of a median of zero pages a day" is. The memo in §4.4 translates every option into engineer-weeks,
 pages per week, or dollars specifically so a VP can trade one option against another using
 the same units she already uses for headcount and pipeline.
 

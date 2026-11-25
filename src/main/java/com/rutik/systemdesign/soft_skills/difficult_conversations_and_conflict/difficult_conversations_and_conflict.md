@@ -640,6 +640,10 @@ decision needs a conversation, only the ones that recur or compound.
   Martin's Press, 2017). Adjacent framework for the "care personally, challenge directly"
   axis that governs how a hard conversation gets delivered, not just what's in it —
   covered fully in [Giving and Receiving Feedback](../giving_and_receiving_feedback/giving_and_receiving_feedback.md).
+- Erin Meyer — *The Culture Map: Breaking Through the Invisible Boundaries of Global
+  Business* (PublicAffairs, 2014). Eight scales for comparing cultures, including how each
+  gives feedback and makes decisions; the reference for the cross-cultural, cross-time-zone
+  disagreement in §12.
 - Reed Hastings and Erin Meyer — *No Rules Rules: Netflix and the Culture of Reinvention*
   (Penguin, 2020). Source of the Netflix candor examples in §7.
 - Related module: [Negotiation for Engineers](../negotiation_for_engineers/negotiation_for_engineers.md)
@@ -828,6 +832,20 @@ plainly rather than re-running the debate: "I hear that you still think this was
 wrong call, and I want to make space for that feedback separately — but I don't think we
 should reopen the decision itself without something new." Reopening decisions on request
 alone teaches the team that no decision is ever actually final.
+
+**Q: You are disagreeing about a design with a colleague in another country and time zone, and every exchange is getting colder. What do you change?**
+**Short:** Move the disagreement off text onto a scheduled call, name the difference in how each of you disagrees, then put the agreed outcome back in writing.
+Two things are stacked here. Time zones turn a disagreement into a slow exchange of
+written positions, each read hours later without tone, so every reply lands harder than it
+was meant. And cultures differ in how directly they disagree and give negative feedback:
+Erin Meyer's *The Culture Map* (PublicAffairs, 2014) places countries on eight scales,
+including how each gives feedback and makes decisions, and a "this approach is wrong" that
+reads as normal engineering bluntness in one culture reads as a personal attack in
+another. The fix is in order: stop the thread ("I think text is making this harder than it
+is — can we do 30 minutes at 08:00 your time?"), on the call say out loud that you may
+disagree differently ("I'm blunt in reviews; tell me if that's landing badly"), argue the
+design on criteria you both accept, and then write the decision and its reasons back into
+the doc so the people who were not on the call see the same outcome.
 
 ---
 

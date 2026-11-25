@@ -758,7 +758,8 @@ memory of the vibe.
 structurally similar separation — interviewers write structured evaluations against named
 attributes, and a hiring committee that was in none of the interviews makes the actual call.
 The predictive-validity research behind why companies moved to this model at all (Schmidt &
-Hunter's 1998 meta-analysis, reconfirmed by Sackett et al. in 2023) is the same research
+Hunter's 1998 meta-analysis, revised by Sackett, Zhang, Berry & Lievens in 2022, which
+lowered every estimate but left structured interviews as the top-ranked predictor) is the same research
 underpinning why Amazon's design — assigning specific principles per interviewer rather
 than "how did the candidate seem overall" — produces a defensible decision instead of a
 popularity contest.

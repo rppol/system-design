@@ -89,9 +89,9 @@ can become a different archetype after a reorg, without changing anything about 
 
 ### Tech Lead
 
-Larson's most common archetype — he reports it as showing up in every company he studied,
-at roughly **one Tech Lead for every eight engineers** once an organization is large enough
-to have more than one team. A Tech Lead "guides the approach and execution of a particular
+Larson's most common archetype, and the one with an explicit ratio: an organization
+"needs roughly one Tech Lead for every eight engineers", which is why it is far more common
+than the other three. A Tech Lead "guides the approach and execution of a particular
 team" and is, in Larson's phrase, "the person defining their team's technical vision." The
 day is: scope the next quarter's hard problems before they land on someone's desk,
 coordinate with two or three adjacent teams so the work doesn't collide with theirs, sit in
@@ -154,8 +154,9 @@ is a list of problems "engaged with" rather than problems closed.
 A Right Hand "operates with the borrowed authority of a senior leader" — sitting in
 leadership meetings, taking the most important ill-defined problem off an executive's plate,
 diving into a fire, changing the plan, then delegating the execution. Larson describes it
-as the **least common** archetype and the one requiring the largest organization, typically
-appearing once a company reaches the **low thousands of engineers**, because it depends on
+as the **least common** archetype, "showing up as an organization reaches hundreds of
+engineers", and notes that in fast-growing technology companies it has generally emerged
+around **one thousand engineers**, because it depends on
 an executive who has both the scale of problem to need this and the trust to hand it to one
 individual.
 
@@ -338,10 +339,12 @@ another candidate's. "Well respected by peers" cannot be compared against anythi
   companies with very different scale. She organizes and hosts LeadDev's StaffPlus
   conference, which exists specifically because this level was underserved by
   conference content built for either ICs or people managers.
-- **Dropbox's public engineering career framework** names explicit archetypes for its
-  senior ICs (its framework is public at `dropbox.github.io/dbx-career-framework`) — one of
-  several companies that have taken Larson's taxonomy, or one close to it, and encoded it
-  directly into a leveling document rather than leaving it as informal folklore.
+- **Dropbox's public engineering career framework** (`dropbox.github.io/dbx-career-framework`)
+  has an "Archetypes Behaviors" appendix that names three archetypes — Technical Lead,
+  Architect and Solver — "heavily inspired from Will Larson's book *Staff Engineer*", and
+  shows how each expresses the framework's core responsibilities differently. It is a
+  worked example of a company encoding Larson's taxonomy directly into a leveling document
+  rather than leaving it as informal folklore.
 - **Being Glue**, Reilly's May 2019 talk at LeadDev New York, is cited across the industry
   (Mike Crittenden's widely shared 2022 post "Glue work is career limiting" is one example)
   as the essay that gave a name to work — reviewing every design doc, onboarding every new
@@ -357,7 +360,7 @@ another candidate's. "Well respected by peers" cannot be compared against anythi
 | Tech Lead | One team | Direct technical judgment | Least visibility outside the team | Any team with unresolved technical ambiguity |
 | Architect | One domain, many teams | Coherence and standards | Slow, hard to show quarter-by-quarter impact | Large or heavily coupled codebase (roughly 100+ engineers) |
 | Solver | One problem at a time, anywhere | Closure on hard, ambiguous fires | No standing team, no durable ownership | Org that plans around individuals, not only teams |
-| Right Hand | Whatever the executive needs | Borrowed authority | Entirely dependent on one relationship | An executive who has run out of trusted technical judgment (typically 1,000+ engineers) |
+| Right Hand | Whatever the executive needs | Borrowed authority | Entirely dependent on one relationship | An executive who has run out of trusted technical judgment (in fast-growing companies, emerging around 1,000 engineers) |
 
 | Choice | Gives you | Takes from you |
 |---|---|---|
@@ -531,15 +534,16 @@ requires asking, concretely, who moved the Solver off each problem and whether a
 receiving team existed to take the handoff.
 
 **Q: What ratio does Larson give for how common each archetype is?**
-**Short:** Tech Lead is most common, roughly one per eight engineers; Right Hand is least common, needing 1,000+ engineers.
-Tech Lead is the archetype Larson found in every company he studied, at roughly one Tech
-Lead per eight engineers once a company has more than one team — making it the most
-accessible first Staff role. Architect tends to appear once an org passes roughly 100
-engineers, when a domain becomes complex enough for inconsistency to be a real cost. Right
-Hand is the rarest, typically requiring an organization in the low thousands of engineers,
-because it depends on a specific executive relationship rather than a team or domain size
-threshold. Solver's frequency depends less on headcount and more on whether the company
-plans work around individuals or strictly around teams.
+**Short:** Roughly one Tech Lead per eight engineers; in fast-growing companies Architects emerge near 100 engineers and Right Hands near 1,000.
+Larson writes that an organization "needs roughly one Tech Lead for every eight engineers",
+which makes Tech Lead far more common than the other archetypes and the most accessible
+first Staff role. For the two rarer ones he gives thresholds rather than ratios: "in the
+recent crops of fast-growing technology companies, the Architect and Right Hand roles have
+generally emerged as the organizations reached one hundred and one thousand engineers,
+respectively", while companies with a different culture may develop them earlier or never.
+Right Hand is the least common, because it depends on a specific executive relationship
+rather than a team or domain size threshold. Solver's frequency depends less on headcount
+and more on whether the company plans work around individuals or strictly around teams.
 
 **Q: What is a "topographic map" in Reilly's framework, and what problem does skipping it
 usually cause?**
